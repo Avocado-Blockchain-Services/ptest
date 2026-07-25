@@ -39,7 +39,8 @@ failures are what make the design look arbitrary until you have hit them.
   - [3.2 The container: Postgres in RAM](#32-the-container-postgres-in-ram)
   - [3.3 The entrypoint contract](#33-the-entrypoint-contract)
   - [3.4 Packing the source](#34-packing-the-source)
-  - [3.5 Runaway protection](#35-runaway-protection)
+  - [3.5 Getting the output back](#35-getting-the-output-back-do-not-skip-this)
+  - [3.6 Runaway protection](#36-runaway-protection)
 - [Part 4 — Terraform](#part-4--terraform)
 - [Part 5 — Hard-won gotchas](#part-5--hard-won-gotchas)
 - [Part 6 — Replication checklist](#part-6--replication-checklist)
@@ -542,7 +543,52 @@ Stripping `.env.example` — tracked, secret-free, and asserted on by tests that
 verify documented environment variables — broke 15 tests in a way that looked
 like an application regression and was pure runner damage.
 
-### 3.5 Runaway protection
+### 3.5 Getting the output back (do not skip this)
+
+**The batch primitive will not hand you the container's stdout.** `gcloud run
+jobs execute --wait` relays only its own progress chatter. On a red suite you
+get dots, `Executing job failed`, and a console URL — **no failing test name**.
+That silently downgrades remote `--full` from a debugging tool to a pass/fail
+gate, and you will not notice until something fails and you have nothing to act
+on. Budget for this; it is the single easiest thing to get wrong here.
+
+The output is not lost, it is in the platform's log sink. Three rules:
+
+**(a) Fetch by execution NAME, never "the most recent execution".** With
+concurrency allowed, the latest execution of a job routinely belongs to somebody
+else's worktree, and you would print their failures as yours. The name appears
+in the CLI's output on both paths — `Execution [job-abc12] has successfully
+completed.` on success, `...executions describe job-abc12` on failure — so parse
+it out:
+
+```python
+blob = (proc.stdout or "") + (proc.stderr or "")
+m = re.search(re.escape(job) + r"-[a-z0-9]{5,}", blob)
+```
+
+**(b) Retry: log ingestion lags execution completion** by a second or two. A
+single immediate read comes back empty and looks like "no output".
+
+**(c) Keep the database off stdout.** `pg_ctl` without `-l` writes the server log
+to stdout — the same stream as the test runner. Every checkpoint line and every
+*expected* constraint violation then interleaves through the progress output, so
+what you fetch back is unreadable. Send it to a file (`pg_ctl -l $PGDATA/server.log`)
+and dump that file only if startup fails.
+
+**Filter what you print.** A green log is thousands of progress-dot lines plus a
+per-file coverage table; dumping it verbatim buries the two numbers that matter.
+
+| Outcome | Print |
+|---|---|
+| success | the summary line + coverage total. Nothing else. |
+| failure | the FAILURES section and every `FAILED …` line. Never the dots. |
+| either | any runner-level `FATAL` line — a broken *runner* must never look like a broken *suite* |
+
+Two safety valves: if the filter matches nothing, print the raw log (better
+noisy than a red run with no explanation), and past a few hundred lines keep the
+tail and say how many you dropped rather than truncating silently.
+
+### 3.6 Runaway protection
 
 An agent in a retry loop can otherwise submit jobs indefinitely. Six layers:
 
@@ -798,7 +844,12 @@ CI exactly makes a green local run mean something. But if CI enumerates paths, i
 may be skipping files; inherit that and you inherit its blind spot. Run the whole
 tests tree so your pre-push gate is *stricter* than CI.
 
-**8. Don't put fresh randomness in test data collected at import time.** Under
+**8. The build context is not the repo.** An image build uploads its whole
+directory. A `terraform/.terraform/` full of provider binaries added ~117MB to
+every single build here before a `.gcloudignore` excluded it. Check what the CLI
+reports it is archiving.
+
+**9. Don't put fresh randomness in test data collected at import time.** Under
 xdist, different workers collect independently — `uuid.uuid4()` in a class body or
 `parametrize` argument produces *different* ids per worker, and assertions that
 compare across them fail only in parallel. Generate inside a fixture or the test
@@ -841,6 +892,10 @@ function.
 - [ ] Concurrency ceiling that fails closed and does NOT fall back to local
 - [ ] Daily per-project cap
 - [ ] End-to-end smoke on ONE test file before trusting a full run
+- [ ] Container stdout fetched back from the log sink by execution NAME, with retry
+- [ ] Database server log written to a file, not stdout
+- [ ] Output filtered: quiet on success, failures-only on red, FATAL always shown
+- [ ] Verified the failure path with a deliberately failing canary test
 
 ---
 

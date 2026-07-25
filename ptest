@@ -436,6 +436,75 @@ def at_concurrency_limit(base: list[str], job: str, region: str, limit: int) -> 
     return False
 
 
+SUMMARY_RE = re.compile(r"^=+.*\b\d+ (passed|failed|error)")
+FAILURES_START_RE = re.compile(r"^=+ FAILURES =+")
+SECTION_END_RE = re.compile(r"^=+ (short test summary|warnings summary|slowest)")
+
+
+def summarize_remote_logs(logs: str, failed: bool) -> str:
+    """Reduce a container's full stdout to what a reader actually needs.
+
+    A green run's log is thousands of progress-dot lines plus a per-file
+    coverage table; dumping it verbatim buries the two numbers that matter. A
+    red run's log is the same, with the failures somewhere in the middle. So:
+    quiet on success (counts + coverage only), and on failure the FAILURES
+    section plus every line that names a failing test — never the dots.
+    """
+    lines = logs.splitlines()
+    keep: list[str] = []
+    in_failures = False
+
+    for line in lines:
+        s = line.strip()
+        if "[ptest-runner] FATAL" in line:      # the runner broke, not the suite
+            keep.append(line)
+            continue
+        if SUMMARY_RE.match(s) or "Required test coverage" in s or s.startswith("TOTAL "):
+            keep.append(line)
+            continue
+        if not failed:
+            continue
+        if FAILURES_START_RE.match(s):
+            in_failures = True
+            keep.append(line)
+            continue
+        if in_failures and SECTION_END_RE.match(s):
+            in_failures = False
+            continue
+        if in_failures or s.startswith("FAILED ") or s.startswith("ERROR "):
+            keep.append(line)
+
+    # A very long traceback set is still unreadable; keep the tail, which holds
+    # the summary lines, and say so rather than truncating silently.
+    if len(keep) > 400:
+        keep = [f"[ptest] … {len(keep) - 400} earlier log lines omitted …"] + keep[-400:]
+    return "\n".join(keep)
+
+
+def fetch_execution_logs(base: list[str], execution: str) -> str:
+    """Pull the container's stdout back out of Cloud Logging.
+
+    `gcloud run jobs execute --wait` relays NOTHING the container printed — on a
+    red suite you get progress dots, "Executing job failed" and a console URL,
+    with no failing test name. That makes remote --full a pass/fail gate instead
+    of something you can act on. The output is not lost, just in Cloud Logging,
+    so fetch it and print it.
+
+    Ingestion lags the execution finishing by a second or two, hence the retry.
+    """
+    query = (f'resource.type="cloud_run_job" AND '
+             f'labels."run.googleapis.com/execution_name"="{execution}"')
+    for attempt in range(4):
+        out = subprocess.run(
+            base + ["logging", "read", query, "--format=value(textPayload)",
+                    "--order=asc", "--limit=5000", "--freshness=3h"],
+            capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout
+        time.sleep(3)
+    return ""
+
+
 def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str) -> int | None:
     """Return an exit code, or None to mean 'fall back to local'."""
     job = pcfg.get("job")
@@ -481,16 +550,41 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str) -> i
         "run", "jobs", "execute", job, f"--region={region}", "--wait",
         "--update-env-vars", f"PTEST_SRC={obj},PTEST_CMD={cmd}",
     ]
-    # --wait streams nothing useful on its own; the job writes test output to stdout
-    # and gcloud surfaces it on completion. Anything that breaks that contract makes
-    # the failure text unreadable to an agent, which is worse than being slow.
+    # --wait relays only its own progress chatter, never the container's stdout.
     proc = subprocess.run(exec_cmd, capture_output=True, text=True)
-    sys.stdout.write(proc.stdout)
+
+    # The execution name is the key to the logs. gcloud prints it on BOTH paths:
+    # "Execution [job-abc12] has successfully completed." on success, and
+    # "...executions describe job-abc12" on failure. Parse it rather than listing
+    # executions afterwards — with concurrent runs allowed, "the most recent
+    # execution of this job" can easily belong to another agent.
+    blob = (proc.stdout or "") + (proc.stderr or "")
+    m = re.search(re.escape(job) + r"-[a-z0-9]{5,}", blob)
+    execution = m.group(0) if m else None
+
+    if execution:
+        logs = fetch_execution_logs(base, execution)
+        if logs.strip():
+            digest = summarize_remote_logs(logs, failed=proc.returncode != 0)
+            if digest.strip():
+                sys.stdout.write(digest + "\n")
+            else:
+                # Nothing matched the filters — better to show everything than
+                # to report a red run with no explanation at all.
+                sys.stdout.write(logs if logs.endswith("\n") else logs + "\n")
+        else:
+            warn(f"could not retrieve logs for {execution}; inspect with: "
+                 f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
+                 f"=\"{execution}\"' --project={gproject}")
+    else:
+        sys.stdout.write(proc.stdout)
     sys.stdout.flush()
+
     if proc.returncode != 0:
         # Distinguish "the tests failed" from "the infrastructure failed".
         if "failed to complete" in proc.stderr.lower() or "execution" in proc.stderr.lower():
-            sys.stderr.write(proc.stderr)
+            if execution:
+                warn(f"remote suite FAILED — execution {execution}")
             return 1
         warn(f"remote execution error ({proc.stderr.strip()[:200]}) — running locally")
         return None

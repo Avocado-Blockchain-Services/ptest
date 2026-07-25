@@ -99,8 +99,13 @@ work_mem = 16MB
 listen_addresses = 'localhost'
 CONF
 
-su postgres -c "$PGBIN/pg_ctl -D $PGDATA -o '-p $PGPORT' -w -t 60 start" \
-  || { cat "$PGDATA"/log/* 2>/dev/null >&2; die "postgres failed to start"; }
+# -l sends the server log to a FILE. Without it postgres writes to stdout, which
+# is the same stream the test output goes to — and since stdout is what ptest
+# later pulls back out of Cloud Logging, every checkpoint line and every expected
+# constraint violation ends up interleaved through the pytest progress dots.
+# On a start failure the log is dumped explicitly below, so nothing is lost.
+su postgres -c "$PGBIN/pg_ctl -D $PGDATA -o '-p $PGPORT' -l $PGDATA/server.log -w -t 60 start" \
+  || { cat "$PGDATA/server.log" 2>/dev/null >&2; die "postgres failed to start"; }
 
 # The test rig connects as a superuser to the `postgres` admin database and
 # issues CREATE/DROP DATABASE, so $PGUSER must be a real superuser. initdb -U

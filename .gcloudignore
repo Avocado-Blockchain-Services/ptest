@@ -1,5 +1,20 @@
+# Build context for the runner images. Only the Dockerfiles and entrypoint.sh
+# are actually needed — everything else here is repo furniture.
+#
+# .terraform/ holds provider binaries (~100MB+). Without this line every image
+# build uploads them to Cloud Build for nothing.
 .git/
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
 *.bak
 *.bak.*
+terraform/
 provision.sh
+provision-vitest.sh
+smoke.sh
 README.md
+outsource_tests.md
+config.example.toml
+ptest
