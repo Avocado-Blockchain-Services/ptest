@@ -1,0 +1,5 @@
+.git/
+*.bak
+*.bak.*
+provision.sh
+README.md

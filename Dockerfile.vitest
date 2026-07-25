@@ -1,0 +1,35 @@
+# ptest remote runner — vitest/node projects.
+#
+# No database: the frontend suites are vitest + jsdom and touch no Postgres, so
+# this image is a fraction of the pytest one and starts correspondingly faster.
+#
+# node 20 because that is what every workflow in persea_content_maker_front
+# pins (.github/workflows/{ci,deploy,guards}.yml). Deliberately NOT the local
+# machine's node 26: CI's version is the one the suite is known to pass on, and
+# a runner that disagrees with CI is worse than useless.
+
+FROM node:20-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PTEST_KIND=vitest \
+    CI=true \
+    NODE_OPTIONS=--max-old-space-size=4096
+
+# curl+ca-certificates for the GCS fetch; git because some npm deps and
+# vitest config resolution expect it to exist.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        tar \
+        gzip \
+        git \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /work
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

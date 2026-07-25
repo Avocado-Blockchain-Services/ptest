@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+"""ptest — one test command for every project and every agent.
+
+Agents call `ptest` (scoped) or `ptest --full` (whole suite) and never learn where
+it ran. Scoped runs stay local with capped workers so six concurrent sessions do not
+oversubscribe the box; full runs go to the configured backend.
+
+  ptest [PATHS/ARGS...]     scoped run, local, workers capped
+  ptest --full              full suite, remote if configured, else local
+  ptest --local --full      force local even when a remote is configured
+  ptest where               show which project/backend resolved for this directory
+  ptest doctor              check config, caps, backend reachability, quota
+  ptest register            print a config stanza for the current repo
+
+Config: ~/.config/ptest/config.toml   (see `ptest register`)
+
+Design rules that must not be broken — agents depend on them:
+  * the exit code is the test run's exit code, always
+  * test output goes to stdout verbatim, never wrapped or summarised
+  * it blocks until the run finishes
+  * an unreachable backend falls back to local with one warning, never hangs
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from datetime import date
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # py<3.11
+    tomllib = None
+
+CONFIG = Path(os.environ.get("PTEST_CONFIG", Path.home() / ".config/ptest/config.toml"))
+STATE = Path.home() / ".local/state/ptest"
+EXCLUDES = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "dist", "build", ".next", "coverage", "htmlcov",
+    ".worktrees", ".pipeline",
+}
+
+# Secrets must never leave the machine. A remote run uploads the tree to a
+# bucket, so anything dotenv-shaped is stripped: these repos keep live DB
+# passwords and third-party API keys in .env, and no test suite here loads it
+# (verified: no pytest-dotenv, no load_dotenv in conftest). The runner injects
+# its own DATABASE_URL, so excluding these changes nothing about a green run.
+SECRET_PREFIXES = (".env",)
+# …but NOT the committed templates. `.env.example` is tracked, contains no
+# secrets, and several suites assert on its contents (persea_content_maker_api's
+# tests/test_m10_deploy_artifacts.py has 15 such tests). Stripping it produced 15
+# failures that looked like application regressions and were pure runner damage.
+SECRET_EXEMPT_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def is_secret_file(name: str) -> bool:
+    return name.startswith(SECRET_PREFIXES) and not name.endswith(SECRET_EXEMPT_SUFFIXES)
+
+# Lockfiles are build INPUT, not build output — a remote run needs them even
+# when the repo gitignores them (persea_content_maker_api gitignores uv.lock).
+# Without the lockfile `uv sync` falls back to *locking*, and locking resolves
+# the whole dependency space including private optional extras the run would
+# otherwise never touch — which fails with an unauthenticated git clone and an
+# error message that points at credentials rather than at the missing lockfile.
+LOCKFILES = (
+    "uv.lock", "poetry.lock", "Pipfile.lock",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Cargo.lock", "go.sum",
+)
+
+
+def warn(msg: str) -> None:
+    print(f"[ptest] {msg}", file=sys.stderr, flush=True)
+
+
+def load_config() -> dict:
+    if not CONFIG.exists():
+        return {}
+    if tomllib is None:
+        warn(f"python {sys.version_info.major}.{sys.version_info.minor} has no tomllib; config ignored")
+        return {}
+    try:
+        return tomllib.loads(CONFIG.read_text())
+    except Exception as exc:  # a broken config must never block a test run
+        warn(f"config unreadable ({exc}); falling back to local defaults")
+        return {}
+
+
+def git_root(start: Path) -> Path | None:
+    r = subprocess.run(
+        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+
+
+def source_repo(cwd: Path) -> Path | None:
+    """The repo a worktree belongs to.
+
+    In a linked worktree `--git-common-dir` points at the ORIGINAL repo's .git, so
+    this resolves ~/worktrees/persea/cc-foo/api back to persea_content_maker_api.
+    Path-prefix matching cannot do that: every worktree of every repo lives under the
+    same ~/worktrees root, so prefixes tie and the winner is arbitrary.
+    """
+    r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = (cwd / common).resolve()
+    return common.parent if common.name == ".git" else None
+
+
+def resolve_project(cfg: dict, cwd: Path) -> tuple[str | None, dict]:
+    """Resolve by source repo first (correct inside worktrees), then by path prefix."""
+    projects: dict = cfg.get("projects", {})
+
+    src = source_repo(cwd)
+    if src:
+        for name, pc in projects.items():
+            if pc.get("root") and Path(os.path.expanduser(pc["root"])).resolve() == src:
+                return name, pc
+
+    best_name, best_cfg, best_len = None, {}, -1
+    for name, pc in projects.items():
+        for root in [pc.get("root")] + list(pc.get("also_roots", [])):
+            if not root:
+                continue
+            root_p = Path(os.path.expanduser(root)).resolve()
+            try:
+                cwd.relative_to(root_p)
+            except ValueError:
+                continue
+            if len(str(root_p)) > best_len:
+                best_name, best_cfg, best_len = name, pc, len(str(root_p))
+    return best_name, best_cfg
+
+
+def default_commands(root: Path) -> dict:
+    """Best-effort detection so ptest is useful in an unregistered repo."""
+    if (root / "pyproject.toml").exists() or (root / "pytest.ini").exists():
+        return {"scoped": "pytest", "full": "pytest", "kind": "pytest"}
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            scripts = json.loads(pkg.read_text()).get("scripts", {})
+        except Exception:
+            scripts = {}
+        if "test" in scripts:
+            kind = "vitest" if "vitest" in scripts["test"] else "npm"
+            # Both carry `--`: without it a run-script swallows forwarded args.
+            return {"scoped": "npm test --", "full": "npm test --", "kind": kind}
+    if (root / "go.mod").exists():
+        return {"scoped": "go test", "full": "go test ./...", "kind": "go"}
+    if (root / "Cargo.toml").exists():
+        return {"scoped": "cargo test", "full": "cargo test", "kind": "cargo"}
+    return {"scoped": "", "full": "", "kind": "unknown"}
+
+
+def cap_workers_for_local(cmd: str, kind: str, workers: int,
+                          root: Path | None = None) -> str:
+    """Force `cmd` down to the local worker cap, stripping any parallelism it
+    already requests.
+
+    A `--full` command is written for the remote container, which owns 8
+    dedicated vCPU, so it legitimately says `-n auto`. That same string is what
+    runs when a remote submit falls back to local — and `auto` there means "every
+    core on a machine shared with five other agents", the precise failure this
+    tool exists to prevent. Appending a second flag is not enough: rely on
+    nothing about which duplicate a runner honours. Remove, then set.
+    """
+    if kind == "pytest":
+        cmd = re.sub(r"\s+(-n|--numprocesses)(\s+|=)\S+", " ", cmd)
+    elif kind in ("vitest", "npm"):
+        # Strip whatever cap flag the configured command already carries — it may
+        # be for any of the runners in NODE_RUNNER_CAPS.
+        cmd = re.sub(
+            r"\s+--(maxWorkers|minWorkers|test-concurrency|concurrency|workers|jobs)"
+            r"(\s+|=)\S+", " ", cmd)
+    elif kind == "go":
+        cmd = re.sub(r"\s+-p(\s+|=)\S+", " ", cmd)
+    elif kind == "cargo":
+        cmd = re.sub(r"\s+--jobs(\s+|=)\S+", " ", cmd)
+    flags = worker_flags(kind, workers, root)
+    if not flags:
+        # No cap known for this runner (e.g. kind "npm" running jest/mocha —
+        # worker_flags has no branch for it). Return the command untouched
+        # rather than bolting on a separator that forwards nothing.
+        return cmd.rstrip()
+    # `npm test --maxWorkers=2` hands the flag to npm, not to the test runner, so
+    # the cap silently does nothing. A run-script needs `--` to forward args.
+    # Add one only for npm/yarn/pnpm-shaped commands that lack a standalone `--`;
+    # never for a direct invocation like `npx vitest run`, where it would change
+    # argument parsing.
+    if re.search(r"(^|\s)(npm|yarn|pnpm)(\s|$)", cmd) and \
+       not re.search(r"(^|\s)--(\s|$)", cmd):
+        cmd = cmd.rstrip() + " --"
+    return f"{cmd.rstrip()} {flags}".strip()
+
+
+# How to cap each JS test runner — but ONLY those that are parallel by default.
+#
+# The job here is to REDUCE parallelism, never to introduce it. mocha is the case
+# that makes the distinction matter: it runs serially unless told otherwise, so
+# "capping" it with `--parallel --jobs 2` would double the load this function
+# exists to cut. It therefore gets no flag, on purpose. Anything unrecognised gets
+# no flag either — an unknown script is most likely serial, and inventing a flag
+# risks passing something the runner rejects, turning a worker cap into a broken
+# test run.
+NODE_RUNNER_CAPS = {
+    "vitest":     "--maxWorkers={n} --minWorkers=1",  # parallel by default
+    "jest":       "--maxWorkers={n}",                 # parallel by default
+    "ava":        "--concurrency={n}",                # parallel by default
+    "playwright": "--workers={n}",                    # defaults to ~half the cores
+    "node-test":  "--test-concurrency={n}",           # node:test, parallel by default
+    "tap":        "--jobs={n}",                       # parallel by default
+    "mocha":      "",                                 # SERIAL by default — leave alone
+}
+
+
+def detect_node_runner(root: Path) -> str:
+    """Identify the JS test runner from package.json rather than assuming it.
+
+    `kind` only distinguishes "vitest" from "npm", so every non-vitest node repo
+    previously fell through with no cap at all. The runner is named in the test
+    script, so read it instead of guessing from the command (`npm test` says
+    nothing about what it runs).
+    """
+    try:
+        scripts = json.loads((root / "package.json").read_text()).get("scripts", {})
+    except Exception:
+        return "unknown"
+    script = " ".join(str(scripts.get(k, "")) for k in ("test", "test:ci"))
+    if not script.strip():
+        return "unknown"
+    # playwright first: its script reads `playwright test`, which also matches
+    # looser patterns below.
+    for pat, name in (
+        (r"\bplaywright\b", "playwright"),
+        (r"\bvitest\b", "vitest"),
+        (r"\bjest\b", "jest"),
+        (r"\bmocha\b", "mocha"),
+        (r"\bava\b", "ava"),
+        (r"\btap\b", "tap"),
+        (r"\bnode\b[^&|]*--test\b", "node-test"),
+    ):
+        if re.search(pat, script):
+            return name
+    return "unknown"
+
+
+def worker_flags(kind: str, workers: int, root: Path | None = None) -> str:
+    """The whole point: six agents each taking `workers` beats three each taking all
+    of them. Never let a runner auto-detect the machine."""
+    if kind == "pytest":
+        return f"-n {workers}" if workers > 1 else "-p no:xdist"
+    if kind in ("vitest", "npm"):
+        runner = detect_node_runner(root) if root else "unknown"
+        if runner == "unknown" and kind == "vitest":
+            runner = "vitest"  # stanza says vitest; trust it over a missing script
+        return NODE_RUNNER_CAPS.get(runner, "").format(n=workers)
+    if kind == "go":
+        return f"-p {workers}"
+    if kind == "cargo":
+        return f"--jobs {workers}"
+    return ""
+
+
+def budget_check(cfg: dict, project: str) -> bool:
+    """A runaway agent loop must not be able to spend all day submitting jobs."""
+    cap = int(cfg.get("defaults", {}).get("daily_remote_runs", 60))
+    STATE.mkdir(parents=True, exist_ok=True)
+    f = STATE / "remote-runs.json"
+    today = date.today().isoformat()
+    data = {}
+    if f.exists():
+        try:
+            data = json.loads(f.read_text())
+        except Exception:
+            data = {}
+    if data.get("day") != today:
+        data = {"day": today, "counts": {}}
+    n = data["counts"].get(project, 0)
+    if n >= cap:
+        warn(f"daily remote-run cap reached for {project} ({cap}) — running locally instead")
+        return False
+    data["counts"][project] = n + 1
+    f.write_text(json.dumps(data))
+    return True
+
+
+def ensure_node_deps(kind: str, root: Path, env: dict) -> int:
+    """A fresh git worktree has no node_modules, so `npm test` dies with
+    "vitest: command not found" — which reads like a broken test setup, not a
+    missing install, and has cost agents whole sessions chasing it.
+
+    uv creates the venv on demand, so pytest worktrees never had this problem.
+    node has no equivalent, so ptest does it here: install once, in the worktree,
+    then run. Never symlink node_modules to the main checkout — vite's
+    node_modules/.vite dep cache is per-project state, and two worktrees sharing
+    one is the same class of bug as a shared .venv.
+    """
+    if kind not in {"vitest", "npm"}:
+        return 0
+    if not (root / "package.json").exists():
+        return 0
+    if (root / "node_modules").exists():  # follows a symlink, which is the caller's call
+        return 0
+
+    lock = (root / "package-lock.json").exists()
+    cmd = "npm ci --no-audit --no-fund --prefer-offline" if lock else \
+          "npm install --no-audit --no-fund --prefer-offline"
+    print(f"[ptest] node_modules missing in {root} — installing once: {cmd}",
+          file=sys.stderr, flush=True)
+    rc = subprocess.call(cmd, shell=True, cwd=str(root), env=env)
+    if rc != 0:
+        warn(f"dependency install failed in {root} (exit {rc}) — not running tests")
+    return rc
+
+
+def run_local(cmd: str, cwd: Path, env: dict) -> int:
+    print(f"[ptest] local: {cmd}", file=sys.stderr, flush=True)
+    return subprocess.call(cmd, shell=True, cwd=str(cwd), env=env)
+
+
+def pack_tree(root: Path) -> Path:
+    """Ship source only. .venv/node_modules live in the image; .git is dead weight
+    and the tree is usually dirty mid-TDD, so an archive beats a push."""
+    tmp = Path(tempfile.mkdtemp(prefix="ptest-"))
+    tar_path = tmp / "src.tar.gz"
+
+    def keep(ti: tarfile.TarInfo):
+        path = Path(ti.name)
+        if set(path.parts) & EXCLUDES:
+            return None
+        if is_secret_file(path.name):
+            return None  # .env, .env.local, .env.auth0.local — but not .env.example
+        return ti
+
+    # Prefer git's own idea of "source". A hand-maintained exclude list always
+    # drifts: this repo alone carries 416MB of gitignored var/media and 199MB of
+    # graphify-out that the list did not know about, which is a 447MB upload on
+    # every single run. `-c -o --exclude-standard` is tracked files PLUS
+    # untracked ones that .gitignore does not cover, so a brand-new test file
+    # written seconds ago still ships — which a `git archive` would have missed.
+    files = None
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"],
+            cwd=str(root), capture_output=True, timeout=60)
+        if out.returncode == 0:
+            files = [f for f in out.stdout.decode().split("\0") if f]
+    except Exception:
+        files = None
+
+    if files is not None:
+        # Re-add gitignored lockfiles; git deliberately does not list them.
+        present = set(files)
+        for lock in LOCKFILES:
+            if lock not in present and (root / lock).is_file():
+                files.append(lock)
+
+    with tarfile.open(tar_path, "w:gz") as tf:
+        if files:
+            for rel in files:
+                src = root / rel
+                # ls-files still lists staged-but-deleted paths; skip them.
+                if not src.exists() or src.is_dir():
+                    continue
+                if is_secret_file(Path(rel).name):
+                    continue
+                tf.add(str(src), arcname=f"./{rel}")
+        else:
+            # Not a git repo (or git unavailable) — fall back to the static list.
+            tf.add(str(root), arcname=".", filter=keep)
+    return tar_path
+
+
+def gcloud_base(pcfg: dict, cfg: dict, gproject: str) -> list[str]:
+    """gcloud invocation carrying an explicit account + billing project.
+
+    Never rely on `gcloud config set account`: this machine routinely has an
+    unrelated engagement's account active, and a test run must not silently
+    authenticate as it (or fail with a confusing 403).
+    """
+    base = ["gcloud", f"--project={gproject}", f"--billing-project={gproject}"]
+    account = pcfg.get("account") or cfg.get("defaults", {}).get("account")
+    if account:
+        base.append(f"--account={account}")
+    return base
+
+
+def at_concurrency_limit(base: list[str], job: str, region: str, limit: int) -> bool:
+    """True if `limit` or more executions of this job are already in flight.
+
+    This is a RUNAWAY brake, not a mutex. Concurrent executions cost nothing on
+    the local machine — that is the entire point of running remotely — and
+    separate worktrees legitimately need separate full runs at the same time.
+    Blocking at 1 just serialised independent work and made agents spin in
+    30-second poll loops. What actually needs preventing is a loop fanning out
+    dozens of executions, which a ceiling handles without penalising normal use.
+    """
+    # status.runningCount is 1 while an execution is in flight and empty once it
+    # finishes. An earlier version filtered on `NOT status.completionTime:*`,
+    # which gcloud rejects outright ("Unknown string format: *") — and because
+    # that version also failed OPEN on error, the guard silently never fired and
+    # three concurrent full suites went through. Hence: no server-side filter,
+    # and a hard refusal when the check itself cannot be completed.
+    out = subprocess.run(
+        base + ["run", "jobs", "executions", "list", f"--job={job}",
+                f"--region={region}", "--limit=20",
+                "--format=value(status.runningCount)"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        warn(f"cannot list executions of {job} ({out.stderr.strip()[:120]}) — "
+             "refusing to submit rather than risk an unbounded fan-out")
+        return True  # fail CLOSED: a safety guard that cannot verify must block
+    running = 0
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line and line not in ("0", ""):
+            running += 1
+    if running >= limit:
+        warn(f"{running} executions of {job} already running (limit {limit})")
+        return True
+    return False
+
+
+def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str) -> int | None:
+    """Return an exit code, or None to mean 'fall back to local'."""
+    job = pcfg.get("job")
+    bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
+    region = pcfg.get("region") or cfg.get("defaults", {}).get("region", "us-central1")
+    gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
+    if not (job and bucket and gproject):
+        warn("cloudrun backend not fully configured (job/bucket/gcp_project) — running locally")
+        return None
+    if not shutil.which("gcloud"):
+        warn("gcloud not on PATH — running locally")
+        return None
+    base = gcloud_base(pcfg, cfg, gproject)
+
+    limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
+    if at_concurrency_limit(base, job, region, limit):
+        # Do NOT return None here. None means "fall back to local", and the
+        # local fallback for --full is the entire ~1300-test suite. With several
+        # agent sessions sharing this machine that converts one blocked remote
+        # run into N concurrent local full suites — the exact load-average
+        # catastrophe ptest exists to prevent. Refuse outright instead.
+        warn("NOT falling back to a local full suite (that would hammer this "
+             "machine). Re-run when one finishes, or use a scoped `ptest <path>`.")
+        return 75  # EX_TEMPFAIL — retry later; distinct from any pytest code
+
+    if not budget_check(cfg, project):
+        return None
+
+    tar_path = pack_tree(root)
+    size_mb = tar_path.stat().st_size / 1e6
+    stamp = f"{project}-{int(time.time())}"
+    obj = f"gs://{bucket}/{stamp}.tar.gz"
+    print(f"[ptest] packaged {size_mb:.0f}MB → {obj}", file=sys.stderr, flush=True)
+
+    up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
+                        capture_output=True, text=True)
+    if up.returncode != 0:
+        warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
+        return None
+
+    print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
+    exec_cmd = base + [
+        "run", "jobs", "execute", job, f"--region={region}", "--wait",
+        "--update-env-vars", f"PTEST_SRC={obj},PTEST_CMD={cmd}",
+    ]
+    # --wait streams nothing useful on its own; the job writes test output to stdout
+    # and gcloud surfaces it on completion. Anything that breaks that contract makes
+    # the failure text unreadable to an agent, which is worse than being slow.
+    proc = subprocess.run(exec_cmd, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    sys.stdout.flush()
+    if proc.returncode != 0:
+        # Distinguish "the tests failed" from "the infrastructure failed".
+        if "failed to complete" in proc.stderr.lower() or "execution" in proc.stderr.lower():
+            sys.stderr.write(proc.stderr)
+            return 1
+        warn(f"remote execution error ({proc.stderr.strip()[:200]}) — running locally")
+        return None
+    return 0
+
+
+def cmd_where(cfg: dict, cwd: Path) -> int:
+    name, pcfg = resolve_project(cfg, cwd)
+    root = git_root(cwd) or cwd
+    det = default_commands(root)
+    src = source_repo(cwd)
+    print(f"cwd      {cwd}")
+    print(f"project  {name or '(unregistered)'}")
+    print(f"runs in  {root}")
+    if src and src != root:
+        print(f"worktree of {src}")
+    print(f"kind     {pcfg.get('kind', det['kind'])}")
+    print(f"workers  {pcfg.get('workers', cfg.get('defaults', {}).get('workers', 2))}")
+    print(f"backend  {pcfg.get('backend', 'local')}")
+    print(f"scoped   {pcfg.get('scoped', det['scoped'])}")
+    print(f"full     {pcfg.get('full', det['full'])}")
+    return 0
+
+
+def cmd_register(cwd: Path) -> int:
+    root = git_root(cwd) or cwd
+    det = default_commands(root)
+    print(f"""# add to {CONFIG}
+[projects.{root.name.replace('_', '-')}]
+root    = "{root}"
+kind    = "{det['kind']}"          # pytest | vitest | npm | go | cargo
+workers = 2                        # per-agent cap; never auto-detect
+scoped  = "{det['scoped']}"
+full    = "{det['full']}"
+backend = "local"                  # switch to "cloudrun" once the job exists
+# job         = "ptest-{root.name}"
+# region      = "us-central1"
+# gcp_project = ""
+# bucket      = ""
+""")
+    return 0
+
+
+def cmd_doctor(cfg: dict, cwd: Path) -> int:
+    ok = True
+    print(f"config      {CONFIG} {'✓' if CONFIG.exists() else '✗ missing (local defaults in use)'}")
+    if tomllib is None:
+        print("tomllib     ✗ python <3.11 — config cannot be parsed")
+        ok = False
+    name, pcfg = resolve_project(cfg, cwd)
+    print(f"project     {name or '✗ unregistered (auto-detect will be used)'}")
+    backend = pcfg.get("backend", "local")
+    print(f"backend     {backend}")
+    if backend == "cloudrun":
+        for key in ("job", "region", "gcp_project", "bucket"):
+            val = pcfg.get(key) or cfg.get("defaults", {}).get(key)
+            print(f"  {key:<11} {val or '✗ unset'}")
+            ok = ok and bool(val)
+        print(f"  gcloud      {shutil.which('gcloud') or '✗ not on PATH'}")
+        ok = ok and bool(shutil.which("gcloud"))
+    f = STATE / "remote-runs.json"
+    if f.exists():
+        try:
+            d = json.loads(f.read_text())
+            print(f"remote runs {d.get('day')}: {d.get('counts')}")
+        except Exception:
+            pass
+    print(f"cap         {cfg.get('defaults', {}).get('daily_remote_runs', 60)}/day/project")
+    return 0 if ok else 1
+
+
+def main(argv: list[str]) -> int:
+    cwd = Path.cwd().resolve()
+    cfg = load_config()
+
+    if argv and argv[0] in {"where", "doctor", "register"}:
+        return {"where": lambda: cmd_where(cfg, cwd),
+                "doctor": lambda: cmd_doctor(cfg, cwd),
+                "register": lambda: cmd_register(cwd)}[argv[0]]()
+
+    full = "--full" in argv
+    force_local = "--local" in argv
+    passthrough = [a for a in argv if a not in {"--full", "--local"}]
+
+    name, pcfg = resolve_project(cfg, cwd)
+    # Always run where you ARE. The stanza's `root` identifies the project and
+    # supplies commands/caps; it must never become the working directory, or a run
+    # from a worktree would silently test the original checkout instead.
+    root = git_root(cwd) or cwd
+    det = default_commands(root)
+    kind = pcfg.get("kind", det["kind"])
+    workers = int(pcfg.get("workers", cfg.get("defaults", {}).get("workers", 2)))
+
+    base = pcfg.get("full" if full else "scoped") or det["full" if full else "scoped"]
+    if not base:
+        warn(f"no test command known for {root} — run `ptest register` and add a stanza")
+        return 2
+
+    parts = [base]
+    if not full or force_local:
+        # Cap workers on anything running on this machine. A remote job owns its
+        # whole container, so it uses the project's own full-suite command as-is.
+        flags = worker_flags(kind, workers, root)
+        if flags:
+            parts.append(flags)
+    # The configured command is user-authored and intentionally shell-evaluated
+    # (env prefixes, &&). Caller arguments are not: an agent constructing a -k
+    # expression or a path must never be able to reach the shell unquoted.
+    parts += [shlex.quote(a) for a in passthrough]
+    cmd = " ".join(p for p in parts if p)
+
+    env = dict(os.environ)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+
+    if full and not force_local and pcfg.get("backend") == "cloudrun":
+        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd)
+        if rc is not None:
+            return rc  # includes real test failures; only None means "fall back"
+
+    rc = ensure_node_deps(kind, root, env)
+    if rc != 0:
+        return rc
+
+    # Anything reaching this line runs on THIS machine — including a --full whose
+    # remote submit fell back. Re-cap here rather than trusting the command built
+    # above, which for a cloudrun project was written for a dedicated container.
+    local_cmd = cap_workers_for_local(cmd, kind, workers, root) if full else cmd
+    if full and local_cmd != cmd:
+        warn(f"running --full LOCALLY — capped to {workers} workers "
+             "(the remote command's parallelism is for a dedicated container)")
+    return run_local(local_cmd, root, env)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

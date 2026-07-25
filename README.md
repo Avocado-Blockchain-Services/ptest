@@ -1,0 +1,81 @@
+# ptest — one test command for every project, every agent
+
+A dispatcher that stops parallel test runners from eating a shared workstation,
+and sends full-suite runs to Cloud Run Jobs with a database living in RAM.
+
+```
+ptest <paths / -k args>    scoped run — always LOCAL, workers capped
+ptest --full               whole suite — remote if configured, else local (capped)
+ptest where                what resolved for this directory
+ptest doctor               config + backend health
+ptest register             print a config stanza for the repo you are in
+```
+
+**The problem it solves.** `pytest -n auto`, `vitest`, `jest` and friends each
+grab roughly every core. Several concurrent sessions auto-detecting the same
+machine is how load average reaches 40 while everything swaps. ptest caps workers
+per run, so six agents at 2 workers each beat three agents at twelve — and routes
+full-suite runs off-box entirely.
+
+## → [`outsource_tests.md`](outsource_tests.md) ←
+
+**The design document.** Parallel-safe per-worker test databases, the worktree
+naming scheme that stops concurrent checkouts destroying each other's data, the
+remote-execution architecture, Terraform, and a long list of gotchas with the
+failure each one prevents. Written so a stranger — human or model — can
+replicate the whole setup on a similar stack.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `ptest` | The dispatcher. Single file, no dependencies beyond Python 3.11+. |
+| `config.example.toml` | Sanitised config; real one lives at `~/.config/ptest/config.toml` |
+| `Dockerfile.pytest` | Runner image: python + postgres 15 + uv |
+| `Dockerfile.vitest` | Runner image: node 20, no database |
+| `entrypoint.sh` | Shared: fetch → boot DB → install deps → run → exit with its code |
+| `cloudbuild.*.yaml` | Image build configs |
+| `terraform/` | Bucket, runner service account, both Cloud Run Jobs |
+| `provision.sh` | Imperative equivalent of the Terraform, plus the image build |
+| `provision-vitest.sh` | Adds the node image + job, reusing bucket and SA |
+| `smoke.sh` | End-to-end check against ONE test file before trusting a full run |
+
+## Install
+
+```bash
+cp ptest ~/.local/bin/ptest && chmod +x ~/.local/bin/ptest
+cp config.example.toml ~/.config/ptest/config.toml   # then edit
+ptest doctor
+```
+
+## Remote backend
+
+Build the images, apply the Terraform, then flip a project to `backend = "cloudrun"`.
+Full walkthrough in [`outsource_tests.md`](outsource_tests.md#part-4--terraform).
+
+**Verify with `smoke.sh` before flipping.** A soft fallback to local means a
+broken remote backend looks exactly like a working one — that failure mode kept
+the backend dormant for months in the original setup.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | tests passed |
+| 1 | tests failed |
+| 2 | ptest itself could not run (no command known, deps failed) |
+| **75** | **remote job at its concurrency ceiling — NOTHING RAN.** Not a test failure. |
+
+75 is `EX_TEMPFAIL`. It deliberately does **not** fall back to a local full run:
+with several agents blocked at once that would be the exact meltdown this tool
+exists to prevent. Retry later, or use a scoped run.
+
+## Notes
+
+- `provision*.sh` carry defaults from the environment they were written for.
+  Override with `PTEST_GCP_PROJECT`, `PTEST_BUCKET`, `PTEST_ACCOUNT`, `PTEST_REGION`.
+- ptest never inherits `gcloud config set account`; the account is explicit in
+  config and passed on every CLI call. On a machine that touches several
+  clients, inheriting it silently authenticates as the wrong identity.
+- After editing `config.toml`, re-parse it. Invalid TOML makes ptest fall back to
+  local defaults for **every** project, with only a warning line.

@@ -1,0 +1,19 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Local backups made while editing the installed copy
+*.bak
+*.bak.*
+
+# The real config carries account names, project ids and absolute paths.
+# config.example.toml is the sanitised one that belongs in git.
+config.toml
+
+__pycache__/
+*.pyc

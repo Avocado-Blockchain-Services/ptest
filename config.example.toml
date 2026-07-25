@@ -1,0 +1,104 @@
+# ptest — one test command for every project and every agent.
+#
+#   ptest              scoped run, always local, workers capped
+#   ptest --full       whole suite, remote if backend = "cloudrun", else local
+#   ptest where        what resolved for this directory
+#   ptest doctor       config + backend health
+#   ptest register     print a stanza for the repo you are standing in
+#
+# Why the cap exists: vitest and pytest -n auto each grab ~all cores. Three
+# concurrent agent sessions auto-detecting the same machine is how load average
+# reaches 42. Six agents politely taking 2 workers each beats three taking twelve.
+
+[defaults]
+workers           = 2      # per-agent worker cap for LOCAL runs. Never auto-detect.
+daily_remote_runs = 60     # per project — a runaway agent loop must not spend all day
+# Ceiling on simultaneous remote executions per job — a runaway-loop brake, not
+# a mutex. Remote runs cost nothing locally and separate worktrees legitimately
+# run at once, so this is set well above normal use.
+max_concurrent_remote_runs = 6
+region            = "us-central1"
+# Never inherit `gcloud config set account`: this machine routinely has an
+# unrelated client engagement's account active, which 403s on our own project.
+account     = "you@example.com"
+gcp_project = "your-test-project"
+bucket      = "your-test-project-ptest"
+
+# Worktrees need no configuration: ptest asks git which repo a worktree belongs to
+# (--git-common-dir) and resolves the stanza from that, then runs in the worktree.
+# `also_roots` exists only for directories that are not git worktrees of the root.
+
+# ── persea ──────────────────────────────────────────────────────────────────────
+
+[projects.persea-api]
+root       = "/abs/path/to/persea_content_maker/persea_content_maker_api"
+kind       = "pytest"
+workers    = 2
+scoped     = "uv run pytest"
+# -n auto matches .github/workflows/ci.yml (serial took 14m40s; xdist takes 2m43s).
+# The path list is deliberately `tests` — a SUPERSET of CI, which enumerates
+# specific paths and thereby skips tests/test_conftest_db_naming.py (the guard
+# that fails the build when a concurrency test lacks `real_commits`) and
+# tests/test_image_mode_residue.py. A pre-push gate that is stricter than CI is
+# safe; one that shares CI's blind spot is not. CI should be fixed separately.
+full       = "uv run pytest -n auto --cov=persea_content_maker_db --cov=content_maker_llm --cov=content_maker_crawler --cov=content_maker_api --cov-report=term-missing --cov-fail-under=85 tests"
+backend    = "cloudrun"    # verified end-to-end 2026-07-25 (10 passed, real Postgres)
+job        = "ptest-persea-api"
+
+[projects.persea-front]
+root    = "/abs/path/to/persea_content_maker/persea_content_maker_front"
+kind    = "vitest"
+workers = 2                # vitest workers are ~350MB each — this is the memory hog
+scoped  = "npm test --"
+full    = "npm test --"   # `--` forwards ptest's worker cap to vitest
+backend = "cloudrun"   # verified end-to-end 2026-07-25 (29 tests green, node 20)
+job     = "ptest-persea-front"
+
+# ── fullon2 ─────────────────────────────────────────────────────────────────────
+# Four independent git repos under one umbrella, same shape as persea. All use uv.
+# No coverage gate is configured in any of them, so `full` is the plain suite.
+
+[projects.fullon2-core]
+root    = "/abs/path/to/fullon2/fullon2"
+kind    = "pytest"
+workers = 2
+scoped  = "uv run pytest"
+# pyproject addopts already excludes e2e / s3_archive / live_llm / fuzz, and the
+# suite carries `isolated` + `modifies_global_state` markers, so it is xdist-aware.
+full    = "uv run pytest"
+backend = "local"
+
+[projects.fullon-api]
+root    = "/abs/path/to/fullon2/fullon-api"
+kind    = "pytest"
+workers = 2
+scoped  = "uv run pytest"
+full    = "uv run pytest"
+backend = "local"
+
+[projects.fullon2-launchpad]
+root    = "/abs/path/to/fullon2/fullon2_launchpad"
+kind    = "pytest"
+workers = 2
+scoped  = "uv run pytest"
+full    = "uv run pytest"
+backend = "local"
+
+[projects.fullon2-web]
+root    = "/abs/path/to/fullon2/fullon2_web"
+kind    = "vitest"
+workers = 2          # vitest workers are ~350MB each — the memory hog
+scoped  = "npm test --"
+full    = "npm test --"   # `--` forwards ptest's worker cap to vitest
+backend = "local"
+
+# ── template for any other project ──────────────────────────────────────────────
+# Run `ptest register` inside the repo and paste what it prints.
+#
+# [projects.fullon2]
+# root    = "/abs/path/to/fullon2"
+# kind    = "pytest"
+# workers = 2
+# scoped  = "uv run pytest"
+# full    = "uv run pytest"
+# backend = "local"

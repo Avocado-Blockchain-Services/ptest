@@ -1,0 +1,57 @@
+# ptest remote runner — pytest projects.
+#
+# Runs a whole test suite inside one Cloud Run Job execution, with Postgres
+# living in the container filesystem. On Cloud Run that filesystem is RAM-backed
+# (writes count against the memory limit), so PGDATA is already "postgres on
+# tmpfs" without mounting anything.
+#
+# Contract with ptest (see ~/.local/bin/ptest, run_cloudrun):
+#   PTEST_SRC  gs://bucket/object.tar.gz  — the packed repo tree
+#   PTEST_CMD  the exact test command, e.g. "uv run pytest --cov=... "
+# The entrypoint exits with the test command's own exit code, so a red suite is
+# a failed execution and a green suite is a successful one.
+
+FROM python:3.12-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+# postgresql-15 is what bookworm ships. curl+ca-certificates are how we pull the
+# source tarball from GCS (the full gcloud SDK is ~1GB and we need exactly one
+# authenticated GET, so we use the metadata server + the GCS JSON API instead).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-15 \
+        postgresql-client-15 \
+        curl \
+        ca-certificates \
+        tar \
+        gzip \
+        git \
+        build-essential \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv, pinned by digest-free tag on purpose: the runner should track the same uv
+# the developer uses locally, and a stale pin here silently diverges from the
+# lockfile semantics the repo was developed against.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ENV PGDATA=/pgdata \
+    PGBIN=/usr/lib/postgresql/15/bin \
+    PGUSER=fullon \
+    PGPORT=5432 \
+    UV_CACHE_DIR=/uv-cache \
+    UV_LINK_MODE=copy
+
+# postgres refuses to run as root, and Cloud Run gives us root. We create the
+# data dir up front owned by the stock `postgres` account and drop to it only
+# for the server; the tests themselves run as root, which is fine and avoids a
+# permissions dance over the unpacked source tree.
+RUN mkdir -p "$PGDATA" /work /uv-cache && chown -R postgres:postgres "$PGDATA"
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
