@@ -88,7 +88,10 @@ the backend dormant for months in the original setup.
 
 75 is `EX_TEMPFAIL`. It deliberately does **not** fall back to a local full run:
 with several agents blocked at once that would be the exact meltdown this tool
-exists to prevent. Retry later, or use a scoped run.
+exists to prevent. A heavy scoped run competes for the same slots as `--full`
+and can return 75 too, so "use a scoped run" only helps if it's small enough
+to stay local (a narrower path, or a `-k`/`-m`/`--lf` filter). Retry later,
+scope it tighter, or pass `--local` to force this run onto the machine.
 
 ## Notes
 
