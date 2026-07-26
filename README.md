@@ -4,7 +4,8 @@ A dispatcher that stops parallel test runners from eating a shared workstation,
 and sends full-suite runs to Cloud Run Jobs with a database living in RAM.
 
 ```
-ptest <paths / -k args>    scoped run — always LOCAL, workers capped
+ptest <paths / -k args>    scoped run — local and workers-capped, unless the path
+                           covers most of the suite (see Three tiers below)
 ptest --full               whole suite — remote if configured, else local (capped)
 ptest where                what resolved for this directory
 ptest doctor               config + backend health
@@ -23,12 +24,12 @@ full-suite runs off-box entirely.
 |---|---|
 | `ptest tests/api/test_x.py`, `ptest -k foo` | local, capped to `workers` |
 | `ptest tests/api` (≥ `remote_scoped_min_files` files) | backend, scoped command, no coverage gate |
-| `ptest --full` | backend, full command, coverage gate |
+| `ptest --full` | the project's `full` command, on its configured backend — coverage gate only if that command sets one |
 
-The middle tier exists because a scoped run can be full-suite-sized: `tests/api`
-is 221 of persea-api's 334 test files. A `-k`/`-m`/`--lf` filter always keeps a
-run local — a filter means you are hunting one failure and want the fast loop.
-`ptest --local <path>` forces local for anything.
+The middle tier exists because a scoped run can be full-suite-sized: in persea-api,
+`tests/api` alone is roughly two-thirds of the whole test suite. A `-k`/`-m`/`--lf`
+filter always keeps a run local — a filter means you are hunting one failure and
+want the fast loop. `ptest --local <path>` forces local for anything.
 
 ## → [`outsource_tests.md`](outsource_tests.md) ←
 
