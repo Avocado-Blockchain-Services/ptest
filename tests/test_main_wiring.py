@@ -82,8 +82,15 @@ def test_busy_backend_refuses_with_75_and_runs_nothing(wired, monkeypatch):
 
 def test_broken_backend_degrades_to_a_capped_local_run(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: None)
+
+    def broken_remote(pcfg, cfg_, project, root, cmd, **kw):
+        calls["remote"].append(cmd)
+        return None            # "broken" — fall back to local
+
+    monkeypatch.setattr(ptest, "run_cloudrun", broken_remote)
     assert ptest.main(["tests/api"]) == 0
+    assert len(calls["remote"]) == 1, "the remote path must have been attempted"
+    assert "-n auto" in calls["remote"][0], "the remote attempt carried container parallelism"
     assert len(calls["local"]) == 1
     assert "-n 2" in calls["local"][0], "the fallback must be capped, not -n auto"
     assert "-n auto" not in calls["local"][0]
