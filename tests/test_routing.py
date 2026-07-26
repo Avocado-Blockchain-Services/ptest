@@ -112,3 +112,80 @@ def test_no_path_args_counts_zero(ptest, persea_shaped, monkeypatch):
 def test_absolute_paths_are_counted(ptest, persea_shaped, monkeypatch):
     monkeypatch.chdir(persea_shaped)
     assert ptest.heavy_scoped_files([str(persea_shaped / "tests/db")], persea_shaped) == 61
+
+
+CLOUD = {"backend": "cloudrun"}
+LOCAL = {"backend": "local"}
+CFG = {"defaults": {"remote_scoped_min_files": 40}}
+
+
+def test_big_directory_routes_remote(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, n = ptest.should_route_remote(["tests/api"], persea_shaped, CLOUD, CFG, False)
+    assert (route, n) == (True, 221)
+
+
+def test_small_directory_stays_local(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, n = ptest.should_route_remote(["tests/crawler"], persea_shaped, CLOUD, CFG, False)
+    assert (route, n) == (False, 23)
+
+
+def test_single_file_stays_local(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, _ = ptest.should_route_remote(["tests/api/test_a0.py"], persea_shaped,
+                                         CLOUD, CFG, False)
+    assert route is False
+
+
+def test_a_narrowing_filter_keeps_a_big_path_local(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, _ = ptest.should_route_remote(["tests/api", "-k", "foo"], persea_shaped,
+                                         CLOUD, CFG, False)
+    assert route is False, "a filter means the caller wants the fast loop"
+
+
+def test_force_local_wins(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, CLOUD, CFG, True)
+    assert route is False
+
+
+def test_local_backend_never_routes(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, LOCAL, CFG, False)
+    assert route is False
+
+
+def test_threshold_zero_disables_the_tier(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    cfg = {"defaults": {"remote_scoped_min_files": 0}}
+    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, CLOUD, cfg, False)
+    assert route is False
+
+
+def test_threshold_boundary_is_inclusive(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    at = {"defaults": {"remote_scoped_min_files": 61}}
+    below = {"defaults": {"remote_scoped_min_files": 62}}
+    assert ptest.should_route_remote(["tests/db"], persea_shaped, CLOUD, at, False)[0]
+    assert not ptest.should_route_remote(["tests/db"], persea_shaped, CLOUD, below, False)[0]
+
+
+def test_project_threshold_overrides_the_default(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    pcfg = {"backend": "cloudrun", "remote_scoped_min_files": 500}
+    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, pcfg, CFG, False)
+    assert route is False
+
+
+def test_default_threshold_when_config_is_silent(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.should_route_remote(["tests/db"], persea_shaped, CLOUD, {}, False)[0]
+    assert not ptest.should_route_remote(["tests/crawler"], persea_shaped, CLOUD, {}, False)[0]
+
+
+def test_only_pytest_needs_an_explicit_parallel_flag(ptest):
+    assert ptest.remote_worker_flags("pytest") == "-n auto"
+    for kind in ("vitest", "npm", "go", "cargo", "unknown"):
+        assert ptest.remote_worker_flags(kind) == ""

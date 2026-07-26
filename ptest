@@ -466,6 +466,47 @@ def heavy_scoped_files(passthrough: list[str], root: Path) -> int:
     return len(covered)
 
 
+# Default only. A project stanza may override it, and 0 disables the tier.
+DEFAULT_REMOTE_SCOPED_MIN_FILES = 40
+
+
+def remote_worker_flags(kind: str) -> str:
+    """Parallelism for a run that owns its container.
+
+    The inverse of worker_flags: that one exists to stop a runner grabbing a
+    machine shared with five other agents, and this one exists because the
+    container is dedicated and capping it would discard the entire benefit.
+
+    Only pytest needs a flag. xdist is opt-in, so `uv run pytest tests/api` in
+    the container runs single-threaded and would be SLOWER than the local run it
+    replaced. vitest, go and cargo already use every core by default.
+    """
+    return "-n auto" if kind == "pytest" else ""
+
+
+def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dict,
+                        force_local: bool) -> tuple[bool, int]:
+    """Is this scoped run big enough to be worth shipping off-box?
+
+    Returns (route?, files covered) — the count comes back so the caller can say
+    what it decided without walking the tree a second time.
+    """
+    if force_local or pcfg.get("backend") != "cloudrun":
+        return False, 0
+    # A filter means the caller is hunting one failure and wants the fastest
+    # loop, not the biggest machine. Never trade their latency for our cores.
+    if has_narrowing_filter(passthrough):
+        return False, 0
+    threshold = int(pcfg.get(
+        "remote_scoped_min_files",
+        cfg.get("defaults", {}).get("remote_scoped_min_files",
+                                    DEFAULT_REMOTE_SCOPED_MIN_FILES)))
+    if threshold <= 0:
+        return False, 0
+    covered = heavy_scoped_files(passthrough, root)
+    return covered >= threshold, covered
+
+
 def budget_check(cfg: dict, project: str) -> bool:
     """A runaway agent loop must not be able to spend all day submitting jobs."""
     cap = int(cfg.get("defaults", {}).get("daily_remote_runs", 60))
