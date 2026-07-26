@@ -31,6 +31,12 @@ The middle tier exists because a scoped run can be full-suite-sized: in persea-a
 filter always keeps a run local — a filter means you are hunting one failure and
 want the fast loop. `ptest --local <path>` forces local for anything.
 
+A routed run's output is not identical to a local one: what comes back is the
+summarized remote digest (counts, coverage, and — on a red run — the full FAILURES
+section), not the streamed, verbatim output a local run gives you. It also uploads
+the working tree to the bucket, the same packing and `.env`-stripping `--full` already
+does. `ptest --local <path>` keeps both the run and its full output on this machine.
+
 ## → [`outsource_tests.md`](outsource_tests.md) ←
 
 **The design document.** Parallel-safe per-worker test databases, the worktree
