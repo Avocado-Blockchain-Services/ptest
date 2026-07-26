@@ -852,7 +852,8 @@ def main(argv: list[str]) -> int:
         # A bare `ptest` names nothing to scope to, and every runner here treats
         # "no arguments" as "the whole suite" — same load as `ptest .`, reached by
         # saying less rather than more.
-        if not any(not a.startswith("-") for a in passthrough):
+        # A flag's VALUE is not a path, so agree with path_like_args on what counts.
+        if not path_like_args(passthrough):
             return refuse_disguised_full(
                 "bare `ptest` (no path, no filter)",
                 "With nothing to scope to it collects every test", root, workers)
