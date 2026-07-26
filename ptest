@@ -5,7 +5,11 @@ Agents call `ptest` (scoped) or `ptest --full` (whole suite) and never learn whe
 it ran. Scoped runs stay local with capped workers so six concurrent sessions do not
 oversubscribe the box; full runs go to the configured backend.
 
-  ptest [PATHS/ARGS...]     scoped run, local, workers capped
+  ptest PATH [ARGS...]      scoped run, local, workers capped. PATH must really
+                            scope: bare `ptest`, `ptest .`, and any directory the
+                            whole suite lives under (`tests`, `src`) are `--full`
+                            in disguise and are REFUSED, for every runner alike.
+                            A `-k`/`-t`/`--lf` filter counts as scoping.
   ptest --full              full suite, remote if configured, else local
   ptest --local --full      force local even when a remote is configured
   ptest where               show which project/backend resolved for this directory
@@ -274,6 +278,133 @@ def worker_flags(kind: str, workers: int, root: Path | None = None) -> str:
     if kind == "cargo":
         return f"--jobs {workers}"
     return ""
+
+
+# `ptest .` and bare `ptest` are the holes in the load guard, and they are the ones
+# agents fall into: `pytest .` is idiomatic, and a bare runner name reads as "the
+# safe default". Both collect the ENTIRE suite while `full` is False — so neither
+# reaches the "refuse a local full suite" branch in run_cloudrun, neither routes to
+# the backend, and both just run ~1300 tests on this machine. That is strictly worse
+# than `--full` in every dimension: same load, same wall-clock, no coverage gate, no
+# remote offload. Refuse them by name.
+#
+# This applies to EVERY runner, not just pytest — vitest, npm, go and cargo all
+# reach the same place through their own spelling, and an agent working in the
+# front repo must meet exactly the behaviour it met in the API repo. One rule,
+# no per-language exceptions: a scoped run names what it is scoped to.
+#
+# Whole-tree spellings that are not filesystem paths, so the exists() test below
+# would never catch them: go's `./...` is the obvious one.
+WHOLE_TREE_TOKENS = {"./...", "...", "*"}
+
+# Naming the full-suite directory is per-language and the config cannot be relied
+# on to spell it: persea-api's `full` says `tests`, but persea-front's says only
+# `npm test --`, so `ptest src` — every test the front repo has — looked scoped.
+# The load-bearing question is not what a directory is CALLED, it is whether
+# everything lives under it. Hence: an arg is the full suite if no test file in
+# the repo falls outside it.
+TEST_FILE_RE = re.compile(
+    r"^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$|_test\.go$|_spec\.rb$"
+)
+
+
+def all_test_files(root: Path) -> list[Path]:
+    """Every test-shaped file in the repo. Name-only walk — nothing is opened."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in EXCLUDES and not d.startswith(".")]
+        for f in filenames:
+            if TEST_FILE_RE.search(f):
+                found.append(Path(dirpath) / f)
+    return found
+
+
+def refuse_disguised_full(what: str, why: str, root: Path, workers: int) -> int:
+    """One refusal, one voice — every path into it must teach the way out."""
+    warn(f"refusing {what} — that IS the full suite, run locally with no coverage gate.")
+    warn(f"  {why} under {root}, on THIS machine, at {workers} workers — the exact "
+         "load `--full` exists to move off-box. Nothing has been run.")
+    warn("  Run the whole suite:   ptest --full        "
+         "(remote when configured; ~3 min for persea-api)")
+    warn("  Or scope it for real:  ptest path/to/test_x.py    "
+         "ptest tests/unit    ptest -k some_expr")
+    return 2
+def full_suite_targets(full_cmd: str, root: Path) -> set[Path]:
+    """Directories the project's own --full command names (e.g. `tests`)."""
+    targets = set()
+    try:
+        toks = shlex.split(full_cmd)
+    except ValueError:
+        return targets
+    for t in toks:
+        if t.startswith("-") or "=" in t:
+            continue
+        p = root / t
+        if p.is_dir():
+            targets.add(p.resolve())
+    return targets
+
+
+def root_targeting_args(passthrough: list[str], root: Path,
+                        full_targets: set[Path]) -> list[str]:
+    """Caller args that would collect the whole suite anyway.
+
+    An arg counts as a path only if it exists on disk, which is what keeps a
+    `-k` expression's VALUE from being mistaken for one.
+
+    A relative arg is checked against BOTH the cwd and the root, because those
+    can disagree: run_local() always executes in the root, so `cd tests && ptest .`
+    hands pytest a `.` that means the root — the full suite — however it looked
+    to the caller. The operative interpretation is the root's; the cwd one is
+    checked too so the refusal still fires if that ever changes.
+    """
+    hits = []
+    tests: list[Path] | None = None  # walked at most once, only if needed
+    for a in passthrough:
+        if a.startswith("-"):
+            continue
+        if a in WHOLE_TREE_TOKENS:
+            hits.append(a)
+            continue
+        if os.path.isabs(a):
+            candidates = [Path(a)]
+        else:
+            candidates = [Path.cwd() / a, root / a]
+        for p in candidates:
+            if not p.exists():
+                continue
+            r = p.resolve()
+            if r == root or r in full_targets:
+                hits.append(a)
+                break
+            # Not named by the config — but if the whole suite lives under it,
+            # it is the whole suite. Walk lazily: only a directory can qualify,
+            # and only if nothing cheaper already matched.
+            if r.is_dir():
+                if tests is None:
+                    tests = all_test_files(root)
+                if tests and all(t.is_relative_to(r) for t in tests):
+                    hits.append(a)
+                    break
+    return hits
+
+
+NARROWING_FLAGS = (
+    "-k", "-m",                    # pytest expression / marker
+    "--deselect",
+    "--lf", "--last-failed",       # pytest: only what failed last time
+    "-t", "--testNamePattern",     # vitest / jest name filter
+)
+
+
+def has_narrowing_filter(passthrough: list[str]) -> bool:
+    """A real filter makes even a root path (or no path) genuinely scoped.
+
+    Deliberately NOT here: `-x`, `--ff`, `--sw`. Those reorder or abort a full
+    collection; they do not reduce it, so they must not buy a pass.
+    """
+    return any(a.startswith(NARROWING_FLAGS) for a in passthrough)
 
 
 def budget_check(cfg: dict, project: str) -> bool:
@@ -682,6 +813,23 @@ def main(argv: list[str]) -> int:
     if not base:
         warn(f"no test command known for {root} — run `ptest register` and add a stanza")
         return 2
+
+    if not full and not has_narrowing_filter(passthrough):
+        hits = root_targeting_args(
+            passthrough, root,
+            full_suite_targets(pcfg.get("full") or det["full"] or "", root),
+        )
+        if hits:
+            return refuse_disguised_full(
+                f"`ptest {' '.join(hits)}`",
+                "It collects every test", root, workers)
+        # A bare `ptest` names nothing to scope to, and every runner here treats
+        # "no arguments" as "the whole suite" — same load as `ptest .`, reached by
+        # saying less rather than more.
+        if not any(not a.startswith("-") for a in passthrough):
+            return refuse_disguised_full(
+                "bare `ptest` (no path, no filter)",
+                "With nothing to scope to it collects every test", root, workers)
 
     parts = [base]
     if not full or force_local:
