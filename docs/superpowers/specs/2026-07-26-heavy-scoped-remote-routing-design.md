@@ -49,9 +49,19 @@ A new pure function reports how much of the suite a scoped invocation covers:
 
 It resolves each path-like argument against `all_test_files(root)` and returns
 the size of the union of test files underneath them. A file named twice counts
-once. Non-path arguments are ignored, and a flag's *value* is never mistaken
-for a path — reuse the flag-skipping already implemented in
-`root_targeting_args`, do not write a second copy of that logic.
+once.
+
+Non-path arguments are ignored, and a flag's *value* must never be mistaken for
+a path. Note that `root_targeting_args` does **not** currently implement this:
+it skips only tokens starting with `-`, and its docstring's claim that the
+exists-on-disk test protects a `-k` value holds only while that value is not
+itself a real path. `--rootdir tests` is the counter-example — `tests` exists,
+so it is read as a selected path today.
+
+So this work extracts one shared helper, `path_like_args(passthrough)`, that
+skips both flags and the values of flags known to take a separate value, and
+routes **both** `heavy_scoped_files` and `root_targeting_args` through it.
+One implementation, not two.
 
 An argument that does not resolve to an existing path under `root` contributes
 zero and is not an error: ptest is not a path validator, and the underlying
