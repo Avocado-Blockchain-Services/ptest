@@ -105,7 +105,21 @@ the lesson while making `--full` and its coverage gate skippable by accident.
 
 The project's `scoped` command, not `full`. A heavy scoped run is still a
 scoped run: same test selection, **no coverage gate**, just executed on the
-container instead of this laptop. Only the location changes.
+container instead of this laptop.
+
+Output is not identical, though. `summarize_remote_logs` reduces the
+container's stdout to a digest before printing it — on a green run only the
+summary/coverage lines survive, so `ptest tests/db -v` routes remote and the
+`-v` per-test listing never reaches the terminal. Failure tracebacks do
+survive (the digest keeps the whole FAILURES section on a red run), which is
+why the trade is acceptable, but it is a real difference from a local run's
+verbatim output, not just a change of location. `ptest --local <path>` keeps
+the run — and its full, unsummarized output — on this machine.
+
+A heavy scoped run also uploads the working tree to the bucket, same as
+`--full` does: same packing (`git ls-files`) and same `.env` stripping, so
+there is no new secret-exposure class — but a command that previously never
+left this machine now does.
 
 Parallelism is the one deliberate difference. Local runs are capped at
 `workers` (2) because several agents share this box; the container is dedicated,
@@ -160,8 +174,19 @@ well-understood, non-destructive outcome with a documented reaction.
 
 Overridable per project. Absolute file count, not a percentage: the number that
 matters is how long the run takes, which tracks test count, not the ratio to a
-suite that grows underneath it. 40 cleanly separates `tests/db` (61) from
-`tests/crawler` (23) in the repo that motivated this.
+suite that grows underneath it.
+
+**40 is an estimate, not a tuned value.** It cleanly separates *file counts* —
+`tests/db` (61) from `tests/crawler` (23) in the repo that motivated this — but
+the tier's premise is that remote is *faster* above the line, and that has
+never been measured. One live remote run (`ptest tests/db` against persea-api,
+2026-07-25) proved correctness — the job executed, Postgres came up, tests
+passed — not timing. `tests/db` sits barely above the boundary at 61 files and
+is the likeliest case to be a net loss once ~2:45 of pack/upload/cold-start is
+priced in against however long 61 files actually take locally. The open
+question that would settle this: time `ptest tests/db` against
+`ptest --local tests/db` on persea-api and compare. Not done here, deliberately
+— see Out of scope.
 
 Projects with `backend = "local"` are unaffected regardless of threshold.
 
@@ -170,7 +195,7 @@ Projects with `backend = "local"` are unaffected regardless of threshold.
 A routed run says so before it goes, because a command that silently takes a
 different path for 2 minutes reads as a hang:
 
-    [ptest] tests/api covers 221/334 test files — routing to remote backend
+    [ptest] tests/api covers 221/334 test files — routing to the remote backend
 
 ## Verification
 
