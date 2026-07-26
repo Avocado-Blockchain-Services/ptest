@@ -47,6 +47,8 @@ def test_rootdir_value_is_no_longer_refused_as_the_whole_suite(ptest, persea_sha
 def test_bare_invocation_with_flag_value_is_refused(ptest, persea_shaped, monkeypatch):
     """ptest --rootdir tests (value only, no path) must be refused as a disguised bare invocation."""
     monkeypatch.chdir(persea_shaped)
+    # Create a pytest.ini to make this look like a valid test project
+    (persea_shaped / "pytest.ini").write_text("[pytest]\n")
     monkeypatch.setattr(ptest, "run_local", lambda *a, **kw: 0)
     # When path_like_args returns empty, the bare-invocation check should fire
     assert ptest.path_like_args(["--rootdir", "tests"]) == []
@@ -58,6 +60,8 @@ def test_bare_invocation_with_flag_value_is_refused(ptest, persea_shaped, monkey
 def test_flag_value_refusal_covers_all_value_flags(ptest, persea_shaped, monkeypatch):
     """Verify the fix covers not just --rootdir but all VALUE_FLAGS."""
     monkeypatch.chdir(persea_shaped)
+    # Create a pytest.ini to make this look like a valid test project
+    (persea_shaped / "pytest.ini").write_text("[pytest]\n")
     monkeypatch.setattr(ptest, "run_local", lambda *a, **kw: 0)
     # Test with -p (pytest's -p flag for plugins)
     assert ptest.path_like_args(["-p", "tests"]) == []
