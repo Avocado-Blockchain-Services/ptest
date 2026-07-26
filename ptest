@@ -5,11 +5,13 @@ Agents call `ptest` (scoped) or `ptest --full` (whole suite) and never learn whe
 it ran. Scoped runs stay local with capped workers so six concurrent sessions do not
 oversubscribe the box; full runs go to the configured backend.
 
-  ptest PATH [ARGS...]      scoped run, local, workers capped. PATH must really
-                            scope: bare `ptest`, `ptest .`, and any directory the
-                            whole suite lives under (`tests`, `src`) are `--full`
-                            in disguise and are REFUSED, for every runner alike.
+  ptest PATH [ARGS...]      scoped run, workers capped. PATH must really scope:
+                            bare `ptest`, `ptest .`, and any directory the whole
+                            suite lives under (`tests`, `src`) are `--full` in
+                            disguise and are REFUSED, for every runner alike.
                             A `-k`/`-t`/`--lf` filter counts as scoping.
+                            A path covering >= remote_scoped_min_files test
+                            files goes to the backend instead of running here.
   ptest --full              full suite, remote if configured, else local
   ptest --local --full      force local even when a remote is configured
   ptest where               show which project/backend resolved for this directory

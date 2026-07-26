@@ -17,6 +17,19 @@ machine is how load average reaches 40 while everything swaps. ptest caps worker
 per run, so six agents at 2 workers each beat three agents at twelve — and routes
 full-suite runs off-box entirely.
 
+### Three tiers, not two
+
+| invocation | where |
+|---|---|
+| `ptest tests/api/test_x.py`, `ptest -k foo` | local, capped to `workers` |
+| `ptest tests/api` (≥ `remote_scoped_min_files` files) | backend, scoped command, no coverage gate |
+| `ptest --full` | backend, full command, coverage gate |
+
+The middle tier exists because a scoped run can be full-suite-sized: `tests/api`
+is 221 of persea-api's 334 test files. A `-k`/`-m`/`--lf` filter always keeps a
+run local — a filter means you are hunting one failure and want the fast loop.
+`ptest --local <path>` forces local for anything.
+
 ## → [`outsource_tests.md`](outsource_tests.md) ←
 
 **The design document.** Parallel-safe per-worker test databases, the worktree
