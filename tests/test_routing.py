@@ -114,6 +114,19 @@ def test_absolute_paths_are_counted(ptest, persea_shaped, monkeypatch):
     assert ptest.heavy_scoped_files([str(persea_shaped / "tests/db")], persea_shaped) == 61
 
 
+def test_resolves_against_root_not_cwd(ptest, persea_shaped, monkeypatch):
+    """cd tests && ptest api must NOT be read as tests/api.
+
+    A run always executes in root (run_local's cwd, and the container
+    entrypoint's cd), so `api` has to resolve against root — where it does not
+    exist — not against cwd, where `tests/api` would make it look like 221
+    files. Every other test in this file chdirs to root, so root / a == cwd / a
+    there and none of them can catch a regression to the cwd-inclusive form.
+    """
+    monkeypatch.chdir(persea_shaped / "tests")
+    assert ptest.heavy_scoped_files(["api"], persea_shaped) == 0
+
+
 CLOUD = {"backend": "cloudrun"}
 LOCAL = {"backend": "local"}
 CFG = {"defaults": {"remote_scoped_min_files": 40}}

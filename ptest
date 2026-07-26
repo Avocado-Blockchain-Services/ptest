@@ -12,7 +12,10 @@ oversubscribe the box — unless the path is large enough to earn its own contai
                             disguise and are REFUSED, for every runner alike.
                             A `-k`/`-m`/`--lf` filter counts as scoping.
                             A path covering >= remote_scoped_min_files test
-                            files goes to the backend instead of running here.
+                            files goes to the backend instead of running here,
+                            which trades verbatim output for a summarized
+                            digest (--local keeps this run, and its full
+                            output, here).
   ptest --full              full suite, remote if configured, else local
   ptest --local --full      force local even when a remote is configured
   ptest where               show which project/backend resolved for this directory
@@ -333,6 +336,8 @@ def refuse_disguised_full(what: str, why: str, root: Path, workers: int) -> int:
     warn("  Or scope it for real:  ptest path/to/test_x.py    "
          "ptest tests/unit    ptest -k some_expr")
     return 2
+
+
 def full_suite_targets(full_cmd: str, root: Path) -> set[Path]:
     """Directories the project's own --full command names (e.g. `tests`)."""
     targets = set()
@@ -457,9 +462,16 @@ def heavy_scoped_files(passthrough: list[str], root: Path) -> int:
         return 0
     covered: set[Path] = set()
     for a in args:
-        # Relative args are checked against BOTH cwd and root for the same
-        # reason root_targeting_args does: run_local() executes in the root.
-        candidates = [Path(a)] if os.path.isabs(a) else [Path.cwd() / a, root / a]
+        # Root only — NOT the cwd/root pair root_targeting_args uses. There, an
+        # extra candidate can only ever ADD a refusal (strictly safe: worst case
+        # is telling someone to use --full). Here it would ADD remote routing,
+        # which is unsafe: `cd tests && ptest api` would resolve `api` against
+        # cwd, count the 221 files under <root>/tests/api, and route a `pytest
+        # api` invocation to run in root — where that path does not exist — to
+        # the remote backend. A run always executes in root (run_local's cwd
+        # arg, and the container entrypoint's cd), so root is the only
+        # candidate that matches what will actually run.
+        candidates = [Path(a)] if os.path.isabs(a) else [root / a]
         for p in candidates:
             if not p.exists():
                 continue
@@ -491,8 +503,10 @@ def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dic
                         force_local: bool) -> tuple[bool, int]:
     """Is this scoped run big enough to be worth shipping off-box?
 
-    Returns (route?, files covered) — the count comes back so the caller can say
-    what it decided without walking the tree a second time.
+    Returns (route?, files covered) — the count comes back so the caller can
+    report what it decided. `main()` still walks the tree a second time itself
+    for the log line's denominator (total test files); that duplicate walk is
+    deliberate, not a bug this return value avoids — it costs ~6ms.
     """
     if force_local or pcfg.get("backend") != "cloudrun":
         return False, 0
@@ -967,8 +981,9 @@ def main(argv: list[str]) -> int:
 
     if route_remote:
         total = len(all_test_files(root))
-        print(f"[ptest] covers {covered}/{total} test files — routing to the "
-              f"remote backend (scoped, no coverage gate)",
+        matched = " ".join(path_like_args(passthrough))
+        print(f"[ptest] {matched} covers {covered}/{total} test files — routing "
+              f"to the remote backend (scoped, no coverage gate)",
               file=sys.stderr, flush=True)
         rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd,
                           what=f"`ptest {' '.join(path_like_args(passthrough))}`")
