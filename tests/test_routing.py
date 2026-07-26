@@ -78,3 +78,37 @@ def test_narrowing_filter_overrides_bare_check(ptest, persea_shaped, monkeypatch
     # This should NOT be refused because -k is a narrowing filter
     rc = ptest.main(["--rootdir", "tests", "-k", "foo"])
     assert rc == 0, "narrowing filter should override bare-invocation refusal (exit 0)"
+
+
+def test_counts_files_under_a_directory_arg(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.heavy_scoped_files(["tests/api"], persea_shaped) == 221
+    assert ptest.heavy_scoped_files(["tests/db"], persea_shaped) == 61
+    assert ptest.heavy_scoped_files(["tests/unit"], persea_shaped) == 3
+
+
+def test_counts_a_single_file_arg_as_one(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.heavy_scoped_files(["tests/api/test_a0.py"], persea_shaped) == 1
+
+
+def test_two_args_are_a_union_not_a_sum(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    both = ptest.heavy_scoped_files(["tests/api", "tests/api/test_a0.py"], persea_shaped)
+    assert both == 221, "the file is already inside the directory"
+    assert ptest.heavy_scoped_files(["tests/api", "tests/db"], persea_shaped) == 282
+
+
+def test_a_nonexistent_path_counts_zero(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.heavy_scoped_files(["tests/typo"], persea_shaped) == 0
+
+
+def test_no_path_args_counts_zero(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.heavy_scoped_files(["-q", "--no-cov"], persea_shaped) == 0
+
+
+def test_absolute_paths_are_counted(ptest, persea_shaped, monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    assert ptest.heavy_scoped_files([str(persea_shaped / "tests/db")], persea_shaped) == 61

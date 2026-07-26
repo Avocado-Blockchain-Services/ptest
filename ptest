@@ -433,6 +433,39 @@ def has_narrowing_filter(passthrough: list[str]) -> bool:
     return any(a.startswith(NARROWING_FLAGS) for a in passthrough)
 
 
+def heavy_scoped_files(passthrough: list[str], root: Path) -> int:
+    """How many of the repo's test files the caller's paths actually cover.
+
+    This is the size signal the remote-routing tier turns on. A scoped run that
+    covers most of the suite costs the same as `--full` on this machine while
+    the dedicated container sits idle; one that covers a handful is finished
+    before a remote round trip has finished packing.
+
+    Union, not sum: `tests/api tests/api/test_x.py` covers 221 files, not 222.
+    An argument that resolves to nothing contributes zero and is NOT an error —
+    ptest is not a path validator, and the runner reports a bad path better than
+    ptest could. A typo therefore routes local, which is the safe direction.
+    """
+    args = path_like_args(passthrough)
+    if not args:
+        return 0
+    tests = [t.resolve() for t in all_test_files(root)]
+    if not tests:
+        return 0
+    covered: set[Path] = set()
+    for a in args:
+        # Relative args are checked against BOTH cwd and root for the same
+        # reason root_targeting_args does: run_local() executes in the root.
+        candidates = [Path(a)] if os.path.isabs(a) else [Path.cwd() / a, root / a]
+        for p in candidates:
+            if not p.exists():
+                continue
+            r = p.resolve()
+            covered.update(t for t in tests if t.is_relative_to(r))
+            break
+    return len(covered)
+
+
 def budget_check(cfg: dict, project: str) -> bool:
     """A runaway agent loop must not be able to spend all day submitting jobs."""
     cap = int(cfg.get("defaults", {}).get("daily_remote_runs", 60))
