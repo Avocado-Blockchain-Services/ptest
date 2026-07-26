@@ -736,7 +736,8 @@ def fetch_execution_logs(base: list[str], execution: str) -> str:
     return ""
 
 
-def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str) -> int | None:
+def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
+                 what: str = "--full") -> int | None:
     """Return an exit code, or None to mean 'fall back to local'."""
     job = pcfg.get("job")
     bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
@@ -757,8 +758,9 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str) -> i
         # agent sessions sharing this machine that converts one blocked remote
         # run into N concurrent local full suites — the exact load-average
         # catastrophe ptest exists to prevent. Refuse outright instead.
-        warn("NOT falling back to a local full suite (that would hammer this "
-             "machine). Re-run when one finishes, or use a scoped `ptest <path>`.")
+        warn(f"NOT falling back to a local {what} run (that would hammer this "
+             "machine). Re-run when one finishes, or scope it tighter with a "
+             "path or a -k filter.")
         return 75  # EX_TEMPFAIL — retry later; distinct from any pytest code
 
     if not budget_check(cfg, project):
@@ -932,13 +934,25 @@ def main(argv: list[str]) -> int:
                 "bare `ptest` (no path, no filter)",
                 "With nothing to scope to it collects every test", root, workers)
 
+    # A scoped run big enough to be worth the container goes there too — the
+    # third tier between "scoped, always local" and "--full, always remote".
+    route_remote, covered = (
+        should_route_remote(passthrough, root, pcfg, cfg, force_local)
+        if not full else (False, 0)
+    )
+
     parts = [base]
-    if not full or force_local:
+    if route_remote:
+        # Dedicated container: use its cores, not this machine's cap.
+        flags = remote_worker_flags(kind)
+    elif not full or force_local:
         # Cap workers on anything running on this machine. A remote job owns its
         # whole container, so it uses the project's own full-suite command as-is.
         flags = worker_flags(kind, workers, root)
-        if flags:
-            parts.append(flags)
+    else:
+        flags = ""
+    if flags:
+        parts.append(flags)
     # The configured command is user-authored and intentionally shell-evaluated
     # (env prefixes, &&). Caller arguments are not: an agent constructing a -k
     # expression or a path must never be able to reach the shell unquoted.
@@ -947,6 +961,17 @@ def main(argv: list[str]) -> int:
 
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
+
+    if route_remote:
+        total = len(all_test_files(root))
+        print(f"[ptest] covers {covered}/{total} test files — routing to the "
+              f"remote backend (scoped, no coverage gate)",
+              file=sys.stderr, flush=True)
+        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd,
+                          what=f"`ptest {' '.join(path_like_args(passthrough))}`")
+        if rc is not None:
+            return rc  # includes 75 (busy: nothing ran) and real test failures
+        warn("remote unavailable — running this scoped run locally at the cap")
 
     if full and not force_local and pcfg.get("backend") == "cloudrun":
         rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd)
@@ -960,10 +985,12 @@ def main(argv: list[str]) -> int:
     # Anything reaching this line runs on THIS machine — including a --full whose
     # remote submit fell back. Re-cap here rather than trusting the command built
     # above, which for a cloudrun project was written for a dedicated container.
-    local_cmd = cap_workers_for_local(cmd, kind, workers, root) if full else cmd
-    if full and local_cmd != cmd:
-        warn(f"running --full LOCALLY — capped to {workers} workers "
-             "(the remote command's parallelism is for a dedicated container)")
+    remote_shaped = full or route_remote
+    local_cmd = cap_workers_for_local(cmd, kind, workers, root) if remote_shaped else cmd
+    if remote_shaped and local_cmd != cmd:
+        warn(f"running {'--full' if full else 'this scoped run'} LOCALLY — capped "
+             f"to {workers} workers (the remote command's parallelism is for a "
+             "dedicated container)")
     return run_local(local_cmd, root, env)
 
 
