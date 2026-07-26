@@ -346,6 +346,34 @@ def full_suite_targets(full_cmd: str, root: Path) -> set[Path]:
     return targets
 
 
+# Flags whose value is a SEPARATE token. Without this list the value is read as
+# a selected path whenever it happens to exist on disk — `--rootdir tests` is
+# the case that bites, since `tests` is a real directory but is not selected.
+# Inline forms (`--cov=x`, `-k=expr`) need no entry: they start with `-`, so the
+# token that follows them is genuinely the next argument.
+VALUE_FLAGS = {
+    "-k", "-m", "--deselect", "--ignore", "--rootdir", "-p",   # pytest
+    "-n", "--numprocesses",                                    # xdist
+    "-t", "--testNamePattern", "--reporter",                   # vitest / jest
+    "--maxWorkers", "--minWorkers", "--concurrency", "--workers", "--jobs",
+}
+
+
+def path_like_args(passthrough: list[str]) -> list[str]:
+    """Caller arguments that could name a test path — flags and their values removed."""
+    out: list[str] = []
+    skip_next = False
+    for a in passthrough:
+        if skip_next:
+            skip_next = False
+            continue
+        if a.startswith("-"):
+            skip_next = a in VALUE_FLAGS
+            continue
+        out.append(a)
+    return out
+
+
 def root_targeting_args(passthrough: list[str], root: Path,
                         full_targets: set[Path]) -> list[str]:
     """Caller args that would collect the whole suite anyway.
@@ -361,9 +389,7 @@ def root_targeting_args(passthrough: list[str], root: Path,
     """
     hits = []
     tests: list[Path] | None = None  # walked at most once, only if needed
-    for a in passthrough:
-        if a.startswith("-"):
-            continue
+    for a in path_like_args(passthrough):
         if a in WHOLE_TREE_TOKENS:
             hits.append(a)
             continue
