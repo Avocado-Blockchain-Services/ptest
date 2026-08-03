@@ -46,7 +46,8 @@ import sys
 import tarfile
 import tempfile
 import time
-from datetime import date, datetime, timezone
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, NamedTuple
 
@@ -1175,6 +1176,7 @@ class ExecutionState(NamedTuple):
     succeeded: bool
     failed: bool
     message: str
+    completed_at: datetime | None = None
 
 
 class ExecutionResult(NamedTuple):
@@ -1183,6 +1185,7 @@ class ExecutionResult(NamedTuple):
     logs: str
     summary: str
     exit_code: int | None
+    completed_at: datetime | None = None
 
 
 def submit_execution(base: list[str], job: str, region: str,
@@ -1262,7 +1265,8 @@ def describe_execution(base: list[str], execution: str,
     )
     if not message and count("cancelledCount"):
         message = "cancelled"
-    return ExecutionState(execution, terminal, succeeded, failed, message)
+    completed_at = _record_time(status.get("completionTime"))
+    return ExecutionState(execution, terminal, succeeded, failed, message, completed_at)
 
 
 def wait_for_execution(base: list[str], execution: str,
@@ -1276,7 +1280,7 @@ def wait_for_execution(base: list[str], execution: str,
         except CloudRunUnavailable as exc:
             describe_failures += 1
             if describe_failures >= 5:
-                return ExecutionResult(execution, "infrastructure", "", str(exc), None)
+                return ExecutionResult(execution, "infrastructure", "", str(exc), None, None)
             time.sleep(delay)
             delay = min(delay * 2, 10)
             continue
@@ -1288,18 +1292,189 @@ def wait_for_execution(base: list[str], execution: str,
     logs = fetch_execution_logs(base, execution)
     if state.succeeded:
         summary = summarize_remote_logs(logs, failed=False)
-        return ExecutionResult(execution, "success", logs, summary, 0)
+        return ExecutionResult(execution, "success", logs, summary, 0, state.completed_at)
     if state.failed and "[ptest-runner] FATAL" not in logs:
         summary = summarize_remote_logs(logs, failed=True)
-        return ExecutionResult(execution, "test_failure", logs, summary, 1)
+        return ExecutionResult(
+            execution, "test_failure", logs, summary, 1, state.completed_at
+        )
     summary = summarize_remote_logs(logs, failed=True)
     if not summary:
         summary = state.message
-    return ExecutionResult(execution, "infrastructure", logs, summary, None)
+    return ExecutionResult(
+        execution, "infrastructure", logs, summary, None, state.completed_at
+    )
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _record_time(value) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def upload_source_once(base: list[str], store: GcsCoordination, archive: Path,
+                       object_name: str, bucket: str) -> bool:
+    """Upload a content-addressed archive once; a racing 412 is success."""
+    uri = f"gs://{bucket}/{object_name}"
+    result = subprocess.run(
+        base + ["storage", "cp", str(archive), uri, "--if-generation-match=0"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 or store._precondition_failed(result):
+        return True
+    warn(f"upload failed ({(result.stderr or '').strip()[:200]}) — running locally")
+    return False
+
+
+def _show_execution_result(result: ExecutionResult, gproject: str) -> int | None:
+    if result.summary.strip():
+        sys.stdout.write(result.summary + "\n")
+    elif result.logs.strip():
+        sys.stdout.write(result.logs if result.logs.endswith("\n") else result.logs + "\n")
+    else:
+        warn(f"could not retrieve logs for {result.name}; inspect with: "
+             f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
+             f"=\"{result.name}\"' --project={gproject}")
+    sys.stdout.flush()
+    if result.exit_code == 1:
+        warn(f"remote suite FAILED — execution {result.name}")
+    elif result.exit_code is None:
+        warn(f"remote execution error ({result.summary[:200]}) — running locally")
+    return result.exit_code
+
+
+def _write_passing_record(store: GcsCoordination, path: str,
+                          result: ExecutionResult, completed: datetime) -> None:
+    value = {
+        "schema": "ptest-pass-v1",
+        "status": "passed",
+        "completed_at": completed.astimezone(timezone.utc).isoformat(),
+        "execution": result.name,
+        "summary": result.summary,
+    }
+    existing = store.read_json(path)
+    if existing is None:
+        store.create_json(path, value)
+    else:
+        store.replace_json(path, value, existing.generation)
+
+
+def _cleanup_record(store: GcsCoordination, path: str) -> None:
+    existing = store.read_json(path)
+    if existing is not None:
+        store.delete_if_generation(path, existing.generation)
+
+
+def _finish_coordinated_execution(
+    store: GcsCoordination,
+    paths: CoordinationPaths,
+    result: ExecutionResult,
+    settings: RemoteCacheSettings,
+    fresh: bool,
+    gproject: str,
+) -> int | None:
+    try:
+        if result.exit_code == 0 and not fresh and result.completed_at is not None:
+            _write_passing_record(store, paths.passing, result, result.completed_at)
+        _cleanup_record(store, paths.execution)
+        _cleanup_record(store, paths.claim)
+    except CoordinationUnavailable as exc:
+        warn(f"remote result completed but cache update failed ({exc})")
+    return _show_execution_result(result, gproject)
+
+
+def _wait_for_published_execution(store: GcsCoordination, path: str,
+                                  attempts: int = 12) -> StoredJson | None:
+    for _ in range(attempts):
+        execution = store.read_json(path)
+        if execution is not None:
+            return execution
+        time.sleep(5)
+    return None
+
+
+def _execution_name(record: StoredJson | None) -> str | None:
+    if record is None or record.value.get("schema") != "ptest-execution-v1":
+        return None
+    name = record.value.get("execution")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,62}", name):
+        return None
+    return name
+
+
+def _published_execution_is_reusable(
+    store: GcsCoordination,
+    paths: CoordinationPaths,
+    published: StoredJson,
+    base: list[str],
+    region: str,
+    settings: RemoteCacheSettings,
+) -> bool:
+    execution = _execution_name(published)
+    if not execution:
+        return True  # malformed is handled by the caller without submitting
+    try:
+        state = describe_execution(base, execution, region)
+    except CloudRunUnavailable:
+        # Ambiguous describe errors must never authorize a duplicate submit.
+        return True
+    if not state.terminal:
+        return True
+    if state.succeeded and state.completed_at is not None:
+        record = {
+            "schema": "ptest-pass-v1",
+            "status": "passed",
+            "completed_at": state.completed_at.isoformat(),
+        }
+        if passing_record_is_fresh(record, utc_now(), settings.ttl_seconds):
+            return True
+    store.delete_if_generation(paths.execution, published.generation)
+    return False
+
+
+def _uncached_remote_execution(
+    pcfg: dict, cfg: dict, project: str, root: Path, cmd: str, what: str,
+    base: list[str], job: str, bucket: str, region: str, gproject: str,
+    store: GcsCoordination,
+) -> int | None:
+    limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
+    if at_concurrency_limit(base, job, region, limit):
+        warn(f"NOT falling back to a local {what} run (that would hammer this "
+             "machine). Re-run when one finishes, or scope it tighter with a "
+             "path or a -k filter.")
+        return 75
+    if not budget_check(cfg, project):
+        return None
+    manifest = source_manifest(root)
+    digest = tree_digest(root, manifest)
+    archive = pack_tree(root, manifest)
+    post_manifest = source_manifest(root)
+    if tree_digest(root, post_manifest) != digest:
+        warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
+        return 75
+    source_path = f"sources/{digest}.tar.gz"
+    if not upload_source_once(base, store, archive, source_path, bucket):
+        return None
+    source_uri = f"gs://{bucket}/{source_path}"
+    print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
+    try:
+        execution = submit_execution(base, job, region, source_uri, cmd)
+    except CloudRunUnavailable as exc:
+        warn(f"remote execution error ({exc}) — running locally")
+        return None
+    return _show_execution_result(wait_for_execution(base, execution, region), gproject)
 
 
 def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
-                 what: str = "--full") -> int | None:
+                 what: str = "--full", fresh: bool = False) -> int | None:
     """Return an exit code, or None to mean 'fall back to local'."""
     job = pcfg.get("job")
     bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
@@ -1312,72 +1487,167 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         warn("gcloud not on PATH — running locally")
         return None
     base = gcloud_base(pcfg, cfg, gproject)
-    tar_path = pack_tree(root)
-    key = remote_run_key(
-        snapshot=snapshot_digest(tar_path),
-        command=cmd,
-        job=job,
-        region=region,
-        project=gproject,
-    )
+    settings = remote_cache_settings(pcfg, cfg)
+    manifest = source_manifest(root)
+    digest = tree_digest(root, manifest)
+    identity = {
+        "schema": "ptest-remote-key-v1",
+        "project": project,
+        "kind": pcfg.get("kind", "unknown"),
+        "command": cmd,
+        "job": job,
+        "region": region,
+        "gcp_project": gproject,
+        "runner_namespace": settings.runner_namespace,
+        "tree_digest": digest,
+    }
+    if fresh:
+        identity["fresh_nonce"] = uuid.uuid4().hex
+    paths = coordination_paths(remote_request_key(identity), digest)
+    store = GcsCoordination(base, bucket)
+    submitted_execution = None
+    try:
+        if not fresh:
+            passing = store.read_json(paths.passing)
+            if passing and passing_record_is_fresh(
+                passing.value, utc_now(), settings.ttl_seconds
+            ):
+                warn(f"reused passing result from {passing.value.get('execution', 'cache')}")
+                summary = passing.value.get("summary", "")
+                if isinstance(summary, str) and summary:
+                    sys.stdout.write(summary + ("" if summary.endswith("\n") else "\n"))
+                    sys.stdout.flush()
+                return 0
 
-    def submit() -> tuple[int | None, str]:
-        # These guards count actual Cloud Run submissions, not callers that
-        # joined an identical in-flight run or reused its successful result.
+        published = store.read_json(paths.execution)
+        execution = _execution_name(published)
+        if published is not None and execution is None:
+            warn("remote execution record is malformed; refusing to submit a duplicate")
+            return 75
+        if execution and _published_execution_is_reusable(
+            store, paths, published, base, region, settings
+        ):
+            warn(f"joining identical remote execution {execution}")
+            result = wait_for_execution(base, execution, region)
+            return _finish_coordinated_execution(
+                store, paths, result, settings, fresh, gproject
+            )
+
+        owner = uuid.uuid4().hex
+        now = utc_now()
+        claim_value = {
+            "schema": "ptest-claim-v1",
+            "owner": owner,
+            "created_at": now.isoformat(),
+            "lease_expires_at": (
+                now + timedelta(seconds=settings.claim_ttl_seconds)
+            ).isoformat(),
+        }
+        claim = store.read_json(paths.claim)
+        owns_claim = False
+        if claim is None:
+            owns_claim = store.create_json(paths.claim, claim_value)
+        else:
+            expiry = _record_time(claim.value.get("lease_expires_at"))
+            if expiry is None:
+                warn("remote claim record is malformed; refusing to submit a duplicate")
+                return 75
+            if utc_now() >= expiry:
+                # Recheck the manifest immediately before stealing an expired
+                # lease: the old owner may have published while we inspected it.
+                published = store.read_json(paths.execution)
+                if published is None:
+                    owns_claim = store.replace_json(
+                        paths.claim, claim_value, claim.generation
+                    )
+
+        if not owns_claim:
+            published = _wait_for_published_execution(store, paths.execution)
+            execution = _execution_name(published)
+            if not execution:
+                warn("identical remote request is claimed but not yet published; retry shortly")
+                return 75
+            warn(f"joining identical remote execution {execution}")
+            result = wait_for_execution(base, execution, region)
+            return _finish_coordinated_execution(
+                store, paths, result, settings, fresh, gproject
+            )
+
+        # Close the publication-versus-expired-lease race: the prior owner can
+        # publish after our pre-steal read but before our generation-safe steal.
+        published = store.read_json(paths.execution)
+        execution = _execution_name(published)
+        if published is not None:
+            if execution is None:
+                warn("remote execution record is malformed; refusing to submit a duplicate")
+                return 75
+            warn(f"joining identical remote execution {execution}")
+            result = wait_for_execution(base, execution, region)
+            return _finish_coordinated_execution(
+                store, paths, result, settings, fresh, gproject
+            )
+
+        claim = store.read_json(paths.claim)
         limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
         if at_concurrency_limit(base, job, region, limit):
-            # Do NOT return None here. None means "fall back to local", and the
-            # local fallback for --full is the entire ~1300-test suite. With several
-            # agent sessions sharing this machine that converts one blocked remote
-            # run into N concurrent local full suites — the exact load-average
-            # catastrophe ptest exists to prevent. Refuse outright instead.
+            if claim:
+                store.delete_if_generation(paths.claim, claim.generation)
             warn(f"NOT falling back to a local {what} run (that would hammer this "
                  "machine). Re-run when one finishes, or scope it tighter with a "
                  "path or a -k filter.")
-            return 75, ""  # EX_TEMPFAIL — retry later; distinct from pytest
+            return 75
+        if not budget_check(cfg, project):
+            if claim:
+                store.delete_if_generation(paths.claim, claim.generation)
+            return None
 
-    limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
-    if at_concurrency_limit(base, job, region, limit):
-        warn(f"NOT falling back to a local {what} run (that would hammer this "
-             "machine). Re-run when one finishes, or scope it tighter with a "
-             "path or a -k filter.")
-        return 75
-
-    if not budget_check(cfg, project):
-        return None
-
-    size_mb = tar_path.stat().st_size / 1e6
-    stamp = f"{project}-{int(time.time())}"
-    obj = f"gs://{bucket}/{stamp}.tar.gz"
-    print(f"[ptest] packaged {size_mb:.0f}MB → {obj}", file=sys.stderr, flush=True)
-
-    up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
-                        capture_output=True, text=True)
-    if up.returncode != 0:
-        warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
-        return None
-
-    print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
-    try:
-        execution = submit_execution(base, job, region, obj, cmd)
-    except CloudRunUnavailable as exc:
-        warn(f"remote execution error ({exc}) — running locally")
-        return None
-    result = wait_for_execution(base, execution, region)
-    if result.summary.strip():
-        sys.stdout.write(result.summary + "\n")
-    elif result.logs.strip():
-        sys.stdout.write(result.logs if result.logs.endswith("\n") else result.logs + "\n")
-    else:
-        warn(f"could not retrieve logs for {execution}; inspect with: "
-             f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
-             f"=\"{execution}\"' --project={gproject}")
-    sys.stdout.flush()
-    if result.exit_code == 1:
-        warn(f"remote suite FAILED — execution {execution}")
-    elif result.exit_code is None:
-        warn(f"remote execution error ({result.summary[:200]}) — running locally")
-    return result.exit_code
+        archive = pack_tree(root, manifest)
+        post_manifest = source_manifest(root)
+        if tree_digest(root, post_manifest) != digest:
+            if claim:
+                store.delete_if_generation(paths.claim, claim.generation)
+            warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
+            return 75
+        size_mb = archive.stat().st_size / 1e6
+        source_uri = f"gs://{bucket}/{paths.source}"
+        print(f"[ptest] packaged {size_mb:.0f}MB → {source_uri}",
+              file=sys.stderr, flush=True)
+        if not upload_source_once(base, store, archive, paths.source, bucket):
+            if claim:
+                store.delete_if_generation(paths.claim, claim.generation)
+            return None
+        print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
+        try:
+            execution = submit_execution(base, job, region, source_uri, cmd)
+            submitted_execution = execution
+        except CloudRunUnavailable as exc:
+            if claim:
+                store.delete_if_generation(paths.claim, claim.generation)
+            warn(f"remote execution error ({exc}) — running locally")
+            return None
+        store.create_json(
+            paths.execution,
+            {"schema": "ptest-execution-v1", "execution": execution,
+             "owner": owner, "source": paths.source,
+             "command_hash": hashlib.sha256(cmd.encode()).hexdigest(),
+             "submitted_at": utc_now().isoformat()},
+        )
+        result = wait_for_execution(base, execution, region)
+        return _finish_coordinated_execution(
+            store, paths, result, settings, fresh, gproject
+        )
+    except CoordinationUnavailable as exc:
+        if submitted_execution:
+            warn(f"cache publication failed after submitting {submitted_execution} ({exc}); "
+                 "waiting for that execution without resubmitting")
+            return _show_execution_result(
+                wait_for_execution(base, submitted_execution, region), gproject
+            )
+        warn(f"remote result cache unavailable ({exc}); continuing uncached")
+        return _uncached_remote_execution(
+            pcfg, cfg, project, root, cmd, what, base, job, bucket, region,
+            gproject, store,
+        )
 
 
 def cmd_where(cfg: dict, cwd: Path) -> int:
@@ -1456,7 +1726,10 @@ def main(argv: list[str]) -> int:
 
     full = "--full" in argv
     force_local = "--local" in argv
-    passthrough = [a for a in argv if a not in {"--full", "--local"}]
+    fresh = "--fresh" in argv
+    passthrough = [
+        a for a in argv if a not in {"--full", "--local", "--fresh"}
+    ]
 
     name, pcfg = resolve_project(cfg, cwd)
     # Always run where you ARE. The stanza's `root` identifies the project and
@@ -1496,6 +1769,12 @@ def main(argv: list[str]) -> int:
         should_route_remote(passthrough, root, pcfg, cfg, force_local)
         if not full else (False, 0)
     )
+    selected_remote = route_remote or (
+        full and not force_local and pcfg.get("backend") == "cloudrun"
+    )
+    if fresh and not selected_remote:
+        warn("--fresh is only valid for a selected Cloud Run execution")
+        return 2
 
     parts = [base]
     if route_remote:
@@ -1525,13 +1804,14 @@ def main(argv: list[str]) -> int:
               f"to the remote backend (scoped, no coverage gate)",
               file=sys.stderr, flush=True)
         rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd,
-                          what=f"`ptest {' '.join(path_like_args(passthrough))}`")
+                          what=f"`ptest {' '.join(path_like_args(passthrough))}`",
+                          fresh=fresh)
         if rc is not None:
             return rc  # includes 75 (busy: nothing ran) and real test failures
         warn("remote unavailable — running this scoped run locally at the cap")
 
     if full and not force_local and pcfg.get("backend") == "cloudrun":
-        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd)
+        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
         if rc is not None:
             return rc  # includes real test failures; only None means "fall back"
 

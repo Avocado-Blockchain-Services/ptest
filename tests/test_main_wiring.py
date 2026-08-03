@@ -26,10 +26,11 @@ def wired(ptest, persea_shaped, monkeypatch, tmp_path):
     monkeypatch.chdir(persea_shaped)
     monkeypatch.setattr(ptest, "ensure_node_deps", lambda *a, **k: 0)
 
-    calls = {"remote": [], "local": []}
+    calls = {"remote": [], "remote_kwargs": [], "local": []}
 
     def fake_remote(pcfg, cfg_, project, root, cmd, **kw):
         calls["remote"].append(cmd)
+        calls["remote_kwargs"].append(kw)
         return 0
 
     def fake_local(cmd, cwd, env):
@@ -113,3 +114,20 @@ def test_full_still_sends_the_full_command(wired):
     ptest, calls = wired
     assert ptest.main(["--full"]) == 0
     assert "--cov-fail-under=85" in calls["remote"][0]
+
+
+def test_fresh_is_a_ptest_only_remote_benchmark_flag(wired):
+    ptest, calls = wired
+
+    assert ptest.main(["--full", "--fresh"]) == 0
+
+    assert "--fresh" not in calls["remote"][0]
+    assert calls["remote_kwargs"][0]["fresh"] is True
+
+
+def test_fresh_is_rejected_when_the_selected_run_is_local(wired):
+    ptest, calls = wired
+
+    assert ptest.main(["--fresh", "tests/crawler"]) == 2
+
+    assert not calls["remote"] and not calls["local"]
