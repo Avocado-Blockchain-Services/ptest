@@ -1165,6 +1165,139 @@ def fetch_execution_logs(base: list[str], execution: str) -> str:
     return ""
 
 
+class CloudRunUnavailable(RuntimeError):
+    """A Cloud Run lifecycle operation failed for infrastructure reasons."""
+
+
+class ExecutionState(NamedTuple):
+    name: str
+    terminal: bool
+    succeeded: bool
+    failed: bool
+    message: str
+
+
+class ExecutionResult(NamedTuple):
+    name: str
+    terminal_category: str
+    logs: str
+    summary: str
+    exit_code: int | None
+
+
+def submit_execution(base: list[str], job: str, region: str,
+                     source_uri: str, command: str) -> str:
+    args = base + [
+        "run", "jobs", "execute", job, f"--region={region}", "--async",
+        "--format=value(metadata.name)",
+        "--update-env-vars", f"PTEST_SRC={source_uri},PTEST_CMD={command}",
+    ]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        raise CloudRunUnavailable("Cloud Run submission could not run") from exc
+    if result.returncode != 0:
+        raise CloudRunUnavailable(
+            f"Cloud Run submission failed: {(result.stderr or '').strip()[:200]}"
+        )
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+    candidates = re.findall(r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?", output.lower())
+    execution = next((value for value in reversed(candidates)
+                      if value.startswith(f"{job}-")), None)
+    if not execution:
+        raise CloudRunUnavailable("Cloud Run submission returned no execution name")
+    return execution
+
+
+def describe_execution(base: list[str], execution: str,
+                       region: str) -> ExecutionState:
+    args = base + [
+        "run", "jobs", "executions", "describe", execution,
+        f"--region={region}", "--format=json",
+    ]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    except Exception as exc:
+        raise CloudRunUnavailable("Cloud Run execution describe could not run") from exc
+    if result.returncode != 0:
+        raise CloudRunUnavailable(
+            f"Cloud Run execution describe failed: {(result.stderr or '').strip()[:200]}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+        status = payload["status"]
+        if not isinstance(status, dict):
+            raise TypeError
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise CloudRunUnavailable("Cloud Run execution status was malformed") from exc
+
+    def count(name: str) -> int:
+        try:
+            return int(status.get(name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    completed_condition = next(
+        (condition for condition in status.get("conditions", [])
+         if isinstance(condition, dict) and condition.get("type") == "Completed"),
+        {},
+    )
+    condition_state = str(
+        completed_condition.get("state", completed_condition.get("status", ""))
+    ).upper()
+    condition_terminal = condition_state in {
+        "TRUE", "FALSE", "CONDITION_SUCCEEDED", "CONDITION_FAILED",
+    }
+    terminal = bool(status.get("completionTime")) or condition_terminal
+    succeeded = count("succeededCount") > 0 or condition_state in {
+        "TRUE", "CONDITION_SUCCEEDED",
+    }
+    failed = count("failedCount") > 0
+    if condition_state in {"FALSE", "CONDITION_FAILED"} and count("cancelledCount") == 0:
+        failed = True
+    message = " ".join(
+        str(completed_condition.get(field, "")).strip()
+        for field in ("reason", "message")
+        if completed_condition.get(field)
+    )
+    if not message and count("cancelledCount"):
+        message = "cancelled"
+    return ExecutionState(execution, terminal, succeeded, failed, message)
+
+
+def wait_for_execution(base: list[str], execution: str,
+                       region: str) -> ExecutionResult:
+    delay = 2
+    describe_failures = 0
+    while True:
+        try:
+            state = describe_execution(base, execution, region)
+            describe_failures = 0
+        except CloudRunUnavailable as exc:
+            describe_failures += 1
+            if describe_failures >= 5:
+                return ExecutionResult(execution, "infrastructure", "", str(exc), None)
+            time.sleep(delay)
+            delay = min(delay * 2, 10)
+            continue
+        if state.terminal:
+            break
+        time.sleep(delay)
+        delay = min(delay * 2, 10)
+
+    logs = fetch_execution_logs(base, execution)
+    if state.succeeded:
+        summary = summarize_remote_logs(logs, failed=False)
+        return ExecutionResult(execution, "success", logs, summary, 0)
+    if state.failed and "[ptest-runner] FATAL" not in logs:
+        summary = summarize_remote_logs(logs, failed=True)
+        return ExecutionResult(execution, "test_failure", logs, summary, 1)
+    summary = summarize_remote_logs(logs, failed=True)
+    if not summary:
+        summary = state.message
+    return ExecutionResult(execution, "infrastructure", logs, summary, None)
+
+
 def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                  what: str = "--full") -> int | None:
     """Return an exit code, or None to mean 'fall back to local'."""
@@ -1203,79 +1336,48 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                  "path or a -k filter.")
             return 75, ""  # EX_TEMPFAIL — retry later; distinct from pytest
 
-        if not budget_check(cfg, project):
-            return None, ""
+    limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
+    if at_concurrency_limit(base, job, region, limit):
+        warn(f"NOT falling back to a local {what} run (that would hammer this "
+             "machine). Re-run when one finishes, or scope it tighter with a "
+             "path or a -k filter.")
+        return 75
 
-        size_mb = tar_path.stat().st_size / 1e6
-        # Different keys may submit concurrently, so a second-resolution name
-        # can make one upload overwrite another before Cloud Run fetches it.
-        # The run key is content/command/destination-derived and immutable.
-        stamp = f"{project}-{key}"
-        obj = f"gs://{bucket}/{stamp}.tar.gz"
-        print(f"[ptest] packaged {size_mb:.0f}MB → {obj}",
-              file=sys.stderr, flush=True)
+    if not budget_check(cfg, project):
+        return None
 
-        up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
-                            capture_output=True, text=True)
-        if up.returncode != 0:
-            warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
-            return None, ""
+    size_mb = tar_path.stat().st_size / 1e6
+    stamp = f"{project}-{int(time.time())}"
+    obj = f"gs://{bucket}/{stamp}.tar.gz"
+    print(f"[ptest] packaged {size_mb:.0f}MB → {obj}", file=sys.stderr, flush=True)
 
-        print(f"[ptest] remote: {job} ({region}) · {cmd}",
-              file=sys.stderr, flush=True)
-        remote_env = f"PTEST_SRC={obj},PTEST_CMD={cmd}"
-        if os.environ.get("PTEST_PROFILE_DB_CLEANUP") == "1":
-            remote_env += ",PTEST_PROFILE_DB_CLEANUP=1"
-        exec_cmd = base + [
-            "run", "jobs", "execute", job, f"--region={region}", "--wait",
-            "--update-env-vars", remote_env,
-        ]
-        # --wait relays only its own progress chatter, never the container's stdout.
-        proc = subprocess.run(exec_cmd, capture_output=True, text=True)
+    up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
+                        capture_output=True, text=True)
+    if up.returncode != 0:
+        warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
+        return None
 
-        # The execution name is the key to the logs. gcloud prints it on BOTH paths:
-        # "Execution [job-abc12] has successfully completed." on success, and
-        # "...executions describe job-abc12" on failure. Parse it rather than listing
-        # executions afterwards — with concurrent runs allowed, "the most recent
-        # execution of this job" can easily belong to another agent.
-        blob = (proc.stdout or "") + (proc.stderr or "")
-        m = re.search(re.escape(job) + r"-[a-z0-9]{5,}", blob)
-        execution = m.group(0) if m else None
-        output = ""
-
-        if execution:
-            logs = fetch_execution_logs(base, execution)
-            if logs.strip():
-                digest = summarize_remote_logs(logs, failed=proc.returncode != 0)
-                if digest.strip():
-                    output = digest + "\n"
-                else:
-                    # Nothing matched the filters — better to show everything than
-                    # to report a red run with no explanation at all.
-                    output = logs if logs.endswith("\n") else logs + "\n"
-            else:
-                warn(f"could not retrieve logs for {execution}; inspect with: "
-                     f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
-                     f"=\"{execution}\"' --project={gproject}")
-        else:
-            output = proc.stdout
-
-        if proc.returncode != 0:
-            # Distinguish "the tests failed" from "the infrastructure failed".
-            if "failed to complete" in proc.stderr.lower() or \
-               "execution" in proc.stderr.lower():
-                if execution:
-                    warn(f"remote suite FAILED — execution {execution}")
-                return 1, output
-            warn(f"remote execution error ({proc.stderr.strip()[:200]}) — running locally")
-            return None, output
-        return 0, output
-
-    exit_code, output = coalesce_remote_run(key, submit)
-    if output:
-        sys.stdout.write(output)
-        sys.stdout.flush()
-    return exit_code
+    print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
+    try:
+        execution = submit_execution(base, job, region, obj, cmd)
+    except CloudRunUnavailable as exc:
+        warn(f"remote execution error ({exc}) — running locally")
+        return None
+    result = wait_for_execution(base, execution, region)
+    if result.summary.strip():
+        sys.stdout.write(result.summary + "\n")
+    elif result.logs.strip():
+        sys.stdout.write(result.logs if result.logs.endswith("\n") else result.logs + "\n")
+    else:
+        warn(f"could not retrieve logs for {execution}; inspect with: "
+             f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
+             f"=\"{execution}\"' --project={gproject}")
+    sys.stdout.flush()
+    if result.exit_code == 1:
+        warn(f"remote suite FAILED — execution {execution}")
+    elif result.exit_code is None:
+        warn(f"remote execution error ({result.summary[:200]}) — running locally")
+    return result.exit_code
 
 
 def cmd_where(cfg: dict, cwd: Path) -> int:
