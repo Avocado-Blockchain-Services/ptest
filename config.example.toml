@@ -26,6 +26,15 @@ remote_scoped_min_files = 40
 # a mutex. Remote runs cost nothing locally and separate worktrees legitimately
 # run at once, so this is set well above normal use.
 max_concurrent_remote_runs = 6
+# Identical in-flight requests share one execution; only passing results are
+# reused, and only for this exact window after completion.
+remote_cache_ttl_seconds = 3600
+# Must exceed the Cloud Run task timeout (30 minutes here) so another caller
+# cannot steal ownership from a legitimately slow execution.
+remote_task_timeout_seconds = 1800
+remote_claim_ttl_seconds = 2100
+# Increment whenever the mutable runner image or job behavior changes.
+runner_namespace = "v1"
 region            = "us-central1"
 # Never inherit `gcloud config set account`: this machine routinely has an
 # unrelated client engagement's account active, which 403s on our own project.
