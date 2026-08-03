@@ -17,6 +17,7 @@ oversubscribe the box — unless the path is large enough to earn its own contai
                             digest (--local keeps this run, and its full
                             output, here).
   ptest --full              full suite, remote if configured, else local
+  ptest --full --fresh      force a new remote execution for benchmarking
   ptest --local --full      force local even when a remote is configured
   ptest where               show which project/backend resolved for this directory
   ptest doctor              check config, caps, backend reachability, quota
@@ -1663,6 +1664,15 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
     print(f"kind     {pcfg.get('kind', det['kind'])}")
     print(f"workers  {pcfg.get('workers', cfg.get('defaults', {}).get('workers', 2))}")
     print(f"backend  {pcfg.get('backend', 'local')}")
+    if pcfg.get("backend") == "cloudrun":
+        try:
+            cache = remote_cache_settings(pcfg, cfg)
+            print(f"cache    on · passing TTL {cache.ttl_seconds}s · "
+                  f"namespace {cache.runner_namespace}")
+        except ValueError:
+            print("cache    ✗ invalid configuration")
+    else:
+        print("cache    off (local backend)")
     print(f"scoped   {pcfg.get('scoped', det['scoped'])}")
     print(f"full     {pcfg.get('full', det['full'])}")
     return 0
@@ -1683,6 +1693,7 @@ backend = "local"                  # switch to "cloudrun" once the job exists
 # region      = "us-central1"
 # gcp_project = ""
 # bucket      = ""
+# runner_namespace = "v1"       # increment after runner image/job changes
 """)
     return 0
 
@@ -1698,12 +1709,33 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
     backend = pcfg.get("backend", "local")
     print(f"backend     {backend}")
     if backend == "cloudrun":
+        backend_values = {}
         for key in ("job", "region", "gcp_project", "bucket"):
             val = pcfg.get(key) or cfg.get("defaults", {}).get(key)
+            backend_values[key] = val
             print(f"  {key:<11} {val or '✗ unset'}")
             ok = ok and bool(val)
-        print(f"  gcloud      {shutil.which('gcloud') or '✗ not on PATH'}")
-        ok = ok and bool(shutil.which("gcloud"))
+        gcloud = shutil.which("gcloud")
+        print(f"  gcloud      {gcloud or '✗ not on PATH'}")
+        ok = ok and bool(gcloud)
+        try:
+            cache = remote_cache_settings(pcfg, cfg)
+            print(f"  cache TTL   {cache.ttl_seconds}s · namespace "
+                  f"{cache.runner_namespace}")
+        except ValueError:
+            print("  cache       ✗ invalid configuration")
+            ok = False
+        else:
+            if all(backend_values.values()) and gcloud:
+                try:
+                    base = gcloud_base(pcfg, cfg, backend_values["gcp_project"])
+                    store = GcsCoordination(base, backend_values["bucket"])
+                    store.object_exists("coord/v1/.ptest-health")
+                except (CoordinationUnavailable, ValueError):
+                    print("  cache       ✗ unavailable")
+                    ok = False
+                else:
+                    print("  cache       ✓ healthy")
     f = STATE / "remote-runs.json"
     if f.exists():
         try:

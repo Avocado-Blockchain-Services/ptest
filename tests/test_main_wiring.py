@@ -5,6 +5,9 @@ CONFIG_TOML = """
 [defaults]
 workers = 2
 remote_scoped_min_files = 40
+region = "us-central1"
+gcp_project = "test-project"
+bucket = "private-bucket"
 
 [projects.fake]
 root    = "{root}"
@@ -131,3 +134,66 @@ def test_fresh_is_rejected_when_the_selected_run_is_local(wired):
     assert ptest.main(["--fresh", "tests/crawler"]) == 2
 
     assert not calls["remote"] and not calls["local"]
+
+
+def test_where_reports_remote_cache_ttl_and_namespace(wired, capsys):
+    ptest, _calls = wired
+
+    assert ptest.main(["where"]) == 0
+
+    output = capsys.readouterr().out
+    assert "cache" in output and "3600s" in output
+    assert "namespace v1" in output
+
+
+def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
+    ptest, _calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"]["backend"] = "local"
+
+    assert ptest.cmd_where(cfg, ptest.Path.cwd()) == 0
+
+    assert "cache    off (local backend)" in capsys.readouterr().out
+
+
+def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+
+    class HealthyStore:
+        def __init__(self, *args):
+            pass
+
+        def object_exists(self, path):
+            assert path == "coord/v1/.ptest-health"
+            return False
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcsCoordination", HealthyStore)
+
+    assert ptest.main(["doctor"]) == 0
+
+    output = capsys.readouterr().out
+    assert "cache       ✓ healthy" in output
+    assert "namespace v1" in output
+
+
+def test_doctor_marks_unavailable_cache_coordination_unhealthy(
+    wired, monkeypatch, capsys
+):
+    ptest, _calls = wired
+
+    class BrokenStore:
+        def __init__(self, *args):
+            pass
+
+        def object_exists(self, path):
+            raise ptest.CoordinationUnavailable("permission denied with secret details")
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcsCoordination", BrokenStore)
+
+    assert ptest.main(["doctor"]) == 1
+
+    output = capsys.readouterr().out
+    assert "cache       ✗ unavailable" in output
+    assert "secret details" not in output

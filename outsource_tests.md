@@ -41,6 +41,7 @@ failures are what make the design look arbitrary until you have hit them.
   - [3.4 Packing the source](#34-packing-the-source)
   - [3.5 Getting the output back](#35-getting-the-output-back-do-not-skip-this)
   - [3.6 Runaway protection](#36-runaway-protection)
+  - [3.7 Identical-request coalescing](#37-identical-request-coalescing)
 - [Part 4 — Terraform](#part-4--terraform)
 - [Part 5 — Hard-won gotchas](#part-5--hard-won-gotchas)
 - [Part 6 — Replication checklist](#part-6--replication-checklist)
@@ -414,7 +415,7 @@ the run ever falls back to local (§3.5).
     │
     ├─ git ls-files → tar.gz  ──────────▶  GCS bucket (3-day lifecycle)
     │                                          │
-    └─ gcloud run jobs execute --wait ──▶  Cloud Run Job
+    └─ async submit + execution poll ──▶  Cloud Run Job
                                                │  PTEST_SRC = gs://…
                                                │  PTEST_CMD = "pytest -n auto …"
                                                ▼
@@ -545,8 +546,8 @@ like an application regression and was pure runner damage.
 
 ### 3.5 Getting the output back (do not skip this)
 
-**The batch primitive will not hand you the container's stdout.** `gcloud run
-jobs execute --wait` relays only its own progress chatter. On a red suite you
+**The batch primitive will not hand you the container's stdout.** Cloud Run's
+execution command relays only its own progress chatter. On a red suite you
 get dots, `Executing job failed`, and a console URL — **no failing test name**.
 That silently downgrades remote `--full` from a debugging tool to a pass/fail
 gate, and you will not notice until something fails and you have nothing to act
@@ -631,6 +632,50 @@ it will report your green suite as broken.
 **And if a full run does legitimately fall back to local, re-cap it.** The `full`
 command says `-n auto` because it was written for a dedicated container. Strip
 that and force the local cap before running, and warn that you did.
+
+### 3.7 Identical-request coalescing
+
+Concurrency is useful for different trees; it is wasteful for identical ones.
+Derive a versioned SHA-256 request key from project, runner kind, exact command,
+job, region, GCP project, runner namespace, and the exact shipped-source digest.
+The source digest and archive must consume the same ordered manifest. Hash path,
+kind, executable bit, length, and bytes (or symlink target), while ignoring
+checkout path, mtime, and gzip metadata.
+
+Use small generation-guarded objects in the existing private bucket:
+
+```text
+coord/v1/<request-key>/claim.json
+coord/v1/<request-key>/execution.json
+coord/v1/<request-key>/pass.json
+sources/<tree-digest>.tar.gz
+```
+
+Read a fresh pass first, then a published execution, then attempt a create-only
+claim with `--if-generation-match=0`. Only the winner checks daily budget and
+concurrency, uploads, and submits. A loser waits for `execution.json` and joins
+that exact execution. Submit asynchronously so the owner can publish its name
+immediately; poll the named execution, never “latest”. Generation-match every
+claim replacement and cleanup so an expired owner cannot erase its successor.
+
+Cache only exit 0, using Cloud Run's completion timestamp. Freshness is
+`now < completed_at + 3600 seconds`; at exactly 3600 seconds it is expired.
+Failures, cancellation, runner `FATAL`, interrupted calls, and infrastructure
+errors never create `pass.json`. Coordination failure is an optimization
+failure: warn and use the existing uncached remote path with the same runaway
+guards. If coordination fails after submission, wait for that known execution—
+never submit again.
+
+The runner namespace is mandatory because mutable `:latest` images do not have a
+stable identity. Increment `runner_namespace` after changing the runner image or
+job behavior. A remote-only `--fresh` flag is useful for benchmarks: give it a
+random nonce, bypass pass reads/writes, retain all safety limits, and never
+forward it to the underlying test runner.
+
+Operationally, run scoped `ptest` paths during TDD and one coverage-enabled
+`ptest --full` for the final tree. If several agents request that state, they
+share the execution or its one-hour passing record. No warm service or VM is
+created by this design; cold-start optimization remains independent.
 
 ---
 

@@ -7,6 +7,7 @@ and sends full-suite runs to Cloud Run Jobs with a database living in RAM.
 ptest <paths / -k args>    scoped run — local and workers-capped, unless the path
                            covers most of the suite (see Three tiers below)
 ptest --full               whole suite — remote if configured, else local (capped)
+ptest --full --fresh       force a new remote execution (benchmarking only)
 ptest where                what resolved for this directory
 ptest doctor               config + backend health
 ptest register             print a config stanza for the repo you are in
@@ -36,6 +37,27 @@ summarized remote digest (counts, coverage, and — on a red run — the full FA
 section), not the streamed, verbatim output a local run gives you. It also uploads
 the working tree to the bucket, the same packing and `.env`-stripping `--full` already
 does. `ptest --local <path>` keeps both the run and its full output on this machine.
+
+### Fast development workflow
+
+Use the smallest scoped `ptest` path or filter for each red/green cycle, then run
+one `ptest --full` after the final tree state is ready. Keep coverage in the
+configured `full` command: batching makes that fixed cost one final gate instead
+of charging it on every edit.
+
+Identical remote requests coalesce automatically. The identity includes the
+exact command, runner namespace, job configuration, and the bytes/permissions of
+tracked files, dirty edits, untracked files, symlinks, and ignored lockfiles. A
+caller joins an identical execution already in flight; a passing result is reused
+for exactly 3600 seconds after Cloud Run reports completion. Failures and runner
+errors are never cached. Cache hits and joiners do not consume the daily budget
+or concurrency slots.
+
+`runner_namespace = "v1"` is the explicit runner-image invalidation switch:
+increment it whenever a mutable runner image or job behavior changes. `ptest
+where` shows the namespace and TTL; `ptest doctor` verifies coordination access.
+Use `--fresh` only for controlled remote benchmarks—it bypasses passing-result
+reuse, gets a unique request identity, and still obeys budget/concurrency guards.
 
 ## → [`outsource_tests.md`](outsource_tests.md) ←
 
@@ -102,3 +124,5 @@ scope it tighter, or pass `--local` to force this run onto the machine.
   clients, inheriting it silently authenticates as the wrong identity.
 - After editing `config.toml`, re-parse it. Invalid TOML makes ptest fall back to
   local defaults for **every** project, with only a warning line.
+- This design does not keep compute warm. Cloud Run Job cold starts remain; a
+  persistent or Spot-backed runner is a separate future backend choice.
