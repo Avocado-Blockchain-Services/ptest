@@ -36,6 +36,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -47,6 +48,7 @@ import tempfile
 import time
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 try:
     import tomllib
@@ -583,56 +585,127 @@ def run_local(cmd: str, cwd: Path, env: dict) -> int:
     return subprocess.call(cmd, shell=True, cwd=str(cwd), env=env)
 
 
-def pack_tree(root: Path) -> Path:
-    """Ship source only. .venv/node_modules live in the image; .git is dead weight
-    and the tree is usually dirty mid-TDD, so an archive beats a push."""
-    tmp = Path(tempfile.mkdtemp(prefix="ptest-"))
-    tar_path = tmp / "src.tar.gz"
+class SourceEntry(NamedTuple):
+    """One source-tree input, described without checkout-specific metadata."""
 
-    def keep(ti: tarfile.TarInfo):
-        path = Path(ti.name)
-        if set(path.parts) & EXCLUDES:
-            return None
-        if is_secret_file(path.name):
-            return None  # .env, .env.local, .env.auth0.local — but not .env.example
-        return ti
+    relative_path: str
+    source_path: Path
+    kind: str
+    executable: bool
+    size: int
+    link_target: str | None
 
-    # Prefer git's own idea of "source". A hand-maintained exclude list always
-    # drifts: this repo alone carries 416MB of gitignored var/media and 199MB of
-    # graphify-out that the list did not know about, which is a 447MB upload on
-    # every single run. `-c -o --exclude-standard` is tracked files PLUS
-    # untracked ones that .gitignore does not cover, so a brand-new test file
-    # written seconds ago still ships — which a `git archive` would have missed.
-    files = None
+
+def _source_entry(root: Path, relative_path: str) -> SourceEntry | None:
+    path = root / relative_path
+    try:
+        metadata = path.lstat()
+    except (FileNotFoundError, OSError):
+        # git ls-files includes staged deletions. A racing editor can also
+        # remove an untracked file between discovery and inspection.
+        return None
+
+    if path.is_symlink():
+        target = os.readlink(path)
+        return SourceEntry(relative_path, path, "symlink", False,
+                           len(os.fsencode(target)), target)
+    if not path.is_file():
+        return None
+    return SourceEntry(relative_path, path, "file",
+                       bool(metadata.st_mode & 0o111), metadata.st_size, None)
+
+
+def _fallback_source_paths(root: Path) -> list[str]:
+    paths: list[str] = []
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        directories[:] = sorted(
+            directory for directory in directories
+            if directory not in EXCLUDES
+        )
+        for name in sorted(files):
+            relative = (current_path / name).relative_to(root)
+            if set(relative.parts) & EXCLUDES or is_secret_file(name):
+                continue
+            paths.append(relative.as_posix())
+        # os.walk lists symlinked directories as directories but will not
+        # descend into them with followlinks=False. Preserve the link itself.
+        for name in directories:
+            candidate = current_path / name
+            if candidate.is_symlink():
+                paths.append(candidate.relative_to(root).as_posix())
+    return paths
+
+
+def source_manifest(root: Path) -> tuple[SourceEntry, ...]:
+    """Return the exact, sorted set of inputs shipped to a remote runner."""
+    root = root.resolve()
+    paths = None
     try:
         out = subprocess.run(
             ["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"],
             cwd=str(root), capture_output=True, timeout=60)
         if out.returncode == 0:
-            files = [f for f in out.stdout.decode().split("\0") if f]
+            paths = [
+                os.fsdecode(raw) for raw in out.stdout.split(b"\0") if raw
+            ]
     except Exception:
-        files = None
+        paths = None
 
-    if files is not None:
-        # Re-add gitignored lockfiles; git deliberately does not list them.
-        present = set(files)
+    git_sources = paths is not None
+    if paths is None:
+        paths = _fallback_source_paths(root)
+    else:
+        present = set(paths)
         for lock in LOCKFILES:
             if lock not in present and (root / lock).is_file():
-                files.append(lock)
+                paths.append(lock)
 
-    with tarfile.open(tar_path, "w:gz") as tf:
-        if files:
-            for rel in files:
-                src = root / rel
-                # ls-files still lists staged-but-deleted paths; skip them.
-                if not src.exists() or src.is_dir():
-                    continue
-                if is_secret_file(Path(rel).name):
-                    continue
-                tf.add(str(src), arcname=f"./{rel}")
+    entries = []
+    for relative_path in sorted(set(paths)):
+        relative = Path(relative_path)
+        if ((not git_sources and set(relative.parts) & EXCLUDES)
+                or is_secret_file(relative.name)):
+            continue
+        entry = _source_entry(root, relative.as_posix())
+        if entry is not None:
+            entries.append(entry)
+    return tuple(entries)
+
+
+def _hash_field(digest, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def tree_digest(root: Path, entries: tuple[SourceEntry, ...] | None = None) -> str:
+    """Hash source bytes and execution-relevant metadata, not paths or mtimes."""
+    manifest = entries if entries is not None else source_manifest(root)
+    digest = hashlib.sha256(b"ptest-source-v1\0")
+    for entry in manifest:
+        _hash_field(digest, os.fsencode(entry.relative_path))
+        _hash_field(digest, entry.kind.encode())
+        _hash_field(digest, b"1" if entry.executable else b"0")
+        _hash_field(digest, entry.size.to_bytes(8, "big"))
+        if entry.kind == "symlink":
+            payload = os.fsencode(entry.link_target or "")
         else:
-            # Not a git repo (or git unavailable) — fall back to the static list.
-            tf.add(str(root), arcname=".", filter=keep)
+            payload = entry.source_path.read_bytes()
+        _hash_field(digest, payload)
+    return digest.hexdigest()
+
+
+def pack_tree(root: Path, entries: tuple[SourceEntry, ...] | None = None) -> Path:
+    """Ship source only. .venv/node_modules live in the image; .git is dead weight
+    and the tree is usually dirty mid-TDD, so an archive beats a push."""
+    tmp = Path(tempfile.mkdtemp(prefix="ptest-"))
+    tar_path = tmp / "src.tar.gz"
+
+    manifest = entries if entries is not None else source_manifest(root)
+    with tarfile.open(tar_path, "w:gz") as tf:
+        for entry in manifest:
+            tf.add(str(entry.source_path), arcname=f"./{entry.relative_path}",
+                   recursive=False)
     return tar_path
 
 
