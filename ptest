@@ -923,6 +923,143 @@ def gcloud_base(pcfg: dict, cfg: dict, gproject: str) -> list[str]:
     return base
 
 
+class CoordinationUnavailable(RuntimeError):
+    """GCS coordination failed ambiguously, so caching must fail open."""
+
+
+class StoredJson(NamedTuple):
+    value: dict
+    generation: int
+
+
+class GcsCoordination:
+    """Small generation-safe JSON object adapter over authenticated gcloud."""
+
+    def __init__(self, base: list[str], bucket: str):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]+", bucket):
+            raise ValueError("invalid coordination bucket name")
+        self.base = list(base)
+        self.bucket = bucket
+
+    def _uri(self, object_name: str) -> str:
+        if (not object_name or object_name.startswith("/") or "\\" in object_name
+                or "#" in object_name or ".." in Path(object_name).parts
+                or not re.fullmatch(r"[A-Za-z0-9._/-]+", object_name)):
+            raise ValueError("invalid coordination object name")
+        return f"gs://{self.bucket}/{object_name}"
+
+    @staticmethod
+    def _message(result: subprocess.CompletedProcess) -> str:
+        chunks = []
+        for value in (result.stdout, result.stderr):
+            if isinstance(value, bytes):
+                chunks.append(value.decode(errors="replace"))
+            elif value:
+                chunks.append(str(value))
+        return "\n".join(chunks)
+
+    @classmethod
+    def _not_found(cls, result: subprocess.CompletedProcess) -> bool:
+        message = cls._message(result).lower()
+        return ("404" in message or "not found" in message
+                or "no urls matched" in message)
+
+    @classmethod
+    def _precondition_failed(cls, result: subprocess.CompletedProcess) -> bool:
+        message = cls._message(result).lower()
+        return ("412" in message or "conditionnotmet" in message
+                or "precondition failed" in message)
+
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(self.base + args, capture_output=True, timeout=60)
+        except Exception as exc:
+            raise CoordinationUnavailable("coordination command could not run") from exc
+
+    def _describe(self, object_name: str) -> subprocess.CompletedProcess:
+        return self._run([
+            "storage", "objects", "describe", self._uri(object_name), "--format=json",
+        ])
+
+    def read_json(self, object_name: str) -> StoredJson | None:
+        described = self._describe(object_name)
+        if described.returncode != 0:
+            if self._not_found(described):
+                return None
+            raise CoordinationUnavailable("coordination object could not be described")
+        try:
+            metadata = json.loads(described.stdout)
+            generation = int(metadata["generation"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CoordinationUnavailable("coordination metadata was malformed") from exc
+
+        fetched = self._run([
+            "storage", "cat", f"{self._uri(object_name)}#{generation}",
+        ])
+        if fetched.returncode != 0:
+            if self._not_found(fetched):
+                return None
+            raise CoordinationUnavailable("coordination object could not be read")
+        try:
+            value = json.loads(fetched.stdout)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CoordinationUnavailable("coordination JSON was malformed") from exc
+        if not isinstance(value, dict):
+            raise CoordinationUnavailable("coordination JSON must be an object")
+        return StoredJson(value, generation)
+
+    def _write_json(self, object_name: str, value: dict,
+                    generation: int) -> bool:
+        uri = self._uri(object_name)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
+            json.dump(value, payload, sort_keys=True, separators=(",", ":"))
+            payload.flush()
+            result = self._run([
+                "storage", "cp", payload.name, uri,
+                f"--if-generation-match={generation}",
+            ])
+        if result.returncode == 0:
+            return True
+        if self._precondition_failed(result):
+            return False
+        raise CoordinationUnavailable("coordination object could not be written")
+
+    def create_json(self, object_name: str, value: dict) -> bool:
+        return self._write_json(object_name, value, 0)
+
+    def replace_json(self, object_name: str, value: dict,
+                     generation: int) -> bool:
+        if generation <= 0:
+            raise ValueError("generation must be positive")
+        return self._write_json(object_name, value, generation)
+
+    def delete_if_generation(self, object_name: str, generation: int) -> bool:
+        if generation <= 0:
+            raise ValueError("generation must be positive")
+        result = self._run([
+            "storage", "rm", self._uri(object_name),
+            f"--if-generation-match={generation}",
+        ])
+        if result.returncode == 0:
+            return True
+        if self._precondition_failed(result) or self._not_found(result):
+            return False
+        raise CoordinationUnavailable("coordination object could not be deleted")
+
+    def object_exists(self, object_name: str) -> bool:
+        result = self._describe(object_name)
+        if result.returncode == 0:
+            try:
+                metadata = json.loads(result.stdout)
+                int(metadata["generation"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise CoordinationUnavailable("coordination metadata was malformed") from exc
+            return True
+        if self._not_found(result):
+            return False
+        raise CoordinationUnavailable("coordination object existence check failed")
+
+
 def at_concurrency_limit(base: list[str], job: str, region: str, limit: int) -> bool:
     """True if `limit` or more executions of this job are already in flight.
 
