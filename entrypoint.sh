@@ -136,6 +136,14 @@ if [ -f pyproject.toml ]; then
   fi
 fi
 
+# Keep import and collection startup off the critical path for pytest runs. The
+# Vitest path exits above, and snapshots without a conventional src/tests layout
+# retain their existing behavior.
+if [ -d src ] && [ -d tests ]; then
+  log "precompiling Python bytecode"
+  uv run python -m compileall -q src tests 2>&1 || die "bytecode precompilation failed"
+fi
+
 log "running: $PTEST_CMD"
 set +e
 bash -lc "$PTEST_CMD"
