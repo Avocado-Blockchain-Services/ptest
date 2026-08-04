@@ -614,7 +614,10 @@ class GcloudSpotQueueStore:
     def _missing(cls, result: subprocess.CompletedProcess) -> bool:
         for line in cls._message(result).splitlines():
             redacted = re.sub(r"gs://\S+", "", line)
-            if "no urls matched" in redacted:
+            if (
+                "no urls matched" in redacted
+                or "urls matched no objects" in redacted
+            ):
                 return True
             if re.search(
                 r"\bhttperror\s+404\b|\bstatus\s*=\s*404\b|"

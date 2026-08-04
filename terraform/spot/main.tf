@@ -196,6 +196,9 @@ resource "google_compute_instance_template" "worker" {
     export SPOT_LEASE_SECONDS=120 SPOT_TASK_TIMEOUT_SECONDS=1800
     ${file("${path.module}/../../scripts/spot-worker-startup.sh")}
   EOT
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 resource "google_compute_region_instance_group_manager" "workers" {
   name               = "ptest-spot-workers"

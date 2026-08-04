@@ -89,6 +89,20 @@ def test_gcloud_request_create_race_reuses_an_identical_winner(monkeypatch):
     assert any("--if-generation-match=0" in call for call in calls)
 
 
+def test_gcloud_recognizes_storage_cat_empty_object_response():
+    from spot_queue import GcloudSpotQueueStore
+
+    result = subprocess.CompletedProcess(
+        ["gcloud", "storage", "cat", "gs://private-bucket/spot/v1/workers/worker-a.json"],
+        1,
+        "",
+        "The following URLs matched no objects or files:\n"
+        "gs://private-bucket/spot/v1/workers/worker-a.json",
+    )
+
+    assert GcloudSpotQueueStore._missing(result) is True
+
+
 def test_gcloud_store_publishes_request_keys_to_pubsub(monkeypatch):
     from spot_queue import GcloudSpotQueueStore
 
