@@ -745,6 +745,12 @@ def coalesce_remote_run(key: str, submit, *, state_dir: Path | None = None,
             if fresh_success or finished_for_waiter:
                 return previous["exit_code"], previous["output"]
 
+        # A replacement owner must erase the record it rejected while it still
+        # owns the key lock. Otherwise, if this submission crashes, a waiter can
+        # mistake an old-boot monotonic timestamp for the result it just awaited.
+        # This also discards malformed/partial records that could not be parsed.
+        result_path.unlink(missing_ok=True)
+
         exit_code, output = submit()
         completed = {
             "exit_code": exit_code,
@@ -919,7 +925,10 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             return None, ""
 
         size_mb = tar_path.stat().st_size / 1e6
-        stamp = f"{project}-{int(time.time())}"
+        # Different keys may submit concurrently, so a second-resolution name
+        # can make one upload overwrite another before Cloud Run fetches it.
+        # The run key is content/command/destination-derived and immutable.
+        stamp = f"{project}-{key}"
         obj = f"gs://{bucket}/{stamp}.tar.gz"
         print(f"[ptest] packaged {size_mb:.0f}MB → {obj}",
               file=sys.stderr, flush=True)
