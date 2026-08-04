@@ -37,6 +37,17 @@ output "spot_queue_topic" {
   description = "Set as spot_topic only after the worker/controller images are built and this static plan is manually applied."
 }
 
+output "spot_queue_config_stanza" {
+  description = "Opt-in Spot backend configuration; keep the admission toggle equal to the controller Terraform variable."
+  value       = <<-EOT
+    [projects.<name>]
+    backend                      = "spot_queue"
+    spot_topic                   = "${google_pubsub_topic.spot_requests.name}"
+    spot_controller_url          = "${google_cloud_run_v2_service.spot_controller.uri}"
+    spot_overflow_reject_enabled = ${var.spot_overflow_reject_enabled}
+  EOT
+}
+
 output "spot_worker_mig" {
   value = google_compute_region_instance_group_manager.spot_workers.name
 }

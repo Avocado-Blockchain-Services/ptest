@@ -72,3 +72,17 @@ def test_readme_preemption_smoke_baselines_generation_after_vm_stop():
     comparison = readme.index('"$new_generation" -gt "$post_stop_generation"')
 
     assert stop < baseline < comparison
+
+
+def test_readme_spot_smoke_rejects_local_fallback_and_remote_failure():
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    live_section = readme.split("After a separately approved apply", 1)[1]
+    block = live_section.split("```bash", 1)[1].split("```", 1)[0]
+
+    assert "ptest --full --fresh 2>spot-request.log" in block
+    assert "spot_rc=$?" in block
+    assert 'test "$spot_rc" -eq 0' in block
+    assert "slow_rc=$?" in block
+    assert 'test "$slow_rc" -eq 0' in block
+    assert block.count('d["status"] == "passed" and d["exit_code"] == 0') == 2
+    assert block.count("assert json.load(sys.stdin) == []") == 2

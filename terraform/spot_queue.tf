@@ -210,6 +210,10 @@ resource "google_cloud_run_v2_service" "spot_controller" {
         value = tostring(var.spot_idle_seconds)
       }
       env {
+        name  = "SPOT_OVERFLOW_REJECT_ENABLED"
+        value = tostring(var.spot_overflow_reject_enabled)
+      }
+      env {
         name  = "SPOT_PROJECT"
         value = var.project_id
       }

@@ -69,6 +69,12 @@ variable "spot_idle_seconds" {
   description = "Keep an idle worker until this exact timeout, unless it owns a lease."
 }
 
+variable "spot_overflow_reject_enabled" {
+  type        = bool
+  default     = false
+  description = "Reject new ptest Spot requests with exit 75 when unacknowledged backlog or the active-lease floor reaches spot_max_workers."
+}
+
 variable "spot_worker_image" {
   type        = string
   description = "Prebuilt Spot worker image with Python and Node/Vitest dependencies."

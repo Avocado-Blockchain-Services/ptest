@@ -13,6 +13,14 @@ from urllib.request import Request, urlopen
 from spot_queue import Lease, WorkerState
 
 
+def admission_allowed(backlog: int, active_leases: int, max_workers: int,
+                      overflow_reject_enabled: bool) -> bool:
+    """Admit new durable work unless the opt-in cap gate is saturated."""
+    if min(backlog, active_leases, max_workers) < 0:
+        raise ValueError("admission inputs must be non-negative")
+    return not overflow_reject_enabled or max(backlog, active_leases) < max_workers
+
+
 def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
                  max_workers: int, active_leases: int = 0,
                  idle_timeout_seconds: int = 3600) -> int:
@@ -37,8 +45,8 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
 def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> int:
     """Read authenticated metrics and set only the Spot MIG target.
 
-    Backlog above the cap remains in Pub/Sub. There is no separate overflow
-    marker or toggle because neither changes dispatch behavior.
+    Backlog above the cap remains in Pub/Sub. Admission rejection is a separate
+    pre-persistence decision; reconciliation never dispatches malformed work.
     """
     backlog, workers, leases, idle_age = adapter.authenticated_metrics()
     target = scale_target(backlog, workers, idle_age, max_workers, leases,
@@ -52,10 +60,18 @@ def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> in
     return target
 
 
-def serve(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
-          host="0.0.0.0", port=8080):
-    """Serve health checks and IAM-protected Cloud Scheduler reconciliation."""
+def build_handler(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
+                  overflow_reject_enabled: bool = False):
+    """Build the IAM-gated controller HTTP contract."""
     class Handler(BaseHTTPRequestHandler):
+        def _json(self, payload: dict) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             if self.path == "/healthz":
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
@@ -63,24 +79,43 @@ def serve(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
                 self.send_error(404)
 
         def do_POST(self):
-            if self.path != "/reconcile" or not adapter.authorize(
-                    self.headers.get("Authorization", "")):
+            if not adapter.authorize(self.headers.get("Authorization", "")):
                 self.send_error(401)
                 return
             try:
+                if self.path == "/admit":
+                    backlog, _workers, leases, _idle_age = adapter.authenticated_metrics()
+                    self._json({
+                        "admitted": admission_allowed(
+                            backlog, leases, max_workers, overflow_reject_enabled
+                        ),
+                        "active_leases": leases,
+                        "backlog": backlog,
+                        "max_workers": max_workers,
+                    })
+                    return
+                if self.path != "/reconcile":
+                    self.send_error(404)
+                    return
                 target = reconcile(adapter, max_workers, idle_timeout_seconds)
             except RuntimeError as exc:
                 self.send_error(503, str(exc))
                 return
-            body = json.dumps({"target": target}).encode()
-            self.send_response(200); self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body))); self.end_headers()
-            self.wfile.write(body)
+            self._json({"target": target})
 
         def log_message(self, *_args):
             pass
 
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    return Handler
+
+
+def serve(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
+          overflow_reject_enabled: bool = False, host="0.0.0.0", port=8080):
+    """Serve health, admission, and Cloud Scheduler reconciliation."""
+    handler = build_handler(
+        adapter, max_workers, idle_timeout_seconds, overflow_reject_enabled
+    )
+    ThreadingHTTPServer((host, port), handler).serve_forever()
 
 
 class GcloudControllerAdapter:
@@ -195,6 +230,9 @@ def main() -> None:
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise SystemExit("missing controller configuration: " + ", ".join(missing))
+    overflow_value = os.environ.get("SPOT_OVERFLOW_REJECT_ENABLED", "false").lower()
+    if overflow_value not in {"true", "false"}:
+        raise SystemExit("SPOT_OVERFLOW_REJECT_ENABLED must be true or false")
     adapter = GcloudControllerAdapter(
         os.environ["SPOT_PROJECT"], os.environ["SPOT_REGION"], os.environ["SPOT_MIG"],
         os.environ["SPOT_SUBSCRIPTION"], os.environ["SPOT_BUCKET"],
@@ -202,6 +240,7 @@ def main() -> None:
     )
     serve(adapter, int(os.environ.get("SPOT_MAX_WORKERS", "5")),
           int(os.environ.get("SPOT_IDLE_SECONDS", "3600")),
+          overflow_value == "true",
           port=int(os.environ.get("PORT", "8080")))
 
 

@@ -1,7 +1,11 @@
+import json
 import sys
+import threading
 from datetime import datetime, timezone
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -16,6 +20,50 @@ def test_idle_worker_is_kept_until_the_exact_idle_timeout():
 
 def test_backlog_is_capped_at_max_workers():
     assert scale_target(99, 0, 0, 5) == 5
+
+
+def test_overflow_admission_rejects_only_when_committed_work_fills_the_cap():
+    import spot_controller
+
+    assert spot_controller.admission_allowed(2, 3, 5, True) is True
+    assert spot_controller.admission_allowed(5, 3, 5, True) is False
+    assert spot_controller.admission_allowed(2, 5, 5, True) is False
+    assert spot_controller.admission_allowed(99, 5, 5, False) is True
+    assert spot_controller.admission_allowed(0, 0, 0, True) is False
+
+
+def test_authenticated_admission_endpoint_reports_saturated_capacity():
+    import spot_controller
+
+    class Adapter:
+        @staticmethod
+        def authorize(value): return value == "Bearer test-token"
+        @staticmethod
+        def authenticated_metrics(): return 5, 4, 3, 0
+
+    handler = spot_controller.build_handler(Adapter(), 5, 3600, True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_port}/admit",
+            method="POST",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert payload == {
+        "admitted": False,
+        "active_leases": 3,
+        "backlog": 5,
+        "max_workers": 5,
+    }
 
 
 def test_active_lease_never_scales_in():
@@ -82,10 +130,9 @@ def test_monitoring_query_uses_a_full_five_minute_window_at_hour_boundary(monkey
     assert query["interval.startTime"] == ["2026-08-04T11:58:00+00:00"]
 
 
-def test_over_cap_backlog_stays_in_pubsub_without_writing_an_overflow_marker(monkeypatch):
+def test_reconcile_keeps_over_cap_backlog_without_malformed_dispatch(monkeypatch):
     adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
     commands = []
-    adapter.overflow_enabled = True
     monkeypatch.setattr(adapter, "authenticated_metrics", lambda: (8, 0, 0, 0))
     monkeypatch.setattr(adapter, "set_target", lambda target: commands.append(("resize", target)))
     monkeypatch.setattr(adapter, "_run", lambda *args: commands.append(args) or "")
@@ -93,7 +140,6 @@ def test_over_cap_backlog_stays_in_pubsub_without_writing_an_overflow_marker(mon
     assert reconcile(adapter, 5) == 5
 
     assert commands == [("resize", 5)]
-    assert not hasattr(adapter, "overflow_state")
 
 
 def test_stale_worker_heartbeats_expire_and_cannot_mask_fresh_idle_age(monkeypatch):
@@ -165,3 +211,41 @@ def test_empty_worker_and_state_prefixes_bootstrap_first_worker(monkeypatch):
 
     assert reconcile(adapter, 5) == 1
     assert targets == [1]
+
+
+def test_controller_main_exposes_overflow_toggle_to_http_contract(monkeypatch):
+    import spot_controller
+
+    values = {
+        "SPOT_PROJECT": "project-a",
+        "SPOT_REGION": "us-central1",
+        "SPOT_MIG": "mig",
+        "SPOT_SUBSCRIPTION": "spot-sub",
+        "SPOT_BUCKET": "bucket",
+        "SPOT_MAX_WORKERS": "5",
+        "SPOT_IDLE_SECONDS": "3600",
+        "SPOT_OVERFLOW_REJECT_ENABLED": "true",
+        "PORT": "8080",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    observed = {}
+
+    def serve(_adapter, max_workers, idle_seconds, overflow_enabled, *, port):
+        observed.update(
+            max_workers=max_workers,
+            idle_seconds=idle_seconds,
+            overflow_enabled=overflow_enabled,
+            port=port,
+        )
+
+    monkeypatch.setattr(spot_controller, "serve", serve)
+
+    spot_controller.main()
+
+    assert observed == {
+        "max_workers": 5,
+        "idle_seconds": 3600,
+        "overflow_enabled": True,
+        "port": 8080,
+    }

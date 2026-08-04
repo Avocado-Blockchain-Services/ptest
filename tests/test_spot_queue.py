@@ -387,6 +387,96 @@ def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
     assert queue.messages == [queue.requests[0].request_key]
 
 
+def test_ptest_overflow_toggle_rejects_saturated_capacity_before_creation(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def read_result(self, _key): return None
+        def read_request(self, _key): return None
+        def create_request(self, _value):
+            raise AssertionError("saturated capacity must reject before persistence")
+
+    admission_calls = []
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(
+        ptest, "prepare_source_archive",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("saturated capacity must reject before source upload")
+        ),
+    )
+    monkeypatch.setattr(
+        ptest, "spot_capacity_admitted",
+        lambda base, url: admission_calls.append((base, url)) or False,
+        raising=False,
+    )
+    config = {
+        "defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}
+    }
+    project = {
+        "kind": "pytest",
+        "spot_topic": "ptest-spot",
+        "spot_overflow_reject_enabled": True,
+        "spot_controller_url": "https://controller.example.run.app",
+    }
+
+    assert ptest.run_spot_queue(
+        project, config, "fake", tmp_path, "uv run pytest tests"
+    ) == 75
+    assert admission_calls == [
+        (
+            [
+                "gcloud",
+                "--project=test-project",
+                "--billing-project=test-project",
+            ],
+            "https://controller.example.run.app",
+        )
+    ]
+
+
+def test_spot_capacity_admission_uses_identity_token_and_controller_response(
+    ptest, monkeypatch
+):
+    requests = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self):
+            return (
+                b'{"admitted":false,"active_leases":3,'
+                b'"backlog":5,"max_workers":5}'
+            )
+
+    monkeypatch.setattr(
+        ptest.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args, 0, "test-token\n", ""
+        ),
+    )
+    monkeypatch.setattr(
+        ptest,
+        "urlopen",
+        lambda request, timeout: requests.append((request, timeout)) or Response(),
+        raising=False,
+    )
+
+    admitted = ptest.spot_capacity_admitted(
+        ["gcloud", "--project=test-project"],
+        "https://controller.example.run.app/",
+    )
+
+    assert admitted is False
+    assert requests[0][0].full_url == "https://controller.example.run.app/admit"
+    assert requests[0][0].method == "POST"
+    assert requests[0][0].get_header("Authorization") == "Bearer test-token"
+    assert requests[0][1] == 30
+
+
 def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatch, tmp_path):
     class Queue:
         def __init__(self): self.events = []

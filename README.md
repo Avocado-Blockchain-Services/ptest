@@ -136,6 +136,7 @@ terraform -chdir=terraform validate
 terraform -chdir=terraform plan \
   -var="project_id=$spot_project" -var="region=$spot_region" \
   -var="bucket_name=YOUR_GLOBALLY_UNIQUE_BUCKET" -var="ar_repo=$spot_repo" \
+  -var="spot_overflow_reject_enabled=true" \
   -var="spot_worker_image=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-worker:$spot_tag" \
   -var="spot_controller_image=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag"
 ```
@@ -144,11 +145,15 @@ After a separately approved apply, use an identity listed in
 `operator_members`: Terraform grants it controller invocation, topic publish,
 subscription pull/ack, source/result object access, and dedicated-project
 Compute OS-admin login plus the narrow instance/MIG read role used below. The
+`terraform -chdir=terraform output -raw spot_queue_config_stanza` output includes
+the controller URL and the same overflow-rejection toggle value for the ptest
+project stanza; do not enable only one side. The
 following live smoke deliberately mutates only the dedicated test project. It
 submits a real queue request through `ptest`, waits for a worker to run it,
 then inspects the durable result and empty delivery:
 
 ```bash
+set -euo pipefail
 controller_url=$(gcloud run services describe ptest-spot-controller \
   --project="$spot_project" --region="$spot_region" --format='value(status.url)')
 curl --fail --header "Authorization: Bearer $(gcloud auth print-identity-token)" \
@@ -161,12 +166,17 @@ gcloud compute instance-groups managed list-instances ptest-spot-workers \
 
 # With a registered project set to backend = "spot_queue", this writes the
 # request record, publishes its request key, and waits for its durable result.
-ptest --full 2>spot-request.log
+set +e
+ptest --full --fresh 2>spot-request.log
+spot_rc=$?
+set -e
+test "$spot_rc" -eq 0 || { echo "initial remote smoke failed with $spot_rc" >&2; exit "$spot_rc"; }
 spot_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-request.log | tail -1)
 test -n "$spot_key"
-gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/states/$spot_key.json"
+gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/states/$spot_key.json" | \
+  python -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"] == "ptest-spot-result-v1" and d["status"] == "passed" and d["exit_code"] == 0; print(json.dumps(d, indent=2))'
 gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" \
-  --limit=1 --format=json  # expect []: result was published then acked
+  --limit=1 --format=json | python -c 'import json,sys; assert json.load(sys.stdin) == []'
 
 # Bubblewrap must be permitted by the worker VM/container runtime. The normal
 # queue run above proves it for the actual isolated test process; this checks it
@@ -237,9 +247,14 @@ while kill -0 "$smoke_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sle
 if kill -0 "$smoke_pid" 2>/dev/null; then
   echo 'timed out waiting for redelivered smoke result' >&2; kill "$smoke_pid"; exit 1
 fi
+set +e
 wait "$smoke_pid"
-gcloud storage cat "$state_uri" | python -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"] == "ptest-spot-result-v1"; print(json.dumps(d, indent=2))'
-gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" --limit=1 --format=json
+slow_rc=$?
+set -e
+test "$slow_rc" -eq 0 || { echo "redelivered remote smoke failed with $slow_rc" >&2; exit "$slow_rc"; }
+gcloud storage cat "$state_uri" | python -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"] == "ptest-spot-result-v1" and d["status"] == "passed" and d["exit_code"] == 0; print(json.dumps(d, indent=2))'
+gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" --limit=1 --format=json | \
+  python -c 'import json,sys; assert json.load(sys.stdin) == []'
 rm -f "$state_json"
 ```
 
@@ -255,10 +270,16 @@ SIGTERM stops the heartbeat, terminates the child, publishes no result, and
 leaves unfinished work unacknowledged for redelivery. Node dependencies are
 installed from `package-lock.json` before the isolated child starts; dependency
 install is script-free, while Vitest itself runs in Bubblewrap with no network.
-Backlog above the Spot cap remains in Pub/Sub; there is no overflow toggle or
-marker pretending to dispatch it elsewhere. Configure `backend = "spot_queue"`
-only after this smoke proves worker/controller IAM, Bubblewrap, terminal
-transition, acknowledgement, cancellation, and retry.
+With `spot_overflow_reject_enabled = true` in both Terraform and the matching
+ptest stanza, a new request first calls the IAM-protected controller `/admit`
+endpoint. When either Pub/Sub's unacknowledged backlog or the active-lease
+floor reaches `spot_max_workers`, ptest returns 75 before uploading source or
+creating durable request state.
+Overflow is never dispatched to a malformed Cloud Run job, and existing durable
+requests bypass admission so retries can rejoin them. Backlog already accepted
+above the cap remains in Pub/Sub. Configure `backend = "spot_queue"` only after
+this smoke proves worker/controller IAM, Bubblewrap, terminal transition,
+acknowledgement, cancellation, and retry.
 
 ## Exit codes
 
