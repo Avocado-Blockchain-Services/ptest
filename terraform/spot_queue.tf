@@ -12,12 +12,41 @@ resource "google_pubsub_topic" "spot_requests" {
   depends_on = [google_project_service.spot_required]
 }
 
+data "google_project" "spot_current" {
+  project_id = var.project_id
+}
+
+resource "google_pubsub_topic" "spot_dead_letters" {
+  name       = "ptest-spot-dead-letters"
+  depends_on = [google_project_service.spot_required]
+}
+
 resource "google_pubsub_subscription" "spot_workers" {
   name                         = "ptest-spot-workers"
   topic                        = google_pubsub_topic.spot_requests.id
   ack_deadline_seconds         = 60
   message_retention_duration   = "86400s"
   enable_exactly_once_delivery = false
+  dead_letter_policy {
+    dead_letter_topic     = google_pubsub_topic.spot_dead_letters.id
+    max_delivery_attempts = 5
+  }
+}
+
+locals {
+  spot_pubsub_service_agent = "service-${data.google_project.spot_current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_pubsub_topic_iam_member" "spot_dead_letter_service_agent" {
+  topic   = google_pubsub_topic.spot_dead_letters.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${local.spot_pubsub_service_agent}"
+}
+
+resource "google_pubsub_subscription_iam_member" "spot_dead_letter_service_agent" {
+  subscription = google_pubsub_subscription.spot_workers.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${local.spot_pubsub_service_agent}"
 }
 
 resource "google_service_account" "spot_worker" {
@@ -51,7 +80,8 @@ resource "google_storage_bucket_iam_member" "spot_worker_mutable_state" {
     title      = "Mutate only Spot state"
     expression = <<-EOT
       resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/states/") ||
-      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/workers/")
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/workers/") ||
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/outputs/")
     EOT
   }
 }
@@ -115,14 +145,14 @@ resource "google_project_iam_custom_role" "spot_smoke_operator" {
 }
 
 resource "google_project_iam_member" "spot_smoke_compute" {
-  for_each = toset(var.operator_members)
+  for_each = toset(var.spot_smoke_admin_members)
   project  = var.project_id
   role     = google_project_iam_custom_role.spot_smoke_operator.name
   member   = each.key
 }
 
 resource "google_project_iam_member" "spot_smoke_os_admin" {
-  for_each = toset(var.operator_members)
+  for_each = toset(var.spot_smoke_admin_members)
   project  = var.project_id
   role     = "roles/compute.osAdminLogin"
   member   = each.key
@@ -138,6 +168,10 @@ resource "google_storage_bucket_iam_member" "spot_controller_state_reader" {
   bucket = google_storage_bucket.src.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.spot_controller.email}"
+  condition {
+    title       = "Read only the current worker index"
+    expression  = "resource.name == 'projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/workers/index/current.json'"
+  }
 }
 
 resource "google_compute_health_check" "spot_worker" {
@@ -181,19 +215,11 @@ resource "google_compute_instance_template" "spot_worker" {
   }
 
   metadata_startup_script = <<-EOT
-    #!/bin/bash
-    set -euo pipefail
-    apt-get update && apt-get install -y docker.io google-cloud-cli-gke-gcloud-auth-plugin
-    systemctl enable --now docker
-    gcloud auth configure-docker ${var.region}-docker.pkg.dev --quiet
-    docker run --detach --restart=always --name ptest-spot-worker --hostname "$(hostname)" --publish 8080:8080 \
-      --security-opt=no-new-privileges:true --security-opt=seccomp=unconfined \
-      --env SPOT_PROJECT=${var.project_id} --env SPOT_REGION=${var.region} \
-      --env SPOT_TOPIC=${google_pubsub_topic.spot_requests.name} \
-      --env SPOT_SUBSCRIPTION=${google_pubsub_subscription.spot_workers.name} \
-      --env SPOT_BUCKET=${google_storage_bucket.src.name} \
-      --env SPOT_LEASE_SECONDS=120 --env SPOT_TASK_TIMEOUT_SECONDS=1800 \
-      ${var.spot_worker_image}
+    export SPOT_PROJECT='${var.project_id}' SPOT_REGION='${var.region}'
+    export SPOT_TOPIC='${google_pubsub_topic.spot_requests.name}' SPOT_SUBSCRIPTION='${google_pubsub_subscription.spot_workers.name}'
+    export SPOT_BUCKET='${google_storage_bucket.src.name}' SPOT_WORKER_IMAGE='${var.spot_worker_image}'
+    export SPOT_LEASE_SECONDS=120 SPOT_TASK_TIMEOUT_SECONDS=1800
+    ${file("${path.module}/../scripts/spot-worker-startup.sh")}
   EOT
 }
 

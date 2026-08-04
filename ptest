@@ -598,8 +598,9 @@ def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dic
     for the log line's denominator (total test files); that duplicate walk is
     deliberate, not a bug this return value avoids — it costs ~6ms.
     """
-    if force_local or pcfg.get("backend") not in {"cloudrun", "spot_queue"}:
-        return False, 0
+    # Full-suite-sized work is compulsory Spot work.  `--local` remains a
+    # narrow-TDD convenience only; it is never an escape hatch for a load that
+    # may already have a durable remote identity.
     # A filter means the caller is hunting one failure and wants the fastest
     # loop, not the biggest machine. Never trade their latency for our cores.
     if has_narrowing_filter(passthrough):
@@ -1884,26 +1885,30 @@ def spot_capacity_admitted(base: list[str], controller_url: str) -> bool:
 
 def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                    what: str = "--full", fresh: bool = False) -> int | None:
-    """Submit a durable request to the opt-in Spot queue, or fall back locally."""
+    """Submit compulsory work to Spot; never authorize a local fallback."""
     bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
     gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
     topic = pcfg.get("spot_topic") or cfg.get("defaults", {}).get("spot_topic")
+    kind = pcfg.get("kind")
     if not (bucket and gproject and topic):
-        warn("spot_queue backend not fully configured (bucket/gcp_project/spot_topic) — running locally")
-        return None
+        warn("compulsory Spot is not fully configured (bucket/gcp_project/spot_topic)")
+        return 2
+    if kind not in {"pytest", "vitest"}:
+        warn("invalid compulsory Spot configuration (kind must be pytest or vitest)")
+        return 2
     if not shutil.which("gcloud"):
-        warn("gcloud not on PATH — running locally")
-        return None
+        warn("compulsory Spot requires gcloud on PATH")
+        return 2
     try:
         import spot_queue
     except ModuleNotFoundError as exc:
         if exc.name == "spot_queue":
-            warn("spot_queue backend is not installed — running locally")
-            return None
+            warn("compulsory Spot companion is not installed")
+            return 2
         raise
     if getattr(spot_queue, "PTEST_SPOT_COMPANION_ABI", None) != PTEST_SPOT_COMPANION_ABI:
-        warn("spot_queue backend companion is incompatible — running locally")
-        return None
+        warn("compulsory Spot companion is incompatible")
+        return 2
     queue_class = GcloudSpotQueueStore or spot_queue.GcloudSpotQueueStore
     try:
         settings = remote_cache_settings(pcfg, cfg)
@@ -1919,8 +1924,8 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             "defaults", {}
         ).get("spot_controller_url")
     except ValueError as exc:
-        warn(f"invalid spot_queue configuration ({exc}) — running locally")
-        return None
+        warn(f"invalid compulsory Spot configuration ({exc})")
+        return 2
     base = gcloud_base(pcfg, cfg, gproject)
     digest_started = time.monotonic()
     manifest = source_manifest(root)
@@ -1960,9 +1965,8 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                 warn("Spot queue request is cancelled but its prior worker is not yet quiesced — "
                      "not starting a duplicate local fallback")
                 return 75
-            warn("Spot queue request was already cancelled; running this deterministic retry locally "
-                 "(use --fresh to submit a new remote attempt)")
-            return None
+            warn("Spot queue request was already cancelled; use --fresh for a new Spot attempt")
+            return 75
         read_request = getattr(queue, "read_request", None)
         existing_request = read_request(request_key_value) if read_request else None
     except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
@@ -1988,22 +1992,22 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     try:
         if existing_request is None:
             if not budget_check(cfg, project):
-                return None
+                return 75
             source_store = GcsCoordination(base, bucket)
             try:
                 if prepare_source_archive(
                     root, digest, manifest, base, source_store, bucket
                 ) is None:
-                    return None
+                        return 75
             except SourceTreeChanged:
                 return 75
         request = spot_queue.SpotRequest(
-            request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now()
+            request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now(), kind
         )
     except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError,
             CoordinationUnavailable, ValueError) as exc:
-        warn(f"spot_queue source preparation failed before durable creation ({exc}) — running locally")
-        return None
+        warn(f"spot_queue source preparation failed before durable creation ({exc})")
+        return 75
 
     try:
         created = queue.create_request(request)
@@ -2058,8 +2062,8 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                 warn("Spot queue cancellation is durable but the worker is not yet quiesced — "
                      "not starting a duplicate local fallback")
                 return 75
-            warn(f"Spot queue timed out after {timeout}s; cancellation is quiesced — running locally")
-            return None
+            warn(f"Spot queue timed out after {timeout}s; cancellation is quiesced — retry on Spot")
+            return 75
     if result.output:
         sys.stdout.write(result.output + ("" if result.output.endswith("\n") else "\n"))
         sys.stdout.flush()
@@ -2068,9 +2072,9 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
 
 def run_remote_backend(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                        what: str = "--full", fresh: bool = False) -> int | None:
-    if pcfg.get("backend") == "spot_queue":
-        return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
-    return run_cloudrun(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
+    # Cloud Run is retained only as deprecated infrastructure.  New ptest
+    # routing must never dispatch there.
+    return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
 
 
 def cmd_where(cfg: dict, cwd: Path) -> int:
@@ -2085,8 +2089,9 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
         print(f"worktree of {src}")
     print(f"kind     {pcfg.get('kind', det['kind'])}")
     print(f"workers  {pcfg.get('workers', cfg.get('defaults', {}).get('workers', 2))}")
-    print(f"backend  {pcfg.get('backend', 'local')}")
-    if pcfg.get("backend") == "cloudrun":
+    print("backend  Spot compulsory for --full and heavy scoped runs")
+    print(f"configured backend  {pcfg.get('backend', 'local')}")
+    if pcfg.get("backend") in {"cloudrun", "spot_queue"}:
         try:
             cache = remote_cache_settings(pcfg, cfg)
             print(f"cache    on · passing TTL {cache.ttl_seconds}s · "
@@ -2094,7 +2099,7 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
         except ValueError:
             print("cache    ✗ invalid configuration")
     else:
-        print("cache    off (local backend)")
+        print("cache    unavailable until Spot is configured")
     print(f"scoped   {pcfg.get('scoped', det['scoped'])}")
     print(f"full     {pcfg.get('full', det['full'])}")
     return 0
@@ -2129,7 +2134,8 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     print(f"project     {name or '✗ unregistered (auto-detect will be used)'}")
     backend = pcfg.get("backend", "local")
-    print(f"backend     {backend}")
+    print("backend     Spot compulsory for --full and heavy scoped runs")
+    print(f"configured  {backend}")
     if backend == "cloudrun":
         backend_values = {}
         for key in ("job", "region", "gcp_project", "bucket"):
@@ -2159,6 +2165,16 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
                 else:
                     print("  cache       ✓ healthy")
     elif backend == "spot_queue":
+        values = {
+            key: pcfg.get(key) or cfg.get("defaults", {}).get(key)
+            for key in ("bucket", "gcp_project", "spot_topic")
+        }
+        for key, value in values.items():
+            print(f"  {key:<11} {value or '✗ unset'}")
+            ok = ok and bool(value)
+        gcloud = shutil.which("gcloud")
+        print(f"  gcloud      {gcloud or '✗ not on PATH'}")
+        ok = ok and bool(gcloud)
         companion = Path(__file__).resolve().with_name("spot_queue.py")
         if not companion.is_file():
             print("  companion   ✗ spot_queue.py is not installed beside ptest")
@@ -2176,6 +2192,7 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
                     ok = False
                 else:
                     print("  companion   ✓ spot_queue.py")
+        print(f"  capable     {'✓ compulsory Spot submission can be attempted' if ok else '✗ compulsory Spot is not capable'}")
     f = STATE / "remote-runs.json"
     if f.exists():
         try:
@@ -2241,9 +2258,11 @@ def main(argv: list[str]) -> int:
         should_route_remote(passthrough, root, pcfg, cfg, force_local)
         if not full else (False, 0)
     )
-    selected_remote = route_remote or (
-        full and not force_local and pcfg.get("backend") in {"cloudrun", "spot_queue"}
-    )
+    selected_remote = route_remote or full
+    compulsory_spot = route_remote or full
+    if compulsory_spot and pcfg.get("backend") == "cloudrun":
+        warn("backend = \"cloudrun\" is deprecated; configure compulsory Spot instead")
+        return 2
     if fresh and not selected_remote:
         warn("--fresh is only valid for a selected remote execution")
         return 2
@@ -2252,7 +2271,7 @@ def main(argv: list[str]) -> int:
     if route_remote:
         # Dedicated container: use its cores, not this machine's cap.
         flags = remote_worker_flags(kind)
-    elif not full or force_local:
+    elif not full:
         # Cap workers on anything running on this machine. A remote job owns its
         # whole container, so it uses the project's own full-suite command as-is.
         flags = worker_flags(kind, workers, root)
@@ -2278,14 +2297,11 @@ def main(argv: list[str]) -> int:
         rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd,
                                 what=f"`ptest {' '.join(path_like_args(passthrough))}`",
                                 fresh=fresh)
-        if rc is not None:
-            return rc  # includes 75 (busy: nothing ran) and real test failures
-        warn("remote unavailable — running this scoped run locally at the cap")
+        return rc if rc is not None else 75
 
-    if full and not force_local and pcfg.get("backend") in {"cloudrun", "spot_queue"}:
+    if full:
         rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
-        if rc is not None:
-            return rc  # includes real test failures; only None means "fall back"
+        return rc if rc is not None else 75
 
     rc = ensure_node_deps(kind, root, env)
     if rc != 0:

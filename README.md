@@ -1,12 +1,12 @@
 # ptest — one test command for every project, every agent
 
 A dispatcher that stops parallel test runners from eating a shared workstation,
-and sends full-suite runs to Cloud Run Jobs with a database living in RAM.
+and sends full-suite and heavy-scoped runs to the compulsory Spot queue.
 
 ```
 ptest <paths / -k args>    scoped run — local and workers-capped, unless the path
                            covers most of the suite (see Three tiers below)
-ptest --full               whole suite — remote if configured, else local (capped)
+ptest --full               whole suite — compulsory Spot; never local or Cloud Run
 ptest --full --fresh       force a new remote execution (benchmarking only)
 ptest where                what resolved for this directory
 ptest doctor               config + backend health
@@ -24,13 +24,13 @@ full-suite runs off-box entirely.
 | invocation | where |
 |---|---|
 | `ptest tests/api/test_x.py`, `ptest -k foo` | local, capped to `workers` |
-| `ptest tests/api` (≥ `remote_scoped_min_files` files) | backend, scoped command, no coverage gate |
-| `ptest --full` | the project's `full` command, on its configured backend — coverage gate only if that command sets one |
+| `ptest tests/api` (≥ `remote_scoped_min_files` files) | compulsory Spot, scoped command, no coverage gate |
+| `ptest --full` | compulsory Spot, using the project's `full` command |
 
 The middle tier exists because a scoped run can be full-suite-sized: in persea-api,
 `tests/api` alone is roughly two-thirds of the whole test suite. A `-k`/`-m`/`--lf`
 filter always keeps a run local — a filter means you are hunting one failure and
-want the fast loop. `ptest --local <path>` forces local for anything.
+want the fast loop. `ptest --local <narrow-path>` stays local; it cannot bypass heavy scoped or full work.
 
 A routed run's output is not identical to a local one: what comes back is the
 summarized remote digest (counts, coverage, and — on a red run — the full FAILURES
@@ -120,11 +120,12 @@ must reuse the joined passing execution. Override `PTEST_LIVE_REPO`, `PTEST_JOB`
 or `PTEST_BIN` for a different registered project or candidate dispatcher. The
 mode is deliberately opt-in because it performs a real remote full command.
 
-### Optional Spot queue (manual deployment only)
+### Compulsory Spot queue (manual deployment only)
 
-`backend = "spot_queue"` is disabled until an operator deliberately builds the
-two images, reviews a static plan, and performs a live smoke. It is never
-enabled by a ptest update and the commands below do **not** apply Terraform.
+Full and heavy-scoped work requires `backend = "spot_queue"`. Cloud Run is not
+an active dispatcher choice, and no compulsory run falls back locally. The
+dedicated-project live smoke remains a later gate; Cloud Run cleanup is deferred
+until after it passes.
 
 ```bash
 spot_project=YOUR_DEDICATED_TEST_PROJECT
@@ -311,8 +312,8 @@ acknowledgement, cancellation, and retry.
 |---|---|
 | 0 | tests passed |
 | 1 | tests failed |
-| 2 | ptest itself could not run (no command known, deps failed) |
-| **75** | **temporary remote coordination outcome; no local fallback started.** Not a test failure. |
+| 2 | compulsory Spot installation/configuration is invalid, or ptest itself could not run |
+| **75** | **temporary Spot capacity/coordination outcome; no tests ran locally.** Not a test failure. |
 
 75 is `EX_TEMPFAIL`. For Cloud Run it can mean the remote concurrency ceiling;
 for the Spot queue it can mean queued/running work or an ambiguous terminal

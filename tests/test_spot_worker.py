@@ -7,7 +7,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spot_queue import Lease, SpotRequest, SpotResult
-from spot_worker import GcloudWorkerAdapter, Worker, _MessageAdapter, run_claimed_request, unpack_archive
+from spot_worker import (GcloudWorkerAdapter, LocalProcessAdapter, Worker, _MessageAdapter, poll_backoff,
+                         run_claimed_request,
+                         terminate_process_group, unpack_archive)
 
 
 KEY = "a" * 64
@@ -45,6 +47,23 @@ def test_claimed_request_downloads_unpacks_runs_publishes_then_acknowledges(tmp_
 
     assert result.status == "passed"
     assert events == ["download", "unpack", "run", "publish", "acknowledge"]
+
+
+def test_large_output_is_stored_raw_while_terminal_result_stays_bounded(tmp_path):
+    published, raw = [], []
+    class Adapter:
+        def download(self, *_args): pass
+        def unpack(self, *_args): pass
+        def run(self, *_args): return 1, "é" * 200_001
+        def store_output(self, key, output): raw.append((key, output)); return f"memory://{key}"
+        def publish_result(self, result): published.append(result); return True
+        def acknowledge(self): pass
+
+    request = SpotRequest(KEY, "test", "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz", NOW)
+    result = run_claimed_request(request, tmp_path, Adapter())
+    assert raw == [(KEY, "é" * 200_001)]
+    assert len(result.output) <= 200_000
+    assert result.output_uri == f"memory://{KEY}"
 
 
 def test_preempted_worker_leaves_no_terminal_result_or_acknowledgement(tmp_path):
@@ -202,6 +221,62 @@ def test_unpack_rejects_path_traversal_and_outside_symlinks(tmp_path):
         unpack_archive(archive, tmp_path / "source")
 
 
+def test_process_group_shutdown_kills_and_reaps_a_child_ignoring_sigterm():
+    import os
+    import subprocess
+
+    child = subprocess.Popen(
+        ["/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done"],
+        start_new_session=True,
+    )
+    try:
+        assert terminate_process_group(child, grace_seconds=0.05) is True
+        assert child.poll() is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(child.pid, 0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_pytest_preparation_uses_the_lockfile_before_network_isolation(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'example'\nversion = '0'\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    calls = []
+
+    class Done:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr("spot_worker.subprocess.run", lambda command, **kwargs: calls.append(command) or Done())
+
+    adapter = LocalProcessAdapter()
+    adapter.prepare(tmp_path, "pytest")
+
+    assert calls[0] == ["uv", "sync", "--frozen"]
+    assert calls[1][0] == "initdb"
+    assert calls[2][0] == "pg_ctl"
+    assert calls[1][calls[1].index("-D") + 1].startswith(str(tmp_path / ".spot-pgdata"))
+    adapter.stop_postgres()
+    assert calls[3][0:3] == ["pg_ctl", "-D", str(tmp_path / ".spot-pgdata")]
+
+
+def test_vitest_preparation_requires_lockfile_and_is_script_free(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="package-lock"):
+        LocalProcessAdapter().prepare(tmp_path, "vitest")
+
+    (tmp_path / "package-lock.json").write_text("{}")
+    calls = []
+    class Done:
+        returncode = 0
+        stdout = stderr = ""
+    monkeypatch.setattr("spot_worker.subprocess.run", lambda command, **kwargs: calls.append(command) or Done())
+    LocalProcessAdapter().prepare(tmp_path, "vitest")
+    assert calls == [["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]]
+
+
 def test_worker_claims_before_running_and_uses_message_bound_ack(tmp_path, monkeypatch):
     events = []
 
@@ -310,3 +385,64 @@ def test_active_cancellation_records_quiescence_before_acknowledging(tmp_path):
 
     assert worker.run_once() is True
     assert events == ["active", "run", "stop-child", "idle", "ack"]
+
+
+def test_poison_delivery_is_dead_lettered_then_a_valid_delivery_still_runs(tmp_path):
+    events = []
+    valid = SpotRequest(KEY, "test", "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz", NOW)
+
+    class Adapter:
+        deliveries = [{"poison": True, "ack_id": "bad"}, {"ack_id": "good"}]
+        def pull(self): return self.deliveries.pop(0) if self.deliveries else None
+        def dead_letter(self, message): events.append(("dead-letter", message["ack_id"])); return True
+        def acknowledge(self, message): events.append(("ack", message["ack_id"]))
+        def read_request(self, _message): return valid
+        def read_result(self, _key): return None
+        def claim(self, *_args): return None
+
+    worker = Worker(Adapter(), tmp_path, "worker-a")
+    assert worker.run_once() is False
+    assert worker.run_once() is False
+    assert events == [("dead-letter", "bad"), ("ack", "bad")]
+
+
+def test_poison_delivery_is_not_acknowledged_when_dead_letter_publish_fails(tmp_path):
+    events = []
+    class Adapter:
+        def pull(self): return {"poison": True, "ack_id": "bad"}
+        def dead_letter(self, _message): events.append("dead-letter"); return False
+        def acknowledge(self, _message): events.append("ack")
+
+    assert Worker(Adapter(), tmp_path, "worker-a").run_once() is False
+    assert events == ["dead-letter"]
+
+
+def test_malformed_durable_request_is_dead_lettered_without_crashing_the_loop(tmp_path):
+    events = []
+    class Adapter:
+        def pull(self): return {"ack_id": "bad", "request_key": KEY}
+        def read_request(self, _message): raise ValueError("invalid request schema")
+        def dead_letter(self, _message): events.append("dead-letter"); return True
+        def acknowledge(self, _message): events.append("ack")
+
+    assert Worker(Adapter(), tmp_path, "worker-a").run_once() is False
+    assert events == ["dead-letter", "ack"]
+
+
+def test_idle_heartbeat_is_rate_limited_but_the_first_transition_is_immediate(tmp_path, monkeypatch):
+    beats, clock = [], iter([0.0, 1.0, 29.0, 30.0])
+    class Adapter:
+        def pull(self): return None
+        def heartbeat_worker(self, worker_id, request): beats.append((worker_id, request))
+    monkeypatch.setattr("spot_worker.time.monotonic", lambda: next(clock))
+    worker = Worker(Adapter(), tmp_path, "worker-a", idle_heartbeat_seconds=30)
+
+    for _ in range(4):
+        assert worker.run_once() is False
+    assert beats == [("worker-a", None), ("worker-a", None)]
+
+
+def test_idle_poll_backoff_is_bounded_exponential_with_jitter():
+    assert poll_backoff(0, random_fn=lambda: 0.5) == 1.0
+    assert poll_backoff(3, random_fn=lambda: 0.5) == 8.0
+    assert poll_backoff(99, random_fn=lambda: 1.0) == 30.0

@@ -173,6 +173,16 @@ def test_renew_is_generation_safe_and_extends_the_lease():
     assert store.renew(lease, NOW + timedelta(seconds=31), 60) is None
 
 
+def test_renewal_cannot_revive_an_expired_lease_or_publish_after_expiry():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+
+    assert store.renew(lease, NOW + timedelta(seconds=60), 60) is None
+    expired_result = SpotResult(KEY, "passed", 0, "late", NOW + timedelta(seconds=60))
+    assert store.publish_result(expired_result, lease) is False
+
+
 def test_cancellation_prevents_a_later_claim_after_local_timeout_fallback():
     store = InMemorySpotQueueStore()
     store.create_request(request())
@@ -417,13 +427,27 @@ def test_requests_keep_the_exact_command_source_key_schema_and_timestamp():
     stored = request().to_record()
 
     assert stored == {
-        "schema": "ptest-spot-request-v1",
+        "schema": "ptest-spot-request-v2",
         "request_key": KEY,
         "command": "uv run pytest tests",
+        "kind": "pytest",
         "source_uri": "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz",
         "created_at": NOW.isoformat(),
     }
     assert SpotRequest.from_record(stored) == request()
+
+
+def test_request_kind_is_versioned_validated_and_changes_the_identity():
+    pytest_request = request()
+    vitest_request = SpotRequest(
+        KEY, pytest_request.command, pytest_request.source_uri, NOW, "vitest"
+    )
+
+    assert pytest_request.to_record()["kind"] == "pytest"
+    assert vitest_request.to_record()["kind"] == "vitest"
+    assert pytest_request.stable_identity != vitest_request.stable_identity
+    with pytest.raises(SpotRecordError, match="kind"):
+        SpotRequest(KEY, "npm test", pytest_request.source_uri, NOW, "unknown")
 
 
 def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
@@ -584,7 +608,7 @@ def test_spot_capacity_admission_rejects_a_disabled_controller(ptest, monkeypatc
         )
 
 
-def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatch, tmp_path):
+def test_ptest_cancels_durable_request_then_returns_75_without_local_fallback(ptest, monkeypatch, tmp_path):
     class Queue:
         def __init__(self): self.events = []
         def read_result(self, _key): return None
@@ -612,7 +636,7 @@ def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatc
     config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
 
     assert ptest.run_spot_queue({"kind": "pytest", "spot_topic": "ptest-spot"}, config,
-                                "fake", tmp_path, "uv run pytest tests") is None
+                                "fake", tmp_path, "uv run pytest tests") == 75
     assert queue.cancelled[0:2] == (KEY, "timeout-local-fallback")
     assert queue.events == ["cancel", "quiesced"]
 
@@ -933,7 +957,7 @@ def test_ambiguous_create_failure_after_persistence_refuses_local_fallback(
     assert queue.persisted is True
 
 
-def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
+def test_cancelled_deterministic_key_requires_a_fresh_spot_attempt(
     ptest, monkeypatch, tmp_path
 ):
     class Queue:
@@ -958,7 +982,7 @@ def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
     assert ptest.run_spot_queue(
         {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
         "fake", tmp_path, "uv run pytest tests"
-    ) is None
+    ) == 75
     assert queue.events == ["quiesced"]
 
 

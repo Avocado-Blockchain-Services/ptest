@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 
-REQUEST_SCHEMA = "ptest-spot-request-v1"
+REQUEST_SCHEMA = "ptest-spot-request-v2"
 LEASE_SCHEMA = "ptest-spot-lease-v1"
 RESULT_SCHEMA = "ptest-spot-result-v1"
 CANCEL_SCHEMA = "ptest-spot-cancel-v1"
@@ -22,6 +22,7 @@ WORKER_SCHEMA = "ptest-spot-worker-v1"
 WORKER_INDEX_SCHEMA = "ptest-spot-worker-index-v1"
 WORKER_INDEX_IDLE_LIMIT = 64
 WORKER_INDEX_LEGACY_ACTIVE_SECONDS = 300
+TERMINAL_OUTPUT_LIMIT = 200_000
 PTEST_SPOT_COMPANION_ABI = 1
 SOURCE_URI_RE = re.compile(
     r"gs://[A-Za-z0-9][A-Za-z0-9._-]+/sources/[0-9a-f]{64}\.tar\.gz"
@@ -87,10 +88,13 @@ class SpotRequest:
     command: str
     source_uri: str
     created_at: datetime
+    kind: str = "pytest"
 
     def __post_init__(self):
         _request_key(self.request_key)
         _text(self.command, "command")
+        if self.kind not in {"pytest", "vitest"}:
+            raise SpotRecordError("kind must be one of: pytest, vitest")
         if not isinstance(self.source_uri, str) or not SOURCE_URI_RE.fullmatch(self.source_uri):
             raise SpotRecordError("source_uri must be a canonical source archive URI")
         if self.created_at.tzinfo is None:
@@ -101,14 +105,15 @@ class SpotRequest:
             "schema": REQUEST_SCHEMA,
             "request_key": self.request_key,
             "command": self.command,
+            "kind": self.kind,
             "source_uri": self.source_uri,
             "created_at": self.created_at.astimezone(timezone.utc).isoformat(),
         }
 
     @property
-    def stable_identity(self) -> tuple[str, str, str]:
+    def stable_identity(self) -> tuple[str, str, str, str]:
         """Fields that remain stable when an at-least-once publish is retried."""
-        return self.request_key, self.command, self.source_uri
+        return self.request_key, self.command, self.source_uri, self.kind
 
     @classmethod
     def from_record(cls, record: object) -> "SpotRequest":
@@ -119,6 +124,7 @@ class SpotRequest:
             _text(record.get("command"), "command"),
             _text(record.get("source_uri"), "source_uri"),
             _timestamp(record.get("created_at"), "created_at"),
+            _text(record.get("kind"), "kind"),
         )
 
 
@@ -269,6 +275,7 @@ class SpotResult:
     exit_code: int | None
     output: str
     completed_at: datetime
+    output_uri: str | None = None
 
     def __post_init__(self):
         _request_key(self.request_key)
@@ -278,6 +285,10 @@ class SpotResult:
             raise SpotRecordError("exit_code must be an integer or null")
         if not isinstance(self.output, str) or self.completed_at.tzinfo is None:
             raise SpotRecordError("result is malformed")
+        if len(self.output) > TERMINAL_OUTPUT_LIMIT:
+            raise SpotRecordError("terminal output exceeds its bounded preview limit")
+        if self.output_uri is not None and (not isinstance(self.output_uri, str) or not self.output_uri):
+            raise SpotRecordError("output_uri must be a non-empty string or null")
         if self.status == "passed" and self.exit_code != 0:
             raise SpotRecordError("passed results require exit_code 0")
         if self.status == "failed" and (self.exit_code is None or self.exit_code == 0):
@@ -292,6 +303,7 @@ class SpotResult:
             "status": self.status,
             "exit_code": self.exit_code,
             "output": self.output,
+            "output_uri": self.output_uri,
             "completed_at": self.completed_at.astimezone(timezone.utc).isoformat(),
         }
 
@@ -305,6 +317,7 @@ class SpotResult:
             record.get("exit_code"),
             record.get("output"),
             _timestamp(record.get("completed_at"), "completed_at"),
+            record.get("output_uri"),
         )
 
 
@@ -320,6 +333,7 @@ class InMemorySpotQueueStore:
     def __init__(self):
         self.records: dict[tuple[str, str], _Stored] = {}
         self.messages: list[str] = []
+        self.outputs: dict[str, str] = {}
         self.worker_states: dict[str, WorkerState] = {}
         self._lock = threading.RLock()
 
@@ -399,9 +413,14 @@ class InMemorySpotQueueStore:
     def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
+        if now >= lease.expires_at:
+            return None
         stored = self._read("states", lease.request_key)
         if stored is None or stored.generation != lease.generation or \
                 stored.value.get("schema") != LEASE_SCHEMA:
+            return None
+        current = Lease.from_record(stored.value, stored.generation)
+        if now >= current.expires_at:
             return None
         candidate = Lease(lease.request_key, lease.worker_id, now,
                           now + timedelta(seconds=lease_seconds), stored.generation + 1)
@@ -421,7 +440,7 @@ class InMemorySpotQueueStore:
             return False
         current = Lease.from_record(stored.value, stored.generation)
         _bound(current.request_key, result.request_key, "lease")
-        if current.worker_id != lease.worker_id:
+        if current.worker_id != lease.worker_id or result.completed_at >= current.expires_at:
             return False
         return self._replace("states", result.request_key, result.to_record(), stored.generation)
 
@@ -540,6 +559,10 @@ class InMemorySpotQueueStore:
         self.messages.append(_request_key(request_key))
         return True
 
+    def store_output(self, request_key: str, output: str) -> str:
+        self.outputs[_request_key(request_key)] = output
+        return f"memory://spot/v1/outputs/{request_key}.log"
+
     def wait_result(self, request_key: str, timeout_seconds: int) -> SpotResult | None:
         return self.read_result(request_key)
 
@@ -559,6 +582,16 @@ class GcloudSpotQueueStore:
 
     def _uri(self, namespace: str, request_key: str) -> str:
         return f"gs://{self.bucket}/{self._object(namespace, request_key)}"
+
+    def store_output(self, request_key: str, output: str) -> str:
+        uri = f"gs://{self.bucket}/spot/v1/outputs/{_request_key(request_key)}.log"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as payload:
+            payload.write(output)
+            payload.flush()
+            result = self._run(["storage", "cp", payload.name, uri])
+        if result.returncode:
+            raise SpotQueueUnavailable("raw Spot output could not be stored")
+        return uri
 
     @staticmethod
     def _worker_id(worker_id: str) -> str:
@@ -776,9 +809,14 @@ class GcloudSpotQueueStore:
     def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
+        if now >= lease.expires_at:
+            return None
         stored = self._read("states", lease.request_key)
         if stored is None or stored.generation != lease.generation or \
                 stored.value.get("schema") != LEASE_SCHEMA:
+            return None
+        current = Lease.from_record(stored.value, stored.generation)
+        if now >= current.expires_at:
             return None
         candidate = Lease(lease.request_key, lease.worker_id, now,
                           now + timedelta(seconds=lease_seconds), stored.generation + 1)
@@ -806,7 +844,7 @@ class GcloudSpotQueueStore:
             return False
         current = Lease.from_record(stored.value, stored.generation)
         _bound(current.request_key, result.request_key, "lease")
-        if current.worker_id != lease.worker_id:
+        if current.worker_id != lease.worker_id or result.completed_at >= current.expires_at:
             return False
         if self._write("states", result.request_key, result.to_record(), stored.generation):
             return True

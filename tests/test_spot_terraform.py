@@ -53,3 +53,27 @@ def test_spot_worker_can_only_mutate_state_and_worker_prefixes():
     assert 'objects/sources/' not in mutable
     assert 'objects/spot/v1/requests/' not in mutable
     assert 'resource "google_storage_bucket_iam_member" "spot_worker_storage"' not in source
+
+
+def test_spot_iam_separates_routine_operators_from_live_smoke_administrators():
+    source = TERRAFORM.read_text()
+    variables = (TERRAFORM.parent / "variables.tf").read_text()
+    assert 'variable "spot_smoke_admin_members"' in variables
+    assert 'for_each = toset(var.spot_smoke_admin_members)' in resource_block(
+        source, 'resource "google_project_iam_member" "spot_smoke_compute"'
+    )
+    assert 'for_each = toset(var.spot_smoke_admin_members)' in resource_block(
+        source, 'resource "google_project_iam_member" "spot_smoke_os_admin"'
+    )
+    controller = resource_block(source, 'resource "google_storage_bucket_iam_member" "spot_controller_state_reader"')
+    assert 'objects/spot/v1/workers/index/current.json' in controller
+
+
+def test_spot_subscription_has_a_dead_letter_policy_and_service_agent_permissions():
+    source = TERRAFORM.read_text()
+    subscription = resource_block(source, 'resource "google_pubsub_subscription" "spot_workers"')
+    assert re.search(r"dead_letter_topic\s*=\s*google_pubsub_topic\.spot_dead_letters\.id", subscription)
+    assert 'max_delivery_attempts = 5' in subscription
+    assert 'resource "google_pubsub_topic" "spot_dead_letters"' in source
+    assert 'gcp-sa-pubsub.iam.gserviceaccount.com' in source
+    assert re.search(r'role\s*=\s*"roles/pubsub.publisher"', source)

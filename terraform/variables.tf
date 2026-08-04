@@ -54,7 +54,13 @@ variable "vitest_job_name" {
 variable "operator_members" {
   type        = list(string)
   default     = []
-  description = "Principals allowed to upload source and execute jobs, e.g. [\"user:you@example.com\"] or a group. Prefer a group."
+  description = "Routine Spot submitters and observers. This does not grant VM-stop or OS Admin permissions."
+}
+
+variable "spot_smoke_admin_members" {
+  type        = list(string)
+  default     = []
+  description = "Dedicated-project principals allowed to stop Spot VMs and use OS Admin during the later live preemption smoke."
 }
 
 variable "spot_max_workers" {

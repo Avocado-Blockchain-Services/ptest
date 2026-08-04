@@ -3,7 +3,7 @@
 #   ptest              scoped run, local and workers-capped, unless the path covers
 #                      most of the suite — then it goes to the backend instead
 #                      (see remote_scoped_min_files below)
-#   ptest --full       whole suite, remote if backend = "cloudrun", else local
+#   ptest --full       compulsory Spot execution; never local or Cloud Run
 #   ptest where        what resolved for this directory
 #   ptest doctor       config + backend health
 #   ptest register     print a stanza for the repo you are standing in
@@ -19,8 +19,8 @@ daily_remote_runs = 60     # per project — a runaway agent loop must not spend
 # instead of running here: in persea-api, `ptest tests/api` alone covers
 # roughly two-thirds of the whole test suite — --full-sized load wearing a
 # scoped command's clothes. Narrow paths and any -k/-m/--lf filter always stay
-# local, where a ~2 min remote round trip would dominate. Set 0 to disable the
-# tier. Overridable per project.
+# local, where a remote round trip would dominate. Heavy scoped work is
+# compulsory Spot work; --local cannot bypass it. Overridable per project.
 remote_scoped_min_files = 40
 # Ceiling on simultaneous remote executions per job — a runaway-loop brake, not
 # a mutex. Remote runs cost nothing locally and separate worktrees legitimately
@@ -60,8 +60,8 @@ scoped     = "uv run pytest"
 # tests/test_image_mode_residue.py. A pre-push gate that is stricter than CI is
 # safe; one that shares CI's blind spot is not. CI should be fixed separately.
 full       = "uv run pytest -n auto --cov=persea_content_maker_db --cov=content_maker_llm --cov=content_maker_crawler --cov=content_maker_api --cov-report=term-missing --cov-fail-under=85 tests"
-backend    = "cloudrun"    # verified end-to-end 2026-07-25 (10 passed, real Postgres)
-job        = "ptest-persea-api"
+backend    = "spot_queue"
+spot_topic = "ptest-spot-requests"
 
 [projects.persea-front]
 root    = "/abs/path/to/persea_content_maker/persea_content_maker_front"
@@ -69,8 +69,8 @@ kind    = "vitest"
 workers = 2                # vitest workers are ~350MB each — this is the memory hog
 scoped  = "npm test --"
 full    = "npm test --"   # `--` forwards ptest's worker cap to vitest
-backend = "cloudrun"   # verified end-to-end 2026-07-25 (29 tests green, node 20)
-job     = "ptest-persea-front"
+backend = "spot_queue"
+spot_topic = "ptest-spot-requests"
 
 # ── fullon2 ─────────────────────────────────────────────────────────────────────
 # Four independent git repos under one umbrella, same shape as persea. All use uv.
@@ -121,8 +121,7 @@ backend = "local"
 # full    = "uv run pytest"
 # backend = "local"
 #
-# Opt-in durable Spot queue backend (requires the worker/controller resources;
-# it is intentionally not the default):
+# Spot queue configuration required for full and heavy-scoped execution:
 # backend = "spot_queue"
 # spot_topic = "ptest-spot-requests"
 # spot_controller_url = "https://ptest-spot-controller-....run.app"
