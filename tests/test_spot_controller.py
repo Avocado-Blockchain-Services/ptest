@@ -17,3 +17,11 @@ def test_backlog_is_capped_at_max_workers():
 
 def test_active_lease_never_scales_in():
     assert scale_target(0, 3, 3600, 5, active_leases=1) == 3
+
+
+def test_active_leases_are_a_floor_even_when_worker_observation_lags():
+    assert scale_target(0, 1, 9999, 5, active_leases=3) == 3
+
+
+def test_idle_age_and_configured_timeout_are_distinct_inputs():
+    assert scale_target(0, 1, 60, 5, idle_timeout_seconds=60) == 0

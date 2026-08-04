@@ -114,6 +114,18 @@ def test_expired_lease_can_be_reacquired_by_another_worker():
     assert replacement.generation == first.generation + 1
 
 
+def test_renew_is_generation_safe_and_extends_the_lease():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+
+    renewed = store.renew(lease, NOW + timedelta(seconds=30), 60)
+
+    assert renewed.generation == 2
+    assert renewed.expires_at == NOW + timedelta(seconds=90)
+    assert store.renew(lease, NOW + timedelta(seconds=31), 60) is None
+
+
 def test_terminal_result_publication_is_idempotent_but_rejects_conflicts():
     store = InMemorySpotQueueStore()
     result = SpotResult(KEY, "passed", 0, "12 passed", NOW)

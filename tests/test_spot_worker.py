@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spot_queue import SpotRequest
-from spot_worker import run_claimed_request
+from spot_worker import Worker, run_claimed_request
 
 
 KEY = "a" * 64
@@ -77,3 +77,35 @@ def test_preempted_worker_publishes_before_leaving_message_unacknowledged(tmp_pa
     run_claimed_request(request, tmp_path, Adapter())
 
     assert events == ["download", "unpack", "run", "publish"]
+
+
+def test_worker_claims_before_running_and_uses_message_bound_ack(tmp_path, monkeypatch):
+    events = []
+
+    class Adapter:
+        def pull(self):
+            events.append("pull")
+            return "message"
+
+        def read_request(self, message):
+            assert message == "message"
+            return SpotRequest(KEY, "test", "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz", NOW)
+
+        def read_result(self, key):
+            return None
+
+        def claim(self, key, worker_id, seconds):
+            events.append("claim")
+            return "lease"
+
+        def heartbeat(self, lease):
+            events.append("heartbeat")
+
+        def for_message(self, message, worker):
+            events.append("bound")
+            return object()
+
+    monkeypatch.setattr("spot_worker.run_claimed_request", lambda request, root, adapter: events.append("run"))
+
+    assert Worker(Adapter(), tmp_path, "worker-a").run_once() is True
+    assert events == ["pull", "claim", "heartbeat", "bound", "run"]

@@ -114,15 +114,53 @@ mode is deliberately opt-in because it performs a real remote full command.
 ### Optional Spot queue (manual deployment only)
 
 `backend = "spot_queue"` is disabled until an operator deliberately builds the
-two Spot images, reviews the static Terraform plan, and applies it. It is never
-enabled by a ptest update. Build `Dockerfile.spot-worker` and
-`Dockerfile.spot-controller`, set the image variables and a dedicated test
-project/bucket, then run `terraform -chdir=terraform fmt -check`,
-`terraform -chdir=terraform validate`, and a reviewed `terraform plan`. Apply
-only through the operator's approved change process. The worker publishes a
-durable result before acknowledging Pub/Sub; preemption leaves the message
-unacknowledged for a later worker. Set `backend = "spot_queue"` and the emitted
-topic only after a smoke run proves the worker/controller IAM and lease flow.
+two images, reviews a static plan, and performs a live smoke. It is never
+enabled by a ptest update and the commands below do **not** apply Terraform.
+
+```bash
+spot_project=YOUR_DEDICATED_TEST_PROJECT
+spot_region=us-central1
+spot_repo=YOUR_ARTIFACT_REPOSITORY
+spot_tag=$(git rev-parse --short HEAD)
+
+gcloud builds submit --project="$spot_project" --region="$spot_region" \
+  --tag "$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-worker:$spot_tag" \
+  --file Dockerfile.spot-worker .
+gcloud builds submit --project="$spot_project" --region="$spot_region" \
+  --tag "$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag" \
+  --file Dockerfile.spot-controller .
+
+terraform -chdir=terraform init
+terraform -chdir=terraform fmt -check
+terraform -chdir=terraform validate
+terraform -chdir=terraform plan \
+  -var="project_id=$spot_project" -var="region=$spot_region" \
+  -var="bucket_name=YOUR_GLOBALLY_UNIQUE_BUCKET" -var="ar_repo=$spot_repo" \
+  -var="spot_worker_image=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-worker:$spot_tag" \
+  -var="spot_controller_image=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag"
+```
+
+After a separately approved apply, check the controller's Cloud Run URL with an
+identity token, then submit one harmless request and inspect its durable result:
+
+```bash
+controller_url=$(gcloud run services describe ptest-spot-controller \
+  --project="$spot_project" --region="$spot_region" --format='value(status.url)')
+curl --fail --header "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "$controller_url/healthz"
+curl --fail --request POST \
+  --header "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "$controller_url/reconcile"
+gcloud compute instance-groups managed list-instances ptest-spot-workers \
+  --project="$spot_project" --region="$spot_region"
+```
+
+The worker pulls one Pub/Sub request, checks the terminal result, takes a
+generation-safe lease, heartbeats while its unprivileged/no-network child runs,
+publishes the durable terminal result, and only then acknowledges. SIGTERM stops
+the heartbeat and leaves unfinished work unacknowledged for redelivery. Configure
+`backend = "spot_queue"` and the emitted topic only after that smoke has proved
+worker/controller IAM and lease flow.
 
 ## Exit codes
 

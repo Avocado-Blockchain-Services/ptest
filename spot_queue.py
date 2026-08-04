@@ -37,6 +37,8 @@ class SpotQueueStore(Protocol):
 
     def publish_result(self, result: "SpotResult") -> bool: ...
 
+    def renew(self, lease: "Lease", now: datetime, lease_seconds: int) -> "Lease | None": ...
+
 
 def _request_key(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
@@ -270,6 +272,17 @@ class InMemorySpotQueueStore:
                  self._replace("leases", request_key, candidate.to_record(), expected_generation))
         return candidate if wrote else None
 
+    def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
+        if lease_seconds <= 0 or now.tzinfo is None:
+            raise ValueError("lease_seconds and now must be positive and timezone-aware")
+        stored = self._read("leases", lease.request_key)
+        if stored is None or stored.generation != lease.generation:
+            return None
+        candidate = Lease(lease.request_key, lease.worker_id, now,
+                          now + timedelta(seconds=lease_seconds), stored.generation + 1)
+        return candidate if self._replace("leases", lease.request_key, candidate.to_record(),
+                                         stored.generation) else None
+
     def publish_result(self, result: SpotResult) -> bool:
         existing = self.read_result(result.request_key)
         if existing is None:
@@ -423,6 +436,21 @@ class GcloudSpotQueueStore:
         lease = Lease.from_record(persisted.value, persisted.generation)
         _bound(lease.request_key, request_key, "lease")
         return lease
+
+    def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
+        if lease_seconds <= 0 or now.tzinfo is None:
+            raise ValueError("lease_seconds and now must be positive and timezone-aware")
+        stored = self._read("leases", lease.request_key)
+        if stored is None or stored.generation != lease.generation:
+            return None
+        candidate = Lease(lease.request_key, lease.worker_id, now,
+                          now + timedelta(seconds=lease_seconds), stored.generation + 1)
+        if not self._write("leases", lease.request_key, candidate.to_record(), stored.generation):
+            return None
+        persisted = self._read("leases", lease.request_key)
+        if persisted is None:
+            raise SpotQueueUnavailable("lease disappeared after renewal")
+        return Lease.from_record(persisted.value, persisted.generation)
 
     def publish_result(self, result: SpotResult) -> bool:
         existing = self.read_result(result.request_key)
