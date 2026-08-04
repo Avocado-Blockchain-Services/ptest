@@ -265,3 +265,66 @@ and Cloud Monitoring behavior. A custom worker lease longer than the default
 180-second cancellation-quiescence wait safely returns 75 unless the worker
 publishes its idle proof first. No Terraform apply, deployment, user config
 mutation, cloud deletion, push, or merge was performed.
+
+## Review fix round 5
+
+### Remediation
+
+- Split source preparation from durable request creation. Source packaging can
+  still fall back locally because it cannot schedule work, but once
+  `create_request()` is attempted any GCS/process ambiguity returns 75. A lost
+  response after a successful create-only CAS can no longer race a local suite.
+- Restored the brief's configurable overflow toggle as a meaningful advisory
+  brake. With matching Terraform and ptest toggles enabled, ptest calls the
+  IAM-protected controller `/admit` endpoint before source upload or durable
+  creation. An observed unacknowledged backlog or active-lease floor at the
+  worker cap returns 75; disabled/mismatched or unavailable admission fails
+  closed. Existing durable requests bypass the gate and rejoin normally.
+- Kept controller IAM least-privilege: admission uses its existing Monitoring,
+  MIG, and read-only bucket access and adds no marker, counter, storage write,
+  malformed Cloud Run dispatch, or new grant. The controller returns its toggle
+  state and ptest validates it. Terraform exposes the boolean and controller
+  environment; its generated Spot config stanza and `config.example.toml`
+  expose the matching client URL/toggle.
+- Documented the truthful limit: delayed, sampled Cloud Monitoring data makes
+  this an advisory overflow brake, not an atomic admission cap. It still changes
+  behavior safely whenever saturation is observed, before any request exists.
+- Hardened both live smoke runs with `--fresh` and explicit process exit checks.
+  Each final durable state must be a passed result with exit code 0, and each
+  subscription pull is parsed and asserted to be an empty JSON array. A passing
+  local fallback can no longer mask a missing or failed remote execution.
+
+### Evidence
+
+- RED: the ambiguous-create regression returned local fallback after simulating
+  a successful persistence followed by a lost response. GREEN: the focused
+  creation/publish/retry selection passed 3 tests after the boundary split.
+- RED: controller policy, real authenticated `/admit`, controller environment,
+  ptest pre-upload rejection, identity-token client, and strict smoke-contract
+  cases each failed before implementation. The corrected Pub/Sub occupancy
+  test also failed the initial double-counting formula before changing it to the
+  maximum of the unacknowledged backlog and active-lease floor.
+- Internal-review RED: 3 focused cases exposed an undocumented hard-cap claim
+  and a client/controller toggle mismatch. GREEN: `/admit` now reports enabled
+  state, mismatches fail closed, and the Monitoring limit is explicit. Follow-up
+  review found no remaining Critical, Important, or Minor issue.
+- GREEN: final queue/worker/controller/main-wiring/smoke selection passed 92
+  tests in 2.35s. `terraform fmt -check`, `terraform validate`, Python bytecode
+  compilation, the extracted README smoke block's `bash -n`, and `git diff
+  --check` all passed.
+- GREEN: final `ptest --full` passed 208 tests in 3.91s.
+
+### Commits
+
+- `fe96d3d fix: fail closed after spot request creation`
+- `bfd932f feat: gate spot queue overflow admission`
+- `4271f32 fix: qualify spot overflow admission brake`
+
+### Remaining operational gate
+
+The overflow brake deliberately is not an atomic reservation: concurrent calls
+can pass before the delayed Monitoring signal reflects them. It prevents new
+durable work only when the controller observes saturation. The corrected live
+dedicated-project smoke remains required for IAM, Monitoring shape/delay, MIG
+replacement, Artifact Registry, Bubblewrap, and Pub/Sub redelivery. No
+Terraform plan/apply, deployment, user config mutation, push, or merge ran.
