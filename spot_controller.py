@@ -7,7 +7,8 @@ import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from spot_queue import WORKER_INDEX_SCHEMA, WorkerState
@@ -156,14 +157,20 @@ class GcloudControllerAdapter:
         return backlog, active, leases, idle_age
 
     def _worker_index(self) -> list[WorkerState]:
-        uri = f"gs://{self.bucket}/spot/v1/workers/index/current.json"
+        object_name = "spot/v1/workers/index/current.json"
+        url = (
+            "https://storage.googleapis.com/storage/v1/b/"
+            f"{quote(self.bucket, safe='')}/o/{quote(object_name, safe='')}?alt=media"
+        )
         try:
-            raw = self._run("storage", "cat", uri)
-        except RuntimeError as exc:
-            message = str(exc).lower()
-            if "no urls matched" in message or "matched no objects" in message:
+            token = self._run("auth", "print-access-token").strip()
+            request = Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urlopen(request, timeout=30) as response:
+                raw = response.read().decode()
+        except HTTPError as exc:
+            if exc.code == 404:
                 return []
-            raise
+            raise RuntimeError("worker index could not be read") from exc
         try:
             record = json.loads(raw)
             if not isinstance(record, dict) or record.get("schema") != WORKER_INDEX_SCHEMA \

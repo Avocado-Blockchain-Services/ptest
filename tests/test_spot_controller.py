@@ -160,20 +160,13 @@ def test_stale_worker_heartbeats_expire_and_cannot_mask_fresh_idle_age(monkeypat
     fresh = WorkerState(
         "idle-worker", now.replace(hour=11, minute=0), now.replace(minute=9), None
     )
-    record = {
-        "schema": "ptest-spot-worker-index-v1",
-        "workers": {
-            "gone-worker": stale.to_record(),
-            "idle-worker": fresh.to_record(),
-        },
-    }
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket",
         worker_heartbeat_ttl_seconds=120,
     )
     monkeypatch.setattr("spot_controller.datetime", Clock)
 
-    monkeypatch.setattr(adapter, "_run", lambda *args: json.dumps(record))
+    monkeypatch.setattr(adapter, "_worker_index", lambda: [stale, fresh])
 
     assert adapter._worker_idle_age() == 4200
 
@@ -192,10 +185,7 @@ def test_only_stale_worker_heartbeats_allow_scale_down(monkeypatch):
         worker_heartbeat_ttl_seconds=120,
     )
     monkeypatch.setattr("spot_controller.datetime", Clock)
-    monkeypatch.setattr(adapter, "_run", lambda *args: json.dumps({
-        "schema": "ptest-spot-worker-index-v1",
-        "workers": {"gone-worker": stale.to_record()},
-    }))
+    monkeypatch.setattr(adapter, "_worker_index", lambda: [stale])
 
     assert scale_target(0, 1, adapter._worker_idle_age(), 5) == 0
 
@@ -207,13 +197,12 @@ def test_missing_worker_index_bootstraps_first_worker(monkeypatch):
     targets = []
 
     def run(*args):
-        if args[:2] == ("storage", "cat"):
-            raise RuntimeError("One or more URLs matched no objects")
         if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
             return "[]"
         raise AssertionError(args)
 
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_worker_index", lambda: [])
     monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 1)
     monkeypatch.setattr(adapter, "set_target", lambda target: targets.append(target))
 
@@ -227,11 +216,6 @@ def test_unindexed_running_worker_is_a_conservative_lease_during_rollout(monkeyp
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket"
     )
-    index = {
-        "schema": "ptest-spot-worker-index-v1",
-        "workers": {"worker-new": indexed_idle.to_record()},
-    }
-
     class Clock:
         @staticmethod
         def now(_tz): return now
@@ -242,13 +226,12 @@ def test_unindexed_running_worker_is_a_conservative_lease_during_rollout(monkeyp
                 {"instanceStatus": "RUNNING", "instance": "zones/a/instances/worker-new"},
                 {"instanceStatus": "RUNNING", "instance": "zones/a/instances/worker-old"},
             ])
-        if args[:2] == ("storage", "cat"):
-            return json.dumps(index)
         raise AssertionError(args)
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
     monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_worker_index", lambda: [indexed_idle])
 
     assert adapter.authenticated_metrics() == (0, 2, 1, 0)
 
@@ -270,16 +253,12 @@ def test_terminated_index_entry_cannot_mask_different_unindexed_worker(monkeypat
                 "instanceStatus": "RUNNING",
                 "instance": "zones/a/instances/worker-running",
             }])
-        if args[:2] == ("storage", "cat"):
-            return json.dumps({
-                "schema": "ptest-spot-worker-index-v1",
-                "workers": {"worker-terminated": terminated.to_record()},
-            })
         raise AssertionError(args)
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
     monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_worker_index", lambda: [terminated])
 
     assert adapter.authenticated_metrics() == (0, 1, 1, 0)
 
@@ -293,9 +272,6 @@ def test_controller_reads_one_bounded_worker_index_not_terminal_history(monkeypa
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket"
     )
-    terminal_objects = [
-        f"gs://bucket/spot/v1/states/{number:064x}.json" for number in range(1000)
-    ]
     calls = []
     index = {
         "schema": "ptest-spot-worker-index-v1",
@@ -318,23 +294,33 @@ def test_controller_reads_one_bounded_worker_index_not_terminal_history(monkeypa
                 "instanceStatus": "RUNNING",
                 "instance": "zones/a/instances/worker-a",
             }])
-        if args == (
-            "storage", "cat", "gs://bucket/spot/v1/workers/index/current.json"
-        ):
-            return json.dumps(index)
-        if args[:2] == ("storage", "ls"):
-            return "\n".join(terminal_objects)
-        if args[:2] == ("storage", "cat"):
-            raise AssertionError("controller fetched retained terminal state")
+        if args == ("auth", "print-access-token"):
+            return "token"
         raise AssertionError(args)
+
+    requests = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return json.dumps(index).encode()
+
+    def open_index(request, timeout):
+        requests.append((request.full_url, request.get_header("Authorization"), timeout))
+        return Response()
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
     monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr("spot_controller.urlopen", open_index)
 
     assert adapter.authenticated_metrics() == (0, 1, 1, 0)
-    assert [call for call in calls if call[:2] == ("storage", "cat")] == [
-        ("storage", "cat", "gs://bucket/spot/v1/workers/index/current.json")
+    assert requests == [
+        (
+            "https://storage.googleapis.com/storage/v1/b/bucket/o/"
+            "spot%2Fv1%2Fworkers%2Findex%2Fcurrent.json?alt=media",
+            "Bearer token", 30,
+        )
     ]
 
 
