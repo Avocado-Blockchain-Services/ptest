@@ -144,3 +144,24 @@ def test_only_stale_worker_heartbeats_allow_scale_down(monkeypatch):
     )
 
     assert scale_target(0, 1, adapter._worker_idle_age(), 5) == 0
+
+
+def test_empty_worker_and_state_prefixes_bootstrap_first_worker(monkeypatch):
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket"
+    )
+    targets = []
+
+    def run(*args):
+        if args[:2] == ("storage", "ls"):
+            raise RuntimeError("One or more URLs matched no objects")
+        if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
+            return "[]"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 1)
+    monkeypatch.setattr(adapter, "set_target", lambda target: targets.append(target))
+
+    assert reconcile(adapter, 5) == 1
+    assert targets == [1]

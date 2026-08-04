@@ -144,6 +144,11 @@ class Lease:
             "expires_at": self.expires_at.astimezone(timezone.utc).isoformat(),
         }
 
+    @property
+    def stable_identity(self) -> tuple[str, str, datetime, datetime]:
+        """Fields that identify one acquisition across a post-CAS re-read."""
+        return self.request_key, self.worker_id, self.acquired_at, self.expires_at
+
     @classmethod
     def from_record(cls, record: object, generation: int) -> "Lease":
         if not isinstance(record, dict) or record.get("schema") != LEASE_SCHEMA:
@@ -656,9 +661,11 @@ class GcloudSpotQueueStore:
         persisted = self._read("states", request_key)
         if persisted is None:
             raise SpotQueueUnavailable("lease disappeared after creation")
+        if persisted.value.get("schema") != LEASE_SCHEMA:
+            return None
         lease = Lease.from_record(persisted.value, persisted.generation)
         _bound(lease.request_key, request_key, "lease")
-        return lease
+        return lease if lease.stable_identity == candidate.stable_identity else None
 
     def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
         if lease_seconds <= 0 or now.tzinfo is None:
@@ -674,7 +681,11 @@ class GcloudSpotQueueStore:
         persisted = self._read("states", lease.request_key)
         if persisted is None:
             raise SpotQueueUnavailable("lease disappeared after renewal")
-        return Lease.from_record(persisted.value, persisted.generation)
+        if persisted.value.get("schema") != LEASE_SCHEMA:
+            return None
+        renewed = Lease.from_record(persisted.value, persisted.generation)
+        _bound(renewed.request_key, lease.request_key, "lease")
+        return renewed if renewed.stable_identity == candidate.stable_identity else None
 
     def publish_result(self, result: SpotResult, lease: Lease) -> bool:
         stored = self._read("states", result.request_key)

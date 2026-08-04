@@ -1889,13 +1889,17 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         queue = queue_class(base, bucket, topic)
         if not fresh:
             completed = queue.read_result(request_key_value)
-            if completed and _spot_result_is_fresh(completed, utc_now(), settings.ttl_seconds):
-                warn("reused passing Spot queue result")
-                if completed.output:
-                    sys.stdout.write(completed.output +
-                                     ("" if completed.output.endswith("\n") else "\n"))
-                    sys.stdout.flush()
-                return 0
+            if completed:
+                if _spot_result_is_fresh(completed, utc_now(), settings.ttl_seconds):
+                    warn("reused passing Spot queue result")
+                    if completed.output:
+                        sys.stdout.write(completed.output +
+                                         ("" if completed.output.endswith("\n") else "\n"))
+                        sys.stdout.flush()
+                    return 0
+                warn("Spot queue key already has a non-reusable terminal result; "
+                     "use --fresh to submit a new remote attempt")
+                return 75
         if getattr(queue, "is_cancelled", lambda _key: False)(request_key_value):
             if not queue.wait_cancellation_quiesced(request_key_value, cancel_timeout):
                 warn("Spot queue request is cancelled but its prior worker is not yet quiesced — "

@@ -129,6 +129,26 @@ def test_gcloud_result_transition_uses_the_exact_lease_generation(monkeypatch):
     assert writes == [("states", KEY, result.to_record(), 7)]
 
 
+def test_gcloud_claim_rejects_a_replacement_lease_seen_after_its_cas(monkeypatch):
+    from types import SimpleNamespace
+    from spot_queue import GcloudSpotQueueStore
+
+    store = GcloudSpotQueueStore(["gcloud"], "private-bucket", "ptest-spot")
+    replacement = Lease(
+        KEY, "worker-b", NOW + timedelta(seconds=61),
+        NOW + timedelta(seconds=121), 99,
+    )
+    states = iter([
+        None,
+        SimpleNamespace(value=replacement.to_record(), generation=99),
+    ])
+    monkeypatch.setattr(store, "read_request", lambda _key: request())
+    monkeypatch.setattr(store, "_read", lambda namespace, _key: next(states))
+    monkeypatch.setattr(store, "_write", lambda *_args: True)
+
+    assert store.claim(KEY, "worker-a", NOW, 60) is None
+
+
 def test_expired_lease_can_be_reacquired_by_another_worker():
     store = InMemorySpotQueueStore()
     store.create_request(request())
@@ -496,6 +516,36 @@ def test_ptest_reuses_a_fresh_passing_spot_result(ptest, monkeypatch, tmp_path, 
 
     assert queue.created == queue.messages == 0
     assert "cached result" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        SpotResult(KEY, "passed", 0, "stale pass", NOW - timedelta(hours=2)),
+        SpotResult(KEY, "failed", 1, "old failure", NOW),
+    ],
+    ids=["stale-pass", "failed-result"],
+)
+def test_ptest_requires_fresh_for_a_non_reusable_terminal_key(
+    ptest, monkeypatch, tmp_path, terminal
+):
+    class Queue:
+        def read_result(self, _key): return terminal
+        def create_request(self, _value):
+            raise AssertionError("immutable terminal keys cannot be republished")
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    monkeypatch.setattr(ptest, "utc_now", lambda: NOW)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 75
 
 
 def test_ptest_retry_after_message_failure_reuses_the_durable_request(

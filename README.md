@@ -182,7 +182,7 @@ gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
 # example `full = "sh -c 'sleep 90; exit 0'"`) with backend = spot_queue.
 # --fresh guarantees a new attempt. Every poll below has a deadline. The active
 # lease must name the VM that is stopped; the MIG, not an assumed Docker restart,
-# then supplies a replacement worker for redelivery.
+# then restores capacity for redelivery.
 ptest --full --fresh 2>spot-slow-request.log & smoke_pid=$!
 slow_key=''
 deadline=$((SECONDS + 60))
@@ -207,6 +207,7 @@ done
 test -n "$active_lease" || { echo 'timed out waiting for an active lease' >&2; kill "$smoke_pid"; exit 1; }
 
 spot_name=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_id"])' "$state_json")
+lease_acquired_at=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["acquired_at"])' "$state_json")
 lease_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
 spot_vm=$(gcloud compute instance-groups managed list-instances ptest-spot-workers \
   --project="$spot_project" --region="$spot_region" --format='value(instance)' | \
@@ -223,7 +224,7 @@ deadline=$((SECONDS + 600))
 replacement_lease=''
 while [ "$SECONDS" -lt "$deadline" ]; do
   if gcloud storage cat "$state_uri" >"$state_json" 2>/dev/null &&
-     python -c 'import datetime,json,sys; d=json.load(open(sys.argv[1])); now=datetime.datetime.now(datetime.timezone.utc); expiry=datetime.datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")); assert d["schema"] == "ptest-spot-lease-v1" and d["worker_id"] != sys.argv[2] and expiry > now' "$state_json" "$spot_name"; then
+     python -c 'import datetime,json,sys; d=json.load(open(sys.argv[1])); now=datetime.datetime.now(datetime.timezone.utc); expiry=datetime.datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")); acquired=datetime.datetime.fromisoformat(d["acquired_at"].replace("Z", "+00:00")); prior=datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")); assert d["schema"] == "ptest-spot-lease-v1" and acquired > prior and expiry > now' "$state_json" "$lease_acquired_at"; then
     new_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
     if [ "$new_generation" -gt "$lease_generation" ]; then replacement_lease=1; break; fi
   fi
@@ -266,14 +267,17 @@ transition, acknowledgement, cancellation, and retry.
 | 0 | tests passed |
 | 1 | tests failed |
 | 2 | ptest itself could not run (no command known, deps failed) |
-| **75** | **remote job at its concurrency ceiling — NOTHING RAN.** Not a test failure. |
+| **75** | **temporary remote coordination outcome; no local fallback started.** Not a test failure. |
 
-75 is `EX_TEMPFAIL`. It deliberately does **not** fall back to a local full run:
-with several agents blocked at once that would be the exact meltdown this tool
-exists to prevent. A heavy scoped run competes for the same slots as `--full`
-and can return 75 too, so "use a scoped run" only helps if it's small enough
-to stay local (a narrower path, or a `-k`/`-m`/`--lf` filter). Retry later,
-scope it tighter, or pass `--local` to force this run onto the machine.
+75 is `EX_TEMPFAIL`. For Cloud Run it can mean the remote concurrency ceiling;
+for the Spot queue it can mean queued/running work or an ambiguous terminal
+coordination outcome. The attempt deliberately does **not** start a local full
+fallback, because remote work may already exist. A heavy scoped run competes
+for the same Cloud Run slots as `--full` and can return 75 too, so "use a scoped
+run" only helps if it's small enough to stay local (a narrower path, or a
+`-k`/`-m`/`--lf` filter). Retry later, use `--fresh` when instructed for an
+immutable Spot terminal key, scope it tighter, or pass `--local` to force this
+run onto the machine.
 
 ## Notes
 

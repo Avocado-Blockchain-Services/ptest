@@ -111,8 +111,18 @@ class GcloudControllerAdapter:
         idle_age = self._worker_idle_age()
         return backlog, active, leases, idle_age
 
+    def _storage_listing(self, uri: str) -> str:
+        """Treat an empty object prefix as an empty metric, not an outage."""
+        try:
+            return self._run("storage", "ls", uri)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "no urls matched" in message or "matched no objects" in message:
+                return ""
+            raise
+
     def _worker_idle_age(self) -> int:
-        listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/workers/")
+        listing = self._storage_listing(f"gs://{self.bucket}/spot/v1/workers/")
         states = []
         for uri in listing.splitlines():
             try:
@@ -154,7 +164,7 @@ class GcloudControllerAdapter:
         return max((int(value) for value in values), default=0)
 
     def _active_leases(self) -> int:
-        listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/states/")
+        listing = self._storage_listing(f"gs://{self.bucket}/spot/v1/states/")
         now, active = datetime.now(timezone.utc), 0
         for uri in listing.splitlines():
             raw = self._run("storage", "cat", uri)
