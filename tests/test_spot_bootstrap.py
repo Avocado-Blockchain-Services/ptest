@@ -16,6 +16,12 @@ def test_spot_worker_image_contains_the_universal_runner_toolchain():
     assert "npm install --global vitest" not in dockerfile
 
 
+def test_spot_worker_image_provides_bubblewrap_bind_target():
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.spot-worker").read_text()
+
+    assert "/work" in dockerfile
+
+
 def test_debian_bootstrap_configures_cloud_repo_before_installing_gcloud(tmp_path):
     log = tmp_path / "commands.log"
     fake_bin = tmp_path / "bin"
