@@ -208,7 +208,6 @@ test -n "$active_lease" || { echo 'timed out waiting for an active lease' >&2; k
 
 spot_name=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_id"])' "$state_json")
 lease_acquired_at=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["acquired_at"])' "$state_json")
-lease_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
 spot_vm=$(gcloud compute instance-groups managed list-instances ptest-spot-workers \
   --project="$spot_project" --region="$spot_region" --format='value(instance)' | \
   grep "/instances/$spot_name$" | head -1)
@@ -219,6 +218,7 @@ spot_zone=${spot_vm%/instances/*}; spot_zone=${spot_zone##*/}
 # can be emitted, its lease expires, and the regional MIG replaces it.
 gcloud compute instances stop "$spot_name" --project="$spot_project" \
   --zone="$spot_zone" --quiet
+post_stop_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
 
 deadline=$((SECONDS + 600))
 replacement_lease=''
@@ -226,7 +226,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   if gcloud storage cat "$state_uri" >"$state_json" 2>/dev/null &&
      python -c 'import datetime,json,sys; d=json.load(open(sys.argv[1])); now=datetime.datetime.now(datetime.timezone.utc); expiry=datetime.datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")); acquired=datetime.datetime.fromisoformat(d["acquired_at"].replace("Z", "+00:00")); prior=datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")); assert d["schema"] == "ptest-spot-lease-v1" and acquired > prior and expiry > now' "$state_json" "$lease_acquired_at"; then
     new_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
-    if [ "$new_generation" -gt "$lease_generation" ]; then replacement_lease=1; break; fi
+    if [ "$new_generation" -gt "$post_stop_generation" ]; then replacement_lease=1; break; fi
   fi
   sleep 3
 done

@@ -63,3 +63,12 @@ def test_smoke_parser_accepts_same_host_lock_join_and_local_cache_hit(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_readme_preemption_smoke_baselines_generation_after_vm_stop():
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    stop = readme.index("gcloud compute instances stop")
+    baseline = readme.index("post_stop_generation=")
+    comparison = readme.index('"$new_generation" -gt "$post_stop_generation"')
+
+    assert stop < baseline < comparison
