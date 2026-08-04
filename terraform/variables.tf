@@ -56,3 +56,36 @@ variable "operator_members" {
   default     = []
   description = "Principals allowed to upload source and execute jobs, e.g. [\"user:you@example.com\"] or a group. Prefer a group."
 }
+
+variable "spot_max_workers" {
+  type        = number
+  default     = 5
+  description = "Hard cap for the regional Spot worker MIG."
+}
+
+variable "spot_idle_seconds" {
+  type        = number
+  default     = 3600
+  description = "Keep an idle worker until this exact timeout, unless it owns a lease."
+}
+
+variable "spot_worker_image" {
+  type        = string
+  description = "Prebuilt Spot worker image with Python and Node/Vitest dependencies."
+}
+
+variable "spot_controller_image" {
+  type        = string
+  description = "Prebuilt authenticated Spot controller image."
+}
+
+variable "spot_machine_type" {
+  type    = string
+  default = "e2-standard-8"
+}
+
+variable "spot_overflow_to_cloudrun" {
+  type        = bool
+  default     = false
+  description = "Opt-in controller policy flag; no Cloud Run overflow is enabled by default."
+}

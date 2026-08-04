@@ -31,3 +31,12 @@ output "config_stanza" {
     job     = "${google_cloud_run_v2_job.pytest.name}"
   EOT
 }
+
+output "spot_queue_topic" {
+  value       = google_pubsub_topic.spot_requests.name
+  description = "Set as spot_topic only after the worker/controller images are built and this static plan is manually applied."
+}
+
+output "spot_worker_mig" {
+  value = google_compute_region_instance_group_manager.spot_workers.name
+}

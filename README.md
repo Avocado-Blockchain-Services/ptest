@@ -77,7 +77,7 @@ replicate the whole setup on a similar stack.
 | `Dockerfile.vitest` | Runner image: node 20, no database |
 | `entrypoint.sh` | Shared: fetch → boot DB → install deps → run → exit with its code |
 | `cloudbuild.*.yaml` | Image build configs |
-| `terraform/` | Bucket, runner service account, both Cloud Run Jobs |
+| `terraform/` | Bucket, Cloud Run jobs, and static opt-in Spot queue resources |
 | `provision.sh` | Imperative equivalent of the Terraform, plus the image build |
 | `provision-vitest.sh` | Adds the node image + job, reusing bucket and SA |
 | `smoke.sh` | End-to-end runner check; opt-in live owner/joiner/cache proof |
@@ -110,6 +110,19 @@ that exactly one new Cloud Run execution appeared, and makes a third call that
 must reuse the joined passing execution. Override `PTEST_LIVE_REPO`, `PTEST_JOB`,
 or `PTEST_BIN` for a different registered project or candidate dispatcher. The
 mode is deliberately opt-in because it performs a real remote full command.
+
+### Optional Spot queue (manual deployment only)
+
+`backend = "spot_queue"` is disabled until an operator deliberately builds the
+two Spot images, reviews the static Terraform plan, and applies it. It is never
+enabled by a ptest update. Build `Dockerfile.spot-worker` and
+`Dockerfile.spot-controller`, set the image variables and a dedicated test
+project/bucket, then run `terraform -chdir=terraform fmt -check`,
+`terraform -chdir=terraform validate`, and a reviewed `terraform plan`. Apply
+only through the operator's approved change process. The worker publishes a
+durable result before acknowledging Pub/Sub; preemption leaves the message
+unacknowledged for a later worker. Set `backend = "spot_queue"` and the emitted
+topic only after a smoke run proves the worker/controller IAM and lease flow.
 
 ## Exit codes
 
