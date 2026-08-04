@@ -40,6 +40,8 @@ def test_authenticated_admission_endpoint_reports_saturated_capacity():
         def authorize(value): return value == "Bearer test-token"
         @staticmethod
         def authenticated_metrics(): return 5, 4, 3, 0
+        @staticmethod
+        def set_target(_target): raise AssertionError("saturated admission must not wake")
 
     handler = spot_controller.build_handler(Adapter(), 5, 3600, True)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -65,6 +67,35 @@ def test_authenticated_admission_endpoint_reports_saturated_capacity():
         "max_workers": 5,
         "overflow_reject_enabled": True,
     }
+
+
+def test_authenticated_admission_wakes_a_worker_before_monitoring_catches_up():
+    import spot_controller
+
+    class Adapter:
+        targets = []
+        @staticmethod
+        def authorize(value): return value == "Bearer test-token"
+        @staticmethod
+        def authenticated_metrics(): return 0, 0, 0, 0
+        @classmethod
+        def set_target(cls, target): cls.targets.append(target)
+
+    handler = spot_controller.build_handler(Adapter(), 5, 3600, True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{server.server_port}/admit", method="POST",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        with urlopen(request, timeout=2) as response:
+            assert json.loads(response.read())["admitted"] is True
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    assert Adapter.targets == [1]
 
 
 def test_active_lease_never_scales_in():

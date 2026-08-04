@@ -85,11 +85,18 @@ def build_handler(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
                 return
             try:
                 if self.path == "/admit":
-                    backlog, _workers, leases, _idle_age = adapter.authenticated_metrics()
+                    backlog, workers, leases, _idle_age = adapter.authenticated_metrics()
+                    admitted = admission_allowed(
+                        backlog, leases, max_workers, overflow_reject_enabled
+                    )
+                    # Pub/Sub's monitoring metric is eventually consistent. A
+                    # newly admitted request must wake one worker immediately;
+                    # reconciliation remains responsible for later scale-out
+                    # and idle scale-in.
+                    if admitted:
+                        adapter.set_target(min(max_workers, max(1, workers, leases)))
                     self._json({
-                        "admitted": admission_allowed(
-                            backlog, leases, max_workers, overflow_reject_enabled
-                        ),
+                        "admitted": admitted,
                         "active_leases": leases,
                         "backlog": backlog,
                         "max_workers": max_workers,
