@@ -243,7 +243,8 @@ class LocalProcessAdapter:
         self._process = subprocess.Popen(
             ["bwrap", "--die-with-parent", "--unshare-user", "--uid", "65534", "--gid", "65534",
              "--unshare-net", "--ro-bind", "/", "/", "--bind", str(cwd.parents[2]),
-             str(cwd.parents[2]), "--chdir", str(cwd), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+             str(cwd.parents[2]), "--chdir", str(cwd), "--proc", "/proc", "--dev", "/dev", "--tmpfs",
+             str(cwd.parents[2] / "bwrap-scratch"),
              "/bin/sh", "-lc", command],
             cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             start_new_session=True,
