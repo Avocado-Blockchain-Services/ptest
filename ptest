@@ -53,16 +53,9 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Mapping, NamedTuple
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from spot_queue import (
-    GcloudSpotQueueStore,
-    SpotRecordError,
-    SpotQueueUnavailable,
-    SpotRequest,
-)
+# Optional companion module. Kept lazy so the longstanding single-file ptest
+# installation remains usable for local and Cloud Run backends.
+GcloudSpotQueueStore = None
 
 try:
     import tomllib
@@ -1848,6 +1841,14 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         warn("gcloud not on PATH — running locally")
         return None
     try:
+        import spot_queue
+    except ModuleNotFoundError as exc:
+        if exc.name == "spot_queue":
+            warn("spot_queue backend is not installed — running locally")
+            return None
+        raise
+    queue_class = GcloudSpotQueueStore or spot_queue.GcloudSpotQueueStore
+    try:
         settings = remote_cache_settings(pcfg, cfg)
         timeout = _spot_queue_timeout(pcfg, cfg)
     except ValueError as exc:
@@ -1873,7 +1874,7 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     request_key_value = remote_request_key(identity)
     print(f"[ptest] spot request: {request_key_value}", file=sys.stderr, flush=True)
     try:
-        queue = GcloudSpotQueueStore(base, bucket, topic)
+        queue = queue_class(base, bucket, topic)
         if not fresh:
             completed = queue.read_result(request_key_value)
             if completed and _spot_result_is_fresh(completed, utc_now(), settings.ttl_seconds):
@@ -1891,7 +1892,7 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                 return None
         except SourceTreeChanged:
             return 75
-        request = SpotRequest(
+        request = spot_queue.SpotRequest(
             request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now()
         )
         if not queue.create_request(request):
@@ -1899,7 +1900,8 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             return None
         queue.publish_message(request_key_value)
         result = queue.wait_result(request_key_value, timeout)
-    except (SpotQueueUnavailable, SpotRecordError, CoordinationUnavailable, ValueError) as exc:
+    except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError,
+            CoordinationUnavailable, ValueError) as exc:
         warn(f"spot_queue unavailable ({exc}) — running locally")
         return None
     if result is None:

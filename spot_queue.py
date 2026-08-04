@@ -16,6 +16,9 @@ from typing import Protocol
 REQUEST_SCHEMA = "ptest-spot-request-v1"
 LEASE_SCHEMA = "ptest-spot-lease-v1"
 RESULT_SCHEMA = "ptest-spot-result-v1"
+SOURCE_URI_RE = re.compile(
+    r"gs://[A-Za-z0-9][A-Za-z0-9._-]+/sources/[0-9a-f]{64}\.tar\.gz"
+)
 
 
 class SpotQueueUnavailable(RuntimeError):
@@ -59,6 +62,11 @@ def _timestamp(value: object, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _bound(record_key: str, lookup_key: str, record_name: str) -> None:
+    if record_key != _request_key(lookup_key):
+        raise SpotRecordError(f"{record_name} request_key does not match its object key")
+
+
 @dataclass(frozen=True)
 class SpotRequest:
     request_key: str
@@ -69,8 +77,8 @@ class SpotRequest:
     def __post_init__(self):
         _request_key(self.request_key)
         _text(self.command, "command")
-        if not isinstance(self.source_uri, str) or not self.source_uri.startswith("gs://"):
-            raise SpotRecordError("source_uri must be a gs:// URI")
+        if not isinstance(self.source_uri, str) or not SOURCE_URI_RE.fullmatch(self.source_uri):
+            raise SpotRecordError("source_uri must be a canonical source archive URI")
         if self.created_at.tzinfo is None:
             raise SpotRecordError("created_at must include a timezone")
 
@@ -82,6 +90,11 @@ class SpotRequest:
             "source_uri": self.source_uri,
             "created_at": self.created_at.astimezone(timezone.utc).isoformat(),
         }
+
+    @property
+    def stable_identity(self) -> tuple[str, str, str]:
+        """Fields that remain stable when an at-least-once publish is retried."""
+        return self.request_key, self.command, self.source_uri
 
     @classmethod
     def from_record(cls, record: object) -> "SpotRequest":
@@ -149,6 +162,12 @@ class SpotResult:
             raise SpotRecordError("exit_code must be an integer or null")
         if not isinstance(self.output, str) or self.completed_at.tzinfo is None:
             raise SpotRecordError("result is malformed")
+        if self.status == "passed" and self.exit_code != 0:
+            raise SpotRecordError("passed results require exit_code 0")
+        if self.status == "failed" and (self.exit_code is None or self.exit_code == 0):
+            raise SpotRecordError("failed results require a nonzero exit_code")
+        if self.status == "infrastructure" and self.exit_code == 0:
+            raise SpotRecordError("infrastructure results cannot succeed")
 
     def to_record(self) -> dict:
         return {
@@ -213,12 +232,18 @@ class InMemorySpotQueueStore:
     def create_request(self, request: SpotRequest) -> bool:
         stored = self._read("requests", request.request_key)
         if stored is not None:
-            return SpotRequest.from_record(stored.value) == request
+            existing = SpotRequest.from_record(stored.value)
+            _bound(existing.request_key, request.request_key, "request")
+            return existing.stable_identity == request.stable_identity
         return self._create("requests", request.request_key, request.to_record())
 
     def read_request(self, request_key: str) -> SpotRequest | None:
         stored = self._read("requests", request_key)
-        return None if stored is None else SpotRequest.from_record(stored.value)
+        if stored is None:
+            return None
+        request = SpotRequest.from_record(stored.value)
+        _bound(request.request_key, request_key, "request")
+        return request
 
     def claim(self, request_key: str, worker_id: str, now: datetime,
               lease_seconds: int) -> Lease | None:
@@ -230,6 +255,7 @@ class InMemorySpotQueueStore:
         stored = self._read("leases", request_key)
         if stored is not None:
             lease = Lease.from_record(stored.value, stored.generation)
+            _bound(lease.request_key, request_key, "lease")
             if lease.expires_at > now:
                 return None
             expected_generation = stored.generation
@@ -245,14 +271,18 @@ class InMemorySpotQueueStore:
         return candidate if wrote else None
 
     def publish_result(self, result: SpotResult) -> bool:
-        stored = self._read("results", result.request_key)
-        if stored is None:
+        existing = self.read_result(result.request_key)
+        if existing is None:
             return self._create("results", result.request_key, result.to_record())
-        return SpotResult.from_record(stored.value) == result
+        return existing == result
 
     def read_result(self, request_key: str) -> SpotResult | None:
         stored = self._read("results", request_key)
-        return None if stored is None else SpotResult.from_record(stored.value)
+        if stored is None:
+            return None
+        result = SpotResult.from_record(stored.value)
+        _bound(result.request_key, request_key, "result")
+        return result
 
     def publish_message(self, request_key: str) -> bool:
         self.messages.append(_request_key(request_key))
@@ -350,18 +380,22 @@ class GcloudSpotQueueStore:
     def create_request(self, request: SpotRequest) -> bool:
         existing = self.read_request(request.request_key)
         if existing is not None:
-            return existing == request
+            return existing.stable_identity == request.stable_identity
         if self._write("requests", request.request_key, request.to_record(), 0):
             return True
         # A create-only precondition failure can be a concurrent identical
         # publisher. Re-read rather than turning an at-least-once delivery into
         # an unnecessary local full-suite fallback.
         existing = self.read_request(request.request_key)
-        return existing == request
+        return existing is not None and existing.stable_identity == request.stable_identity
 
     def read_request(self, request_key: str) -> SpotRequest | None:
         stored = self._read("requests", request_key)
-        return None if stored is None else SpotRequest.from_record(stored.value)
+        if stored is None:
+            return None
+        request = SpotRequest.from_record(stored.value)
+        _bound(request.request_key, request_key, "request")
+        return request
 
     def claim(self, request_key: str, worker_id: str, now: datetime,
               lease_seconds: int) -> Lease | None:
@@ -373,6 +407,7 @@ class GcloudSpotQueueStore:
         stored = self._read("leases", request_key)
         if stored is not None:
             lease = Lease.from_record(stored.value, stored.generation)
+            _bound(lease.request_key, request_key, "lease")
             if lease.expires_at > now:
                 return None
             generation = stored.generation
@@ -385,20 +420,26 @@ class GcloudSpotQueueStore:
         persisted = self._read("leases", request_key)
         if persisted is None:
             raise SpotQueueUnavailable("lease disappeared after creation")
-        return Lease.from_record(persisted.value, persisted.generation)
+        lease = Lease.from_record(persisted.value, persisted.generation)
+        _bound(lease.request_key, request_key, "lease")
+        return lease
 
     def publish_result(self, result: SpotResult) -> bool:
-        stored = self._read("results", result.request_key)
-        if stored is not None:
-            return SpotResult.from_record(stored.value) == result
+        existing = self.read_result(result.request_key)
+        if existing is not None:
+            return existing == result
         if self._write("results", result.request_key, result.to_record(), 0):
             return True
-        stored = self._read("results", result.request_key)
-        return stored is not None and SpotResult.from_record(stored.value) == result
+        existing = self.read_result(result.request_key)
+        return existing is not None and existing == result
 
     def read_result(self, request_key: str) -> SpotResult | None:
         stored = self._read("results", request_key)
-        return None if stored is None else SpotResult.from_record(stored.value)
+        if stored is None:
+            return None
+        result = SpotResult.from_record(stored.value)
+        _bound(result.request_key, request_key, "result")
+        return result
 
     def publish_message(self, request_key: str) -> bool:
         result = self._run(["pubsub", "topics", "publish", self.topic,

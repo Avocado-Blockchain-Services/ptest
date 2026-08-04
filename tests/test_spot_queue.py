@@ -24,7 +24,7 @@ def request():
     return SpotRequest(
         request_key=KEY,
         command="uv run pytest tests",
-        source_uri="gs://private-bucket/sources/source.tar.gz",
+        source_uri="gs://private-bucket/sources/" + "b" * 64 + ".tar.gz",
         created_at=NOW,
     )
 
@@ -45,6 +45,19 @@ def test_request_creation_is_idempotent_for_at_least_once_delivery():
 
     assert store.create_request(request()) is True
     assert store.create_request(request()) is True
+
+
+def test_request_retries_keep_the_winning_timestamp_when_identity_is_stable():
+    store = InMemorySpotQueueStore()
+    original = request()
+    retry = SpotRequest(
+        original.request_key, original.command, original.source_uri,
+        NOW + timedelta(seconds=30),
+    )
+
+    assert store.create_request(original) is True
+    assert store.create_request(retry) is True
+    assert store.read_request(KEY).created_at == NOW
 
 
 def test_gcloud_request_create_race_reuses_an_identical_winner(monkeypatch):
@@ -123,6 +136,42 @@ def test_malformed_records_are_rejected_not_claimed_or_reused():
         SpotRequest.from_record({"schema": "ptest-spot-request-v1"})
 
 
+def test_request_lease_and_result_records_must_match_their_lookup_key():
+    store = InMemorySpotQueueStore()
+    other_key = "c" * 64
+    other_request = SpotRequest(other_key, request().command, request().source_uri, NOW)
+    store.seed("requests", KEY, other_request.to_record())
+
+    with pytest.raises(SpotRecordError):
+        store.read_request(KEY)
+
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    other_lease = store.claim(KEY, "worker", NOW, 60)
+    store.seed("leases", KEY, {**other_lease.to_record(), "request_key": other_key})
+    with pytest.raises(SpotRecordError):
+        store.claim(KEY, "worker-two", NOW + timedelta(seconds=61), 60)
+
+    store.seed("results", KEY, SpotResult(other_key, "passed", 0, "", NOW).to_record())
+    with pytest.raises(SpotRecordError):
+        store.read_result(KEY)
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [
+        ("passed", 1),
+        ("passed", None),
+        ("failed", 0),
+        ("failed", None),
+        ("infrastructure", 0),
+    ],
+)
+def test_terminal_results_reject_status_exit_code_combinations(status, exit_code):
+    with pytest.raises(SpotRecordError):
+        SpotResult(KEY, status, exit_code, "", NOW)
+
+
 def test_requests_keep_the_exact_command_source_key_schema_and_timestamp():
     stored = request().to_record()
 
@@ -130,7 +179,7 @@ def test_requests_keep_the_exact_command_source_key_schema_and_timestamp():
         "schema": "ptest-spot-request-v1",
         "request_key": KEY,
         "command": "uv run pytest tests",
-        "source_uri": "gs://private-bucket/sources/source.tar.gz",
+        "source_uri": "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz",
         "created_at": NOW.isoformat(),
     }
     assert SpotRequest.from_record(stored) == request()
@@ -245,3 +294,78 @@ def test_ptest_reuses_a_fresh_passing_spot_result(ptest, monkeypatch, tmp_path, 
 
     assert queue.created == queue.messages == 0
     assert "cached result" in capsys.readouterr().out
+
+
+def test_ptest_retry_after_message_failure_reuses_the_durable_request(
+    ptest, monkeypatch, tmp_path
+):
+    from spot_queue import SpotQueueUnavailable
+
+    class Queue:
+        def __init__(self):
+            self.request = None
+            self.publish_attempts = 0
+
+        def read_result(self, request_key):
+            return None
+
+        def create_request(self, value):
+            if self.request is None:
+                self.request = value
+                return True
+            return self.request.stable_identity == value.stable_identity
+
+        def publish_message(self, request_key):
+            self.publish_attempts += 1
+            if self.publish_attempts == 1:
+                raise SpotQueueUnavailable("publish failed")
+            return True
+
+        def wait_result(self, request_key, timeout_seconds):
+            return SpotResult(request_key, "passed", 0, "recovered", NOW)
+
+    queue = Queue()
+    monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *args: queue)
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda fields: KEY)
+    now = iter([NOW, NOW + timedelta(seconds=30)])
+    monkeypatch.setattr(ptest, "utc_now", lambda: next(now))
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+    project = {"kind": "pytest", "spot_topic": "ptest-spot"}
+
+    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") is None
+    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") == 0
+    assert queue.request.created_at == NOW
+    assert queue.publish_attempts == 2
+
+
+def test_malformed_spot_result_falls_back_to_local_infrastructure_path(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def read_result(self, request_key):
+            raise SpotRecordError("malformed terminal result")
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *args: Queue())
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+    project = {"kind": "pytest", "spot_topic": "ptest-spot"}
+
+    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") is None
+
+
+def test_ptest_starts_without_spot_queue_when_installed_as_a_single_file(tmp_path):
+    runner = tmp_path / "ptest"
+    runner.write_text(Path(__file__).resolve().parents[1].joinpath("ptest").read_text())
+
+    completed = subprocess.run(
+        [sys.executable, str(runner), "where"], capture_output=True, text=True
+    )
+
+    assert completed.returncode == 0
+    assert "backend" in completed.stdout
