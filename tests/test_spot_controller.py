@@ -25,6 +25,22 @@ def test_active_leases_are_a_floor_even_when_worker_observation_lags():
     assert scale_target(0, 1, 9999, 5, active_leases=3) == 3
 
 
+def test_target_never_exceeds_cap_when_lease_count_is_inconsistent():
+    assert scale_target(0, 7, 9999, 5, active_leases=7) == 5
+
+
+def test_lease_count_over_cap_does_not_issue_a_downsize():
+    class Adapter:
+        overflow_enabled = False
+        def authenticated_metrics(self): return 0, 7, 7, 9999
+        def set_target(self, _target): raise AssertionError("must retain live lease capacity")
+        def record_capacity_fault(self, leases, maximum): self.fault = (leases, maximum)
+
+    adapter = Adapter()
+    assert reconcile(adapter, 5) == 5
+    assert adapter.fault == (7, 5)
+
+
 def test_idle_age_and_configured_timeout_are_distinct_inputs():
     assert scale_target(0, 1, 60, 5, idle_timeout_seconds=60) == 0
 
@@ -83,3 +99,26 @@ def test_overflow_explicitly_retains_messages_when_no_compatible_cloudrun_job_ex
 
     assert reconcile(adapter, 5) == 5
     assert adapter.overflow_state == {"mode": "retain-queue", "excess": 3}
+
+
+def test_overflow_toggle_off_leaves_no_durable_overflow_marker():
+    class Adapter:
+        overflow_enabled = False
+        def authenticated_metrics(self): return 8, 0, 0, 0
+        def set_target(self, target): self.target = target
+        def retain_overflow(self, excess): raise AssertionError(excess)
+
+    assert reconcile(Adapter(), 5) == 5
+
+
+def test_overflow_state_is_written_to_durable_storage(monkeypatch):
+    adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
+    commands = []
+    monkeypatch.setattr(adapter, "_run", lambda *args: commands.append(args) or "")
+
+    state = adapter.retain_overflow(3)
+
+    assert state["mode"] == "retain-queue"
+    assert state["excess"] == 3
+    assert commands[-1][0:2] == ("storage", "cp")
+    assert commands[-1][-1] == "gs://bucket/spot/v1/overflow/current.json"

@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from spot_queue import Lease
+from spot_queue import Lease, WorkerState
 
 
 def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
@@ -26,7 +27,7 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
            active_leases, idle_timeout_seconds) < 0:
         raise ValueError("capacity inputs must be non-negative")
     if active_leases:
-        return max(active_workers, active_leases)
+        return min(max_workers, max(active_workers, active_leases))
     if max_workers == 0:
         return 0
     if backlog:
@@ -45,6 +46,11 @@ def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> in
     backlog, workers, leases, idle_age = adapter.authenticated_metrics()
     target = scale_target(backlog, workers, idle_age, max_workers, leases,
                           idle_timeout_seconds)
+    if leases > max_workers:
+        # Do not issue a downsize while the observed lease floor is already
+        # inconsistent with policy; retain current capacity and surface state.
+        adapter.record_capacity_fault(leases, max_workers)
+        return target
     adapter.set_target(target)
     if backlog > max_workers and getattr(adapter, "overflow_enabled", False):
         adapter.retain_overflow(backlog - max_workers)
@@ -105,22 +111,22 @@ class GcloudControllerAdapter:
                                          "--format=json"))
         active = sum(1 for instance in instances if instance.get("instanceStatus") == "RUNNING")
         leases = self._active_leases()
-        # With no lease, a worker's last-start time is a conservative observable
-        # upper bound for its idle age. Query the actual VM rather than treating
-        # the policy timeout as a metric or inferring it from MIG desired size.
-        parsed = []
-        for instance in instances:
-            parts = instance.get("instance", "").rstrip("/").split("/")
-            if len(parts) < 5 or parts[-4] != "zones" or parts[-2] != "instances":
-                continue
-            details = json.loads(self._run("compute", "instances", "describe", parts[-1],
-                                           "--zone", parts[-3], "--format=json"))
-            if details.get("lastStartTimestamp"):
-                parsed.append(datetime.fromisoformat(
-                    details["lastStartTimestamp"].replace("Z", "+00:00")))
-        idle_age = int(min((datetime.now(timezone.utc) - value).total_seconds() for value in parsed)
-                       ) if parsed else 0
+        idle_age = self._worker_idle_age()
         return backlog, active, leases, idle_age
+
+    def _worker_idle_age(self) -> int:
+        listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/workers/")
+        states = []
+        for uri in listing.splitlines():
+            try:
+                states.append(WorkerState.from_record(json.loads(self._run("storage", "cat", uri))))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+        if not states or any(state.active_request is not None for state in states):
+            return 0
+        now = datetime.now(timezone.utc)
+        return int(min((now - state.idle_since).total_seconds() for state in states
+                       if state.idle_since is not None))
 
     def _monitoring_backlog(self) -> int:
         """Read the supported Cloud Monitoring REST metric (not a gcloud alias)."""
@@ -160,8 +166,17 @@ class GcloudControllerAdapter:
     def retain_overflow(self, excess: int) -> dict[str, int | str]:
         # Explicit, safe behavior: do not launch a Cloud Run job with an
         # incomplete request contract; leave the durable Pub/Sub message alone.
-        self.overflow_state = {"mode": "retain-queue", "excess": excess}
+        self.overflow_state = {"mode": "retain-queue", "excess": excess,
+                               "observed_at": datetime.now(timezone.utc).isoformat()}
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
+            json.dump(self.overflow_state, payload, sort_keys=True, separators=(",", ":"))
+            payload.flush()
+            self._run("storage", "cp", payload.name,
+                      f"gs://{self.bucket}/spot/v1/overflow/current.json")
         return self.overflow_state
+
+    def record_capacity_fault(self, leases: int, maximum: int) -> None:
+        self.overflow_state = {"mode": "lease-cap-fault", "leases": leases, "maximum": maximum}
 
     @staticmethod
     def authorize(authorization: str) -> bool:

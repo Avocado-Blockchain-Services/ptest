@@ -42,6 +42,13 @@ resource "google_pubsub_subscription_iam_member" "spot_worker_subscriber" {
   member       = "serviceAccount:${google_service_account.spot_worker.email}"
 }
 
+resource "google_pubsub_subscription_iam_member" "spot_operator_smoke_subscriber" {
+  for_each     = toset(var.operator_members)
+  subscription = google_pubsub_subscription.spot_workers.name
+  role         = "roles/pubsub.subscriber"
+  member       = each.key
+}
+
 resource "google_pubsub_topic_iam_member" "spot_operator_publisher" {
   for_each = toset(var.operator_members)
   topic    = google_pubsub_topic.spot_requests.name
@@ -75,10 +82,29 @@ resource "google_project_iam_member" "spot_controller_compute" {
   member  = "serviceAccount:${google_service_account.spot_controller.email}"
 }
 
-resource "google_project_iam_member" "spot_controller_subscription_viewer" {
+resource "google_project_iam_custom_role" "spot_smoke_operator" {
   project = var.project_id
-  role    = "roles/pubsub.viewer"
-  member  = "serviceAccount:${google_service_account.spot_controller.email}"
+  role_id = "ptestSpotSmokeOperator"
+  title   = "ptest Spot smoke operator"
+  permissions = [
+    "compute.instances.get",
+    "compute.instances.list",
+    "compute.regionInstanceGroupManagers.get",
+  ]
+}
+
+resource "google_project_iam_member" "spot_smoke_compute" {
+  for_each = toset(var.operator_members)
+  project  = var.project_id
+  role     = google_project_iam_custom_role.spot_smoke_operator.name
+  member   = each.key
+}
+
+resource "google_project_iam_member" "spot_smoke_os_admin" {
+  for_each = toset(var.operator_members)
+  project  = var.project_id
+  role     = "roles/compute.osAdminLogin"
+  member   = each.key
 }
 
 resource "google_project_iam_member" "spot_controller_monitoring_viewer" {
@@ -89,7 +115,7 @@ resource "google_project_iam_member" "spot_controller_monitoring_viewer" {
 
 resource "google_storage_bucket_iam_member" "spot_controller_leases" {
   bucket = google_storage_bucket.src.name
-  role   = "roles/storage.objectViewer"
+  role   = "roles/storage.objectUser"
   member = "serviceAccount:${google_service_account.spot_controller.email}"
 }
 

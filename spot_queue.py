@@ -16,6 +16,8 @@ from typing import Protocol
 REQUEST_SCHEMA = "ptest-spot-request-v1"
 LEASE_SCHEMA = "ptest-spot-lease-v1"
 RESULT_SCHEMA = "ptest-spot-result-v1"
+CANCEL_SCHEMA = "ptest-spot-cancel-v1"
+WORKER_SCHEMA = "ptest-spot-worker-v1"
 SOURCE_URI_RE = re.compile(
     r"gs://[A-Za-z0-9][A-Za-z0-9._-]+/sources/[0-9a-f]{64}\.tar\.gz"
 )
@@ -38,6 +40,8 @@ class SpotQueueStore(Protocol):
     def publish_result(self, result: "SpotResult") -> bool: ...
 
     def renew(self, lease: "Lease", now: datetime, lease_seconds: int) -> "Lease | None": ...
+
+    def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool: ...
 
 
 def _request_key(value: object) -> str:
@@ -149,6 +153,41 @@ class Lease:
 
 
 @dataclass(frozen=True)
+class WorkerState:
+    worker_id: str
+    idle_since: datetime | None
+    heartbeat_at: datetime
+    active_request: str | None
+
+    def __post_init__(self):
+        _text(self.worker_id, "worker_id")
+        if self.idle_since is not None and self.idle_since.tzinfo is None:
+            raise SpotRecordError("idle_since must include a timezone")
+        if self.heartbeat_at.tzinfo is None:
+            raise SpotRecordError("heartbeat_at must include a timezone")
+        if self.active_request is not None:
+            _request_key(self.active_request)
+        if (self.idle_since is None) != (self.active_request is not None):
+            raise SpotRecordError("worker state must be exactly idle or active")
+
+    def to_record(self) -> dict:
+        return {"schema": WORKER_SCHEMA, "worker_id": self.worker_id,
+                "idle_since": self.idle_since.astimezone(timezone.utc).isoformat() if self.idle_since else None,
+                "heartbeat_at": self.heartbeat_at.astimezone(timezone.utc).isoformat(),
+                "active_request": self.active_request}
+
+    @classmethod
+    def from_record(cls, record: object) -> "WorkerState":
+        if not isinstance(record, dict) or record.get("schema") != WORKER_SCHEMA:
+            raise SpotRecordError("worker state record has an invalid schema")
+        idle = record.get("idle_since")
+        return cls(_text(record.get("worker_id"), "worker_id"),
+                   _timestamp(idle, "idle_since") if idle is not None else None,
+                   _timestamp(record.get("heartbeat_at"), "heartbeat_at"),
+                   record.get("active_request"))
+
+
+@dataclass(frozen=True)
 class SpotResult:
     request_key: str
     status: str
@@ -206,6 +245,7 @@ class InMemorySpotQueueStore:
     def __init__(self):
         self.records: dict[tuple[str, str], _Stored] = {}
         self.messages: list[str] = []
+        self.worker_states: dict[str, WorkerState] = {}
 
     def seed(self, namespace: str, request_key: str, value: dict) -> None:
         key = (namespace, _request_key(request_key))
@@ -252,7 +292,7 @@ class InMemorySpotQueueStore:
         _request_key(request_key)
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        if self.read_request(request_key) is None:
+        if self.read_request(request_key) is None or self.is_cancelled(request_key):
             return None
         stored = self._read("leases", request_key)
         if stored is not None:
@@ -284,6 +324,8 @@ class InMemorySpotQueueStore:
                                          stored.generation) else None
 
     def publish_result(self, result: SpotResult) -> bool:
+        if self.is_cancelled(result.request_key):
+            return False
         existing = self.read_result(result.request_key)
         if existing is None:
             return self._create("results", result.request_key, result.to_record())
@@ -296,6 +338,53 @@ class InMemorySpotQueueStore:
         result = SpotResult.from_record(stored.value)
         _bound(result.request_key, request_key, "result")
         return result
+
+    def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool:
+        _request_key(request_key)
+        if self.read_request(request_key) is None:
+            return False
+        record = {"schema": CANCEL_SCHEMA, "request_key": request_key,
+                  "reason": _text(reason, "reason"), "cancelled_at": now.isoformat()}
+        stored = self._read("cancellations", request_key)
+        if stored is not None:
+            return stored.value == record
+        return self._create("cancellations", request_key, record)
+
+    def is_cancelled(self, request_key: str) -> bool:
+        stored = self._read("cancellations", request_key)
+        if stored is None:
+            return False
+        record = stored.value
+        if record.get("schema") != CANCEL_SCHEMA or record.get("request_key") != _request_key(request_key):
+            raise SpotRecordError("cancellation record is malformed")
+        _text(record.get("reason"), "reason")
+        _timestamp(record.get("cancelled_at"), "cancelled_at")
+        return True
+
+    def heartbeat_worker(self, worker_id: str, active_request: str | None,
+                         now: datetime) -> WorkerState:
+        _text(worker_id, "worker_id")
+        if now.tzinfo is None:
+            raise ValueError("worker heartbeat must be timezone-aware")
+        if active_request is not None:
+            _request_key(active_request)
+        prior = self.worker_states.get(worker_id)
+        idle_since = None if active_request else (
+            prior.idle_since if prior and prior.active_request is None else now)
+        state = WorkerState(worker_id, idle_since, now, active_request)
+        self.worker_states[worker_id] = state
+        return state
+
+    def list_worker_states(self) -> list[WorkerState]:
+        return list(self.worker_states.values())
+
+    def release(self, lease: Lease, now: datetime) -> bool:
+        stored = self._read("leases", lease.request_key)
+        if stored is None or stored.generation != lease.generation:
+            return False
+        released = Lease(lease.request_key, lease.worker_id, now - timedelta(seconds=1), now,
+                         stored.generation + 1)
+        return self._replace("leases", lease.request_key, released.to_record(), stored.generation)
 
     def publish_message(self, request_key: str) -> bool:
         self.messages.append(_request_key(request_key))
@@ -320,6 +409,16 @@ class GcloudSpotQueueStore:
 
     def _uri(self, namespace: str, request_key: str) -> str:
         return f"gs://{self.bucket}/{self._object(namespace, request_key)}"
+
+    @staticmethod
+    def _worker_id(worker_id: str) -> str:
+        value = _text(worker_id, "worker_id")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value):
+            raise SpotRecordError("worker_id contains unsafe storage characters")
+        return value
+
+    def _worker_uri(self, worker_id: str) -> str:
+        return f"gs://{self.bucket}/spot/v1/workers/{self._worker_id(worker_id)}.json"
 
     @staticmethod
     def _message(result: subprocess.CompletedProcess) -> str:
@@ -415,7 +514,7 @@ class GcloudSpotQueueStore:
         _request_key(request_key)
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        if self.read_request(request_key) is None:
+        if self.read_request(request_key) is None or self.is_cancelled(request_key):
             return None
         stored = self._read("leases", request_key)
         if stored is not None:
@@ -453,6 +552,8 @@ class GcloudSpotQueueStore:
         return Lease.from_record(persisted.value, persisted.generation)
 
     def publish_result(self, result: SpotResult) -> bool:
+        if self.is_cancelled(result.request_key):
+            return False
         existing = self.read_result(result.request_key)
         if existing is not None:
             return existing == result
@@ -468,6 +569,62 @@ class GcloudSpotQueueStore:
         result = SpotResult.from_record(stored.value)
         _bound(result.request_key, request_key, "result")
         return result
+
+    def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool:
+        _request_key(request_key)
+        if self.read_request(request_key) is None:
+            return False
+        record = {"schema": CANCEL_SCHEMA, "request_key": request_key,
+                  "reason": _text(reason, "reason"), "cancelled_at": now.isoformat()}
+        stored = self._read("cancellations", request_key)
+        if stored is not None:
+            return stored.value == record
+        return self._write("cancellations", request_key, record, 0)
+
+    def is_cancelled(self, request_key: str) -> bool:
+        stored = self._read("cancellations", request_key)
+        if stored is None:
+            return False
+        record = stored.value
+        if record.get("schema") != CANCEL_SCHEMA or record.get("request_key") != _request_key(request_key):
+            raise SpotRecordError("cancellation record is malformed")
+        _text(record.get("reason"), "reason")
+        _timestamp(record.get("cancelled_at"), "cancelled_at")
+        return True
+
+    def heartbeat_worker(self, worker_id: str, active_request: str | None,
+                         now: datetime) -> WorkerState:
+        if now.tzinfo is None:
+            raise ValueError("worker heartbeat must be timezone-aware")
+        if active_request is not None:
+            _request_key(active_request)
+        prior = self.read_worker_state(worker_id)
+        idle_since = None if active_request else (
+            prior.idle_since if prior and prior.active_request is None else now)
+        state = WorkerState(worker_id, idle_since, now, active_request)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
+            json.dump(state.to_record(), payload, sort_keys=True, separators=(",", ":"))
+            payload.flush()
+            result = self._run(["storage", "cp", payload.name, self._worker_uri(worker_id)])
+        if result.returncode:
+            raise SpotQueueUnavailable("worker state could not be written")
+        return state
+
+    def read_worker_state(self, worker_id: str) -> WorkerState | None:
+        result = self._run(["storage", "cat", self._worker_uri(worker_id)])
+        if result.returncode:
+            if self._missing(result):
+                return None
+            raise SpotQueueUnavailable("worker state could not be read")
+        return WorkerState.from_record(json.loads(result.stdout))
+
+    def release(self, lease: Lease, now: datetime) -> bool:
+        stored = self._read("leases", lease.request_key)
+        if stored is None or stored.generation != lease.generation:
+            return False
+        released = Lease(lease.request_key, lease.worker_id, now - timedelta(seconds=1), now,
+                         stored.generation + 1)
+        return self._write("leases", lease.request_key, released.to_record(), stored.generation)
 
     def publish_message(self, request_key: str) -> bool:
         result = self._run(["pubsub", "topics", "publish", self.topic,

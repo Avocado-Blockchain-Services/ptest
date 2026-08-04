@@ -126,6 +126,29 @@ def test_renew_is_generation_safe_and_extends_the_lease():
     assert store.renew(lease, NOW + timedelta(seconds=31), 60) is None
 
 
+def test_cancellation_prevents_a_later_claim_after_local_timeout_fallback():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+
+    assert store.cancel_request(KEY, "timeout-local-fallback", NOW) is True
+    assert store.claim(KEY, "worker-a", NOW, 60) is None
+    assert store.is_cancelled(KEY) is True
+
+
+def test_worker_heartbeat_tracks_actual_idle_since_and_completed_lease_releases():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+
+    active = store.heartbeat_worker("worker-a", KEY, NOW)
+    idle = store.heartbeat_worker("worker-a", None, NOW + timedelta(seconds=5))
+
+    assert active.idle_since is None
+    assert idle.idle_since == NOW + timedelta(seconds=5)
+    assert store.release(lease, NOW + timedelta(seconds=6)) is True
+    assert store.claim(KEY, "worker-b", NOW + timedelta(seconds=6), 60).worker_id == "worker-b"
+
+
 def test_terminal_result_publication_is_idempotent_but_rejects_conflicts():
     store = InMemorySpotQueueStore()
     result = SpotResult(KEY, "passed", 0, "12 passed", NOW)
@@ -236,6 +259,30 @@ def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
     assert queue.requests[0].command == "uv run pytest tests"
     assert queue.requests[0].source_uri == "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz"
     assert queue.messages == [queue.requests[0].request_key]
+
+
+def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatch, tmp_path):
+    class Queue:
+        def read_result(self, _key): return None
+        def create_request(self, _value): return True
+        def publish_message(self, _key): return True
+        def wait_result(self, _key, _timeout): return None
+        def cancel_request(self, key, reason, now): self.cancelled = (key, reason, now); return True
+
+    queue = Queue()
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: queue)
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *_args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *_args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *_args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue({"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+                                "fake", tmp_path, "uv run pytest tests") is None
+    assert queue.cancelled[0:2] == (KEY, "timeout-local-fallback")
 
 
 def test_ptest_fresh_ignores_a_passing_spot_result(ptest, monkeypatch, tmp_path):

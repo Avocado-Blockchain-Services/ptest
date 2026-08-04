@@ -35,14 +35,24 @@ class Worker:
     def run_once(self) -> bool:
         message = self.adapter.pull()
         if message is None or self.stopping:
+            if not self.stopping:
+                mark_idle = getattr(self.adapter, "heartbeat_worker", None)
+                if mark_idle:
+                    mark_idle(self.worker_id, None)
             return False
         request = self.adapter.read_request(message)
         if request is None or self.adapter.read_result(request.request_key) is not None:
             self.adapter.acknowledge(message)
             return False
+        if getattr(self.adapter, "is_cancelled", lambda _key: False)(request.request_key):
+            self.adapter.acknowledge(message)
+            return False
         lease = self.adapter.claim(request.request_key, self.worker_id, self.lease_seconds)
         if lease is None:
             return False
+        mark_active = getattr(self.adapter, "heartbeat_worker", None)
+        if mark_active:
+            mark_active(self.worker_id, request.request_key)
         self.adapter.heartbeat(lease)
         bound = self.adapter.for_message(message, self)
         heartbeat_done = threading.Event()
@@ -50,7 +60,11 @@ class Worker:
 
         def heartbeat_loop():
             while not heartbeat_done.wait(max(1, self.lease_seconds // 3)) and not self.stopping:
-                renewed = bound.heartbeat(current_lease[0])
+                try:
+                    renewed = bound.heartbeat(current_lease[0])
+                except Exception:
+                    self.stop()
+                    return
                 if renewed is None:
                     self.stop()
                     return
@@ -58,11 +72,18 @@ class Worker:
 
         heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
         heartbeat.start()
+        result = None
         try:
-            run_claimed_request(request, self.workspace_root, bound)
+            result = run_claimed_request(request, self.workspace_root, bound)
         finally:
             heartbeat_done.set()
             heartbeat.join(timeout=1)
+        if result is not None and not self.stopping:
+            release = getattr(self.adapter, "release", None)
+            if release:
+                release(current_lease[0])
+            if mark_active:
+                mark_active(self.worker_id, None)
         return True
 
     def run_forever(self) -> None:
@@ -85,12 +106,14 @@ def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult | 
         prepare = getattr(adapter, "prepare", None)
         if prepare:
             prepare(source)
-        if getattr(adapter, "preempted", lambda: False)():
+        if getattr(adapter, "preempted", lambda: False)() or \
+                getattr(adapter, "cancelled", lambda: False)():
             return None
         code, output = adapter.run(request.command, source)
         # Preemption is not a terminal test outcome. The durable lease expires
         # and Pub/Sub redelivers the original request to a future worker.
-        if getattr(adapter, "preempted", lambda: False)():
+        if getattr(adapter, "preempted", lambda: False)() or \
+                getattr(adapter, "cancelled", lambda: False)():
             return None
         result = SpotResult(request.request_key, "passed" if code == 0 else "failed", code,
                             output, datetime.now(timezone.utc))
@@ -101,7 +124,8 @@ def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult | 
             adapter.acknowledge()
         return result
     except Exception as exc:
-        if getattr(adapter, "preempted", lambda: False)():
+        if getattr(adapter, "preempted", lambda: False)() or \
+                getattr(adapter, "cancelled", lambda: False)():
             return None
         result = SpotResult(request.request_key, "infrastructure", None, str(exc),
                             datetime.now(timezone.utc))
@@ -246,6 +270,9 @@ class GcloudWorkerAdapter:
     def read_result(self, request_key):
         return self.store.read_result(request_key)
 
+    def is_cancelled(self, request_key):
+        return self.store.is_cancelled(request_key)
+
     def claim(self, request_key, worker_id, lease_seconds):
         return self.store.claim(request_key, worker_id, datetime.now(timezone.utc), lease_seconds)
 
@@ -253,6 +280,12 @@ class GcloudWorkerAdapter:
         # First heartbeat establishes the loop. Bound heartbeats renew both the
         # durable generation-checked lease and the transient delivery deadline.
         return None
+
+    def heartbeat_worker(self, worker_id, active_request):
+        return self.store.heartbeat_worker(worker_id, active_request, datetime.now(timezone.utc))
+
+    def release(self, lease):
+        return self.store.release(lease, datetime.now(timezone.utc))
 
     def acknowledge(self, message):
         self._run("pubsub", "subscriptions", "ack", self.subscription,
@@ -289,12 +322,16 @@ class _MessageAdapter:
         self.supervisor.acknowledge(self.message)
 
     def heartbeat(self, lease):
+        if self.cancelled():
+            self.worker.stop()
+            return None
         renewed = self.supervisor.store.renew(
             lease, datetime.now(timezone.utc),
             int((lease.expires_at - lease.acquired_at).total_seconds()),
         )
         if renewed is None:
             return None
+        self.supervisor.heartbeat_worker(self.worker.worker_id, lease.request_key)
         self.supervisor._run("pubsub", "subscriptions", "modify-message-ack-deadline",
                              self.supervisor.subscription, "--ack-ids", self.message["ack_id"],
                              "--ack-deadline", str(max(10, int((renewed.expires_at -
@@ -303,6 +340,9 @@ class _MessageAdapter:
 
     def preempted(self):
         return self.worker.stopping
+
+    def cancelled(self):
+        return self.supervisor.store.is_cancelled(self.message["request_key"])
 
 
 def _serve_healthz() -> ThreadingHTTPServer:

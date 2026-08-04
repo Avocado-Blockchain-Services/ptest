@@ -141,10 +141,12 @@ terraform -chdir=terraform plan \
 ```
 
 After a separately approved apply, use an identity listed in
-`operator_members`: it is the documented controller invoker and topic
-publisher. The following live smoke deliberately mutates only the dedicated
-test project. It submits a real queue request through `ptest`, waits for a
-worker to run it, then inspects the durable result and empty delivery:
+`operator_members`: Terraform grants it controller invocation, topic publish,
+subscription pull/ack, source/result object access, and dedicated-project
+Compute OS-admin login plus the narrow instance/MIG read role used below. The
+following live smoke deliberately mutates only the dedicated test project. It
+submits a real queue request through `ptest`, waits for a worker to run it,
+then inspects the durable result and empty delivery:
 
 ```bash
 controller_url=$(gcloud run services describe ptest-spot-controller \
@@ -166,25 +168,39 @@ gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$spot_key.j
 gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" \
   --limit=1 --format=json  # expect []: result was published then acked
 
-# Bubblewrap must be permitted by the worker VM/container runtime.
+# Bubblewrap must be permitted by the worker VM/container runtime. The normal
+# queue run above proves it for the actual isolated test process; this checks it
+# directly before running the preemption proof.
 spot_vm=$(gcloud compute instance-groups managed list-instances ptest-spot-workers \
   --project="$spot_project" --region="$spot_region" --format='value(instance)' | head -1)
-gcloud compute ssh "${spot_vm##*/}" --project="$spot_project" --zone=YOUR_WORKER_ZONE \
+spot_name=${spot_vm##*/}
+spot_zone=${spot_vm%/instances/*}; spot_zone=${spot_zone##*/}
+gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
   --command='sudo docker exec --user ptest ptest-spot-worker bwrap --die-with-parent --unshare-user --uid 65534 --gid 65534 --unshare-net --ro-bind / / /bin/true'
 
-# Preemption/redelivery proof: submit a configured slow smoke project, wait
-# until its lease appears, then stop the supervisor on the worker VM. There
-# must be no result; Docker restarts it, the unacked message redelivers, and a
-# later terminal record proves the retry.
+# Preemption/redelivery proof: configure a harmless slow smoke project (for
+# example `full = "sh -c 'sleep 90; exit 0'"`) with backend = spot_queue.
+# Wait for its durable lease instead of using a timing guess, then SIGTERM the
+# supervisor. Docker's restart policy must bring health back. Before the
+# Pub/Sub deadline expires there must be no terminal result; the restarted
+# worker then receives the unacked delivery and completes it.
 ptest --full 2>spot-slow-request.log & smoke_pid=$!
-sleep 20
-gcloud compute ssh "${spot_vm##*/}" --project="$spot_project" --zone=YOUR_WORKER_ZONE \
+slow_key=''
+until [ -n "$slow_key" ]; do
+  slow_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-slow-request.log | tail -1 || true)
+  sleep 1
+done
+until gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/leases/$slow_key.json" >/dev/null 2>&1; do sleep 1; done
+gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
   --command='sudo docker kill --signal TERM ptest-spot-worker'
-wait "$smoke_pid" || true
-slow_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-slow-request.log | tail -1)
-gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json" && exit 1 || true
-# Wait past the subscription deadline, let the restarted worker retry, then:
+until gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
+  --command='sudo docker inspect --format="{{.State.Running}}" ptest-spot-worker' | grep -qx true; do sleep 1; done
+if gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json" >/dev/null 2>&1; then
+  echo 'unexpected terminal result before redelivery' >&2; exit 1
+fi
+wait "$smoke_pid"
 gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json"
+gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" --limit=1 --format=json
 ```
 
 The worker pulls one Pub/Sub request, checks the terminal result, takes a
@@ -195,10 +211,12 @@ unfinished work unacknowledged for redelivery. Node dependencies are installed
 from `package-lock.json` before the isolated child starts; dependency install is
 script-free, while Vitest itself runs in Bubblewrap with no network. At the Spot
 cap, `spot_overflow_to_cloudrun = true` explicitly retains excess messages in
-the durable queue rather than launching an existing Cloud Run Job without the
-request's source/command contract; ptest's configured timeout then performs its
-normal local fallback. Configure `backend = "spot_queue"` only after this smoke
-proves worker/controller IAM, Bubblewrap, result, acknowledgement, and retry.
+the durable queue and writes `spot/v1/overflow/current.json` rather than
+launching an existing Cloud Run Job without the request's source/command
+contract. On timeout ptest writes a durable cancellation before its normal
+local fallback; workers stop/ack cancelled deliveries and cannot duplicate that
+local execution. Configure `backend = "spot_queue"` only after this smoke proves
+worker/controller IAM, Bubblewrap, result, acknowledgement, and retry.
 
 ## Exit codes
 

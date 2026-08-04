@@ -1905,6 +1905,16 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         warn(f"spot_queue unavailable ({exc}) — running locally")
         return None
     if result is None:
+        try:
+            cancelled = queue.cancel_request(request_key_value, "timeout-local-fallback", utc_now())
+        except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError):
+            # The fallback remains safe only when the cancellation is durable;
+            # on ambiguity, leave the request queued instead of racing locally.
+            warn("Spot queue cancellation unavailable — not starting a duplicate local fallback")
+            return 75
+        if not cancelled:
+            warn("Spot queue cancellation conflict — not starting a duplicate local fallback")
+            return 75
         warn(f"Spot queue timed out after {timeout}s — running locally")
         return None
     if result.output:
