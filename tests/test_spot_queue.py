@@ -654,10 +654,38 @@ def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
     ptest, monkeypatch, tmp_path
 ):
     class Queue:
+        def __init__(self): self.events = []
         def read_result(self, _key): return None
         def is_cancelled(self, _key): return True
+        def wait_cancellation_quiesced(self, key, timeout_seconds):
+            assert key == KEY and timeout_seconds > 0
+            self.events.append("quiesced")
+            return True
         def create_request(self, _value):
             raise AssertionError("a cancelled deterministic key must not be republished")
+
+    queue = Queue()
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: queue)
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) is None
+    assert queue.events == ["quiesced"]
+
+
+def test_cancelled_deterministic_retry_returns_75_while_prior_worker_may_run(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def read_result(self, _key): return None
+        def is_cancelled(self, _key): return True
+        def wait_cancellation_quiesced(self, _key, _timeout): return False
 
     monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
     monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
@@ -669,7 +697,7 @@ def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
     assert ptest.run_spot_queue(
         {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
         "fake", tmp_path, "uv run pytest tests"
-    ) is None
+    ) == 75
 
 
 def test_ptest_starts_without_spot_queue_when_installed_as_a_single_file(tmp_path):

@@ -218,15 +218,19 @@ authorized project mutation.
   the split terminal race, absent quiescence barrier, unsafe ambiguous fallback,
   timestamp-conflicting retry, stale heartbeat retention, overflow marker, and
   smoke/worker ordering gaps.
-- GREEN: focused queue/worker/controller tests passed 57 tests; the final
-  queue/worker/controller/main-wiring/smoke selection passed 77 tests in 2.33s.
+- Follow-up RED: the cancelled-deterministic-key retry test failed because a
+  later caller did not re-check the prior cancellation's quiescence barrier.
+  The paired not-yet-quiesced case now proves that retry returns 75.
+- GREEN: focused queue/worker/controller tests passed 57 tests before that
+  follow-up; the final queue/worker/controller/main-wiring/smoke selection
+  passed 78 tests in 2.38s.
 - GREEN: the concurrent result/cancellation race passed five additional repeated
   scoped runs; the documented live-smoke shell block passed `bash -n`.
 - GREEN: `terraform -chdir=terraform fmt -check`,
   `terraform -chdir=terraform validate`, and `python -m py_compile ptest
   spot_queue.py spot_worker.py spot_controller.py` passed. No plan/apply/deploy
   command ran.
-- GREEN: `ptest --full` passed 193 tests in 3.40s.
+- GREEN: the final `ptest --full` passed 194 tests in 3.47s.
 
 ### Commit
 

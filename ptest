@@ -1897,6 +1897,10 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                     sys.stdout.flush()
                 return 0
         if getattr(queue, "is_cancelled", lambda _key: False)(request_key_value):
+            if not queue.wait_cancellation_quiesced(request_key_value, cancel_timeout):
+                warn("Spot queue request is cancelled but its prior worker is not yet quiesced — "
+                     "not starting a duplicate local fallback")
+                return 75
             warn("Spot queue request was already cancelled; running this deterministic retry locally "
                  "(use --fresh to submit a new remote attempt)")
             return None
