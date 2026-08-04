@@ -17,3 +17,11 @@ def test_spot_only_deployment_uses_its_own_remote_state_prefix():
     backend = (SPOT_ROOT / "backend.tf").read_text()
 
     assert 'prefix = "ptest-spot"' in backend
+
+
+def test_spot_only_deployment_uses_valid_compute_iam_permission_names():
+    main = (SPOT_ROOT / "main.tf").read_text()
+
+    assert '"compute.instanceGroupManagers.get"' in main
+    assert '"compute.instanceGroupManagers.update"' in main
+    assert "compute.regionInstanceGroupManagers" not in main

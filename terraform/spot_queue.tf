@@ -118,8 +118,8 @@ resource "google_project_iam_custom_role" "spot_controller_mig" {
   role_id = "ptestSpotMigController"
   title   = "ptest Spot MIG controller"
   permissions = [
-    "compute.regionInstanceGroupManagers.get",
-    "compute.regionInstanceGroupManagers.update",
+    "compute.instanceGroupManagers.get",
+    "compute.instanceGroupManagers.update",
     "compute.regionOperations.get",
     "compute.instances.get",
     "compute.instances.list",
@@ -140,7 +140,7 @@ resource "google_project_iam_custom_role" "spot_smoke_operator" {
     "compute.instances.get",
     "compute.instances.list",
     "compute.instances.stop",
-    "compute.regionInstanceGroupManagers.get",
+    "compute.instanceGroupManagers.get",
   ]
 }
 

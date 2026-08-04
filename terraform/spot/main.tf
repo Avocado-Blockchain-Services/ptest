@@ -111,7 +111,7 @@ resource "google_project_iam_custom_role" "controller_mig" {
   project     = var.project_id
   role_id     = "ptestSpotMigController"
   title       = "ptest Spot MIG controller"
-  permissions = ["compute.regionInstanceGroupManagers.get", "compute.regionInstanceGroupManagers.update", "compute.regionOperations.get", "compute.instances.get", "compute.instances.list"]
+  permissions = ["compute.instanceGroupManagers.get", "compute.instanceGroupManagers.update", "compute.regionOperations.get", "compute.instances.get", "compute.instances.list"]
 }
 resource "google_project_iam_member" "controller_compute" {
   project = var.project_id
@@ -127,7 +127,7 @@ resource "google_project_iam_custom_role" "smoke_operator" {
   project     = var.project_id
   role_id     = "ptestSpotSmokeOperator"
   title       = "ptest Spot smoke operator"
-  permissions = ["compute.instances.get", "compute.instances.list", "compute.instances.stop", "compute.regionInstanceGroupManagers.get"]
+  permissions = ["compute.instances.get", "compute.instances.list", "compute.instances.stop", "compute.instanceGroupManagers.get"]
 }
 resource "google_project_iam_member" "smoke_compute" {
   for_each = toset(var.spot_smoke_admin_members)
