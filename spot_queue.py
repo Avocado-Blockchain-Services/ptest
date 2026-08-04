@@ -670,6 +670,34 @@ class GcloudSpotQueueStore:
             raise SpotRecordError("queue JSON must be an object")
         return value
 
+    def _write_json(self, uri: str, value: dict, generation: int | None) -> bool:
+        prefix = f"gs://{self.bucket}/"
+        if not uri.startswith(prefix):
+            raise SpotQueueUnavailable("queue object URI is outside the configured bucket")
+        object_name = uri.removeprefix(prefix).split("#", 1)[0]
+        token = self._run(["auth", "print-access-token"])
+        if token.returncode:
+            raise SpotQueueUnavailable("queue access token could not be read")
+        query = f"uploadType=media&name={quote(object_name, safe='')}"
+        if generation is not None:
+            query += f"&ifGenerationMatch={generation}"
+        request = Request(
+            f"https://storage.googleapis.com/upload/storage/v1/b/{quote(self.bucket, safe='')}/o?{query}",
+            data=json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token.stdout.strip()}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=60):
+                return True
+        except HTTPError as exc:
+            if exc.code == 412:
+                return False
+            raise SpotQueueUnavailable("queue object could not be written") from exc
+
     def _read(self, namespace: str, request_key: str) -> _Stored | None:
         uri = self._uri(namespace, request_key)
         described = self._run(["storage", "objects", "describe", uri, "--format=json"])
@@ -688,19 +716,7 @@ class GcloudSpotQueueStore:
 
     def _write(self, namespace: str, request_key: str, value: dict,
                generation: int) -> bool:
-        uri = self._uri(namespace, request_key)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
-            json.dump(value, payload, sort_keys=True, separators=(",", ":"))
-            payload.flush()
-            result = self._run([
-                "storage", "cp", payload.name, uri,
-                f"--if-generation-match={generation}",
-            ])
-        if result.returncode == 0:
-            return True
-        if self._precondition(result):
-            return False
-        raise SpotQueueUnavailable("queue object could not be written")
+        return self._write_json(self._uri(namespace, request_key), value, generation)
 
     def _read_worker_index(self) -> _Stored | None:
         uri = self._worker_index_uri()
@@ -722,18 +738,7 @@ class GcloudSpotQueueStore:
         return _Stored(value, generation)
 
     def _write_worker_index(self, value: dict, generation: int) -> bool:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
-            json.dump(value, payload, sort_keys=True, separators=(",", ":"))
-            payload.flush()
-            result = self._run([
-                "storage", "cp", payload.name, self._worker_index_uri(),
-                f"--if-generation-match={generation}",
-            ])
-        if result.returncode == 0:
-            return True
-        if self._precondition(result):
-            return False
-        raise SpotQueueUnavailable("worker index could not be written")
+        return self._write_json(self._worker_index_uri(), value, generation)
 
     def _update_worker_index(self, state: WorkerState, now: datetime) -> None:
         """CAS-merge one worker into a bounded, controller-readable snapshot."""
@@ -971,11 +976,7 @@ class GcloudSpotQueueStore:
         # Publish the shared floor first. Claim/renew callers do this before
         # their lease CAS, so a partial failure can only overcount until expiry.
         self._update_worker_index(state, now)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
-            json.dump(state.to_record(), payload, sort_keys=True, separators=(",", ":"))
-            payload.flush()
-            result = self._run(["storage", "cp", payload.name, self._worker_uri(worker_id)])
-        if result.returncode:
+        if not self._write_json(self._worker_uri(worker_id), state.to_record(), None):
             raise SpotQueueUnavailable("worker state could not be written")
         return state
 

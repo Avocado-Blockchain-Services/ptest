@@ -83,9 +83,13 @@ def test_gcloud_request_create_race_reuses_an_identical_winner(monkeypatch):
 
     monkeypatch.setattr(store, "_run", run)
     monkeypatch.setattr(store, "_fetch_json", lambda *_args: record)
+    writes = []
+    monkeypatch.setattr(
+        store, "_write_json", lambda *args: writes.append(args) or False
+    )
 
     assert store.create_request(request()) is True
-    assert any("--if-generation-match=0" in call for call in calls)
+    assert writes[0][-1] == 0
 
 
 def test_gcloud_recognizes_storage_cat_empty_object_response():
@@ -363,6 +367,10 @@ def test_gcloud_heartbeat_publishes_shared_index_before_per_worker_record(monkey
         store, "_run",
         lambda args: events.append(("worker", args))
         or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(
+        store, "_write_json",
+        lambda uri, value, generation: events.append(("worker", uri, value, generation)) or True,
     )
 
     state = store.heartbeat_worker(
