@@ -618,7 +618,8 @@ class GcloudSpotQueueStore:
                 return True
             if re.search(
                 r"\bhttperror\s+404\b|\bstatus\s*=\s*404\b|"
-                r"(?:^|[):])\s*404\s+not\s+found\b",
+                r"(?:^|[):])\s*404\s+not\s+found\b|"
+                r"not\s+found:\s*404\b",
                 redacted,
             ):
                 return True
