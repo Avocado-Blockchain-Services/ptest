@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from spot_queue import GcloudSpotQueueStore, SpotResult, TERMINAL_OUTPUT_LIMIT
 
@@ -447,7 +449,19 @@ class _MessageAdapter:
         self._lease = lease
 
     def download(self, source_uri, destination):
-        self.supervisor._run("storage", "cp", source_uri, str(destination))
+        prefix = f"gs://{self.supervisor.store.bucket}/"
+        if not source_uri.startswith(prefix):
+            raise RuntimeError("source archive is outside the configured bucket")
+        object_name = source_uri.removeprefix(prefix)
+        token = self.supervisor._run("auth", "print-access-token").strip()
+        request = Request(
+            "https://storage.googleapis.com/storage/v1/b/"
+            f"{quote(self.supervisor.store.bucket, safe='')}/o/"
+            f"{quote(object_name, safe='')}?alt=media",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urlopen(request, timeout=120) as response:
+            Path(destination).write_bytes(response.read())
 
     @staticmethod
     def unpack(archive, destination):
