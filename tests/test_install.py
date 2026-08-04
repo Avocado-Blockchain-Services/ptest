@@ -32,6 +32,7 @@ def test_installer_places_spot_companion_where_ptest_can_import_it(tmp_path):
     assert installed.returncode == 0, installed.stderr
     assert (destination / "ptest").is_symlink()
     assert (destination / "ptest").resolve().with_name("spot_queue.py").is_file()
+    assert (destination / "ptest").resolve().with_name("spot_controller.py").is_file()
 
     environment = os.environ.copy()
     environment["PTEST_CONFIG"] = str(config)

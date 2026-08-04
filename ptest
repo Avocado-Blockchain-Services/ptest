@@ -21,6 +21,7 @@ oversubscribe the box — unless the path is large enough to earn its own contai
   ptest --local --full      force local even when a remote is configured
   ptest where               show which project/backend resolved for this directory
   ptest doctor              check config, caps, backend reachability, quota
+  ptest status              show live Spot queued jobs, working jobs, and servers on
   ptest register            print a config stanza for the current repo
 
 Config: ~/.config/ptest/config.toml   (see `ptest register`)
@@ -2091,6 +2092,46 @@ def run_remote_backend(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str
     return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
 
 
+def spot_status(pcfg: Mapping, cfg: Mapping) -> tuple[int, int, int]:
+    """Read live Spot capacity without changing queue delivery or VM state."""
+    if pcfg.get("backend") != "spot_queue":
+        raise ValueError("Spot queue is not configured for this project")
+    defaults = cfg.get("defaults", {})
+    project = pcfg.get("gcp_project") or defaults.get("gcp_project")
+    region = pcfg.get("region") or defaults.get("region")
+    bucket = pcfg.get("bucket") or defaults.get("bucket")
+    if not all((project, region, bucket)):
+        raise ValueError("Spot queue status needs gcp_project, region, and bucket")
+    if not shutil.which("gcloud"):
+        raise ValueError("gcloud is not on PATH")
+    try:
+        from spot_controller import GcloudControllerAdapter
+    except (ImportError, SyntaxError) as exc:
+        raise ValueError("spot_controller.py is not installed beside ptest") from exc
+    adapter = GcloudControllerAdapter(
+        str(project), str(region),
+        str(pcfg.get("spot_mig") or defaults.get("spot_mig") or "ptest-spot-workers"),
+        str(pcfg.get("spot_subscription") or defaults.get("spot_subscription") or
+            "ptest-spot-workers"),
+        str(bucket),
+        account=pcfg.get("account") or defaults.get("account"),
+    )
+    return adapter.status_metrics()
+
+
+def cmd_status(pcfg: Mapping, cfg: Mapping) -> int:
+    try:
+        waiting, working, servers = spot_status(pcfg, cfg)
+    except (RuntimeError, ValueError) as exc:
+        warn(str(exc))
+        return 2
+    print("Spot queue")
+    print(f"  waiting jobs   {waiting}")
+    print(f"  working jobs   {working}")
+    print(f"  servers on     {servers}")
+    return 0
+
+
 def cmd_where(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     root = git_root(cwd) or cwd
@@ -2222,10 +2263,12 @@ def main(argv: list[str]) -> int:
     cwd = Path.cwd().resolve()
     cfg = load_config()
 
-    if argv and argv[0] in {"where", "doctor", "register"}:
+    if argv and argv[0] in {"where", "doctor", "register", "status"}:
+        _name, pcfg = resolve_project(cfg, cwd)
         return {"where": lambda: cmd_where(cfg, cwd),
                 "doctor": lambda: cmd_doctor(cfg, cwd),
-                "register": lambda: cmd_register(cwd)}[argv[0]]()
+                "register": lambda: cmd_register(cwd),
+                "status": lambda: cmd_status(pcfg, cfg)}[argv[0]]()
 
     full = "--full" in argv
     force_local = "--local" in argv

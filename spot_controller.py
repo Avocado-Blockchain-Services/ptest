@@ -136,15 +136,19 @@ class GcloudControllerAdapter:
     """Minimal real adapter; Cloud Run IAM authenticates the OIDC caller first."""
 
     def __init__(self, project: str, region: str, mig: str, subscription: str, bucket: str,
-                 worker_heartbeat_ttl_seconds: int = 120):
+                 worker_heartbeat_ttl_seconds: int = 120, account: str | None = None):
         if worker_heartbeat_ttl_seconds <= 0:
             raise ValueError("worker heartbeat TTL must be positive")
         self.project, self.region, self.mig = project, region, mig
         self.subscription, self.bucket = subscription, bucket
         self.worker_heartbeat_ttl_seconds = worker_heartbeat_ttl_seconds
+        self.account = account
 
     def _run(self, *args: str) -> str:
-        result = subprocess.run(["gcloud", "--project", self.project, *args], text=True,
+        command = ["gcloud", "--project", self.project, f"--billing-project={self.project}"]
+        if self.account:
+            command.append(f"--account={self.account}")
+        result = subprocess.run([*command, *args], text=True,
                                 capture_output=True, timeout=30)
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "gcloud controller command failed")
@@ -167,6 +171,11 @@ class GcloudControllerAdapter:
         active = len(running)
         leases, idle_age = self._worker_metrics(active, running_worker_ids)
         return backlog, active, leases, idle_age
+
+    def status_metrics(self) -> tuple[int, int, int]:
+        """Return live queue backlog, active jobs, and powered-on workers."""
+        backlog, workers, leases, _idle_age = self.authenticated_metrics()
+        return backlog, leases, workers
 
     def _worker_index(self) -> list[WorkerState]:
         object_name = "spot/v1/workers/index/current.json"

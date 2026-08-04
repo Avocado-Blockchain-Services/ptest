@@ -124,6 +124,8 @@ backend = "local"
 # Spot queue configuration required for full and heavy-scoped execution:
 # backend = "spot_queue"
 # spot_topic = "ptest-spot-requests"
+# spot_subscription = "ptest-spot-workers"  # status default; set if deployment differs
+# spot_mig = "ptest-spot-workers"           # status default; set if deployment differs
 # spot_controller_url = "https://ptest-spot-controller-....run.app"
 # spot_overflow_reject_enabled = true  # advisory pre-upload 75 brake on observed saturation
 # spot_result_timeout_seconds = 1800

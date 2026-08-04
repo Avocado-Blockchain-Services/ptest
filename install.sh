@@ -10,6 +10,7 @@ mkdir -p -- "$bundle_root"
 bundle=$(mktemp -d "${bundle_root}/bundle.XXXXXX")
 
 install -m 0644 -- "${source_dir}/spot_queue.py" "${bundle}/spot_queue.py"
+install -m 0644 -- "${source_dir}/spot_controller.py" "${bundle}/spot_controller.py"
 install -m 0755 -- "${source_dir}/ptest" "${bundle}/ptest"
 
 # Build the complete pair out of sight, then atomically switch the one public
