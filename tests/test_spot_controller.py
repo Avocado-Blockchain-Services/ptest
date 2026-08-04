@@ -98,6 +98,20 @@ def test_authenticated_admission_wakes_a_worker_before_monitoring_catches_up():
     assert Adapter.targets == [1]
 
 
+def test_reconcile_keeps_an_admitted_target_until_its_first_worker_heartbeat():
+    class Adapter:
+        targets = []
+        @staticmethod
+        def authenticated_metrics(): return 0, 0, 0, 2 ** 31 - 1
+        @staticmethod
+        def current_target(): return 1
+        @classmethod
+        def set_target(cls, target): cls.targets.append(target)
+
+    assert reconcile(Adapter(), 5) == 1
+    assert Adapter.targets == [1]
+
+
 def test_active_lease_never_scales_in():
     assert scale_target(0, 3, 3600, 5, active_leases=1) == 3
 

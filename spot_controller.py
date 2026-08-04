@@ -52,6 +52,11 @@ def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> in
     backlog, workers, leases, idle_age = adapter.authenticated_metrics()
     target = scale_target(backlog, workers, idle_age, max_workers, leases,
                           idle_timeout_seconds)
+    # Monitoring backlog lags an admission.  Do not erase the one worker the
+    # admission endpoint just requested before it has had a chance to boot and
+    # publish its first heartbeat.
+    if target == 0 and workers == 0 and leases == 0 and adapter.current_target() > 0:
+        target = 1
     if leases > max_workers:
         # Do not issue a downsize while the observed lease floor is already
         # inconsistent with policy; retain current capacity and surface state.
@@ -256,6 +261,11 @@ class GcloudControllerAdapter:
     def set_target(self, target: int) -> None:
         self._run("compute", "instance-groups", "managed", "resize", self.mig,
                   "--region", self.region, "--size", str(target), "--quiet")
+
+    def current_target(self) -> int:
+        raw = self._run("compute", "instance-groups", "managed", "describe", self.mig,
+                        "--region", self.region, "--format=value(targetSize)").strip()
+        return int(raw or 0)
 
     def record_capacity_fault(self, leases: int, maximum: int) -> None:
         self.capacity_fault = {"leases": leases, "maximum": maximum}
