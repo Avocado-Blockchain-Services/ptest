@@ -22,6 +22,7 @@ oversubscribe the box — unless the path is large enough to earn its own contai
   ptest where               show which project/backend resolved for this directory
   ptest doctor              check config, caps, backend reachability, quota
   ptest status              show live Spot queued jobs, working jobs, and servers on
+  ptest result KEY          show one durable Spot result; add --output to page its log
   ptest register            print a config stanza for the current repo
 
 Config: ~/.config/ptest/config.toml   (see `ptest register`)
@@ -2132,6 +2133,53 @@ def cmd_status(pcfg: Mapping, cfg: Mapping) -> int:
     return 0
 
 
+def spot_result(pcfg: Mapping, cfg: Mapping, request_key: str):
+    """Read one terminal Spot result without queue or VM mutation."""
+    if pcfg.get("backend") != "spot_queue":
+        raise ValueError("Spot queue is not configured for this project")
+    if not re.fullmatch(r"[0-9a-f]{64}", request_key):
+        raise ValueError("Spot request key must be 64 lowercase hexadecimal characters")
+    defaults = cfg.get("defaults", {})
+    project = pcfg.get("gcp_project") or defaults.get("gcp_project")
+    bucket = pcfg.get("bucket") or defaults.get("bucket")
+    topic = pcfg.get("spot_topic") or defaults.get("spot_topic")
+    if not all((project, bucket, topic)):
+        raise ValueError("Spot result needs gcp_project, bucket, and spot_topic")
+    if not shutil.which("gcloud"):
+        raise ValueError("gcloud is not on PATH")
+    try:
+        import spot_queue
+    except (ImportError, SyntaxError) as exc:
+        raise ValueError("spot_queue.py is not installed beside ptest") from exc
+    queue_class = GcloudSpotQueueStore or spot_queue.GcloudSpotQueueStore
+    result = queue_class(gcloud_base(pcfg, cfg, str(project)), str(bucket), str(topic)).read_result(
+        request_key
+    )
+    if result is None:
+        raise ValueError("Spot result is not terminal or does not exist")
+    return result
+
+
+def cmd_result(pcfg: Mapping, cfg: Mapping, args: list[str]) -> int:
+    output_only = len(args) == 2 and args[1] == "--output"
+    if not ((len(args) == 1) or output_only):
+        warn("usage: ptest result <request-key> [--output]")
+        return 2
+    try:
+        result = spot_result(pcfg, cfg, args[0])
+    except (RuntimeError, ValueError) as exc:
+        warn(str(exc))
+        return 2
+    if output_only:
+        sys.stdout.write(result.output + ("" if result.output.endswith("\n") else "\n"))
+        return 0
+    print(f"Spot result {args[0]}")
+    print(f"  status       {result.status}")
+    print(f"  exit code    {result.exit_code if result.exit_code is not None else '-'}")
+    print(f"  completed at {result.completed_at.isoformat() if hasattr(result.completed_at, 'isoformat') else result.completed_at}")
+    return 0
+
+
 def cmd_where(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     root = git_root(cwd) or cwd
@@ -2263,12 +2311,13 @@ def main(argv: list[str]) -> int:
     cwd = Path.cwd().resolve()
     cfg = load_config()
 
-    if argv and argv[0] in {"where", "doctor", "register", "status"}:
+    if argv and argv[0] in {"where", "doctor", "register", "status", "result"}:
         _name, pcfg = resolve_project(cfg, cwd)
         return {"where": lambda: cmd_where(cfg, cwd),
                 "doctor": lambda: cmd_doctor(cfg, cwd),
                 "register": lambda: cmd_register(cwd),
-                "status": lambda: cmd_status(pcfg, cfg)}[argv[0]]()
+                "status": lambda: cmd_status(pcfg, cfg),
+                "result": lambda: cmd_result(pcfg, cfg, argv[1:])}[argv[0]]()
 
     full = "--full" in argv
     force_local = "--local" in argv

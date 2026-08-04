@@ -99,6 +99,19 @@ the previous complete pair. `ptest doctor` rejects a configured Spot backend
 when its companion is missing or ABI-incompatible. Local and Cloud Run backends
 remain usable with the historical single-file `ptest` layout.
 
+## Inspect a Spot result
+
+`ptest status` reports queue capacity. To inspect one completed remote request,
+use the request key printed at submission time:
+
+```bash
+ptest result <request-key>          # status, exit code, and completion time
+ptest result <request-key> --output | less
+```
+
+Both commands only read the durable result record; neither acknowledges a
+delivery nor changes worker capacity.
+
 ## Remote backend
 
 Build the images, apply the Terraform, then flip a project to `backend = "cloudrun"`.
