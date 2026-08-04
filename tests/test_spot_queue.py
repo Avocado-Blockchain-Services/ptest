@@ -77,13 +77,12 @@ def test_gcloud_request_create_race_reuses_an_identical_winner(monkeypatch):
             if describes == 1:
                 return subprocess.CompletedProcess(args, 1, "", "404 Not Found")
             return subprocess.CompletedProcess(args, 0, '{"generation":"2"}', "")
-        if args[:2] == ["storage", "cat"]:
-            return subprocess.CompletedProcess(args, 0, json.dumps(record), "")
         if args[:3] == ["storage", "cp", args[2]]:
             return subprocess.CompletedProcess(args, 1, "", "412 Precondition Failed")
         raise AssertionError(args)
 
     monkeypatch.setattr(store, "_run", run)
+    monkeypatch.setattr(store, "_fetch_json", lambda *_args: record)
 
     assert store.create_request(request()) is True
     assert any("--if-generation-match=0" in call for call in calls)

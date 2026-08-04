@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 
 REQUEST_SCHEMA = "ptest-spot-request-v2"
@@ -639,6 +642,34 @@ class GcloudSpotQueueStore:
         except Exception as exc:
             raise SpotQueueUnavailable("queue command could not run") from exc
 
+    def _fetch_json(self, uri: str, generation: int | None = None) -> dict | None:
+        """Fetch one known object without requiring bucket-list permission."""
+        prefix = f"gs://{self.bucket}/"
+        if not uri.startswith(prefix):
+            raise SpotQueueUnavailable("queue object URI is outside the configured bucket")
+        object_name = uri.removeprefix(prefix).split("#", 1)[0]
+        query = "?alt=media" + (f"&generation={generation}" if generation else "")
+        token = self._run(["auth", "print-access-token"])
+        if token.returncode:
+            raise SpotQueueUnavailable("queue access token could not be read")
+        request = Request(
+            "https://storage.googleapis.com/storage/v1/b/"
+            f"{quote(self.bucket, safe='')}/o/{quote(object_name, safe='')}{query}",
+            headers={"Authorization": f"Bearer {token.stdout.strip()}"},
+        )
+        try:
+            with urlopen(request, timeout=60) as response:
+                value = json.loads(response.read())
+        except HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise SpotQueueUnavailable("queue object could not be read") from exc
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SpotQueueUnavailable("queue JSON was malformed") from exc
+        if not isinstance(value, dict):
+            raise SpotRecordError("queue JSON must be an object")
+        return value
+
     def _read(self, namespace: str, request_key: str) -> _Stored | None:
         uri = self._uri(namespace, request_key)
         described = self._run(["storage", "objects", "describe", uri, "--format=json"])
@@ -650,17 +681,9 @@ class GcloudSpotQueueStore:
             generation = int(json.loads(described.stdout)["generation"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SpotQueueUnavailable("queue metadata was malformed") from exc
-        fetched = self._run(["storage", "cat", f"{uri}#{generation}"])
-        if fetched.returncode != 0:
-            if self._missing(fetched):
-                return None
-            raise SpotQueueUnavailable("queue object could not be read")
-        try:
-            value = json.loads(fetched.stdout)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise SpotQueueUnavailable("queue JSON was malformed") from exc
-        if not isinstance(value, dict):
-            raise SpotRecordError("queue JSON must be an object")
+        value = self._fetch_json(uri, generation)
+        if value is None:
+            return None
         return _Stored(value, generation)
 
     def _write(self, namespace: str, request_key: str, value: dict,
@@ -690,15 +713,9 @@ class GcloudSpotQueueStore:
             generation = int(json.loads(described.stdout)["generation"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SpotQueueUnavailable("worker index metadata was malformed") from exc
-        fetched = self._run(["storage", "cat", f"{uri}#{generation}"])
-        if fetched.returncode != 0:
-            if self._missing(fetched):
-                return None
-            raise SpotQueueUnavailable("worker index could not be read")
-        try:
-            value = json.loads(fetched.stdout)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise SpotQueueUnavailable("worker index JSON was malformed") from exc
+        value = self._fetch_json(uri, generation)
+        if value is None:
+            return None
         if not isinstance(value, dict) or value.get("schema") != WORKER_INDEX_SCHEMA \
                 or not isinstance(value.get("workers"), dict):
             raise SpotRecordError("worker index record has an invalid schema")
@@ -963,12 +980,8 @@ class GcloudSpotQueueStore:
         return state
 
     def read_worker_state(self, worker_id: str) -> WorkerState | None:
-        result = self._run(["storage", "cat", self._worker_uri(worker_id)])
-        if result.returncode:
-            if self._missing(result):
-                return None
-            raise SpotQueueUnavailable("worker state could not be read")
-        return WorkerState.from_record(json.loads(result.stdout))
+        value = self._fetch_json(self._worker_uri(worker_id))
+        return None if value is None else WorkerState.from_record(value)
 
     def release(self, lease: Lease, now: datetime) -> bool:
         stored = self._read("states", lease.request_key)
