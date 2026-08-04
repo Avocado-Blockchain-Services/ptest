@@ -242,8 +242,8 @@ class LocalProcessAdapter:
             )
         self._process = subprocess.Popen(
             ["bwrap", "--die-with-parent", "--unshare-user", "--uid", "65534", "--gid", "65534",
-             "--unshare-net", "--ro-bind", "/", "/", "--bind", str(cwd.parent.parent),
-             str(cwd.parent.parent), "--chdir", str(cwd), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+             "--unshare-net", "--ro-bind", "/", "/", "--bind", str(cwd.parents[2]),
+             str(cwd.parents[2]), "--chdir", str(cwd), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
              "/bin/sh", "-lc", command],
             cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             start_new_session=True,

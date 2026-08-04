@@ -294,7 +294,7 @@ def test_pytest_child_reuses_the_prepared_workspace_cache_without_network(tmp_pa
     assert adapter.run("uv run pytest", tmp_path) == (0, "passed")
 
     command, kwargs = calls[0]
-    assert ["--bind", str(tmp_path.parent.parent), str(tmp_path.parent.parent)] == command[command.index("--bind"):command.index("--bind") + 3]
+    assert ["--bind", str(tmp_path.parents[2]), str(tmp_path.parents[2])] == command[command.index("--bind"):command.index("--bind") + 3]
     assert command[command.index("--chdir") + 1] == str(tmp_path)
     assert kwargs["env"]["HOME"] == str(tmp_path)
     assert kwargs["env"]["UV_CACHE_DIR"] == str(tmp_path / ".uv-cache")
