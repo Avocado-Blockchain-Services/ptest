@@ -1,0 +1,19 @@
+from pathlib import Path
+
+
+SPOT_ROOT = Path(__file__).resolve().parents[1] / "terraform" / "spot"
+
+
+def test_spot_only_deployment_references_shared_bucket_and_registry_without_managing_them():
+    main = (SPOT_ROOT / "main.tf").read_text()
+
+    assert 'data "google_storage_bucket" "source"' in main
+    assert 'data "google_artifact_registry_repository" "images"' in main
+    assert 'resource "google_storage_bucket"' not in main
+    assert 'resource "google_cloud_run_v2_job"' not in main
+
+
+def test_spot_only_deployment_uses_its_own_remote_state_prefix():
+    backend = (SPOT_ROOT / "backend.tf").read_text()
+
+    assert 'prefix = "ptest-spot"' in backend
