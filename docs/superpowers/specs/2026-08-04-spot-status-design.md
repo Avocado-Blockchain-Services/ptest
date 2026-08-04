@@ -14,7 +14,7 @@ For a configured `spot_queue` backend it prints a compact, stable summary:
 
 ```text
 Spot queue
-  waiting jobs   <integer>
+  unacknowledged deliveries   <integer>
   working jobs   <integer>
   servers on     <integer>
 ```
@@ -24,8 +24,10 @@ create, cancel, or modify a queue object or VM.
 
 ## Sources and meaning
 
-- **waiting jobs** is the current Pub/Sub subscription backlog, obtained using
-  the same authenticated monitoring query used by the capacity controller.
+- **unacknowledged deliveries** is the current Pub/Sub subscription backlog,
+  obtained using the same authenticated monitoring query used by the capacity
+  controller. It can overlap with active jobs until the worker acknowledges
+  their deliveries.
 - **working jobs** is the number of unexpired durable Spot leases.  This is the
   authoritative in-flight-job measure, rather than a count inferred from VMs.
 - **servers on** is the number of RUNNING instances in the configured Spot MIG.

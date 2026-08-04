@@ -227,7 +227,7 @@ def test_status_prints_live_spot_queue_counts(wired, monkeypatch, capsys):
 
     assert capsys.readouterr().out == (
         "Spot queue\n"
-        "  waiting jobs   3\n"
+        "  unacknowledged deliveries   3\n"
         "  working jobs   2\n"
         "  servers on     4\n"
     )
