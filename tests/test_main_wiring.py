@@ -1,4 +1,6 @@
 """What main() dispatches to, and with what command."""
+from types import SimpleNamespace
+
 import pytest
 
 CONFIG_TOML = """
@@ -242,6 +244,48 @@ def test_status_refuses_a_project_without_spot_queue(wired, monkeypatch, capsys)
     assert ptest.main(["status"]) == 2
 
     assert "Spot queue is not configured" in capsys.readouterr().err
+
+
+def test_result_prints_terminal_spot_summary(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    key = "a" * 64
+    monkeypatch.setattr(
+        ptest, "spot_result",
+        lambda *_args: SimpleNamespace(status="failed", exit_code=1,
+                                       completed_at="2026-08-04T22:05:22+00:00",
+                                       output="failure details"),
+        raising=False,
+    )
+
+    assert ptest.main(["result", key]) == 0
+
+    assert capsys.readouterr().out == (
+        f"Spot result {key}\n"
+        "  status       failed\n"
+        "  exit code    1\n"
+        "  completed at 2026-08-04T22:05:22+00:00\n"
+    )
+
+
+def test_result_output_is_raw_for_paging(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    monkeypatch.setattr(
+        ptest, "spot_result",
+        lambda *_args: SimpleNamespace(output="first line\nsecond line\n"),
+        raising=False,
+    )
+
+    assert ptest.main(["result", "a" * 64, "--output"]) == 0
+
+    assert capsys.readouterr().out == "first line\nsecond line\n"
+
+
+def test_result_requires_one_request_key(wired, capsys):
+    ptest, _calls = wired
+
+    assert ptest.main(["result"]) == 2
+
+    assert "usage: ptest result <request-key> [--output]" in capsys.readouterr().err
 
 
 def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
