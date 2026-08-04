@@ -1,7 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spot_queue import (
     InMemorySpotQueueStore,
+    Lease,
     SpotRecordError,
     SpotRequest,
     SpotResult,
@@ -102,6 +105,30 @@ def test_gcloud_store_publishes_request_keys_to_pubsub(monkeypatch):
     assert calls == [["pubsub", "topics", "publish", "ptest-spot", "--message", KEY]]
 
 
+def test_gcloud_result_transition_uses_the_exact_lease_generation(monkeypatch):
+    from types import SimpleNamespace
+    from spot_queue import GcloudSpotQueueStore
+
+    store = GcloudSpotQueueStore(["gcloud"], "private-bucket", "ptest-spot")
+    lease = Lease(KEY, "worker-a", NOW, NOW + timedelta(seconds=60), 7)
+    result = SpotResult(KEY, "passed", 0, "12 passed", NOW + timedelta(seconds=1))
+    writes = []
+    monkeypatch.setattr(
+        store, "_read", lambda namespace, key: SimpleNamespace(
+            value=lease.to_record(), generation=7
+        )
+    )
+    monkeypatch.setattr(
+        store, "_write",
+        lambda namespace, key, value, generation: writes.append(
+            (namespace, key, value, generation)
+        ) or True,
+    )
+
+    assert store.publish_result(result, lease) is True
+    assert writes == [("states", KEY, result.to_record(), 7)]
+
+
 def test_expired_lease_can_be_reacquired_by_another_worker():
     store = InMemorySpotQueueStore()
     store.create_request(request())
@@ -135,6 +162,81 @@ def test_cancellation_prevents_a_later_claim_after_local_timeout_fallback():
     assert store.is_cancelled(KEY) is True
 
 
+def test_result_and_cancellation_race_has_exactly_one_generation_checked_winner():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+    result = SpotResult(KEY, "passed", 0, "12 passed", NOW + timedelta(seconds=1))
+    start = threading.Barrier(3)
+
+    def publish():
+        start.wait()
+        return store.publish_result(result, lease)
+
+    def cancel():
+        start.wait()
+        return store.cancel_request(
+            KEY, "timeout-local-fallback", NOW + timedelta(seconds=1)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        publishing = pool.submit(publish)
+        cancelling = pool.submit(cancel)
+        start.wait()
+        outcomes = publishing.result(), cancelling.result()
+
+    assert outcomes.count(True) == 1
+    assert (store.read_result(KEY) is not None) != store.is_cancelled(KEY)
+
+
+def test_cancellation_blocks_a_stale_lease_result_and_is_timestamp_idempotent():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+
+    assert store.cancel_request(KEY, "timeout-local-fallback", NOW + timedelta(seconds=1))
+    assert store.publish_result(
+        SpotResult(KEY, "passed", 0, "late result", NOW + timedelta(seconds=2)), lease
+    ) is False
+    assert store.cancel_request(
+        KEY, "timeout-local-fallback", NOW + timedelta(seconds=30)
+    ) is True
+    assert store.read_result(KEY) is None
+
+
+def test_result_terminal_transition_blocks_a_later_cancellation():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
+    result = SpotResult(KEY, "passed", 0, "12 passed", NOW + timedelta(seconds=1))
+
+    assert store.publish_result(result, lease) is True
+    assert store.cancel_request(
+        KEY, "timeout-local-fallback", NOW + timedelta(seconds=2)
+    ) is False
+    assert store.read_result(KEY) == result
+
+
+def test_cancelled_lease_requires_worker_quiescence_or_captured_expiry():
+    store = InMemorySpotQueueStore()
+    store.create_request(request())
+    store.claim(KEY, "worker-a", NOW, 60)
+    store.heartbeat_worker("worker-a", KEY, NOW)
+    store.cancel_request(KEY, "timeout-local-fallback", NOW + timedelta(seconds=1))
+
+    assert store.cancellation_quiesced(KEY, NOW + timedelta(seconds=2)) is False
+
+    store.heartbeat_worker("worker-a", None, NOW + timedelta(seconds=3))
+    assert store.cancellation_quiesced(KEY, NOW + timedelta(seconds=3)) is True
+
+    other = InMemorySpotQueueStore()
+    other.create_request(request())
+    other.claim(KEY, "preempted-worker", NOW, 60)
+    other.cancel_request(KEY, "timeout-local-fallback", NOW + timedelta(seconds=1))
+    assert other.cancellation_quiesced(KEY, NOW + timedelta(seconds=59)) is False
+    assert other.cancellation_quiesced(KEY, NOW + timedelta(seconds=60)) is True
+
+
 def test_worker_heartbeat_tracks_actual_idle_since_and_completed_lease_releases():
     store = InMemorySpotQueueStore()
     store.create_request(request())
@@ -151,18 +253,22 @@ def test_worker_heartbeat_tracks_actual_idle_since_and_completed_lease_releases(
 
 def test_terminal_result_publication_is_idempotent_but_rejects_conflicts():
     store = InMemorySpotQueueStore()
+    store.create_request(request())
+    lease = store.claim(KEY, "worker-a", NOW, 60)
     result = SpotResult(KEY, "passed", 0, "12 passed", NOW)
 
-    assert store.publish_result(result) is True
-    assert store.publish_result(result) is True
-    assert store.publish_result(SpotResult(KEY, "failed", 1, "FAILED", NOW)) is False
+    assert store.publish_result(result, lease) is True
+    assert store.publish_result(result, lease) is True
+    assert store.publish_result(
+        SpotResult(KEY, "failed", 1, "FAILED", NOW), lease
+    ) is False
     assert store.read_result(KEY) == result
 
 
 def test_malformed_records_are_rejected_not_claimed_or_reused():
     store = InMemorySpotQueueStore()
     store.create_request(request())
-    store.seed("leases", KEY, {"schema": "ptest-spot-lease-v1", "worker_id": 7})
+    store.seed("states", KEY, {"schema": "ptest-spot-lease-v1", "worker_id": 7})
 
     with pytest.raises(SpotRecordError):
         store.claim(KEY, "worker-a", NOW, 60)
@@ -183,11 +289,11 @@ def test_request_lease_and_result_records_must_match_their_lookup_key():
     store = InMemorySpotQueueStore()
     store.create_request(request())
     other_lease = store.claim(KEY, "worker", NOW, 60)
-    store.seed("leases", KEY, {**other_lease.to_record(), "request_key": other_key})
+    store.seed("states", KEY, {**other_lease.to_record(), "request_key": other_key})
     with pytest.raises(SpotRecordError):
         store.claim(KEY, "worker-two", NOW + timedelta(seconds=61), 60)
 
-    store.seed("results", KEY, SpotResult(other_key, "passed", 0, "", NOW).to_record())
+    store.seed("states", KEY, SpotResult(other_key, "passed", 0, "", NOW).to_record())
     with pytest.raises(SpotRecordError):
         store.read_result(KEY)
 
@@ -263,11 +369,19 @@ def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
 
 def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatch, tmp_path):
     class Queue:
+        def __init__(self): self.events = []
         def read_result(self, _key): return None
         def create_request(self, _value): return True
         def publish_message(self, _key): return True
         def wait_result(self, _key, _timeout): return None
-        def cancel_request(self, key, reason, now): self.cancelled = (key, reason, now); return True
+        def cancel_request(self, key, reason, now):
+            self.events.append("cancel")
+            self.cancelled = (key, reason, now)
+            return True
+        def wait_cancellation_quiesced(self, key, timeout_seconds):
+            assert key == KEY and timeout_seconds > 0
+            self.events.append("quiesced")
+            return True
 
     queue = Queue()
     monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
@@ -283,6 +397,34 @@ def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatc
     assert ptest.run_spot_queue({"kind": "pytest", "spot_topic": "ptest-spot"}, config,
                                 "fake", tmp_path, "uv run pytest tests") is None
     assert queue.cancelled[0:2] == (KEY, "timeout-local-fallback")
+    assert queue.events == ["cancel", "quiesced"]
+
+
+def test_ptest_refuses_local_fallback_until_cancelled_worker_is_quiesced(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def read_result(self, _key): return None
+        def create_request(self, _value): return True
+        def publish_message(self, _key): return True
+        def wait_result(self, _key, _timeout): return None
+        def cancel_request(self, _key, _reason, _now): return True
+        def wait_cancellation_quiesced(self, _key, _timeout): return False
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *_args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *_args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *_args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 75
 
 
 def test_ptest_fresh_ignores_a_passing_spot_result(ptest, monkeypatch, tmp_path):
@@ -398,13 +540,74 @@ def test_ptest_retry_after_message_failure_reuses_the_durable_request(
     config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
     project = {"kind": "pytest", "spot_topic": "ptest-spot"}
 
-    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") is None
+    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") == 75
     assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") == 0
     assert queue.request.created_at == NOW
     assert queue.publish_attempts == 2
 
 
-def test_malformed_spot_result_falls_back_to_local_infrastructure_path(
+def test_ptest_rejoins_an_existing_request_before_considering_local_fallback(
+    ptest, monkeypatch, tmp_path
+):
+    existing = request()
+
+    class Queue:
+        def read_result(self, _key): return None
+        def is_cancelled(self, _key): return False
+        def read_request(self, _key): return existing
+        def create_request(self, value): return value.stable_identity == existing.stable_identity
+        def publish_message(self, _key): return True
+        def wait_result(self, key, _timeout): return SpotResult(key, "passed", 0, "joined", NOW)
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    monkeypatch.setattr(
+        ptest, "budget_check",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("an already durable request must be rejoined")
+        ),
+    )
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 0
+
+
+def test_ptest_returns_the_result_that_wins_the_timeout_cancellation_race(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def __init__(self): self.reads = 0
+        def read_result(self, key):
+            self.reads += 1
+            return None if self.reads == 1 else SpotResult(key, "passed", 0, "winner", NOW)
+        def create_request(self, _value): return True
+        def publish_message(self, _key): return True
+        def wait_result(self, _key, _timeout): return None
+        def cancel_request(self, _key, _reason, _now): return False
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *_args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *_args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *_args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 0
+
+
+def test_malformed_spot_result_refuses_a_possible_duplicate_local_run(
     ptest, monkeypatch, tmp_path
 ):
     class Queue:
@@ -416,7 +619,57 @@ def test_malformed_spot_result_falls_back_to_local_infrastructure_path(
     config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
     project = {"kind": "pytest", "spot_topic": "ptest-spot"}
 
-    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") is None
+    assert ptest.run_spot_queue(project, config, "fake", tmp_path, "uv run pytest tests") == 75
+
+
+def test_ambiguous_wait_failure_after_publish_refuses_local_fallback(
+    ptest, monkeypatch, tmp_path
+):
+    from spot_queue import SpotQueueUnavailable
+
+    class Queue:
+        def read_result(self, _key): return None
+        def create_request(self, _value): return True
+        def publish_message(self, _key): return True
+        def wait_result(self, _key, _timeout):
+            raise SpotQueueUnavailable("result lookup failed after publish")
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *_args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *_args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *_args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 75
+
+
+def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
+    ptest, monkeypatch, tmp_path
+):
+    class Queue:
+        def read_result(self, _key): return None
+        def is_cancelled(self, _key): return True
+        def create_request(self, _value):
+            raise AssertionError("a cancelled deterministic key must not be republished")
+
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: Queue())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) is None
 
 
 def test_ptest_starts_without_spot_queue_when_installed_as_a_single_file(tmp_path):

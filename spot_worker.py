@@ -55,6 +55,9 @@ class Worker:
             mark_active(self.worker_id, request.request_key)
         self.adapter.heartbeat(lease)
         bound = self.adapter.for_message(message, self)
+        bind_lease = getattr(bound, "bind_lease", None)
+        if bind_lease:
+            bind_lease(lease)
         heartbeat_done = threading.Event()
         current_lease = [lease]
 
@@ -79,11 +82,15 @@ class Worker:
             heartbeat_done.set()
             heartbeat.join(timeout=1)
         if result is not None and not self.stopping:
-            release = getattr(self.adapter, "release", None)
-            if release:
-                release(current_lease[0])
             if mark_active:
                 mark_active(self.worker_id, None)
+        elif getattr(self.adapter, "is_cancelled", lambda _key: False)(request.request_key):
+            # An idle heartbeat written only after run_claimed_request returns
+            # is the positive proof that the cancelled child is quiesced. The
+            # timeout caller may start locally only after this or lease expiry.
+            if mark_active:
+                mark_active(self.worker_id, None)
+            self.adapter.acknowledge(message)
         return True
 
     def run_forever(self) -> None:
@@ -118,8 +125,7 @@ def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult | 
         result = SpotResult(request.request_key, "passed" if code == 0 else "failed", code,
                             output, datetime.now(timezone.utc))
         if not adapter.publish_result(result):
-            return SpotResult(request.request_key, "infrastructure", None,
-                              "result publication lost", datetime.now(timezone.utc))
+            return None
         if not getattr(adapter, "preempted", lambda: False)():
             adapter.acknowledge()
         return result
@@ -301,6 +307,12 @@ class GcloudWorkerAdapter:
 class _MessageAdapter:
     def __init__(self, supervisor: GcloudWorkerAdapter, message, worker: Worker):
         self.supervisor, self.message, self.worker = supervisor, message, worker
+        self._lease = None
+        self._terminal = False
+        self._transition_lock = threading.Lock()
+
+    def bind_lease(self, lease):
+        self._lease = lease
 
     def download(self, source_uri, destination):
         self.supervisor._run("storage", "cp", source_uri, str(destination))
@@ -316,27 +328,39 @@ class _MessageAdapter:
         self.supervisor.runner.prepare(cwd)
 
     def publish_result(self, result):
-        return self.supervisor.store.publish_result(result)
+        with self._transition_lock:
+            if self._lease is None:
+                raise RuntimeError("message adapter has no active lease")
+            published = self.supervisor.store.publish_result(result, self._lease)
+            if published:
+                self._terminal = True
+            return published
 
     def acknowledge(self):
         self.supervisor.acknowledge(self.message)
 
     def heartbeat(self, lease):
-        if self.cancelled():
-            self.worker.stop()
-            return None
-        renewed = self.supervisor.store.renew(
-            lease, datetime.now(timezone.utc),
-            int((lease.expires_at - lease.acquired_at).total_seconds()),
-        )
-        if renewed is None:
-            return None
-        self.supervisor.heartbeat_worker(self.worker.worker_id, lease.request_key)
-        self.supervisor._run("pubsub", "subscriptions", "modify-message-ack-deadline",
-                             self.supervisor.subscription, "--ack-ids", self.message["ack_id"],
-                             "--ack-deadline", str(max(10, int((renewed.expires_at -
-                                                                  renewed.acquired_at).total_seconds()))))
-        return renewed
+        with self._transition_lock:
+            if self._terminal:
+                return self._lease
+            if self.cancelled():
+                self.worker.stop()
+                return None
+            renewed = self.supervisor.store.renew(
+                lease, datetime.now(timezone.utc),
+                int((lease.expires_at - lease.acquired_at).total_seconds()),
+            )
+            if renewed is None:
+                return None
+            self._lease = renewed
+            self.supervisor.heartbeat_worker(self.worker.worker_id, lease.request_key)
+            self.supervisor._run(
+                "pubsub", "subscriptions", "modify-message-ack-deadline",
+                self.supervisor.subscription, "--ack-ids", self.message["ack_id"],
+                "--ack-deadline", str(max(10, int((renewed.expires_at -
+                                                   renewed.acquired_at).total_seconds()))),
+            )
+            return renewed
 
     def preempted(self):
         return self.worker.stopping

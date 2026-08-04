@@ -164,7 +164,7 @@ gcloud compute instance-groups managed list-instances ptest-spot-workers \
 ptest --full 2>spot-request.log
 spot_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-request.log | tail -1)
 test -n "$spot_key"
-gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$spot_key.json"
+gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/states/$spot_key.json"
 gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" \
   --limit=1 --format=json  # expect []: result was published then acked
 
@@ -180,43 +180,84 @@ gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
 
 # Preemption/redelivery proof: configure a harmless slow smoke project (for
 # example `full = "sh -c 'sleep 90; exit 0'"`) with backend = spot_queue.
-# Wait for its durable lease instead of using a timing guess, then SIGTERM the
-# supervisor. Docker's restart policy must bring health back. Before the
-# Pub/Sub deadline expires there must be no terminal result; the restarted
-# worker then receives the unacked delivery and completes it.
-ptest --full 2>spot-slow-request.log & smoke_pid=$!
+# --fresh guarantees a new attempt. Every poll below has a deadline. The active
+# lease must name the VM that is stopped; the MIG, not an assumed Docker restart,
+# then supplies a replacement worker for redelivery.
+ptest --full --fresh 2>spot-slow-request.log & smoke_pid=$!
 slow_key=''
-until [ -n "$slow_key" ]; do
+deadline=$((SECONDS + 60))
+while [ -z "$slow_key" ] && [ "$SECONDS" -lt "$deadline" ]; do
   slow_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-slow-request.log | tail -1 || true)
   sleep 1
 done
-until gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/leases/$slow_key.json" >/dev/null 2>&1; do sleep 1; done
-gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
-  --command='sudo docker kill --signal TERM ptest-spot-worker'
-until gcloud compute ssh "$spot_name" --project="$spot_project" --zone="$spot_zone" \
-  --command='sudo docker inspect --format="{{.State.Running}}" ptest-spot-worker' | grep -qx true; do sleep 1; done
-if gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json" >/dev/null 2>&1; then
-  echo 'unexpected terminal result before redelivery' >&2; exit 1
+test -n "$slow_key" || { echo 'timed out waiting for request key' >&2; kill "$smoke_pid"; exit 1; }
+
+state_uri="gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/states/$slow_key.json"
+state_json=$(mktemp)
+deadline=$((SECONDS + 180))
+active_lease=''
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if gcloud storage cat "$state_uri" >"$state_json" 2>/dev/null &&
+     python -c 'import datetime,json,sys; d=json.load(open(sys.argv[1])); now=datetime.datetime.now(datetime.timezone.utc); expiry=datetime.datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")); assert d["schema"] == "ptest-spot-lease-v1" and d["request_key"] == sys.argv[2] and expiry > now' "$state_json" "$slow_key"; then
+    active_lease=1
+    break
+  fi
+  sleep 2
+done
+test -n "$active_lease" || { echo 'timed out waiting for an active lease' >&2; kill "$smoke_pid"; exit 1; }
+
+spot_name=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["worker_id"])' "$state_json")
+lease_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
+spot_vm=$(gcloud compute instance-groups managed list-instances ptest-spot-workers \
+  --project="$spot_project" --region="$spot_region" --format='value(instance)' | \
+  grep "/instances/$spot_name$" | head -1)
+test -n "$spot_vm" || { echo 'active lease does not name a managed worker VM' >&2; kill "$smoke_pid"; exit 1; }
+spot_zone=${spot_vm%/instances/*}; spot_zone=${spot_zone##*/}
+
+# Stopping the leased VM exercises the lost-worker boundary: no result or ack
+# can be emitted, its lease expires, and the regional MIG replaces it.
+gcloud compute instances stop "$spot_name" --project="$spot_project" \
+  --zone="$spot_zone" --quiet
+
+deadline=$((SECONDS + 600))
+replacement_lease=''
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if gcloud storage cat "$state_uri" >"$state_json" 2>/dev/null &&
+     python -c 'import datetime,json,sys; d=json.load(open(sys.argv[1])); now=datetime.datetime.now(datetime.timezone.utc); expiry=datetime.datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")); assert d["schema"] == "ptest-spot-lease-v1" and d["worker_id"] != sys.argv[2] and expiry > now' "$state_json" "$spot_name"; then
+    new_generation=$(gcloud storage objects describe "$state_uri" --format='value(generation)')
+    if [ "$new_generation" -gt "$lease_generation" ]; then replacement_lease=1; break; fi
+  fi
+  sleep 3
+done
+test -n "$replacement_lease" || { echo 'timed out waiting for replacement lease' >&2; kill "$smoke_pid"; exit 1; }
+
+deadline=$((SECONDS + 900))
+while kill -0 "$smoke_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 2; done
+if kill -0 "$smoke_pid" 2>/dev/null; then
+  echo 'timed out waiting for redelivered smoke result' >&2; kill "$smoke_pid"; exit 1
 fi
 wait "$smoke_pid"
-gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json"
+gcloud storage cat "$state_uri" | python -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"] == "ptest-spot-result-v1"; print(json.dumps(d, indent=2))'
 gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" --limit=1 --format=json
+rm -f "$state_json"
 ```
 
-The worker pulls one Pub/Sub request, checks the terminal result, takes a
-generation-safe lease, heartbeats while its unprivileged/no-network child runs,
-publishes the durable terminal result, and only then acknowledges. SIGTERM stops
-the heartbeat, terminates the child, publishes no terminal result, and leaves
-unfinished work unacknowledged for redelivery. Node dependencies are installed
-from `package-lock.json` before the isolated child starts; dependency install is
-script-free, while Vitest itself runs in Bubblewrap with no network. At the Spot
-cap, `spot_overflow_to_cloudrun = true` explicitly retains excess messages in
-the durable queue and writes `spot/v1/overflow/current.json` rather than
-launching an existing Cloud Run Job without the request's source/command
-contract. On timeout ptest writes a durable cancellation before its normal
-local fallback; workers stop/ack cancelled deliveries and cannot duplicate that
-local execution. Configure `backend = "spot_queue"` only after this smoke proves
-worker/controller IAM, Bubblewrap, result, acknowledgement, and retry.
+The worker pulls one Pub/Sub request, checks terminal state, and takes a
+generation-safe lease in one state object. It heartbeats while its
+unprivileged/no-network child runs, CAS-transitions that lease to the durable
+result, and only then acknowledges. Cancellation uses the competing CAS
+transition, so result and cancellation cannot both win. Before local fallback,
+ptest waits for a post-cancel idle heartbeat or the captured lease expiry;
+ambiguous publish, wait, or cancellation outcomes return 75. A cancelled
+deterministic key retries locally, while `--fresh` creates a new remote attempt.
+SIGTERM stops the heartbeat, terminates the child, publishes no result, and
+leaves unfinished work unacknowledged for redelivery. Node dependencies are
+installed from `package-lock.json` before the isolated child starts; dependency
+install is script-free, while Vitest itself runs in Bubblewrap with no network.
+Backlog above the Spot cap remains in Pub/Sub; there is no overflow toggle or
+marker pretending to dispatch it elsewhere. Configure `backend = "spot_queue"`
+only after this smoke proves worker/controller IAM, Bubblewrap, terminal
+transition, acknowledgement, cancellation, and retry.
 
 ## Exit codes
 

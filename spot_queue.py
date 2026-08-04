@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,11 +38,14 @@ class SpotQueueStore(Protocol):
     def claim(self, request_key: str, worker_id: str, now: datetime,
               lease_seconds: int) -> "Lease | None": ...
 
-    def publish_result(self, result: "SpotResult") -> bool: ...
+    def publish_result(self, result: "SpotResult", lease: "Lease") -> bool: ...
 
     def renew(self, lease: "Lease", now: datetime, lease_seconds: int) -> "Lease | None": ...
 
     def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool: ...
+
+    def wait_cancellation_quiesced(self, request_key: str,
+                                   timeout_seconds: int) -> bool: ...
 
 
 def _request_key(value: object) -> str:
@@ -153,6 +157,53 @@ class Lease:
 
 
 @dataclass(frozen=True)
+class Cancellation:
+    request_key: str
+    reason: str
+    cancelled_at: datetime
+    lease_worker_id: str | None
+    lease_expires_at: datetime | None
+
+    def __post_init__(self):
+        _request_key(self.request_key)
+        _text(self.reason, "reason")
+        if self.cancelled_at.tzinfo is None:
+            raise SpotRecordError("cancelled_at must include a timezone")
+        if (self.lease_worker_id is None) != (self.lease_expires_at is None):
+            raise SpotRecordError("cancellation lease barrier is malformed")
+        if self.lease_worker_id is not None:
+            _text(self.lease_worker_id, "lease_worker_id")
+            if self.lease_expires_at.tzinfo is None:
+                raise SpotRecordError("lease_expires_at must include a timezone")
+
+    def to_record(self) -> dict:
+        return {
+            "schema": CANCEL_SCHEMA,
+            "request_key": self.request_key,
+            "reason": self.reason,
+            "cancelled_at": self.cancelled_at.astimezone(timezone.utc).isoformat(),
+            "lease_worker_id": self.lease_worker_id,
+            "lease_expires_at": (
+                self.lease_expires_at.astimezone(timezone.utc).isoformat()
+                if self.lease_expires_at else None
+            ),
+        }
+
+    @classmethod
+    def from_record(cls, record: object) -> "Cancellation":
+        if not isinstance(record, dict) or record.get("schema") != CANCEL_SCHEMA:
+            raise SpotRecordError("cancellation record has an invalid schema")
+        expires = record.get("lease_expires_at")
+        return cls(
+            _request_key(record.get("request_key")),
+            _text(record.get("reason"), "reason"),
+            _timestamp(record.get("cancelled_at"), "cancelled_at"),
+            record.get("lease_worker_id"),
+            _timestamp(expires, "lease_expires_at") if expires is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class WorkerState:
     worker_id: str
     idle_since: datetime | None
@@ -246,30 +297,37 @@ class InMemorySpotQueueStore:
         self.records: dict[tuple[str, str], _Stored] = {}
         self.messages: list[str] = []
         self.worker_states: dict[str, WorkerState] = {}
+        self._lock = threading.RLock()
 
     def seed(self, namespace: str, request_key: str, value: dict) -> None:
         key = (namespace, _request_key(request_key))
-        prior = self.records.get(key)
-        self.records[key] = _Stored(dict(value), 1 if prior is None else prior.generation + 1)
+        with self._lock:
+            prior = self.records.get(key)
+            self.records[key] = _Stored(
+                dict(value), 1 if prior is None else prior.generation + 1
+            )
 
     def _read(self, namespace: str, request_key: str) -> _Stored | None:
-        return self.records.get((namespace, _request_key(request_key)))
+        with self._lock:
+            return self.records.get((namespace, _request_key(request_key)))
 
     def _create(self, namespace: str, request_key: str, value: dict) -> bool:
         key = (namespace, _request_key(request_key))
-        if key in self.records:
-            return False
-        self.records[key] = _Stored(dict(value), 1)
-        return True
+        with self._lock:
+            if key in self.records:
+                return False
+            self.records[key] = _Stored(dict(value), 1)
+            return True
 
     def _replace(self, namespace: str, request_key: str, value: dict,
                  generation: int) -> bool:
         key = (namespace, _request_key(request_key))
-        stored = self.records.get(key)
-        if stored is None or stored.generation != generation:
-            return False
-        self.records[key] = _Stored(dict(value), generation + 1)
-        return True
+        with self._lock:
+            stored = self.records.get(key)
+            if stored is None or stored.generation != generation:
+                return False
+            self.records[key] = _Stored(dict(value), generation + 1)
+            return True
 
     def create_request(self, request: SpotRequest) -> bool:
         stored = self._read("requests", request.request_key)
@@ -292,10 +350,12 @@ class InMemorySpotQueueStore:
         _request_key(request_key)
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        if self.read_request(request_key) is None or self.is_cancelled(request_key):
+        if self.read_request(request_key) is None:
             return None
-        stored = self._read("leases", request_key)
+        stored = self._read("states", request_key)
         if stored is not None:
+            if stored.value.get("schema") in {RESULT_SCHEMA, CANCEL_SCHEMA}:
+                return None
             lease = Lease.from_record(stored.value, stored.generation)
             _bound(lease.request_key, request_key, "lease")
             if lease.expires_at > now:
@@ -307,33 +367,43 @@ class InMemorySpotQueueStore:
             request_key, worker_id, now,
             now + timedelta(seconds=lease_seconds), expected_generation + 1,
         )
-        wrote = (self._create("leases", request_key, candidate.to_record())
+        wrote = (self._create("states", request_key, candidate.to_record())
                  if expected_generation == 0 else
-                 self._replace("leases", request_key, candidate.to_record(), expected_generation))
+                 self._replace("states", request_key, candidate.to_record(), expected_generation))
         return candidate if wrote else None
 
     def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        stored = self._read("leases", lease.request_key)
-        if stored is None or stored.generation != lease.generation:
+        stored = self._read("states", lease.request_key)
+        if stored is None or stored.generation != lease.generation or \
+                stored.value.get("schema") != LEASE_SCHEMA:
             return None
         candidate = Lease(lease.request_key, lease.worker_id, now,
                           now + timedelta(seconds=lease_seconds), stored.generation + 1)
-        return candidate if self._replace("leases", lease.request_key, candidate.to_record(),
+        return candidate if self._replace("states", lease.request_key, candidate.to_record(),
                                          stored.generation) else None
 
-    def publish_result(self, result: SpotResult) -> bool:
-        if self.is_cancelled(result.request_key):
+    def publish_result(self, result: SpotResult, lease: Lease) -> bool:
+        stored = self._read("states", result.request_key)
+        if stored is None:
             return False
-        existing = self.read_result(result.request_key)
-        if existing is None:
-            return self._create("results", result.request_key, result.to_record())
-        return existing == result
+        schema = stored.value.get("schema")
+        if schema == RESULT_SCHEMA:
+            existing = SpotResult.from_record(stored.value)
+            _bound(existing.request_key, result.request_key, "result")
+            return existing == result
+        if schema == CANCEL_SCHEMA or stored.generation != lease.generation:
+            return False
+        current = Lease.from_record(stored.value, stored.generation)
+        _bound(current.request_key, result.request_key, "lease")
+        if current.worker_id != lease.worker_id:
+            return False
+        return self._replace("states", result.request_key, result.to_record(), stored.generation)
 
     def read_result(self, request_key: str) -> SpotResult | None:
-        stored = self._read("results", request_key)
-        if stored is None:
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") in {LEASE_SCHEMA, CANCEL_SCHEMA}:
             return None
         result = SpotResult.from_record(stored.value)
         _bound(result.request_key, request_key, "result")
@@ -341,25 +411,74 @@ class InMemorySpotQueueStore:
 
     def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool:
         _request_key(request_key)
+        reason = _text(reason, "reason")
+        if now.tzinfo is None:
+            raise ValueError("cancellation time must be timezone-aware")
         if self.read_request(request_key) is None:
             return False
-        record = {"schema": CANCEL_SCHEMA, "request_key": request_key,
-                  "reason": _text(reason, "reason"), "cancelled_at": now.isoformat()}
-        stored = self._read("cancellations", request_key)
-        if stored is not None:
-            return stored.value == record
-        return self._create("cancellations", request_key, record)
+        for _attempt in range(8):
+            stored = self._read("states", request_key)
+            if stored is None:
+                cancellation = Cancellation(request_key, reason, now, None, None)
+                if self._create("states", request_key, cancellation.to_record()):
+                    return True
+                continue
+            schema = stored.value.get("schema")
+            if schema == RESULT_SCHEMA:
+                result = SpotResult.from_record(stored.value)
+                _bound(result.request_key, request_key, "result")
+                return False
+            if schema == CANCEL_SCHEMA:
+                cancellation = Cancellation.from_record(stored.value)
+                _bound(cancellation.request_key, request_key, "cancellation")
+                return cancellation.reason == reason
+            lease = Lease.from_record(stored.value, stored.generation)
+            _bound(lease.request_key, request_key, "lease")
+            active = lease.expires_at > now
+            cancellation = Cancellation(
+                request_key, reason, now,
+                lease.worker_id if active else None,
+                lease.expires_at if active else None,
+            )
+            if self._replace("states", request_key, cancellation.to_record(), stored.generation):
+                return True
+        return False
 
     def is_cancelled(self, request_key: str) -> bool:
-        stored = self._read("cancellations", request_key)
-        if stored is None:
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") != CANCEL_SCHEMA:
             return False
-        record = stored.value
-        if record.get("schema") != CANCEL_SCHEMA or record.get("request_key") != _request_key(request_key):
-            raise SpotRecordError("cancellation record is malformed")
-        _text(record.get("reason"), "reason")
-        _timestamp(record.get("cancelled_at"), "cancelled_at")
+        cancellation = Cancellation.from_record(stored.value)
+        _bound(cancellation.request_key, request_key, "cancellation")
         return True
+
+    def cancellation_quiesced(self, request_key: str, now: datetime) -> bool:
+        if now.tzinfo is None:
+            raise ValueError("quiescence time must be timezone-aware")
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") != CANCEL_SCHEMA:
+            return False
+        cancellation = Cancellation.from_record(stored.value)
+        _bound(cancellation.request_key, request_key, "cancellation")
+        if cancellation.lease_worker_id is None or now >= cancellation.lease_expires_at:
+            return True
+        with self._lock:
+            state = self.worker_states.get(cancellation.lease_worker_id)
+        return bool(
+            state and state.heartbeat_at >= cancellation.cancelled_at
+            and state.active_request != request_key
+        )
+
+    def wait_cancellation_quiesced(self, request_key: str,
+                                   timeout_seconds: int) -> bool:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.cancellation_quiesced(request_key, datetime.now(timezone.utc)):
+                return True
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        return self.cancellation_quiesced(request_key, datetime.now(timezone.utc))
 
     def heartbeat_worker(self, worker_id: str, active_request: str | None,
                          now: datetime) -> WorkerState:
@@ -368,23 +487,26 @@ class InMemorySpotQueueStore:
             raise ValueError("worker heartbeat must be timezone-aware")
         if active_request is not None:
             _request_key(active_request)
-        prior = self.worker_states.get(worker_id)
-        idle_since = None if active_request else (
-            prior.idle_since if prior and prior.active_request is None else now)
-        state = WorkerState(worker_id, idle_since, now, active_request)
-        self.worker_states[worker_id] = state
+        with self._lock:
+            prior = self.worker_states.get(worker_id)
+            idle_since = None if active_request else (
+                prior.idle_since if prior and prior.active_request is None else now)
+            state = WorkerState(worker_id, idle_since, now, active_request)
+            self.worker_states[worker_id] = state
         return state
 
     def list_worker_states(self) -> list[WorkerState]:
-        return list(self.worker_states.values())
+        with self._lock:
+            return list(self.worker_states.values())
 
     def release(self, lease: Lease, now: datetime) -> bool:
-        stored = self._read("leases", lease.request_key)
-        if stored is None or stored.generation != lease.generation:
+        stored = self._read("states", lease.request_key)
+        if stored is None or stored.generation != lease.generation or \
+                stored.value.get("schema") != LEASE_SCHEMA:
             return False
         released = Lease(lease.request_key, lease.worker_id, now - timedelta(seconds=1), now,
                          stored.generation + 1)
-        return self._replace("leases", lease.request_key, released.to_record(), stored.generation)
+        return self._replace("states", lease.request_key, released.to_record(), stored.generation)
 
     def publish_message(self, request_key: str) -> bool:
         self.messages.append(_request_key(request_key))
@@ -514,10 +636,12 @@ class GcloudSpotQueueStore:
         _request_key(request_key)
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        if self.read_request(request_key) is None or self.is_cancelled(request_key):
+        if self.read_request(request_key) is None:
             return None
-        stored = self._read("leases", request_key)
+        stored = self._read("states", request_key)
         if stored is not None:
+            if stored.value.get("schema") in {RESULT_SCHEMA, CANCEL_SCHEMA}:
+                return None
             lease = Lease.from_record(stored.value, stored.generation)
             _bound(lease.request_key, request_key, "lease")
             if lease.expires_at > now:
@@ -527,9 +651,9 @@ class GcloudSpotQueueStore:
             generation = 0
         candidate = Lease(request_key, worker_id, now, now + timedelta(seconds=lease_seconds),
                           generation + 1)
-        if not self._write("leases", request_key, candidate.to_record(), generation):
+        if not self._write("states", request_key, candidate.to_record(), generation):
             return None
-        persisted = self._read("leases", request_key)
+        persisted = self._read("states", request_key)
         if persisted is None:
             raise SpotQueueUnavailable("lease disappeared after creation")
         lease = Lease.from_record(persisted.value, persisted.generation)
@@ -539,32 +663,46 @@ class GcloudSpotQueueStore:
     def renew(self, lease: Lease, now: datetime, lease_seconds: int) -> Lease | None:
         if lease_seconds <= 0 or now.tzinfo is None:
             raise ValueError("lease_seconds and now must be positive and timezone-aware")
-        stored = self._read("leases", lease.request_key)
-        if stored is None or stored.generation != lease.generation:
+        stored = self._read("states", lease.request_key)
+        if stored is None or stored.generation != lease.generation or \
+                stored.value.get("schema") != LEASE_SCHEMA:
             return None
         candidate = Lease(lease.request_key, lease.worker_id, now,
                           now + timedelta(seconds=lease_seconds), stored.generation + 1)
-        if not self._write("leases", lease.request_key, candidate.to_record(), stored.generation):
+        if not self._write("states", lease.request_key, candidate.to_record(), stored.generation):
             return None
-        persisted = self._read("leases", lease.request_key)
+        persisted = self._read("states", lease.request_key)
         if persisted is None:
             raise SpotQueueUnavailable("lease disappeared after renewal")
         return Lease.from_record(persisted.value, persisted.generation)
 
-    def publish_result(self, result: SpotResult) -> bool:
-        if self.is_cancelled(result.request_key):
+    def publish_result(self, result: SpotResult, lease: Lease) -> bool:
+        stored = self._read("states", result.request_key)
+        if stored is None:
             return False
-        existing = self.read_result(result.request_key)
-        if existing is not None:
+        schema = stored.value.get("schema")
+        if schema == RESULT_SCHEMA:
+            existing = SpotResult.from_record(stored.value)
+            _bound(existing.request_key, result.request_key, "result")
             return existing == result
-        if self._write("results", result.request_key, result.to_record(), 0):
+        if schema == CANCEL_SCHEMA or stored.generation != lease.generation:
+            return False
+        current = Lease.from_record(stored.value, stored.generation)
+        _bound(current.request_key, result.request_key, "lease")
+        if current.worker_id != lease.worker_id:
+            return False
+        if self._write("states", result.request_key, result.to_record(), stored.generation):
             return True
-        existing = self.read_result(result.request_key)
-        return existing is not None and existing == result
+        persisted = self._read("states", result.request_key)
+        if persisted is None or persisted.value.get("schema") != RESULT_SCHEMA:
+            return False
+        existing = SpotResult.from_record(persisted.value)
+        _bound(existing.request_key, result.request_key, "result")
+        return existing == result
 
     def read_result(self, request_key: str) -> SpotResult | None:
-        stored = self._read("results", request_key)
-        if stored is None:
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") in {LEASE_SCHEMA, CANCEL_SCHEMA}:
             return None
         result = SpotResult.from_record(stored.value)
         _bound(result.request_key, request_key, "result")
@@ -572,25 +710,73 @@ class GcloudSpotQueueStore:
 
     def cancel_request(self, request_key: str, reason: str, now: datetime) -> bool:
         _request_key(request_key)
+        reason = _text(reason, "reason")
+        if now.tzinfo is None:
+            raise ValueError("cancellation time must be timezone-aware")
         if self.read_request(request_key) is None:
             return False
-        record = {"schema": CANCEL_SCHEMA, "request_key": request_key,
-                  "reason": _text(reason, "reason"), "cancelled_at": now.isoformat()}
-        stored = self._read("cancellations", request_key)
-        if stored is not None:
-            return stored.value == record
-        return self._write("cancellations", request_key, record, 0)
+        for _attempt in range(8):
+            stored = self._read("states", request_key)
+            if stored is None:
+                cancellation = Cancellation(request_key, reason, now, None, None)
+                if self._write("states", request_key, cancellation.to_record(), 0):
+                    return True
+                continue
+            schema = stored.value.get("schema")
+            if schema == RESULT_SCHEMA:
+                result = SpotResult.from_record(stored.value)
+                _bound(result.request_key, request_key, "result")
+                return False
+            if schema == CANCEL_SCHEMA:
+                cancellation = Cancellation.from_record(stored.value)
+                _bound(cancellation.request_key, request_key, "cancellation")
+                return cancellation.reason == reason
+            lease = Lease.from_record(stored.value, stored.generation)
+            _bound(lease.request_key, request_key, "lease")
+            active = lease.expires_at > now
+            cancellation = Cancellation(
+                request_key, reason, now,
+                lease.worker_id if active else None,
+                lease.expires_at if active else None,
+            )
+            if self._write("states", request_key, cancellation.to_record(), stored.generation):
+                return True
+        raise SpotQueueUnavailable("cancellation could not win a stable generation")
 
     def is_cancelled(self, request_key: str) -> bool:
-        stored = self._read("cancellations", request_key)
-        if stored is None:
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") != CANCEL_SCHEMA:
             return False
-        record = stored.value
-        if record.get("schema") != CANCEL_SCHEMA or record.get("request_key") != _request_key(request_key):
-            raise SpotRecordError("cancellation record is malformed")
-        _text(record.get("reason"), "reason")
-        _timestamp(record.get("cancelled_at"), "cancelled_at")
+        cancellation = Cancellation.from_record(stored.value)
+        _bound(cancellation.request_key, request_key, "cancellation")
         return True
+
+    def cancellation_quiesced(self, request_key: str, now: datetime) -> bool:
+        if now.tzinfo is None:
+            raise ValueError("quiescence time must be timezone-aware")
+        stored = self._read("states", request_key)
+        if stored is None or stored.value.get("schema") != CANCEL_SCHEMA:
+            return False
+        cancellation = Cancellation.from_record(stored.value)
+        _bound(cancellation.request_key, request_key, "cancellation")
+        if cancellation.lease_worker_id is None or now >= cancellation.lease_expires_at:
+            return True
+        state = self.read_worker_state(cancellation.lease_worker_id)
+        return bool(
+            state and state.heartbeat_at >= cancellation.cancelled_at
+            and state.active_request != request_key
+        )
+
+    def wait_cancellation_quiesced(self, request_key: str,
+                                   timeout_seconds: int) -> bool:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.cancellation_quiesced(request_key, datetime.now(timezone.utc)):
+                return True
+            time.sleep(min(2, max(0.1, deadline - time.monotonic())))
+        return self.cancellation_quiesced(request_key, datetime.now(timezone.utc))
 
     def heartbeat_worker(self, worker_id: str, active_request: str | None,
                          now: datetime) -> WorkerState:
@@ -619,12 +805,13 @@ class GcloudSpotQueueStore:
         return WorkerState.from_record(json.loads(result.stdout))
 
     def release(self, lease: Lease, now: datetime) -> bool:
-        stored = self._read("leases", lease.request_key)
-        if stored is None or stored.generation != lease.generation:
+        stored = self._read("states", lease.request_key)
+        if stored is None or stored.generation != lease.generation or \
+                stored.value.get("schema") != LEASE_SCHEMA:
             return False
         released = Lease(lease.request_key, lease.worker_id, now - timedelta(seconds=1), now,
                          stored.generation + 1)
-        return self._write("leases", lease.request_key, released.to_record(), stored.generation)
+        return self._write("states", lease.request_key, released.to_record(), stored.generation)
 
     def publish_message(self, request_key: str) -> bool:
         result = self._run(["pubsub", "topics", "publish", self.topic,

@@ -126,3 +126,4 @@ backend = "local"
 # backend = "spot_queue"
 # spot_topic = "ptest-spot-requests"
 # spot_result_timeout_seconds = 1800
+# spot_cancel_quiesce_timeout_seconds = 180

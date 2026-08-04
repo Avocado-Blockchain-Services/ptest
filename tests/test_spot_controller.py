@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spot_controller import GcloudControllerAdapter, reconcile, scale_target
+from spot_queue import WorkerState
 
 
 def test_idle_worker_is_kept_until_the_exact_idle_timeout():
@@ -81,44 +82,65 @@ def test_monitoring_query_uses_a_full_five_minute_window_at_hour_boundary(monkey
     assert query["interval.startTime"] == ["2026-08-04T11:58:00+00:00"]
 
 
-def test_overflow_explicitly_retains_messages_when_no_compatible_cloudrun_job_exists():
-    class Adapter:
-        overflow_enabled = True
-
-        def authenticated_metrics(self):
-            return 8, 0, 0, 0
-
-        def set_target(self, target):
-            self.target = target
-
-        def retain_overflow(self, excess):
-            self.overflow_state = {"mode": "retain-queue", "excess": excess}
-            return self.overflow_state
-
-    adapter = Adapter()
-
-    assert reconcile(adapter, 5) == 5
-    assert adapter.overflow_state == {"mode": "retain-queue", "excess": 3}
-
-
-def test_overflow_toggle_off_leaves_no_durable_overflow_marker():
-    class Adapter:
-        overflow_enabled = False
-        def authenticated_metrics(self): return 8, 0, 0, 0
-        def set_target(self, target): self.target = target
-        def retain_overflow(self, excess): raise AssertionError(excess)
-
-    assert reconcile(Adapter(), 5) == 5
-
-
-def test_overflow_state_is_written_to_durable_storage(monkeypatch):
+def test_over_cap_backlog_stays_in_pubsub_without_writing_an_overflow_marker(monkeypatch):
     adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
     commands = []
+    adapter.overflow_enabled = True
+    monkeypatch.setattr(adapter, "authenticated_metrics", lambda: (8, 0, 0, 0))
+    monkeypatch.setattr(adapter, "set_target", lambda target: commands.append(("resize", target)))
     monkeypatch.setattr(adapter, "_run", lambda *args: commands.append(args) or "")
 
-    state = adapter.retain_overflow(3)
+    assert reconcile(adapter, 5) == 5
 
-    assert state["mode"] == "retain-queue"
-    assert state["excess"] == 3
-    assert commands[-1][0:2] == ("storage", "cp")
-    assert commands[-1][-1] == "gs://bucket/spot/v1/overflow/current.json"
+    assert commands == [("resize", 5)]
+    assert not hasattr(adapter, "overflow_state")
+
+
+def test_stale_worker_heartbeats_expire_and_cannot_mask_fresh_idle_age(monkeypatch):
+    class Clock:
+        @staticmethod
+        def now(_tz): return datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
+
+    now = Clock.now(timezone.utc)
+    stale = WorkerState("gone-worker", None, now.replace(minute=0), "a" * 64)
+    fresh = WorkerState(
+        "idle-worker", now.replace(hour=11, minute=0), now.replace(minute=9), None
+    )
+    records = {
+        "gs://bucket/spot/v1/workers/gone-worker.json": stale.to_record(),
+        "gs://bucket/spot/v1/workers/idle-worker.json": fresh.to_record(),
+    }
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket",
+        worker_heartbeat_ttl_seconds=120,
+    )
+    monkeypatch.setattr("spot_controller.datetime", Clock)
+
+    def run(*args):
+        if args[:2] == ("storage", "ls"):
+            return "\n".join(records)
+        return __import__("json").dumps(records[args[-1]])
+
+    monkeypatch.setattr(adapter, "_run", run)
+
+    assert adapter._worker_idle_age() == 4200
+
+
+def test_only_stale_worker_heartbeats_allow_scale_down(monkeypatch):
+    class Clock:
+        @staticmethod
+        def now(_tz): return datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
+
+    stale = WorkerState("gone-worker", None, Clock.now(timezone.utc).replace(minute=0), "a" * 64)
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket",
+        worker_heartbeat_ttl_seconds=120,
+    )
+    monkeypatch.setattr("spot_controller.datetime", Clock)
+    monkeypatch.setattr(
+        adapter, "_run",
+        lambda *args: "gs://bucket/spot/v1/workers/gone-worker.json"
+        if args[:2] == ("storage", "ls") else __import__("json").dumps(stale.to_record()),
+    )
+
+    assert scale_target(0, 1, adapter._worker_idle_age(), 5) == 0

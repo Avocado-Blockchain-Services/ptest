@@ -1821,6 +1821,17 @@ def _spot_queue_timeout(pcfg: Mapping, cfg: Mapping) -> int:
     return timeout
 
 
+def _spot_cancel_quiesce_timeout(pcfg: Mapping, cfg: Mapping) -> int:
+    value = pcfg.get(
+        "spot_cancel_quiesce_timeout_seconds",
+        cfg.get("defaults", {}).get("spot_cancel_quiesce_timeout_seconds", 180),
+    )
+    timeout = int(value)
+    if timeout <= 0:
+        raise ValueError("spot_cancel_quiesce_timeout_seconds must be positive")
+    return timeout
+
+
 def _spot_result_is_fresh(result, now: datetime, ttl_seconds: int) -> bool:
     if result.status != "passed" or result.exit_code != 0:
         return False
@@ -1851,6 +1862,7 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     try:
         settings = remote_cache_settings(pcfg, cfg)
         timeout = _spot_queue_timeout(pcfg, cfg)
+        cancel_timeout = _spot_cancel_quiesce_timeout(pcfg, cfg)
     except ValueError as exc:
         warn(f"invalid spot_queue configuration ({exc}) — running locally")
         return None
@@ -1884,26 +1896,55 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                                      ("" if completed.output.endswith("\n") else "\n"))
                     sys.stdout.flush()
                 return 0
-        if not budget_check(cfg, project):
+        if getattr(queue, "is_cancelled", lambda _key: False)(request_key_value):
+            warn("Spot queue request was already cancelled; running this deterministic retry locally "
+                 "(use --fresh to submit a new remote attempt)")
             return None
-        source_store = GcsCoordination(base, bucket)
-        try:
-            if prepare_source_archive(root, digest, manifest, base, source_store, bucket) is None:
+        read_request = getattr(queue, "read_request", None)
+        existing_request = read_request(request_key_value) if read_request else None
+    except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
+        # This key may already identify a queued or running request from an
+        # earlier attempt. Ambiguous durable state is never permission to run a
+        # duplicate local full suite.
+        warn(f"spot_queue state unavailable ({exc}) — not starting a duplicate local fallback")
+        return 75
+
+    try:
+        if existing_request is None:
+            if not budget_check(cfg, project):
                 return None
-        except SourceTreeChanged:
-            return 75
+            source_store = GcsCoordination(base, bucket)
+            try:
+                if prepare_source_archive(
+                    root, digest, manifest, base, source_store, bucket
+                ) is None:
+                    return None
+            except SourceTreeChanged:
+                return 75
         request = spot_queue.SpotRequest(
             request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now()
         )
         if not queue.create_request(request):
-            warn("Spot queue request conflicts with an existing durable record — running locally")
-            return None
-        queue.publish_message(request_key_value)
-        result = queue.wait_result(request_key_value, timeout)
+            warn("Spot queue request conflicts with an existing durable record — refusing a duplicate")
+            return 75
     except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError,
             CoordinationUnavailable, ValueError) as exc:
-        warn(f"spot_queue unavailable ({exc}) — running locally")
+        warn(f"spot_queue unavailable before publish ({exc}) — running locally")
         return None
+
+    try:
+        queue.publish_message(request_key_value)
+    except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
+        # Pub/Sub publish may have succeeded even when the client lost its
+        # response. The durable request can therefore still execute remotely.
+        warn(f"Spot queue publish outcome is ambiguous ({exc}) — retry without local fallback")
+        return 75
+
+    try:
+        result = queue.wait_result(request_key_value, timeout)
+    except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
+        warn(f"Spot queue wait outcome is ambiguous ({exc}) — retry without local fallback")
+        return 75
     if result is None:
         try:
             cancelled = queue.cancel_request(request_key_value, "timeout-local-fallback", utc_now())
@@ -1913,10 +1954,28 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             warn("Spot queue cancellation unavailable — not starting a duplicate local fallback")
             return 75
         if not cancelled:
-            warn("Spot queue cancellation conflict — not starting a duplicate local fallback")
-            return 75
-        warn(f"Spot queue timed out after {timeout}s — running locally")
-        return None
+            # The worker can win the same generation transition while the
+            # timeout caller is cancelling. Return that authoritative result.
+            try:
+                result = queue.read_result(request_key_value)
+            except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError):
+                result = None
+            if result is None:
+                warn("Spot queue cancellation lost its terminal race — retry without local fallback")
+                return 75
+        else:
+            try:
+                quiesced = queue.wait_cancellation_quiesced(
+                    request_key_value, cancel_timeout
+                )
+            except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError):
+                quiesced = False
+            if not quiesced:
+                warn("Spot queue cancellation is durable but the worker is not yet quiesced — "
+                     "not starting a duplicate local fallback")
+                return 75
+            warn(f"Spot queue timed out after {timeout}s; cancellation is quiesced — running locally")
+            return None
     if result.output:
         sys.stdout.write(result.output + ("" if result.output.endswith("\n") else "\n"))
         sys.stdout.flush()

@@ -15,7 +15,7 @@
 - `spot_queue` is opt-in; existing `cloudrun` behavior stays unchanged.
 - Queue work is at-least-once safe; each worker handles one suite in a new temporary directory.
 - Do not run `terraform apply`, alter deployed infrastructure, alter user config, push, or merge.
-- Configure a regional Spot MIG with max workers defaulting to 5, idle timeout defaulting to 3600 seconds, and a Cloud Run overflow option.
+- Configure a regional Spot MIG with max workers defaulting to 5 and idle timeout defaulting to 3600 seconds; excess backlog remains in Pub/Sub.
 
 ---
 
@@ -35,7 +35,7 @@
 
 **Files:** Modify `ptest`, `config.example.toml`, `tests/test_main_wiring.py`; create `spot_queue.py`, `tests/test_spot_queue.py`.
 
-**Interfaces:** versioned `SpotRequest`, `Lease`, and `SpotResult`; `SpotQueueStore.claim(request_key, worker_id, now, lease_seconds) -> Lease | None`; `publish_result(result) -> bool`.
+**Interfaces:** versioned `SpotRequest`, `Lease`, and `SpotResult`; `SpotQueueStore.claim(request_key, worker_id, now, lease_seconds) -> Lease | None`; `publish_result(result, lease) -> bool`.
 
 - [ ] Write failing tests for exclusive generation-safe claims, expired-lease reacquisition, idempotent terminal result publication, malformed record rejection, and `backend = "spot_queue"` routing.
 - [ ] Run `ptest tests/test_spot_queue.py tests/test_main_wiring.py` and confirm RED.
@@ -51,7 +51,7 @@
 - [ ] Write failing tests: keep one worker at 3599 idle seconds, zero at 3600; cap backlog at five; never scale in an active lease; worker event order is download, unpack, run, publish result, then acknowledge.
 - [ ] Run `ptest tests/test_spot_worker.py tests/test_spot_controller.py` and confirm RED.
 - [ ] Implement a worker pull/lease/heartbeat/cleanup loop with SIGTERM/preemption leaving work unacknowledged. Implement a pure controller scale policy and authenticated reconcile process; it never executes tests or owns result state.
-- [ ] Add Docker images with baked Node/Vitest dependencies. Add non-applied Terraform for Pub/Sub pull subscription, service accounts/IAM, regional Spot MIG/instance template/health check, controller service, scheduler, variables `spot_max_workers=5`, `spot_idle_seconds=3600`, images/machine type, and overflow toggle.
+- [ ] Add Docker images with baked Node/Vitest dependencies. Add non-applied Terraform for Pub/Sub pull subscription, service accounts/IAM, regional Spot MIG/instance template/health check, controller service, scheduler, variables `spot_max_workers=5`, `spot_idle_seconds=3600`, images, and machine type.
 - [ ] Run `ptest tests/test_spot_worker.py tests/test_spot_controller.py tests/test_spot_queue.py`; run `terraform -chdir=terraform fmt -check && terraform -chdir=terraform validate`; document the manual-only deployment procedure; commit `feat: add spot queue worker infrastructure`.
 
 ### Task 4: Whole-branch verification
@@ -60,5 +60,5 @@
 
 - [ ] Run `ptest --full`.
 - [ ] Run `python -m py_compile ptest spot_queue.py spot_worker.py spot_controller.py` and `terraform -chdir=terraform fmt -check && terraform -chdir=terraform validate`.
-- [ ] Audit: no apply/config mutation/default-backend change; validated records only; result before acknowledgement; fresh worker directories; capacity/overflow behavior.
+- [ ] Audit: no apply/config mutation/default-backend change; validated records only; result before acknowledgement; fresh worker directories; capacity/backlog behavior.
 - [ ] Commit only review fixes. Leave the branch unmerged and the worktree intact.

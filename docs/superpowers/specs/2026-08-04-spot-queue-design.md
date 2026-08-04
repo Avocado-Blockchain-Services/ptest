@@ -28,11 +28,11 @@ duplicate delivery/preemption cannot produce two authoritative results.
 ## Control plane
 
 A small authenticated Cloud Run controller calculates a regional Spot MIG
-target from queue backlog and worker heartbeats. It keeps one worker for a
-configurable idle window, scales zero through a configurable maximum, never
-scales in an active lease, and uses Cloud Run as configured overflow. The MIG
-replaces preempted VMs. The worker image bakes Node/Vitest dependencies but no
-application source.
+target from queue backlog and fresh worker heartbeats. It keeps one worker for
+a configurable idle window, scales zero through a configurable maximum, and
+never scales in an active lease. Backlog above the cap remains in Pub/Sub; no
+marker or toggle claims to dispatch it elsewhere. The MIG replaces preempted
+VMs. The worker image bakes Node/Vitest dependencies but no application source.
 
 ## Safety and verification
 

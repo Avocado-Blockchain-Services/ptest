@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spot_queue import Lease, SpotRequest
+from spot_queue import Lease, SpotRequest, SpotResult
 from spot_worker import GcloudWorkerAdapter, Worker, _MessageAdapter, run_claimed_request, unpack_archive
 
 
@@ -121,6 +121,28 @@ def test_worker_uses_supported_pubsub_ack_and_deadline_commands(monkeypatch):
     ]
 
 
+def test_message_adapter_publishes_with_latest_renewed_lease_generation(monkeypatch):
+    adapter = GcloudWorkerAdapter("project-a", "private-bucket", "spot-topic", "spot-sub")
+    initial = Lease(KEY, "worker-a", NOW, NOW.replace(minute=2), 1)
+    renewed = Lease(KEY, "worker-a", NOW, NOW.replace(minute=2), 2)
+    published = []
+    adapter.store.is_cancelled = lambda _key: False
+    adapter.store.renew = lambda *_args: renewed
+    adapter.store.publish_result = lambda result, lease: published.append((result, lease)) or True
+    adapter.heartbeat_worker = lambda *_args: None
+    monkeypatch.setattr(adapter, "_run", lambda *_args: "")
+    bound = _MessageAdapter(
+        adapter, {"ack_id": "ack-1", "request_key": KEY},
+        type("WorkerState", (), {"stopping": False, "worker_id": "worker-a"})(),
+    )
+    bound.bind_lease(initial)
+
+    assert bound.heartbeat(initial) == renewed
+    result = SpotResult(KEY, "passed", 0, "12 passed", NOW)
+    assert bound.publish_result(result) is True
+    assert published == [(result, renewed)]
+
+
 def test_unpack_rejects_path_traversal_and_outside_symlinks(tmp_path):
     import io
     import tarfile
@@ -197,3 +219,48 @@ def test_heartbeat_failure_stops_child_and_suppresses_result_and_ack(tmp_path):
     assert worker.run_once() is True
     assert worker.stopping is True
     assert events == ["download", "unpack", "run", "stop-child"]
+
+
+def test_active_cancellation_records_quiescence_before_acknowledging(tmp_path):
+    import threading
+
+    events, child_stopped, cancelled = [], threading.Event(), threading.Event()
+    lease = Lease(KEY, "worker-a", NOW, NOW.replace(minute=1), 1)
+
+    class Bound:
+        def download(self, *_args): pass
+        def unpack(self, *_args): pass
+        def run(self, *_args):
+            events.append("run")
+            child_stopped.wait(2)
+            return 143, "terminated"
+        def heartbeat(self, _lease):
+            cancelled.set()
+            return None
+        def preempted(self): return worker.stopping
+        def cancelled(self): return cancelled.is_set()
+        def publish_result(self, _result): events.append("publish")
+        def acknowledge(self): events.append("bound-ack")
+
+    class Adapter:
+        def pull(self): return "message"
+        def read_request(self, _message):
+            return SpotRequest(
+                KEY, "test", "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz", NOW
+            )
+        def read_result(self, _key): return None
+        def is_cancelled(self, _key): return cancelled.is_set()
+        def claim(self, *_args): return lease
+        def heartbeat(self, _lease): pass
+        def for_message(self, *_args): return Bound()
+        def heartbeat_worker(self, _worker, active_request):
+            events.append("active" if active_request else "idle")
+        def acknowledge(self, _message): events.append("ack")
+        def stop_active(self):
+            events.append("stop-child")
+            child_stopped.set()
+
+    worker = Worker(Adapter(), tmp_path, "worker-a", lease_seconds=1)
+
+    assert worker.run_once() is True
+    assert events == ["active", "run", "stop-child", "idle", "ack"]

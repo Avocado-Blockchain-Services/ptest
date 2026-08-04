@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode
@@ -38,10 +37,8 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
 def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> int:
     """Read authenticated metrics and set only the Spot MIG target.
 
-    A queue request cannot be safely converted into a Cloud Run Job execution
-    without its source/command contract. Until a compatible overflow dispatcher
-    is configured, overflow remains durably queued and ptest's normal timeout
-    fallback is the only safe fallback.
+    Backlog above the cap remains in Pub/Sub. There is no separate overflow
+    marker or toggle because neither changes dispatch behavior.
     """
     backlog, workers, leases, idle_age = adapter.authenticated_metrics()
     target = scale_target(backlog, workers, idle_age, max_workers, leases,
@@ -52,8 +49,6 @@ def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> in
         adapter.record_capacity_fault(leases, max_workers)
         return target
     adapter.set_target(target)
-    if backlog > max_workers and getattr(adapter, "overflow_enabled", False):
-        adapter.retain_overflow(backlog - max_workers)
     return target
 
 
@@ -92,10 +87,12 @@ class GcloudControllerAdapter:
     """Minimal real adapter; Cloud Run IAM authenticates the OIDC caller first."""
 
     def __init__(self, project: str, region: str, mig: str, subscription: str, bucket: str,
-                 overflow_enabled: bool = False):
+                 worker_heartbeat_ttl_seconds: int = 120):
+        if worker_heartbeat_ttl_seconds <= 0:
+            raise ValueError("worker heartbeat TTL must be positive")
         self.project, self.region, self.mig = project, region, mig
         self.subscription, self.bucket = subscription, bucket
-        self.overflow_enabled = overflow_enabled
+        self.worker_heartbeat_ttl_seconds = worker_heartbeat_ttl_seconds
 
     def _run(self, *args: str) -> str:
         result = subprocess.run(["gcloud", "--project", self.project, *args], text=True,
@@ -122,11 +119,20 @@ class GcloudControllerAdapter:
                 states.append(WorkerState.from_record(json.loads(self._run("storage", "cat", uri))))
             except (ValueError, TypeError, json.JSONDecodeError):
                 continue
-        if not states or any(state.active_request is not None for state in states):
-            return 0
         now = datetime.now(timezone.utc)
-        return int(min((now - state.idle_since).total_seconds() for state in states
-                       if state.idle_since is not None))
+        fresh = [
+            state for state in states
+            if 0 <= (now - state.heartbeat_at).total_seconds()
+            <= self.worker_heartbeat_ttl_seconds
+        ]
+        if not fresh:
+            # No current heartbeat can justify keeping a RUNNING instance. A
+            # large observed idle age lets the pure scale policy reach zero.
+            return 2 ** 31 - 1
+        if any(state.active_request is not None for state in fresh):
+            return 0
+        return int(min(max(0, (now - state.idle_since).total_seconds())
+                       for state in fresh if state.idle_since is not None))
 
     def _monitoring_backlog(self) -> int:
         """Read the supported Cloud Monitoring REST metric (not a gcloud alias)."""
@@ -148,7 +154,7 @@ class GcloudControllerAdapter:
         return max((int(value) for value in values), default=0)
 
     def _active_leases(self) -> int:
-        listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/leases/")
+        listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/states/")
         now, active = datetime.now(timezone.utc), 0
         for uri in listing.splitlines():
             raw = self._run("storage", "cat", uri)
@@ -163,20 +169,8 @@ class GcloudControllerAdapter:
         self._run("compute", "instance-groups", "managed", "resize", self.mig,
                   "--region", self.region, "--size", str(target), "--quiet")
 
-    def retain_overflow(self, excess: int) -> dict[str, int | str]:
-        # Explicit, safe behavior: do not launch a Cloud Run job with an
-        # incomplete request contract; leave the durable Pub/Sub message alone.
-        self.overflow_state = {"mode": "retain-queue", "excess": excess,
-                               "observed_at": datetime.now(timezone.utc).isoformat()}
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
-            json.dump(self.overflow_state, payload, sort_keys=True, separators=(",", ":"))
-            payload.flush()
-            self._run("storage", "cp", payload.name,
-                      f"gs://{self.bucket}/spot/v1/overflow/current.json")
-        return self.overflow_state
-
     def record_capacity_fault(self, leases: int, maximum: int) -> None:
-        self.overflow_state = {"mode": "lease-cap-fault", "leases": leases, "maximum": maximum}
+        self.capacity_fault = {"leases": leases, "maximum": maximum}
 
     @staticmethod
     def authorize(authorization: str) -> bool:
@@ -194,7 +188,7 @@ def main() -> None:
     adapter = GcloudControllerAdapter(
         os.environ["SPOT_PROJECT"], os.environ["SPOT_REGION"], os.environ["SPOT_MIG"],
         os.environ["SPOT_SUBSCRIPTION"], os.environ["SPOT_BUCKET"],
-        os.environ.get("SPOT_OVERFLOW_TO_CLOUDRUN", "false").lower() == "true",
+        int(os.environ.get("SPOT_WORKER_HEARTBEAT_TTL_SECONDS", "120")),
     )
     serve(adapter, int(os.environ.get("SPOT_MAX_WORKERS", "5")),
           int(os.environ.get("SPOT_IDLE_SECONDS", "3600")),

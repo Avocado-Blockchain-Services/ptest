@@ -89,6 +89,7 @@ resource "google_project_iam_custom_role" "spot_smoke_operator" {
   permissions = [
     "compute.instances.get",
     "compute.instances.list",
+    "compute.instances.stop",
     "compute.regionInstanceGroupManagers.get",
   ]
 }
@@ -113,9 +114,9 @@ resource "google_project_iam_member" "spot_controller_monitoring_viewer" {
   member  = "serviceAccount:${google_service_account.spot_controller.email}"
 }
 
-resource "google_storage_bucket_iam_member" "spot_controller_leases" {
+resource "google_storage_bucket_iam_member" "spot_controller_state_reader" {
   bucket = google_storage_bucket.src.name
-  role   = "roles/storage.objectUser"
+  role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.spot_controller.email}"
 }
 
@@ -165,7 +166,7 @@ resource "google_compute_instance_template" "spot_worker" {
     apt-get update && apt-get install -y docker.io google-cloud-cli-gke-gcloud-auth-plugin
     systemctl enable --now docker
     gcloud auth configure-docker ${var.region}-docker.pkg.dev --quiet
-    docker run --detach --restart=always --name ptest-spot-worker --publish 8080:8080 \
+    docker run --detach --restart=always --name ptest-spot-worker --hostname "$(hostname)" --publish 8080:8080 \
       --security-opt=no-new-privileges:true --security-opt=seccomp=unconfined \
       --env SPOT_PROJECT=${var.project_id} --env SPOT_REGION=${var.region} \
       --env SPOT_TOPIC=${google_pubsub_topic.spot_requests.name} \
@@ -229,8 +230,8 @@ resource "google_cloud_run_v2_service" "spot_controller" {
         value = google_storage_bucket.src.name
       }
       env {
-        name  = "SPOT_OVERFLOW_TO_CLOUDRUN"
-        value = tostring(var.spot_overflow_to_cloudrun)
+        name  = "SPOT_WORKER_HEARTBEAT_TTL_SECONDS"
+        value = "120"
       }
     }
   }

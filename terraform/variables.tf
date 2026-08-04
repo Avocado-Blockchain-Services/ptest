@@ -83,9 +83,3 @@ variable "spot_machine_type" {
   type    = string
   default = "e2-standard-8"
 }
-
-variable "spot_overflow_to_cloudrun" {
-  type        = bool
-  default     = false
-  description = "When true, overflow is explicitly retained in the durable Spot queue until a compatible Cloud Run dispatcher is provided; no incomplete request is ever launched as a job."
-}
