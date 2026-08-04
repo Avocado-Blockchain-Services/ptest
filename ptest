@@ -53,6 +53,17 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Mapping, NamedTuple
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from spot_queue import (
+    GcloudSpotQueueStore,
+    SpotRecordError,
+    SpotQueueUnavailable,
+    SpotRequest,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # py<3.11
@@ -587,7 +598,7 @@ def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dic
     for the log line's denominator (total test files); that duplicate walk is
     deliberate, not a bug this return value avoids — it costs ~6ms.
     """
-    if force_local or pcfg.get("backend") != "cloudrun":
+    if force_local or pcfg.get("backend") not in {"cloudrun", "spot_queue"}:
         return False, 0
     # A filter means the caller is hunting one failure and wants the fastest
     # loop, not the biggest machine. Never trade their latency for our cores.
@@ -1806,6 +1817,107 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     return exit_code
 
 
+def _spot_queue_timeout(pcfg: Mapping, cfg: Mapping) -> int:
+    value = pcfg.get(
+        "spot_result_timeout_seconds",
+        cfg.get("defaults", {}).get("spot_result_timeout_seconds", 1800),
+    )
+    timeout = int(value)
+    if timeout <= 0:
+        raise ValueError("spot_result_timeout_seconds must be positive")
+    return timeout
+
+
+def _spot_result_is_fresh(result, now: datetime, ttl_seconds: int) -> bool:
+    if result.status != "passed" or result.exit_code != 0:
+        return False
+    age = (now.astimezone(timezone.utc) - result.completed_at.astimezone(timezone.utc))
+    return 0 <= age.total_seconds() < ttl_seconds
+
+
+def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
+                   what: str = "--full", fresh: bool = False) -> int | None:
+    """Submit a durable request to the opt-in Spot queue, or fall back locally."""
+    bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
+    gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
+    topic = pcfg.get("spot_topic") or cfg.get("defaults", {}).get("spot_topic")
+    if not (bucket and gproject and topic):
+        warn("spot_queue backend not fully configured (bucket/gcp_project/spot_topic) — running locally")
+        return None
+    if not shutil.which("gcloud"):
+        warn("gcloud not on PATH — running locally")
+        return None
+    try:
+        settings = remote_cache_settings(pcfg, cfg)
+        timeout = _spot_queue_timeout(pcfg, cfg)
+    except ValueError as exc:
+        warn(f"invalid spot_queue configuration ({exc}) — running locally")
+        return None
+    base = gcloud_base(pcfg, cfg, gproject)
+    digest_started = time.monotonic()
+    manifest = source_manifest(root)
+    digest = tree_digest(root, manifest)
+    _source_timing("source digest", digest_started)
+    identity = {
+        "schema": "ptest-spot-request-key-v1",
+        "project": project,
+        "kind": pcfg.get("kind", "unknown"),
+        "command": cmd,
+        "gcp_project": gproject,
+        "spot_topic": topic,
+        "runner_namespace": settings.runner_namespace,
+        "tree_digest": digest,
+    }
+    if fresh:
+        identity["fresh_nonce"] = uuid.uuid4().hex
+    request_key_value = remote_request_key(identity)
+    print(f"[ptest] spot request: {request_key_value}", file=sys.stderr, flush=True)
+    try:
+        queue = GcloudSpotQueueStore(base, bucket, topic)
+        if not fresh:
+            completed = queue.read_result(request_key_value)
+            if completed and _spot_result_is_fresh(completed, utc_now(), settings.ttl_seconds):
+                warn("reused passing Spot queue result")
+                if completed.output:
+                    sys.stdout.write(completed.output +
+                                     ("" if completed.output.endswith("\n") else "\n"))
+                    sys.stdout.flush()
+                return 0
+        if not budget_check(cfg, project):
+            return None
+        source_store = GcsCoordination(base, bucket)
+        try:
+            if prepare_source_archive(root, digest, manifest, base, source_store, bucket) is None:
+                return None
+        except SourceTreeChanged:
+            return 75
+        request = SpotRequest(
+            request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now()
+        )
+        if not queue.create_request(request):
+            warn("Spot queue request conflicts with an existing durable record — running locally")
+            return None
+        queue.publish_message(request_key_value)
+        result = queue.wait_result(request_key_value, timeout)
+    except (SpotQueueUnavailable, SpotRecordError, CoordinationUnavailable, ValueError) as exc:
+        warn(f"spot_queue unavailable ({exc}) — running locally")
+        return None
+    if result is None:
+        warn(f"Spot queue timed out after {timeout}s — running locally")
+        return None
+    if result.output:
+        sys.stdout.write(result.output + ("" if result.output.endswith("\n") else "\n"))
+        sys.stdout.flush()
+    return result.exit_code
+
+
+def run_remote_backend(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
+                       what: str = "--full", fresh: bool = False) -> int | None:
+    if pcfg.get("backend") == "spot_queue":
+        return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
+    return run_cloudrun(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
+
+
 def cmd_where(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     root = git_root(cwd) or cwd
@@ -1957,10 +2069,10 @@ def main(argv: list[str]) -> int:
         if not full else (False, 0)
     )
     selected_remote = route_remote or (
-        full and not force_local and pcfg.get("backend") == "cloudrun"
+        full and not force_local and pcfg.get("backend") in {"cloudrun", "spot_queue"}
     )
     if fresh and not selected_remote:
-        warn("--fresh is only valid for a selected Cloud Run execution")
+        warn("--fresh is only valid for a selected remote execution")
         return 2
 
     parts = [base]
@@ -1990,15 +2102,15 @@ def main(argv: list[str]) -> int:
         print(f"[ptest] {matched} covers {covered}/{total} test files — routing "
               f"to the remote backend (scoped, no coverage gate)",
               file=sys.stderr, flush=True)
-        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd,
-                          what=f"`ptest {' '.join(path_like_args(passthrough))}`",
-                          fresh=fresh)
+        rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd,
+                                what=f"`ptest {' '.join(path_like_args(passthrough))}`",
+                                fresh=fresh)
         if rc is not None:
             return rc  # includes 75 (busy: nothing ran) and real test failures
         warn("remote unavailable — running this scoped run locally at the cap")
 
-    if full and not force_local and pcfg.get("backend") == "cloudrun":
-        rc = run_cloudrun(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
+    if full and not force_local and pcfg.get("backend") in {"cloudrun", "spot_queue"}:
+        rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
         if rc is not None:
             return rc  # includes real test failures; only None means "fall back"
 

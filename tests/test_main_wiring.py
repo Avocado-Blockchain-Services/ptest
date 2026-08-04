@@ -119,6 +119,26 @@ def test_full_still_sends_the_full_command(wired):
     assert "--cov-fail-under=85" in calls["remote"][0]
 
 
+def test_spot_queue_backend_routes_full_runs_and_keeps_fresh_out_of_the_command(
+    wired, monkeypatch
+):
+    ptest, calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"].update({"backend": "spot_queue", "spot_topic": "ptest-spot"})
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+
+    def run_spot_queue(pcfg, cfg_, project, root, cmd, **kwargs):
+        calls["remote"].append(cmd)
+        calls["remote_kwargs"].append(kwargs)
+        return 0
+
+    monkeypatch.setattr(ptest, "run_spot_queue", run_spot_queue, raising=False)
+
+    assert ptest.main(["--full", "--fresh"]) == 0
+    assert calls["remote"] == ["uv run pytest --cov-fail-under=85 tests"]
+    assert calls["remote_kwargs"] == [{"what": "--full", "fresh": True}]
+
+
 def test_fresh_is_a_ptest_only_remote_benchmark_flag(wired):
     ptest, calls = wired
 
