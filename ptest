@@ -1352,6 +1352,20 @@ class SourceTreeChanged(RuntimeError):
     """Packaging observed a different source tree than the submitted digest."""
 
 
+def _source_object_not_found(result: subprocess.CompletedProcess) -> bool:
+    """Recognize GCS's explicit object-miss responses, never echoed URIs."""
+    message = "\n".join(
+        str(value) for value in (result.stdout, result.stderr) if value
+    )
+    for line in message.splitlines():
+        redacted = re.sub(r"gs://\S+", "", line.lower())
+        if "no urls matched" in redacted:
+            return True
+        if re.search(r"(?:^|[):])\s*404(?:\s|$)", redacted):
+            return True
+    return False
+
+
 def source_object_exists(base: list[str], bucket: str,
                          object_name: str) -> bool | None:
     """Return whether a source archive exists, or None when GCS is ambiguous."""
@@ -1366,12 +1380,21 @@ def source_object_exists(base: list[str], bucket: str,
         return None
     if result.returncode == 0:
         return bool((result.stdout or "").strip())
-    message = "\n".join(
-        str(value) for value in (result.stdout, result.stderr) if value
-    ).lower()
-    if "404" in message or "no urls matched" in message:
+    if _source_object_not_found(result):
         return False
     return None
+
+
+def _cleanup_source_archive(archive: Path) -> None:
+    """Remove the temporary archive only when it has pack_tree's shape."""
+    parent = archive.parent
+    if archive.name != "src.tar.gz" or not parent.name.startswith("ptest-"):
+        return
+    archive.unlink(missing_ok=True)
+    try:
+        parent.rmdir()
+    except OSError:
+        pass
 
 
 def prepare_source_archive(root: Path, digest: str,
@@ -1379,9 +1402,11 @@ def prepare_source_archive(root: Path, digest: str,
                            store: GcsCoordination, bucket: str) -> Path | None:
     """Ensure a content-addressed source archive is available for submission.
 
-    A returned path means the source object is ready (either from the remote
-    cache or a fresh generation-safe upload). None leaves the caller on its
-    established local fallback path because GCS could not be probed safely.
+    A returned path is the remote source object's path once ready (either from
+    the cache or a fresh generation-safe upload). The local archive is owned by
+    this helper and removed after every package attempt. None leaves the caller
+    on its established local fallback path because GCS could not be probed
+    safely.
     """
     source_path = f"sources/{digest}.tar.gz"
     cache_started = time.monotonic()
@@ -1397,14 +1422,20 @@ def prepare_source_archive(root: Path, digest: str,
     packaging_started = time.monotonic()
     archive = pack_tree(root, manifest)
     _source_timing("source packaging", packaging_started)
-    if tree_digest(root, source_manifest(root)) != digest:
-        warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
-        raise SourceTreeChanged
+    try:
+        if tree_digest(root, source_manifest(root)) != digest:
+            warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
+            raise SourceTreeChanged
 
-    upload_started = time.monotonic()
-    uploaded = upload_source_once(base, store, archive, source_path, bucket)
-    _source_timing("source upload", upload_started)
-    return archive if uploaded else None
+        size_mb = archive.stat().st_size / 1e6
+        print(f"[ptest] packaged {size_mb:.0f}MB → gs://{bucket}/{source_path}",
+              file=sys.stderr, flush=True)
+        upload_started = time.monotonic()
+        uploaded = upload_source_once(base, store, archive, source_path, bucket)
+        _source_timing("source upload", upload_started)
+        return Path(source_path) if uploaded else None
+    finally:
+        _cleanup_source_archive(archive)
 
 
 def _show_execution_result(result: ExecutionResult, gproject: str) -> int | None:
@@ -1696,13 +1727,6 @@ def _run_cloudrun_coordinated(
             if claim:
                 store.delete_if_generation(paths.claim, claim.generation)
             return None
-        if archive == Path(paths.source):
-            print(f"[ptest] source cache ready → {source_uri}",
-                  file=sys.stderr, flush=True)
-        else:
-            size_mb = archive.stat().st_size / 1e6
-            print(f"[ptest] packaged {size_mb:.0f}MB → {source_uri}",
-                  file=sys.stderr, flush=True)
         print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
         try:
             execution = submit_execution(base, job, region, source_uri, cmd)

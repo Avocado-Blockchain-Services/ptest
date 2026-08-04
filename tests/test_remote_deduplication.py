@@ -179,7 +179,7 @@ def test_owner_alone_checks_budget_and_concurrency_then_publishes_execution(
 
 
 def test_existing_source_archive_skips_packaging_and_upload(
-    ptest, monkeypatch, tmp_path
+    ptest, monkeypatch, tmp_path, capsys
 ):
     store = MemoryStore(ptest)
     calls = harness(ptest, monkeypatch, tmp_path, store)
@@ -195,10 +195,29 @@ def test_existing_source_archive_skips_packaging_and_upload(
 
     assert calls["upload"] == 0
     assert calls["submit"] == calls["wait"] == 1
+    assert "[ptest] source cache hit:" in capsys.readouterr().err
+
+
+def test_ambiguous_source_probe_falls_back_without_packaging_or_upload(
+    ptest, monkeypatch, tmp_path
+):
+    store = MemoryStore(ptest)
+    calls = harness(ptest, monkeypatch, tmp_path, store)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: None)
+
+    def unexpected_pack(*args):
+        raise AssertionError("ambiguous source probe must not package")
+
+    monkeypatch.setattr(ptest, "pack_tree", unexpected_pack)
+    pcfg, cfg = configured()
+
+    assert ptest.run_cloudrun(pcfg, cfg, "front", tmp_path, "run tests") is None
+
+    assert calls["upload"] == calls["submit"] == calls["wait"] == 0
 
 
 def test_missing_source_archive_is_packaged_and_uploaded_once(
-    ptest, monkeypatch, tmp_path
+    ptest, monkeypatch, tmp_path, capsys
 ):
     store = MemoryStore(ptest)
     calls = harness(ptest, monkeypatch, tmp_path, store)
@@ -218,6 +237,11 @@ def test_missing_source_archive_is_packaged_and_uploaded_once(
 
     assert packaged == 1
     assert calls["upload"] == calls["submit"] == calls["wait"] == 1
+    timing = capsys.readouterr().err
+    assert "[ptest] source digest:" in timing
+    assert "[ptest] source cache miss:" in timing
+    assert "[ptest] source packaging:" in timing
+    assert "[ptest] source upload:" in timing
 
 
 def test_live_claim_loser_waits_for_execution_instead_of_submitting(

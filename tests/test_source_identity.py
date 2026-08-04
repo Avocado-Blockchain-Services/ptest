@@ -47,6 +47,88 @@ def test_source_object_exists_distinguishes_hits_misses_and_ambiguous_failures(
     ]
 
 
+def test_source_object_exists_does_not_misclassify_an_echoed_404_uri(
+    ptest, monkeypatch
+):
+    digest = "a" * 20 + "404" + "b" * 41
+
+    def run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 1, "",
+            f"credentials not found while reading gs://private-bucket/sources/{digest}.tar.gz",
+        )
+
+    monkeypatch.setattr(ptest.subprocess, "run", run)
+
+    assert ptest.source_object_exists(
+        ["gcloud"], "private-bucket", f"sources/{digest}.tar.gz"
+    ) is None
+
+
+def _archive(tmp_path):
+    directory = tmp_path / "ptest-source-archive"
+    directory.mkdir()
+    archive = directory / "src.tar.gz"
+    archive.write_bytes(b"archive")
+    return archive, directory
+
+
+def _prepare_source_archive(ptest, monkeypatch, tmp_path, upload, digests):
+    archive, directory = _archive(tmp_path)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False)
+    monkeypatch.setattr(ptest, "pack_tree", lambda *args: archive)
+    monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda *args: next(digests))
+    monkeypatch.setattr(ptest, "upload_source_once", lambda *args: upload)
+    result = ptest.prepare_source_archive(
+        tmp_path, "a" * 64, (), ["gcloud"], object(), "private-bucket"
+    )
+    return result, archive, directory
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_upload(
+    ptest, monkeypatch, tmp_path
+):
+    result, archive, directory = _prepare_source_archive(
+        ptest, monkeypatch, tmp_path, True, iter(["a" * 64])
+    )
+
+    assert result == Path("sources/" + "a" * 64 + ".tar.gz")
+    assert not archive.exists()
+    assert not directory.exists()
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_upload_failure(
+    ptest, monkeypatch, tmp_path
+):
+    result, archive, directory = _prepare_source_archive(
+        ptest, monkeypatch, tmp_path, False, iter(["a" * 64])
+    )
+
+    assert result is None
+    assert not archive.exists()
+    assert not directory.exists()
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_source_change(
+    ptest, monkeypatch, tmp_path
+):
+    archive, directory = _archive(tmp_path)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False)
+    monkeypatch.setattr(ptest, "pack_tree", lambda *args: archive)
+    monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda *args: "b" * 64)
+    monkeypatch.setattr(ptest, "upload_source_once", lambda *args: True)
+
+    with pytest.raises(ptest.SourceTreeChanged):
+        ptest.prepare_source_archive(
+            tmp_path, "a" * 64, (), ["gcloud"], object(), "private-bucket"
+        )
+
+    assert not archive.exists()
+    assert not directory.exists()
+
+
 def test_digest_is_independent_of_checkout_path_and_mtime(ptest, tmp_path):
     digests = []
     for name, mtime in (("one", 1_000_000_000), ("two", 2_000_000_000)):
