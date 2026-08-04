@@ -205,10 +205,11 @@ authorized project mutation.
   or local overflow state remained to clear, and no cloud deletion was run.
 - Rewrote the manual preemption smoke with `--fresh`, bounded polling, an
   unexpired active-lease assertion tied to the exact managed VM, a stopped VM
-  followed by a higher-generation replacement lease, and bounded terminal
-  waiting. It no longer claims Docker restarts a manually stopped container.
-  Worker containers receive the VM hostname so the live lease/VM assertion is
-  meaningful.
+  followed by a later-acquired lease whose generation advances beyond a
+  post-stop baseline, and bounded terminal waiting. It accepts MIG recreation
+  under the same VM name and cannot mistake the stopped worker's final renewal
+  for redelivery. Worker containers receive the VM hostname so the initial
+  live lease/VM assertion is meaningful.
 
 ### Evidence
 
@@ -222,19 +223,39 @@ authorized project mutation.
   later caller did not re-check the prior cancellation's quiescence barrier.
   The paired not-yet-quiesced case now proves that retry returns 75.
 - GREEN: focused queue/worker/controller tests passed 57 tests before that
-  follow-up; the final queue/worker/controller/main-wiring/smoke selection
+  follow-up. The first queue/worker/controller/main-wiring/smoke selection
   passed 78 tests in 2.38s.
+- Internal-review RED: the empty-prefix bootstrap, post-CAS claimant identity,
+  and stale/failed immutable-terminal regressions failed all 4 focused cases.
+  The fixes treat only GCS's explicit empty-listing diagnostics as empty,
+  validate that the persisted lease is the exact candidate acquisition, and
+  return 75 with `--fresh` guidance for non-reusable terminal keys.
+- Internal-review GREEN: the queue/worker/controller/main-wiring/smoke
+  selection passed 82 tests in 2.38s. The README preemption proof now accepts a
+  MIG recreation with the same VM name and instead requires both a higher GCS
+  generation and later `acquired_at`; exit-75 documentation covers Spot
+  coordination without claiming no remote work ran.
+- Follow-up review RED: a static smoke-ordering test failed because the first
+  generation baseline was still captured before VM stop, so a last renewal
+  could masquerade as reacquisition. GREEN: the baseline now occurs only after
+  the stop operation completes; a subsequent active lease must have both a
+  higher generation and later acquisition. The final focused selection passed
+  83 tests in 2.34s, and the smoke block passed `bash -n`. The follow-up
+  internal review found no remaining Critical, Important, or Minor issue.
 - GREEN: the concurrent result/cancellation race passed five additional repeated
   scoped runs; the documented live-smoke shell block passed `bash -n`.
 - GREEN: `terraform -chdir=terraform fmt -check`,
   `terraform -chdir=terraform validate`, and `python -m py_compile ptest
   spot_queue.py spot_worker.py spot_controller.py` passed. No plan/apply/deploy
   command ran.
-- GREEN: the final `ptest --full` passed 194 tests in 3.47s.
+- GREEN: the final `ptest --full` passed 199 tests in 3.39s.
 
 ### Commit
 
 - `e8d577c fix: serialize spot queue terminal transitions`
+- `afb204f fix: recheck cancelled retry quiescence`
+- `328a0c8 fix: harden spot queue bootstrap and retries`
+- `c350333 docs: make preemption proof generation-safe`
 
 ### Remaining operational gate
 
