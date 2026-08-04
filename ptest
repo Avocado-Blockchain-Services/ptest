@@ -1868,7 +1868,11 @@ def spot_capacity_admitted(base: list[str], controller_url: str) -> bool:
             payload = json.loads(response.read())
     except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         raise CoordinationUnavailable("controller admission request failed") from exc
-    if not isinstance(payload, dict) or type(payload.get("admitted")) is not bool:
+    if not isinstance(payload, dict):
+        raise CoordinationUnavailable("controller admission response was malformed")
+    if payload.get("overflow_reject_enabled") is not True:
+        raise CoordinationUnavailable("controller overflow rejection is not enabled")
+    if type(payload.get("admitted")) is not bool:
         raise CoordinationUnavailable("controller admission response was malformed")
     return payload["admitted"]
 
@@ -1970,7 +1974,7 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             warn(f"Spot capacity admission unavailable ({exc}) — retry later")
             return 75
         if not admitted:
-            warn("Spot worker capacity is saturated — retry later")
+            warn("Spot controller reports worker capacity saturation — retry later")
             return 75
 
     try:

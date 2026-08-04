@@ -38,7 +38,7 @@ output "spot_queue_topic" {
 }
 
 output "spot_queue_config_stanza" {
-  description = "Opt-in Spot backend configuration; keep the admission toggle equal to the controller Terraform variable."
+  description = "Opt-in Spot backend configuration; keep the advisory admission toggle equal to the controller Terraform variable."
   value       = <<-EOT
     [projects.<name>]
     backend                      = "spot_queue"

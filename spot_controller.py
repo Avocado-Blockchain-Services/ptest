@@ -15,7 +15,7 @@ from spot_queue import Lease, WorkerState
 
 def admission_allowed(backlog: int, active_leases: int, max_workers: int,
                       overflow_reject_enabled: bool) -> bool:
-    """Admit new durable work unless the opt-in cap gate is saturated."""
+    """Apply the opt-in brake to the controller's current capacity observation."""
     if min(backlog, active_leases, max_workers) < 0:
         raise ValueError("admission inputs must be non-negative")
     return not overflow_reject_enabled or max(backlog, active_leases) < max_workers
@@ -92,6 +92,7 @@ def build_handler(adapter, max_workers: int, idle_timeout_seconds: int = 3600,
                         "active_leases": leases,
                         "backlog": backlog,
                         "max_workers": max_workers,
+                        "overflow_reject_enabled": overflow_reject_enabled,
                     })
                     return
                 if self.path != "/reconcile":

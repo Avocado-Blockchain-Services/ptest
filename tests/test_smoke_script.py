@@ -86,3 +86,11 @@ def test_readme_spot_smoke_rejects_local_fallback_and_remote_failure():
     assert 'test "$slow_rc" -eq 0' in block
     assert block.count('d["status"] == "passed" and d["exit_code"] == 0') == 2
     assert block.count("assert json.load(sys.stdin) == []") == 2
+
+
+def test_readme_calls_the_monitoring_overflow_gate_advisory_not_a_hard_cap():
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    prose = " ".join(readme.split())
+
+    assert "advisory overflow brake" in prose
+    assert "not a hard admission cap" in prose

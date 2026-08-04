@@ -448,7 +448,8 @@ def test_spot_capacity_admission_uses_identity_token_and_controller_response(
         def read(self):
             return (
                 b'{"admitted":false,"active_leases":3,'
-                b'"backlog":5,"max_workers":5}'
+                b'"backlog":5,"max_workers":5,'
+                b'"overflow_reject_enabled":true}'
             )
 
     monkeypatch.setattr(
@@ -475,6 +476,33 @@ def test_spot_capacity_admission_uses_identity_token_and_controller_response(
     assert requests[0][0].method == "POST"
     assert requests[0][0].get_header("Authorization") == "Bearer test-token"
     assert requests[0][1] == 30
+
+
+def test_spot_capacity_admission_rejects_a_disabled_controller(ptest, monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self):
+            return (
+                b'{"admitted":true,"active_leases":0,'
+                b'"backlog":0,"max_workers":5,'
+                b'"overflow_reject_enabled":false}'
+            )
+
+    monkeypatch.setattr(
+        ptest.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args, 0, "test-token\n", ""
+        ),
+    )
+    monkeypatch.setattr(ptest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ptest.CoordinationUnavailable, match="not enabled"):
+        ptest.spot_capacity_admitted(
+            ["gcloud", "--project=test-project"],
+            "https://controller.example.run.app",
+        )
 
 
 def test_ptest_cancels_durable_request_before_timeout_fallback(ptest, monkeypatch, tmp_path):

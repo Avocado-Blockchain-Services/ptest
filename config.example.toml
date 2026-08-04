@@ -126,6 +126,6 @@ backend = "local"
 # backend = "spot_queue"
 # spot_topic = "ptest-spot-requests"
 # spot_controller_url = "https://ptest-spot-controller-....run.app"
-# spot_overflow_reject_enabled = true  # fail with 75 before upload when capacity is full
+# spot_overflow_reject_enabled = true  # advisory pre-upload 75 brake on observed saturation
 # spot_result_timeout_seconds = 1800
 # spot_cancel_quiesce_timeout_seconds = 180

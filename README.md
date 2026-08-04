@@ -272,9 +272,14 @@ installed from `package-lock.json` before the isolated child starts; dependency
 install is script-free, while Vitest itself runs in Bubblewrap with no network.
 With `spot_overflow_reject_enabled = true` in both Terraform and the matching
 ptest stanza, a new request first calls the IAM-protected controller `/admit`
-endpoint. When either Pub/Sub's unacknowledged backlog or the active-lease
-floor reaches `spot_max_workers`, ptest returns 75 before uploading source or
-creating durable request state.
+endpoint. When the controller observes either Pub/Sub's unacknowledged backlog
+or the active-lease floor at `spot_max_workers`, ptest returns 75 before
+uploading source or creating durable request state. This is an advisory overflow
+brake, not a hard admission cap: the
+[Pub/Sub metric](https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z)
+is sampled and delayed, so concurrent callers can pass before saturation is
+visible. The controller response carries its enabled state, and an enabled
+ptest client fails closed if the controller toggle does not match.
 Overflow is never dispatched to a malformed Cloud Run job, and existing durable
 requests bypass admission so retries can rejoin them. Backlog already accepted
 above the cap remains in Pub/Sub. Configure `backend = "spot_queue"` only after

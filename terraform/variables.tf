@@ -72,7 +72,7 @@ variable "spot_idle_seconds" {
 variable "spot_overflow_reject_enabled" {
   type        = bool
   default     = false
-  description = "Reject new ptest Spot requests with exit 75 when unacknowledged backlog or the active-lease floor reaches spot_max_workers."
+  description = "Enable the advisory exit-75 brake when observed unacknowledged backlog or active leases reaches spot_max_workers; delayed Monitoring data means this is not a hard cap."
 }
 
 variable "spot_worker_image" {

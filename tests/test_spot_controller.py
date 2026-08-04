@@ -63,6 +63,7 @@ def test_authenticated_admission_endpoint_reports_saturated_capacity():
         "active_leases": 3,
         "backlog": 5,
         "max_workers": 5,
+        "overflow_reject_enabled": True,
     }
 
 
