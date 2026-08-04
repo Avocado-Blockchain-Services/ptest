@@ -225,11 +225,15 @@ class LocalProcessAdapter:
         self._pgdata: Path | None = None
         self._pgsocket: Path | None = None
 
+    @staticmethod
+    def _path() -> str:
+        return "/usr/lib/postgresql/15/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
+
     def run(self, command, cwd):
         # Deliberately do not forward GCP credential/configuration variables.
         # Bubblewrap gives each untrusted suite an unprivileged user and a
         # network namespace with no interfaces; the supervisor retains GCP I/O.
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd),
+        env = {"PATH": self._path(), "HOME": str(cwd),
                "PYTHONUNBUFFERED": "1", "NO_PROXY": "*"}
         if self._pgsocket:
             env["DATABASE_URL"] = (
@@ -273,7 +277,7 @@ class LocalProcessAdapter:
         lock = cwd / "package-lock.json"
         if not lock.exists():
             raise RuntimeError("Spot Vitest requests require package-lock.json")
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd),
+        env = {"PATH": self._path(), "HOME": str(cwd),
                "NPM_CONFIG_IGNORE_SCRIPTS": "true", "NPM_CONFIG_AUDIT": "false",
                "NPM_CONFIG_FUND": "false"}
         completed = subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
