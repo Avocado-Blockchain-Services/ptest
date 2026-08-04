@@ -700,6 +700,42 @@ def test_ambiguous_wait_failure_after_publish_refuses_local_fallback(
     ) == 75
 
 
+def test_ambiguous_create_failure_after_persistence_refuses_local_fallback(
+    ptest, monkeypatch, tmp_path
+):
+    from spot_queue import SpotQueueUnavailable
+
+    class Queue:
+        def __init__(self):
+            self.persisted = False
+
+        def read_result(self, _key): return None
+        def is_cancelled(self, _key): return False
+        def read_request(self, _key): return None
+        def create_request(self, _value):
+            self.persisted = True
+            raise SpotQueueUnavailable("response lost after create-only CAS")
+        def publish_message(self, _key):
+            raise AssertionError("ambiguous creation must be retried, not published")
+
+    queue = Queue()
+    monkeypatch.setattr(ptest.shutil, "which", lambda _name: "/usr/bin/gcloud")
+    monkeypatch.setattr(ptest, "GcloudSpotQueueStore", lambda *_args: queue)
+    monkeypatch.setattr(ptest, "GcsCoordination", lambda *_args: object())
+    monkeypatch.setattr(ptest, "source_manifest", lambda _root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda _root, entries=None: "b" * 64)
+    monkeypatch.setattr(ptest, "prepare_source_archive", lambda *_args: Path("sources/archive"))
+    monkeypatch.setattr(ptest, "budget_check", lambda *_args: True)
+    monkeypatch.setattr(ptest, "remote_request_key", lambda _fields: KEY)
+    config = {"defaults": {"bucket": "private-bucket", "gcp_project": "test-project"}}
+
+    assert ptest.run_spot_queue(
+        {"kind": "pytest", "spot_topic": "ptest-spot"}, config,
+        "fake", tmp_path, "uv run pytest tests"
+    ) == 75
+    assert queue.persisted is True
+
+
 def test_cancelled_deterministic_key_is_an_explicit_safe_local_retry(
     ptest, monkeypatch, tmp_path
 ):

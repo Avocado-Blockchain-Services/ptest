@@ -1932,13 +1932,21 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         request = spot_queue.SpotRequest(
             request_key_value, cmd, f"gs://{bucket}/sources/{digest}.tar.gz", utc_now()
         )
-        if not queue.create_request(request):
-            warn("Spot queue request conflicts with an existing durable record — refusing a duplicate")
-            return 75
     except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError,
             CoordinationUnavailable, ValueError) as exc:
-        warn(f"spot_queue unavailable before publish ({exc}) — running locally")
+        warn(f"spot_queue source preparation failed before durable creation ({exc}) — running locally")
         return None
+
+    try:
+        created = queue.create_request(request)
+    except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
+        # The create-only CAS may have persisted even if gcloud or its response
+        # failed afterward. Once attempted, local fallback can race that request.
+        warn(f"Spot queue request creation outcome is ambiguous ({exc}) — retry without local fallback")
+        return 75
+    if not created:
+        warn("Spot queue request conflicts with an existing durable record — refusing a duplicate")
+        return 75
 
     try:
         queue.publish_message(request_key_value)
