@@ -300,15 +300,24 @@ class LocalProcessAdapter:
         self._pgsocket = cwd / ".spot-pg"
         self._pgdata.mkdir(mode=0o700)
         self._pgsocket.mkdir(mode=0o700)
+        pg_log = self._pgdata / "postgres.log"
         commands = [
             ["initdb", "-D", str(self._pgdata), "-U", "ptest", "--auth=trust", "--encoding=UTF8"],
-            ["pg_ctl", "-D", str(self._pgdata), "-o", f"-k {self._pgsocket}", "-w", "-t", "60", "start"],
+            ["pg_ctl", "-D", str(self._pgdata), "-l", str(pg_log),
+             "-o", f"-k {self._pgsocket}", "-w", "-t", "60", "start"],
         ]
         for command in commands:
-            completed = subprocess.run(command, text=True, capture_output=True, timeout=90)
+            # postgres inherits pg_ctl's streams. Capturing them makes
+            # subprocess.run wait for the daemon's open pipe after pg_ctl has
+            # successfully returned, creating a false startup timeout.
+            completed = subprocess.run(
+                command, text=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=90,
+            )
             if completed.returncode:
                 self.stop_postgres()
-                raise RuntimeError(completed.stdout + completed.stderr)
+                detail = pg_log.read_text(errors="replace") if pg_log.exists() else ""
+                raise RuntimeError(detail)
 
     def stop_postgres(self) -> None:
         if self._pgdata is None:
