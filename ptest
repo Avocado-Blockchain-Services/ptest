@@ -1361,7 +1361,11 @@ def _source_object_not_found(result: subprocess.CompletedProcess) -> bool:
         redacted = re.sub(r"gs://\S+", "", line.lower())
         if "no urls matched" in redacted:
             return True
-        if re.search(r"(?:^|[):])\s*404(?:\s|$)", redacted):
+        if re.search(
+            r"\bhttperror\s+404\b|\bstatus\s*=\s*404\b|"
+            r"(?:^|[):])\s*404\s+not\s+found\b",
+            redacted,
+        ):
             return True
     return False
 

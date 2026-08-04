@@ -214,6 +214,7 @@ def test_ambiguous_source_probe_falls_back_without_packaging_or_upload(
     assert ptest.run_cloudrun(pcfg, cfg, "front", tmp_path, "run tests") is None
 
     assert calls["upload"] == calls["submit"] == calls["wait"] == 0
+    assert store.read_json(request_paths(ptest).claim) is None
 
 
 def test_missing_source_archive_is_packaged_and_uploaded_once(
