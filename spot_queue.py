@@ -166,8 +166,8 @@ class SpotResult:
             raise SpotRecordError("passed results require exit_code 0")
         if self.status == "failed" and (self.exit_code is None or self.exit_code == 0):
             raise SpotRecordError("failed results require a nonzero exit_code")
-        if self.status == "infrastructure" and self.exit_code == 0:
-            raise SpotRecordError("infrastructure results cannot succeed")
+        if self.status == "infrastructure" and self.exit_code is not None:
+            raise SpotRecordError("infrastructure results require a null exit_code")
 
     def to_record(self) -> dict:
         return {

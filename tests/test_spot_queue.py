@@ -165,6 +165,7 @@ def test_request_lease_and_result_records_must_match_their_lookup_key():
         ("failed", 0),
         ("failed", None),
         ("infrastructure", 0),
+        ("infrastructure", 1),
     ],
 )
 def test_terminal_results_reject_status_exit_code_combinations(status, exit_code):
