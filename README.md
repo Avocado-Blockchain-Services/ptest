@@ -80,7 +80,7 @@ replicate the whole setup on a similar stack.
 | `terraform/` | Bucket, runner service account, both Cloud Run Jobs |
 | `provision.sh` | Imperative equivalent of the Terraform, plus the image build |
 | `provision-vitest.sh` | Adds the node image + job, reusing bucket and SA |
-| `smoke.sh` | End-to-end check against ONE test file before trusting a full run |
+| `smoke.sh` | End-to-end runner check; opt-in live owner/joiner/cache proof |
 
 ## Install
 
@@ -98,6 +98,18 @@ Full walkthrough in [`outsource_tests.md`](outsource_tests.md#part-4--terraform)
 **Verify with `smoke.sh` before flipping.** A soft fallback to local means a
 broken remote backend looks exactly like a working one — that failure mode kept
 the backend dormant for months in the original setup.
+
+After enabling coordination, run its live proof once from this repository:
+
+```bash
+PTEST_LIVE_DEDUP_SMOKE=1 ./smoke.sh
+```
+
+It launches two identical `ptest --full` callers, requires both to pass, checks
+that exactly one new Cloud Run execution appeared, and makes a third call that
+must reuse the joined passing execution. Override `PTEST_LIVE_REPO`, `PTEST_JOB`,
+or `PTEST_BIN` for a different registered project or candidate dispatcher. The
+mode is deliberately opt-in because it performs a real remote full command.
 
 ## Exit codes
 

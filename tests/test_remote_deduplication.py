@@ -131,6 +131,8 @@ def test_fresh_passing_hit_bypasses_budget_upload_concurrency_and_submission(
 
     assert calls == {"concurrency": 0, "budget": 0, "upload": 0, "submit": 0, "wait": 0}
     output = capsys.readouterr()
+    request_key = paths.claim.split("/")[-2]
+    assert f"[ptest] request: {request_key}" in output.err
     assert "reused passing result" in output.err
     assert "10 passed" in output.out
 

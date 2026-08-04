@@ -1504,7 +1504,9 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     }
     if fresh:
         identity["fresh_nonce"] = uuid.uuid4().hex
-    paths = coordination_paths(remote_request_key(identity), digest)
+    request_key_value = remote_request_key(identity)
+    paths = coordination_paths(request_key_value, digest)
+    print(f"[ptest] request: {request_key_value}", file=sys.stderr, flush=True)
     store = GcsCoordination(base, bucket)
     submitted_execution = None
     try:
