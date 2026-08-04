@@ -52,3 +52,14 @@ def test_smoke_parser_accepts_either_concurrent_caller_as_joiner(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_smoke_parser_accepts_same_host_lock_join_and_local_cache_hit(tmp_path):
+    result = run_fixture_assertion(
+        tmp_path,
+        f"[ptest] request: {KEY}\n[ptest] remote: fake-job\n",
+        f"[ptest] request: {KEY}\n[ptest] joined identical local request {KEY}\n",
+        f"[ptest] request: {KEY}\n[ptest] reused passing local result for {KEY}\n",
+    )
+
+    assert result.returncode == 0, result.stderr

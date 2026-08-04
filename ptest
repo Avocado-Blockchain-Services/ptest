@@ -891,6 +891,10 @@ def coalesce_remote_run(key: str, submit, *, state_dir: Path | None = None,
                 waited and previous["completed_ns"] >= wait_started_ns
             )
             if fresh_success or finished_for_waiter:
+                if waited:
+                    warn(f"joined identical local request {key}")
+                else:
+                    warn(f"reused passing local result for {key}")
                 return previous["exit_code"], previous["output"]
 
         # A replacement owner must erase the record it rejected while it still
@@ -1686,6 +1690,7 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     if fresh:
         identity["fresh_nonce"] = uuid.uuid4().hex
     local_key = remote_request_key(identity)
+    print(f"[ptest] request: {local_key}", file=sys.stderr, flush=True)
 
     def submit() -> tuple[int | None, str]:
         output = io.StringIO()

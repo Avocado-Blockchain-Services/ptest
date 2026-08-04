@@ -150,7 +150,7 @@ def test_remote_run_key_is_sensitive_to_every_identity_field(ptest):
     assert ptest.remote_run_key(**fields) == base
 
 
-def test_concurrent_success_submits_once_and_is_reused(ptest, tmp_path):
+def test_concurrent_success_submits_once_and_is_reused(ptest, tmp_path, capsys):
     submissions, results = _run_two_callers(
         ptest, tmp_path, exit_code=0, output="12 passed\n"
     )
@@ -164,6 +164,7 @@ def test_concurrent_success_submits_once_and_is_reused(ptest, tmp_path):
     assert ptest.coalesce_remote_run(
         "same-run", must_not_submit, state_dir=tmp_path
     ) == (0, "12 passed\n")
+    assert "reused passing local result for same-run" in capsys.readouterr().err
 
 
 def test_waiter_replays_failure_but_later_caller_retries(ptest, tmp_path):
@@ -366,4 +367,6 @@ def test_replayed_run_cloudrun_result_bypasses_accounting_and_keeps_contract(
     assert ptest.run_cloudrun(
         pcfg, {}, "api", tmp_path, "pytest tests -n auto"
     ) == exit_code
-    assert capsys.readouterr().out == output
+    captured = capsys.readouterr()
+    assert captured.out == output
+    assert "[ptest] request:" in captured.err

@@ -23,7 +23,7 @@ one_request_key() {
 
 assert_dedup_fixtures() {
   local owner_log=$1 joiner_log=$2 cached_log=$3
-  local owner_key joiner_key cached_key joined_execution cached_execution
+  local owner_key joiner_key cached_key joined_execution cached_execution local_join local_cache
   owner_key=$(one_request_key "$owner_log")
   joiner_key=$(one_request_key "$joiner_log")
   cached_key=$(one_request_key "$cached_log")
@@ -33,11 +33,19 @@ assert_dedup_fixtures() {
   joined_execution=$(sed -nE 's/.*joining identical remote execution ([a-z0-9-]+).*/\1/p' \
     "$owner_log" "$joiner_log" | tail -1)
   cached_execution=$(sed -nE 's/.*reused passing result from ([a-z0-9-]+).*/\1/p' "$cached_log" | tail -1)
-  [[ -n $joined_execution ]] || die "joiner log has no shared execution"
-  [[ $joined_execution == "$cached_execution" ]] ||
-    die "cache hit did not reuse joined execution $joined_execution"
-
-  echo "dedup fixtures: request $owner_key joined and reused $joined_execution"
+  local_join=$(sed -nE 's/.*joined identical local request ([0-9a-f]{64}).*/\1/p' \
+    "$owner_log" "$joiner_log" | tail -1)
+  local_cache=$(sed -nE 's/.*reused passing local result for ([0-9a-f]{64}).*/\1/p' \
+    "$cached_log" | tail -1)
+  if [[ -n $joined_execution ]]; then
+    [[ $joined_execution == "$cached_execution" ]] ||
+      die "cache hit did not reuse joined execution $joined_execution"
+    echo "dedup fixtures: request $owner_key joined and reused $joined_execution"
+  else
+    [[ $local_join == "$owner_key" ]] || die "joiner log has no shared local request"
+    [[ $local_cache == "$owner_key" ]] || die "third caller has no passing local cache hit"
+    echo "dedup fixtures: request $owner_key joined and reused through the local lock/cache"
+  fi
 }
 
 run_live_dedup_smoke() {
