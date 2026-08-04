@@ -33,6 +33,8 @@ Design rules that must not be broken — agents depend on them:
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -634,6 +636,128 @@ def pack_tree(root: Path) -> Path:
     return tar_path
 
 
+REMOTE_RESULT_TTL = 600
+
+
+def snapshot_digest(tar_path: Path) -> str:
+    """Return a stable digest of the source represented by an upload archive.
+
+    gzip headers and tar mtimes vary every time ``pack_tree`` runs, even when
+    the source does not. Hash the archive's meaningful entries instead: names,
+    types, permission bits, link targets, and file bytes. Sorting makes the
+    identity independent of archive traversal order without overlooking any
+    source that the remote job will receive.
+    """
+    digest = hashlib.sha256()
+    with tarfile.open(tar_path, "r:gz") as archive:
+        for member in sorted(archive.getmembers(), key=lambda item: item.name):
+            metadata = json.dumps(
+                [member.name, member.type.decode("latin1"), member.mode & 0o777,
+                 member.linkname],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(metadata).to_bytes(8, "big"))
+            digest.update(metadata)
+            extracted = archive.extractfile(member) if member.isfile() else None
+            if extracted is not None:
+                while chunk := extracted.read(1024 * 1024):
+                    digest.update(len(chunk).to_bytes(8, "big"))
+                    digest.update(chunk)
+            digest.update((0).to_bytes(8, "big"))
+    return digest.hexdigest()
+
+
+def remote_run_key(*, snapshot: str, command: str, job: str, region: str,
+                   project: str) -> str:
+    """Identify exactly one source/command/Cloud Run destination tuple."""
+    identity = json.dumps(
+        [snapshot, command, job, region, project],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _read_remote_result(path: Path) -> dict | None:
+    try:
+        result = json.loads(path.read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    required = {"exit_code", "output", "completed_at", "completed_ns"}
+    if not isinstance(result, dict) or not required <= result.keys():
+        return None
+    exit_code = result["exit_code"]
+    if (exit_code is not None and type(exit_code) is not int) or \
+       not isinstance(result["output"], str) or \
+       type(result["completed_at"]) not in (int, float) or \
+       type(result["completed_ns"]) is not int:
+        return None
+    return result
+
+
+def _write_remote_result(path: Path, result: dict) -> None:
+    """Atomically publish a completed result; partial JSON is never visible."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as tmp:
+            json.dump(result, tmp, separators=(",", ":"))
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def coalesce_remote_run(key: str, submit, *, state_dir: Path | None = None,
+                        ttl: int = REMOTE_RESULT_TTL) -> tuple[int | None, str]:
+    """Run one identical remote submission and replay its completed result.
+
+    A caller that finds the per-key lock busy is part of the in-flight cohort,
+    so it may replay either success or failure from the owner it waited for.
+    A caller that acquires immediately only reuses a successful, fresh result.
+    ``flock`` is released by the kernel if an owner process crashes.
+    """
+    directory = state_dir or (STATE / "remote-results")
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / f"{key}.lock"
+    result_path = directory / f"{key}.json"
+    wait_started_ns = time.monotonic_ns()
+
+    with lock_path.open("a+b") as lock:
+        waited = False
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            waited = True
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+
+        previous = _read_remote_result(result_path)
+        if previous is not None:
+            age = time.time() - previous["completed_at"]
+            fresh_success = previous["exit_code"] == 0 and 0 <= age <= ttl
+            finished_for_waiter = (
+                waited and previous["completed_ns"] >= wait_started_ns
+            )
+            if fresh_success or finished_for_waiter:
+                return previous["exit_code"], previous["output"]
+
+        exit_code, output = submit()
+        completed = {
+            "exit_code": exit_code,
+            "output": output,
+            "completed_at": time.time(),
+            # Monotonic time decides only whether this caller waited for this
+            # owner; wall-clock adjustments cannot turn an old failure fresh.
+            "completed_ns": time.monotonic_ns(),
+        }
+        _write_remote_result(result_path, completed)
+        return exit_code, output
+
+
 def gcloud_base(pcfg: dict, cfg: dict, gproject: str) -> list[str]:
     """gcloud invocation carrying an explicit account + billing project.
 
@@ -767,78 +891,97 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         warn("gcloud not on PATH — running locally")
         return None
     base = gcloud_base(pcfg, cfg, gproject)
-
-    limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
-    if at_concurrency_limit(base, job, region, limit):
-        # Do NOT return None here. None means "fall back to local", and the
-        # local fallback for --full is the entire ~1300-test suite. With several
-        # agent sessions sharing this machine that converts one blocked remote
-        # run into N concurrent local full suites — the exact load-average
-        # catastrophe ptest exists to prevent. Refuse outright instead.
-        warn(f"NOT falling back to a local {what} run (that would hammer this "
-             "machine). Re-run when one finishes, or scope it tighter with a "
-             "path or a -k filter.")
-        return 75  # EX_TEMPFAIL — retry later; distinct from any pytest code
-
-    if not budget_check(cfg, project):
-        return None
-
     tar_path = pack_tree(root)
-    size_mb = tar_path.stat().st_size / 1e6
-    stamp = f"{project}-{int(time.time())}"
-    obj = f"gs://{bucket}/{stamp}.tar.gz"
-    print(f"[ptest] packaged {size_mb:.0f}MB → {obj}", file=sys.stderr, flush=True)
+    key = remote_run_key(
+        snapshot=snapshot_digest(tar_path),
+        command=cmd,
+        job=job,
+        region=region,
+        project=gproject,
+    )
 
-    up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
-                        capture_output=True, text=True)
-    if up.returncode != 0:
-        warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
-        return None
+    def submit() -> tuple[int | None, str]:
+        # These guards count actual Cloud Run submissions, not callers that
+        # joined an identical in-flight run or reused its successful result.
+        limit = int(cfg.get("defaults", {}).get("max_concurrent_remote_runs", 6))
+        if at_concurrency_limit(base, job, region, limit):
+            # Do NOT return None here. None means "fall back to local", and the
+            # local fallback for --full is the entire ~1300-test suite. With several
+            # agent sessions sharing this machine that converts one blocked remote
+            # run into N concurrent local full suites — the exact load-average
+            # catastrophe ptest exists to prevent. Refuse outright instead.
+            warn(f"NOT falling back to a local {what} run (that would hammer this "
+                 "machine). Re-run when one finishes, or scope it tighter with a "
+                 "path or a -k filter.")
+            return 75, ""  # EX_TEMPFAIL — retry later; distinct from pytest
 
-    print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
-    exec_cmd = base + [
-        "run", "jobs", "execute", job, f"--region={region}", "--wait",
-        "--update-env-vars", f"PTEST_SRC={obj},PTEST_CMD={cmd}",
-    ]
-    # --wait relays only its own progress chatter, never the container's stdout.
-    proc = subprocess.run(exec_cmd, capture_output=True, text=True)
+        if not budget_check(cfg, project):
+            return None, ""
 
-    # The execution name is the key to the logs. gcloud prints it on BOTH paths:
-    # "Execution [job-abc12] has successfully completed." on success, and
-    # "...executions describe job-abc12" on failure. Parse it rather than listing
-    # executions afterwards — with concurrent runs allowed, "the most recent
-    # execution of this job" can easily belong to another agent.
-    blob = (proc.stdout or "") + (proc.stderr or "")
-    m = re.search(re.escape(job) + r"-[a-z0-9]{5,}", blob)
-    execution = m.group(0) if m else None
+        size_mb = tar_path.stat().st_size / 1e6
+        stamp = f"{project}-{int(time.time())}"
+        obj = f"gs://{bucket}/{stamp}.tar.gz"
+        print(f"[ptest] packaged {size_mb:.0f}MB → {obj}",
+              file=sys.stderr, flush=True)
 
-    if execution:
-        logs = fetch_execution_logs(base, execution)
-        if logs.strip():
-            digest = summarize_remote_logs(logs, failed=proc.returncode != 0)
-            if digest.strip():
-                sys.stdout.write(digest + "\n")
+        up = subprocess.run(base + ["storage", "cp", str(tar_path), obj],
+                            capture_output=True, text=True)
+        if up.returncode != 0:
+            warn(f"upload failed ({up.stderr.strip()[:200]}) — running locally")
+            return None, ""
+
+        print(f"[ptest] remote: {job} ({region}) · {cmd}",
+              file=sys.stderr, flush=True)
+        exec_cmd = base + [
+            "run", "jobs", "execute", job, f"--region={region}", "--wait",
+            "--update-env-vars", f"PTEST_SRC={obj},PTEST_CMD={cmd}",
+        ]
+        # --wait relays only its own progress chatter, never the container's stdout.
+        proc = subprocess.run(exec_cmd, capture_output=True, text=True)
+
+        # The execution name is the key to the logs. gcloud prints it on BOTH paths:
+        # "Execution [job-abc12] has successfully completed." on success, and
+        # "...executions describe job-abc12" on failure. Parse it rather than listing
+        # executions afterwards — with concurrent runs allowed, "the most recent
+        # execution of this job" can easily belong to another agent.
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        m = re.search(re.escape(job) + r"-[a-z0-9]{5,}", blob)
+        execution = m.group(0) if m else None
+        output = ""
+
+        if execution:
+            logs = fetch_execution_logs(base, execution)
+            if logs.strip():
+                digest = summarize_remote_logs(logs, failed=proc.returncode != 0)
+                if digest.strip():
+                    output = digest + "\n"
+                else:
+                    # Nothing matched the filters — better to show everything than
+                    # to report a red run with no explanation at all.
+                    output = logs if logs.endswith("\n") else logs + "\n"
             else:
-                # Nothing matched the filters — better to show everything than
-                # to report a red run with no explanation at all.
-                sys.stdout.write(logs if logs.endswith("\n") else logs + "\n")
+                warn(f"could not retrieve logs for {execution}; inspect with: "
+                     f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
+                     f"=\"{execution}\"' --project={gproject}")
         else:
-            warn(f"could not retrieve logs for {execution}; inspect with: "
-                 f"gcloud logging read 'labels.\"run.googleapis.com/execution_name\""
-                 f"=\"{execution}\"' --project={gproject}")
-    else:
-        sys.stdout.write(proc.stdout)
-    sys.stdout.flush()
+            output = proc.stdout
 
-    if proc.returncode != 0:
-        # Distinguish "the tests failed" from "the infrastructure failed".
-        if "failed to complete" in proc.stderr.lower() or "execution" in proc.stderr.lower():
-            if execution:
-                warn(f"remote suite FAILED — execution {execution}")
-            return 1
-        warn(f"remote execution error ({proc.stderr.strip()[:200]}) — running locally")
-        return None
-    return 0
+        if proc.returncode != 0:
+            # Distinguish "the tests failed" from "the infrastructure failed".
+            if "failed to complete" in proc.stderr.lower() or \
+               "execution" in proc.stderr.lower():
+                if execution:
+                    warn(f"remote suite FAILED — execution {execution}")
+                return 1, output
+            warn(f"remote execution error ({proc.stderr.strip()[:200]}) — running locally")
+            return None, output
+        return 0, output
+
+    exit_code, output = coalesce_remote_run(key, submit)
+    if output:
+        sys.stdout.write(output)
+        sys.stdout.flush()
+    return exit_code
 
 
 def cmd_where(cfg: dict, cwd: Path) -> int:
