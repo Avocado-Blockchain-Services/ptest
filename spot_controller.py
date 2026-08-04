@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from spot_queue import Lease, WorkerState
+from spot_queue import WORKER_INDEX_SCHEMA, WorkerState
 
 
 def admission_allowed(backlog: int, active_leases: int, max_workers: int,
@@ -34,7 +34,7 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
            active_leases, idle_timeout_seconds) < 0:
         raise ValueError("capacity inputs must be non-negative")
     if active_leases:
-        return min(max_workers, max(active_workers, active_leases))
+        return min(max_workers, max(backlog, active_workers, active_leases))
     if max_workers == 0:
         return 0
     if backlog:
@@ -142,43 +142,83 @@ class GcloudControllerAdapter:
         instances = json.loads(self._run("compute", "instance-groups", "managed",
                                          "list-instances", self.mig, "--region", self.region,
                                          "--format=json"))
-        active = sum(1 for instance in instances if instance.get("instanceStatus") == "RUNNING")
-        leases = self._active_leases()
-        idle_age = self._worker_idle_age()
+        running = [
+            instance for instance in instances
+            if instance.get("instanceStatus") == "RUNNING"
+        ]
+        running_worker_ids = {
+            str(instance.get("instance") or instance.get("name")).rsplit("/", 1)[-1]
+            for instance in running
+            if instance.get("instance") or instance.get("name")
+        }
+        active = len(running)
+        leases, idle_age = self._worker_metrics(active, running_worker_ids)
         return backlog, active, leases, idle_age
 
-    def _storage_listing(self, uri: str) -> str:
-        """Treat an empty object prefix as an empty metric, not an outage."""
+    def _worker_index(self) -> list[WorkerState]:
+        uri = f"gs://{self.bucket}/spot/v1/workers/index/current.json"
         try:
-            return self._run("storage", "ls", uri)
+            raw = self._run("storage", "cat", uri)
         except RuntimeError as exc:
             message = str(exc).lower()
             if "no urls matched" in message or "matched no objects" in message:
-                return ""
+                return []
             raise
+        try:
+            record = json.loads(raw)
+            if not isinstance(record, dict) or record.get("schema") != WORKER_INDEX_SCHEMA \
+                    or not isinstance(record.get("workers"), dict):
+                raise ValueError("invalid schema")
+            return [WorkerState.from_record(value) for value in record["workers"].values()]
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("worker index is malformed") from exc
 
-    def _worker_idle_age(self) -> int:
-        listing = self._storage_listing(f"gs://{self.bucket}/spot/v1/workers/")
-        states = []
-        for uri in listing.splitlines():
-            try:
-                states.append(WorkerState.from_record(json.loads(self._run("storage", "cat", uri))))
-            except (ValueError, TypeError, json.JSONDecodeError):
-                continue
+    def _worker_metrics(self, active_workers: int = 0,
+                        running_worker_ids: set[str] | None = None) -> tuple[int, int]:
+        states = self._worker_index()
         now = datetime.now(timezone.utc)
         fresh = [
             state for state in states
             if 0 <= (now - state.heartbeat_at).total_seconds()
             <= self.worker_heartbeat_ttl_seconds
         ]
+        indexed_leases = sum(
+            1 for state in states
+            if state.active_request is not None and (
+                state.active_lease_expires_at > now
+                if state.active_lease_expires_at is not None
+                else state in fresh
+            )
+        )
+        indexed_worker_ids = {
+            state.worker_id for state in states
+            if state in fresh or (
+                state.active_lease_expires_at is not None
+                and state.active_lease_expires_at > now
+            )
+        }
+        # A controller may roll out while older workers still have leases but
+        # have not joined the new index. Count every such running instance as
+        # leased until its first indexed heartbeat; this can only overcount.
+        running_worker_ids = running_worker_ids or set()
+        unidentified_workers = max(0, active_workers - len(running_worker_ids))
+        unindexed_workers = len(running_worker_ids - indexed_worker_ids) + \
+            unidentified_workers
+        leases = indexed_leases + unindexed_workers
+        if unindexed_workers:
+            return leases, 0
         if not fresh:
             # No current heartbeat can justify keeping a RUNNING instance. A
             # large observed idle age lets the pure scale policy reach zero.
-            return 2 ** 31 - 1
+            return leases, 2 ** 31 - 1
         if any(state.active_request is not None for state in fresh):
-            return 0
-        return int(min(max(0, (now - state.idle_since).total_seconds())
-                       for state in fresh if state.idle_since is not None))
+            return leases, 0
+        idle_age = int(min(max(0, (now - state.idle_since).total_seconds())
+                           for state in fresh if state.idle_since is not None))
+        return leases, idle_age
+
+    def _worker_idle_age(self) -> int:
+        return self._worker_metrics()[1]
 
     def _monitoring_backlog(self) -> int:
         """Read the supported Cloud Monitoring REST metric (not a gcloud alias)."""
@@ -198,18 +238,6 @@ class GcloudControllerAdapter:
         values = [point.get("value", {}).get("int64Value", 0)
                   for series in payload.get("timeSeries", []) for point in series.get("points", [])]
         return max((int(value) for value in values), default=0)
-
-    def _active_leases(self) -> int:
-        listing = self._storage_listing(f"gs://{self.bucket}/spot/v1/states/")
-        now, active = datetime.now(timezone.utc), 0
-        for uri in listing.splitlines():
-            raw = self._run("storage", "cat", uri)
-            try:
-                lease = Lease.from_record(json.loads(raw), 1)
-            except (ValueError, TypeError, json.JSONDecodeError):
-                continue
-            active += lease.expires_at > now
-        return active
 
     def set_target(self, target: int) -> None:
         self._run("compute", "instance-groups", "managed", "resize", self.mig,

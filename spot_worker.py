@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -280,15 +280,24 @@ class GcloudWorkerAdapter:
         return self.store.is_cancelled(request_key)
 
     def claim(self, request_key, worker_id, lease_seconds):
-        return self.store.claim(request_key, worker_id, datetime.now(timezone.utc), lease_seconds)
+        now = datetime.now(timezone.utc)
+        self.heartbeat_worker(
+            worker_id, request_key, now + timedelta(seconds=lease_seconds), now
+        )
+        lease = self.store.claim(request_key, worker_id, now, lease_seconds)
+        if lease is None:
+            self.heartbeat_worker(worker_id, None)
+        return lease
 
     def heartbeat(self, _lease):
         # First heartbeat establishes the loop. Bound heartbeats renew both the
         # durable generation-checked lease and the transient delivery deadline.
         return None
 
-    def heartbeat_worker(self, worker_id, active_request):
-        return self.store.heartbeat_worker(worker_id, active_request, datetime.now(timezone.utc))
+    def heartbeat_worker(self, worker_id, active_request, lease_expires_at=None, now=None):
+        return self.store.heartbeat_worker(
+            worker_id, active_request, now or datetime.now(timezone.utc), lease_expires_at
+        )
 
     def release(self, lease):
         return self.store.release(lease, datetime.now(timezone.utc))
@@ -346,14 +355,16 @@ class _MessageAdapter:
             if self.cancelled():
                 self.worker.stop()
                 return None
-            renewed = self.supervisor.store.renew(
-                lease, datetime.now(timezone.utc),
-                int((lease.expires_at - lease.acquired_at).total_seconds()),
+            renewed_at = datetime.now(timezone.utc)
+            lease_seconds = int((lease.expires_at - lease.acquired_at).total_seconds())
+            self.supervisor.heartbeat_worker(
+                self.worker.worker_id, lease.request_key,
+                renewed_at + timedelta(seconds=lease_seconds), renewed_at,
             )
+            renewed = self.supervisor.store.renew(lease, renewed_at, lease_seconds)
             if renewed is None:
                 return None
             self._lease = renewed
-            self.supervisor.heartbeat_worker(self.worker.worker_id, lease.request_key)
             self.supervisor._run(
                 "pubsub", "subscriptions", "modify-message-ack-deadline",
                 self.supervisor.subscription, "--ack-ids", self.message["ack_id"],

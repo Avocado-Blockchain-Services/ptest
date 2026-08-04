@@ -1,7 +1,7 @@
 import json
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -73,6 +73,10 @@ def test_active_lease_never_scales_in():
 
 def test_active_leases_are_a_floor_even_when_worker_observation_lags():
     assert scale_target(0, 1, 9999, 5, active_leases=3) == 3
+
+
+def test_backlog_remains_a_scale_out_signal_while_a_lease_is_active():
+    assert scale_target(4, 1, 0, 5, active_leases=1) == 4
 
 
 def test_target_never_exceeds_cap_when_lease_count_is_inconsistent():
@@ -149,13 +153,19 @@ def test_stale_worker_heartbeats_expire_and_cannot_mask_fresh_idle_age(monkeypat
         def now(_tz): return datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
 
     now = Clock.now(timezone.utc)
-    stale = WorkerState("gone-worker", None, now.replace(minute=0), "a" * 64)
+    stale = WorkerState(
+        "gone-worker", None, now.replace(minute=0), "a" * 64,
+        now + timedelta(minutes=1),
+    )
     fresh = WorkerState(
         "idle-worker", now.replace(hour=11, minute=0), now.replace(minute=9), None
     )
-    records = {
-        "gs://bucket/spot/v1/workers/gone-worker.json": stale.to_record(),
-        "gs://bucket/spot/v1/workers/idle-worker.json": fresh.to_record(),
+    record = {
+        "schema": "ptest-spot-worker-index-v1",
+        "workers": {
+            "gone-worker": stale.to_record(),
+            "idle-worker": fresh.to_record(),
+        },
     }
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket",
@@ -163,12 +173,7 @@ def test_stale_worker_heartbeats_expire_and_cannot_mask_fresh_idle_age(monkeypat
     )
     monkeypatch.setattr("spot_controller.datetime", Clock)
 
-    def run(*args):
-        if args[:2] == ("storage", "ls"):
-            return "\n".join(records)
-        return __import__("json").dumps(records[args[-1]])
-
-    monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_run", lambda *args: json.dumps(record))
 
     assert adapter._worker_idle_age() == 4200
 
@@ -178,29 +183,31 @@ def test_only_stale_worker_heartbeats_allow_scale_down(monkeypatch):
         @staticmethod
         def now(_tz): return datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
 
-    stale = WorkerState("gone-worker", None, Clock.now(timezone.utc).replace(minute=0), "a" * 64)
+    stale = WorkerState(
+        "gone-worker", None, Clock.now(timezone.utc).replace(minute=0),
+        "a" * 64, Clock.now(timezone.utc).replace(minute=1),
+    )
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket",
         worker_heartbeat_ttl_seconds=120,
     )
     monkeypatch.setattr("spot_controller.datetime", Clock)
-    monkeypatch.setattr(
-        adapter, "_run",
-        lambda *args: "gs://bucket/spot/v1/workers/gone-worker.json"
-        if args[:2] == ("storage", "ls") else __import__("json").dumps(stale.to_record()),
-    )
+    monkeypatch.setattr(adapter, "_run", lambda *args: json.dumps({
+        "schema": "ptest-spot-worker-index-v1",
+        "workers": {"gone-worker": stale.to_record()},
+    }))
 
     assert scale_target(0, 1, adapter._worker_idle_age(), 5) == 0
 
 
-def test_empty_worker_and_state_prefixes_bootstrap_first_worker(monkeypatch):
+def test_missing_worker_index_bootstraps_first_worker(monkeypatch):
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket"
     )
     targets = []
 
     def run(*args):
-        if args[:2] == ("storage", "ls"):
+        if args[:2] == ("storage", "cat"):
             raise RuntimeError("One or more URLs matched no objects")
         if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
             return "[]"
@@ -212,6 +219,123 @@ def test_empty_worker_and_state_prefixes_bootstrap_first_worker(monkeypatch):
 
     assert reconcile(adapter, 5) == 1
     assert targets == [1]
+
+
+def test_unindexed_running_worker_is_a_conservative_lease_during_rollout(monkeypatch):
+    now = datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
+    indexed_idle = WorkerState("worker-new", now, now, None)
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket"
+    )
+    index = {
+        "schema": "ptest-spot-worker-index-v1",
+        "workers": {"worker-new": indexed_idle.to_record()},
+    }
+
+    class Clock:
+        @staticmethod
+        def now(_tz): return now
+
+    def run(*args):
+        if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
+            return json.dumps([
+                {"instanceStatus": "RUNNING", "instance": "zones/a/instances/worker-new"},
+                {"instanceStatus": "RUNNING", "instance": "zones/a/instances/worker-old"},
+            ])
+        if args[:2] == ("storage", "cat"):
+            return json.dumps(index)
+        raise AssertionError(args)
+
+    monkeypatch.setattr("spot_controller.datetime", Clock)
+    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_run", run)
+
+    assert adapter.authenticated_metrics() == (0, 2, 1, 0)
+
+
+def test_terminated_index_entry_cannot_mask_different_unindexed_worker(monkeypatch):
+    now = datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
+    terminated = WorkerState("worker-terminated", now, now, None)
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket"
+    )
+
+    class Clock:
+        @staticmethod
+        def now(_tz): return now
+
+    def run(*args):
+        if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
+            return json.dumps([{
+                "instanceStatus": "RUNNING",
+                "instance": "zones/a/instances/worker-running",
+            }])
+        if args[:2] == ("storage", "cat"):
+            return json.dumps({
+                "schema": "ptest-spot-worker-index-v1",
+                "workers": {"worker-terminated": terminated.to_record()},
+            })
+        raise AssertionError(args)
+
+    monkeypatch.setattr("spot_controller.datetime", Clock)
+    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_run", run)
+
+    assert adapter.authenticated_metrics() == (0, 1, 1, 0)
+
+
+def test_controller_reads_one_bounded_worker_index_not_terminal_history(monkeypatch):
+    class Clock:
+        @staticmethod
+        def now(_tz): return datetime(2026, 8, 4, 12, 10, tzinfo=timezone.utc)
+
+    now = Clock.now(timezone.utc)
+    adapter = GcloudControllerAdapter(
+        "project-a", "us-central1", "mig", "spot-sub", "bucket"
+    )
+    terminal_objects = [
+        f"gs://bucket/spot/v1/states/{number:064x}.json" for number in range(1000)
+    ]
+    calls = []
+    index = {
+        "schema": "ptest-spot-worker-index-v1",
+        "workers": {
+            "worker-a": {
+                "schema": "ptest-spot-worker-v1",
+                "worker_id": "worker-a",
+                "idle_since": None,
+                "heartbeat_at": now.isoformat(),
+                "active_request": "a" * 64,
+                "active_lease_expires_at": (now + timedelta(minutes=2)).isoformat(),
+            }
+        },
+    }
+
+    def run(*args):
+        calls.append(args)
+        if args[:4] == ("compute", "instance-groups", "managed", "list-instances"):
+            return json.dumps([{
+                "instanceStatus": "RUNNING",
+                "instance": "zones/a/instances/worker-a",
+            }])
+        if args == (
+            "storage", "cat", "gs://bucket/spot/v1/workers/index/current.json"
+        ):
+            return json.dumps(index)
+        if args[:2] == ("storage", "ls"):
+            return "\n".join(terminal_objects)
+        if args[:2] == ("storage", "cat"):
+            raise AssertionError("controller fetched retained terminal state")
+        raise AssertionError(args)
+
+    monkeypatch.setattr("spot_controller.datetime", Clock)
+    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_run", run)
+
+    assert adapter.authenticated_metrics() == (0, 1, 1, 0)
+    assert [call for call in calls if call[:2] == ("storage", "cat")] == [
+        ("storage", "cat", "gs://bucket/spot/v1/workers/index/current.json")
+    ]
 
 
 def test_controller_main_exposes_overflow_toggle_to_http_contract(monkeypatch):

@@ -71,7 +71,9 @@ replicate the whole setup on a similar stack.
 
 | Path | What |
 |---|---|
-| `ptest` | The dispatcher. Single file, no dependencies beyond Python 3.11+. |
+| `ptest` | The dispatcher. No dependencies beyond Python 3.11+ for local and Cloud Run use. |
+| `spot_queue.py` | Companion module required by the opt-in Spot backend. |
+| `install.sh` | Atomically installs `ptest` and its Spot companion together. |
 | `config.example.toml` | Sanitised config; real one lives at `~/.config/ptest/config.toml` |
 | `Dockerfile.pytest` | Runner image: python + postgres 15 + uv |
 | `Dockerfile.vitest` | Runner image: node 20, no database |
@@ -85,10 +87,17 @@ replicate the whole setup on a similar stack.
 ## Install
 
 ```bash
-cp ptest ~/.local/bin/ptest && chmod +x ~/.local/bin/ptest
+./install.sh
 cp config.example.toml ~/.config/ptest/config.toml   # then edit
 ptest doctor
 ```
+
+Pass a destination as the first argument to install somewhere other than
+`~/.local/bin`. The installer builds a versioned `ptest`/`spot_queue.py` bundle
+and atomically switches the executable symlink, so an interrupted upgrade keeps
+the previous complete pair. `ptest doctor` rejects a configured Spot backend
+when its companion is missing or ABI-incompatible. Local and Cloud Run backends
+remain usable with the historical single-file `ptest` layout.
 
 ## Remote backend
 
@@ -270,6 +279,16 @@ SIGTERM stops the heartbeat, terminates the child, publishes no result, and
 leaves unfinished work unacknowledged for redelivery. Node dependencies are
 installed from `package-lock.json` before the isolated child starts; dependency
 install is script-free, while Vitest itself runs in Bubblewrap with no network.
+The worker service account has conditional `roles/storage.objectViewer` access
+only to immutable `sources/` and `spot/v1/requests/` objects. Its conditional
+`roles/storage.objectUser` grant is limited to mutable `spot/v1/states/` and
+`spot/v1/workers/` objects, so a compromised worker cannot overwrite source
+archives or request records. The conditions use Cloud Storage's documented
+[resource-name prefix model](https://cloud.google.com/storage/docs/access-control/iam-conditions#resource-attributes).
+Workers generation-CAS their current lease expiry into the bounded
+`spot/v1/workers/index/current.json` snapshot before claiming or renewing. The
+controller reads that one snapshot for the lease floor and idle age; retained
+terminal state objects do not add controller reads.
 With `spot_overflow_reject_enabled = true` in both Terraform and the matching
 ptest stanza, a new request first calls the IAM-protected controller `/admit`
 endpoint. When the controller observes either Pub/Sub's unacknowledged backlog

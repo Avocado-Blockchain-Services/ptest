@@ -58,11 +58,16 @@ from urllib.request import Request, urlopen
 # Optional companion module. Kept lazy so the longstanding single-file ptest
 # installation remains usable for local and Cloud Run backends.
 GcloudSpotQueueStore = None
+PTEST_SPOT_COMPANION_ABI = 1
 
 try:
     import tomllib
 except ModuleNotFoundError:  # py<3.11
     tomllib = None
+
+RUNNER_DIRECTORY = Path(__file__).resolve().parent
+if str(RUNNER_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(RUNNER_DIRECTORY))
 
 CONFIG = Path(os.environ.get("PTEST_CONFIG", Path.home() / ".config/ptest/config.toml"))
 STATE = Path.home() / ".local/state/ptest"
@@ -1896,6 +1901,9 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             warn("spot_queue backend is not installed — running locally")
             return None
         raise
+    if getattr(spot_queue, "PTEST_SPOT_COMPANION_ABI", None) != PTEST_SPOT_COMPANION_ABI:
+        warn("spot_queue backend companion is incompatible — running locally")
+        return None
     queue_class = GcloudSpotQueueStore or spot_queue.GcloudSpotQueueStore
     try:
         settings = remote_cache_settings(pcfg, cfg)
@@ -2150,6 +2158,24 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
                     ok = False
                 else:
                     print("  cache       ✓ healthy")
+    elif backend == "spot_queue":
+        companion = Path(__file__).resolve().with_name("spot_queue.py")
+        if not companion.is_file():
+            print("  companion   ✗ spot_queue.py is not installed beside ptest")
+            ok = False
+        else:
+            try:
+                import spot_queue  # noqa: F401
+            except (ImportError, SyntaxError):
+                print("  companion   ✗ spot_queue.py cannot be imported")
+                ok = False
+            else:
+                if getattr(spot_queue, "PTEST_SPOT_COMPANION_ABI", None) != \
+                        PTEST_SPOT_COMPANION_ABI:
+                    print("  companion   ✗ incompatible spot_queue.py")
+                    ok = False
+                else:
+                    print("  companion   ✓ spot_queue.py")
     f = STATE / "remote-runs.json"
     if f.exists():
         try:

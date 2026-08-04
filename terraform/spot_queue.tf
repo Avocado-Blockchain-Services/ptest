@@ -30,10 +30,30 @@ resource "google_service_account" "spot_controller" {
   display_name = "ptest Spot queue controller"
 }
 
-resource "google_storage_bucket_iam_member" "spot_worker_storage" {
+resource "google_storage_bucket_iam_member" "spot_worker_immutable_reader" {
   bucket = google_storage_bucket.src.name
-  role   = "roles/storage.objectUser" # source + generation-safe queue records in this bucket only
+  role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.spot_worker.email}"
+  condition {
+    title      = "Read immutable Spot inputs"
+    expression = <<-EOT
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/sources/") ||
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/requests/")
+    EOT
+  }
+}
+
+resource "google_storage_bucket_iam_member" "spot_worker_mutable_state" {
+  bucket = google_storage_bucket.src.name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.spot_worker.email}"
+  condition {
+    title      = "Mutate only Spot state"
+    expression = <<-EOT
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/states/") ||
+      resource.name.startsWith("projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/workers/")
+    EOT
+  }
 }
 
 resource "google_pubsub_subscription_iam_member" "spot_worker_subscriber" {
@@ -266,6 +286,7 @@ resource "google_cloud_scheduler_job" "spot_controller" {
     uri         = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"
     oidc_token {
       service_account_email = google_service_account.spot_controller.email
+      audience              = google_cloud_run_v2_service.spot_controller.uri
     }
   }
 }

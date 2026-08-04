@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -118,6 +118,52 @@ def test_worker_uses_supported_pubsub_ack_and_deadline_commands(monkeypatch):
         ("pubsub", "subscriptions", "ack", "spot-sub", "--ack-ids", "ack-1"),
         ("pubsub", "subscriptions", "modify-message-ack-deadline", "spot-sub",
          "--ack-ids", "ack-1", "--ack-deadline", "120"),
+    ]
+
+
+def test_claim_announces_the_lease_floor_before_creating_the_durable_lease(monkeypatch):
+    adapter = GcloudWorkerAdapter("project-a", "private-bucket", "spot-topic", "spot-sub")
+    events = []
+    lease = Lease(KEY, "worker-a", NOW, NOW + timedelta(seconds=120), 1)
+    monkeypatch.setattr("spot_worker.datetime", type("Clock", (), {
+        "now": staticmethod(lambda _tz: NOW),
+    }))
+    adapter.heartbeat_worker = lambda worker, request, expiry=None, now=None: events.append(
+        ("index", worker, request, expiry, now)
+    )
+    adapter.store.claim = lambda *args: events.append(("claim", *args)) or lease
+
+    assert adapter.claim(KEY, "worker-a", 120) == lease
+    assert events == [
+        ("index", "worker-a", KEY, NOW + timedelta(seconds=120), NOW),
+        ("claim", KEY, "worker-a", NOW, 120),
+    ]
+
+
+def test_renew_announces_the_next_lease_floor_before_lease_cas(monkeypatch):
+    adapter = GcloudWorkerAdapter("project-a", "private-bucket", "spot-topic", "spot-sub")
+    initial = Lease(KEY, "worker-a", NOW, NOW + timedelta(seconds=120), 1)
+    renewed_at = NOW + timedelta(seconds=40)
+    renewed = Lease(KEY, "worker-a", renewed_at, renewed_at + timedelta(seconds=120), 2)
+    events = []
+    adapter.store.is_cancelled = lambda _key: False
+    adapter.heartbeat_worker = lambda worker, request, expiry=None, now=None: events.append(
+        ("index", expiry, now)
+    )
+    adapter.store.renew = lambda *args: events.append(("renew", *args)) or renewed
+    monkeypatch.setattr("spot_worker.datetime", type("Clock", (), {
+        "now": staticmethod(lambda _tz: renewed_at),
+    }))
+    monkeypatch.setattr(adapter, "_run", lambda *_args: "")
+    bound = _MessageAdapter(
+        adapter, {"ack_id": "ack-1", "request_key": KEY},
+        type("WorkerState", (), {"stopping": False, "worker_id": "worker-a"})(),
+    )
+
+    assert bound.heartbeat(initial) == renewed
+    assert events == [
+        ("index", renewed.expires_at, renewed_at),
+        ("renew", initial, renewed_at, 120),
     ]
 
 

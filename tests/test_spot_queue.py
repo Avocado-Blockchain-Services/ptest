@@ -271,6 +271,85 @@ def test_worker_heartbeat_tracks_actual_idle_since_and_completed_lease_releases(
     assert store.claim(KEY, "worker-b", NOW + timedelta(seconds=6), 60).worker_id == "worker-b"
 
 
+def test_worker_index_carries_the_durable_lease_expiry():
+    store = InMemorySpotQueueStore()
+    expiry = NOW + timedelta(seconds=60)
+
+    active = store.heartbeat_worker("worker-a", KEY, NOW, expiry)
+    idle = store.heartbeat_worker("worker-a", None, NOW + timedelta(seconds=5))
+
+    assert active.active_lease_expires_at == expiry
+    assert idle.active_lease_expires_at is None
+
+
+def test_gcloud_worker_index_keeps_all_live_leases_and_bounds_idle_history(monkeypatch):
+    from types import SimpleNamespace
+    from spot_queue import GcloudSpotQueueStore, WorkerState
+
+    store = GcloudSpotQueueStore(["gcloud"], "private-bucket", "ptest-spot")
+    live = WorkerState(
+        "worker-live", None, NOW, "b" * 64, NOW + timedelta(seconds=60)
+    )
+    idle = {
+        f"worker-{number}": WorkerState(
+            f"worker-{number}", NOW + timedelta(seconds=number),
+            NOW + timedelta(seconds=number), None,
+        )
+        for number in range(80)
+    }
+    existing = {
+        "schema": "ptest-spot-worker-index-v1",
+        "workers": {
+            live.worker_id: live.to_record(),
+            **{worker_id: state.to_record() for worker_id, state in idle.items()},
+        },
+    }
+    written = []
+    monkeypatch.setattr(
+        store, "_read_worker_index",
+        lambda: SimpleNamespace(value=existing, generation=7),
+    )
+    monkeypatch.setattr(
+        store, "_write_worker_index",
+        lambda value, generation: written.append((value, generation)) or True,
+    )
+    current = WorkerState(
+        "worker-current", None, NOW, KEY, NOW + timedelta(seconds=60)
+    )
+
+    store._update_worker_index(current, NOW)
+
+    workers = written[0][0]["workers"]
+    assert written[0][1] == 7
+    assert "worker-live" in workers
+    assert "worker-current" in workers
+    assert sum(record["active_request"] is None for record in workers.values()) == 64
+
+
+def test_gcloud_heartbeat_publishes_shared_index_before_per_worker_record(monkeypatch):
+    from spot_queue import GcloudSpotQueueStore
+
+    store = GcloudSpotQueueStore(["gcloud"], "private-bucket", "ptest-spot")
+    events = []
+    monkeypatch.setattr(store, "read_worker_state", lambda _worker_id: None)
+    monkeypatch.setattr(
+        store, "_update_worker_index",
+        lambda state, now: events.append(("index", state, now)),
+    )
+    monkeypatch.setattr(
+        store, "_run",
+        lambda args: events.append(("worker", args))
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    state = store.heartbeat_worker(
+        "worker-a", KEY, NOW, NOW + timedelta(seconds=60)
+    )
+
+    assert events[0] == ("index", state, NOW)
+    assert events[1][0] == "worker"
+
+
 def test_terminal_result_publication_is_idempotent_but_rejects_conflicts():
     store = InMemorySpotQueueStore()
     store.create_request(request())

@@ -19,6 +19,10 @@ LEASE_SCHEMA = "ptest-spot-lease-v1"
 RESULT_SCHEMA = "ptest-spot-result-v1"
 CANCEL_SCHEMA = "ptest-spot-cancel-v1"
 WORKER_SCHEMA = "ptest-spot-worker-v1"
+WORKER_INDEX_SCHEMA = "ptest-spot-worker-index-v1"
+WORKER_INDEX_IDLE_LIMIT = 64
+WORKER_INDEX_LEGACY_ACTIVE_SECONDS = 300
+PTEST_SPOT_COMPANION_ABI = 1
 SOURCE_URI_RE = re.compile(
     r"gs://[A-Za-z0-9][A-Za-z0-9._-]+/sources/[0-9a-f]{64}\.tar\.gz"
 )
@@ -214,6 +218,7 @@ class WorkerState:
     idle_since: datetime | None
     heartbeat_at: datetime
     active_request: str | None
+    active_lease_expires_at: datetime | None = None
 
     def __post_init__(self):
         _text(self.worker_id, "worker_id")
@@ -225,22 +230,36 @@ class WorkerState:
             _request_key(self.active_request)
         if (self.idle_since is None) != (self.active_request is not None):
             raise SpotRecordError("worker state must be exactly idle or active")
+        if self.active_lease_expires_at is not None:
+            if self.active_request is None:
+                raise SpotRecordError("idle worker cannot retain a lease expiry")
+            if self.active_lease_expires_at.tzinfo is None:
+                raise SpotRecordError("active lease expiry must include a timezone")
+            if self.active_lease_expires_at <= self.heartbeat_at:
+                raise SpotRecordError("active lease expiry must follow its heartbeat")
 
     def to_record(self) -> dict:
         return {"schema": WORKER_SCHEMA, "worker_id": self.worker_id,
                 "idle_since": self.idle_since.astimezone(timezone.utc).isoformat() if self.idle_since else None,
                 "heartbeat_at": self.heartbeat_at.astimezone(timezone.utc).isoformat(),
-                "active_request": self.active_request}
+                "active_request": self.active_request,
+                "active_lease_expires_at": (
+                    self.active_lease_expires_at.astimezone(timezone.utc).isoformat()
+                    if self.active_lease_expires_at else None
+                )}
 
     @classmethod
     def from_record(cls, record: object) -> "WorkerState":
         if not isinstance(record, dict) or record.get("schema") != WORKER_SCHEMA:
             raise SpotRecordError("worker state record has an invalid schema")
         idle = record.get("idle_since")
+        expires = record.get("active_lease_expires_at")
         return cls(_text(record.get("worker_id"), "worker_id"),
                    _timestamp(idle, "idle_since") if idle is not None else None,
                    _timestamp(record.get("heartbeat_at"), "heartbeat_at"),
-                   record.get("active_request"))
+                   record.get("active_request"),
+                   _timestamp(expires, "active_lease_expires_at")
+                   if expires is not None else None)
 
 
 @dataclass(frozen=True)
@@ -486,7 +505,8 @@ class InMemorySpotQueueStore:
         return self.cancellation_quiesced(request_key, datetime.now(timezone.utc))
 
     def heartbeat_worker(self, worker_id: str, active_request: str | None,
-                         now: datetime) -> WorkerState:
+                         now: datetime,
+                         active_lease_expires_at: datetime | None = None) -> WorkerState:
         _text(worker_id, "worker_id")
         if now.tzinfo is None:
             raise ValueError("worker heartbeat must be timezone-aware")
@@ -496,7 +516,10 @@ class InMemorySpotQueueStore:
             prior = self.worker_states.get(worker_id)
             idle_since = None if active_request else (
                 prior.idle_since if prior and prior.active_request is None else now)
-            state = WorkerState(worker_id, idle_since, now, active_request)
+            expiry = active_lease_expires_at
+            if expiry is None and prior and prior.active_request == active_request:
+                expiry = prior.active_lease_expires_at
+            state = WorkerState(worker_id, idle_since, now, active_request, expiry)
             self.worker_states[worker_id] = state
         return state
 
@@ -546,6 +569,9 @@ class GcloudSpotQueueStore:
 
     def _worker_uri(self, worker_id: str) -> str:
         return f"gs://{self.bucket}/spot/v1/workers/{self._worker_id(worker_id)}.json"
+
+    def _worker_index_uri(self) -> str:
+        return f"gs://{self.bucket}/spot/v1/workers/index/current.json"
 
     @staticmethod
     def _message(result: subprocess.CompletedProcess) -> str:
@@ -615,6 +641,86 @@ class GcloudSpotQueueStore:
         if self._precondition(result):
             return False
         raise SpotQueueUnavailable("queue object could not be written")
+
+    def _read_worker_index(self) -> _Stored | None:
+        uri = self._worker_index_uri()
+        described = self._run(["storage", "objects", "describe", uri, "--format=json"])
+        if described.returncode != 0:
+            if self._missing(described):
+                return None
+            raise SpotQueueUnavailable("worker index could not be described")
+        try:
+            generation = int(json.loads(described.stdout)["generation"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SpotQueueUnavailable("worker index metadata was malformed") from exc
+        fetched = self._run(["storage", "cat", f"{uri}#{generation}"])
+        if fetched.returncode != 0:
+            if self._missing(fetched):
+                return None
+            raise SpotQueueUnavailable("worker index could not be read")
+        try:
+            value = json.loads(fetched.stdout)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SpotQueueUnavailable("worker index JSON was malformed") from exc
+        if not isinstance(value, dict) or value.get("schema") != WORKER_INDEX_SCHEMA \
+                or not isinstance(value.get("workers"), dict):
+            raise SpotRecordError("worker index record has an invalid schema")
+        return _Stored(value, generation)
+
+    def _write_worker_index(self, value: dict, generation: int) -> bool:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
+            json.dump(value, payload, sort_keys=True, separators=(",", ":"))
+            payload.flush()
+            result = self._run([
+                "storage", "cp", payload.name, self._worker_index_uri(),
+                f"--if-generation-match={generation}",
+            ])
+        if result.returncode == 0:
+            return True
+        if self._precondition(result):
+            return False
+        raise SpotQueueUnavailable("worker index could not be written")
+
+    def _update_worker_index(self, state: WorkerState, now: datetime) -> None:
+        """CAS-merge one worker into a bounded, controller-readable snapshot."""
+        for _attempt in range(8):
+            stored = self._read_worker_index()
+            states: dict[str, WorkerState] = {}
+            if stored is not None:
+                for worker_id, record in stored.value["workers"].items():
+                    parsed = WorkerState.from_record(record)
+                    if parsed.worker_id != worker_id:
+                        raise SpotRecordError("worker index key does not match worker_id")
+                    states[worker_id] = parsed
+            states[state.worker_id] = state
+
+            active, idle = {}, []
+            legacy_cutoff = now - timedelta(seconds=WORKER_INDEX_LEGACY_ACTIVE_SECONDS)
+            for worker_id, candidate in states.items():
+                if candidate.active_request is not None:
+                    if candidate.active_lease_expires_at is not None:
+                        if candidate.active_lease_expires_at > now:
+                            active[worker_id] = candidate
+                    elif candidate.heartbeat_at >= legacy_cutoff:
+                        active[worker_id] = candidate
+                else:
+                    idle.append(candidate)
+            idle.sort(key=lambda candidate: candidate.heartbeat_at, reverse=True)
+            bounded = {**active, **{
+                candidate.worker_id: candidate
+                for candidate in idle[:WORKER_INDEX_IDLE_LIMIT]
+            }}
+            record = {
+                "schema": WORKER_INDEX_SCHEMA,
+                "workers": {
+                    worker_id: candidate.to_record()
+                    for worker_id, candidate in sorted(bounded.items())
+                },
+            }
+            generation = stored.generation if stored is not None else 0
+            if self._write_worker_index(record, generation):
+                return
+        raise SpotQueueUnavailable("worker index could not win a stable generation")
 
     def create_request(self, request: SpotRequest) -> bool:
         existing = self.read_request(request.request_key)
@@ -790,7 +896,8 @@ class GcloudSpotQueueStore:
         return self.cancellation_quiesced(request_key, datetime.now(timezone.utc))
 
     def heartbeat_worker(self, worker_id: str, active_request: str | None,
-                         now: datetime) -> WorkerState:
+                         now: datetime,
+                         active_lease_expires_at: datetime | None = None) -> WorkerState:
         if now.tzinfo is None:
             raise ValueError("worker heartbeat must be timezone-aware")
         if active_request is not None:
@@ -798,7 +905,13 @@ class GcloudSpotQueueStore:
         prior = self.read_worker_state(worker_id)
         idle_since = None if active_request else (
             prior.idle_since if prior and prior.active_request is None else now)
-        state = WorkerState(worker_id, idle_since, now, active_request)
+        expiry = active_lease_expires_at
+        if expiry is None and prior and prior.active_request == active_request:
+            expiry = prior.active_lease_expires_at
+        state = WorkerState(worker_id, idle_since, now, active_request, expiry)
+        # Publish the shared floor first. Claim/renew callers do this before
+        # their lease CAS, so a partial failure can only overcount until expiry.
+        self._update_worker_index(state, now)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as payload:
             json.dump(state.to_record(), payload, sort_keys=True, separators=(",", ":"))
             payload.flush()
