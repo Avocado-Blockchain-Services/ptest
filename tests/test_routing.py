@@ -158,16 +158,16 @@ def test_a_narrowing_filter_keeps_a_big_path_local(ptest, persea_shaped, monkeyp
     assert route is False, "a filter means the caller wants the fast loop"
 
 
-def test_force_local_wins(ptest, persea_shaped, monkeypatch):
+def test_force_local_cannot_bypass_compulsory_heavy_spot(ptest, persea_shaped, monkeypatch):
     monkeypatch.chdir(persea_shaped)
     route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, CLOUD, CFG, True)
-    assert route is False
+    assert route is True
 
 
-def test_local_backend_never_routes(ptest, persea_shaped, monkeypatch):
+def test_legacy_local_backend_does_not_bypass_compulsory_heavy_spot(ptest, persea_shaped, monkeypatch):
     monkeypatch.chdir(persea_shaped)
     route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, LOCAL, CFG, False)
-    assert route is False
+    assert route is True
 
 
 def test_threshold_zero_disables_the_tier(ptest, persea_shaped, monkeypatch):

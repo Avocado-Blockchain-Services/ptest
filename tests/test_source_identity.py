@@ -3,6 +3,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 
 def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
@@ -12,6 +14,122 @@ def init_repo(repo: Path) -> None:
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "ptest@example.invalid")
     git(repo, "config", "user.name", "ptest")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected"),
+    [
+        (0, "12345\n", "", True),
+        (0, "", "", False),
+        (1, "", "ERROR: (gcloud.storage.objects.describe) 404 Not Found", False),
+        (1, "", "HTTPError 404: Not Found", False),
+        (1, "", "status=404", False),
+        (1, "", "404 Not Found", False),
+        (1, "", "credentials not found", None),
+        (1, "", "permission denied", None),
+    ],
+)
+def test_source_object_exists_distinguishes_hits_misses_and_ambiguous_failures(
+    ptest, monkeypatch, returncode, stdout, stderr, expected
+):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    monkeypatch.setattr(ptest.subprocess, "run", run)
+
+    assert ptest.source_object_exists(
+        ["gcloud", "--project=test-project"], "private-bucket", "sources/a.tar.gz"
+    ) is expected
+    assert calls == [
+        (["gcloud", "--project=test-project", "storage", "objects", "describe",
+          "gs://private-bucket/sources/a.tar.gz", "--format=value(generation)"],
+         {"capture_output": True, "text": True, "timeout": 60})
+    ]
+
+
+def test_source_object_exists_does_not_misclassify_an_echoed_404_uri(
+    ptest, monkeypatch
+):
+    digest = "a" * 20 + "404" + "b" * 41
+
+    def run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 1, "",
+            f"credentials not found while reading gs://private-bucket/sources/{digest}.tar.gz",
+        )
+
+    monkeypatch.setattr(ptest.subprocess, "run", run)
+
+    assert ptest.source_object_exists(
+        ["gcloud"], "private-bucket", f"sources/{digest}.tar.gz"
+    ) is None
+
+
+def _archive(tmp_path):
+    directory = tmp_path / "ptest-source-archive"
+    directory.mkdir()
+    archive = directory / "src.tar.gz"
+    archive.write_bytes(b"archive")
+    return archive, directory
+
+
+def _prepare_source_archive(ptest, monkeypatch, tmp_path, upload, digests):
+    archive, directory = _archive(tmp_path)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False)
+    monkeypatch.setattr(ptest, "pack_tree", lambda *args: archive)
+    monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda *args: next(digests))
+    monkeypatch.setattr(ptest, "upload_source_once", lambda *args: upload)
+    result = ptest.prepare_source_archive(
+        tmp_path, "a" * 64, (), ["gcloud"], object(), "private-bucket"
+    )
+    return result, archive, directory
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_upload(
+    ptest, monkeypatch, tmp_path
+):
+    result, archive, directory = _prepare_source_archive(
+        ptest, monkeypatch, tmp_path, True, iter(["a" * 64])
+    )
+
+    assert result == Path("sources/" + "a" * 64 + ".tar.gz")
+    assert not archive.exists()
+    assert not directory.exists()
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_upload_failure(
+    ptest, monkeypatch, tmp_path
+):
+    result, archive, directory = _prepare_source_archive(
+        ptest, monkeypatch, tmp_path, False, iter(["a" * 64])
+    )
+
+    assert result is None
+    assert not archive.exists()
+    assert not directory.exists()
+
+
+def test_prepare_source_archive_cleans_owned_archive_after_source_change(
+    ptest, monkeypatch, tmp_path
+):
+    archive, directory = _archive(tmp_path)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False)
+    monkeypatch.setattr(ptest, "pack_tree", lambda *args: archive)
+    monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
+    monkeypatch.setattr(ptest, "tree_digest", lambda *args: "b" * 64)
+    monkeypatch.setattr(ptest, "upload_source_once", lambda *args: True)
+
+    with pytest.raises(ptest.SourceTreeChanged):
+        ptest.prepare_source_archive(
+            tmp_path, "a" * 64, (), ["gcloud"], object(), "private-bucket"
+        )
+
+    assert not archive.exists()
+    assert not directory.exists()
 
 
 def test_digest_is_independent_of_checkout_path_and_mtime(ptest, tmp_path):

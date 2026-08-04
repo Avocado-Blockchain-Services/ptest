@@ -1,0 +1,19 @@
+FROM node:20-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv git tar gzip curl tini ca-certificates gnupg bubblewrap \
+    postgresql-15 postgresql-client-15 libpq-dev build-essential \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/google-cloud.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/google-cloud.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y --no-install-recommends google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ENV PATH=/usr/lib/postgresql/15/bin:${PATH}
+WORKDIR /opt/ptest
+COPY spot_queue.py spot_worker.py ./
+RUN useradd --system --uid 10001 --create-home ptest \
+    && mkdir -p /work \
+    && chown -R ptest:ptest /opt/ptest /work
+USER ptest
+ENTRYPOINT ["/usr/bin/tini", "--", "python3", "spot_worker.py"]

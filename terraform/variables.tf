@@ -54,5 +54,44 @@ variable "vitest_job_name" {
 variable "operator_members" {
   type        = list(string)
   default     = []
-  description = "Principals allowed to upload source and execute jobs, e.g. [\"user:you@example.com\"] or a group. Prefer a group."
+  description = "Routine Spot submitters and observers. This does not grant VM-stop or OS Admin permissions."
+}
+
+variable "spot_smoke_admin_members" {
+  type        = list(string)
+  default     = []
+  description = "Dedicated-project principals allowed to stop Spot VMs and use OS Admin during the later live preemption smoke."
+}
+
+variable "spot_max_workers" {
+  type        = number
+  default     = 5
+  description = "Hard cap for the regional Spot worker MIG."
+}
+
+variable "spot_idle_seconds" {
+  type        = number
+  default     = 3600
+  description = "Keep an idle worker until this exact timeout, unless it owns a lease."
+}
+
+variable "spot_overflow_reject_enabled" {
+  type        = bool
+  default     = false
+  description = "Enable the advisory exit-75 brake when observed unacknowledged backlog or active leases reaches spot_max_workers; delayed Monitoring data means this is not a hard cap."
+}
+
+variable "spot_worker_image" {
+  type        = string
+  description = "Prebuilt Spot worker image with Python and Node/Vitest dependencies."
+}
+
+variable "spot_controller_image" {
+  type        = string
+  description = "Prebuilt authenticated Spot controller image."
+}
+
+variable "spot_machine_type" {
+  type    = string
+  default = "e2-standard-8"
 }

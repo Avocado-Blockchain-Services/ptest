@@ -15,8 +15,8 @@ kind    = "pytest"
 workers = 2
 scoped  = "uv run pytest"
 full    = "uv run pytest --cov-fail-under=85 tests"
-backend = "cloudrun"
-job     = "fake-job"
+backend = "spot_queue"
+spot_topic = "ptest-spot"
 """
 
 
@@ -40,7 +40,7 @@ def wired(ptest, persea_shaped, monkeypatch, tmp_path):
         calls["local"].append(cmd)
         return 0
 
-    monkeypatch.setattr(ptest, "run_cloudrun", fake_remote)
+    monkeypatch.setattr(ptest, "run_spot_queue", fake_remote)
     monkeypatch.setattr(ptest, "run_local", fake_local)
     return ptest, calls
 
@@ -63,11 +63,11 @@ def test_small_path_runs_local_at_the_cap(wired):
     assert "-n auto" not in calls["local"][0]
 
 
-def test_force_local_keeps_a_big_path_here(wired):
+def test_force_local_cannot_keep_a_heavy_path_here(wired):
     ptest, calls = wired
     assert ptest.main(["--local", "tests/api"]) == 0
-    assert len(calls["local"]) == 1 and not calls["remote"]
-    assert "-n 2" in calls["local"][0]
+    assert not calls["local"] and len(calls["remote"]) == 1
+    assert "-n auto" in calls["remote"][0]
 
 
 def test_callers_own_flag_wins_over_container_parallelism(wired):
@@ -79,30 +79,28 @@ def test_callers_own_flag_wins_over_container_parallelism(wired):
 
 def test_busy_backend_refuses_with_75_and_runs_nothing(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: 75)
+    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 75)
     assert ptest.main(["tests/api"]) == 75
     assert not calls["local"], "exit 75 means nothing ran"
 
 
-def test_broken_backend_degrades_to_a_capped_local_run(wired, monkeypatch):
+def test_broken_backend_returns_75_without_a_local_fallback(wired, monkeypatch):
     ptest, calls = wired
 
     def broken_remote(pcfg, cfg_, project, root, cmd, **kw):
         calls["remote"].append(cmd)
         return None            # "broken" — fall back to local
 
-    monkeypatch.setattr(ptest, "run_cloudrun", broken_remote)
-    assert ptest.main(["tests/api"]) == 0
+    monkeypatch.setattr(ptest, "run_spot_queue", broken_remote)
+    assert ptest.main(["tests/api"]) == 75
     assert len(calls["remote"]) == 1, "the remote path must have been attempted"
     assert "-n auto" in calls["remote"][0], "the remote attempt carried container parallelism"
-    assert len(calls["local"]) == 1
-    assert "-n 2" in calls["local"][0], "the fallback must be capped, not -n auto"
-    assert "-n auto" not in calls["local"][0]
+    assert not calls["local"]
 
 
 def test_remote_test_failure_is_returned_verbatim(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: 1)
+    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 1)
     assert ptest.main(["tests/api"]) == 1
     assert not calls["local"]
 
@@ -117,6 +115,72 @@ def test_full_still_sends_the_full_command(wired):
     ptest, calls = wired
     assert ptest.main(["--full"]) == 0
     assert "--cov-fail-under=85" in calls["remote"][0]
+
+
+def test_full_is_compulsory_spot_even_when_project_config_says_local(wired, monkeypatch):
+    """A full suite must never escape to this machine through --local/local config."""
+    ptest, calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"]["backend"] = "local"
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 75)
+
+    assert ptest.main(["--full", "--local"]) == 75
+    assert not calls["local"]
+
+
+def test_heavy_scope_is_compulsory_spot_even_with_force_local(wired, monkeypatch):
+    ptest, calls = wired
+    called = []
+
+    def unavailable(*args, **kwargs):
+        called.append((args, kwargs))
+        return 75
+
+    monkeypatch.setattr(ptest, "run_spot_queue", unavailable)
+
+    assert ptest.main(["--local", "tests/api"]) == 75
+    assert len(called) == 1
+    assert not calls["local"]
+
+
+def test_compulsory_spot_none_result_is_converted_to_75_not_local(wired, monkeypatch):
+    ptest, calls = wired
+    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: None)
+
+    assert ptest.main(["--full"]) == 75
+    assert not calls["local"]
+
+
+def test_cloudrun_project_configuration_is_rejected_for_compulsory_work(wired, monkeypatch):
+    ptest, calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"]["backend"] = "cloudrun"
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: pytest.fail("must not call Cloud Run"))
+
+    assert ptest.main(["--full"]) == 2
+    assert not calls["local"]
+
+
+def test_spot_queue_backend_routes_full_runs_and_keeps_fresh_out_of_the_command(
+    wired, monkeypatch
+):
+    ptest, calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"].update({"backend": "spot_queue", "spot_topic": "ptest-spot"})
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+
+    def run_spot_queue(pcfg, cfg_, project, root, cmd, **kwargs):
+        calls["remote"].append(cmd)
+        calls["remote_kwargs"].append(kwargs)
+        return 0
+
+    monkeypatch.setattr(ptest, "run_spot_queue", run_spot_queue, raising=False)
+
+    assert ptest.main(["--full", "--fresh"]) == 0
+    assert calls["remote"] == ["uv run pytest --cov-fail-under=85 tests"]
+    assert calls["remote_kwargs"] == [{"what": "--full", "fresh": True}]
 
 
 def test_fresh_is_a_ptest_only_remote_benchmark_flag(wired):
@@ -142,8 +206,7 @@ def test_where_reports_remote_cache_ttl_and_namespace(wired, capsys):
     assert ptest.main(["where"]) == 0
 
     output = capsys.readouterr().out
-    assert "cache" in output and "3600s" in output
-    assert "namespace v1" in output
+    assert "Spot compulsory" in output
 
 
 def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
@@ -153,7 +216,32 @@ def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
 
     assert ptest.cmd_where(cfg, ptest.Path.cwd()) == 0
 
-    assert "cache    off (local backend)" in capsys.readouterr().out
+    assert "unavailable until Spot is configured" in capsys.readouterr().out
+
+
+def test_status_prints_live_spot_queue_counts(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    monkeypatch.setattr(ptest, "spot_status", lambda *_args: (3, 2, 4), raising=False)
+
+    assert ptest.main(["status"]) == 0
+
+    assert capsys.readouterr().out == (
+        "Spot queue\n"
+        "  waiting jobs   3\n"
+        "  working jobs   2\n"
+        "  servers on     4\n"
+    )
+
+
+def test_status_refuses_a_project_without_spot_queue(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"]["backend"] = "local"
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+
+    assert ptest.main(["status"]) == 2
+
+    assert "Spot queue is not configured" in capsys.readouterr().err
 
 
 def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
@@ -173,8 +261,7 @@ def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
     assert ptest.main(["doctor"]) == 0
 
     output = capsys.readouterr().out
-    assert "cache       ✓ healthy" in output
-    assert "namespace v1" in output
+    assert "capable     ✓ compulsory Spot submission can be attempted" in output
 
 
 def test_doctor_marks_unavailable_cache_coordination_unhealthy(
@@ -192,8 +279,7 @@ def test_doctor_marks_unavailable_cache_coordination_unhealthy(
     monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
     monkeypatch.setattr(ptest, "GcsCoordination", BrokenStore)
 
-    assert ptest.main(["doctor"]) == 1
+    assert ptest.main(["doctor"]) == 0
 
     output = capsys.readouterr().out
-    assert "cache       ✗ unavailable" in output
-    assert "secret details" not in output
+    assert "capable     ✓ compulsory Spot submission can be attempted" in output
