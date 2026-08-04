@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from spot_queue import Lease
 
@@ -35,15 +37,17 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
 def reconcile(adapter, max_workers: int, idle_timeout_seconds: int = 3600) -> int:
     """Read authenticated metrics and set only the Spot MIG target.
 
-    Overflow is deliberately an adapter action: it is never silently routed to
-    another backend just because the fixed-capacity Spot pool is full.
+    A queue request cannot be safely converted into a Cloud Run Job execution
+    without its source/command contract. Until a compatible overflow dispatcher
+    is configured, overflow remains durably queued and ptest's normal timeout
+    fallback is the only safe fallback.
     """
     backlog, workers, leases, idle_age = adapter.authenticated_metrics()
     target = scale_target(backlog, workers, idle_age, max_workers, leases,
                           idle_timeout_seconds)
     adapter.set_target(target)
     if backlog > max_workers and getattr(adapter, "overflow_enabled", False):
-        adapter.record_overflow(backlog - max_workers)
+        adapter.retain_overflow(backlog - max_workers)
     return target
 
 
@@ -95,12 +99,7 @@ class GcloudControllerAdapter:
         return result.stdout
 
     def authenticated_metrics(self) -> tuple[int, int, int, int]:
-        samples = json.loads(self._run(
-            "monitoring", "time-series", "list",
-            "--filter=metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" "
-            f"AND resource.labels.subscription_id=\"{self.subscription}\"",
-            "--limit=1", "--format=json"))
-        backlog = int(samples[0]["points"][0]["value"].get("int64Value", 0)) if samples else 0
+        backlog = self._monitoring_backlog()
         instances = json.loads(self._run("compute", "instance-groups", "managed",
                                          "list-instances", self.mig, "--region", self.region,
                                          "--format=json"))
@@ -123,6 +122,25 @@ class GcloudControllerAdapter:
                        ) if parsed else 0
         return backlog, active, leases, idle_age
 
+    def _monitoring_backlog(self) -> int:
+        """Read the supported Cloud Monitoring REST metric (not a gcloud alias)."""
+        token = self._run("auth", "print-access-token").strip()
+        now = datetime.now(timezone.utc)
+        query = urlencode({
+            "filter": "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" "
+                      f"AND resource.labels.subscription_id=\"{self.subscription}\"",
+            "interval.endTime": now.isoformat(),
+            "interval.startTime": (now - timedelta(minutes=5)).isoformat(),
+            "view": "FULL",
+        })
+        request = Request(f"https://monitoring.googleapis.com/v3/projects/{self.project}/timeSeries?{query}",
+                          headers={"Authorization": f"Bearer {token}"})
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+        values = [point.get("value", {}).get("int64Value", 0)
+                  for series in payload.get("timeSeries", []) for point in series.get("points", [])]
+        return max((int(value) for value in values), default=0)
+
     def _active_leases(self) -> int:
         listing = self._run("storage", "ls", f"gs://{self.bucket}/spot/v1/leases/")
         now, active = datetime.now(timezone.utc), 0
@@ -139,9 +157,11 @@ class GcloudControllerAdapter:
         self._run("compute", "instance-groups", "managed", "resize", self.mig,
                   "--region", self.region, "--size", str(target), "--quiet")
 
-    def record_overflow(self, excess: int) -> None:
-        # Explicitly observable; a future configured overflow adapter may use it.
-        print(json.dumps({"event": "spot-overflow", "queued": excess}), flush=True)
+    def retain_overflow(self, excess: int) -> dict[str, int | str]:
+        # Explicit, safe behavior: do not launch a Cloud Run job with an
+        # incomplete request contract; leave the durable Pub/Sub message alone.
+        self.overflow_state = {"mode": "retain-queue", "excess": excess}
+        return self.overflow_state
 
     @staticmethod
     def authorize(authorization: str) -> bool:

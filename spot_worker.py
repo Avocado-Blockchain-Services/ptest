@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -72,7 +73,7 @@ class Worker:
                 time.sleep(2)
 
 
-def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult:
+def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult | None:
     """Run one leased request; durably publish before acknowledging its message."""
     workspace_root.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix="ptest-spot-", dir=workspace_root))
@@ -81,7 +82,16 @@ def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult:
     try:
         adapter.download(request.source_uri, archive)
         adapter.unpack(archive, source)
+        prepare = getattr(adapter, "prepare", None)
+        if prepare:
+            prepare(source)
+        if getattr(adapter, "preempted", lambda: False)():
+            return None
         code, output = adapter.run(request.command, source)
+        # Preemption is not a terminal test outcome. The durable lease expires
+        # and Pub/Sub redelivers the original request to a future worker.
+        if getattr(adapter, "preempted", lambda: False)():
+            return None
         result = SpotResult(request.request_key, "passed" if code == 0 else "failed", code,
                             output, datetime.now(timezone.utc))
         if not adapter.publish_result(result):
@@ -91,6 +101,8 @@ def run_claimed_request(request, workspace_root: Path, adapter) -> SpotResult:
             adapter.acknowledge()
         return result
     except Exception as exc:
+        if getattr(adapter, "preempted", lambda: False)():
+            return None
         result = SpotResult(request.request_key, "infrastructure", None, str(exc),
                             datetime.now(timezone.utc))
         try:
@@ -133,9 +145,72 @@ class LocalProcessAdapter:
             self._process = None
         return code, output[-200000:]
 
+    def prepare(self, cwd: Path) -> None:
+        """Provision lockfile-pinned Node dependencies before network isolation."""
+        package = cwd / "package.json"
+        if not package.exists():
+            return
+        lock = cwd / "package-lock.json"
+        if not lock.exists():
+            raise RuntimeError("Spot Vitest requests require package-lock.json")
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd),
+               "NPM_CONFIG_IGNORE_SCRIPTS": "true", "NPM_CONFIG_AUDIT": "false",
+               "NPM_CONFIG_FUND": "false"}
+        completed = subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+                                   cwd=cwd, env=env, text=True, capture_output=True, timeout=600)
+        if completed.returncode:
+            raise RuntimeError((completed.stdout + completed.stderr)[-200000:])
+        for path in cwd.rglob("*"):
+            if path.is_symlink():
+                continue
+            path.chmod(0o777 if path.is_dir() else (0o755 if path.stat().st_mode & 0o111 else 0o666))
+
     def stop_active(self):
         if self._process and self._process.poll() is None:
             os.killpg(self._process.pid, signal.SIGTERM)
+
+
+def _safe_archive_name(name: str) -> Path:
+    candidate = Path(name)
+    if not name or candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("unsafe archive member")
+    return candidate
+
+
+def unpack_archive(archive: Path, destination: Path) -> None:
+    """Extract only regular files/dirs and contained symlinks with safe modes."""
+    with tarfile.open(archive, "r:gz") as payload:
+        members = payload.getmembers()
+        for member in members:
+            path = _safe_archive_name(member.name)
+            if member.isdir() or member.isfile():
+                continue
+            if member.issym():
+                resolved = path.parent / member.linkname
+                if Path(member.linkname).is_absolute() or ".." in resolved.parts:
+                    raise ValueError("unsafe archive member")
+                continue
+            raise ValueError("unsafe archive member")
+        destination.mkdir(parents=True, exist_ok=True)
+        destination.chmod(0o777)
+        for member in members:
+            target = destination / _safe_archive_name(member.name)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(0o777)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.chmod(0o777)
+                source = payload.extractfile(member)
+                if source is None:
+                    raise ValueError("unsafe archive member")
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(0o755 if member.mode & 0o111 else 0o666)
+            elif member.issym():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.chmod(0o777)
+                target.symlink_to(member.linkname)
 
 
 class GcloudWorkerAdapter:
@@ -180,7 +255,7 @@ class GcloudWorkerAdapter:
         return None
 
     def acknowledge(self, message):
-        self._run("pubsub", "subscriptions", "acknowledge", self.subscription,
+        self._run("pubsub", "subscriptions", "ack", self.subscription,
                   "--ack-ids", message["ack_id"])
 
     def for_message(self, message, worker):
@@ -199,11 +274,13 @@ class _MessageAdapter:
 
     @staticmethod
     def unpack(archive, destination):
-        subprocess.run(["tar", "-xzf", str(archive), "-C", str(destination)], check=True,
-                       timeout=60)
+        unpack_archive(archive, destination)
 
     def run(self, command, cwd):
         return self.supervisor.runner.run(command, cwd)
+
+    def prepare(self, cwd):
+        self.supervisor.runner.prepare(cwd)
 
     def publish_result(self, result):
         return self.supervisor.store.publish_result(result)
@@ -218,7 +295,7 @@ class _MessageAdapter:
         )
         if renewed is None:
             return None
-        self.supervisor._run("pubsub", "subscriptions", "modify-ack-deadline",
+        self.supervisor._run("pubsub", "subscriptions", "modify-message-ack-deadline",
                              self.supervisor.subscription, "--ack-ids", self.message["ack_id"],
                              "--ack-deadline", str(max(10, int((renewed.expires_at -
                                                                   renewed.acquired_at).total_seconds()))))

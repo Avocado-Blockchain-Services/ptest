@@ -87,5 +87,5 @@ variable "spot_machine_type" {
 variable "spot_overflow_to_cloudrun" {
   type        = bool
   default     = false
-  description = "Opt-in controller policy flag; no Cloud Run overflow is enabled by default."
+  description = "When true, overflow is explicitly retained in the durable Spot queue until a compatible Cloud Run dispatcher is provided; no incomplete request is ever launched as a job."
 }

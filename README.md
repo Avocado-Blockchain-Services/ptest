@@ -123,12 +123,12 @@ spot_region=us-central1
 spot_repo=YOUR_ARTIFACT_REPOSITORY
 spot_tag=$(git rev-parse --short HEAD)
 
-gcloud builds submit --project="$spot_project" --region="$spot_region" \
-  --tag "$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-worker:$spot_tag" \
-  --file Dockerfile.spot-worker .
-gcloud builds submit --project="$spot_project" --region="$spot_region" \
-  --tag "$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag" \
-  --file Dockerfile.spot-controller .
+gcloud builds submit --project="$spot_project" --region="$spot_region" . \
+  --config=cloudbuild.spot-worker.yaml \
+  --substitutions="_IMAGE=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-worker:$spot_tag"
+gcloud builds submit --project="$spot_project" --region="$spot_region" . \
+  --config=cloudbuild.spot-controller.yaml \
+  --substitutions="_IMAGE=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag"
 
 terraform -chdir=terraform init
 terraform -chdir=terraform fmt -check
@@ -140,8 +140,11 @@ terraform -chdir=terraform plan \
   -var="spot_controller_image=$spot_region-docker.pkg.dev/$spot_project/$spot_repo/ptest-spot-controller:$spot_tag"
 ```
 
-After a separately approved apply, check the controller's Cloud Run URL with an
-identity token, then submit one harmless request and inspect its durable result:
+After a separately approved apply, use an identity listed in
+`operator_members`: it is the documented controller invoker and topic
+publisher. The following live smoke deliberately mutates only the dedicated
+test project. It submits a real queue request through `ptest`, waits for a
+worker to run it, then inspects the durable result and empty delivery:
 
 ```bash
 controller_url=$(gcloud run services describe ptest-spot-controller \
@@ -153,14 +156,49 @@ curl --fail --request POST \
   "$controller_url/reconcile"
 gcloud compute instance-groups managed list-instances ptest-spot-workers \
   --project="$spot_project" --region="$spot_region"
+
+# With a registered project set to backend = "spot_queue", this writes the
+# request record, publishes its request key, and waits for its durable result.
+ptest --full 2>spot-request.log
+spot_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-request.log | tail -1)
+test -n "$spot_key"
+gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$spot_key.json"
+gcloud pubsub subscriptions pull ptest-spot-workers --project="$spot_project" \
+  --limit=1 --format=json  # expect []: result was published then acked
+
+# Bubblewrap must be permitted by the worker VM/container runtime.
+spot_vm=$(gcloud compute instance-groups managed list-instances ptest-spot-workers \
+  --project="$spot_project" --region="$spot_region" --format='value(instance)' | head -1)
+gcloud compute ssh "${spot_vm##*/}" --project="$spot_project" --zone=YOUR_WORKER_ZONE \
+  --command='sudo docker exec --user ptest ptest-spot-worker bwrap --die-with-parent --unshare-user --uid 65534 --gid 65534 --unshare-net --ro-bind / / /bin/true'
+
+# Preemption/redelivery proof: submit a configured slow smoke project, wait
+# until its lease appears, then stop the supervisor on the worker VM. There
+# must be no result; Docker restarts it, the unacked message redelivers, and a
+# later terminal record proves the retry.
+ptest --full 2>spot-slow-request.log & smoke_pid=$!
+sleep 20
+gcloud compute ssh "${spot_vm##*/}" --project="$spot_project" --zone=YOUR_WORKER_ZONE \
+  --command='sudo docker kill --signal TERM ptest-spot-worker'
+wait "$smoke_pid" || true
+slow_key=$(sed -n 's/.*spot request: \([0-9a-f]\{64\}\).*/\1/p' spot-slow-request.log | tail -1)
+gcloud storage ls "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json" && exit 1 || true
+# Wait past the subscription deadline, let the restarted worker retry, then:
+gcloud storage cat "gs://YOUR_GLOBALLY_UNIQUE_BUCKET/spot/v1/results/$slow_key.json"
 ```
 
 The worker pulls one Pub/Sub request, checks the terminal result, takes a
 generation-safe lease, heartbeats while its unprivileged/no-network child runs,
 publishes the durable terminal result, and only then acknowledges. SIGTERM stops
-the heartbeat and leaves unfinished work unacknowledged for redelivery. Configure
-`backend = "spot_queue"` and the emitted topic only after that smoke has proved
-worker/controller IAM and lease flow.
+the heartbeat, terminates the child, publishes no terminal result, and leaves
+unfinished work unacknowledged for redelivery. Node dependencies are installed
+from `package-lock.json` before the isolated child starts; dependency install is
+script-free, while Vitest itself runs in Bubblewrap with no network. At the Spot
+cap, `spot_overflow_to_cloudrun = true` explicitly retains excess messages in
+the durable queue rather than launching an existing Cloud Run Job without the
+request's source/command contract; ptest's configured timeout then performs its
+normal local fallback. Configure `backend = "spot_queue"` only after this smoke
+proves worker/controller IAM, Bubblewrap, result, acknowledgement, and retry.
 
 ## Exit codes
 

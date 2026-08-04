@@ -42,12 +42,6 @@ resource "google_pubsub_subscription_iam_member" "spot_worker_subscriber" {
   member       = "serviceAccount:${google_service_account.spot_worker.email}"
 }
 
-resource "google_pubsub_topic_iam_member" "spot_publisher" {
-  topic  = google_pubsub_topic.spot_requests.name
-  role   = "roles/pubsub.publisher"
-  member = "serviceAccount:${google_service_account.spot_controller.email}"
-}
-
 resource "google_pubsub_topic_iam_member" "spot_operator_publisher" {
   for_each = toset(var.operator_members)
   topic    = google_pubsub_topic.spot_requests.name
@@ -146,6 +140,7 @@ resource "google_compute_instance_template" "spot_worker" {
     systemctl enable --now docker
     gcloud auth configure-docker ${var.region}-docker.pkg.dev --quiet
     docker run --detach --restart=always --name ptest-spot-worker --publish 8080:8080 \
+      --security-opt=no-new-privileges:true --security-opt=seccomp=unconfined \
       --env SPOT_PROJECT=${var.project_id} --env SPOT_REGION=${var.region} \
       --env SPOT_TOPIC=${google_pubsub_topic.spot_requests.name} \
       --env SPOT_SUBSCRIPTION=${google_pubsub_subscription.spot_workers.name} \
@@ -220,6 +215,14 @@ resource "google_cloud_run_v2_service_iam_member" "spot_controller_invoker" {
   location = var.region
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.spot_controller.email}"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "spot_controller_operator_invoker" {
+  for_each = toset(var.operator_members)
+  name     = google_cloud_run_v2_service.spot_controller.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = each.key
 }
 
 resource "google_cloud_scheduler_job" "spot_controller" {
