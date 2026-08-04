@@ -212,6 +212,7 @@ resource "google_compute_instance_template" "spot_worker" {
     preemptible        = true
     automatic_restart  = false
     provisioning_model = "SPOT"
+    instance_termination_action = "STOP"
   }
 
   metadata_startup_script = <<-EOT

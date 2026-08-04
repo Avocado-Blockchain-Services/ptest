@@ -581,6 +581,37 @@ def test_spot_capacity_admission_uses_identity_token_and_controller_response(
     assert requests[0][1] == 30
 
 
+def test_spot_capacity_admission_uses_a_dedicated_invoker_identity_when_configured(
+    ptest, monkeypatch
+):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self):
+            return b'{"admitted":true,"overflow_reject_enabled":true}'
+
+    commands = []
+    monkeypatch.setattr(
+        ptest.subprocess,
+        "run",
+        lambda args, **_kwargs: commands.append(args) or subprocess.CompletedProcess(
+            args, 0, "caller-token\\n", ""
+        ),
+    )
+    monkeypatch.setattr(ptest, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert ptest.spot_capacity_admitted(
+        ["gcloud", "--project=test-project"],
+        "https://controller.example.run.app",
+        "ptest-spot-invoker@test-project.iam.gserviceaccount.com",
+    ) is True
+    assert commands == [[
+        "gcloud", "--project=test-project", "auth", "print-identity-token",
+        "--impersonate-service-account=ptest-spot-invoker@test-project.iam.gserviceaccount.com",
+        "--audiences=https://controller.example.run.app",
+    ]]
+
+
 def test_spot_capacity_admission_rejects_a_disabled_controller(ptest, monkeypatch):
     class Response:
         def __enter__(self): return self

@@ -1847,7 +1847,8 @@ def _spot_result_is_fresh(result, now: datetime, ttl_seconds: int) -> bool:
     return 0 <= age.total_seconds() < ttl_seconds
 
 
-def spot_capacity_admitted(base: list[str], controller_url: str) -> bool:
+def spot_capacity_admitted(base: list[str], controller_url: str,
+                           invoker_service_account: str | None = None) -> bool:
     """Ask the IAM-protected controller whether a new durable request fits."""
     parsed = urlparse(controller_url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username \
@@ -1855,8 +1856,14 @@ def spot_capacity_admitted(base: list[str], controller_url: str) -> bool:
             or parsed.path not in {"", "/"}:
         raise ValueError("spot_controller_url must be an HTTPS service root")
     try:
+        token_command = base + ["auth", "print-identity-token"]
+        if invoker_service_account:
+            token_command += [
+                f"--impersonate-service-account={invoker_service_account}",
+                f"--audiences={controller_url.rstrip('/')}",
+            ]
         token_result = subprocess.run(
-            base + ["auth", "print-identity-token"],
+            token_command,
             capture_output=True, text=True, timeout=30,
         )
     except Exception as exc:
@@ -1923,6 +1930,9 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         controller_url = pcfg.get("spot_controller_url") or cfg.get(
             "defaults", {}
         ).get("spot_controller_url")
+        invoker_service_account = pcfg.get("spot_invoker_service_account") or cfg.get(
+            "defaults", {}
+        ).get("spot_invoker_service_account")
     except ValueError as exc:
         warn(f"invalid compulsory Spot configuration ({exc})")
         return 2
@@ -1981,7 +1991,11 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             warn("Spot overflow rejection is enabled without spot_controller_url — retry later")
             return 75
         try:
-            admitted = spot_capacity_admitted(base, controller_url)
+            admitted = (
+                spot_capacity_admitted(base, controller_url, invoker_service_account)
+                if invoker_service_account
+                else spot_capacity_admitted(base, controller_url)
+            )
         except (CoordinationUnavailable, ValueError) as exc:
             warn(f"Spot capacity admission unavailable ({exc}) — retry later")
             return 75

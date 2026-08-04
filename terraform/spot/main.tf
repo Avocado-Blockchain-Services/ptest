@@ -56,6 +56,16 @@ resource "google_service_account" "controller" {
   account_id   = "ptest-spot-controller"
   display_name = "ptest Spot queue controller"
 }
+resource "google_service_account" "invoker" {
+  account_id   = "ptest-spot-invoker"
+  display_name = "ptest Spot controller invoker"
+}
+resource "google_service_account_iam_member" "operator_invoker_token_creator" {
+  for_each           = toset(var.operator_members)
+  service_account_id = google_service_account.invoker.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.key
+}
 resource "google_storage_bucket_iam_member" "worker_immutable_reader" {
   bucket = data.google_storage_bucket.source.name
   role   = "roles/storage.objectViewer"
@@ -174,9 +184,10 @@ resource "google_compute_instance_template" "worker" {
     scopes = ["cloud-platform"]
   }
   scheduling {
-    preemptible        = true
-    automatic_restart  = false
-    provisioning_model = "SPOT"
+    preemptible                 = true
+    automatic_restart           = false
+    provisioning_model          = "SPOT"
+    instance_termination_action = "STOP"
   }
   metadata_startup_script = <<-EOT
     export SPOT_PROJECT='${var.project_id}' SPOT_REGION='${var.region}'
@@ -244,12 +255,21 @@ resource "google_cloud_run_v2_service" "controller" {
       }
     }
   }
+  lifecycle {
+    ignore_changes = [template[0].scaling]
+  }
 }
 resource "google_cloud_run_v2_service_iam_member" "controller_invoker" {
   name     = google_cloud_run_v2_service.controller.name
   location = var.region
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.controller.email}"
+}
+resource "google_cloud_run_v2_service_iam_member" "invoker_identity" {
+  name     = google_cloud_run_v2_service.controller.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.invoker.email}"
 }
 resource "google_cloud_run_v2_service_iam_member" "operator_invoker" {
   for_each = toset(var.operator_members)
