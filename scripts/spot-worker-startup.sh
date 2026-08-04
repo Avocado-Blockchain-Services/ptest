@@ -35,7 +35,7 @@ systemctl enable --now docker
 gcloud auth configure-docker "${SPOT_REGION}-docker.pkg.dev" --quiet
 docker rm -f ptest-spot-worker >/dev/null 2>&1 || true
 docker run --detach --restart=always --name ptest-spot-worker --hostname "$(hostname)" --publish 8080:8080 \
-  --security-opt=no-new-privileges:true --security-opt=seccomp=unconfined \
+  --cap-add=SYS_ADMIN --security-opt=no-new-privileges:true --security-opt=seccomp=unconfined \
   --env SPOT_PROJECT --env SPOT_REGION --env SPOT_TOPIC --env SPOT_SUBSCRIPTION --env SPOT_BUCKET \
   --env SPOT_LEASE_SECONDS="${SPOT_LEASE_SECONDS:-120}" \
   --env SPOT_TASK_TIMEOUT_SECONDS="${SPOT_TASK_TIMEOUT_SECONDS:-1800}" \

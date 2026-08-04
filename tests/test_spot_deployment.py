@@ -39,3 +39,10 @@ def test_spot_only_deployment_declares_the_provider_spot_termination_default():
     main = (SPOT_ROOT / "main.tf").read_text()
 
     assert 'instance_termination_action = "STOP"' in main
+
+
+def test_worker_container_has_the_minimal_mount_capability_for_bubblewrap():
+    startup = (Path(__file__).resolve().parents[1] / "scripts" / "spot-worker-startup.sh").read_text()
+
+    assert "--cap-add=SYS_ADMIN" in startup
+    assert "--privileged" not in startup
