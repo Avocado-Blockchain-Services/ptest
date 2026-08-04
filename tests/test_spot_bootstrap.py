@@ -10,6 +10,7 @@ def test_spot_worker_image_contains_the_universal_runner_toolchain():
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.spot-worker").read_text()
     assert "postgresql-15" in dockerfile
     assert "postgresql-client-15" in dockerfile
+    assert "ENV PATH=/usr/lib/postgresql/15/bin:${PATH}" in dockerfile
     assert "COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv" in dockerfile
     assert "bubblewrap" in dockerfile
     assert "npm install --global vitest" not in dockerfile
