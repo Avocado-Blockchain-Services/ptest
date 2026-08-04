@@ -351,7 +351,13 @@ class GcloudSpotQueueStore:
         existing = self.read_request(request.request_key)
         if existing is not None:
             return existing == request
-        return self._write("requests", request.request_key, request.to_record(), 0)
+        if self._write("requests", request.request_key, request.to_record(), 0):
+            return True
+        # A create-only precondition failure can be a concurrent identical
+        # publisher. Re-read rather than turning an at-least-once delivery into
+        # an unnecessary local full-suite fallback.
+        existing = self.read_request(request.request_key)
+        return existing == request
 
     def read_request(self, request_key: str) -> SpotRequest | None:
         stored = self._read("requests", request_key)
