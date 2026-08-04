@@ -941,9 +941,12 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
 
         print(f"[ptest] remote: {job} ({region}) · {cmd}",
               file=sys.stderr, flush=True)
+        remote_env = f"PTEST_SRC={obj},PTEST_CMD={cmd}"
+        if os.environ.get("PTEST_PROFILE_DB_CLEANUP") == "1":
+            remote_env += ",PTEST_PROFILE_DB_CLEANUP=1"
         exec_cmd = base + [
             "run", "jobs", "execute", job, f"--region={region}", "--wait",
-            "--update-env-vars", f"PTEST_SRC={obj},PTEST_CMD={cmd}",
+            "--update-env-vars", remote_env,
         ]
         # --wait relays only its own progress chatter, never the container's stdout.
         proc = subprocess.run(exec_cmd, capture_output=True, text=True)
