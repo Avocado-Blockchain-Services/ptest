@@ -80,6 +80,7 @@ def harness(ptest, monkeypatch, tmp_path, store, result=None):
     monkeypatch.setattr(ptest, "source_manifest", lambda root: ())
     monkeypatch.setattr(ptest, "tree_digest", lambda root, entries=None: DIGEST)
     monkeypatch.setattr(ptest, "pack_tree", lambda root, entries=None: archive)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False, raising=False)
     monkeypatch.setattr(ptest, "utc_now", lambda: NOW)
     monkeypatch.setattr(ptest, "GcsCoordination", lambda *args: store)
     # These tests exercise the cross-machine GCS state machine directly. The
@@ -175,6 +176,48 @@ def test_owner_alone_checks_budget_and_concurrency_then_publishes_execution(
 
     assert calls == {"concurrency": 1, "budget": 1, "upload": 1, "submit": 1, "wait": 1}
     assert store.read_json(request_paths(ptest).passing).value["status"] == "passed"
+
+
+def test_existing_source_archive_skips_packaging_and_upload(
+    ptest, monkeypatch, tmp_path
+):
+    store = MemoryStore(ptest)
+    calls = harness(ptest, monkeypatch, tmp_path, store)
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: True, raising=False)
+
+    def unexpected_pack(*args):
+        raise AssertionError("cached source archive must not be packaged")
+
+    monkeypatch.setattr(ptest, "pack_tree", unexpected_pack)
+    pcfg, cfg = configured()
+
+    assert ptest.run_cloudrun(pcfg, cfg, "front", tmp_path, "run tests") == 0
+
+    assert calls["upload"] == 0
+    assert calls["submit"] == calls["wait"] == 1
+
+
+def test_missing_source_archive_is_packaged_and_uploaded_once(
+    ptest, monkeypatch, tmp_path
+):
+    store = MemoryStore(ptest)
+    calls = harness(ptest, monkeypatch, tmp_path, store)
+    packaged = 0
+    archive = tmp_path / "source.tar.gz"
+
+    def pack(*args):
+        nonlocal packaged
+        packaged += 1
+        return archive
+
+    monkeypatch.setattr(ptest, "source_object_exists", lambda *args: False, raising=False)
+    monkeypatch.setattr(ptest, "pack_tree", pack)
+    pcfg, cfg = configured()
+
+    assert ptest.run_cloudrun(pcfg, cfg, "front", tmp_path, "run tests") == 0
+
+    assert packaged == 1
+    assert calls["upload"] == calls["submit"] == calls["wait"] == 1
 
 
 def test_live_claim_loser_waits_for_execution_instead_of_submitting(

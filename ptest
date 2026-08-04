@@ -1343,6 +1343,70 @@ def upload_source_once(base: list[str], store: GcsCoordination, archive: Path,
     return False
 
 
+def _source_timing(label: str, started: float) -> None:
+    elapsed = time.monotonic() - started
+    print(f"[ptest] {label}: {elapsed:.2f}s", file=sys.stderr, flush=True)
+
+
+class SourceTreeChanged(RuntimeError):
+    """Packaging observed a different source tree than the submitted digest."""
+
+
+def source_object_exists(base: list[str], bucket: str,
+                         object_name: str) -> bool | None:
+    """Return whether a source archive exists, or None when GCS is ambiguous."""
+    uri = f"gs://{bucket}/{object_name}"
+    try:
+        result = subprocess.run(
+            base + ["storage", "objects", "describe", uri,
+                    "--format=value(generation)"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    if result.returncode == 0:
+        return bool((result.stdout or "").strip())
+    message = "\n".join(
+        str(value) for value in (result.stdout, result.stderr) if value
+    ).lower()
+    if "404" in message or "no urls matched" in message:
+        return False
+    return None
+
+
+def prepare_source_archive(root: Path, digest: str,
+                           manifest: tuple[SourceEntry, ...], base: list[str],
+                           store: GcsCoordination, bucket: str) -> Path | None:
+    """Ensure a content-addressed source archive is available for submission.
+
+    A returned path means the source object is ready (either from the remote
+    cache or a fresh generation-safe upload). None leaves the caller on its
+    established local fallback path because GCS could not be probed safely.
+    """
+    source_path = f"sources/{digest}.tar.gz"
+    cache_started = time.monotonic()
+    exists = source_object_exists(base, bucket, source_path)
+    if exists is None:
+        _source_timing("source cache probe", cache_started)
+        warn("cannot verify source cache — running locally")
+        return None
+    _source_timing(f"source cache {'hit' if exists else 'miss'}", cache_started)
+    if exists:
+        return Path(source_path)
+
+    packaging_started = time.monotonic()
+    archive = pack_tree(root, manifest)
+    _source_timing("source packaging", packaging_started)
+    if tree_digest(root, source_manifest(root)) != digest:
+        warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
+        raise SourceTreeChanged
+
+    upload_started = time.monotonic()
+    uploaded = upload_source_once(base, store, archive, source_path, bucket)
+    _source_timing("source upload", upload_started)
+    return archive if uploaded else None
+
+
 def _show_execution_result(result: ExecutionResult, gproject: str) -> int | None:
     if result.summary.strip():
         sys.stdout.write(result.summary + "\n")
@@ -1462,16 +1526,16 @@ def _uncached_remote_execution(
         return 75
     if not budget_check(cfg, project):
         return None
+    digest_started = time.monotonic()
     manifest = source_manifest(root)
     digest = tree_digest(root, manifest)
-    archive = pack_tree(root, manifest)
-    post_manifest = source_manifest(root)
-    if tree_digest(root, post_manifest) != digest:
-        warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
-        return 75
+    _source_timing("source digest", digest_started)
     source_path = f"sources/{digest}.tar.gz"
-    if not upload_source_once(base, store, archive, source_path, bucket):
-        return None
+    try:
+        if prepare_source_archive(root, digest, manifest, base, store, bucket) is None:
+            return None
+    except SourceTreeChanged:
+        return 75
     source_uri = f"gs://{bucket}/{source_path}"
     print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
     try:
@@ -1504,8 +1568,10 @@ def _run_cloudrun_coordinated(
         return None
     base = gcloud_base(pcfg, cfg, gproject)
     settings = remote_cache_settings(pcfg, cfg)
+    digest_started = time.monotonic()
     manifest = source_manifest(root)
     digest = tree_digest(root, manifest)
+    _source_timing("source digest", digest_started)
     identity = {
         "schema": "ptest-remote-key-v1",
         "project": project,
@@ -1619,21 +1685,24 @@ def _run_cloudrun_coordinated(
                 store.delete_if_generation(paths.claim, claim.generation)
             return None
 
-        archive = pack_tree(root, manifest)
-        post_manifest = source_manifest(root)
-        if tree_digest(root, post_manifest) != digest:
+        source_uri = f"gs://{bucket}/{paths.source}"
+        try:
+            archive = prepare_source_archive(root, digest, manifest, base, store, bucket)
+        except SourceTreeChanged:
             if claim:
                 store.delete_if_generation(paths.claim, claim.generation)
-            warn("source tree changed while packaging; refusing to submit an ambiguous snapshot")
             return 75
-        size_mb = archive.stat().st_size / 1e6
-        source_uri = f"gs://{bucket}/{paths.source}"
-        print(f"[ptest] packaged {size_mb:.0f}MB → {source_uri}",
-              file=sys.stderr, flush=True)
-        if not upload_source_once(base, store, archive, paths.source, bucket):
+        if archive is None:
             if claim:
                 store.delete_if_generation(paths.claim, claim.generation)
             return None
+        if archive == Path(paths.source):
+            print(f"[ptest] source cache ready → {source_uri}",
+                  file=sys.stderr, flush=True)
+        else:
+            size_mb = archive.stat().st_size / 1e6
+            print(f"[ptest] packaged {size_mb:.0f}MB → {source_uri}",
+                  file=sys.stderr, flush=True)
         print(f"[ptest] remote: {job} ({region}) · {cmd}", file=sys.stderr, flush=True)
         try:
             execution = submit_execution(base, job, region, source_uri, cmd)
@@ -1675,7 +1744,9 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
     region = pcfg.get("region") or cfg.get("defaults", {}).get("region", "us-central1")
     gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
     settings = remote_cache_settings(pcfg, cfg)
+    digest_started = time.monotonic()
     digest = tree_digest(root, source_manifest(root))
+    _source_timing("source digest", digest_started)
     identity = {
         "schema": "ptest-remote-key-v1",
         "project": project,

@@ -3,6 +3,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 
 def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
@@ -12,6 +14,37 @@ def init_repo(repo: Path) -> None:
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "ptest@example.invalid")
     git(repo, "config", "user.name", "ptest")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected"),
+    [
+        (0, "12345\n", "", True),
+        (0, "", "", False),
+        (1, "", "ERROR: (gcloud.storage.objects.describe) 404 Not Found", False),
+        (1, "", "credentials not found", None),
+        (1, "", "permission denied", None),
+    ],
+)
+def test_source_object_exists_distinguishes_hits_misses_and_ambiguous_failures(
+    ptest, monkeypatch, returncode, stdout, stderr, expected
+):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    monkeypatch.setattr(ptest.subprocess, "run", run)
+
+    assert ptest.source_object_exists(
+        ["gcloud", "--project=test-project"], "private-bucket", "sources/a.tar.gz"
+    ) is expected
+    assert calls == [
+        (["gcloud", "--project=test-project", "storage", "objects", "describe",
+          "gs://private-bucket/sources/a.tar.gz", "--format=value(generation)"],
+         {"capture_output": True, "text": True, "timeout": 60})
+    ]
 
 
 def test_digest_is_independent_of_checkout_path_and_mtime(ptest, tmp_path):
