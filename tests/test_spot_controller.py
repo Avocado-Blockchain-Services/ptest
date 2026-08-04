@@ -159,6 +159,13 @@ def test_controller_queries_monitoring_rest_api_with_supported_token_command(mon
     assert requests[0].get_header("Authorization") == "Bearer token"
 
 
+def test_status_metrics_return_backlog_leases_and_running_instances(monkeypatch):
+    adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
+    monkeypatch.setattr(adapter, "authenticated_metrics", lambda: (7, 3, 2, 99))
+
+    assert adapter.status_metrics() == (7, 2, 3)
+
+
 def test_monitoring_query_uses_a_full_five_minute_window_at_hour_boundary(monkeypatch):
     adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
     requests = []

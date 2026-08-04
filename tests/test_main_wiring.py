@@ -219,6 +219,31 @@ def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
     assert "unavailable until Spot is configured" in capsys.readouterr().out
 
 
+def test_status_prints_live_spot_queue_counts(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    monkeypatch.setattr(ptest, "spot_status", lambda *_args: (3, 2, 4), raising=False)
+
+    assert ptest.main(["status"]) == 0
+
+    assert capsys.readouterr().out == (
+        "Spot queue\n"
+        "  waiting jobs   3\n"
+        "  working jobs   2\n"
+        "  servers on     4\n"
+    )
+
+
+def test_status_refuses_a_project_without_spot_queue(wired, monkeypatch, capsys):
+    ptest, _calls = wired
+    cfg = ptest.load_config()
+    cfg["projects"]["fake"]["backend"] = "local"
+    monkeypatch.setattr(ptest, "load_config", lambda: cfg)
+
+    assert ptest.main(["status"]) == 2
+
+    assert "Spot queue is not configured" in capsys.readouterr().err
+
+
 def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
     ptest, _calls = wired
 
