@@ -263,7 +263,7 @@ resource "google_cloud_scheduler_job" "spot_controller" {
   attempt_deadline = "60s"
   http_target {
     http_method = "POST"
-    uri         = google_cloud_run_v2_service.spot_controller.uri
+    uri         = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"
     oidc_token {
       service_account_email = google_service_account.spot_controller.email
     }
