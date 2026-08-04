@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import io
 import json
-import hashlib
 import os
 import re
 import shlex
@@ -49,6 +49,7 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Mapping, NamedTuple
 
@@ -1191,10 +1192,13 @@ class ExecutionResult(NamedTuple):
 
 def submit_execution(base: list[str], job: str, region: str,
                      source_uri: str, command: str) -> str:
+    remote_env = f"PTEST_SRC={source_uri},PTEST_CMD={command}"
+    if os.environ.get("PTEST_PROFILE_DB_CLEANUP") == "1":
+        remote_env += ",PTEST_PROFILE_DB_CLEANUP=1"
     args = base + [
         "run", "jobs", "execute", job, f"--region={region}", "--async",
         "--format=value(metadata.name)",
-        "--update-env-vars", f"PTEST_SRC={source_uri},PTEST_CMD={command}",
+        "--update-env-vars", remote_env,
     ]
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=120)
@@ -1474,8 +1478,15 @@ def _uncached_remote_execution(
     return _show_execution_result(wait_for_execution(base, execution, region), gproject)
 
 
-def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
-                 what: str = "--full", fresh: bool = False) -> int | None:
+def _run_cloudrun_coordinated(
+    pcfg: dict,
+    cfg: dict,
+    project: str,
+    root: Path,
+    cmd: str,
+    what: str = "--full",
+    fresh: bool = False,
+) -> int | None:
     """Return an exit code, or None to mean 'fall back to local'."""
     job = pcfg.get("job")
     bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
@@ -1651,6 +1662,44 @@ def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
             pcfg, cfg, project, root, cmd, what, base, job, bucket, region,
             gproject, store,
         )
+
+
+def run_cloudrun(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
+                 what: str = "--full", fresh: bool = False) -> int | None:
+    """Coalesce locally first, then coordinate the request across machines."""
+    job = pcfg.get("job")
+    region = pcfg.get("region") or cfg.get("defaults", {}).get("region", "us-central1")
+    gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
+    settings = remote_cache_settings(pcfg, cfg)
+    digest = tree_digest(root, source_manifest(root))
+    identity = {
+        "schema": "ptest-remote-key-v1",
+        "project": project,
+        "kind": pcfg.get("kind", "unknown"),
+        "command": cmd,
+        "job": job or "",
+        "region": region,
+        "gcp_project": gproject or "",
+        "runner_namespace": settings.runner_namespace,
+        "tree_digest": digest,
+    }
+    if fresh:
+        identity["fresh_nonce"] = uuid.uuid4().hex
+    local_key = remote_request_key(identity)
+
+    def submit() -> tuple[int | None, str]:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = _run_cloudrun_coordinated(
+                pcfg, cfg, project, root, cmd, what=what, fresh=fresh
+            )
+        return exit_code, output.getvalue()
+
+    exit_code, output = coalesce_remote_run(local_key, submit)
+    if output:
+        sys.stdout.write(output)
+        sys.stdout.flush()
+    return exit_code
 
 
 def cmd_where(cfg: dict, cwd: Path) -> int:

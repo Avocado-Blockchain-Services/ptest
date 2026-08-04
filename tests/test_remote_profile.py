@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture
 def cloudrun_submission(ptest, tmp_path, monkeypatch):
     archive = ptest.pack_tree(tmp_path)
-    monkeypatch.setattr(ptest, "pack_tree", lambda root: archive)
+    monkeypatch.setattr(ptest, "pack_tree", lambda root, entries=None: archive)
     monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
     monkeypatch.setattr(ptest, "at_concurrency_limit", lambda *args: False)
     monkeypatch.setattr(ptest, "budget_check", lambda *args: True)
@@ -18,11 +18,20 @@ def cloudrun_submission(ptest, tmp_path, monkeypatch):
 
     def fake_gcloud(args, **kwargs):
         calls.append(args)
+        if "objects" in args and "describe" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="404 not found")
         if "storage" in args:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "executions" in args and "describe" in args:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"status":{"conditions":[{"type":"Completed","status":"True"}],'
+                       '"succeededCount":1,"completionTime":"2026-08-03T12:00:00Z"}}',
+                stderr="",
+            )
         return SimpleNamespace(
             returncode=0,
-            stdout="Execution [ptest-api-abcde] has successfully completed.\n",
+            stdout="ptest-api-abcde\n",
             stderr="",
         )
 

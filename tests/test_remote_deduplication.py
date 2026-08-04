@@ -82,6 +82,9 @@ def harness(ptest, monkeypatch, tmp_path, store, result=None):
     monkeypatch.setattr(ptest, "pack_tree", lambda root, entries=None: archive)
     monkeypatch.setattr(ptest, "utc_now", lambda: NOW)
     monkeypatch.setattr(ptest, "GcsCoordination", lambda *args: store)
+    # These tests exercise the cross-machine GCS state machine directly. The
+    # same-host file-lock/cache layer has its own crash/replay suite.
+    monkeypatch.setattr(ptest, "coalesce_remote_run", lambda key, submit: submit())
 
     def concurrency(*args):
         calls["concurrency"] += 1
@@ -343,7 +346,9 @@ def test_source_change_during_packaging_refuses_to_cache_or_submit(
 ):
     store = MemoryStore(ptest)
     calls = harness(ptest, monkeypatch, tmp_path, store)
-    digests = iter([DIGEST, "b" * 64])
+    # The local coalescing layer hashes once, then the GCS owner verifies the
+    # same digest before and after packaging.
+    digests = iter([DIGEST, DIGEST, "b" * 64])
     monkeypatch.setattr(ptest, "tree_digest", lambda root, entries=None: next(digests))
     pcfg, cfg = configured()
 

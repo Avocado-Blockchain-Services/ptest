@@ -288,7 +288,7 @@ def test_distinct_snapshots_in_same_second_use_distinct_gcs_objects(
     (second_root / "source.py").write_text("value = 2\n")
     archives = iter([ptest.pack_tree(first_root), ptest.pack_tree(second_root)])
 
-    monkeypatch.setattr(ptest, "pack_tree", lambda root: next(archives))
+    monkeypatch.setattr(ptest, "pack_tree", lambda root, entries=None: next(archives))
     monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
     monkeypatch.setattr(ptest, "at_concurrency_limit", lambda *args: False)
     monkeypatch.setattr(ptest, "budget_check", lambda *args: True)
@@ -299,12 +299,23 @@ def test_distinct_snapshots_in_same_second_use_distinct_gcs_objects(
     objects = []
 
     def fake_gcloud(args, **kwargs):
+        if "objects" in args and "describe" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="404 not found")
         if "storage" in args:
-            objects.append(args[-1])
+            uploaded = next((part for part in args if part.startswith("gs://")), "")
+            if "cp" in args and uploaded.endswith(".tar.gz"):
+                objects.append(uploaded)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "executions" in args and "describe" in args:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"status":{"conditions":[{"type":"Completed","status":"True"}],'
+                       '"succeededCount":1,"completionTime":"2026-08-03T12:00:00Z"}}',
+                stderr="",
+            )
         return SimpleNamespace(
             returncode=0,
-            stdout="Execution [ptest-api-abcde] has successfully completed.\n",
+            stdout="ptest-api-abcde\n",
             stderr="",
         )
 
@@ -332,7 +343,7 @@ def test_replayed_run_cloudrun_result_bypasses_accounting_and_keeps_contract(
     ptest, tmp_path, monkeypatch, capsys, exit_code, output
 ):
     archive = ptest.pack_tree(tmp_path)
-    monkeypatch.setattr(ptest, "pack_tree", lambda root: archive)
+    monkeypatch.setattr(ptest, "pack_tree", lambda root, entries=None: archive)
     monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
     monkeypatch.setattr(
         ptest,
