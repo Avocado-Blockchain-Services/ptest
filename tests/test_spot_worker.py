@@ -277,6 +277,30 @@ def test_vitest_preparation_requires_lockfile_and_is_script_free(tmp_path, monke
     assert calls == [["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]]
 
 
+def test_pytest_child_reuses_the_prepared_workspace_cache_without_network(tmp_path, monkeypatch):
+    calls = []
+
+    class Child:
+        returncode = 0
+        def communicate(self, timeout): return "passed", None
+
+    monkeypatch.setattr(
+        "spot_worker.subprocess.Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or Child(),
+    )
+    adapter = LocalProcessAdapter()
+    monkeypatch.setattr(adapter, "stop_postgres", lambda: None)
+
+    assert adapter.run("uv run pytest", tmp_path) == (0, "passed")
+
+    command, kwargs = calls[0]
+    assert ["--bind", str(tmp_path.parent.parent), str(tmp_path.parent.parent)] == command[command.index("--bind"):command.index("--bind") + 3]
+    assert command[command.index("--chdir") + 1] == str(tmp_path)
+    assert kwargs["env"]["HOME"] == str(tmp_path)
+    assert kwargs["env"]["UV_CACHE_DIR"] == str(tmp_path / ".uv-cache")
+    assert kwargs["env"]["UV_OFFLINE"] == "1"
+
+
 def test_worker_claims_before_running_and_uses_message_bound_ack(tmp_path, monkeypatch):
     events = []
 

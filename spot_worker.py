@@ -234,15 +234,16 @@ class LocalProcessAdapter:
         # Bubblewrap gives each untrusted suite an unprivileged user and a
         # network namespace with no interfaces; the supervisor retains GCP I/O.
         env = {"PATH": self._path(), "HOME": str(cwd),
-               "PYTHONUNBUFFERED": "1", "NO_PROXY": "*"}
+               "PYTHONUNBUFFERED": "1", "NO_PROXY": "*",
+               "UV_CACHE_DIR": str(cwd / ".uv-cache"), "UV_OFFLINE": "1"}
         if self._pgsocket:
             env["DATABASE_URL"] = (
-                "postgresql+asyncpg://ptest@/persea_content_maker_test?host=/work/.spot-pg"
+                "postgresql+asyncpg://ptest@/persea_content_maker_test?host=" + str(self._pgsocket)
             )
         self._process = subprocess.Popen(
             ["bwrap", "--die-with-parent", "--unshare-user", "--uid", "65534", "--gid", "65534",
-             "--unshare-net", "--ro-bind", "/", "/", "--bind", str(cwd), "/work",
-             "--chdir", "/work", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+             "--unshare-net", "--ro-bind", "/", "/", "--bind", str(cwd.parent.parent),
+             str(cwd.parent.parent), "--chdir", str(cwd), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
              "/bin/sh", "-lc", command],
             cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -264,8 +265,11 @@ class LocalProcessAdapter:
         if kind == "pytest":
             if not (cwd / "pyproject.toml").exists() or not (cwd / "uv.lock").exists():
                 raise RuntimeError("Spot pytest requests require pyproject.toml and uv.lock")
-            completed = subprocess.run(["uv", "sync", "--frozen"], cwd=cwd,
-                                       text=True, capture_output=True, timeout=600)
+            completed = subprocess.run(
+                ["uv", "sync", "--frozen"], cwd=cwd,
+                env={**os.environ, "UV_CACHE_DIR": str(cwd / ".uv-cache")},
+                text=True, capture_output=True, timeout=600,
+            )
             if completed.returncode:
                 raise RuntimeError(completed.stdout + completed.stderr)
             self._start_postgres(cwd)
