@@ -265,7 +265,7 @@ def test_only_stale_worker_heartbeats_allow_scale_down(monkeypatch):
     assert scale_target(0, 1, adapter._worker_idle_age(), 5) == 0
 
 
-def test_missing_worker_index_bootstraps_first_worker(monkeypatch):
+def test_durable_queued_job_bootstraps_first_worker_without_monitoring(monkeypatch):
     adapter = GcloudControllerAdapter(
         "project-a", "us-central1", "mig", "spot-sub", "bucket"
     )
@@ -278,7 +278,7 @@ def test_missing_worker_index_bootstraps_first_worker(monkeypatch):
 
     monkeypatch.setattr(adapter, "_run", run)
     monkeypatch.setattr(adapter, "_worker_index", lambda: [])
-    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 1)
+    monkeypatch.setattr(adapter, "_durable_queue_counts", lambda: (1, 0))
     monkeypatch.setattr(adapter, "set_target", lambda target: targets.append(target))
 
     assert reconcile(adapter, 5) == 1
@@ -304,7 +304,7 @@ def test_unindexed_running_worker_is_a_conservative_lease_during_rollout(monkeyp
         raise AssertionError(args)
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
-    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_durable_queue_counts", lambda: (0, 0))
     monkeypatch.setattr(adapter, "_run", run)
     monkeypatch.setattr(adapter, "_worker_index", lambda: [indexed_idle])
 
@@ -331,7 +331,7 @@ def test_terminated_index_entry_cannot_mask_different_unindexed_worker(monkeypat
         raise AssertionError(args)
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
-    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_durable_queue_counts", lambda: (0, 0))
     monkeypatch.setattr(adapter, "_run", run)
     monkeypatch.setattr(adapter, "_worker_index", lambda: [terminated])
 
@@ -385,7 +385,7 @@ def test_controller_reads_one_bounded_worker_index_not_terminal_history(monkeypa
         return Response()
 
     monkeypatch.setattr("spot_controller.datetime", Clock)
-    monkeypatch.setattr(adapter, "_monitoring_backlog", lambda: 0)
+    monkeypatch.setattr(adapter, "_durable_queue_counts", lambda: (0, 0))
     monkeypatch.setattr(adapter, "_run", run)
     monkeypatch.setattr("spot_controller.urlopen", open_index)
 

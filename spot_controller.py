@@ -183,7 +183,10 @@ class GcloudControllerAdapter:
         return result.stdout
 
     def authenticated_metrics(self) -> tuple[int, int, int, int]:
-        backlog = self._monitoring_backlog()
+        # Pub/Sub Monitoring is eventually consistent and may show an empty
+        # subscription while a durable request is waiting to be redelivered.
+        # Scaling must follow the queue ledger that workers actually claim.
+        backlog, durable_leases = self._durable_queue_counts()
         instances = json.loads(self._run("compute", "instance-groups", "managed",
                                          "list-instances", self.mig, "--region", self.region,
                                          "--format=json"))
@@ -197,7 +200,8 @@ class GcloudControllerAdapter:
             if instance.get("instance") or instance.get("name")
         }
         active = len(running)
-        leases, idle_age = self._worker_metrics(active, running_worker_ids)
+        indexed_leases, idle_age = self._worker_metrics(active, running_worker_ids)
+        leases = max(durable_leases, indexed_leases)
         return backlog, active, leases, idle_age
 
     def status_metrics(self) -> tuple[int, int, int]:
