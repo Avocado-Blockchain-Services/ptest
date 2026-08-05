@@ -2093,8 +2093,8 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
 
 def run_remote_backend(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                        what: str = "--full", fresh: bool = False) -> int | None:
-    # Cloud Run is retained only as deprecated infrastructure.  New ptest
-    # routing must never dispatch there.
+    if pcfg.get("backend") == "cloudrun":
+        return run_cloudrun(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
     return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
 
 

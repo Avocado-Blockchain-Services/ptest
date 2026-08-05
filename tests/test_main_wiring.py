@@ -159,10 +159,12 @@ def test_cloudrun_project_configuration_routes_compulsory_work_to_cloud_run(wire
     cfg = ptest.load_config()
     cfg["projects"]["fake"]["backend"] = "cloudrun"
     monkeypatch.setattr(ptest, "load_config", lambda: cfg)
-    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: calls["remote"].append(a[4]) or 0)
+    cloudrun_calls = []
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: cloudrun_calls.append(a[4]) or 0)
+    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: pytest.fail("must not call Spot"))
 
     assert ptest.main(["--full"]) == 0
-    assert calls["remote"] == [cfg["projects"]["fake"]["full"]]
+    assert cloudrun_calls == [cfg["projects"]["fake"]["full"]]
     assert not calls["local"]
 
 
