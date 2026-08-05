@@ -39,6 +39,7 @@ def test_spot_queue_wakes_the_controller_on_each_publish_while_idle_sweep_is_inf
     scheduler = resource_block(source, 'resource "google_cloud_scheduler_job" "spot_controller"')
 
     assert re.search(r'topic\s*=\s*google_pubsub_topic\.spot_requests\.id', wake)
+    assert 'ack_deadline_seconds = 60' in wake
     assert 'push_endpoint = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"' in wake
     assert 'service_account_email = google_service_account.spot_controller.email' in wake
     assert 'schedule         = "*/5 * * * *"' in scheduler

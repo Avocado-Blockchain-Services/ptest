@@ -308,8 +308,9 @@ resource "google_service_account_iam_member" "spot_pubsub_push_token_creator" {
 # Each publish wakes capacity immediately.  This is independent of the worker
 # subscription, so acknowledging the controller delivery never consumes work.
 resource "google_pubsub_subscription" "spot_controller_wake" {
-  name  = "ptest-spot-controller-wake"
-  topic = google_pubsub_topic.spot_requests.id
+  name                 = "ptest-spot-controller-wake"
+  topic                = google_pubsub_topic.spot_requests.id
+  ack_deadline_seconds = 60
   push_config {
     push_endpoint = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"
     oidc_token {
