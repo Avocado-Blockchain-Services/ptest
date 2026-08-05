@@ -119,16 +119,16 @@ def test_full_still_sends_the_full_command(wired):
     assert "--cov-fail-under=85" in calls["remote"][0]
 
 
-def test_full_is_compulsory_spot_even_when_project_config_says_local(wired, monkeypatch):
-    """A full suite must never escape to this machine through --local/local config."""
+def test_force_local_full_bypasses_spot_and_caps_workers(wired, monkeypatch):
     ptest, calls = wired
     cfg = ptest.load_config()
     cfg["projects"]["fake"]["backend"] = "local"
     monkeypatch.setattr(ptest, "load_config", lambda: cfg)
-    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 75)
 
-    assert ptest.main(["--full", "--local"]) == 75
-    assert not calls["local"]
+    assert ptest.main(["--full", "--local"]) == 0
+    assert not calls["remote"]
+    assert len(calls["local"]) == 1
+    assert "-n 2" in calls["local"][0]
 
 
 def test_heavy_scope_is_compulsory_spot_even_with_force_local(wired, monkeypatch):

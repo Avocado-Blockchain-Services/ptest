@@ -2364,8 +2364,11 @@ def main(argv: list[str]) -> int:
         should_route_remote(passthrough, root, pcfg, cfg, force_local)
         if not full else (False, 0)
     )
-    selected_remote = route_remote or full
-    compulsory_spot = route_remote or full
+    # `--local` is an explicit operator override for a full suite. Large scoped
+    # selections remain compulsory Spot work because they are a load guard, not
+    # a convenience routing choice.
+    selected_remote = route_remote or (full and not force_local)
+    compulsory_spot = route_remote or (full and not force_local)
     if compulsory_spot and pcfg.get("backend") == "cloudrun":
         warn("backend = \"cloudrun\" is deprecated; configure compulsory Spot instead")
         return 2
@@ -2405,7 +2408,7 @@ def main(argv: list[str]) -> int:
                                 fresh=fresh)
         return rc if rc is not None else 75
 
-    if full:
+    if full and not force_local:
         rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
         return rc if rc is not None else 75
 
