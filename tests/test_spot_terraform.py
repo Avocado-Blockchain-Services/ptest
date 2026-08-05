@@ -77,7 +77,10 @@ def test_spot_iam_separates_routine_operators_from_live_smoke_administrators():
         source, 'resource "google_project_iam_member" "spot_smoke_os_admin"'
     )
     controller = resource_block(source, 'resource "google_storage_bucket_iam_member" "spot_controller_state_reader"')
-    assert 'objects/spot/v1/workers/index/current.json' in controller
+    # GCS object-list authorization is evaluated at bucket scope, so the
+    # controller needs object viewing at this bucket to read the durable queue.
+    assert 'role   = "roles/storage.objectViewer"' in controller
+    assert 'condition {' not in controller
 
 
 def test_spot_subscription_has_a_dead_letter_policy_and_service_agent_permissions():

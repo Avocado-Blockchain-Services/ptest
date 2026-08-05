@@ -168,10 +168,6 @@ resource "google_storage_bucket_iam_member" "spot_controller_state_reader" {
   bucket = google_storage_bucket.src.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.spot_controller.email}"
-  condition {
-    title       = "Read worker index and durable queue ledger"
-    expression  = "resource.name == 'projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/workers/index/current.json' || resource.name.startsWith('projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/requests/') || resource.name.startsWith('projects/_/buckets/${google_storage_bucket.src.name}/objects/spot/v1/states/')"
-  }
 }
 
 resource "google_compute_health_check" "spot_worker" {
