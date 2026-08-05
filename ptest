@@ -2374,9 +2374,6 @@ def main(argv: list[str]) -> int:
     # a convenience routing choice.
     selected_remote = route_remote or (full and not force_local)
     compulsory_spot = route_remote or (full and not force_local)
-    if compulsory_spot and pcfg.get("backend") == "cloudrun":
-        warn("backend = \"cloudrun\" is deprecated; configure compulsory Spot instead")
-        return 2
     if fresh and not selected_remote:
         warn("--fresh is only valid for a selected remote execution")
         return 2

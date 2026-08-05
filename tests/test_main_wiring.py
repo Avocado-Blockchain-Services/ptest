@@ -154,14 +154,15 @@ def test_compulsory_spot_none_result_is_converted_to_75_not_local(wired, monkeyp
     assert not calls["local"]
 
 
-def test_cloudrun_project_configuration_is_rejected_for_compulsory_work(wired, monkeypatch):
+def test_cloudrun_project_configuration_routes_compulsory_work_to_cloud_run(wired, monkeypatch):
     ptest, calls = wired
     cfg = ptest.load_config()
     cfg["projects"]["fake"]["backend"] = "cloudrun"
     monkeypatch.setattr(ptest, "load_config", lambda: cfg)
-    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: pytest.fail("must not call Cloud Run"))
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: calls["remote"].append(a[4]) or 0)
 
-    assert ptest.main(["--full"]) == 2
+    assert ptest.main(["--full"]) == 0
+    assert calls["remote"] == [cfg["projects"]["fake"]["full"]]
     assert not calls["local"]
 
 
