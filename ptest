@@ -2197,8 +2197,14 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
         print(f"worktree of {src}")
     print(f"kind     {pcfg.get('kind', det['kind'])}")
     print(f"workers  {pcfg.get('workers', cfg.get('defaults', {}).get('workers', 2))}")
-    print("backend  Spot compulsory for --full and heavy scoped runs")
-    print(f"configured backend  {pcfg.get('backend', 'local')}")
+    backend = pcfg.get("backend", "local")
+    description = (
+        "Cloud Run Jobs for --full" if backend == "cloudrun"
+        else "Spot queue for --full and heavy scoped runs" if backend == "spot_queue"
+        else "local"
+    )
+    print(f"backend  {description}")
+    print(f"configured backend  {backend}")
     if pcfg.get("backend") in {"cloudrun", "spot_queue"}:
         try:
             cache = remote_cache_settings(pcfg, cfg)
@@ -2242,7 +2248,12 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     print(f"project     {name or '✗ unregistered (auto-detect will be used)'}")
     backend = pcfg.get("backend", "local")
-    print("backend     Spot compulsory for --full and heavy scoped runs")
+    description = (
+        "Cloud Run Jobs for --full" if backend == "cloudrun"
+        else "Spot queue for --full and heavy scoped runs" if backend == "spot_queue"
+        else "local"
+    )
+    print(f"backend     {description}")
     print(f"configured  {backend}")
     if backend == "cloudrun":
         backend_values = {}

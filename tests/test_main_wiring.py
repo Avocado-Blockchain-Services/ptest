@@ -211,7 +211,7 @@ def test_where_reports_remote_cache_ttl_and_namespace(wired, capsys):
     assert ptest.main(["where"]) == 0
 
     output = capsys.readouterr().out
-    assert "Spot compulsory" in output
+    assert "Spot queue for --full and heavy scoped runs" in output
 
 
 def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
