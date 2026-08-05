@@ -21,7 +21,7 @@ variable "spot_max_workers" {
 }
 variable "spot_idle_seconds" {
   type    = number
-  default = 3600
+  default = 1200
 }
 variable "spot_overflow_reject_enabled" {
   type    = bool

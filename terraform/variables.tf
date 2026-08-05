@@ -71,7 +71,7 @@ variable "spot_max_workers" {
 
 variable "spot_idle_seconds" {
   type        = number
-  default     = 3600
+  default     = 1200
   description = "Keep an idle worker until this exact timeout, unless it owns a lease."
 }
 
