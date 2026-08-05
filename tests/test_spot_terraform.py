@@ -33,6 +33,17 @@ def test_spot_scheduler_posts_to_the_controller_reconcile_route():
     )
 
 
+def test_spot_queue_wakes_the_controller_on_each_publish_while_idle_sweep_is_infrequent():
+    source = TERRAFORM.read_text()
+    wake = resource_block(source, 'resource "google_pubsub_subscription" "spot_controller_wake"')
+    scheduler = resource_block(source, 'resource "google_cloud_scheduler_job" "spot_controller"')
+
+    assert re.search(r'topic\s*=\s*google_pubsub_topic\.spot_requests\.id', wake)
+    assert 'push_endpoint = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"' in wake
+    assert 'service_account_email = google_service_account.spot_controller.email' in wake
+    assert 'schedule         = "*/5 * * * *"' in scheduler
+
+
 def test_spot_worker_can_only_mutate_state_and_worker_prefixes():
     source = TERRAFORM.read_text()
     immutable = resource_block(

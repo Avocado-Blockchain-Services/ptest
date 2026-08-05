@@ -303,9 +303,34 @@ resource "google_cloud_run_v2_service_iam_member" "spot_controller_operator_invo
   member   = each.key
 }
 
+resource "google_service_account_iam_member" "spot_pubsub_push_token_creator" {
+  service_account_id = google_service_account.spot_controller.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${local.spot_pubsub_service_agent}"
+}
+
+# Each publish wakes capacity immediately.  This is independent of the worker
+# subscription, so acknowledging the controller delivery never consumes work.
+resource "google_pubsub_subscription" "spot_controller_wake" {
+  name  = "ptest-spot-controller-wake"
+  topic = google_pubsub_topic.spot_requests.id
+  push_config {
+    push_endpoint = "${google_cloud_run_v2_service.spot_controller.uri}/reconcile"
+    oidc_token {
+      service_account_email = google_service_account.spot_controller.email
+      audience              = google_cloud_run_v2_service.spot_controller.uri
+    }
+  }
+  depends_on = [
+    google_cloud_run_v2_service_iam_member.spot_controller_invoker,
+    google_service_account_iam_member.spot_pubsub_push_token_creator,
+  ]
+}
+
 resource "google_cloud_scheduler_job" "spot_controller" {
   name             = "ptest-spot-controller"
-  schedule         = "* * * * *"
+  # Only the idle scale-down sweep: publish events handle scale-up.
+  schedule         = "*/5 * * * *"
   time_zone        = "Etc/UTC"
   attempt_deadline = "60s"
   http_target {
