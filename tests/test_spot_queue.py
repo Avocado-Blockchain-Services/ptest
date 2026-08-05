@@ -472,7 +472,7 @@ def test_request_kind_is_versioned_validated_and_changes_the_identity():
 
 
 def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
-    ptest, monkeypatch, tmp_path
+    ptest, monkeypatch, tmp_path, capsys
 ):
     class Queue:
         def __init__(self):
@@ -509,6 +509,7 @@ def test_ptest_publishes_a_durable_spot_request_and_waits_for_its_result(
     assert queue.requests[0].command == "uv run pytest tests"
     assert queue.requests[0].source_uri == "gs://private-bucket/sources/" + "b" * 64 + ".tar.gz"
     assert queue.messages == [queue.requests[0].request_key]
+    assert "waiting for remote completion (silence is normal; do not resubmit)" in capsys.readouterr().err
 
 
 def test_ptest_overflow_toggle_rejects_saturated_capacity_before_creation(

@@ -2044,6 +2044,11 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
         warn(f"Spot queue publish outcome is ambiguous ({exc}) — retry without local fallback")
         return 75
 
+    print("[ptest] waiting for remote completion (silence is normal; do not resubmit)",
+          file=sys.stderr, flush=True)
+    print(f"[ptest] if this client is interrupted, inspect: ptest result {request_key_value}",
+          file=sys.stderr, flush=True)
+
     try:
         result = queue.wait_result(request_key_value, timeout)
     except (spot_queue.SpotQueueUnavailable, spot_queue.SpotRecordError, ValueError) as exc:
