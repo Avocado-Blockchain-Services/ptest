@@ -32,6 +32,18 @@ def test_submit_execution_is_async_and_returns_the_exact_execution_name(ptest, m
     assert "PTEST_SRC=gs://bucket/source.tar.gz,PTEST_CMD=run tests" in args
 
 
+def test_remote_execution_guidance_explains_wait_and_recovery_commands(ptest, capsys):
+    ptest.remote_execution_guidance(
+        "ptest-api", "ptest-api-abc12", "us-central1", "test-project"
+    )
+
+    output = capsys.readouterr().err
+    assert "running remotely on Cloud Run" in output
+    assert "ptest-api-abc12" in output
+    assert "gcloud run jobs executions describe ptest-api-abc12" in output
+    assert "gcloud logging read" in output
+
+
 def test_submit_failure_is_an_infrastructure_error(ptest, monkeypatch):
     monkeypatch.setattr(
         ptest.subprocess,

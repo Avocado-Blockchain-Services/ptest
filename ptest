@@ -1235,6 +1235,18 @@ def submit_execution(base: list[str], job: str, region: str,
     return execution
 
 
+def remote_execution_guidance(job: str, execution: str, region: str, project: str) -> None:
+    """Tell an interrupted caller how to observe its remote Cloud Run suite."""
+    warn(f"running remotely on Cloud Run: {job} execution {execution}")
+    warn("waiting for the terminal test result; do not resubmit while it is running")
+    warn("if interrupted, inspect status: "
+         f"gcloud run jobs executions describe {execution} --region={region} --project={project}")
+    query = (f'resource.type="cloud_run_job" AND '
+             f'labels."run.googleapis.com/execution_name"="{execution}"')
+    warn("to see remote test output: "
+         f"gcloud logging read '{query}' --project={project} --order=asc")
+
+
 def describe_execution(base: list[str], execution: str,
                        region: str) -> ExecutionState:
     args = base + [
@@ -1592,6 +1604,7 @@ def _uncached_remote_execution(
     except CloudRunUnavailable as exc:
         warn(f"remote execution error ({exc}) — running locally")
         return None
+    remote_execution_guidance(job, execution, region, gproject)
     return _show_execution_result(wait_for_execution(base, execution, region), gproject)
 
 
@@ -1754,6 +1767,7 @@ def _run_cloudrun_coordinated(
                 store.delete_if_generation(paths.claim, claim.generation)
             warn(f"remote execution error ({exc}) — running locally")
             return None
+        remote_execution_guidance(job, execution, region, gproject)
         store.create_json(
             paths.execution,
             {"schema": "ptest-execution-v1", "execution": execution,
