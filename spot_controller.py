@@ -63,7 +63,10 @@ def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
            active_leases, idle_timeout_seconds) < 0:
         raise ValueError("capacity inputs must be non-negative")
     if active_leases:
-        return min(max_workers, max(backlog, active_workers, active_leases))
+        # ``backlog`` is waiting work and ``active_leases`` is work already
+        # consuming a worker.  They are disjoint durable states, so taking
+        # their maximum strands queued work behind busy workers.
+        return min(max_workers, max(active_workers, backlog + active_leases))
     if max_workers == 0:
         return 0
     if backlog:

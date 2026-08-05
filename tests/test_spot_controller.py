@@ -120,8 +120,12 @@ def test_active_leases_are_a_floor_even_when_worker_observation_lags():
     assert scale_target(0, 1, 9999, 5, active_leases=3) == 3
 
 
-def test_backlog_remains_a_scale_out_signal_while_a_lease_is_active():
-    assert scale_target(4, 1, 0, 5, active_leases=1) == 4
+def test_backlog_adds_capacity_to_workers_already_busy():
+    assert scale_target(4, 1, 0, 5, active_leases=1) == 5
+
+
+def test_queued_work_scales_beyond_workers_already_busy():
+    assert scale_target(1, 1, 0, 5, active_leases=1) == 2
 
 
 def test_target_never_exceeds_cap_when_lease_count_is_inconsistent():
