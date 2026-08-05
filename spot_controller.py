@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from spot_queue import WORKER_INDEX_SCHEMA, WorkerState
+from spot_queue import LEASE_SCHEMA, WORKER_INDEX_SCHEMA, WorkerState
 
 
 def admission_allowed(backlog: int, active_leases: int, max_workers: int,
@@ -20,6 +20,34 @@ def admission_allowed(backlog: int, active_leases: int, max_workers: int,
     if min(backlog, active_leases, max_workers) < 0:
         raise ValueError("admission inputs must be non-negative")
     return not overflow_reject_enabled or max(backlog, active_leases) < max_workers
+
+
+def durable_job_counts(request_keys: set[str], states: dict[str, dict],
+                       now: datetime) -> tuple[int, int]:
+    """Return queued and actively leased jobs from the durable queue ledger."""
+    if now.tzinfo is None:
+        raise ValueError("queue status clock must be timezone-aware")
+    queued = working = 0
+    for request_key in request_keys:
+        state = states.get(request_key)
+        if state is None:
+            queued += 1
+            continue
+        if state.get("schema") != LEASE_SCHEMA:
+            # Terminal results and cancellations are historical, not queued work.
+            continue
+        try:
+            expires_at = datetime.fromisoformat(str(state["expires_at"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("queue lease state is malformed") from exc
+        if expires_at.tzinfo is None:
+            raise ValueError("queue lease expiry must be timezone-aware")
+        if expires_at > now:
+            working += 1
+        else:
+            # An expired lease is eligible for Pub/Sub redelivery.
+            queued += 1
+    return queued, working
 
 
 def scale_target(backlog: int, active_workers: int, idle_age_seconds: int,
@@ -173,9 +201,66 @@ class GcloudControllerAdapter:
         return backlog, active, leases, idle_age
 
     def status_metrics(self) -> tuple[int, int, int]:
-        """Return live queue backlog, active jobs, and powered-on workers."""
-        backlog, workers, leases, _idle_age = self.authenticated_metrics()
-        return backlog, leases, workers
+        """Return durable queued jobs, live leases, and powered-on workers."""
+        queued, working = self._durable_queue_counts()
+        instances = json.loads(self._run("compute", "instance-groups", "managed",
+                                         "list-instances", self.mig, "--region", self.region,
+                                         "--format=json"))
+        servers = sum(1 for instance in instances if instance.get("instanceStatus") == "RUNNING")
+        return queued, working, servers
+
+    def _durable_queue_counts(self) -> tuple[int, int]:
+        token = self._run("auth", "print-access-token").strip()
+        request_names = self._storage_object_names("spot/v1/requests/", token)
+        state_names = self._storage_object_names("spot/v1/states/", token)
+        request_prefix, state_prefix = "spot/v1/requests/", "spot/v1/states/"
+        request_keys = {
+            name.removeprefix(request_prefix).removesuffix(".json")
+            for name in request_names if name.startswith(request_prefix) and name.endswith(".json")
+        }
+        states = {
+            name.removeprefix(state_prefix).removesuffix(".json"):
+            self._storage_object_json(name, token)
+            for name in state_names if name.startswith(state_prefix) and name.endswith(".json")
+        }
+        if not all(isinstance(record, dict) for record in states.values()):
+            raise RuntimeError("queue state object is malformed")
+        return durable_job_counts(request_keys, states, datetime.now(timezone.utc))
+
+    def _storage_object_names(self, prefix: str, token: str) -> list[str]:
+        names, page_token = [], None
+        while True:
+            query = urlencode({"prefix": prefix, **({"pageToken": page_token} if page_token else {})})
+            url = ("https://storage.googleapis.com/storage/v1/b/"
+                   f"{quote(self.bucket, safe='')}/o?{query}")
+            try:
+                request = Request(url, headers={"Authorization": f"Bearer {token}"})
+                with urlopen(request, timeout=30) as response:
+                    payload = json.loads(response.read().decode())
+            except (HTTPError, json.JSONDecodeError) as exc:
+                raise RuntimeError("queue objects could not be listed") from exc
+            items = payload.get("items", [])
+            if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                raise RuntimeError("queue object listing is malformed")
+            names.extend(item["name"] for item in items if isinstance(item.get("name"), str))
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                return names
+            if not isinstance(page_token, str):
+                raise RuntimeError("queue object listing page token is malformed")
+
+    def _storage_object_json(self, object_name: str, token: str) -> dict:
+        url = ("https://storage.googleapis.com/storage/v1/b/"
+               f"{quote(self.bucket, safe='')}/o/{quote(object_name, safe='')}?alt=media")
+        try:
+            request = Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urlopen(request, timeout=30) as response:
+                value = json.loads(response.read().decode())
+        except (HTTPError, json.JSONDecodeError) as exc:
+            raise RuntimeError("queue state object could not be read") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("queue state object is malformed")
+        return value
 
     def _worker_index(self) -> list[WorkerState]:
         object_name = "spot/v1/workers/index/current.json"

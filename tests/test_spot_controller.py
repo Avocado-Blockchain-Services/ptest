@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spot_controller import GcloudControllerAdapter, reconcile, scale_target
+from spot_controller import GcloudControllerAdapter, durable_job_counts, reconcile, scale_target
 from spot_queue import WorkerState
 
 
@@ -159,11 +159,34 @@ def test_controller_queries_monitoring_rest_api_with_supported_token_command(mon
     assert requests[0].get_header("Authorization") == "Bearer token"
 
 
-def test_status_metrics_return_backlog_leases_and_running_instances(monkeypatch):
+def test_status_metrics_return_durable_queue_counts_and_running_instances(monkeypatch):
     adapter = GcloudControllerAdapter("project-a", "us-central1", "mig", "spot-sub", "bucket")
-    monkeypatch.setattr(adapter, "authenticated_metrics", lambda: (7, 3, 2, 99))
+    monkeypatch.setattr(adapter, "_durable_queue_counts", lambda: (7, 2))
+    monkeypatch.setattr(adapter, "_run", lambda *_args: json.dumps([
+        {"instanceStatus": "RUNNING"}, {"instanceStatus": "RUNNING"},
+        {"instanceStatus": "STOPPING"},
+    ]))
 
-    assert adapter.status_metrics() == (7, 2, 3)
+    assert adapter.status_metrics() == (7, 2, 2)
+
+
+def test_durable_job_counts_distinguish_queued_work_from_live_leases():
+    now = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+    requests = {"queued", "running", "expired", "passed", "cancelled"}
+    states = {
+        "running": {
+            "schema": "ptest-spot-lease-v1",
+            "expires_at": (now + timedelta(seconds=120)).isoformat(),
+        },
+        "expired": {
+            "schema": "ptest-spot-lease-v1",
+            "expires_at": (now - timedelta(seconds=1)).isoformat(),
+        },
+        "passed": {"schema": "ptest-spot-result-v1"},
+        "cancelled": {"schema": "ptest-spot-cancel-v1"},
+    }
+
+    assert durable_job_counts(requests, states, now) == (2, 1)
 
 
 def test_monitoring_query_uses_a_full_five_minute_window_at_hour_boundary(monkeypatch):
