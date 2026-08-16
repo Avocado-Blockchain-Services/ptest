@@ -101,9 +101,14 @@ say "5. Grant the runner read access to the source bucket only"
 echo "waiting for the service account to propagate…"
 retry 12 "${G[@]}" iam service-accounts describe "$SA" >/dev/null
 
+# --condition=None is mandatory, not cosmetic: once ANY conditional binding
+# exists on the policy, gcloud refuses an unconditional add in non-interactive
+# mode. The project binding below always had it; the bucket ones did not, so
+# re-running this script broke the moment a condition appeared on the bucket.
 retry 6 "${G[@]}" storage buckets add-iam-policy-binding "gs://$BUCKET" \
   --member="serviceAccount:${SA}" \
-  --role="roles/storage.objectViewer" >/dev/null
+  --role="roles/storage.objectViewer" \
+  --condition=None >/dev/null
 retry 6 "${G[@]}" projects add-iam-policy-binding "$PROJECT" \
   --member="serviceAccount:${SA}" \
   --role="roles/logging.logWriter" \
@@ -140,7 +145,8 @@ fi
 
 say "8. Let your account push source and execute the job"
 "${G[@]}" storage buckets add-iam-policy-binding "gs://$BUCKET" \
-  --member="user:${ACCOUNT}" --role="roles/storage.objectAdmin" >/dev/null
+  --member="user:${ACCOUNT}" --role="roles/storage.objectAdmin" \
+  --condition=None >/dev/null
 
 cat <<SUMMARY
 
