@@ -243,7 +243,7 @@ def test_status_prints_live_spot_queue_counts(wired, monkeypatch, capsys):
     ptest, _calls = wired
     monkeypatch.setattr(ptest, "spot_status", lambda *_args: (3, 2, 4), raising=False)
 
-    assert ptest.main(["status"]) == 0
+    assert ptest.main(["spot-status"]) == 0
 
     assert capsys.readouterr().out == (
         "Spot queue\n"
@@ -259,7 +259,7 @@ def test_status_refuses_a_project_without_spot_queue(wired, monkeypatch, capsys)
     cfg["projects"]["fake"]["backend"] = "local"
     monkeypatch.setattr(ptest, "load_config", lambda: cfg)
 
-    assert ptest.main(["status"]) == 2
+    assert ptest.main(["spot-status"]) == 2
 
     assert "Spot queue is not configured" in capsys.readouterr().err
 
@@ -275,7 +275,7 @@ def test_result_prints_terminal_spot_summary(wired, monkeypatch, capsys):
         raising=False,
     )
 
-    assert ptest.main(["result", key]) == 0
+    assert ptest.main(["spot-result", key]) == 0
 
     assert capsys.readouterr().out == (
         f"Spot result {key}\n"
@@ -293,7 +293,7 @@ def test_result_output_is_raw_for_paging(wired, monkeypatch, capsys):
         raising=False,
     )
 
-    assert ptest.main(["result", "a" * 64, "--output"]) == 0
+    assert ptest.main(["spot-result", "a" * 64, "--output"]) == 0
 
     assert capsys.readouterr().out == "first line\nsecond line\n"
 
@@ -301,9 +301,9 @@ def test_result_output_is_raw_for_paging(wired, monkeypatch, capsys):
 def test_result_requires_one_request_key(wired, capsys):
     ptest, _calls = wired
 
-    assert ptest.main(["result"]) == 2
+    assert ptest.main(["spot-result"]) == 2
 
-    assert "usage: ptest result <request-key> [--output]" in capsys.readouterr().err
+    assert "usage: ptest spot-result <request-key> [--output]" in capsys.readouterr().err
 
 
 def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):

@@ -51,7 +51,7 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import Mapping, NamedTuple
 from urllib.parse import urlparse
@@ -665,6 +665,291 @@ def budget_check(cfg: dict, project: str) -> bool:
     data["counts"][project] = n + 1
     f.write_text(json.dumps(data))
     return True
+
+
+# ── situational awareness ───────────────────────────────────────────────────
+#
+# The load problem ptest exists to solve is invisible from inside a single
+# session: your own run is polite, and nothing tells you about the five other
+# agents doing the same thing, or the one bare `pytest -n auto` undoing all of
+# it. Runs announce themselves here so any other session can see them.
+
+ACTIVE = STATE / "active"
+
+# Only argv[0..1] are inspected, so a path that merely mentions a runner cannot
+# masquerade as one.
+RUNNER_TOKENS = frozenset({"pytest", "py.test", "vitest", "jest"})
+WORKER_FLAGS = frozenset({"-n", "--numprocesses", "--max-workers", "--maxWorkers"})
+
+
+def machine_load() -> tuple[float, int]:
+    try:
+        return os.getloadavg()[0], os.cpu_count() or 1
+    except OSError:
+        return 0.0, os.cpu_count() or 1
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # someone else's process, but a real one
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def registered_run(project: str, root: Path, cmd: str, where: str):
+    """Publish this run for the duration, then take it down.
+
+    Bookkeeping must never cost a test run: if the state directory is
+    unwritable the run proceeds unannounced rather than failing.
+    """
+    record = ACTIVE / f"{os.getpid()}.json"
+    try:
+        ACTIVE.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({
+            "pid": os.getpid(), "project": project, "root": str(root),
+            "cmd": cmd, "where": where, "started": time.time(),
+        }))
+    except OSError:
+        record = None
+    try:
+        yield
+    finally:
+        if record is not None:
+            try:
+                record.unlink()
+            except OSError:
+                pass
+
+
+def active_runs() -> list[dict]:
+    """Live ptest runs, pruning records whose process is gone.
+
+    A killed ptest never reaches its finally block, so the reader — not the
+    writer — is responsible for cleanup. Otherwise one `kill -9` would leave a
+    permanent phantom that makes every future status report a lie.
+    """
+    try:
+        entries = sorted(ACTIVE.glob("*.json"))
+    except OSError:
+        return []
+    runs = []
+    for f in entries:
+        record = None
+        try:
+            record = json.loads(f.read_text())
+        except (OSError, ValueError):
+            record = None
+        pid = (record or {}).get("pid")
+        if record is None or not isinstance(pid, int) or not pid_alive(pid):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
+        runs.append(record)
+    return runs
+
+
+def runner_kind(argv: list[str]) -> str | None:
+    exe = os.path.basename(argv[0])
+    head = {os.path.basename(a) for a in argv[:2]}
+    if "ptest" in head:
+        return None
+    if head & RUNNER_TOKENS:
+        return next(iter(head & RUNNER_TOKENS))
+    if exe.startswith("python") and argv[1:3] == ["-m", "pytest"]:
+        return "pytest"
+    if exe == "go" and argv[1:2] == ["test"]:
+        return "go test"
+    if exe == "cargo" and argv[1:2] == ["test"]:
+        return "cargo test"
+    return None
+
+
+def runner_workers(argv: list[str]) -> int | str | None:
+    def parse(value: str) -> int | str | None:
+        if value.isdigit():
+            return int(value)
+        return value if value in {"auto", "logical"} else None
+
+    for i, arg in enumerate(argv):
+        if arg in WORKER_FLAGS and i + 1 < len(argv):
+            return parse(argv[i + 1])
+        if "=" in arg and arg.split("=", 1)[0] in WORKER_FLAGS:
+            return parse(arg.split("=", 1)[1])
+    return None
+
+
+def _owned_by(pid: int, procs: dict[int, tuple[int, list[str]]],
+              registered: frozenset) -> bool:
+    """Walk parents: a runner started BY ptest is not a stray.
+
+    ptest runs suites through a shell, so the runner is always a grandchild.
+    Directory names and cwd both lie about who started a process — the parent
+    chain does not.
+    """
+    seen: set[int] = set()
+    while pid and pid not in seen and len(seen) < 32:
+        if pid in registered:
+            return True
+        seen.add(pid)
+        entry = procs.get(pid)
+        if entry is None:
+            return False
+        pid = entry[0]
+    return False
+
+
+def stray_runners(proc: Path = Path("/proc"),
+                  registered: frozenset = frozenset()) -> list[dict]:
+    """Test runners on this machine that ptest did not start, and so did not cap."""
+    procs: dict[int, tuple[int, list[str]]] = {}
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit():
+            continue
+        directory = proc / name
+        try:
+            raw = (directory / "cmdline").read_bytes()
+        except OSError:
+            continue          # the process exited between listdir and read
+        argv = [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+        if not argv:
+            continue
+        parent = 0
+        try:
+            for line in (directory / "status").read_text().splitlines():
+                if line.startswith("PPid:"):
+                    parent = int(line.split()[1])
+                    break
+        except (OSError, ValueError, IndexError):
+            parent = 0
+        procs[int(name)] = (parent, argv)
+
+    strays = []
+    for pid, (_parent, argv) in sorted(procs.items()):
+        kind = runner_kind(argv)
+        if kind is None or _owned_by(pid, procs, registered):
+            continue
+        strays.append({"pid": pid, "kind": kind,
+                       "workers": runner_workers(argv),
+                       "cmd": " ".join(argv)[:120]})
+    return strays
+
+
+def missing_full_paths(pcfg: Mapping, root: Path) -> list[str]:
+    """Paths a project's `--full` command names that are not there.
+
+    A single wrong path makes pytest collect nothing and exit 5 — and it does so
+    only when someone finally runs `--full`, which for a remote project can be
+    weeks after the directory was moved.
+    """
+    try:
+        tokens = shlex.split(pcfg.get("full") or "")
+    except ValueError:
+        return []
+    last = None
+    for i, token in enumerate(tokens):
+        if os.path.basename(token) in RUNNER_TOKENS:
+            last = i
+    if last is None:
+        return []             # `npm test --` names no path; that is normal
+    return [p for p in path_like_args(tokens[last + 1:]) if not (root / p).exists()]
+
+
+def remote_counts() -> tuple[str, dict]:
+    try:
+        data = json.loads((STATE / "remote-runs.json").read_text())
+    except (OSError, ValueError):
+        return date.today().isoformat(), {}
+    return data.get("day", ""), data.get("counts", {}) or {}
+
+
+def status_warnings(*, load: float, cores: int, runs: list, strays: list,
+                    counts: Mapping, cap: int, missing_paths: Mapping) -> list[str]:
+    """Everything worth knowing before starting a run, worst first."""
+    out = []
+    for stray in strays:
+        n = stray.get("workers")
+        detail = (f" with {n} workers" if isinstance(n, int)
+                  else f" with -n {n}" if n else "")
+        out.append(
+            f"⚠ pid {stray['pid']} is running {stray.get('kind', 'tests')} outside "
+            f"ptest{detail} — an uncapped runner is exactly the load ptest exists "
+            f"to prevent: {stray.get('cmd', '')}")
+    if load > cores * 0.75:
+        out.append(f"⚠ load {load:.1f} on {cores} cores — the machine is already "
+                   "busy; scope tighter or wait rather than adding to it")
+    if len(runs) >= 3:
+        out.append(f"⚠ {len(runs)} ptest runs are already active here — another "
+                   "one will oversubscribe the cap they were sized against")
+    for project, n in sorted(counts.items()):
+        if n >= cap:
+            out.append(f"⚠ {project} has used all {cap} remote runs today — "
+                       "--full now falls back to a capped local run")
+        elif n >= cap * 0.9:
+            out.append(f"⚠ {project} is at {n}/{cap} remote runs today")
+    for project, paths in sorted(missing_paths.items()):
+        out.append(f"⚠ {project}: --full names {', '.join(paths)}, which does not "
+                   "exist — that run would collect 0 tests and exit 5")
+    return out
+
+
+def _age(started: float) -> str:
+    seconds = max(0, int(time.time() - started))
+    return f"{seconds // 60}m{seconds % 60:02d}s"
+
+
+def cmd_status(cfg: dict, cwd: Path) -> int:
+    """What is happening on this machine and off it, for whoever asks next."""
+    load, cores = machine_load()
+    runs = active_runs()
+    strays = stray_runners(registered=frozenset(r["pid"] for r in runs))
+    day, counts = remote_counts()
+    cap = int(cfg.get("defaults", {}).get("daily_remote_runs", 60))
+
+    missing_paths = {}
+    for name, pcfg in (cfg.get("projects") or {}).items():
+        root = Path(pcfg.get("root", ""))
+        if root.is_dir():
+            bad = missing_full_paths(pcfg, root)
+            if bad:
+                missing_paths[name] = bad
+
+    print(f"machine   load {load:.1f} on {cores} cores")
+    if not runs:
+        print("          no other ptest runs on this machine")
+    else:
+        print(f"          {len(runs)} ptest run(s) in flight:")
+        for r in runs:
+            print(f"            {r.get('project', '?'):<22} {r.get('where', '?'):<9} "
+                  f"{_age(r.get('started', time.time())):>7}  {r.get('cmd', '')[:56]}")
+    for stray in strays:
+        print(f"          ✗ unregistered {stray.get('kind', 'test runner')} "
+              f"(pid {stray['pid']}) {stray.get('cmd', '')[:56]}")
+
+    print(f"remote    {day or 'today'}: "
+          + (", ".join(f"{p} {n}/{cap}" for p, n in sorted(counts.items()))
+             if counts else f"no runs yet (cap {cap}/project/day)"))
+
+    warnings = status_warnings(load=load, cores=cores, runs=runs, strays=strays,
+                               counts=counts, cap=cap, missing_paths=missing_paths)
+    if not warnings:
+        print("\nall clear")
+        return 0
+    print()
+    for line in warnings:
+        print(line)
+    return 1
 
 
 def ensure_node_deps(kind: str, root: Path, env: dict) -> int:
@@ -2180,7 +2465,7 @@ def spot_status(pcfg: Mapping, cfg: Mapping) -> tuple[int, int, int]:
     return adapter.status_metrics()
 
 
-def cmd_status(pcfg: Mapping, cfg: Mapping) -> int:
+def cmd_spot_status(pcfg: Mapping, cfg: Mapping) -> int:
     try:
         waiting, working, servers = spot_status(pcfg, cfg)
     except (RuntimeError, ValueError) as exc:
@@ -2220,10 +2505,10 @@ def spot_result(pcfg: Mapping, cfg: Mapping, request_key: str):
     return result
 
 
-def cmd_result(pcfg: Mapping, cfg: Mapping, args: list[str]) -> int:
+def cmd_spot_result(pcfg: Mapping, cfg: Mapping, args: list[str]) -> int:
     output_only = len(args) == 2 and args[1] == "--output"
     if not ((len(args) == 1) or output_only):
-        warn("usage: ptest result <request-key> [--output]")
+        warn("usage: ptest spot-result <request-key> [--output]")
         return 2
     try:
         result = spot_result(pcfg, cfg, args[0])
@@ -2387,13 +2672,18 @@ def main(argv: list[str]) -> int:
     cwd = Path.cwd().resolve()
     cfg = load_config()
 
-    if argv and argv[0] in {"where", "doctor", "register", "status", "result"}:
+    # `status` is the situational-awareness command: what is running here and
+    # off-box, and what is about to go wrong. Spot's own queue introspection
+    # keeps its verbs under a spot- prefix, where a retired backend belongs.
+    if argv and argv[0] in {"where", "doctor", "register", "status",
+                            "spot-status", "spot-result"}:
         _name, pcfg = resolve_project(cfg, cwd)
         return {"where": lambda: cmd_where(cfg, cwd),
                 "doctor": lambda: cmd_doctor(cfg, cwd),
                 "register": lambda: cmd_register(cwd),
-                "status": lambda: cmd_status(pcfg, cfg),
-                "result": lambda: cmd_result(pcfg, cfg, argv[1:])}[argv[0]]()
+                "status": lambda: cmd_status(cfg, cwd),
+                "spot-status": lambda: cmd_spot_status(pcfg, cfg),
+                "spot-result": lambda: cmd_spot_result(pcfg, cfg, argv[1:])}[argv[0]]()
 
     full = "--full" in argv
     force_local = "--local" in argv
@@ -2476,13 +2766,18 @@ def main(argv: list[str]) -> int:
         print(f"[ptest] {matched} covers {covered}/{total} test files — routing "
               f"to the remote backend (scoped, no coverage gate)",
               file=sys.stderr, flush=True)
-        rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd,
-                                what=f"`ptest {' '.join(path_like_args(passthrough))}`",
-                                fresh=fresh)
+        with registered_run(name or root.name, root, cmd,
+                            pcfg.get("backend", "local")):
+            rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd,
+                                    what=f"`ptest {' '.join(path_like_args(passthrough))}`",
+                                    fresh=fresh)
         return rc if rc is not None else 75
 
     if submit_full:
-        rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
+        with registered_run(name or root.name, root, cmd,
+                            pcfg.get("backend", "local")):
+            rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd,
+                                    fresh=fresh)
         return rc if rc is not None else 75
 
     rc = ensure_node_deps(kind, root, env)
@@ -2498,7 +2793,8 @@ def main(argv: list[str]) -> int:
         warn(f"running {'--full' if full else 'this scoped run'} LOCALLY — capped "
              f"to {workers} workers (the remote command's parallelism is for a "
              "dedicated container)")
-    return run_local(local_cmd, root, env)
+    with registered_run(name or root.name, root, local_cmd, "local"):
+        return run_local(local_cmd, root, env)
 
 
 if __name__ == "__main__":
