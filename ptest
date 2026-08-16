@@ -576,6 +576,29 @@ def heavy_scoped_files(passthrough: list[str], root: Path) -> int:
 # Default only. A project stanza may override it, and 0 disables the tier.
 DEFAULT_REMOTE_SCOPED_MIN_FILES = 40
 
+# The backends that can actually accept work. Anything else — "local", or a
+# project with no stanza at all — runs on this machine, and asking it to route
+# remote is a bug, not a fallback: there is nowhere for the work to go.
+REMOTE_BACKENDS = frozenset({"cloudrun", "spot_queue"})
+
+
+def backend_is_remote(pcfg: Mapping) -> bool:
+    return pcfg.get("backend") in REMOTE_BACKENDS
+
+
+def spot_enabled(pcfg: Mapping, cfg: Mapping) -> bool:
+    """Is the Spot backend switched on?
+
+    Spot is retired but not deleted: spot_queue.py, spot_worker.py,
+    spot_controller.py, their Terraform and their tests all stay put, and this
+    one flag brings the path back. Default off, and only a real `true` counts —
+    a project that still says `backend = "spot_queue"` must fail loudly rather
+    than resurrect an infrastructure that is no longer deployed.
+    """
+    value = pcfg.get("spot_enabled",
+                     cfg.get("defaults", {}).get("spot_enabled", False))
+    return value is True
+
 
 def remote_worker_flags(kind: str) -> str:
     """Parallelism for a run that owns its container.
@@ -600,9 +623,13 @@ def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dic
     for the log line's denominator (total test files); that duplicate walk is
     deliberate, not a bug this return value avoids — it costs ~6ms.
     """
-    # Full-suite-sized work is compulsory Spot work.  `--local` remains a
-    # narrow-TDD convenience only; it is never an escape hatch for a load that
-    # may already have a durable remote identity.
+    # No remote backend, nothing to route to. This is checked FIRST because the
+    # tier is an optimisation, and a project without a backend must degrade to a
+    # capped local run rather than fail.  `--local` remains a narrow-TDD
+    # convenience only; it is never an escape hatch for a load that already has
+    # somewhere remote to go.
+    if not backend_is_remote(pcfg):
+        return False, 0
     # A filter means the caller is hunting one failure and wants the fastest
     # loop, not the biggest machine. Never trade their latency for our cores.
     if has_narrowing_filter(passthrough):
@@ -2107,9 +2134,23 @@ def run_spot_queue(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
 
 def run_remote_backend(pcfg: dict, cfg: dict, project: str, root: Path, cmd: str,
                        what: str = "--full", fresh: bool = False) -> int | None:
-    if pcfg.get("backend") == "cloudrun":
+    backend = pcfg.get("backend")
+    if backend == "cloudrun":
         return run_cloudrun(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
-    return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
+    if backend == "spot_queue":
+        if not spot_enabled(pcfg, cfg):
+            warn("the Spot backend is switched off — set spot_enabled = true in "
+                 "~/.config/ptest/config.toml to bring it back, or move this "
+                 'project to backend = "cloudrun"')
+            return 2
+        return run_spot_queue(pcfg, cfg, project, root, cmd, what=what, fresh=fresh)
+    # Spot used to be the fallthrough here, so a `local` project submitted work
+    # to an infrastructure it had no configuration for and died at the config
+    # check. Callers must not route a local backend remotely; say so plainly
+    # rather than silently picking a backend on the project's behalf.
+    warn(f"no remote backend configured (backend = {backend or 'local'!r}) — "
+         "this run should have stayed on this machine")
+    return 2
 
 
 def spot_status(pcfg: Mapping, cfg: Mapping) -> tuple[int, int, int]:
@@ -2199,6 +2240,18 @@ def cmd_result(pcfg: Mapping, cfg: Mapping, args: list[str]) -> int:
     return 0
 
 
+def backend_description(pcfg: Mapping, cfg: Mapping) -> str:
+    """One line for `where` and `doctor` — and the only place they can disagree."""
+    backend = pcfg.get("backend", "local")
+    if backend == "cloudrun":
+        return "Cloud Run Jobs for --full and heavy scoped runs"
+    if backend == "spot_queue":
+        return ("Spot queue for --full and heavy scoped runs"
+                if spot_enabled(pcfg, cfg)
+                else "✗ Spot queue — SWITCHED OFF, --full will refuse")
+    return "local (--full runs here, capped)"
+
+
 def cmd_where(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     root = git_root(cwd) or cwd
@@ -2212,14 +2265,9 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
     print(f"kind     {pcfg.get('kind', det['kind'])}")
     print(f"workers  {pcfg.get('workers', cfg.get('defaults', {}).get('workers', 2))}")
     backend = pcfg.get("backend", "local")
-    description = (
-        "Cloud Run Jobs for --full" if backend == "cloudrun"
-        else "Spot queue for --full and heavy scoped runs" if backend == "spot_queue"
-        else "local"
-    )
-    print(f"backend  {description}")
+    print(f"backend  {backend_description(pcfg, cfg)}")
     print(f"configured backend  {backend}")
-    if pcfg.get("backend") in {"cloudrun", "spot_queue"}:
+    if backend_is_remote(pcfg):
         try:
             cache = remote_cache_settings(pcfg, cfg)
             print(f"cache    on · passing TTL {cache.ttl_seconds}s · "
@@ -2227,7 +2275,7 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
         except ValueError:
             print("cache    ✗ invalid configuration")
     else:
-        print("cache    unavailable until Spot is configured")
+        print('cache    unavailable until backend = "cloudrun" is configured')
     print(f"scoped   {pcfg.get('scoped', det['scoped'])}")
     print(f"full     {pcfg.get('full', det['full'])}")
     return 0
@@ -2262,12 +2310,7 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
     name, pcfg = resolve_project(cfg, cwd)
     print(f"project     {name or '✗ unregistered (auto-detect will be used)'}")
     backend = pcfg.get("backend", "local")
-    description = (
-        "Cloud Run Jobs for --full" if backend == "cloudrun"
-        else "Spot queue for --full and heavy scoped runs" if backend == "spot_queue"
-        else "local"
-    )
-    print(f"backend     {description}")
+    print(f"backend     {backend_description(pcfg, cfg)}")
     print(f"configured  {backend}")
     if backend == "cloudrun":
         backend_values = {}
@@ -2298,6 +2341,9 @@ def cmd_doctor(cfg: dict, cwd: Path) -> int:
                 else:
                     print("  cache       ✓ healthy")
     elif backend == "spot_queue":
+        on = spot_enabled(pcfg, cfg)
+        print(f"  switch      {'✓ spot_enabled = true' if on else '✗ SWITCHED OFF — set spot_enabled = true to restore'}")
+        ok = ok and on
         values = {
             key: pcfg.get(key) or cfg.get("defaults", {}).get(key)
             for key in ("bucket", "gcp_project", "spot_topic")
@@ -2394,11 +2440,11 @@ def main(argv: list[str]) -> int:
         should_route_remote(passthrough, root, pcfg, cfg, force_local)
         if not full else (False, 0)
     )
-    # `--local` is an explicit operator override for a full suite. Large scoped
-    # selections remain compulsory Spot work because they are a load guard, not
-    # a convenience routing choice.
-    selected_remote = route_remote or (full and not force_local)
-    compulsory_spot = route_remote or (full and not force_local)
+    # `--local` is an explicit operator override for a full suite; a project
+    # with no remote backend is not an override but a fact, and takes the same
+    # capped local path.
+    submit_full = full and not force_local and backend_is_remote(pcfg)
+    selected_remote = route_remote or submit_full
     if fresh and not selected_remote:
         warn("--fresh is only valid for a selected remote execution")
         return 2
@@ -2435,7 +2481,7 @@ def main(argv: list[str]) -> int:
                                 fresh=fresh)
         return rc if rc is not None else 75
 
-    if full and not force_local:
+    if submit_full:
         rc = run_remote_backend(pcfg, cfg, name or root.name, root, cmd, fresh=fresh)
         return rc if rc is not None else 75
 

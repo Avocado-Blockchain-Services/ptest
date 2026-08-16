@@ -7,8 +7,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _spot_config(path: Path, project: Path) -> None:
+    """A Spot project with the switch thrown.
+
+    Spot is off by default now, but the companion-placement contract still has
+    to hold — it is the thing that makes re-enabling Spot a config change rather
+    than a reinstall. Every test here is about that machinery, so each one opts
+    in explicitly.
+    """
     path.write_text(
         "[defaults]\n"
+        "spot_enabled = true\n"
         'bucket = "private-bucket"\n'
         'gcp_project = "project-a"\n'
         "\n[projects.isolated]\n"

@@ -1,5 +1,7 @@
 """Routing decisions: which invocations run where."""
 
+import pytest
+
 
 def test_all_test_files_finds_every_test_file(ptest, persea_shaped):
     assert len(ptest.all_test_files(persea_shaped)) == 221 + 61 + 23 + 3
@@ -164,10 +166,45 @@ def test_force_local_cannot_bypass_compulsory_heavy_spot(ptest, persea_shaped, m
     assert route is True
 
 
-def test_legacy_local_backend_does_not_bypass_compulsory_heavy_spot(ptest, persea_shaped, monkeypatch):
+def test_a_local_backend_keeps_heavy_scoped_runs_here(ptest, persea_shaped, monkeypatch):
+    """Replaces the compulsory-Spot rule, which is retired.
+
+    While Spot was compulsory, a heavy scoped run routed remote regardless of
+    the project's backend — correct then, because every project was supposed to
+    end up on Spot. With Spot off, a `local` project has nowhere to route to,
+    and pretending otherwise is how `--full` started failing with exit 2.
+    """
     monkeypatch.chdir(persea_shaped)
-    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, LOCAL, CFG, False)
-    assert route is True
+    route, n = ptest.should_route_remote(["tests/api"], persea_shaped, LOCAL, CFG, False)
+    assert (route, n) == (False, 0)
+
+
+def test_an_unregistered_project_keeps_heavy_scoped_runs_here(ptest, persea_shaped,
+                                                              monkeypatch):
+    monkeypatch.chdir(persea_shaped)
+    route, _ = ptest.should_route_remote(["tests/api"], persea_shaped, {}, CFG, False)
+    assert route is False, "no stanza means no remote backend to route to"
+
+
+def test_full_on_a_local_backend_runs_here(ptest, persea_shaped, monkeypatch):
+    """`ptest --full` on a local project must run, capped — not exit 2."""
+    monkeypatch.chdir(persea_shaped)
+    monkeypatch.setattr(ptest, "resolve_project", lambda cfg, cwd: (
+        "fake", {"backend": "local", "kind": "pytest", "full": "pytest tests"}))
+
+    def no_remote(*a, **kw):
+        pytest.fail("a local backend must never submit remotely")
+
+    ran = {}
+
+    def fake_local(cmd, root, env):
+        ran["cmd"] = cmd
+        return 0
+
+    monkeypatch.setattr(ptest, "run_remote_backend", no_remote)
+    monkeypatch.setattr(ptest, "run_local", fake_local)
+    assert ptest.main(["--full"]) == 0
+    assert "pytest" in ran["cmd"]
 
 
 def test_threshold_zero_disables_the_tier(ptest, persea_shaped, monkeypatch):

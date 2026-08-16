@@ -17,14 +17,22 @@ kind    = "pytest"
 workers = 2
 scoped  = "uv run pytest"
 full    = "uv run pytest --cov-fail-under=85 tests"
-backend = "spot_queue"
-spot_topic = "ptest-spot"
+backend = "cloudrun"
+job     = "ptest-fake"
 """
 
 
 @pytest.fixture
 def wired(ptest, persea_shaped, monkeypatch, tmp_path):
-    """main() with the runners replaced by recorders."""
+    """main() with the runners replaced by recorders.
+
+    The fixture's remote backend is Cloud Run because that is the one that is
+    deployed. It used to be Spot, back when Spot was compulsory; these tests are
+    about ROUTING — which invocation goes off-box, carrying which command — and
+    were never about Spot itself. Spot keeps its own tests, and reaching it from
+    here is now a failure, which is what pins the regression that sent
+    local-backend projects into the Spot submitter.
+    """
     cfg = tmp_path / "config.toml"
     cfg.write_text(CONFIG_TOML.format(root=persea_shaped))
     monkeypatch.setattr(ptest, "CONFIG", cfg)
@@ -42,7 +50,11 @@ def wired(ptest, persea_shaped, monkeypatch, tmp_path):
         calls["local"].append(cmd)
         return 0
 
-    monkeypatch.setattr(ptest, "run_spot_queue", fake_remote)
+    def no_spot(*a, **kw):
+        pytest.fail("Cloud Run work must never reach the Spot submitter")
+
+    monkeypatch.setattr(ptest, "run_cloudrun", fake_remote)
+    monkeypatch.setattr(ptest, "run_spot_queue", no_spot)
     monkeypatch.setattr(ptest, "run_local", fake_local)
     return ptest, calls
 
@@ -81,7 +93,7 @@ def test_callers_own_flag_wins_over_container_parallelism(wired):
 
 def test_busy_backend_refuses_with_75_and_runs_nothing(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 75)
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: 75)
     assert ptest.main(["tests/api"]) == 75
     assert not calls["local"], "exit 75 means nothing ran"
 
@@ -93,7 +105,7 @@ def test_broken_backend_returns_75_without_a_local_fallback(wired, monkeypatch):
         calls["remote"].append(cmd)
         return None            # "broken" — fall back to local
 
-    monkeypatch.setattr(ptest, "run_spot_queue", broken_remote)
+    monkeypatch.setattr(ptest, "run_cloudrun", broken_remote)
     assert ptest.main(["tests/api"]) == 75
     assert len(calls["remote"]) == 1, "the remote path must have been attempted"
     assert "-n auto" in calls["remote"][0], "the remote attempt carried container parallelism"
@@ -102,7 +114,7 @@ def test_broken_backend_returns_75_without_a_local_fallback(wired, monkeypatch):
 
 def test_remote_test_failure_is_returned_verbatim(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: 1)
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: 1)
     assert ptest.main(["tests/api"]) == 1
     assert not calls["local"]
 
@@ -119,7 +131,7 @@ def test_full_still_sends_the_full_command(wired):
     assert "--cov-fail-under=85" in calls["remote"][0]
 
 
-def test_force_local_full_bypasses_spot_and_caps_workers(wired, monkeypatch):
+def test_force_local_full_bypasses_the_remote_and_caps_workers(wired, monkeypatch):
     ptest, calls = wired
     cfg = ptest.load_config()
     cfg["projects"]["fake"]["backend"] = "local"
@@ -131,7 +143,7 @@ def test_force_local_full_bypasses_spot_and_caps_workers(wired, monkeypatch):
     assert "-n 2" in calls["local"][0]
 
 
-def test_heavy_scope_is_compulsory_spot_even_with_force_local(wired, monkeypatch):
+def test_heavy_scope_goes_remote_even_with_force_local(wired, monkeypatch):
     ptest, calls = wired
     called = []
 
@@ -139,16 +151,16 @@ def test_heavy_scope_is_compulsory_spot_even_with_force_local(wired, monkeypatch
         called.append((args, kwargs))
         return 75
 
-    monkeypatch.setattr(ptest, "run_spot_queue", unavailable)
+    monkeypatch.setattr(ptest, "run_cloudrun", unavailable)
 
     assert ptest.main(["--local", "tests/api"]) == 75
     assert len(called) == 1
     assert not calls["local"]
 
 
-def test_compulsory_spot_none_result_is_converted_to_75_not_local(wired, monkeypatch):
+def test_remote_none_result_is_converted_to_75_not_local(wired, monkeypatch):
     ptest, calls = wired
-    monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: None)
+    monkeypatch.setattr(ptest, "run_cloudrun", lambda *a, **k: None)
 
     assert ptest.main(["--full"]) == 75
     assert not calls["local"]
@@ -173,7 +185,10 @@ def test_spot_queue_backend_routes_full_runs_and_keeps_fresh_out_of_the_command(
 ):
     ptest, calls = wired
     cfg = ptest.load_config()
-    cfg["projects"]["fake"].update({"backend": "spot_queue", "spot_topic": "ptest-spot"})
+    # Spot is off by default; this test is specifically about the Spot path
+    # still being wired up, so it throws the switch itself.
+    cfg["projects"]["fake"].update({"backend": "spot_queue", "spot_topic": "ptest-spot",
+                                    "spot_enabled": True})
     monkeypatch.setattr(ptest, "load_config", lambda: cfg)
 
     def run_spot_queue(pcfg, cfg_, project, root, cmd, **kwargs):
@@ -211,7 +226,7 @@ def test_where_reports_remote_cache_ttl_and_namespace(wired, capsys):
     assert ptest.main(["where"]) == 0
 
     output = capsys.readouterr().out
-    assert "Spot queue for --full and heavy scoped runs" in output
+    assert "Cloud Run Jobs for --full and heavy scoped runs" in output
 
 
 def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
@@ -221,7 +236,7 @@ def test_where_reports_cache_disabled_for_local_backend(wired, capsys):
 
     assert ptest.cmd_where(cfg, ptest.Path.cwd()) == 0
 
-    assert "unavailable until Spot is configured" in capsys.readouterr().out
+    assert 'unavailable until backend = "cloudrun" is configured' in capsys.readouterr().out
 
 
 def test_status_prints_live_spot_queue_counts(wired, monkeypatch, capsys):
@@ -308,7 +323,7 @@ def test_doctor_reports_healthy_cache_coordination(wired, monkeypatch, capsys):
     assert ptest.main(["doctor"]) == 0
 
     output = capsys.readouterr().out
-    assert "capable     ✓ compulsory Spot submission can be attempted" in output
+    assert "cache       ✓ healthy" in output
 
 
 def test_doctor_marks_unavailable_cache_coordination_unhealthy(
@@ -326,7 +341,9 @@ def test_doctor_marks_unavailable_cache_coordination_unhealthy(
     monkeypatch.setattr(ptest.shutil, "which", lambda name: "/usr/bin/gcloud")
     monkeypatch.setattr(ptest, "GcsCoordination", BrokenStore)
 
-    assert ptest.main(["doctor"]) == 0
+    assert ptest.main(["doctor"]) == 1, "an unreachable cache is not a healthy doctor"
 
     output = capsys.readouterr().out
-    assert "capable     ✓ compulsory Spot submission can be attempted" in output
+    assert "cache       ✗ unavailable" in output
+    assert "permission denied with secret details" not in output, \
+        "the backend's error detail must not leak into operator output"
