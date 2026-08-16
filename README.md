@@ -1,17 +1,35 @@
 # ptest — one test command for every project, every agent
 
 A dispatcher that stops parallel test runners from eating a shared workstation,
-and sends full-suite and heavy-scoped runs to the compulsory Spot queue.
+and sends full-suite and heavy-scoped runs off-box when the project has a remote
+backend to send them to.
 
 ```
 ptest <paths / -k args>    scoped run — local and workers-capped, unless the path
                            covers most of the suite (see Three tiers below)
-ptest --full               whole suite — compulsory Spot; never local or Cloud Run
+ptest --full               whole suite — remote when the project has a backend,
+                           otherwise here, capped to `workers`
 ptest --full --fresh       force a new remote execution (benchmarking only)
+ptest status               what is running here and off-box, and what is wrong
 ptest where                what resolved for this directory
 ptest doctor               config + backend health
 ptest register             print a config stanza for the repo you are in
+ptest spot-status          Spot queue capacity (Spot is switched off; see below)
+ptest spot-result <key>    inspect one completed Spot request
 ```
+
+**Spot is retired, not removed.** `spot_queue.py`, `spot_worker.py`,
+`spot_controller.py`, their Terraform and their tests all remain; the backend is
+gated behind `spot_enabled` (default `false`) and its infrastructure is torn
+down. Setting `spot_enabled = true` is all the code needs to come back — but the
+MIG, controller and workers have to be redeployed first, or submitted work will
+queue for a collector that does not exist.
+
+**`ptest status` is for deciding how to run**, on a machine several agents
+share. It reports load, in-flight ptest runs and their commands, test runners
+nobody registered (found by walking the parent chain, since names and cwd lie),
+today's remote budget, and `--full` commands naming paths that no longer exist.
+It exits 1 when any of that needs attention.
 
 **The problem it solves.** `pytest -n auto`, `vitest`, `jest` and friends each
 grab roughly every core. Several concurrent sessions auto-detecting the same
@@ -24,8 +42,12 @@ full-suite runs off-box entirely.
 | invocation | where |
 |---|---|
 | `ptest tests/api/test_x.py`, `ptest -k foo` | local, capped to `workers` |
-| `ptest tests/api` (≥ `remote_scoped_min_files` files) | compulsory Spot, scoped command, no coverage gate |
-| `ptest --full` | compulsory Spot, using the project's `full` command |
+| `ptest tests/api` (≥ `remote_scoped_min_files` files) | remote, scoped command, no coverage gate |
+| `ptest --full` | remote, using the project's `full` command |
+
+"Remote" means the project's configured backend. A project with
+`backend = "local"` — or no stanza at all — has nowhere to route to, so both
+lower tiers collapse to a capped local run rather than failing.
 
 The middle tier exists because a scoped run can be full-suite-sized: in persea-api,
 `tests/api` alone is roughly two-thirds of the whole test suite. A `-k`/`-m`/`--lf`
