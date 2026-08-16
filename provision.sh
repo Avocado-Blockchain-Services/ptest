@@ -19,6 +19,14 @@ SA_NAME="ptest-runner"
 SA="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 AR_REPO="${PTEST_AR_REPO:-persea}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/ptest-runner:latest"
+JOB="${PTEST_JOB:-ptest-persea-api}"
+
+# Extra job-level environment, as gcloud's comma-separated KEY=VALUE list.
+# ptest sends PTEST_SRC/PTEST_CMD per execution with --update-env-vars, which
+# merges rather than replaces, so anything set here survives every run. This is
+# where a project whose suite reads discrete DB_*/REDIS_* variables (fullon2)
+# rather than a single DATABASE_URL (persea) declares them.
+JOB_ENV="${PTEST_JOB_ENV:-}"
 
 # Runaway controls. These are the whole reason this file is not a one-liner.
 TASK_TIMEOUT="${PTEST_TASK_TIMEOUT:-1800s}"   # hard server-side wall clock
@@ -109,7 +117,9 @@ _here="$(cd "$(dirname "$0")" && pwd)"
   --substitutions=_IMAGE="$IMAGE"
 # NOTE: no pipe above, on purpose — see the header comment.
 
-say "7. Cloud Run job ptest-persea-api"
+say "7. Cloud Run job $JOB"
+_env="PTEST_SRC=unset,PTEST_CMD=unset"
+[ -n "$JOB_ENV" ] && _env="${_env},${JOB_ENV}"
 JOB_ARGS=(
   --image="$IMAGE"
   --region="$REGION"
@@ -120,12 +130,12 @@ JOB_ARGS=(
   --task-timeout="$TASK_TIMEOUT"
   --parallelism=1
   --tasks=1
-  --set-env-vars="PTEST_SRC=unset,PTEST_CMD=unset"
+  --set-env-vars="$_env"
 )
-if have "${G[@]}" run jobs describe ptest-persea-api --region="$REGION"; then
-  "${G[@]}" run jobs update ptest-persea-api "${JOB_ARGS[@]}"
+if have "${G[@]}" run jobs describe "$JOB" --region="$REGION"; then
+  "${G[@]}" run jobs update "$JOB" "${JOB_ARGS[@]}"
 else
-  "${G[@]}" run jobs create ptest-persea-api "${JOB_ARGS[@]}"
+  "${G[@]}" run jobs create "$JOB" "${JOB_ARGS[@]}"
 fi
 
 say "8. Let your account push source and execute the job"
@@ -138,7 +148,7 @@ Provisioned:
   bucket   gs://$BUCKET           (objects auto-delete after ${SRC_RETENTION_DAYS}d)
   runner   $SA
   image    $IMAGE
-  job      ptest-persea-api  ($CPU vCPU / $MEMORY, timeout $TASK_TIMEOUT, retries $MAX_RETRIES)
+  job      $JOB  ($CPU vCPU / $MEMORY, timeout $TASK_TIMEOUT, retries $MAX_RETRIES)
 
 Runaway controls in place:
   - max-retries 0     a failed run is NOT silently retried 3x
@@ -148,9 +158,9 @@ Runaway controls in place:
 
 Now flip the stanza in ~/.config/ptest/config.toml:
 
-  [projects.persea-api]
+  [projects.<project>]
   backend     = "cloudrun"
-  job         = "ptest-persea-api"
+  job         = "$JOB"
   gcp_project = "$PROJECT"
   bucket      = "$BUCKET"
 

@@ -1,9 +1,10 @@
 # ptest remote runner — pytest projects.
 #
-# Runs a whole test suite inside one Cloud Run Job execution, with Postgres
-# living in the container filesystem. On Cloud Run that filesystem is RAM-backed
-# (writes count against the memory limit), so PGDATA is already "postgres on
-# tmpfs" without mounting anything.
+# Runs a whole test suite inside one Cloud Run Job execution, with Postgres and
+# Redis living in the container filesystem. On Cloud Run that filesystem is
+# RAM-backed (writes count against the memory limit), so PGDATA is already
+# "postgres on tmpfs" without mounting anything, and Redis is told to persist
+# nothing at all.
 #
 # Contract with ptest (see ~/.local/bin/ptest, run_cloudrun):
 #   PTEST_SRC  gs://bucket/object.tar.gz  — the packed repo tree
@@ -23,6 +24,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         postgresql-15 \
         postgresql-client-15 \
+        redis-server \
         curl \
         ca-certificates \
         tar \
@@ -41,6 +43,7 @@ ENV PGDATA=/pgdata \
     PGBIN=/usr/lib/postgresql/15/bin \
     PGUSER=fullon \
     PGPORT=5432 \
+    REDISPORT=6379 \
     UV_CACHE_DIR=/uv-cache \
     UV_LINK_MODE=copy
 

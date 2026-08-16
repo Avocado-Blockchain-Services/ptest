@@ -115,11 +115,42 @@ psql -U "$PGUSER" -d postgres -tAc \
   || die "role $PGUSER is not a superuser — the temp-DB rig cannot work"
 log "postgres up on :$PGPORT as superuser $PGUSER"
 
+# ── 2b. Redis, for suites that use it ────────────────────────────────────────
+# Started unconditionally on the pytest path: it costs a few MB and ~50ms, and
+# the alternative is a per-project flag that is wrong exactly once — when a
+# suite grows its first cache test and fails remotely but not locally.
+#
+# --save '' disables RDB snapshots entirely. The filesystem here is RAM, so a
+# snapshot would spend the memory limit persisting state that dies with the
+# execution regardless.
+REDISPORT="${REDISPORT:-6379}"
+log "starting redis on :${REDISPORT}"
+redis-server --port "$REDISPORT" --bind 127.0.0.1 --save '' --appendonly no \
+  --daemonize yes --logfile /tmp/redis.log \
+  || { cat /tmp/redis.log 2>/dev/null >&2; die "redis failed to start"; }
+
+for _i in $(seq 1 50); do
+  redis-cli -p "$REDISPORT" ping 2>/dev/null | grep -qx PONG && break
+  [ "$_i" = "50" ] && { cat /tmp/redis.log 2>/dev/null >&2; die "redis never answered PING"; }
+  sleep 0.1
+done
+log "redis up on :$REDISPORT"
+
 # ── 3. Run the suite ─────────────────────────────────────────────────────────
 # DATABASE_URL matches the conftest default so an unregistered repo still works.
 export DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://${PGUSER}@localhost:${PGPORT}/persea_content_maker_test}"
 export ENVIRONMENT=test
 export PYTHONDONTWRITEBYTECODE=1
+
+# Discrete DB_*/REDIS_* variables, because not every suite reads a single URL:
+# fullon2 resolves its connection from these, persea from DATABASE_URL. Defaults
+# only — a job that sets them (fullon2 needs DB_NAME/DB_TEST_NAME) keeps its own.
+export DB_HOST="${DB_HOST:-127.0.0.1}"
+export DB_PORT="${DB_PORT:-$PGPORT}"
+export DB_USER="${DB_USER:-$PGUSER}"
+export DB_PASSWORD="${DB_PASSWORD:-}"
+export REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
+export REDIS_PORT="${REDIS_PORT:-$REDISPORT}"
 
 if [ -f pyproject.toml ]; then
   if [ -f uv.lock ]; then
