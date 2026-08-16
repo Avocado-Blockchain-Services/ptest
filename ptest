@@ -660,7 +660,8 @@ def budget_check(cfg: dict, project: str) -> bool:
         data = {"day": today, "counts": {}}
     n = data["counts"].get(project, 0)
     if n >= cap:
-        warn(f"daily remote-run cap reached for {project} ({cap}) — running locally instead")
+        warn(f"daily remote-run cap reached for {project} ({cap}) — nothing ran; "
+             "re-run tomorrow, or scope it to a path or -k filter to run here")
         return False
     data["counts"][project] = n + 1
     f.write_text(json.dumps(data))
@@ -895,7 +896,8 @@ def status_warnings(*, load: float, cores: int, runs: list, strays: list,
     for project, n in sorted(counts.items()):
         if n >= cap:
             out.append(f"⚠ {project} has used all {cap} remote runs today — "
-                       "--full now falls back to a capped local run")
+                       "--full will refuse (exit 75) until tomorrow; scope to a "
+                       "path or -k filter to run here instead")
         elif n >= cap * 0.9:
             out.append(f"⚠ {project} is at {n}/{cap} remote runs today")
     for project, paths in sorted(missing_paths.items()):
@@ -1677,7 +1679,7 @@ def upload_source_once(base: list[str], store: GcsCoordination, archive: Path,
     )
     if result.returncode == 0 or store._precondition_failed(result):
         return True
-    warn(f"upload failed ({(result.stderr or '').strip()[:200]}) — running locally")
+    warn(f"upload failed ({(result.stderr or '').strip()[:200]}) — nothing ran")
     return False
 
 
@@ -1755,7 +1757,7 @@ def prepare_source_archive(root: Path, digest: str,
     exists = source_object_exists(base, bucket, source_path)
     if exists is None:
         _source_timing("source cache probe", cache_started)
-        warn("cannot verify source cache — running locally")
+        warn("cannot verify source cache — nothing ran")
         return None
     _source_timing(f"source cache {'hit' if exists else 'miss'}", cache_started)
     if exists:
@@ -1793,7 +1795,7 @@ def _show_execution_result(result: ExecutionResult, gproject: str) -> int | None
     if result.exit_code == 1:
         warn(f"remote suite FAILED — execution {result.name}")
     elif result.exit_code is None:
-        warn(f"remote execution error ({result.summary[:200]}) — running locally")
+        warn(f"remote execution error ({result.summary[:200]}) — nothing ran")
     return result.exit_code
 
 
@@ -1914,7 +1916,7 @@ def _uncached_remote_execution(
     try:
         execution = submit_execution(base, job, region, source_uri, cmd)
     except CloudRunUnavailable as exc:
-        warn(f"remote execution error ({exc}) — running locally")
+        warn(f"remote execution error ({exc}) — nothing ran")
         return None
     remote_execution_guidance(job, execution, region, gproject)
     return _show_execution_result(wait_for_execution(base, execution, region), gproject)
@@ -1929,16 +1931,21 @@ def _run_cloudrun_coordinated(
     what: str = "--full",
     fresh: bool = False,
 ) -> int | None:
-    """Return an exit code, or None to mean 'fall back to local'."""
+    """Return an exit code, or None meaning "could not run it remotely".
+
+    None does NOT mean "fall back to local": main() turns it into exit 75 and
+    runs nothing. A failed remote submit for a full suite used to land on this
+    machine, which is the precise load ptest exists to prevent.
+    """
     job = pcfg.get("job")
     bucket = pcfg.get("bucket") or cfg.get("defaults", {}).get("bucket")
     region = pcfg.get("region") or cfg.get("defaults", {}).get("region", "us-central1")
     gproject = pcfg.get("gcp_project") or cfg.get("defaults", {}).get("gcp_project")
     if not (job and bucket and gproject):
-        warn("cloudrun backend not fully configured (job/bucket/gcp_project) — running locally")
+        warn("cloudrun backend not fully configured (job/bucket/gcp_project) — nothing ran")
         return None
     if not shutil.which("gcloud"):
-        warn("gcloud not on PATH — running locally")
+        warn("gcloud not on PATH — nothing ran")
         return None
     base = gcloud_base(pcfg, cfg, gproject)
     settings = remote_cache_settings(pcfg, cfg)
@@ -2077,7 +2084,7 @@ def _run_cloudrun_coordinated(
         except CloudRunUnavailable as exc:
             if claim:
                 store.delete_if_generation(paths.claim, claim.generation)
-            warn(f"remote execution error ({exc}) — running locally")
+            warn(f"remote execution error ({exc}) — nothing ran")
             return None
         remote_execution_guidance(job, execution, region, gproject)
         store.create_json(

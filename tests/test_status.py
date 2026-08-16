@@ -9,6 +9,7 @@ running, what is already off-box, and what is about to go wrong.
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -172,6 +173,27 @@ def test_approaching_the_daily_cap_warns(ptest):
 def test_a_quiet_machine_has_nothing_to_say(ptest):
     assert ptest.status_warnings(load=0.5, cores=16, runs=[], strays=[],
                                  counts={"p": 2}, cap=60, missing_paths={}) == []
+
+
+def test_no_message_promises_a_local_fallback_that_never_happens(ptest):
+    """Every remote failure returns 75 and runs NOTHING — say that, not the opposite.
+
+    These messages date from when a failed remote submit fell back to a local
+    run. That fallback was deliberately removed (a full suite landing on this
+    machine is the exact load ptest exists to prevent), but the wording stayed,
+    so a reader was told their suite was running here while nothing ran at all.
+    """
+    source = Path(ptest.__file__).read_text()
+    assert "— running locally" not in source
+    assert "running locally instead" not in source
+
+
+def test_the_cap_warning_does_not_promise_a_local_run(ptest):
+    warnings = ptest.status_warnings(
+        load=0.5, cores=16, runs=[], strays=[], counts={"p": 60}, cap=60,
+        missing_paths={})
+    assert warnings and "local" not in warnings[0].lower(), \
+        "hitting the cap refuses the run; it does not move it here"
 
 
 def test_a_broken_full_path_warns(ptest):
