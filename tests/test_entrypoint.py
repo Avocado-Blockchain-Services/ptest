@@ -46,6 +46,25 @@ def test_a_redis_that_will_not_start_is_a_runner_failure_not_a_red_suite():
     assert 'die "redis' in redis_block.lower() or "die \"redis" in redis_block.lower()
 
 
+def test_the_pytest_image_ships_timescaledb():
+    """fullon2's OHLCV suite issues CREATE EXTENSION timescaledb per test database."""
+    dockerfile = DOCKERFILE.read_text()
+    assert "timescaledb-2-postgresql-15" in dockerfile
+
+
+def test_timescaledb_is_preloaded_by_the_server():
+    """TimescaleDB refuses to be created unless the library is preloaded at start.
+
+    Installing the package is not enough — without this the extension is
+    "available" to apt and still fails at CREATE EXTENSION.
+    """
+    source = ENTRYPOINT.read_text()
+    preload = source.index("shared_preload_libraries")
+    start = source.index("pg_ctl -D $PGDATA")
+    assert preload < start, "the setting must be written before postgres starts"
+    assert "timescaledb" in source[preload:preload + 120]
+
+
 def test_redis_does_not_persist_anything():
     """A test cache that writes an RDB to a RAM filesystem costs memory for nothing."""
     source = ENTRYPOINT.read_text()

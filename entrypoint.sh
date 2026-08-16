@@ -88,6 +88,11 @@ su postgres -c "$PGBIN/initdb -D $PGDATA -U $PGUSER --auth=trust --encoding=UTF8
   || die "initdb failed"
 
 cat >>"$PGDATA/postgresql.conf" <<'CONF'
+# TimescaleDB will not load on demand: without preloading it here, the package
+# is installed and CREATE EXTENSION still fails. Harmless for suites that never
+# ask for it.
+shared_preload_libraries = 'timescaledb'
+timescaledb.telemetry_level = off
 # Test-only durability tradeoffs — the volume dies with the container.
 fsync = off
 synchronous_commit = off
