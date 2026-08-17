@@ -320,7 +320,9 @@ def cap_workers_for_local(cmd: str, kind: str, workers: int,
 # risks passing something the runner rejects, turning a worker cap into a broken
 # test run.
 NODE_RUNNER_CAPS = {
-    "vitest":     "--maxWorkers={n} --minWorkers=1",  # parallel by default
+    # vitest 4 removed `--minWorkers` (unknown-option CACError); `--maxWorkers`
+    # alone still caps in every supported version. min defaults to 1 anyway.
+    "vitest":     "--maxWorkers={n}",                 # parallel by default
     "jest":       "--maxWorkers={n}",                 # parallel by default
     "ava":        "--concurrency={n}",                # parallel by default
     "playwright": "--workers={n}",                    # defaults to ~half the cores

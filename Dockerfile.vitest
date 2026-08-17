@@ -24,7 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gzip \
         git \
         python3 \
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# pnpm for repos that ship pnpm-lock.yaml instead of package-lock.json
+# (npm install on those trees fails peer resolution that pnpm tolerates).
+RUN npm install -g pnpm@9 --no-audit --no-fund
 
 RUN mkdir -p /work
 

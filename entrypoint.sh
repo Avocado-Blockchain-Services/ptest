@@ -62,11 +62,14 @@ log "workdir $(pwd) (kind=$PTEST_KIND)"
 if [ "$PTEST_KIND" = "vitest" ]; then
   # ── Node path: no database, no Postgres. ──────────────────────────────────
   [ -f package.json ] || die "no package.json at $(pwd)"
-  if [ -f package-lock.json ]; then
+  if [ -f pnpm-lock.yaml ]; then
+    log "pnpm install --frozen-lockfile"
+    pnpm install --frozen-lockfile 2>&1 || die "pnpm install failed"
+  elif [ -f package-lock.json ]; then
     log "npm ci"
     npm ci --no-audit --no-fund 2>&1 || die "npm ci failed"
   else
-    log "WARNING: no package-lock.json shipped — falling back to npm install"
+    log "WARNING: no lockfile shipped — falling back to npm install"
     npm install --no-audit --no-fund 2>&1 || die "npm install failed"
   fi
 
