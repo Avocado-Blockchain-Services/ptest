@@ -64,7 +64,7 @@ def test_big_path_goes_remote_with_container_parallelism(wired):
     assert ptest.main(["tests/api"]) == 0
     assert len(calls["remote"]) == 1 and not calls["local"]
     cmd = calls["remote"][0]
-    assert "-n auto" in cmd
+    assert "-n 8" in cmd, "the container's dedicated vCPU, stated not detected"
     assert "tests/api" in cmd
     assert "--cov-fail-under" not in cmd, "a scoped run keeps no coverage gate"
 
@@ -74,21 +74,21 @@ def test_small_path_runs_local_at_the_cap(wired):
     assert ptest.main(["tests/crawler"]) == 0
     assert len(calls["local"]) == 1 and not calls["remote"]
     assert "-n 2" in calls["local"][0]
-    assert "-n auto" not in calls["local"][0]
+    assert "-n 8" not in calls["local"][0]
 
 
 def test_force_local_cannot_keep_a_heavy_path_here(wired):
     ptest, calls = wired
     assert ptest.main(["--local", "tests/api"]) == 0
     assert not calls["local"] and len(calls["remote"]) == 1
-    assert "-n auto" in calls["remote"][0]
+    assert "-n 8" in calls["remote"][0]
 
 
 def test_callers_own_flag_wins_over_container_parallelism(wired):
     ptest, calls = wired
     assert ptest.main(["tests/api", "-n", "0"]) == 0
     cmd = calls["remote"][0]
-    assert cmd.index("-n auto") < cmd.index("-n 0"), "caller's flag must come last"
+    assert cmd.index("-n 8") < cmd.index("-n 0"), "caller's flag must come last"
 
 
 def test_busy_backend_refuses_with_75_and_runs_nothing(wired, monkeypatch):
@@ -108,7 +108,7 @@ def test_broken_backend_returns_75_without_a_local_fallback(wired, monkeypatch):
     monkeypatch.setattr(ptest, "run_cloudrun", broken_remote)
     assert ptest.main(["tests/api"]) == 75
     assert len(calls["remote"]) == 1, "the remote path must have been attempted"
-    assert "-n auto" in calls["remote"][0], "the remote attempt carried container parallelism"
+    assert "-n 8" in calls["remote"][0], "the remote attempt carried container parallelism"
     assert not calls["local"]
 
 
@@ -176,7 +176,7 @@ def test_cloudrun_project_configuration_routes_compulsory_work_to_cloud_run(wire
     monkeypatch.setattr(ptest, "run_spot_queue", lambda *a, **k: pytest.fail("must not call Spot"))
 
     assert ptest.main(["--full"]) == 0
-    assert cloudrun_calls == [cfg["projects"]["fake"]["full"]]
+    assert cloudrun_calls == [cfg["projects"]["fake"]["full"] + " -n 8"]
     assert not calls["local"]
 
 
@@ -199,7 +199,7 @@ def test_spot_queue_backend_routes_full_runs_and_keeps_fresh_out_of_the_command(
     monkeypatch.setattr(ptest, "run_spot_queue", run_spot_queue, raising=False)
 
     assert ptest.main(["--full", "--fresh"]) == 0
-    assert calls["remote"] == ["uv run pytest --cov-fail-under=85 tests"]
+    assert calls["remote"] == ["uv run pytest --cov-fail-under=85 tests -n 8"]
     assert calls["remote_kwargs"] == [{"what": "--full", "fresh": True}]
 
 

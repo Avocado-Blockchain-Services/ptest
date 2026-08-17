@@ -59,6 +59,18 @@ if [ ! -f pyproject.toml ] && [ ! -f package.json ] \
 fi
 log "workdir $(pwd) (kind=$PTEST_KIND)"
 
+# ptest pins the worker count from config (`remote_workers`, default 8) because
+# it must equal the job's --cpu, and the two live in different files. Print what
+# the container actually reports so that invariant is checkable from any run's
+# log instead of being assumed. nproc reads the affinity mask, which is why
+# nothing here is allowed to auto-detect: it is not required to agree with the
+# cgroup CPU quota Cloud Run actually enforces.
+log "detected parallelism: nproc=$(nproc 2>/dev/null || echo '?')$(
+  command -v node >/dev/null 2>&1 \
+    && printf ' node.availableParallelism=%s' \
+       "$(node -e 'process.stdout.write(String(require("os").availableParallelism()))' 2>/dev/null || echo '?')"
+)"
+
 if [ "$PTEST_KIND" = "vitest" ]; then
   # ── Node path: no database, no Postgres. ──────────────────────────────────
   [ -f package.json ] || die "no package.json at $(pwd)"

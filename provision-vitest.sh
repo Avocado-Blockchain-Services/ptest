@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Provision the vitest remote runner (job: ptest-persea-front).
+# Provision a vitest remote runner.
+#
+#   ./provision-vitest.sh                                      persea-front, node 20
+#   PTEST_JOB=ptest-fullon2-web PTEST_NODE_VERSION=22 ./provision-vitest.sh
 #
 # Reuses the bucket and runner service account created by provision.sh — those
 # are shared infrastructure, not per-toolchain. This script only adds the node
@@ -8,6 +11,11 @@
 # A SEPARATE job per project, not one shared job, on purpose: the concurrency
 # guard keys on the job, so a single shared job would make a fullon2 run block
 # a persea run for no reason.
+#
+# The image tag carries the Node major (:20, :22) and is NEVER `latest`. Node
+# version must match the consuming project's CI, and the projects disagree, so a
+# shared moving tag silently gives one of them the wrong runtime — which is
+# exactly what happened to fullon2_web (engines >=22) on the node-20 image.
 
 set -Eeuo pipefail
 
@@ -17,7 +25,8 @@ ACCOUNT="${PTEST_ACCOUNT:-ingmar@avocadoblock.com}"
 BUCKET="${PTEST_BUCKET:-${PROJECT}-ptest}"
 SA="ptest-runner@${PROJECT}.iam.gserviceaccount.com"
 AR_REPO="${PTEST_AR_REPO:-persea}"
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/ptest-runner-node:latest"
+NODE_VERSION="${PTEST_NODE_VERSION:-20}"
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/ptest-runner-node:${NODE_VERSION}"
 JOB="${PTEST_JOB:-ptest-persea-front}"
 
 # vitest workers are ~350MB each and the suite is CPU-bound, not IO-bound.
@@ -36,12 +45,12 @@ have "${G[@]}" storage buckets describe "gs://$BUCKET" \
 have "${G[@]}" iam service-accounts describe "$SA" \
   || { echo "service account $SA missing — run provision.sh first"; exit 1; }
 
-say "1. Build the node runner image"
+say "1. Build the node runner image (node $NODE_VERSION)"
 echo "target: $IMAGE"
 _here="$(cd "$(dirname "$0")" && pwd)"
 "${G[@]}" builds submit "$_here" \
   --config="$_here/cloudbuild.vitest.yaml" \
-  --substitutions=_IMAGE="$IMAGE"
+  --substitutions=_IMAGE="$IMAGE",_NODE_VERSION="$NODE_VERSION"
 
 say "2. Cloud Run job $JOB"
 JOB_ARGS=(
@@ -65,13 +74,16 @@ fi
 cat <<SUMMARY
 
 Provisioned:
-  image  $IMAGE
+  image  $IMAGE  (node $NODE_VERSION)
   job    $JOB  ($CPU vCPU / $MEMORY, timeout $TASK_TIMEOUT, retries 0)
 
 Then in ~/.config/ptest/config.toml:
 
-  [projects.persea-front]
+  [projects.<name>]
   backend = "cloudrun"
   job     = "$JOB"
+
+\`remote_workers\` defaults to $CPU in ptest and must track --cpu above; every run
+logs the parallelism the container actually reports, so drift shows up there.
 
 SUMMARY

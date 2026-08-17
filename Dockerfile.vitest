@@ -3,12 +3,21 @@
 # No database: the frontend suites are vitest + jsdom and touch no Postgres, so
 # this image is a fraction of the pytest one and starts correspondingly faster.
 #
-# node 20 because that is what every workflow in persea_content_maker_front
-# pins (.github/workflows/{ci,deploy,guards}.yml). Deliberately NOT the local
-# machine's node 26: CI's version is the one the suite is known to pass on, and
-# a runner that disagrees with CI is worse than useless.
-
-FROM node:20-slim
+# The Node version is a BUILD ARG, and the image is tagged with it
+# (ptest-runner-node:20, :22 — never a moving `latest`). The rule is that the
+# runner matches the project's own CI, because CI's version is the one the suite
+# is known to pass on and a runner that disagrees with CI is worse than useless.
+# Two consumers, two answers, and no single tag can serve both:
+#
+#   persea-front   node 20   .github/workflows/{ci,deploy,guards}.yml, npm
+#   fullon2_web    node 22   .nvmrc + Dockerfile, engines >=22, pnpm
+#
+# Deliberately NOT the local machine's node 26 in either case. Before this was
+# parameterised, fullon2_web ran on the shared node-20 image — silently, because
+# pnpm does not enforce `engines` by default, so a suite whose own manifest
+# declares node 20 unsupported was tested on it anyway and reported green.
+ARG NODE_VERSION=20
+FROM node:${NODE_VERSION}-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PTEST_KIND=vitest \

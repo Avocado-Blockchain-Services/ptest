@@ -269,30 +269,46 @@ def default_commands(root: Path) -> dict:
     return {"scoped": "", "full": "", "kind": "unknown"}
 
 
-def cap_workers_for_local(cmd: str, kind: str, workers: int,
-                          root: Path | None = None) -> str:
-    """Force `cmd` down to the local worker cap, stripping any parallelism it
-    already requests.
+def set_worker_count(cmd: str, kind: str, workers: int,
+                     root: Path | None = None) -> str:
+    """Pin `cmd` to exactly `workers`, stripping any parallelism it already requests.
 
-    A `--full` command is written for the remote container, which owns 8
-    dedicated vCPU, so it legitimately says `-n auto`. That same string is what
-    runs when a remote submit falls back to local — and `auto` there means "every
-    core on a machine shared with five other agents", the precise failure this
-    tool exists to prevent. Appending a second flag is not enough: rely on
-    nothing about which duplicate a runner honours. Remove, then set.
+    Used in BOTH directions, which is why it is not named for either one:
+
+      local  — force the command DOWN to the shared-machine cap. A `--full`
+               command is written for the remote container and legitimately says
+               `-n auto`; run here, `auto` means "every core on a machine shared
+               with five other agents", the precise failure this tool exists to
+               prevent.
+      remote — force the command UP to the container's dedicated vCPU, and say so
+               explicitly rather than leaving it to the runner's auto-detection.
+               Auto-detection is not trustworthy in a container: libuv's
+               `uv_available_parallelism` (what Node's `os.availableParallelism`
+               and therefore vitest's default fork count come from) reads the
+               affinity mask, not the cgroup CPU quota, so it can report the
+               HOST's core count. The suite then either under- or wildly
+               over-subscribes, silently, and the run is no longer the run anyone
+               reasoned about.
+
+    Appending a second flag is not enough in either direction: rely on nothing
+    about which duplicate a runner honours. Remove, then set.
     """
+    # Each pattern consumes the whitespace BEFORE the flag, so the replacement is
+    # empty rather than a space — the separator after the flag is still there, and
+    # substituting " " leaves a double space that ends up in logs, in `ptest
+    # status`, and in the remote cache key.
     if kind == "pytest":
-        cmd = re.sub(r"\s+(-n|--numprocesses)(\s+|=)\S+", " ", cmd)
+        cmd = re.sub(r"\s+(-n|--numprocesses)(\s+|=)\S+", "", cmd)
     elif kind in ("vitest", "npm"):
         # Strip whatever cap flag the configured command already carries — it may
         # be for any of the runners in NODE_RUNNER_CAPS.
         cmd = re.sub(
             r"\s+--(maxWorkers|minWorkers|test-concurrency|concurrency|workers|jobs)"
-            r"(\s+|=)\S+", " ", cmd)
+            r"(\s+|=)\S+", "", cmd)
     elif kind == "go":
-        cmd = re.sub(r"\s+-p(\s+|=)\S+", " ", cmd)
+        cmd = re.sub(r"\s+-p(\s+|=)\S+", "", cmd)
     elif kind == "cargo":
-        cmd = re.sub(r"\s+--jobs(\s+|=)\S+", " ", cmd)
+        cmd = re.sub(r"\s+--jobs(\s+|=)\S+", "", cmd)
     flags = worker_flags(kind, workers, root)
     if not flags:
         # No cap known for this runner (e.g. kind "npm" running jest/mocha —
@@ -578,6 +594,10 @@ def heavy_scoped_files(passthrough: list[str], root: Path) -> int:
 # Default only. A project stanza may override it, and 0 disables the tier.
 DEFAULT_REMOTE_SCOPED_MIN_FILES = 40
 
+# Every ptest Cloud Run job is provisioned `--cpu 8` (provision.sh,
+# provision-vitest.sh). Override per project only if that job's --cpu differs.
+DEFAULT_REMOTE_WORKERS = 8
+
 # The backends that can actually accept work. Anything else — "local", or a
 # project with no stanza at all — runs on this machine, and asking it to route
 # remote is a bug, not a fallback: there is nowhere for the work to go.
@@ -602,18 +622,30 @@ def spot_enabled(pcfg: Mapping, cfg: Mapping) -> bool:
     return value is True
 
 
-def remote_worker_flags(kind: str) -> str:
-    """Parallelism for a run that owns its container.
+def remote_workers(pcfg: Mapping, cfg: Mapping) -> int:
+    """How many workers a run that owns its container should use.
 
-    The inverse of worker_flags: that one exists to stop a runner grabbing a
-    machine shared with five other agents, and this one exists because the
-    container is dedicated and capping it would discard the entire benefit.
+    This is the container's dedicated vCPU count, and it is CONFIGURED rather
+    than detected. Two reasons it cannot be left to the runner:
 
-    Only pytest needs a flag. xdist is opt-in, so `uv run pytest tests/api` in
-    the container runs single-threaded and would be SLOWER than the local run it
-    replaced. vitest, go and cargo already use every core by default.
+      * pytest-xdist is opt-in, so a bare `uv run pytest tests/api` in the
+        container runs single-threaded — SLOWER than the local run it replaced.
+      * vitest/go/cargo do auto-detect, but what they detect in a Cloud Run
+        container is the affinity mask rather than the cgroup quota, so "every
+        core" can mean the host's core count. See set_worker_count.
+
+    It must therefore match the `--cpu` that provision.sh gives the job. That is
+    a two-place invariant, so the runner logs the parallelism it actually sees
+    (entrypoint.sh, "detected parallelism") — if the two ever drift apart, the
+    evidence is in the log of every run rather than in nobody's head.
     """
-    return "-n auto" if kind == "pytest" else ""
+    value = pcfg.get("remote_workers",
+                     cfg.get("defaults", {}).get("remote_workers",
+                                                 DEFAULT_REMOTE_WORKERS))
+    workers = int(value)
+    if workers < 1:
+        raise ValueError("remote_workers must be at least 1")
+    return workers
 
 
 def should_route_remote(passthrough: list[str], root: Path, pcfg: dict, cfg: dict,
@@ -2748,18 +2780,20 @@ def main(argv: list[str]) -> int:
         warn("--fresh is only valid for a selected remote execution")
         return 2
 
-    parts = [base]
-    if route_remote:
-        # Dedicated container: use its cores, not this machine's cap.
-        flags = remote_worker_flags(kind)
-    elif not full:
-        # Cap workers on anything running on this machine. A remote job owns its
-        # whole container, so it uses the project's own full-suite command as-is.
-        flags = worker_flags(kind, workers, root)
+    # Parallelism is applied to the CONFIGURED command only, never to the whole
+    # line: the caller's own arguments are appended afterwards, so an explicit
+    # `ptest --full -n 4` still wins over the number set here. Stripping it from
+    # the assembled command would silently discard the caller's flag instead.
+    if selected_remote:
+        parts = [set_worker_count(base, kind, remote_workers(pcfg, cfg), root)]
     else:
-        flags = ""
-    if flags:
-        parts.append(flags)
+        parts = [base]
+        # Cap anything running on this machine. `--full` is left alone here and
+        # re-capped below, after the remote/local decision is final.
+        if not full:
+            flags = worker_flags(kind, workers, root)
+            if flags:
+                parts.append(flags)
     # The configured command is user-authored and intentionally shell-evaluated
     # (env prefixes, &&). Caller arguments are not: an agent constructing a -k
     # expression or a path must never be able to reach the shell unquoted.
@@ -2797,8 +2831,12 @@ def main(argv: list[str]) -> int:
     # remote submit fell back. Re-cap here rather than trusting the command built
     # above, which for a cloudrun project was written for a dedicated container.
     remote_shaped = full or route_remote
-    local_cmd = cap_workers_for_local(cmd, kind, workers, root) if remote_shaped else cmd
-    if remote_shaped and local_cmd != cmd:
+    local_cmd = set_worker_count(cmd, kind, workers, root) if remote_shaped else cmd
+    # Only worth saying when the run COULD have gone to a container and did not.
+    # A project with backend = "local" has no container to be capped relative to,
+    # and telling its operator that "the remote command's parallelism is for a
+    # dedicated container" describes infrastructure that does not exist for them.
+    if remote_shaped and local_cmd != cmd and backend_is_remote(pcfg):
         warn(f"running {'--full' if full else 'this scoped run'} LOCALLY — capped "
              f"to {workers} workers (the remote command's parallelism is for a "
              "dedicated container)")

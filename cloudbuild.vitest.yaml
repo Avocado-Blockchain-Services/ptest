@@ -1,9 +1,25 @@
 # Build the vitest/node runner image.
+#
+# _NODE_VERSION selects the Node major and MUST match the tag in _IMAGE — the
+# tag is the only thing a reader of `gcloud run jobs list` can see, so an image
+# tagged :22 that is secretly node 20 is worse than no tag at all.
+# provision-vitest.sh derives both from one variable; prefer it to calling this
+# directly.
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: ["build", "-f", "Dockerfile.vitest", "-t", "${_IMAGE}", "."]
+    args:
+      - build
+      - -f
+      - Dockerfile.vitest
+      - --build-arg
+      - NODE_VERSION=${_NODE_VERSION}
+      - -t
+      - ${_IMAGE}
+      - .
 images:
   - "${_IMAGE}"
+substitutions:
+  _NODE_VERSION: "20"
 options:
   machineType: E2_HIGHCPU_8
 timeout: 1800s

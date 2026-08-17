@@ -235,7 +235,63 @@ def test_default_threshold_when_config_is_silent(ptest, persea_shaped, monkeypat
     assert not ptest.should_route_remote(["tests/crawler"], persea_shaped, CLOUD, {}, False)[0]
 
 
-def test_only_pytest_needs_an_explicit_parallel_flag(ptest):
-    assert ptest.remote_worker_flags("pytest") == "-n auto"
-    for kind in ("vitest", "npm", "go", "cargo", "unknown"):
-        assert ptest.remote_worker_flags(kind) == ""
+# ── container parallelism is stated, never auto-detected ────────────────────
+#
+# A container run used to say `-n auto` for pytest and nothing at all for every
+# other runner, on the theory that "vitest, go and cargo already use every core
+# by default". What they actually use is `uv_available_parallelism`, which reads
+# the affinity mask rather than the cgroup quota — so in a Cloud Run container it
+# can report the HOST's core count, and the run silently stops being the run
+# anyone reasoned about. State the number instead.
+
+def test_remote_workers_defaults_to_the_jobs_cpu_allocation(ptest):
+    assert ptest.remote_workers({}, {}) == ptest.DEFAULT_REMOTE_WORKERS == 8
+
+
+def test_a_project_may_override_remote_workers(ptest):
+    assert ptest.remote_workers({"remote_workers": 4}, {}) == 4
+    assert ptest.remote_workers({}, {"defaults": {"remote_workers": 16}}) == 16
+    # The project stanza is the more specific statement and wins.
+    assert ptest.remote_workers({"remote_workers": 4},
+                                {"defaults": {"remote_workers": 16}}) == 4
+
+
+def test_a_nonsense_remote_worker_count_is_refused_not_silently_used(ptest):
+    with pytest.raises(ValueError):
+        ptest.remote_workers({"remote_workers": 0}, {})
+
+
+def test_every_runner_gets_an_explicit_container_worker_count(ptest, tmp_path):
+    """Not just pytest — the runner that auto-detects is the dangerous one."""
+    assert ptest.set_worker_count("uv run pytest", "pytest", 8) == "uv run pytest -n 8"
+    assert ptest.set_worker_count("go test ./...", "go", 8) == "go test ./... -p 8"
+    assert ptest.set_worker_count("cargo test", "cargo", 8) == "cargo test --jobs 8"
+
+
+def test_vitest_gets_a_container_worker_count_through_the_run_script(ptest, repo):
+    root = repo(["package.json"])
+    (root / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    assert ptest.set_worker_count("npm test --", "vitest", 8, root) == \
+        "npm test -- --maxWorkers=8"
+
+
+def test_the_configured_auto_is_replaced_not_appended_to(ptest):
+    """Two parallelism flags means depending on which duplicate a runner honours."""
+    out = ptest.set_worker_count("uv run pytest -n auto --cov=pkg tests", "pytest", 8)
+    assert out == "uv run pytest --cov=pkg tests -n 8"
+    assert "auto" not in out
+
+
+def test_stripping_a_flag_leaves_no_double_space(ptest):
+    """The command reaches logs, `ptest status` and the remote cache key verbatim."""
+    for kind, cmd in (("pytest", "uv run pytest -n auto tests"),
+                      ("go", "go test -p 4 ./..."),
+                      ("cargo", "cargo test --jobs 4 --release")):
+        assert "  " not in ptest.set_worker_count(cmd, kind, 8)
+
+
+def test_the_local_cap_and_the_container_count_share_one_implementation(ptest):
+    """The same command, pinned both directions — the only difference is the number."""
+    cmd = "uv run pytest -n auto tests"
+    assert ptest.set_worker_count(cmd, "pytest", 2) == "uv run pytest tests -n 2"
+    assert ptest.set_worker_count(cmd, "pytest", 8) == "uv run pytest tests -n 8"
