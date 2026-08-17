@@ -2603,7 +2603,21 @@ def cmd_where(cfg: dict, cwd: Path) -> int:
     else:
         print('cache    unavailable until backend = "cloudrun" is configured')
     print(f"scoped   {pcfg.get('scoped', det['scoped'])}")
-    print(f"full     {pcfg.get('full', det['full'])}")
+    full_cmd = pcfg.get("full", det["full"])
+    print(f"full     {full_cmd}")
+    # The configured string is not what runs: ptest pins the worker count to the
+    # destination. Printing only the config would send a reader looking for a
+    # `-n` that is not there, or assuming the runner auto-detects — the exact
+    # confusion that let vitest run on an unstated fork count in the container.
+    kind = pcfg.get("kind", det["kind"])
+    workers = pcfg.get("workers", cfg.get("defaults", {}).get("workers", 2))
+    if backend_is_remote(pcfg):
+        try:
+            effective = set_worker_count(full_cmd, kind, remote_workers(pcfg, cfg), root)
+        except ValueError:
+            effective = "✗ invalid remote_workers"
+        print(f"  remote {effective}")
+    print(f"  here   {set_worker_count(full_cmd, kind, workers, root)}")
     return 0
 
 

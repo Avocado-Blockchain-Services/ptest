@@ -243,3 +243,28 @@ def test_status_exits_nonzero_when_something_is_wrong(ptest, tmp_path, monkeypat
 
     assert ptest.cmd_status({"projects": {}}, tmp_path) == 1
     assert "⚠" in capsys.readouterr().out
+
+
+# ── `ptest where` shows what will actually run ──────────────────────────────
+
+def test_where_shows_the_command_the_container_will_actually_run(ptest, tmp_path,
+                                                                 capsys):
+    """The configured string omits parallelism; the reader needs the real one."""
+    cfg = {"projects": {"p": {"root": str(tmp_path), "kind": "pytest",
+                              "backend": "cloudrun", "job": "ptest-p",
+                              "scoped": "uv run pytest",
+                              "full": "uv run pytest"}}}
+    assert ptest.cmd_where(cfg, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "remote uv run pytest -n 8" in out
+    assert "here   uv run pytest -n 2" in out
+
+
+def test_where_omits_a_remote_command_for_a_local_project(ptest, tmp_path, capsys):
+    cfg = {"projects": {"p": {"root": str(tmp_path), "kind": "pytest",
+                              "backend": "local", "scoped": "uv run pytest",
+                              "full": "uv run pytest"}}}
+    assert ptest.cmd_where(cfg, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "remote" not in out.split("full")[-1]
+    assert "here   uv run pytest -n 2" in out
