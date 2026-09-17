@@ -301,3 +301,10 @@
   T2 unchanged. Launcher now requires exact approved repaired-T0 SHA/current plan
   section and explicitly distinguishes local build instructions from product TUI
   portability/runtime dependencies. No downstream source work launched yet.
+
+- Public repair run2 exited0 with a read-only gap inventory and NO implementation:
+  it incorrectly interpreted --disable-write as disabling shell patches. Actual
+  `muse exec --help` says only non-shell filesystem writes are disabled. Root
+  clarified authorized shell apply_patch and exact readable skill paths, then
+  resumed the same model/effort as task-0-public-muse-run3.jsonl. Clean071d4af
+  preserved; no model substitution or fabricated successful implementation.

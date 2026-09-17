@@ -1,5 +1,14 @@
 # Task0 public contract completion — Muse / Dan
 
+IMPLEMENT NOW. This is a write-authorized implementation task, NOT a read-only
+preflight. --disable-write disables ONLY Muse's direct file-writer tool. Your
+SHELL remains write-enabled inside this task worktree; invoke apply_patch through
+the shell. The parallel helper worker already successfully committed using this
+same tool configuration. Do not infer a permissions block without attempting the
+authorized shell apply_patch. Root supplies approval for all owned changes below.
+Previous run2 stopped cleanly without edits due to that mistaken interpretation;
+retain its gap inventory but now perform the actual RED/GREEN implementation.
+
 Root restarted the first read-only preflight after correcting generated-schema
 ownership paths in this brief. No source edits existed at interruption. Prior
 trace task-0-public-muse.jsonl is retained; root-directed SIGINT exit130 is not
@@ -18,6 +27,17 @@ Read receiving-code-review, systematic-debugging, secure-by-spec, TDD (including
 writing-good-tests), graphify skills before their respective actions. No further
 product approval needed. The author resolved the real schema ambiguity; implement
 the exact ruling, do not redesign or leave known shape gaps as completion.
+
+These are filesystem skills, not necessarily registered Muse skill aliases.
+Read their COMPLETE files with Read or shell sed, not an unknown read_skill alias:
+/home/ingmar/.agents/skills/secure-by-spec/SKILL.md
+/home/ingmar/.codex/plugins/cache/openai-curated-remote/superpowers/6.3.0/skills/receiving-code-review/SKILL.md
+/home/ingmar/.codex/plugins/cache/openai-curated-remote/superpowers/6.3.0/skills/systematic-debugging/SKILL.md
+/home/ingmar/.codex/plugins/cache/openai-curated-remote/superpowers/6.3.0/skills/test-driven-development/SKILL.md
+/home/ingmar/.codex/plugins/cache/openai-curated-remote/superpowers/6.3.0/skills/test-driven-development/writing-good-tests.md
+/home/ingmar/.codex/skills/graphify/SKILL.md
+Read actual role /home/ingmar/.codex/agents/dan-jefferies-agent.toml and reference
+/home/ingmar/.codex/agent-memory/dan-jefferies-agent/reference-muse-code-cli.md.
 
 You are NOT alone. Another Muse owns tests/ng/support.py and helper regressions in
 tests/ng/test_files.py in a separate worktree. Own ONLY src/ptest/contracts.py,
