@@ -278,3 +278,16 @@
   task-0-helper (baseced109b) owns only support.py, helper tests in test_files.py
   and its unique helper-repair report. It fixes explicitly required watchdogs and
   bounded-while-reading capture/export parsing. No downstream consumers launched.
+
+- Astra public-summary addendum2162cf2 integrated as7220fba on chain and071d4af
+  in Task0. Exact ConfigSummary/EffectiveLimits/InitAction/history reuse and
+  recursive public known-field projection are now explicit authority.
+- Helper attempt1 was root-interrupted (ownedPID1257715,exit130), edits preserved,
+  to add verified prefix-only argument ordering/result-option regression. Same
+  Muse medium restarted as task-0-helper-muse-run2.jsonl; independent public
+  repair has disjoint source/test/report ownership.
+- Public attempt1 was root-interrupted during clean read-only preflight
+  (ownedPID1261783,exit130) to fix root's erroneous generated-schema paths in its
+  brief. Actual authorized paths are docs/schemas/v1/*.json and the existing
+  src/ptest/runtime/protocol-v1.json, not invented schemas/public directories.
+  Same Muse medium resumes with corrected brief; no source edits discarded.

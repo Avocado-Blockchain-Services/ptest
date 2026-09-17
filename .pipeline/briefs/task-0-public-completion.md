@@ -1,5 +1,10 @@
 # Task0 public contract completion — Muse / Dan
 
+Root restarted the first read-only preflight after correcting generated-schema
+ownership paths in this brief. No source edits existed at interruption. Prior
+trace task-0-public-muse.jsonl is retained; root-directed SIGINT exit130 is not
+a test failure. The exact generated paths below match the original Task0 brief.
+
 Use muse-spark-1.3 at medium effort, actual Muse CLI, no delegation. Worktree:
 /home/ingmar/worktrees/ptest/cx-ng-product/task-0, branch cx-ng-product-task-0.
 Current base 071d4af includes prior repair ced109b plus Astra's approved narrow
@@ -16,8 +21,9 @@ the exact ruling, do not redesign or leave known shape gaps as completion.
 
 You are NOT alone. Another Muse owns tests/ng/support.py and helper regressions in
 tests/ng/test_files.py in a separate worktree. Own ONLY src/ptest/contracts.py,
-tests/ng/test_contracts.py, Task0-generated schemas/public/* and schemas/protocol/*
-when legitimately affected, and .pipeline/out/task-0.json. Do not touch helper,
+tests/ng/test_contracts.py, Task0-generated docs/schemas/v1/*.json and
+src/ptest/runtime/protocol-v1.json when legitimately affected, and
+.pipeline/out/task-0.json. Do not touch helper,
 files/storage modules, other tests, scripts, design/plan, dependencies, or legacy.
 Do not integrate another branch. Root combines disjoint repairs before Opus review.
 
