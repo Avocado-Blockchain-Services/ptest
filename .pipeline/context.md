@@ -1,5 +1,10 @@
 # ptest NG context and approved workflow
 
+Current phase (2026-09-17): the user explicitly approved the reviewed product
+specification. Proceed to Astra xhigh design and Opus design review, then the
+approved implementation/audit sequence. Linux/macOS v1 scope is accepted; release,
+license, main merge, installation, and publication remain separate gates.
+
 ## User intent
 
 Rebuild ptest in its existing Git repository into a local-first, open-source-ready

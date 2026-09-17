@@ -96,3 +96,12 @@
   detailed design, Muse coding, code removal, installation, main merge, or release
   on the strength of this report alone. Linux+macOS remains the proposed v1 scope;
   native Windows is deferred, and license/publication decisions remain M5 gates.
+
+## Human specification approval; design started
+
+- User explicitly replied "approved!" to the reviewed specification on 2026-09-17.
+- Product contract is now approved, including Linux/macOS first-release scope.
+- Proceeding with Astra xhigh detailed design/contracts/task plan and independent
+  parallel design research, then Opus review before Muse/Dan implementation.
+- No runtime edits, tests, dependency installation, or legacy removal at this gate.
+- Final integrated review remains Opus then Astra; subsequent corrections use Sol.

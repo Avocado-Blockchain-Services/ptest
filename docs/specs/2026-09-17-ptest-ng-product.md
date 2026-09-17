@@ -4,7 +4,7 @@ Created: 2026-09-17 UTC
 
 Author: architect-agent (Astra)
 
-Status: independently reviewed product contract; Fable repair review passed with no blocking findings; pending user approval
+Status: user approved (2026-09-17); Fable repair review passed with no blocking findings; authoritative input to detailed design
 
 ## 1. Product and decision boundary
 
@@ -27,7 +27,7 @@ For X = local-first ptest NG, these are the product questions Q and proposed ans
 | How is speed evaluated? | Separate planning, queue, setup, execution, and recording measurements; unchanged assertions and full coverage gates; replayable comparisons. No universal speedup promise. |
 | What is the first support boundary? | Linux and macOS; first-class pytest/Vitest; bounded legacy Go/Cargo execution; generic CLI use from coding TUIs. Exact tested versions are frozen in the design/release matrix. |
 | What is deferred? | Remote runs, service deployment, native Windows support, cross-repository impact graphs, automatic code repair, agent launchers, and a broad adapter marketplace. |
-| What may happen next? | Independent specification review, correction, and user approval. Detailed design and implementation cannot begin on the strength of this draft alone. |
+| What may happen next? | User approval is recorded. Detailed design and independent Opus review precede implementation; this specification alone does not approve implementation choices. |
 
 ### Traceability to user intent
 
