@@ -379,3 +379,9 @@
   Traces .pipeline/out/task-N-muse.jsonl/.stderr. Root exec sessions (unordered
   launch-completion IDs)66311,89618,11923; task identity comes from per-task traces,
   not guessed output ordering. Ownership T1config/init;T2platform;T3history.
+
+- T3 attempt1 (session11923) exited0 with empty terminal text, no tool calls and
+  clean base60deb4e. Trace records provider final wire event response.incomplete,
+  but runtime labelled stream_succeeded/maincompleted. This is NOT implementation
+  success. Retained trace; same model/effort/task restarted as task-3-muse-run2,
+  session6389. T1/T2 continue; no lost work or silent substitution.
