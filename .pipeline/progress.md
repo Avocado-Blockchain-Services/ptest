@@ -308,3 +308,18 @@
   clarified authorized shell apply_patch and exact readable skill paths, then
   resumed the same model/effort as task-0-public-muse-run3.jsonl. Clean071d4af
   preserved; no model substitution or fabricated successful implementation.
+
+- Helper Opus audit31turns/486449ms actualprimaryclaude-opus-5 completed with
+  approved_with_notes but TWO required blocking corrections H-1(stderr cap test
+  never reached),H-2(absolute export uses blocking unsafe open outside watchdog).
+  Root treats any required blocking item as NOT accepted regardless verdictlabel.
+  SameMusemedium helper repair2 launched, including related prefix/env/result-type/
+  descriptor-error negatives; no producer source overlap with public branch.
+- Review's claim that two skills were absent is REFUTED: it searched only
+  /home/ingmar/.agents/skills, not the explicit existing superpowers cache paths.
+  Repair brief supplies complete exact paths and requires filesystem reading.
+- Public addendum dbac887 submitted; root78passed/0.13s, schema drift0,9ownedpaths,
+  clean. Actual producer encode_public_document still passes raw payload/domain
+  dicts; original tests only assert privacy after decode/re-encode. Root sent this
+  and schema/validator parity hypotheses to Opus public T0-1..T0-6 re-review while
+  independent helper repair runs. Overall Task0 barrier remains UNAPPROVED.
