@@ -346,3 +346,12 @@
   Own uv environment/cache; combined112passed/2.80s, schema drift0, clean diff.
   This proves composition of SUBMITTED bytes only, NOT acceptance; public findings
   remain. Normal chain/main/installed CLI are untouched by this check.
+
+- Helper focused Opus re-review35turns approved_with_notes, blocking=[]:
+  H-1/H-2 and authorized related corrections resolved at0f41c78. Root confirms
+  exactSHA via git log; no extra self-referential SHA edit needed in workerreport.
+  Retained notes: actualT11/macOS integration not proven, test-only post-reapPID
+  residual, minor artifact/report hygiene and disclosed patch-file workflow gap.
+  Helper half of Task0 is accepted; public correction and combined final gate remain.
+- Combined checkout AST graph update completedexit0; two JSONschema files produce
+  zero nodes (tool warning), no semantic extraction/provider. Labels/wiki not used.
