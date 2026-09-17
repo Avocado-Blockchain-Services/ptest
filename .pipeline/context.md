@@ -2,10 +2,12 @@
 
 Current phase (2026-09-17): user-approved product specification and Astra design
 have passed Opus focused re-review (approved_with_notes, no blocking findings).
-Astra clarified the non-blocking shared-contract notes in a001145. Muse Task0
-first submission c545671 passed49 scoped tests but Opus rejected seven required
-acceptance gaps. Muse repair round1 is authorized; wave1 waits for the corrected
-runnable barrier. Linux/macOS v1 scope is accepted; release,
+Astra clarified shared-contract notes in a001145 and public summaries in2162cf2.
+Muse Task0's first seven findings are repaired; the helper half at0f41c78 passed
+Opus focused re-review with no required findings. Public findingsT0-8..T0-11 were
+repaired in8e3d370 and are under final Opus combined re-review atcd572ec. Root's
+combined119scoped tests pass; this is NOT yet acceptance. Wave1 waits for this
+corrected runnable barrier. Linux/macOS v1 scope is accepted; release,
 license, main merge, installation, and publication remain separate gates.
 
 ## User intent

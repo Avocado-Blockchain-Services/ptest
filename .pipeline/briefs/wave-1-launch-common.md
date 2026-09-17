@@ -3,6 +3,11 @@ using the Dan Jefferies role, medium effort. Do not delegate. The existing task
 worktree is your only write scope; verify cwd/branch before editing. Other agents
 own other task worktrees. Do not revert others or edit shared registration points.
 
+This is IMPLEMENTATION once root launches after the gate. --disable-write means
+only Muse's NON-SHELL writer is disabled; shell apply_patch is explicitly write-
+authorized for your owned files. Do not stop at a read-only preflight because of
+that flag. Do not cat patches into temporary files: feed them to apply_patch.
+
 Read .pipeline/briefs/task-N-brief.md FIRST (replace N with your assigned number).
 Read .pipeline/briefs/muse-dan-common.md, your AGENTS.md and .pipeline/context.md.
 Read the actual Muse reference and Dan role files specified there, the complete
