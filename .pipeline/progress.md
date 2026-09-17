@@ -31,3 +31,16 @@
   trace retained locally (ignored) in .pipeline/out/muse-trust-preflight.jsonl.
 - Fable spec audit brief and structured verdict schema prepared. Runtime primary
   aliases are pinned in evidence; Fable will run read/search tools only, no shell.
+
+## Parallel specification inputs completed
+
+- TUI compatibility research: worker commit 17e44ed, integrated as 6059a7b. Six
+  families covered using primary documentation and bounded local Muse evidence.
+- Product specification: Astra xhigh worker commit feb2b680, integrated as
+  05736da. Owns docs/specs/2026-09-17-ptest-ng-product.md and author manifest.
+- Documentation validation passed (JSON parsing, whitespace and ownership checks).
+  No product tests, dependency installations, or runtime edits in this stage.
+- Fable 5.1 high specification audit launched against this immutable draft with
+  only Read/Glob/Grep tools. Output: .pipeline/out/spec-review-fable.json.
+- Human gate remains pending: reviewed product spec approval. The Linux/macOS
+  preference question is optional; proposed default remains Linux+macOS v1.
