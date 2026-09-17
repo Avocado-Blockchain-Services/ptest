@@ -266,3 +266,15 @@
   scratch probe despite patch-only instructions; subsequent source repairs use
   apply_patch correctly. Do not claim perfect patch-only compliance. Durable
   regressions and complete retained evidence remain required for acceptance.
+
+- Repair1 ced109b completed, root independently68passed/0.12s, slowest0.02s;
+  standalone schema drift check exit0. Not integrated/approved: worker correctly
+  identified remaining missing public summary shapes rather than inventing them.
+- Astra confirmed true omissions for ConfigSummary, EffectiveLimits, InitAction
+  and history summary shape; a narrow author addendum is underway. Existing
+  Capability/LeaseView/etc were already specified and repaired, not new scope.
+- Split remaining T0 work into disjoint repair worktrees before the combined gate:
+  original task-0 will own public contracts/schemas/test_contracts/report;
+  task-0-helper (baseced109b) owns only support.py, helper tests in test_files.py
+  and its unique helper-repair report. It fixes explicitly required watchdogs and
+  bounded-while-reading capture/export parsing. No downstream consumers launched.
