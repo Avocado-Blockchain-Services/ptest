@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "kind": "research_handoff",
+  "date": "2026-09-17",
+  "status": "research_complete_not_implementation",
+  "artifact": "docs/research/2026-09-17-agent-interoperability.md",
+  "scope": "Six coding TUIs; ordinary CLI, JSON and prompt-file interoperability",
+  "recommendation": "Provider-independent ptest CLI, versioned reports, printable repair prompts and one generic checked-in guide; optional thin native entrypoints",
+  "matrix": [
+    {
+      "tool": "Codex CLI", "generic": "expected", "native": "documented_not_tested",
+      "instruction": "AGENTS.md; AGENTS.override.md takes precedence",
+      "sources": ["https://learn.chatgpt.com/docs/agent-configuration/agents-md", "https://learn.chatgpt.com/docs/non-interactive-mode"]
+    },
+    {
+      "tool": "Claude Code", "generic": "expected", "native": "documented_not_tested",
+      "instruction": "CLAUDE.md or .claude/CLAUDE.md; @path import; not direct AGENTS.md loading",
+      "sources": ["https://code.claude.com/docs/en/memory", "https://code.claude.com/docs/en/headless"]
+    },
+    {
+      "tool": "Muse Code", "version": "1.3.0-R3233.1", "generic": "expected",
+      "native": "single_trusted_loading_smoke_verified; ptest_integration_unverified",
+      "instruction": "AGENTS.md; workspace trust applies; exact heading returned with no tools",
+      "sources": ["local: muse --help", "local: muse exec --help", "local: muse init --help", "local: muse --version", ".pipeline/out/runtime-preflight.json", ".pipeline/out/muse-trust-preflight.jsonl", ".pipeline/out/muse-trust-preflight.stderr", "/home/ingmar/.codex/agent-memory/dan-jefferies-agent/reference-muse-code-cli.md"]
+    },
+    {
+      "tool": "Gemini CLI", "generic": "expected", "native": "documented_not_tested",
+      "instruction": "GEMINI.md; @path imports; context.fileName optionally configurable",
+      "sources": ["https://geminicli.com/docs/cli/gemini-md/", "https://geminicli.com/docs/cli/headless/", "https://geminicli.com/docs/cli/trusted-folders/"]
+    },
+    {
+      "tool": "OpenCode", "generic": "expected", "native": "documented_not_tested",
+      "instruction": "AGENTS.md; CLAUDE.md fallback; file references not automatically imported",
+      "sources": ["https://opencode.ai/docs/rules/", "https://opencode.ai/docs/cli/"]
+    },
+    {
+      "tool": "Aider", "generic": "expected", "native": "documented_explicit_file_loading_not_tested",
+      "instruction": "--read PATH or /read PATH; optional .aider.conf.yml read setting",
+      "sources": ["https://aider.chat/docs/usage/conventions.html", "https://aider.chat/docs/scripting.html", "https://aider.chat/docs/usage/commands.html"]
+    }
+  ],
+  "minimum_requirements": [
+    "No ptest model API, credentials, launcher, MCP or hosted-service dependency",
+    "Noninteractive local CLI and file/text handoff, with no required TTY or agent installation",
+    "Literal argv and normal runner output/exit preservation; skipped/incomplete is not passed",
+    "Versioned JSON with stable finding IDs, evidence, uncertainty and completeness",
+    "Clean JSON stdout; diagnostic stderr; separate machine reports from raw runner streams",
+    "Deterministic repair prompts from the same finding model, with bounded untrusted evidence",
+    "One generic repository guide plus optional native pointers with safe no-overwrite initialization",
+    "Never modify global agent configuration, disable approvals, or broaden workspace trust",
+    "Separate expected generic compatibility from documented native conventions and tested integration"
+  ],
+  "verification": {
+    "local_commands": ["muse --help", "muse exec --help", "muse init --help", "muse --version"],
+    "local_command_exit_codes": [0, 0, 0, 0],
+    "provider_calls_by_research_task": 0,
+    "native_positive_loading_tests_by_research_task": 0,
+    "orchestrator_loading_smokes_with_artifacts_inspected": 1,
+    "muse_probe": {"model": "muse-spark-1.3", "observed_heading": "# ptest NG product workflow", "trust": "run-flag", "reported_exit_code": 0, "tool_events_observed": 0},
+    "ptest_adapter_tests": 0,
+    "test_suites": "not run: documentation-only task",
+    "installs": 0,
+    "source_changes": false
+  },
+  "limitations": [
+    "No end-to-end ptest integration verified; native-loading smoke limited to Muse",
+    "Muse probe executed by orchestrator; raw evidence inspected here; import syntax unverified",
+    "No Windows/macOS, version-matrix, cancellation or real-provider compatibility smoke",
+    "Aider stable agent JSON output not established; common contract uses ptest output",
+    "Proposed flags, schemas and exit distinctions require product-spec approval"
+  ]
+}
