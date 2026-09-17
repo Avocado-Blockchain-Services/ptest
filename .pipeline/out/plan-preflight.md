@@ -47,3 +47,15 @@ P1 is a concrete unresolved design-interface question raised to the author while
 Opus reviews; no edits requested until review findings are combined. It must be
 resolved before the runnable contract barrier, with fixture history/key isolation
 tests. This report does not approve implementation or claim any tests passed.
+
+P2: design section4's statement that recognized ptest switches before `--` are
+consumed does not freeze protection for a runner-valued token such as
+`ptest -k --workers` or `ptest -k --full`. C1 requires preserving such values.
+Define prefix-only parsing or another precise safe rule and negative tests;
+do not invent a universal runner option-arity parser during T11.
+
+After Opus returned, root independently checked NG-1's machine-state example:
+`stat -c '%a %U %n' /home/ingmar/.local/state/ptest /home/ingmar/.config/ptest`
+returned both directories as mode755 owned by ingmar. They must not be silently
+chmodded/pruned/treated as exclusive NG state. NG-8's example literal length was
+also verified as33 with `printf %s cd58ec6cf99748ce9f15dfce137f044d3 | wc -c`.

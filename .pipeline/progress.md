@@ -161,3 +161,22 @@
   using `.pipeline/briefs/design-review.md` and the existing JSON schema. Trace:
   `.pipeline/out/design-review-opus.jsonl`. Runtime source remains legacy while
   review runs; no implementation task is authorized before required corrections.
+
+## Opus design gate — corrections required
+
+- claude-opus-5/high completed25 turns, exit0, no permission denials; incidental
+  Haiku metadata usage is not the primary reviewer. Verdict rejected with NG-1–9
+  required findings (3HIGH,6MEDIUM). Full result and extracted findings are in
+  `.pipeline/out/design-review-opus.json` and `design-review-findings.json`.
+- Required: legacy state-root collision; default unknown-memory serialization and
+  missing mixed-runner benchmark; shared write/default/control-frame contracts;
+  register JSON alias/schema; execution-vs-selection version degradation; private
+  installation/dependency provisioning; queue default; invalid example ID; a
+  vacuous doctor assertion. Root stat/length checks confirm concrete NG-1/NG-8 facts.
+- Root preflight additionally records P1 explicit domain routing for history/source
+  and P2 literal runner-value parsing. Combine these with reviewer findings for one
+  Astra repair pass; do not patch runtime code or bypass review.
+- Reviewer notes on lock generation, adoption nesting, project Python versions,
+  doctor benchmark completion, package-data/ownership, shared storage helpers and
+  explicit watchdogs also require dispositions. Alternatives must preserve the
+  approved safety contract; untested versions cannot simply be called bounded.
