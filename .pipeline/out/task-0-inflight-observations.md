@@ -25,3 +25,12 @@ and refute/close each before reporting a finding; worker may repair them itself.
 
 No code changes or reproduced runtime claims in this note. Final root mechanical
 gate and independent Opus audit remain required.
+
+## Runtime observation after the initial read
+
+The first scoped files/contracts/storage run blocked in the FIFO case. Root
+observed PID1239598, cwd exactly task-0, command python3, elapsed47s and Linux
+wchan `wait_for_partner`. This matches read_regular's blocking O_RDONLY FIFO
+open before fstat. Root sent SIGINT to that exact owned pytest process; no other
+process or file was touched. The run is interrupted/failed evidence, not GREEN.
+The old sentence above refers only to the initial read-only note.
