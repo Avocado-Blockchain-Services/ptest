@@ -1,0 +1,160 @@
+{
+  "task": "task-2",
+  "status": "complete",
+  "model": "Codex gpt-5.6-luna",
+  "reasoning_effort": "xhigh",
+  "routing": "User-authorized Luna fallback after Muse quota exhaustion; no delegation or model substitution.",
+  "base": "60deb4e66bb97bb6e83429c4460877419b137f0c",
+  "head": "60deb4e66bb97bb6e83429c4460877419b137f0c (reviewed working-tree head; final commit SHA is returned in the handoff)",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+  "branch": "cx-ng-product-task-2",
+  "commit_message": "feat: establish canonical domain and conservative process identity",
+  "owned_files": [
+    "src/ptest/platform.py",
+    "tests/ng/test_platform.py",
+    ".pipeline/out/task-2.json"
+  ],
+  "touched_files": [
+    "src/ptest/platform.py",
+    "tests/ng/test_platform.py",
+    ".pipeline/out/task-2.json"
+  ],
+  "touched_not_owned": [],
+  "inherited_work": {
+    "task1_partial": "Not present in this isolated Task 2 worktree; preserved by making no changes outside the declared ownership.",
+    "source_base": "Task 2 source and tests were clean/absent at the approved Task0 base; no partial implementation was inherited."
+  },
+  "implementation": {
+    "domain": "domain_paths derives Linux paths from pwd.getpwuid(os.getuid()) or macOS paths from the account home, validates equal real/effective uid, local supported filesystem, existing canonical ownership/modes and private metadata without creating/chmodding/pruning anything. Explicit fixture domains require an existing private root and strict bounded fixture-domain.toml with matching uid/device/inode and a 32-hex fixture id.",
+    "process": "process_identity observes only psutil birth time, real/effective uid and os.getpgid, rejects inaccessible/split/reused observations, and never reads argv or environment.",
+    "groups": "probe_group uses killpg(pgid, 0) only; ESRCH is the sole absent result, while permission/other errors remain indeterminate.",
+    "boot": "boot_identity reads Linux kernel boot_id or formats a macOS psutil boot-time observation and raises a typed state-unavailable error when the observation cannot be obtained."
+  },
+  "evidence": [
+    {
+      "command": "export PTEST_BOOTSTRAP=/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest; scripts/ptest-bootstrap where; sha256sum $PTEST_BOOTSTRAP",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "duration_s": 0.1,
+      "output": "where showed the current Task 2 worktree, local backend and one worker; dispatcher SHA256 matched 3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py -k ignores_home",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 4,
+      "duration_s": 1.6,
+      "output": "Baseline before the owned test existed: file-or-directory-not-found collection failure; not behavioral RED.",
+      "raw": ".pipeline/local/task-2-baseline.log"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py -k ignores_home",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 2,
+      "duration_s": 1.0,
+      "output": "After negative tests were written, collection failed because src/ptest/platform.py was not yet present; not behavioral RED.",
+      "raw": ".pipeline/local/task-2-red.log"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py -k ignores_home",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "duration_s": 0.4,
+      "output": "1 passed, 38 deselected in 0.05s",
+      "raw": ".pipeline/local/task-2-green-focused.log"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "duration_s": 0.6,
+      "output": "43 passed in 0.12s",
+      "raw": ".pipeline/local/task-2-green-final-2.log"
+    },
+    {
+      "command": "UV_CACHE_DIR=$PWD/.pipeline/local/uv-cache uv run --locked --no-sync python -c 'import os; from ptest.platform import boot_identity, domain_paths, process_identity, probe_group; print(domain_paths(None)); print(process_identity(os.getpid())); print(probe_group(os.getpgrp())); print(boot_identity())'",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "duration_s": 0.2,
+      "output": "Linux smoke returned canonical normal paths, current-process birth/uid/pgid, exists=True permission=True for signal-zero group probing, and a stable kernel boot id.",
+      "raw": ".pipeline/local/task-2-linux-smoke.log"
+    },
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "duration_s": 3.5,
+      "output": "AST-only update succeeded; graph rebuilt to 3012 nodes, 5208 edges, 222 communities. graphify warned that review.json and protocol-v1.json produced zero AST nodes; no semantic extraction ran.",
+      "raw": ".pipeline/local/task-2-graphify-final.log"
+    },
+    {
+      "command": "git diff --check plus awk trailing-whitespace check on the two new source/test files",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+      "exit": 0,
+      "output": "No whitespace errors. Ownership status before report/commit contained only the two Task 2 source/test files as untracked changes."
+    }
+  ],
+  "acceptance": {
+    "domain_invariance": "MET: tests/ng/test_platform.py:28-32 changes HOME/XDG and asserts the account-derived root is unchanged; src/ptest/platform.py:340-350 does not consult environment variables.",
+    "canonical_resolution": "MET on Linux and deterministic macOS branch: src/ptest/platform.py:242-269 resolves the frozen account paths; tests/ng/test_platform.py:35-48 and :101-113 assert absent parents are not created, and :86-99 covers existing 0700 coordination plus 0600 machine config.",
+    "read_only_migration": "MET: src/ptest/platform.py:120-157 only lstat-validates existing components; tests/ng/test_platform.py:51-84 preserve 0755 canonical parents, legacy active/0644 record and legacy config bytes/modes. Production platform.py contains no mkdir, chmod, unlink or write operation.",
+    "filesystem_and_permissions": "MET: src/ptest/platform.py:94-136 enforces equal uid context, owned non-writable parents and private 0700 coordination; :170-215 validates supported local filesystem types; tests cover unsupported OS, foreign home, group-writable parent, wrong coordination/machine modes, symlink components and unknown/network/overlay filesystem observations.",
+    "fixture_validation": "MET: src/ptest/platform.py:282-337 validates existing private roots, bounded strict marker fields, matching uid/device/inode, workload and lowercase hex identity; tests/ng/test_platform.py:217-299 cover missing/outside/symlink root, wrong mode, hardlinks, stale inode, unknown field, oversize and marker symlink.",
+    "process_identity": "MET: src/ptest/platform.py:356-383 observes birth, real/effective uid and pgid with a second birth observation; tests/ng/test_platform.py:302-384 cover actual Linux evidence, invalid/inaccessible/split ownership, forbidden argv/env access, disappearance and PID reuse.",
+    "group_probe": "MET: src/ptest/platform.py:386-401 uses only killpg(..., 0), maps only ESRCH to exists=False and otherwise fails closed; tests/ng/test_platform.py:387-434 assert the exact signal and permission/invalid paths.",
+    "boot_identity": "MET for Linux and simulated macOS-capable implementation: src/ptest/platform.py:404-432 reads/validates Linux boot_id and uses a stable macOS boot-time format; tests/ng/test_platform.py:437-460 cover stability, changed observations and inaccessible boot identity. Actual macOS execution is not available in this worktree."
+  },
+  "security": {
+    "abuse_cases": [
+      "A HOME/XDG/PTEST_* change must not relocate the normal coordination domain.",
+      "Absent canonical parents must not be created by read-only resolution; existing legacy siblings must not be changed, pruned or interpreted.",
+      "Foreign owners, writable parents, symlink components, hardlinked metadata, unsupported/network filesystems and stale fixture identity must not authorize a domain.",
+      "Inaccessible or PID-reused observations must not authorize process ownership; split real/effective uid observations are rejected.",
+      "Group probing must never signal a process group; permission/unknown observations must not be treated as absent.",
+      "Boot identity failure must not be converted into a reusable/valid identity."
+    ],
+    "negative_red_green": "The intended focused behavioral RED was blocked by the absent module (exit 2), accurately recorded as collection failure; all negative assertions turned GREEN in the 43-test scoped run. Test no-op sensitivity is nonvacuous: changing root derivation fails the environment/path assertions, removing marker checks fails strict/stale cases, and changing signal 0 fails the exact call assertion.",
+    "gates": {
+      "run": [],
+      "not_run": [
+        "Bandit, pip-audit and Gitleaks were not run; the design assigns their release/security-gate execution to the later security task, and no dependency or scanner configuration is owned here.",
+        "No macOS subprocess gate was available; only the deterministic Darwin branch was exercised."
+      ]
+    }
+  },
+  "dan_passes": {
+    "pass1_reread": "MET: platform.py and test_platform.py were reread end-to-end after implementation. New observation: fixture marker parsing initially used read_regular(max) and could accept a valid-looking truncated prefix; it was corrected to read max+1 and reject oversize before TOML parsing at src/ptest/platform.py:295-300, with a regression at tests/ng/test_platform.py:279-287.",
+    "pass2_reanchor": "MET: re-read task-2-brief, the Task 2 plan section, design sections 6-7/11 and product scheduling/security sections. The three Task 2 requirements are covered by the acceptance entries above; state creation/execution, scheduler marker/ledger transitions and full integrated testing remain explicitly deferred to T4/T11/root.",
+    "pass3_smell_sweep": "MET: symbol/synonym search found only this platform owner for domain_paths, process_identity, probe_group and boot_identity; no Path.home, os.environ, process cmdline/environ access or nonzero group signal exists in production. No TODO/NotImplemented/stub or new dependency was added. Platform path validation stays in platform.py; shared exclusive creation remains T0 files.py and state creation remains out of scope. Time is applicable for monotonic group observations and boot/process identity; no wall-clock deadline or cleanup claim was introduced."
+  },
+  "implemented": [
+    "Read-only canonical Linux/macOS normal-domain resolution independent of HOME/XDG.",
+    "Supported local-filesystem, uid, ownership, mode, symlink and private metadata validation.",
+    "Strict bounded fixture-domain marker validation with device/inode binding.",
+    "Birth/real-effective-uid/pgid process observation with PID-reuse rejection.",
+    "Signal-zero group observation and fail-closed boot identity helpers.",
+    "43 focused positive and negative regression tests."
+  ],
+  "verified": [
+    "Frozen bootstrap where/hash and local one-worker routing.",
+    "Focused HOME/XDG test: 1 passed.",
+    "Full scoped Task 2 suite: 43 passed in 0.12s.",
+    "Actual Linux domain/process/group/boot smoke: exit 0.",
+    "AST-only graphify update: exit 0.",
+    "git diff --check and untracked-file whitespace check: exit 0."
+  ],
+  "not_verified": [
+    "Actual macOS filesystem/process/boot matrix.",
+    "Scheduler consumption and domain creation/marker-ledger lifecycle owned by T4.",
+    "CLI integration and final integrated ptest --full owned by root/T11.",
+    "Release security scanners owned by later security gates."
+  ],
+  "deferred": [
+    "Normal domain state creation, bootstrap lock, domain marker/ledger identity and recovery remain T4/T11 scope.",
+    "Quiescent finalization and process-group descendant lifecycle remain T7/T11 scope."
+  ],
+  "discovered_not_fixed": [
+    "graphify update emitted a warning that review.json and protocol-v1.json have zero AST nodes; these are non-code/generated inputs outside Task 2 ownership and were not modified."
+  ],
+  "claimed_vs_shipped_delta": "Task 2 implementation is shipped and scoped-verified. The task brief's actual macOS evidence, downstream scheduler/CLI consumption and root final full gate were not claimed and remain later gates.",
+  "confidence": "medium-high: all owned behavior has focused negative coverage and actual Linux smoke evidence, while macOS and downstream integration remain unverified by design."
+}
