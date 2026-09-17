@@ -487,8 +487,7 @@ def test_frame_oversize_rejected():
         C.decode_control_frame(length + b'{"protocol":1}')
     oversized = C.ControlFrame(
         protocol=1, run_id=RUN_ID, nonce=NONCE, kind="phase",
-        payload={"phase": "execution", "attempt_id": "a001",
-                 "blob": "x" * 70000},
+        payload={"phase": "execution", "attempt_id": "x" * 70000},
     )
     with pytest.raises(Problem, match="protocol-mismatch"):
         C.encode_control_frame(oversized)
@@ -1000,6 +999,8 @@ def test_public_decode_drops_additive_unknowns():
     attempt["future_attempt"] = sentinel
     run["attempts"] = [attempt]
     run["future_run"] = sentinel
+    run["command"] = dict(run["command"], argv=[sentinel],
+                          env={"K": sentinel})
     status = payloads["status"]
     status["queued"][0] = dict(status["queued"][0], future_lease=sentinel)
     status["effective_limits"] = dict(
@@ -1026,58 +1027,59 @@ def test_public_decode_drops_additive_unknowns():
         register["commands"][0], future_command=sentinel)
     payloads["plan"]["future_plan"] = sentinel
     for kind, data in payloads.items():
-        doc = C.decode_public_document(
-            C.encode_public_document(kind, data))
+        doc = C.decode_public_document(_hostile_envelope(kind, data))
         assert doc.error is None, kind
     revived_where = C.decode_public_document(
-        C.encode_public_document("where", payloads["where"])).data
+        _hostile_envelope("where", payloads["where"])).data
     assert "future_top" not in revived_where
     assert "future_note" not in revived_where["capability"]
     assert "future_count" not in revived_where["commands"][0]
     assert "future_ceiling" not in revived_where["effective_limits"]
     assert revived_where["capability"]["execution"] == "advanced"
     revived_run = C.decode_public_document(
-        C.encode_public_document("run", payloads["run"])).data
+        _hostile_envelope("run", payloads["run"])).data
     assert "future_run" not in revived_run
+    assert "argv" not in revived_run["command"]
+    assert "env" not in revived_run["command"]
     assert "future_total" not in revived_run["counts"]
     assert "future_attempt" not in revived_run["attempts"][0]
     assert "future_phase" not in revived_run["attempts"][0]["timings"]
     assert revived_run["attempts"][0]["timings"]["queue"] == 0.1
     revived_status = C.decode_public_document(
-        C.encode_public_document("status", payloads["status"])).data
+        _hostile_envelope("status", payloads["status"])).data
     assert "future_lease" not in revived_status["queued"][0]
     assert "future_ceiling" not in revived_status["effective_limits"]
     revived_history = C.decode_public_document(
-        C.encode_public_document("history", payloads["history"])).data
+        _hostile_envelope("history", payloads["history"])).data
     assert "future_summary" not in revived_history["summaries"][0]
     assert "future_obligation" not in revived_history["obligations"][0]
     assert revived_history["summaries"][0]["run_id"] == RUN_ID
     revived_init = C.decode_public_document(
-        C.encode_public_document("init", payloads["init"])).data
+        _hostile_envelope("init", payloads["init"])).data
     assert "future_init" not in revived_init
     assert "future_config" not in revived_init["config"]
     assert "future_command" not in revived_init["config"]["commands"][0]
     assert revived_init["config"]["commands"][1]["mode"] == "full"
     revived_doctor = C.decode_public_document(
-        C.encode_public_document("doctor", payloads["doctor"])).data
+        _hostile_envelope("doctor", payloads["doctor"])).data
     assert "future_readiness" not in revived_doctor["readiness"][0]
     assert "future_finding" not in revived_doctor["findings"][0]
     assert "future_limit" not in revived_doctor["limits"]
     assert "future_usage" not in revived_doctor["usage"]
     revived_register = C.decode_public_document(
-        C.encode_public_document("register", payloads["register"])).data
+        _hostile_envelope("register", payloads["register"])).data
     assert "future_command" not in revived_register["commands"][0]
     revived_plan = C.decode_public_document(
-        C.encode_public_document("plan", payloads["plan"])).data
+        _hostile_envelope("plan", payloads["plan"])).data
     assert "future_plan" not in revived_plan
     assert revived_plan["execution"] == "selected"
     for kind in ("where", "run", "history", "init"):
         rendered = C.encode_public_document(
             kind, C.decode_public_document(
-                C.encode_public_document(
+                _hostile_envelope(
                     kind, payloads[kind])).data).decode()
         assert sentinel not in rendered, kind
-    raw = json.loads(C.encode_public_document("where", payloads["where"]))
+    raw = json.loads(_hostile_envelope("where", payloads["where"]))
     raw["future_envelope"] = sentinel
     raw["domain"] = {"id": "ab" * 16, "fixture": False,
                      "future_domain": sentinel}
@@ -1122,3 +1124,401 @@ def test_addendum_schema_shapes():
     assert "mode" in summaries["required"]
     assert "sequence" not in summaries["required"]
     assert "policy_digest" not in summaries.get("properties", {})
+
+
+_BOUNDARY_SENTINEL = "smuggled-boundary-9d3"
+
+_PUBLIC_DATA_KEYS = {
+    "run": {"run_id", "project_id", "checkout_id", "mode", "status",
+            "phase", "started_at", "finished_at", "plan", "command",
+            "granted_workers", "memory_estimate_mb", "reserved_memory_mb",
+            "runner_exit_code", "exit_code", "exit_origin", "signal",
+            "source_valid", "full_gate_eligible", "baseline_published",
+            "counts", "timings", "attempts", "reasons", "limitations",
+            "artifact_id"},
+    "plan": {"mode", "execution", "files", "reasons", "input_digest",
+             "compatibility", "baseline_run_id", "static_preview"},
+    "where": {"root", "config_path", "initialized", "runner_kind",
+              "capability", "commands", "effective_limits", "provenance",
+              "warnings"},
+    "status": {"effective_limits", "queued", "active"},
+    "history": {"summaries", "obligations"},
+    "init": {"action", "target", "exists", "warnings", "config"},
+    "doctor": {"scope", "readiness", "findings", "limits", "usage",
+               "limitations"},
+    "register": {"root", "initialized", "legacy_present", "legacy_local",
+                 "proposed_runner", "commands", "legacy_alias_count",
+                 "required_actions", "warnings"},
+}
+
+
+def _hostile_envelope(kind, data, domain=None):
+    """Build a hostile public document without the producer under test."""
+    return json.dumps({
+        "schema_version": 1,
+        "kind": kind,
+        "ptest_version": "0.1.0",
+        "domain": domain,
+        "data": data,
+        "error": None,
+    }).encode()
+
+
+def _dirty_payloads(sentinel):
+    """Valid payloads carrying argv/env-like additive unknowns everywhere."""
+    payloads = _full_payloads()
+    run = payloads["run"]
+    run["command"] = dict(run["command"], argv=[sentinel],
+                          env={"K": sentinel})
+    run["future_run"] = {"argv": [sentinel]}
+    run["counts"] = dict(run["counts"], future_total=1)
+    run["attempts"] = [dict(run["attempts"][0],
+                            future_attempt=sentinel)]
+    where = payloads["where"]
+    where["future_top"] = {"argv": [sentinel], "env": {"K": sentinel}}
+    where["capability"] = dict(where["capability"],
+                               future_note=sentinel)
+    where["commands"] = [dict(where["commands"][0], future_count=3)]
+    where["provenance"] = list(where["provenance"]) + ["extra-source"]
+    status = payloads["status"]
+    status["queued"] = [dict(status["queued"][0],
+                             future_lease=sentinel)]
+    history = payloads["history"]
+    history["summaries"] = [dict(history["summaries"][0],
+                                 future_summary=sentinel)]
+    history["obligations"] = [dict(history["obligations"][0],
+                                   future_obligation=sentinel)]
+    init = payloads["init"]
+    init["future_init"] = sentinel
+    init["config"] = dict(init["config"], future_config=sentinel)
+    doctor = payloads["doctor"]
+    doctor["scope"] = list(doctor["scope"]) + ["extra-area"]
+    doctor["readiness"] = [dict(doctor["readiness"][0],
+                               future_readiness=sentinel)]
+    doctor["findings"] = [dict(doctor["findings"][0],
+                              future_finding=sentinel)]
+    doctor["limits"] = dict(doctor["limits"], future_limit=sentinel)
+    doctor["usage"] = dict(doctor["usage"], future_usage=sentinel)
+    register = payloads["register"]
+    register["commands"] = [dict(register["commands"][0],
+                                 future_command=sentinel)]
+    payloads["plan"] = dict(payloads["plan"], future_plan=sentinel)
+    return payloads
+
+
+def test_public_producer_emits_allowlisted_fields_first_encode():
+    sentinel = _BOUNDARY_SENTINEL
+    for kind, dirty in _dirty_payloads(sentinel).items():
+        before = json.loads(json.dumps(dirty))
+        raw = C.encode_public_document(kind, dirty)
+        assert sentinel not in raw.decode(), kind
+        parsed = json.loads(raw.decode())
+        assert set(parsed["data"]) == _PUBLIC_DATA_KEYS[kind], kind
+        assert dirty == before, kind
+    parsed_run = json.loads(C.encode_public_document(
+        "run", _dirty_payloads(sentinel)["run"]).decode())["data"]
+    assert set(parsed_run["command"]) == {
+        "kind", "mode", "argument_count", "generated_options", "workers",
+        "provenance"}
+    assert "argv" not in parsed_run["command"]
+    assert "env" not in parsed_run["command"]
+    assert set(parsed_run["plan"]) == _PUBLIC_DATA_KEYS["plan"]
+    assert set(parsed_run["attempts"][0]) == {
+        "attempt_id", "phase", "status", "raw_exit_code",
+        "final_exit_code", "source_valid", "inventory_complete",
+        "timings"}
+    parsed_where = json.loads(C.encode_public_document(
+        "where", _dirty_payloads(sentinel)["where"]).decode())["data"]
+    assert set(parsed_where["capability"]) == {
+        "execution", "selection", "lifecycle", "limitations"}
+    assert set(parsed_where["effective_limits"]) == {
+        "max_slots", "max_jobs", "memory_mb", "repo_workers"}
+    assert "future_top" not in parsed_where
+    parsed_status = json.loads(C.encode_public_document(
+        "status", _dirty_payloads(sentinel)["status"]).decode())["data"]
+    assert set(parsed_status["queued"][0]) == {
+        "run_id", "checkout_id", "state", "sequence", "requested_slots",
+        "slots", "memory_estimate_mb", "reserved_memory_mb", "phase",
+        "age_s", "queue_wait_s", "ownership", "fixture", "reasons"}
+    parsed_init = json.loads(C.encode_public_document(
+        "init", _dirty_payloads(sentinel)["init"]).decode())["data"]
+    assert set(parsed_init["config"]) == {
+        "project_id", "runner_kind", "workers", "commands",
+        "setup_configured", "setup_network", "setup_lifecycle_scripts",
+        "selection_enabled", "closed_inputs"}
+    parsed_doctor = json.loads(C.encode_public_document(
+        "doctor", _dirty_payloads(sentinel)["doctor"]).decode())["data"]
+    assert set(parsed_doctor["readiness"][0]) == {
+        "area", "state", "reasons"}
+    assert set(parsed_doctor["findings"][0]) == {
+        "code", "severity", "confidence", "path", "line",
+        "evidence_type", "consequence", "remediation", "verification"}
+    assert set(parsed_doctor["limits"]) == {
+        "entries", "files", "file_bytes", "total_bytes", "findings",
+        "output_bytes", "elapsed_s", "depth", "ast_nodes"}
+    assert set(parsed_doctor["usage"]) == {
+        "entries", "files", "file_bytes", "total_bytes", "findings",
+        "output_bytes", "elapsed_s", "skipped", "truncated"}
+    where_raw = C.encode_public_document(
+        "where", _full_payloads()["where"],
+        domain={"id": "ab" * 16, "fixture": False,
+                "future_domain": sentinel})
+    assert sentinel not in where_raw.decode()
+    assert json.loads(where_raw.decode())["domain"] == {
+        "id": "ab" * 16, "fixture": False}
+    problem = Problem(code="x", message="y", phase="z")
+    err = json.loads(
+        C.encode_public_document("run", None, error=problem).decode())
+    assert err["data"] is None
+    assert set(err["error"]) == {"code", "message", "phase",
+                                 "retryable"}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.encode_public_document(
+            "where", _full_payloads()["where"],
+            domain={"id": "not-hex", "fixture": False})
+
+
+def test_known_string_list_fields_reject_nested_objects():
+    run = _run_data()
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope(
+            "run", dict(run, artifact_id={"argv": [_BOUNDARY_SENTINEL]})))
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope(
+            "run", dict(run, artifact_id=7)))
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope(
+            "run", dict(run, artifact_id="")))
+    where = _full_payloads()["where"]
+    where["provenance"] = [{"argv": [_BOUNDARY_SENTINEL]}]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope("where", where))
+    doctor = _full_payloads()["doctor"]
+    doctor["scope"] = [{"env": {"K": _BOUNDARY_SENTINEL}}]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope("doctor", doctor))
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope(
+            "run", dict(run, run_id="not-a-hex-id")))
+    history = {
+        "summaries": [dict(
+            C.serialize_run_result(_secret_result(["-q"])),
+            run_id="not-a-hex-id")],
+        "obligations": [],
+    }
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope("history", history))
+    for name, value in (("granted_workers", 0),
+                        ("granted_workers", 65),
+                        ("memory_estimate_mb", -1),
+                        ("reserved_memory_mb", -5)):
+        with pytest.raises(Problem, match="report-invalid"):
+            C.decode_public_document(_hostile_envelope(
+                "run", dict(run, **{name: value})))
+    register = _full_payloads()["register"]
+    register["legacy_alias_count"] = -1
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(
+            _hostile_envelope("register", register))
+    assert C.decode_public_document(
+        _hostile_envelope("run", run)).error is None
+
+
+def _mutate_path(payload, path, value):
+    node = payload
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+
+
+def test_closed_enums_reject_malformed_values():
+    scalar_paths = [
+        ("run", ["command", "kind"]),
+        ("run", ["command", "mode"]),
+        ("run", ["mode"]),
+        ("run", ["status"]),
+        ("run", ["phase"]),
+        ("run", ["exit_origin"]),
+        ("run", ["attempts", 0, "phase"]),
+        ("run", ["attempts", 0, "status"]),
+        ("plan", ["mode"]),
+        ("plan", ["execution"]),
+        ("where", ["capability", "execution"]),
+        ("where", ["commands", 0, "kind"]),
+        ("status", ["queued", 0, "state"]),
+        ("status", ["queued", 0, "ownership"]),
+        ("history", ["summaries", 0, "mode"]),
+        ("init", ["action"]),
+        ("init", ["config", "runner_kind"]),
+        ("doctor", ["readiness", 0, "area"]),
+        ("doctor", ["readiness", 0, "state"]),
+        ("doctor", ["findings", 0, "code"]),
+        ("doctor", ["findings", 0, "severity"]),
+        ("doctor", ["findings", 0, "confidence"]),
+        ("register", ["required_actions", 0]),
+    ]
+    nullable_paths = [
+        ("where", ["runner_kind"]),
+        ("register", ["proposed_runner"]),
+    ]
+    for kind, path in scalar_paths:
+        for value in ({}, [], True, None, 7, "bogus-value"):
+            if kind == "run":
+                payload = C.serialize_run_result(
+                    _secret_result(["-q"]))
+            else:
+                payload = _full_payloads()[kind]
+            _mutate_path(payload, path, value)
+            with pytest.raises(Problem, match="report-invalid"):
+                C.decode_public_document(
+                    _hostile_envelope(kind, payload))
+    for kind, path in nullable_paths:
+        for value in ({}, [], True, 7, "bogus-value"):
+            payload = _full_payloads()[kind]
+            _mutate_path(payload, path, value)
+            with pytest.raises(Problem, match="report-invalid"):
+                C.decode_public_document(
+                    _hostile_envelope(kind, payload))
+
+
+def _control_raw(payload_dict, kind="cancel", extra_top=None):
+    obj = {"protocol": 1, "run_id": RUN_ID, "nonce": NONCE,
+           "kind": kind, "payload": payload_dict}
+    if extra_top:
+        obj.update(extra_top)
+    body = json.dumps(obj).encode()
+    return struct.pack(">I", len(body)) + body
+
+
+def test_control_frame_kind_rejects_malformed_values():
+    for value in ({}, [], True, None, 7, "bogus-kind"):
+        with pytest.raises(Problem, match="protocol-mismatch"):
+            C.decode_control_frame(_control_raw({}, value))
+
+
+def _valid_frame_payloads():
+    guard = {"pid": 1, "birth": 0.0, "uid": 0, "pgid": 1}
+    return {
+        "cancel": {"signal": 2},
+        "parent-closing": {},
+        "registered": {"guard": dict(guard)},
+        "phase": {"phase": "execution", "attempt_id": None},
+        "runner-facts": {"attempt_id": "a001", "phase": "execution",
+                         "raw_exit_code": None, "report_name": None,
+                         "problem": None},
+        "draining": {"provisional_artifact_id": None},
+    }
+
+
+def test_private_frame_rejects_unknown_fields():
+    for kind, payload in _valid_frame_payloads().items():
+        assert C.decode_control_frame(
+            _control_raw(payload, kind)).kind == kind
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(
+            _control_raw({"signal": 2}, "cancel",
+                         extra_top={"future_top": 1}))
+    for kind, payload in _valid_frame_payloads().items():
+        with pytest.raises(Problem, match="protocol-mismatch"):
+            C.decode_control_frame(
+                _control_raw(dict(payload, future_field=1), kind))
+    guard_extra = {"guard": {"pid": 1, "birth": 0.0, "uid": 0,
+                             "pgid": 1, "future_guard": 1}}
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(
+            _control_raw(guard_extra, "registered"))
+    problem_extra = dict(_valid_frame_payloads()["runner-facts"],
+                         problem={"code": "x", "message": "y",
+                                  "phase": "z", "retryable": False,
+                                  "future_problem": 1})
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(
+            _control_raw(problem_extra, "runner-facts"))
+
+
+def _valid_manifest(case):
+    domain = case.domain()
+    grant = C.Grant(
+        run_id=RUN_ID, nonce=NONCE, slots=1,
+        memory_estimate_mb=None, reserved_memory_mb=None,
+        generation=1, domain_id="d" * 32,
+    )
+    prepared = C.PreparedRun(
+        argv=("true",), cwd=domain.root, env_updates=(),
+        report_path=None,
+        capability=C.Capability(
+            execution=C.ExecutionTier.ADVANCED, selection=True,
+            lifecycle="cooperative-process-group", limitations=(),
+        ),
+        summary=C.summarize_command(
+            C.RunnerKind.PYTEST, C.Mode.SCOPED, ["-q"],
+            generated_options=("-q",), workers=1,
+            provenance=("adapter",),
+        ),
+    )
+    return C.LaunchManifest(
+        protocol=1, domain=domain, grant=grant, setup=None,
+        attempts=(prepared,), attempt_ids=("a001",),
+        setup_timeout_s=300.0, attempt_timeout_s=30.0,
+        compound_timeout_s=600.0,
+    )
+
+
+def _manifest_raw(case, mutate):
+    body = json.loads(
+        C.encode_launch_manifest(_valid_manifest(case))[4:])
+    mutate(body)
+    tampered = json.dumps(body).encode()
+    return struct.pack(">I", len(tampered)) + tampered
+
+
+def test_private_manifest_rejects_unknown_fields(case):
+    levels = [
+        lambda body: body.update(future_manifest=1),
+        lambda body: body["domain"].update(future_domain=1),
+        lambda body: body["grant"].update(future_grant=1),
+        lambda body: body["attempts"][0].update(future_prepared=1),
+        lambda body: body["attempts"][0]["capability"].update(
+            future_capability=1),
+        lambda body: body["attempts"][0]["summary"].update(
+            future_summary=1),
+    ]
+    for mutate in levels:
+        with pytest.raises(Problem, match="protocol-mismatch"):
+            C.decode_launch_manifest(_manifest_raw(case, mutate))
+
+
+def test_decoder_messages_never_echo_input():
+    sentinel = "SECRET-SENTINEL-4b1"
+    run = _run_data()
+    register = _full_payloads()["register"]
+    raws = [
+        ("public", _hostile_envelope("run-" + sentinel, run)),
+        ("public", _hostile_envelope({"echo": sentinel}, run)),
+        ("public", _hostile_envelope(
+            "run", dict(run, mode=sentinel))),
+        ("public", _hostile_envelope(
+            "register",
+            dict(register, required_actions=[sentinel]))),
+        ("public", _hostile_envelope(
+            "run", dict(run, reasons=[{"code": "scan-limit",
+                                      "message": "m", "paths": [],
+                                      sentinel: 1}]))),
+        ("public", json.dumps({
+            "schema_version": 12345678901234567890,
+            "kind": "run", "ptest_version": "0.1.0", "domain": None,
+            "data": run, "error": None}).encode()),
+        ("control", _control_raw({"signal": 2}, "cancel-" + sentinel)),
+    ]
+    for channel, raw in raws:
+        with pytest.raises(Problem) as caught:
+            if channel == "control":
+                C.decode_control_frame(raw)
+            else:
+                C.decode_public_document(raw)
+        assert sentinel not in str(caught.value)
+        assert "12345678901234567890" not in str(caught.value)
+        rendered = C.encode_public_document(
+            "run", None, error=caught.value).decode()
+        assert sentinel not in rendered
+        assert "12345678901234567890" not in rendered

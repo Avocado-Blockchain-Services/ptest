@@ -1758,8 +1758,8 @@ class ControlFrame:
             raise ValueError("control.protocol must be 1")
         _check_hex("control.run_id", self.run_id, 32)
         _check_hex("control.nonce", self.nonce, 64)
-        if self.kind not in CONTROL_KINDS:
-            raise ValueError(f"control.kind {self.kind!r} is not a guard kind")
+        if not _is_known(self.kind, CONTROL_KINDS):
+            raise ValueError("control.kind is not a guard kind")
         if not isinstance(self.payload, dict):
             raise TypeError("control.payload must be a dict")
         _require_frame_keys(self.kind, self.payload)
@@ -1779,10 +1779,12 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
     for key in required:
         if key not in payload:
             raise ValueError(f"control frame {kind!r} requires {key!r}")
+    for key in payload:
+        if key not in required:
+            raise ValueError(
+                f"control frame {kind!r} carries an unknown field")
     if kind == "cancel" and payload["signal"] not in (2, 15):
         raise ValueError("cancel signal must be 2 or 15")
-    if kind == "parent-closing" and payload != {}:
-        raise ValueError("parent-closing payload must be empty")
     if kind == "registered":
         guard = payload["guard"]
         if not isinstance(guard, dict):
@@ -1790,6 +1792,10 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
         for key in ("pid", "birth", "uid", "pgid"):
             if key not in guard:
                 raise ValueError(f"registered guard requires {key!r}")
+        for key in guard:
+            if key not in ("pid", "birth", "uid", "pgid"):
+                raise ValueError(
+                    "registered guard carries an unknown field")
         _check_int("registered.guard.pid", guard["pid"], lo=1)
         _check_float("registered.guard.birth", guard["birth"], lo=0)
         _check_int("registered.guard.uid", guard["uid"], lo=0)
@@ -1815,6 +1821,11 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
         if payload["problem"] is not None and not isinstance(
                 payload["problem"], dict):
             raise TypeError("runner-facts problem must be an object or null")
+        if isinstance(payload["problem"], dict):
+            for key in payload["problem"]:
+                if key not in ("code", "message", "phase", "retryable"):
+                    raise ValueError(
+                        "runner-facts problem carries an unknown field")
     if kind == "draining" and payload["provisional_artifact_id"] is not None:
         if not isinstance(payload["provisional_artifact_id"], str):
             raise TypeError(
@@ -1889,17 +1900,25 @@ class PublicDocument:
 def encode_public_document(kind: str, data: dict | None, *,
                            error: Problem | None = None,
                            domain: dict | None = None) -> bytes:
-    """Serialize one public JSON document with explicit allowlisted fields."""
+    """Serialize one public JSON document with explicit allowlisted fields.
+
+    Success payloads run through the same validate-then-project authority
+    the consumer uses, so the first emitted bytes already carry exactly the
+    descriptor field set; additive unknowns (including argv/env-like keys)
+    are dropped, never published. Invalid payload content raises Problem.
+    """
     if kind not in PUBLIC_KINDS:
         raise ValueError(f"unknown public kind {kind!r}")
     if error is not None and not isinstance(error, Problem):
         raise TypeError("error must be Problem or None")
     if error is not None and data is not None:
         raise ValueError("error documents carry a null payload")
-    if error is None and not isinstance(data, dict):
-        raise TypeError("data must be a dict for success documents")
-    if domain is not None and not isinstance(domain, dict):
-        raise TypeError("domain must be a dict or None")
+    domain = _validate_domain(domain)
+    if error is None:
+        if not isinstance(data, dict):
+            raise TypeError("data must be a dict for success documents")
+        _PAYLOAD_VALIDATORS[kind](data)
+        data = _PROJECTORS[kind](data)
     envelope = {
         "schema_version": SCHEMA_VERSION,
         "kind": kind,
@@ -1969,7 +1988,8 @@ def _check_reason_dict(item: object) -> None:
             raise _invalid("report-invalid", f"reason is missing {key!r}")
     for key in item:
         if key not in ("code", "message", "paths"):
-            raise _invalid("report-invalid", f"reason carries unknown field {key!r}")
+            raise _invalid("report-invalid",
+                           "reason carries an unknown field")
     if not isinstance(item["code"], str) or not item["code"]:
         raise _invalid("report-invalid", "reason.code must be a nonempty string")
     if item["code"] not in REASON_CODES:
@@ -2044,11 +2064,18 @@ _COMMAND_FIELDS = frozenset({
 })
 
 
+def _is_known(value: object, allowed: frozenset) -> bool:
+    """Closed-enum membership that maps unhashable input to unknown."""
+    return isinstance(value, str) and value in allowed
+
+
 def _check_command_dict(item: object, ctx: str = "run.command") -> None:
     _check_required_keys(item, _COMMAND_FIELDS, ctx)
-    if item["kind"] not in frozenset(entry.value for entry in RunnerKind):
+    if not _is_known(item["kind"],
+                     frozenset(entry.value for entry in RunnerKind)):
         raise _invalid("report-invalid", f"{ctx} has an unknown kind")
-    if item["mode"] not in frozenset(entry.value for entry in Mode):
+    if not _is_known(item["mode"],
+                     frozenset(entry.value for entry in Mode)):
         raise _invalid("report-invalid", f"{ctx} has an unknown mode")
     _check_int_field(item, "argument_count", ctx, lo=0)
     _check_str_list(item["generated_options"], f"{ctx}.generated_options")
@@ -2065,7 +2092,8 @@ def _check_capability_dict(value: object) -> None:
     if value is None:
         return
     _check_required_keys(value, _CAPABILITY_FIELDS, "where.capability")
-    if value["execution"] not in frozenset(entry.value for entry in ExecutionTier):
+    if not _is_known(value["execution"],
+                     frozenset(entry.value for entry in ExecutionTier)):
         raise _invalid("report-invalid", "where.capability has an unknown tier")
     if not isinstance(value["selection"], bool):
         raise _invalid("report-invalid", "where.capability.selection must be boolean")
@@ -2115,9 +2143,10 @@ def _check_attempt_dict(item: object) -> None:
     _check_str_list([item["attempt_id"]], "run.attempts entry.attempt_id")
     if not ATTEMPT_ID_PATTERN.fullmatch(item["attempt_id"]):
         raise _invalid("report-invalid", "run.attempts entry has a bad attempt_id")
-    if item["phase"] not in RUN_PHASES:
+    if not _is_known(item["phase"], RUN_PHASES):
         raise _invalid("report-invalid", "run.attempts entry has an unknown phase")
-    if item["status"] not in frozenset(entry.value for entry in Status):
+    if not _is_known(item["status"],
+                     frozenset(entry.value for entry in Status)):
         raise _invalid("report-invalid", "run.attempts entry has an unknown status")
     _check_int_field(item, "raw_exit_code", "run.attempts entry", allow_none=True)
     _check_int_field(item, "final_exit_code", "run.attempts entry", allow_none=True)
@@ -2136,9 +2165,9 @@ _READINESS_FIELDS = frozenset({"area", "state", "reasons"})
 
 def _check_readiness_dict(item: object) -> None:
     _check_required_keys(item, _READINESS_FIELDS, "doctor.readiness entry")
-    if item["area"] not in READINESS_AREAS:
+    if not _is_known(item["area"], READINESS_AREAS):
         raise _invalid("report-invalid", "doctor.readiness entry has an unknown area")
-    if item["state"] not in READINESS_STATES:
+    if not _is_known(item["state"], READINESS_STATES):
         raise _invalid("report-invalid", "doctor.readiness entry has an unknown state")
     if not isinstance(item["reasons"], list):
         raise _invalid("report-invalid", "doctor.readiness entry reasons must be a list")
@@ -2154,7 +2183,7 @@ _FINDING_FIELDS = frozenset({
 
 def _check_finding_dict(item: object) -> None:
     _check_required_keys(item, _FINDING_FIELDS, "doctor.findings entry")
-    if item["code"] not in FINDING_CODES:
+    if not _is_known(item["code"], FINDING_CODES):
         raise _invalid("report-invalid", "doctor.findings entry has an unknown code")
     if item["severity"] not in ("low", "medium", "high"):
         raise _invalid("report-invalid", "doctor.findings entry has a bad severity")
@@ -2181,7 +2210,8 @@ def _check_lease_dict(item: object, ctx: str) -> None:
     _check_required_keys(item, _LEASE_FIELDS, ctx)
     _check_hex_field(item, "run_id", ctx, 32)
     _check_hex_field(item, "checkout_id", ctx, 32)
-    if item["state"] not in frozenset(entry.value for entry in LeaseState):
+    if not _is_known(item["state"],
+                     frozenset(entry.value for entry in LeaseState)):
         raise _invalid("report-invalid", f"{ctx} has an unknown state")
     _check_int_field(item, "sequence", ctx, lo=0)
     _check_int_field(item, "requested_slots", ctx, lo=1, hi=64)
@@ -2265,8 +2295,8 @@ def _check_config_summary_dict(value: object, ctx: str) -> None:
         return
     _check_required_keys(value, _CONFIG_SUMMARY_FIELDS, ctx)
     _check_hex_field(value, "project_id", ctx, 32)
-    if value["runner_kind"] not in frozenset(
-            item.value for item in RunnerKind):
+    if not _is_known(value["runner_kind"],
+                     frozenset(item.value for item in RunnerKind)):
         raise _invalid("report-invalid", f"{ctx} has an unknown runner_kind")
     _check_int_field(value, "workers", ctx, lo=1, hi=64)
     commands = value["commands"]
@@ -2318,14 +2348,16 @@ def _check_closed(data: dict, name: str, allowed: frozenset,
     if value is None:
         return None
     if value not in allowed:
-        raise _invalid("report-invalid", f"field {name!r} has unknown value {value!r}")
+        raise _invalid("report-invalid",
+                       f"field {name!r} has an unknown value")
     return value
 
 
 def _validate_run_payload(data: dict) -> None:
-    for name in (
-        "run_id", "project_id", "checkout_id", "started_at", "finished_at",
-    ):
+    for name in ("run_id", "project_id", "checkout_id"):
+        _need_str(data, name)
+        _check_hex_field(data, name, "run", 32)
+    for name in ("started_at", "finished_at"):
         _need_str(data, name)
     _check_closed(data, "mode", frozenset(item.value for item in Mode))
     _check_closed(data, "status", frozenset(item.value for item in Status))
@@ -2336,19 +2368,23 @@ def _validate_run_payload(data: dict) -> None:
     if "command" not in data or not isinstance(data["command"], dict):
         raise _invalid("report-invalid", "run.command must be an object")
     _check_command_dict(data["command"])
-    command = data["command"]
-    if "argv" in command or "env" in command:
-        raise _invalid("report-invalid", "run.command must not carry argv or env")
     _need_int(data, "exit_code")
     _check_closed(data, "exit_origin", EXIT_ORIGINS)
     for name in ("granted_workers", "memory_estimate_mb", "reserved_memory_mb",
                  "runner_exit_code", "signal"):
         _need_int(data, name, allow_none=True)
+    _check_int_field(data, "granted_workers", "run", allow_none=True,
+                     lo=1, hi=64)
+    _check_int_field(data, "memory_estimate_mb", "run", allow_none=True,
+                     lo=0)
+    _check_int_field(data, "reserved_memory_mb", "run", allow_none=True,
+                     lo=0)
     for name in ("source_valid", "full_gate_eligible", "baseline_published"):
         _need_bool(data, name)
-    for name in ("counts", "timings", "artifact_id"):
+    for name in ("counts", "timings"):
         if name not in data:
             raise _invalid("report-invalid", f"missing required field {name!r}")
+    _need_str(data, "artifact_id", allow_none=True)
     _check_counts_dict(data["counts"])
     _check_timings_dict(data["timings"])
     attempts = _need_list(data, "attempts")
@@ -2396,7 +2432,7 @@ def _validate_where_payload(data: dict) -> None:
         raise _invalid("report-invalid", "where.effective_limits must be an object")
     _check_effective_limits_dict(
         data["effective_limits"], "where.effective_limits")
-    _need_list(data, "provenance")
+    _check_str_list(_need_list(data, "provenance"), "where.provenance")
     for item in _need_list(data, "warnings"):
         _check_reason_dict(item)
 
@@ -2424,7 +2460,7 @@ def _validate_history_payload(data: dict) -> None:
 
 
 def _validate_init_payload(data: dict) -> None:
-    if data.get("action") not in _INIT_ACTIONS:
+    if not _is_known(data.get("action"), _INIT_ACTIONS):
         raise _invalid("report-invalid", "init.action is unknown")
     _need_str(data, "target")
     _need_bool(data, "exists")
@@ -2438,7 +2474,7 @@ def _validate_init_payload(data: dict) -> None:
 
 
 def _validate_doctor_payload(data: dict) -> None:
-    _need_list(data, "scope")
+    _check_str_list(_need_list(data, "scope"), "doctor.scope")
     for entry in _need_list(data, "readiness"):
         _check_readiness_dict(entry)
     for entry in _need_list(data, "findings"):
@@ -2463,16 +2499,19 @@ def _validate_register_payload(data: dict) -> None:
         raise _invalid("report-invalid", "register.legacy_local must be boolean or null")
     if "proposed_runner" not in data:
         raise _invalid("report-invalid", "missing required field 'proposed_runner'")
-    if data["proposed_runner"] is not None and data["proposed_runner"] not in frozenset(
-            item.value for item in RunnerKind):
+    if (data["proposed_runner"] is not None
+            and not _is_known(data["proposed_runner"], frozenset(
+                item.value for item in RunnerKind))):
         raise _invalid("report-invalid", "register.proposed_runner is unknown")
     for entry in _need_list(data, "commands"):
         _check_command_dict(entry, "register.commands entry")
     _need_int(data, "legacy_alias_count")
+    _check_int_field(data, "legacy_alias_count", "register", lo=0)
     actions = _need_list(data, "required_actions")
     for action in actions:
-        if action not in REQUIRED_ACTIONS:
-            raise _invalid("report-invalid", f"unknown required action {action!r}")
+        if not _is_known(action, REQUIRED_ACTIONS):
+            raise _invalid("report-invalid",
+                           "register.required_actions has an unknown action")
     for item in _need_list(data, "warnings"):
         _check_reason_dict(item)
 
@@ -2728,6 +2767,23 @@ def _project_domain(value: object) -> dict | None:
     return {"id": value["id"], "fixture": value["fixture"]}
 
 
+def _validate_domain(value: object) -> dict | None:
+    """Validate a public envelope domain and project onto known fields."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _invalid("report-invalid", "domain must be an object or null")
+    if set(("id", "fixture")) - set(value):
+        raise _invalid("report-invalid", "domain requires id and fixture")
+    try:
+        _check_hex("domain.id", value["id"], 32)
+    except (TypeError, ValueError):
+        raise _invalid("report-invalid", "domain.id must be 32 hex") from None
+    if not isinstance(value["fixture"], bool):
+        raise _invalid("report-invalid", "domain.fixture must be boolean")
+    return _project_domain(value)
+
+
 def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
     """Parse and strictly validate one public JSON document."""
     if isinstance(raw, (bytes, bytearray)):
@@ -2749,26 +2805,15 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
     if not _is_int(version):
         raise _invalid("report-invalid", "schema_version must be an integer")
     if version != SCHEMA_VERSION:
-        raise _invalid("protocol-mismatch", f"unsupported schema major version {version}")
+        raise _invalid("protocol-mismatch",
+                       "unsupported schema major version")
     kind = envelope.get("kind")
     if kind not in PUBLIC_KINDS:
-        raise _invalid("report-invalid", f"unknown document kind {kind!r}")
+        raise _invalid("report-invalid", "unknown document kind")
     ptest_version = envelope.get("ptest_version")
     if not isinstance(ptest_version, str) or not ptest_version:
         raise _invalid("report-invalid", "ptest_version must be a nonempty string")
-    domain = envelope.get("domain")
-    if domain is not None:
-        if not isinstance(domain, dict):
-            raise _invalid("report-invalid", "domain must be an object or null")
-        if set(("id", "fixture")) - set(domain):
-            raise _invalid("report-invalid", "domain requires id and fixture")
-        try:
-            _check_hex("domain.id", domain["id"], 32)
-        except (TypeError, ValueError):
-            raise _invalid("report-invalid", "domain.id must be 32 hex") from None
-        if not isinstance(domain["fixture"], bool):
-            raise _invalid("report-invalid", "domain.fixture must be boolean")
-        domain = _project_domain(domain)
+    domain = _validate_domain(envelope.get("domain"))
     error_raw = envelope.get("error")
     error = None
     if error_raw is not None:
@@ -2859,6 +2904,10 @@ def decode_control_frame(data: bytes | bytearray, *,
         raise _invalid("protocol-mismatch", "control frame is not JSON") from None
     if not isinstance(obj, dict):
         raise _invalid("protocol-mismatch", "control frame must be an object")
+    for key in obj:
+        if key not in ("protocol", "run_id", "nonce", "kind", "payload"):
+            raise _invalid("protocol-mismatch",
+                           "control frame carries an unknown field")
     if obj.get("protocol") != PROTOCOL_VERSION:
         raise _invalid("protocol-mismatch", "control frame has the wrong protocol")
     try:
@@ -2867,8 +2916,8 @@ def decode_control_frame(data: bytes | bytearray, *,
     except (TypeError, ValueError):
         raise _invalid("protocol-mismatch", "control frame has a bad run or nonce") from None
     kind = obj.get("kind")
-    if kind not in CONTROL_KINDS:
-        raise _invalid("protocol-mismatch", f"control frame kind {kind!r} is unknown")
+    if not _is_known(kind, CONTROL_KINDS):
+        raise _invalid("protocol-mismatch", "control frame kind is unknown")
     payload = obj.get("payload")
     if not isinstance(payload, dict):
         raise _invalid("protocol-mismatch", "control frame payload must be an object")
@@ -2948,6 +2997,11 @@ def encode_launch_manifest(manifest: LaunchManifest) -> bytes:
 def _build_domain(raw: object) -> DomainPaths:
     if not isinstance(raw, dict):
         raise _invalid("protocol-mismatch", "manifest domain must be an object")
+    for key in raw:
+        if key not in ("root", "machine_config", "ledger", "marker",
+                       "fixture", "domain_id"):
+            raise _invalid("protocol-mismatch",
+                           "manifest domain carries an unknown field")
     try:
         return DomainPaths(
             root=raw["root"], machine_config=raw["machine_config"],
@@ -2962,6 +3016,11 @@ def _build_domain(raw: object) -> DomainPaths:
 def _build_grant(raw: object) -> Grant:
     if not isinstance(raw, dict):
         raise _invalid("protocol-mismatch", "manifest grant must be an object")
+    for key in raw:
+        if key not in ("run_id", "nonce", "slots", "memory_estimate_mb",
+                       "reserved_memory_mb", "generation", "domain_id"):
+            raise _invalid("protocol-mismatch",
+                           "manifest grant carries an unknown field")
     try:
         return Grant(
             run_id=raw["run_id"], nonce=raw["nonce"], slots=raw["slots"],
@@ -2977,22 +3036,55 @@ def _build_grant(raw: object) -> Grant:
 def _build_prepared(raw: object) -> PreparedRun:
     if not isinstance(raw, dict):
         raise _invalid("protocol-mismatch", "manifest attempt must be an object")
+    for key in raw:
+        if key not in ("argv", "cwd", "env_updates", "report_path",
+                       "capability", "summary"):
+            raise _invalid("protocol-mismatch",
+                           "manifest attempt carries an unknown field")
     try:
         capability = None
         if raw.get("capability") is not None:
             cap = raw["capability"]
+            if not isinstance(cap, dict):
+                raise _invalid("protocol-mismatch",
+                               "manifest capability must be an object")
+            for key in cap:
+                if key not in ("execution", "selection", "lifecycle",
+                               "limitations"):
+                    raise _invalid(
+                        "protocol-mismatch",
+                        "manifest capability carries an unknown field")
+            entries = []
+            for item in cap.get("limitations", []):
+                if not isinstance(item, dict):
+                    raise _invalid("protocol-mismatch",
+                                   "manifest limitation must be an object")
+                for key in item:
+                    if key not in ("code", "message", "paths"):
+                        raise _invalid(
+                            "protocol-mismatch",
+                            "manifest limitation carries an unknown field")
+                entries.append(item)
             capability = Capability(
                 execution=cap["execution"], selection=cap["selection"],
                 lifecycle=cap["lifecycle"],
                 limitations=tuple(
                     Reason(code=item["code"], message=item["message"],
                            paths=tuple(item["paths"]))
-                    for item in cap.get("limitations", [])
+                    for item in entries
                 ),
             )
         summary = None
         if raw.get("summary") is not None:
             node = raw["summary"]
+            if not isinstance(node, dict):
+                raise _invalid("protocol-mismatch",
+                               "manifest summary must be an object")
+            for key in node:
+                if key not in ("kind", "mode", "argument_count",
+                               "generated_options", "workers", "provenance"):
+                    raise _invalid("protocol-mismatch",
+                                   "manifest summary carries an unknown field")
             summary = CommandSummary(
                 kind=node["kind"], mode=node["mode"],
                 argument_count=node["argument_count"],
@@ -3030,6 +3122,12 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
         raise _invalid("protocol-mismatch", "manifest is not JSON") from None
     if not isinstance(obj, dict) or obj.get("protocol") != PROTOCOL_VERSION:
         raise _invalid("protocol-mismatch", "manifest has the wrong protocol")
+    for key in obj:
+        if key not in ("protocol", "domain", "grant", "setup", "attempts",
+                       "attempt_ids", "setup_timeout_s", "attempt_timeout_s",
+                       "compound_timeout_s"):
+            raise _invalid("protocol-mismatch",
+                           "manifest carries an unknown field")
     _check_nesting(obj, MANIFEST_MAX_NESTING)
     try:
         setup = None
