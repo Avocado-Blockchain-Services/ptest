@@ -11,11 +11,11 @@ After serial integration and chain checks, wave1 T1/T2/T3 may run in independent
 worktrees. Linux/macOS v1 scope is accepted; release,
 license, main merge, installation, and publication remain separate gates.
 
-CURRENT RUNTIME PAUSE (2026-09-17 22:36 UTC): all three wave1 Muse workers ended
-with provider429 subscription quota exhausted, reset23:22:52 UTC. No model has
-been substituted. T1 has uncommitted/untracked partial config/tests/fixtures;
-T2/T3 source trees remain clean at base60deb4e. Preserve every tree and trace.
-Await user direction to resume Muse after reset or authorize a different routing.
+CURRENT ROUTING (2026-09-17): after Muse quota exhaustion, the user explicitly
+authorized temporary gpt-5.6-luna at xhigh for implementation. Resume wave1 in
+the existing task worktrees at base60deb4e; preserve T1 partial config/tests and
+all Muse traces. Dan discipline and Opus/Astra review gates remain unchanged.
+This overrides stale Muse/medium launch wording, not product scope or contracts.
 
 ## User intent
 
@@ -63,7 +63,8 @@ compatibility, tested adapters, and unverified native integrations.
 3. Present reviewed spec for user approval before detailed design/implementation.
 4. Astra xhigh produces design, frozen contracts, test strategy and owned task plan.
 5. Claude Opus reviews design; repair and review findings before coding.
-6. Muse, given Dan Jefferies' actual instructions, implements bounded tasks with TDD.
+6. Muse, given Dan Jefferies' actual instructions, implements bounded tasks with TDD;
+   temporarily use Luna xhigh while Muse is unavailable, per explicit user direction.
 7. Claude Opus audits implementation stages and the integrated result.
 8. Astra xhigh independently audits the integrated result again.
 9. If corrections remain after that Astra audit, use Sol for repairs/re-review.

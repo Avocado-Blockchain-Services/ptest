@@ -396,3 +396,10 @@
   Root will request wait-vs-routing direction rather than silently substituting
   the user's explicitly selected implementation model. Task0 remains approved,
   integrated and verified119passing; overall NG implementation is NOT complete.
+
+- User authorized temporary Luna xhigh implementation after Muse quota exhaustion.
+  Ruling: resume T1/T2/T3 via codex exec gpt-5.6-luna/xhigh with explicit Dan
+  instructions, existing separate worktrees and base60deb4e. New Luna resume brief
+  overrides old Muse-medium routing only. Opus task/integrated audits, independent
+  Astra xhigh final audit and Sol post-Astra corrections remain unchanged.
+  T1 partial source/tests preserved; T2/T3 confirmed clean. Main/live CLI untouched.
