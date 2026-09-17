@@ -255,3 +255,14 @@
 - Muse repair1 receives all seven plus closely related owned protocol/storage/
   artifact/evidence notes. Regression-first, same task worktree/model/effort,
   patch-only tools. No design reopening, full suite, or wave1 dispatch yet.
+
+- Repair1 pre-fix scratch probe at /tmp/t0r1-red/test_red.py ran through bootstrap,
+  exit1:5failed/1passed. Root read raw /tmp/t0r1-red/red.log and red.exit:
+  Application Support/spaced-bracketed paths fail,300nested reads leak300FDs,
+  result mode is incorrectly automatic, and exception text leaks a synthetic
+  sentinel. The chosen2000-depth frame probe already passed; that is NOT RED
+  evidence for parser-depth failure. Require a real recursion-limit case later.
+- Process deviation retained honestly: Muse used a shell heredoc to create that
+  scratch probe despite patch-only instructions; subsequent source repairs use
+  apply_patch correctly. Do not claim perfect patch-only compliance. Durable
+  regressions and complete retained evidence remain required for acceptance.
