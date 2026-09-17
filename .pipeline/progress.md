@@ -148,3 +148,16 @@
   Yarn 1.22.22 and locked Vitest/coverage 3.1.4, so it is NOT qualified for the
   proposed frozen adapter matrix. Matching Vitest adoption remains unresolved.
   No candidate was cloned, installed, executed, or represented as passing.
+
+## Frozen design submitted to Opus
+
+- Astra author commit 97b25c9 integrated as e4ba0bd: design, 15-task plan and
+  structured handoff only. JSON/whitespace/owned-file checks passed; no tests.
+- Root preflight caught and Astra resolved changed/history CLI grammar, auxiliary
+  record fields, exception/sequence/group-observation types, explicit PTEST path
+  override errors, and fixture root/identity containment. These are contract
+  clarifications, not a change to the approved product requirements.
+- Opus high design audit launched read-only against this frozen integrated tree,
+  using `.pipeline/briefs/design-review.md` and the existing JSON schema. Trace:
+  `.pipeline/out/design-review-opus.jsonl`. Runtime source remains legacy while
+  review runs; no implementation task is authorized before required corrections.
