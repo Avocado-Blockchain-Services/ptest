@@ -224,3 +224,9 @@
 - Task0 Muse implementation authorized in its own task-0 worktree. Bootstrap is
   the frozen legacy target above; dependency setup is now within the passed gate.
   Root owns mechanical verification, Opus task review and chain integration.
+
+- Task0 launch attempt1 exited2 before work: Muse requires --workspace and
+  --worktree-existing to differ. Corrected launcher uses chain as origin and
+  task-0 as selected worktree. Attempt2 confirms workspace task-0, actual runtime
+  muse-spark-1.3; session `01a0b122-ed82-7e21-b633-78f2177449fe`, base042dde1.
+  Trace `task-0-muse-run2.jsonl`; attempt1 retained, no silent retry overwrite.
