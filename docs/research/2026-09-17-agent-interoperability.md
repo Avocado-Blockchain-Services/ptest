@@ -142,11 +142,13 @@ This research task ran only `muse --help`, `muse exec --help`, `muse init --help
 and `muse --version`; all exited zero. It also read the supplied local reference:
 `/home/ingmar/.codex/agent-memory/dan-jefferies-agent/reference-muse-code-cli.md`.
 The reference describes invocation, not proof of imported Codex agent definitions.
-The orchestrator's [selected preflight fields](../../.pipeline/out/runtime-preflight.json)
-record the Muse dry-run, untrusted skipped-rule warning, and a trusted probe. This
-researcher inspected those fields and the probe's
-[raw JSONL](../../.pipeline/out/muse-trust-preflight.jsonl) and
-[stderr](../../.pipeline/out/muse-trust-preflight.stderr). With `--trust-workspace`,
+The orchestrator's tracked [selected preflight fields](../../.pipeline/out/runtime-preflight.json)
+record the Muse dry-run, untrusted skipped-rule warning, and a trusted probe; this
+report is the portable evidence available in Git. This researcher also inspected
+the probe's `.pipeline/out/muse-trust-preflight.jsonl` and
+`.pipeline/out/muse-trust-preflight.stderr` in the chain worktree. Those raw traces
+are ignored local audit artifacts, not shipped in Git or available in a fresh
+clone. With `--trust-workspace`,
 shell/write/web disabled, and foreign personal context excluded, Muse returned
 the exact supplied first heading, `# ptest NG product workflow`, without tool
 events. Stderr recorded `trusted source=run-flag`; the orchestrator recorded exit 0.

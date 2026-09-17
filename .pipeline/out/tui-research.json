@@ -21,7 +21,8 @@
       "tool": "Muse Code", "version": "1.3.0-R3233.1", "generic": "expected",
       "native": "single_trusted_loading_smoke_verified; ptest_integration_unverified",
       "instruction": "AGENTS.md; workspace trust applies; exact heading returned with no tools",
-      "sources": ["local: muse --help", "local: muse exec --help", "local: muse init --help", "local: muse --version", ".pipeline/out/runtime-preflight.json", ".pipeline/out/muse-trust-preflight.jsonl", ".pipeline/out/muse-trust-preflight.stderr", "/home/ingmar/.codex/agent-memory/dan-jefferies-agent/reference-muse-code-cli.md"]
+      "sources": ["local: muse --help", "local: muse exec --help", "local: muse init --help", "local: muse --version", ".pipeline/out/runtime-preflight.json", "/home/ingmar/.codex/agent-memory/dan-jefferies-agent/reference-muse-code-cli.md"],
+      "local_audit_artifacts_not_shipped_in_git": [".pipeline/out/muse-trust-preflight.jsonl", ".pipeline/out/muse-trust-preflight.stderr"]
     },
     {
       "tool": "Gemini CLI", "generic": "expected", "native": "documented_not_tested",
