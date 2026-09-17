@@ -1,0 +1,30 @@
+{
+  "status": "ready_for_independent_spec_review",
+  "commit": null,
+  "commit_note": "The immutable commit containing this manifest and spec is supplied in the author's final handoff; a manifest cannot contain its own Git commit hash.",
+  "spec_path": "docs/specs/2026-09-17-ptest-ng-product.md",
+  "summary": "Proposed local-first ptest NG product specification, with shared local admission, conservative selection, static doctor and explicit probes, resource ownership guidance, portable configuration, CLI/JSON semantics, TUI support tiers, negative contracts, and finite release gates. No detailed architecture or implementation is approved by this draft.",
+  "decisions": [
+    "Bare ptest requests automatic local selection with full fallback; explicit scopes stay explicit and --full remains the authoritative configured gate.",
+    "Coordinate same-host/same-OS-user invocations across repositories, worktrees, shells, and TUIs, with conservative admission, fairness, cancellation, and ownership-aware crash recovery.",
+    "Propose Linux and macOS v1 support; pytest/Vitest are first-class, Go/Cargo retain bounded explicit execution, and arbitrary wrappers have explicit best-effort limitations.",
+    "Selection must account for dirty/untracked/configuration changes and unresolved failures; uncertain evidence widens execution and cannot fabricate a pass.",
+    "Static doctor never executes repository code; bounded probes are separately explicit; repair prompts are local data for an existing agent.",
+    "Use generic DB/cache/resource ownership recipes, reusable expensive setup, clean per-test state, factories/builders, and observed timing without a universal service-management framework.",
+    "Use ordinary noninteractive CLI, versioned JSON, one generic guide, and optional thin TUI pointers; no model API, launcher, hosted service, or native integration dependency.",
+    "Keep the provisional foundation read-only and evaluate it for later reuse; historical cloud architecture and remote rollout gates are not requirements.",
+    "Independent Fable specification review and user approval must precede detailed design; public licensing/publication remain separate user-owned release decisions."
+  ],
+  "open_product_questions": [
+    "Linux+macOS is the proposed v1 platform scope, pending the user's already-asked platform preference.",
+    "The user must choose an open-source license before public release; this does not block specification review or design."
+  ],
+  "tests_run": [],
+  "validation": [
+    "Read assigned AGENTS.md and .pipeline/context.md in full.",
+    "Read historical ptest_ng.md and inspected legacy/provisional files without modifying source or running their code.",
+    "Read final interoperability research and incorporated its generic interface, non-overwriting, trust, and support-evidence requirements.",
+    "Specification-only work: no project tests, dependencies, remote operations, source edits, live CLI installation, or graph generation."
+  ],
+  "next_gate": "Fable specification review, resolution of findings, then user approval of the reviewed product specification."
+}
