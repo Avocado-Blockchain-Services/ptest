@@ -230,3 +230,10 @@
   task-0 as selected worktree. Attempt2 confirms workspace task-0, actual runtime
   muse-spark-1.3; session `01a0b122-ed82-7e21-b633-78f2177449fe`, base042dde1.
   Trace `task-0-muse-run2.jsonl`; attempt1 retained, no silent retry overwrite.
+
+- Attempt2 wrote only its untracked pyproject.toml using Muse's direct writer,
+  violating the requested patch-only workflow. Root interrupted owned Muse PID
+  1222435 with SIGINT; exit130, file preserved, no task tests/implementation gate.
+  Muse headless session-message ingress was unavailable (external_agent_ingress_closed).
+  Restart uses --disable-write so local edits must use shell apply_patch, same
+  model/effort/task/base. All attempts retained; no silent substitution or reset.
