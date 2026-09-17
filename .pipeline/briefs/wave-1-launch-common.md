@@ -14,6 +14,10 @@ before coding. Inspect the real contract bytes before writing consumers.
 Do not invent field names, helper semantics, schemas, or a parallel storage layer.
 Report a concrete blocking contract gap to root before changing a shared contract.
 
+Shared read_regular is an at-most-N prefix reader, not an oversize rejection API.
+For bounded complete config/JSON inputs, request limit+1 then reject excess before
+parsing; never accept a valid-looking truncated prefix as the complete document.
+
 Read and follow secure-by-spec, executing-plans, test-driven-development and its
 writing-good-tests.md reference. Use graphify's skill for AST maintenance only.
 All relevant paths are in the common brief or Task0 launch brief. No new spec
@@ -52,3 +56,8 @@ needs explicitly supplied readable equivalents; never assume an agent inherits
 them. Raw .pipeline/local logs are local-only, unshipped audit artifacts; confirm
 the integrated T0 ignore entries and retain selected evidence in tracked reports.
 The product itself must work without these developer tools, accounts or APIs.
+
+Read .pipeline/briefs/muse-dan-common.md by its exact repository path. Filesystem
+skills may not be registered Muse aliases: if a skill alias is unavailable, read
+the explicit SKILL.md file supplied in task-0-launch.md. Do not search broad
+personal configuration/history directories to rediscover a path already supplied.

@@ -323,3 +323,13 @@
   dicts; original tests only assert privacy after decode/re-encode. Root sent this
   and schema/validator parity hypotheses to Opus public T0-1..T0-6 re-review while
   independent helper repair runs. Overall Task0 barrier remains UNAPPROVED.
+
+- Helper repair2 committed0f41c78; root92passed/2.56s, slowest1.05s post-exitpipe
+  and1.01s watchdog, remaining<=0.03s. Exact raw root-helper-repair2.log under
+  helper .pipeline/local. Opus focused H-1/H-2/related-diff re-review runs parallel
+  to public review. No source changes integrated into chain yet.
+- Additional process limitation: helper repair2 used cat for temporary patch
+  files /tmp/red_fix.txt and /tmp/rep*.txt, then apply_patch for actual repo edits.
+  Retained in raw trace and reviewer brief; not perfect patch-only compliance.
+  Do not mistake initial malformed miniature-target RED for product evidence;
+  corrected red-repair2b carries the meaningful behavioral failures.
