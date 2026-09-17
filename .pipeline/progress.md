@@ -368,3 +368,14 @@
 - Carry forward later-owner duties: T3/T11 enforce history count/byte bounds;
   T5/T6/T7 bridge codecs enforce private unknown-field rejection; T11 renders
   typed contract failures versus programmer-misuse errors as one JSON document.
+
+- Accepted Task0 merged serially into chain at60deb4e66bb97bb6e83429c4460877419b137f0c.
+  Chain fresh own uv environment:119passed/2.85s, schema check0, ASTgraphupdate0,
+  clean diff. Main bae8863 and installed ptest unchanged. Merge had no conflicts.
+- Wave1 AUTHORIZED and launched concurrently: tasks1/2/3 each start at exact
+  base60deb4e66bb97bb6e83429c4460877419b137f0c, branchcx-ng-product-task-N and
+  /home/ingmar/worktrees/ptest/cx-ng-product/task-N. Actual Muse model/effort fixed
+  muse-spark-1.3/medium; separate local UV caches/venvs, patch-only shell authority.
+  Traces .pipeline/out/task-N-muse.jsonl/.stderr. Root exec sessions (unordered
+  launch-completion IDs)66311,89618,11923; task identity comes from per-task traces,
+  not guessed output ordering. Ownership T1config/init;T2platform;T3history.
