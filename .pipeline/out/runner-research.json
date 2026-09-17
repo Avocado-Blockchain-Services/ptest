@@ -58,6 +58,28 @@
     "Critical-hook allowlists and native worker controls are compatibility restrictions, not a sandbox.",
     "No source changes, installations, tests, provider calls, main merge, push, or deployment."
   ],
+  "ng5_addendum": {
+    "status": "acceptance-candidates-not-tested",
+    "basic_pytest_serial_candidates": ["8.4.2", "9.0.3", "9.1.0", "9.1.1"],
+    "basic_vitest_serial_candidates": ["3.1.4", "3.2.6", "3.2.7"],
+    "xdist_required": false,
+    "reservation": "one-nonexclusive-slot",
+    "advanced_tuple_mismatch": "basic-serial-when-its-independent-acceptance-profile-passes",
+    "selection": false,
+    "reusable_selection_baseline": false,
+    "preserve": ["literal-argv", "native-config", "coverage-gates", "stdout", "stderr", "native-exit"],
+    "reject": ["unbounded-config", "untested-critical-control-hooks", "unsupported-runtime-api"],
+    "unknown_versions_inferred_supported": false
+  },
+  "design_pin_metadata": {
+    "psutil": {"version": "7.2.2", "exists": true, "requires_python": ">=3.6", "yanked": false},
+    "bandit": {"version": "1.9.4", "exists": true, "requires_python": ">=3.10", "yanked": false},
+    "pip_audit": {"version": "2.10.1", "exists": true, "requires_python": ">=3.10", "yanked": false},
+    "gitleaks": {"version": "8.30.1", "exists": true, "requires_python": null, "platform_archives_and_checksums_listed": true},
+    "gitleaks_issue_2170": "closed; comments attribute sample miss to intentional placeholder stopword allowlist, not confirmed blanket regression",
+    "sensitivity_reproduced_locally": false,
+    "artifacts_downloaded_or_executed": false
+  },
   "primary_sources": [
     "https://docs.pytest.org/en/stable/reference/customize.html",
     "https://docs.pytest.org/en/stable/how-to/usage.html",
@@ -76,6 +98,15 @@
     "https://docs.astral.sh/uv/concepts/projects/sync/",
     "https://docs.npmjs.com/cli/v10/commands/npm-run-script/",
     "https://pkg.go.dev/cmd/go",
-    "https://doc.rust-lang.org/cargo/commands/cargo-test.html"
+    "https://doc.rust-lang.org/cargo/commands/cargo-test.html",
+    "https://raw.githubusercontent.com/pytest-dev/pytest/8.4.2/src/_pytest/config/__init__.py",
+    "https://raw.githubusercontent.com/pytest-dev/pytest/9.0.3/src/_pytest/config/__init__.py",
+    "https://raw.githubusercontent.com/vitest-dev/vitest/v3.1.4/packages/vitest/src/node/core.ts",
+    "https://pypi.org/pypi/psutil/7.2.2/json",
+    "https://pypi.org/pypi/bandit/1.9.4/json",
+    "https://pypi.org/pypi/pip-audit/2.10.1/json",
+    "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1",
+    "https://github.com/gitleaks/gitleaks/issues/2170#issuecomment-4877877658",
+    "https://github.com/gitleaks/gitleaks/issues/2170#issuecomment-5063891505"
   ]
 }

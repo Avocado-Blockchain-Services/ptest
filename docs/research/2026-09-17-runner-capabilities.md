@@ -224,3 +224,75 @@ Local provenance (read only; not shared into this worktree):
 Portable evidence is the primary-source links, not availability of these machine-local
 paths in a fresh clone. v3.2.7 upstream `create.ts`/`plugins/index.ts` were additionally
 read for creation/plugin ordering; this is source inspection, not runtime verification.
+
+## NG-5 repair addendum: basic serial is a separate capability
+
+The advanced tuple must not become the sole gate for ordinary cooperative execution.
+Add an independently tested `basic_serial` capability: one nonexclusive scheduler slot,
+native configured scoped/full execution, untouched coverage gates/output/exit, no automatic
+narrowing or reusable selection baseline. Report the advanced-capability limitation;
+do not require `command`/whole-host exclusivity solely because an advanced tuple differs.
+This updates the earlier single-tuple recommendation, not the evidence that tests remain unrun.
+
+Finite **acceptance candidates, not passing support claims**:
+
+| Basic profile | Exact runner fixtures | Conditions |
+|---|---|---|
+| pytest serial | 8.4.2, 9.0.3, 9.1.0, 9.1.1 | xdist absent; native config/addopts; no untested orchestration hooks; optional pytest-cov 7.1.0 / coverage 7.15.0 cases |
+| Vitest serial | 3.1.4, 3.2.6, 3.2.7 | Single project, standard forks, matching coverage-v8 when configured, all effective worker bounds and maxConcurrency=1; no API/watch/browser/custom control hooks |
+
+Use the already declared CPython 3.11–3.14 project-interpreter target explicitly, separate
+from ptest's interpreter; build a syntax-compatible stdlib-only bridge. Test fixtures must
+record resolved interpreter/Node/Vite versions, not merely runner package versions.
+Pytest 8.4.2 requires Python >=3.9; 9.0.3/9.1.0 require >=3.10, so this proposed floor
+does not conflict with their metadata. [8.4.2](https://pypi.org/project/pytest/8.4.2/),
+[9.0.3 metadata](https://pypi.org/pypi/pytest/9.0.3/json), [9.1.0 metadata](https://pypi.org/pypi/pytest/9.1.0/json).
+
+`pytest.main(argv, plugins)` and native exit propagation exist in both inspected earlier
+sources; serial does not intrinsically require xdist or advanced identity instrumentation.
+Preserve actual plugin/config behavior rather than disabling coverage to qualify. An
+unknown control plugin or unbounded configuration is distinct from an unpromoted evidence
+tuple and may still block the bounded path. Do not infer all plugin safety from pytest's
+version. [8.4.2 source](https://raw.githubusercontent.com/pytest-dev/pytest/8.4.2/src/_pytest/config/__init__.py),
+[9.0.3 source](https://raw.githubusercontent.com/pytest-dev/pytest/9.0.3/src/_pytest/config/__init__.py).
+
+Vitest 3.1.4 already has the discussed creation, configuration-plugin, and run APIs; its
+fork pool and environment precedence have the same relevant controls. Basic serial can
+use guarded `createVitest` then native `start(filters)` and `close`, preserving native
+coverage lifecycle without depending on advanced exact-spec selection. Never call both
+`init` and `start`. Successful basic execution still needs trustworthy run completion;
+missing required completion evidence is not an excuse to manufacture green. Unknown
+per-test identity/timing stays unknown and cannot clear old failure obligations.
+[3.1.4 creation](https://raw.githubusercontent.com/vitest-dev/vitest/v3.1.4/packages/vitest/src/node/create.ts),
+[core](https://raw.githubusercontent.com/vitest-dev/vitest/v3.1.4/packages/vitest/src/node/core.ts),
+[forks](https://raw.githubusercontent.com/vitest-dev/vitest/v3.1.4/packages/vitest/src/node/pools/forks.ts),
+[config](https://raw.githubusercontent.com/vitest-dev/vitest/v3.1.4/packages/vitest/src/node/config/resolveConfig.ts).
+
+Do not silently upgrade an unchanged 3.1.4 adoption repository to 3.2.7 merely to fit the
+advanced tuple. Additional patches/families require an explicit compatibility policy and
+acceptance evidence; this note does not assert every version between the candidates works.
+Required regression: a basic-only tuple runs at grant 1 alongside another checkout,
+preserves a failing coverage threshold, and reports selection unavailable rather than
+refusing execution or reserving the host exclusively.
+
+## Design-pin metadata check
+
+Public registry/release metadata retrieved 2026-09-17; no packages/binaries downloaded,
+installed, imported, or executed. Existence is not a vulnerability audit or runtime proof.
+
+| Pin | Metadata result | Primary evidence |
+|---|---|---|
+| psutil 7.2.2 | Exists, Requires-Python >=3.6; files not yanked; Linux/macOS x64/arm64 wheels listed | [PyPI JSON](https://pypi.org/pypi/psutil/7.2.2/json) |
+| Bandit 1.9.4 | Exists, Requires-Python >=3.10; files not yanked | [PyPI JSON](https://pypi.org/pypi/bandit/1.9.4/json) |
+| pip-audit 2.10.1 | Exists, Requires-Python >=3.10; files not yanked | [PyPI JSON](https://pypi.org/pypi/pip-audit/2.10.1/json) |
+| Gitleaks 8.30.1 | Release exists; Darwin/Linux x64/arm64 archives and checksum file listed; Python requirement not applicable | [Release](https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1) |
+
+Correction to the sensitivity concern: issue 2170 is closed. Comments explain that its
+alphabet-sequence fake token matches an intentional global stopword allowlist and show
+a changed token being detected. This is not evidence of a confirmed blanket detector
+regression. Keep the actual-binary sensitivity gate, using non-allowlisted synthetic
+positive and negative samples, and verify release checksums during authorized setup.
+[Reproduction explanation](https://github.com/gitleaks/gitleaks/issues/2170#issuecomment-4877877658),
+[follow-up analysis](https://github.com/gitleaks/gitleaks/issues/2170#issuecomment-5063891505).
+The rendered issue page omitted comments; the public GitHub issue-comments API supplied
+them. This stage did not reproduce either the original claim or its correction locally.
