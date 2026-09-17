@@ -1,0 +1,40 @@
+{
+  "status": "approved_design_notes_clarified",
+  "base_commit": "44c7a9eecfa8f9ad3aad37e670cc365b90405e07",
+  "review_verdict": "approved_with_notes",
+  "review_blocking": [],
+  "scope": "Six narrow residual notes before T0 freezes shared contracts; no product or architecture expansion.",
+  "clarifications": [
+    {
+      "note": "Absent canonical parents",
+      "contract": "T4 creates only the fixed account-relative parent chains one component at a time via T0 ensure_shared_dir(parent,name): absent0700, existing owned non-symlink/not-group-or-other-writable including0755 accepted unchanged. ensure_private_dir remains strict0700 for coordination. No recursive arbitrary mkdir, legacy chmod or prune; T2/static paths create nothing."
+    },
+    {
+      "note": "Capability enum",
+      "contract": "ExecutionTier is exactly advanced|basic_serial|bounded_native|exclusive_command|unavailable. Only advanced may advertise selection; Go/Cargo use bounded_native, explicit generic uses exclusive_command, unresolved inspection uses unavailable and cannot launch."
+    },
+    {
+      "note": "Memory translation",
+      "contract": "T1 retains config0; T11 translates0 to AdmissionRequest.memory_mb=None and positive values unchanged as per-worker MiB. AdmissionRequest rejects numeric0. T4 multiplies by actual granted slots for total memory_estimate_mb and records reservation separately."
+    },
+    {
+      "note": "Prompt constant",
+      "contract": "contracts.MAX_PROMPT_BYTES=65536 is the fixed default/upper limit on the complete UTF-8 repair prompt, separate from diagnostic ScanLimits.output_bytes."
+    },
+    {
+      "note": "T2 ownership",
+      "contract": "T2 tests only read-only resolution/validation for missing or existing shared parents. T4/T11 own first-create/execution and sibling-preservation evidence."
+    },
+    {
+      "note": "A12 tier traceability",
+      "contract": "A12 closure requires both independent pytest and Vitest advanced-capability full baselines/workflows. Basic serial adoption is partial evidence with full fallback/no baseline; an advanced derivative is labeled separately."
+    }
+  ],
+  "checks": ["JSON parse", "staged whitespace", "producer/consumer signature and enum/default consistency"],
+  "tests_run": [],
+  "runtime_changes": false,
+  "dependency_installs": false,
+  "open_questions": [],
+  "commit": null,
+  "commit_note": "SHA supplied in parent handoff; this report is committed with the two clarified documents."
+}
