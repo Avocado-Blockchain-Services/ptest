@@ -7,7 +7,10 @@ Read .pipeline/briefs/task-N-brief.md FIRST (replace N with your assigned number
 Read .pipeline/briefs/muse-dan-common.md, your AGENTS.md and .pipeline/context.md.
 Read the actual Muse reference and Dan role files specified there, the complete
 approved design, plan global constraints and shared helper interface. T0's frozen
-contracts are implemented now: inspect their real bytes before writing consumers.
+contracts must be approved and integrated before this launch: the launcher supplies
+the exact approved repaired T0 SHA and your task base. Read the current TaskN plan
+section as well as its extracted brief; if they disagree, report the discrepancy
+before coding. Inspect the real contract bytes before writing consumers.
 Do not invent field names, helper semantics, schemas, or a parallel storage layer.
 Report a concrete blocking contract gap to root before changing a shared contract.
 
@@ -19,6 +22,12 @@ approval, self-launched reviewers, or task scope expansion.
 Use your own environment: uv sync --locked. PTEST_BOOTSTRAP is the frozen legacy
 absolute executable supplied by root. Verify scripts/ptest-bootstrap where, then
 all task tests go through scripts/ptest-bootstrap with explicit scoped paths.
+
+Use a worktree-local UV_CACHE_DIR under .pipeline/local; never share a venv/cache
+that can import another checkout. All local source/test/scratch edits use shell
+apply_patch (bare @@ hunks); no direct writer, cat/Python source rewrites, or
+delete/re-add patch workarounds. Capture full raw RED/GREEN logs and save the ptest
+exit immediately; do not report a succeeding tail/grep as the test exit.
 Never raw test runners, never full suite, never shared environments/global config.
 Clear inherited bootstrap PTEST_CONFIG in candidate/direct-unit test environments
 as the existing autouse fixture specifies; do not weaken normal NG validation.
