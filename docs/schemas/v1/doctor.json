@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "findings": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "type": "object"
+        },
+        "readiness": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "scope",
+        "readiness",
+        "findings",
+        "limits",
+        "usage",
+        "limitations"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "doctor",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: doctor",
+  "type": "object"
+}

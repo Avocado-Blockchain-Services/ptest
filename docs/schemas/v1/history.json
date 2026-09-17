@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "obligations": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "summaries": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "summaries",
+        "obligations"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "history",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: history",
+  "type": "object"
+}

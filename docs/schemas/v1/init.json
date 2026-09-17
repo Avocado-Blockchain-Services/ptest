@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "config": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "target": {
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "exists",
+        "warnings",
+        "config"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "init",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: init",
+  "type": "object"
+}

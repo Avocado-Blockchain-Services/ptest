@@ -1,0 +1,160 @@
+{
+  "task": "task-0",
+  "status": "complete",
+  "base": "042dde1",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+  "branch": "cx-ng-product-task-0",
+  "commit_message": "build: establish local NG contract bootstrap",
+  "dispatcher": {
+    "path": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "verified": "sha256sum exit 0, hash matches recorded value; wrapper re-hashes every invocation and refuses on mismatch"
+  },
+  "runtime": {
+    "venv_python": "CPython 3.13.11 (.venv, uv-managed, project-local)",
+    "pytest": "9.1.1",
+    "psutil": "7.2.2",
+    "pytest_xdist": "3.8.0 (locked test extra, not installed; serial runs use -p no:xdist)",
+    "uv": "0.9.26",
+    "build_backend": "setuptools>=77,<83 (declared; runtime venv carries no setuptools)"
+  },
+  "owned_files": [
+    "pyproject.toml",
+    "uv.lock",
+    "src/ptest/__init__.py",
+    "src/ptest/adapters/__init__.py",
+    "src/ptest/runtime/__init__.py",
+    "src/ptest/contracts.py",
+    "src/ptest/files.py",
+    "src/ptest/storage.py",
+    "scripts/ptest-bootstrap",
+    "scripts/export-schemas.py",
+    "tests/ng/conftest.py",
+    "tests/ng/support.py",
+    "tests/ng/test_contracts.py",
+    "tests/ng/test_files.py",
+    "tests/ng/test_storage.py",
+    "docs/schemas/v1/doctor.json",
+    "docs/schemas/v1/history.json",
+    "docs/schemas/v1/init.json",
+    "docs/schemas/v1/plan.json",
+    "docs/schemas/v1/register.json",
+    "docs/schemas/v1/run.json",
+    "docs/schemas/v1/status.json",
+    "docs/schemas/v1/where.json",
+    "src/ptest/runtime/protocol-v1.json",
+    ".gitignore",
+    ".pipeline/out/task-0.json"
+  ],
+  "touched_not_owned": [],
+  "not_committed": ["graphify-out/ (regenerated AST graph, local only)", ".pipeline/local/ (raw logs, gitignored)"],
+  "pyproject_note": "pyproject.toml was untracked prior work from the interrupted attempt; inspected, preserved byte-identical, adopted as the Task0 manifest (pytest 9.1.1 dev, xdist 3.8.0 test extra, psutil 7.2.2, package-data globs, ptest entrypoint declaration)",
+  "evidence": [
+    {
+      "command": "sha256sum $PTEST_BOOTSTRAP && $PTEST_BOOTSTRAP --version",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68; legacy prints bare-ptest guard notice"
+    },
+    {
+      "command": "uv lock && uv sync",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Resolved 10 packages; initial failure (read-only $HOME/.cache/uv, missing src/) fixed with UV_CACHE_DIR=/tmp/uv-cache-task0 plus owned package stubs; sync installed ptest-ng 0.1.0 editable, pytest 9.1.1, psutil 7.2.2"
+    },
+    {
+      "command": "scripts/ptest-bootstrap where",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "project ng_bootstrap; runs in worktree; worktree of /home/ingmar/code/tools/ptest; kind pytest; workers 1; backend local; here: uv run --locked --no-sync python -m pytest -p no:xdist"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_files.py -k rejects_escape",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": "nonzero",
+      "output": "RED baseline: collection ImportError (ptest.contracts missing) - an import failure, not a behavioral assertion failure"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "49 passed in 0.06s (raw: .pipeline/local/green-final2.log). Intermediate finds fixed along the way: FIFO blocking open -> O_NONBLOCK; test-side non-hex nonces; cancel-shape oversize probe",
+      "durations": "first full attempt 64s including FIFO-hang interrupt; final GREEN 0.06s"
+    },
+    {
+      "command": "uv run --locked --no-sync python scripts/export-schemas.py --check",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "no drift across 8 public schemas + runtime/protocol-v1.json"
+    },
+    {
+      "command": "scripts/ptest-bootstrap /tmp/.../test_sensitivity.py -k probe",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "3 passed: no-op read_regular, permissive validate_private_dir, and nonce-bypass sabotage are each detected (pytest.raises fails under sabotage)"
+    },
+    {
+      "command": "scripts/ptest-bootstrap --full tests/ng/test_files.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 2,
+      "output": "ptest-bootstrap refuses --full: scoped runs only until the final-gate switch"
+    },
+    {
+      "command": "/tmp/.../bootstrap-tampered.py where (scratch copy with wrong pinned hash)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "bootstrap unavailable: frozen ptest hash mismatch (got 3cab2091...); refusing to run against a changed dispatcher"
+    },
+    {
+      "command": "stat -c %a .pipeline/local ptest-bootstrap.toml",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "700 .pipeline/local; 600 ptest-bootstrap.toml"
+    },
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Rebuilt: 2368 nodes, 4125 edges, 181 communities; AST-only, no LLM, no semantic extraction"
+    },
+    {
+      "command": "git diff --check + trailing-whitespace grep over owned files",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "clean"
+    }
+  ],
+  "raw_logs": [
+    ".pipeline/local/ptest-bootstrap.toml",
+    ".pipeline/local/green-final.log",
+    ".pipeline/local/green-final2.log",
+    ".pipeline/local/schema-check.log",
+    ".pipeline/local/schema-check2.log",
+    ".pipeline/local/graphify-update.log"
+  ],
+  "acceptance": {
+    "bootstrap_barrier": "MET: where shows worktree, local backend, 1 worker; bootstrap_smoke passes via -k bootstrap_smoke path",
+    "negative_red": "MET: escape/redaction/version/frame/mode/overwrite/corruption negatives written first; RED recorded as collection ImportError; assertion sensitivity proven by sabotage probes",
+    "shared_apis": "MET: all 7 files.py functions + storage.open_database with descriptor-relative, no-follow, exclusive, fsync semantics",
+    "contracts_codecs": "MET: all frozen records/enums/defaults (ExecutionTier closed, MAX_PROMPT_BYTES=65536), 8 documents parse, register error schema, unknown-major/truncation/nonce/oversize rejection, boundary integers, default drift, no argv/env in command summaries",
+    "schema_drift": "MET: export --check exit 0",
+    "provenance": "MET: frozen absolute dispatcher + per-run SHA256 gate (tamper probe exit 1), --full refused exit 2, 0700/0600 generated config"
+  },
+  "dan_passes": {
+    "pass1_reread": "Re-read bootstrap/storage/files bytes end-to-end. New observations: os.write partial-write risk in wrapper config (fixed with write loop); FIFO read-open wedge (fixed with O_NONBLOCK); obscure manifest decode expression (fixed to iterate attempts directly, 1-line diff proven vs backup); unused except variable (fixed). No findings left unaddressed.",
+    "pass2_reanchor": "All 5 Task0 checkboxes MET with file:line evidence: wrapper scripts/ptest-bootstrap:100-128; 7 APIs src/ptest/files.py:123-393; opener src/ptest/storage.py:31-131; records/codecs src/ptest/contracts.py; helpers tests/ng/support.py + conftest.py; exporter scripts/export-schemas.py; schemas docs/schemas/v1/*.json + runtime/protocol-v1.json. No scope expansion: no scheduler/runner/config/platform code.",
+    "pass3_smells": "Single definitions verified by search (files.py:123-354, storage.py:31); no duplicate sqlite3.connect outside storage.py; support.py imports only contracts+files (no T2 platform); no TODO/stubs; 2 additive codes (already-exists, invalid-bound) documented in REASON_CODES; Problem messages carry validated relative names only, no raw exception text; empty/error/repeat paths covered by tests; no new dependencies; no shims."
+  },
+  "contract_notes": [
+    "encode_public_document validates kind/shape/exclusivity only; decode validates payloads strictly (producer-liberal, consumer-strict split)",
+    "Two additive machine codes beyond the design catalog: already-exists, invalid-bound",
+    "AttemptIdentity attempt_id pattern a001-a010 enforced; resource_prefix max 54 ASCII"
+  ],
+  "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries"],
+  "verified": ["49 passed exit 0 in 0.06s via frozen bootstrap", "schema --check exit 0", "3 sabotage-sensitivity probes", "--full refusal exit 2", "hash-tamper refusal exit 1", "where local/1-worker provenance", "graphify AST update exit 0", "diff --check clean"],
+  "not_verified": ["macOS fullfsync branch (linux host)", "foreign-uid branches (single-user env)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "requested model identity (root checks independently)"],
+  "deferred": [],
+  "discovered_not_fixed": ["raise AssertionError(unreachable) after _fail is verbose by design (aids type narrowing); kept deliberately"],
+  "confidence": "medium: every Task0 behavior is implemented and green with sensitivity evidence, but cross-task consumption has not run yet",
+  "blockers": []
+}
