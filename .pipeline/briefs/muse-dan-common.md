@@ -28,6 +28,22 @@ Use apply_patch for local edits (native tool or the existing apply_patch command
 Do not write/edit source using shell heredocs, cat, or Python file-writing tricks.
 Normal generated build files, lockfiles and captured command logs are exceptions.
 
+The installed apply_patch command uses Codex patch syntax, NOT numbered unified
+diff hunks. An update looks like this (bare @@, no -12,3 +12,3 coordinates):
+
+```text
+*** Begin Patch
+*** Update File: relative/path.py
+@@
+-old exact line
++new exact line
+*** End Patch
+```
+
+Feed that text to apply_patch on stdin. Check its actual exit/output before a
+later command can mask failure; re-read the edited bytes. Do not repeatedly try
+numbered hunks or replace whole files to work around a syntax misunderstanding.
+
 ## Test-first and negative contracts
 
 Read the required security properties before coding. Write focused behavior and
