@@ -283,5 +283,82 @@
   "discovered_not_fixed": ["raise AssertionError(unreachable) after _fail is verbose by design (aids type narrowing); kept deliberately", "history.summaries, where/status effective_limits and init.config stay bare objects: their JSON field shapes are not frozen anywhere in the approved design, so no authority exists to freeze them at this barrier; noted for the owning tasks"],
   "failed_attempts_retained": ["initial full attempt wedged on FIFO blocking open (64s, interrupted only the owned test; fixed with O_NONBLOCK)", "repair GREEN attempt 1: 67 passed + 1 failed when the miniature target observed PTEST_BOOTSTRAP in its environment; the assertion was scoped to the documented CONTROL_VARS instead of every PTEST_* var (PTEST_BOOTSTRAP is orchestrator shell env, outside the fixture contract)"],
   "confidence": "medium: every Task0 behavior is implemented and green with focused regression evidence, but cross-task consumption has not run yet",
-  "blockers": []
+  "blockers": [],
+  "addendum_round": {
+    "base": "071d4af",
+    "scope": "Author-frozen public-summary addendum (design section 6 + plan T0/T1/T3/T4/T11 notes): InitAction, ConfigSummary, EffectiveLimits, history RunResult reuse, init precedence/relations, allowlisted producers, recursive consumer projection. No redesign; previous T0-1..T0-7 repairs preserved byte-for-behavior.",
+    "change": "src/ptest/contracts.py: InitAction closed enum; ConfigSummary (hex32 project_id, RunnerKind, workers 1-64, exactly scoped-then-full kind-matched CommandSummary pair, five bools) + summarize_config allowlisted builder; EffectiveLimits (nullable max_slots/max_jobs 1-64 paired, memory_mb 64-1048576, repo_workers 1-64, max_jobs<=max_slots) + converters; InitResult.action is InitAction with preview/exists consistency + select_init_action precedence (existing wins even dry-run, then created, then preview, else error-envelope ValueError) + serialize_init_result; _check_exact_keys renamed to _check_required_keys (additive unknowns tolerated); _check_config_summary_dict/_check_effective_limits_dict; where/status/history/init validators tightened (history summaries reuse _validate_run_payload); _PROJECTORS recursive known-field projection wired into decode_public_document plus domain projection; generated schemas allow additive properties (10 additionalProperties:false removed) and type the new shapes (_config_summary_schema with min/maxItems 2, _effective_limits_schema, history items reuse _run_data_schema, init action enum). Private control/launch/bridge codecs untouched and still strict.",
+    "tests": "tests/ng/test_contracts.py: 10 new tests (closed enum + coercion + action/exists consistency, precedence 4 branches + error case, scoped-then-full ordering/kind/count negatives, absent-setup flags, limits pairing/bounds 6 negatives, init round-trip exact key sets + 6-sentinel absence, init/where/status negatives, history reuse + tampered-mode rejection + smuggled-sequence drop + empty history, all-8-kinds recursive drop incl. envelope/domain/error extras + re-encode sentinel absence, generated-shape assertions); _full_payloads now uses production serializers (_effective_limits_dict, serialize_run_result, serialize_init_result, summarize_config); smuggled-extra-key rejection block replaced by projection coverage per the author ruling.",
+    "evidence": [
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "12 failed, 28 passed in 0.34s: 2 behavioral REDs (unknown init.action accepted, tampered history summary accepted), 1 schema-shape RED, 9 missing-symbol errors for the unimplemented surface",
+        "raw": ".pipeline/local/red-addendum.log + .pipeline/local/red-addendum.exit"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "1 failed, 39 passed in 0.08s: only test_addendum_schema_shapes, pending regeneration",
+        "raw": ".pipeline/local/green-addendum1.log + .pipeline/local/green-addendum1.exit"
+      },
+      {
+        "command": "uv run --locked --no-sync python scripts/export-schemas.py && uv run --locked --no-sync python scripts/export-schemas.py --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "regenerated 8 schemas + protocol-v1.json; only doctor/history/init/run/status/where changed; --check clean",
+        "raw": ".pipeline/local/schema-export-addendum.log, .pipeline/local/schema-check-addendum.log"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "78 passed in 0.14s (final re-runs 0.14s/0.21s); test_files/test_storage run read-only as sibling-owned verification",
+        "raw": ".pipeline/local/green-addendum.log, green-addendum-final.log, green-addendum-final2.log, green-addendum-final3.log (+ .exit files)"
+      },
+      {
+        "command": "sabotage probes via apply_patch then immediate restore",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "sabotage1 (InitAction coercion removed): closed_enum fails; sabotage2 (projection bypassed): drops_additive + history_summaries fail; sabotage3 (max_jobs<=max_slots removed): pairing fails; all restored, 78 passed after",
+        "raw": ".pipeline/local/sabotage1.log, sabotage2.log, sabotage3.log"
+      },
+      {
+        "command": "graphify update .",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "AST-only update, no semantic extraction (no API key configured)",
+        "raw": ".pipeline/local/graphify-update-addendum.log"
+      },
+      {
+        "command": "git diff --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "clean"
+      }
+    ],
+    "acceptance": {
+      "init_action_precedence": "MET: closed enum, constructor/exists relations, pure precedence helper, decode enforcement; unknown actions rejected",
+      "config_summary": "MET: frozen record + allowlisted builder/serializer/validator/schema; scoped-then-full kind-matched ordering; absent-setup clears flags; 6-sentinel redaction incl. re-encode",
+      "effective_limits": "MET: nullable fields, bounds, paired slot/job unknowns, max_jobs<=max_slots; shared by where/status validators and schemas",
+      "history_reuse": "MET: summaries validated by _validate_run_payload, schema items are the run payload, fixtures serialize via serialize_run_result; internal fields absent; empty history is an empty array",
+      "projection": "MET: all 8 kinds plus domain/error project to known fields; additive unknowns dropped never re-emitted; bad known values still rejected; private protocols untouched",
+      "schema_drift": "MET: export --check exit 0; protocol-v1.json byte-identical (private surface unchanged)"
+    },
+    "dan_passes": {
+      "pass1_reread": "Re-read the full contracts diff twice. Observations: _INIT_ACTIONS comment claimed validator proximity it did not have (comment removed, one-liner kept); a probe patch briefly added a bogus run-schema field and was reverted immediately (verified gone); a builder insert duplicated the run body and the stub was deleted (verified gone). No other findings.",
+      "pass2_reanchor": "All 5 addendum contracts MET with file evidence above; prior T0-1..T0-7 behaviors preserved (scoped suite green incl. sibling-owned files/storage tests run read-only). No scope expansion: no scheduler/runner/config/platform/CLI code, no new dependencies, no private-codec changes.",
+      "pass3_smells": "No TODOs/stubs; new names have no synonyms in the tree (InitAction/ConfigSummary/EffectiveLimits/summarize_config/select_init_action/serialize_init_result/_PROJECTORS are the only owners); validators run before projectors so KeyError paths are unreachable on accepted shapes; None-passthrough preserved for capability/counts/timings/config; argv/env in run.command still rejected (stronger than ignore, consistent with never-trusted); happy/empty/error paths covered, cancellation/repeat N/A for pure codecs (no I/O added)."
+    },
+    "implemented": ["InitAction + select_init_action + InitResult relations + serialize_init_result", "ConfigSummary + summarize_config + converter/validator/schema", "EffectiveLimits + converter/validator/schema shared by where/status", "history RunResult payload reuse (validator + schema + serializer fixtures)", "recursive public projection in decode + additive schema properties", "10 addendum regression tests + production-serializer fixtures + empty-history edge"],
+    "verified": ["78 passed exit 0 scoped via frozen bootstrap", "schema --check exit 0", "RED exit 1 with 2 behavioral + 1 shape + 9 missing-symbol failures", "3 sabotage mutations each detected then restored", "graphify AST exit 0", "diff --check clean"],
+    "not_verified": ["macOS branches (linux host)", "consumption by T1/T3/T4/T11 (later waves build on these records)", "requested model identity (root checks independently)"],
+    "deferred": [],
+    "discovered_not_fixed": ["run.command carrying literal argv/env keys is still a hard rejection rather than a drop; kept deliberately as the stronger never-trusted posture, consistent with the existing redaction contract"],
+    "failed_attempts_retained": ["probe patch added a bogus run-schema 'note' field to test mechanics; reverted immediately in the next command and verified absent via grep", "builder insert duplicated the _run_data_schema body as _run_payload_schema stub; stub deleted, verified absent; final diff contains each builder once", "one validator patch failed on a mistranscribed context line (findings placement); retried with minimal anchor, no source touched by the failure"],
+    "confidence": "high for the addendum surface: every frozen behavior is implemented, red-then-green with sabotage sensitivity, and the full owned-plus-sibling scoped suite is green",
+    "owned_files_committed": ["src/ptest/contracts.py", "tests/ng/test_contracts.py", "docs/schemas/v1/doctor.json", "docs/schemas/v1/history.json", "docs/schemas/v1/init.json", "docs/schemas/v1/run.json", "docs/schemas/v1/status.json", "docs/schemas/v1/where.json", ".pipeline/out/task-0.json"]
+  }
 }

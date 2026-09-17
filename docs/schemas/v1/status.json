@@ -5,7 +5,6 @@
       "properties": {
         "active": {
           "items": {
-            "additionalProperties": false,
             "properties": {
               "age_s": {
                 "minimum": 0,
@@ -126,11 +125,50 @@
           "type": "array"
         },
         "effective_limits": {
+          "properties": {
+            "max_jobs": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_slots": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_mb": {
+              "maximum": 1048576,
+              "minimum": 64,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "repo_workers": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "max_slots",
+            "max_jobs",
+            "memory_mb",
+            "repo_workers"
+          ],
           "type": "object"
         },
         "queued": {
           "items": {
-            "additionalProperties": false,
             "properties": {
               "age_s": {
                 "minimum": 0,

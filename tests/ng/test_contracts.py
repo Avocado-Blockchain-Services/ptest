@@ -202,6 +202,75 @@ def _finding_data():
     return C._finding_dict(finding)
 
 
+_SUMMARY_SENTINELS = (
+    "launcher-secret-7f1",
+    "args-secret-7f1",
+    "full-secret-7f1",
+    "setup-secret-7f1",
+    "env-secret-7f1",
+    "positional-secret-7f1",
+)
+
+
+def _summary_case(with_setup=True):
+    runner = C.RunnerConfig(
+        kind=C.RunnerKind.PYTEST,
+        launcher=("python", "launcher-secret-7f1"),
+        args=("--args-secret-7f1",),
+        full_args=("--full-secret-7f1",),
+        test_roots=("tests",),
+        workers=4,
+        lifecycle="cooperative-process-group",
+    )
+    setup = None
+    if with_setup:
+        setup = C.SetupConfig(
+            argv=("setup-secret-7f1",),
+            required_paths=("pyproject.toml",),
+            network=True,
+            lifecycle_scripts=True,
+        )
+    config = C.Config(
+        runner=runner,
+        setup=setup,
+        resources=C.ResourceConfig(
+            locks=(), memory_mb_per_worker=0,
+            probe_isolation="undeclared",
+        ),
+        selection=C.SelectionPolicy(
+            enabled=True, closed_inputs=True, input_roots=("src",),
+            ignored_inputs=(), environment=("ENV-secret=env-secret-7f1",),
+            full_triggers=(), always=(), no_tests=(),
+            non_input_outputs=(), full_ratio=0.70, groups=(),
+        ),
+        project_id="ab" * 16,
+    )
+    scoped = C.summarize_command(
+        C.RunnerKind.PYTEST, C.Mode.SCOPED,
+        ["-q", "positional-secret-7f1"],
+        generated_options=("-q",), workers=4, provenance=("adapter",),
+    )
+    full = C.summarize_command(
+        C.RunnerKind.PYTEST, C.Mode.FULL, ["-q"],
+        generated_options=(), workers=4, provenance=("adapter",),
+    )
+    return config, scoped, full
+
+
+def _limits_data():
+    return C._effective_limits_dict(C.EffectiveLimits(
+        max_slots=8, max_jobs=4, memory_mb=4096, repo_workers=2))
+
+
+def _init_result():
+    config, scoped, full = _summary_case()
+    summary = C.summarize_config(config, scoped=scoped, full=full)
+    return C.InitResult(
+        action="created", target=Path("/repo/.ptest.toml"), exists=True,
+        config=summary, warnings=(),
+    )
+
+
 def _full_payloads():
     return {
         "run": C.serialize_run_result(_secret_result(["-q"])),
@@ -216,21 +285,18 @@ def _full_payloads():
             "initialized": True, "runner_kind": "pytest",
             "capability": _capability_data(),
             "commands": [_full_command_data()],
-            "effective_limits": {"workers": 1},
+            "effective_limits": _limits_data(),
             "provenance": ["config"], "warnings": [],
         },
         "status": {
-            "effective_limits": {"workers": 1},
+            "effective_limits": _limits_data(),
             "queued": [_lease_data()], "active": [],
         },
         "history": {
-            "summaries": [{"run_id": RUN_ID}],
+            "summaries": [C.serialize_run_result(_secret_result(["-q"]))],
             "obligations": [_obligation_data()],
         },
-        "init": {
-            "action": "created", "target": "/repo/.ptest.toml",
-            "exists": False, "warnings": [], "config": None,
-        },
+        "init": C.serialize_init_result(_init_result()),
         "doctor": {
             "scope": ["tests"], "readiness": [_readiness_data()],
             "findings": [_finding_data()],
@@ -277,6 +343,20 @@ def test_eight_public_documents_parse():
         C.encode_public_document("doctor", _full_payloads()["doctor"]))
     assert doctor_doc.data["findings"][0]["code"] == "timing.slow-test"
     assert doctor_doc.data["limits"]["ast_nodes"] == 50000
+    init_doc = C.decode_public_document(
+        C.encode_public_document("init", _full_payloads()["init"]))
+    assert init_doc.data["action"] == "created"
+    assert init_doc.data["exists"] is True
+    assert init_doc.data["config"]["project_id"] == "ab" * 16
+    assert [c["mode"] for c in init_doc.data["config"]["commands"]] == [
+        "scoped", "full"]
+    history_doc = C.decode_public_document(
+        C.encode_public_document("history", _full_payloads()["history"]))
+    assert history_doc.data["summaries"][0]["run_id"] == RUN_ID
+    assert history_doc.data["summaries"][0]["mode"] == "shadow"
+    for internal in ("sequence", "input_before", "input_after",
+                     "policy_digest"):
+        assert internal not in history_doc.data["summaries"][0]
 
 
 def test_generated_schema_files_match_frozen_shapes():
@@ -341,10 +421,8 @@ def test_frozen_subrecord_negatives_rejected():
                        "paths": []}]
     with pytest.raises(Problem, match="report-invalid"):
         C.decode_public_document(C.encode_public_document("run", run))
-    where = _full_payloads()["where"]
-    where["capability"] = dict(_capability_data(), smuggled=True)
-    with pytest.raises(Problem, match="report-invalid"):
-        C.decode_public_document(C.encode_public_document("where", where))
+# Additive same-major public fields are dropped on decode, never rejected;
+# test_public_decode_drops_additive_unknowns covers that projection.
 
 
 def _attempt_dict_for_negative():
@@ -700,3 +778,347 @@ def test_unknown_config_alias_raises(case):
         case.config(bogus_field=True)
     with pytest.raises(ValueError, match="unknown result override"):
         case.result(bogus_field=True)
+
+
+def test_init_action_is_closed_enum():
+    assert [item.value for item in C.InitAction] == [
+        "created", "preview", "existing"]
+    good = C.InitResult(
+        action=C.InitAction.CREATED, target=Path("/repo/.ptest.toml"),
+        exists=True, config=None, warnings=())
+    assert good.action is C.InitAction.CREATED
+    coerced = C.InitResult(
+        action="preview", target=Path("/repo/.ptest.toml"),
+        exists=False, config=None, warnings=())
+    assert coerced.action is C.InitAction.PREVIEW
+    with pytest.raises(ValueError):
+        C.InitResult(
+            action="deleted", target=Path("/repo/.ptest.toml"),
+            exists=False, config=None, warnings=())
+    with pytest.raises(ValueError):
+        C.InitResult(
+            action="preview", target=Path("/repo/.ptest.toml"),
+            exists=True, config=None, warnings=())
+    with pytest.raises(ValueError):
+        C.InitResult(
+            action="created", target=Path("/repo/.ptest.toml"),
+            exists=False, config=None, warnings=())
+    with pytest.raises(ValueError):
+        C.InitResult(
+            action="existing", target=Path("/repo/.ptest.toml"),
+            exists=False, config=None, warnings=())
+
+
+def test_select_init_action_precedence():
+    assert C.select_init_action(
+        target_exists=True, dry_run=True, created=False) == (
+        C.InitAction.EXISTING, True)
+    assert C.select_init_action(
+        target_exists=True, dry_run=False, created=False) == (
+        C.InitAction.EXISTING, True)
+    assert C.select_init_action(
+        target_exists=False, dry_run=True, created=False) == (
+        C.InitAction.PREVIEW, False)
+    assert C.select_init_action(
+        target_exists=False, dry_run=False, created=True) == (
+        C.InitAction.CREATED, True)
+    with pytest.raises(ValueError):
+        C.select_init_action(
+            target_exists=False, dry_run=False, created=False)
+
+
+def test_config_summary_requires_scoped_then_full():
+    config, scoped, full = _summary_case()
+    summary = C.summarize_config(config, scoped=scoped, full=full)
+    assert summary.project_id == "ab" * 16
+    assert summary.runner_kind is C.RunnerKind.PYTEST
+    assert summary.workers == 4
+    assert [item.mode for item in summary.commands] == [
+        C.Mode.SCOPED, C.Mode.FULL]
+    assert (summary.setup_configured, summary.setup_network,
+            summary.setup_lifecycle_scripts) == (True, True, True)
+    assert (summary.selection_enabled, summary.closed_inputs) == (True, True)
+    with pytest.raises(ValueError):
+        C.summarize_config(config, scoped=full, full=scoped)
+    with pytest.raises(ValueError):
+        C.summarize_config(config, scoped=scoped, full=scoped)
+    other = C.summarize_command(
+        C.RunnerKind.GO, C.Mode.FULL, ["-q"],
+        workers=1, provenance=("test",))
+    with pytest.raises(ValueError):
+        C.summarize_config(config, scoped=scoped, full=other)
+    with pytest.raises(ValueError):
+        C.ConfigSummary(
+            project_id="zz", runner_kind=C.RunnerKind.PYTEST, workers=4,
+            commands=(scoped, full), setup_configured=True,
+            setup_network=True, setup_lifecycle_scripts=True,
+            selection_enabled=True, closed_inputs=True)
+    with pytest.raises(ValueError):
+        C.ConfigSummary(
+            project_id="ab" * 16, runner_kind=C.RunnerKind.PYTEST,
+            workers=65, commands=(scoped, full), setup_configured=True,
+            setup_network=True, setup_lifecycle_scripts=True,
+            selection_enabled=True, closed_inputs=True)
+    with pytest.raises(ValueError):
+        C.ConfigSummary(
+            project_id="ab" * 16, runner_kind=C.RunnerKind.PYTEST,
+            workers=4, commands=(scoped,), setup_configured=True,
+            setup_network=True, setup_lifecycle_scripts=True,
+            selection_enabled=True, closed_inputs=True)
+
+
+def test_config_summary_absent_setup_clears_setup_flags():
+    config, scoped, full = _summary_case(with_setup=False)
+    summary = C.summarize_config(config, scoped=scoped, full=full)
+    assert (summary.setup_configured, summary.setup_network,
+            summary.setup_lifecycle_scripts) == (False, False, False)
+
+
+def test_effective_limits_pairing_and_bounds():
+    ok = C.EffectiveLimits(
+        max_slots=8, max_jobs=8, memory_mb=4096, repo_workers=4)
+    assert ok.max_jobs <= ok.max_slots
+    none_ok = C.EffectiveLimits(
+        max_slots=None, max_jobs=None, memory_mb=None, repo_workers=None)
+    assert none_ok.max_slots is None
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=8, max_jobs=None, memory_mb=None, repo_workers=None)
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=None, max_jobs=2, memory_mb=None, repo_workers=None)
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=4, max_jobs=8, memory_mb=None, repo_workers=None)
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=0, max_jobs=0, memory_mb=None, repo_workers=None)
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=8, max_jobs=8, memory_mb=32, repo_workers=None)
+    with pytest.raises(ValueError):
+        C.EffectiveLimits(
+            max_slots=8, max_jobs=8, memory_mb=None, repo_workers=65)
+
+
+def test_public_init_roundtrip_uses_config_summary():
+    payload = C.serialize_init_result(_init_result())
+    assert set(payload) == {
+        "action", "target", "exists", "warnings", "config"}
+    assert payload["action"] == "created"
+    assert payload["target"] == "/repo/.ptest.toml"
+    assert set(payload["config"]) == {
+        "project_id", "runner_kind", "workers", "commands",
+        "setup_configured", "setup_network", "setup_lifecycle_scripts",
+        "selection_enabled", "closed_inputs"}
+    assert [item["mode"] for item in payload["config"]["commands"]] == [
+        "scoped", "full"]
+    rendered = C.encode_public_document("init", payload).decode()
+    for sentinel in _SUMMARY_SENTINELS:
+        assert sentinel not in rendered
+    revived = C.decode_public_document(
+        C.encode_public_document("init", payload))
+    assert revived.data["action"] == "created"
+    assert revived.data["config"]["project_id"] == "ab" * 16
+    assert revived.data["config"]["workers"] == 4
+
+
+def test_init_payload_negatives_rejected():
+    bad = {"action": "deleted", "target": "/repo/.ptest.toml",
+           "exists": False, "warnings": [], "config": None}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("init", bad))
+    mismatch = {"action": "preview", "target": "/repo/.ptest.toml",
+                "exists": True, "warnings": [], "config": None}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(
+            C.encode_public_document("init", mismatch))
+    partial = {"action": "created", "target": "/repo/.ptest.toml",
+               "exists": True, "warnings": [],
+               "config": {"project_id": "ab" * 16}}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(
+            C.encode_public_document("init", partial))
+    where = _full_payloads()["where"]
+    where["effective_limits"] = {"max_slots": 8, "max_jobs": None,
+                                 "memory_mb": None, "repo_workers": None}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("where", where))
+    status = _full_payloads()["status"]
+    status["effective_limits"] = {"max_slots": 2, "max_jobs": 9,
+                                  "memory_mb": None, "repo_workers": None}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(
+            C.encode_public_document("status", status))
+
+
+def test_history_summaries_reuse_run_payload():
+    run_payload = C.serialize_run_result(_secret_result(["-q"]))
+    history = {"summaries": [run_payload],
+               "obligations": [_obligation_data()]}
+    revived = C.decode_public_document(
+        C.encode_public_document("history", history))
+    assert revived.data["summaries"][0]["run_id"] == RUN_ID
+    assert revived.data["summaries"][0]["counts"]["collected"] == 6
+    assert revived.data["summaries"][0]["attempts"][0]["attempt_id"] == "a001"
+    for internal in ("sequence", "input_before", "input_after",
+                     "policy_digest"):
+        assert internal not in revived.data["summaries"][0]
+    tampered = {"summaries": [dict(run_payload, mode="turbo")],
+                "obligations": []}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(
+            C.encode_public_document("history", tampered))
+    smuggled = {"summaries": [dict(run_payload, sequence=7)],
+                "obligations": []}
+    dropped = C.decode_public_document(
+        C.encode_public_document("history", smuggled))
+    assert "sequence" not in dropped.data["summaries"][0]
+    empty = C.decode_public_document(
+        C.encode_public_document(
+            "history", {"summaries": [], "obligations": []}))
+    assert empty.data == {"summaries": [], "obligations": []}
+
+
+def test_public_decode_drops_additive_unknowns():
+    sentinel = "smuggled-additive-4d7"
+    payloads = _full_payloads()
+    where = payloads["where"]
+    where["capability"] = dict(
+        where["capability"], future_note=sentinel)
+    where["commands"][0] = dict(
+        where["commands"][0], future_count=3)
+    where["effective_limits"] = dict(
+        where["effective_limits"], future_ceiling=9)
+    where["future_top"] = {"argv": [sentinel], "env": {"K": sentinel}}
+    run = payloads["run"]
+    run["counts"] = dict(run["counts"], future_total=1)
+    attempt = dict(run["attempts"][0])
+    attempt["timings"] = dict(C._timings_dict(C.Timings(
+        queue_s=0.1, setup_s=0.2, collection_s=0.3,
+        execution_s=0.4, finalization_s=0.5)), future_phase=sentinel)
+    attempt["future_attempt"] = sentinel
+    run["attempts"] = [attempt]
+    run["future_run"] = sentinel
+    status = payloads["status"]
+    status["queued"][0] = dict(status["queued"][0], future_lease=sentinel)
+    status["effective_limits"] = dict(
+        status["effective_limits"], future_ceiling=1)
+    history = payloads["history"]
+    history["summaries"][0] = dict(
+        history["summaries"][0], future_summary=sentinel)
+    history["obligations"][0] = dict(
+        history["obligations"][0], future_obligation=sentinel)
+    init = payloads["init"]
+    init["config"] = dict(init["config"], future_config=sentinel)
+    init["config"]["commands"][0] = dict(
+        init["config"]["commands"][0], future_command=sentinel)
+    init["future_init"] = sentinel
+    doctor = payloads["doctor"]
+    doctor["readiness"][0] = dict(
+        doctor["readiness"][0], future_readiness=sentinel)
+    doctor["findings"][0] = dict(
+        doctor["findings"][0], future_finding=sentinel)
+    doctor["limits"] = dict(doctor["limits"], future_limit=sentinel)
+    doctor["usage"] = dict(doctor["usage"], future_usage=sentinel)
+    register = payloads["register"]
+    register["commands"][0] = dict(
+        register["commands"][0], future_command=sentinel)
+    payloads["plan"]["future_plan"] = sentinel
+    for kind, data in payloads.items():
+        doc = C.decode_public_document(
+            C.encode_public_document(kind, data))
+        assert doc.error is None, kind
+    revived_where = C.decode_public_document(
+        C.encode_public_document("where", payloads["where"])).data
+    assert "future_top" not in revived_where
+    assert "future_note" not in revived_where["capability"]
+    assert "future_count" not in revived_where["commands"][0]
+    assert "future_ceiling" not in revived_where["effective_limits"]
+    assert revived_where["capability"]["execution"] == "advanced"
+    revived_run = C.decode_public_document(
+        C.encode_public_document("run", payloads["run"])).data
+    assert "future_run" not in revived_run
+    assert "future_total" not in revived_run["counts"]
+    assert "future_attempt" not in revived_run["attempts"][0]
+    assert "future_phase" not in revived_run["attempts"][0]["timings"]
+    assert revived_run["attempts"][0]["timings"]["queue"] == 0.1
+    revived_status = C.decode_public_document(
+        C.encode_public_document("status", payloads["status"])).data
+    assert "future_lease" not in revived_status["queued"][0]
+    assert "future_ceiling" not in revived_status["effective_limits"]
+    revived_history = C.decode_public_document(
+        C.encode_public_document("history", payloads["history"])).data
+    assert "future_summary" not in revived_history["summaries"][0]
+    assert "future_obligation" not in revived_history["obligations"][0]
+    assert revived_history["summaries"][0]["run_id"] == RUN_ID
+    revived_init = C.decode_public_document(
+        C.encode_public_document("init", payloads["init"])).data
+    assert "future_init" not in revived_init
+    assert "future_config" not in revived_init["config"]
+    assert "future_command" not in revived_init["config"]["commands"][0]
+    assert revived_init["config"]["commands"][1]["mode"] == "full"
+    revived_doctor = C.decode_public_document(
+        C.encode_public_document("doctor", payloads["doctor"])).data
+    assert "future_readiness" not in revived_doctor["readiness"][0]
+    assert "future_finding" not in revived_doctor["findings"][0]
+    assert "future_limit" not in revived_doctor["limits"]
+    assert "future_usage" not in revived_doctor["usage"]
+    revived_register = C.decode_public_document(
+        C.encode_public_document("register", payloads["register"])).data
+    assert "future_command" not in revived_register["commands"][0]
+    revived_plan = C.decode_public_document(
+        C.encode_public_document("plan", payloads["plan"])).data
+    assert "future_plan" not in revived_plan
+    assert revived_plan["execution"] == "selected"
+    for kind in ("where", "run", "history", "init"):
+        rendered = C.encode_public_document(
+            kind, C.decode_public_document(
+                C.encode_public_document(
+                    kind, payloads[kind])).data).decode()
+        assert sentinel not in rendered, kind
+    raw = json.loads(C.encode_public_document("where", payloads["where"]))
+    raw["future_envelope"] = sentinel
+    raw["domain"] = {"id": "ab" * 16, "fixture": False,
+                     "future_domain": sentinel}
+    envelope_doc = C.decode_public_document(json.dumps(raw).encode())
+    assert envelope_doc.domain == {"id": "ab" * 16, "fixture": False}
+    problem = Problem(code="x", message="y", phase="z")
+    err_raw = json.loads(C.encode_public_document("run", None, error=problem))
+    err_raw["error"]["future_error"] = sentinel
+    err_doc = C.decode_public_document(json.dumps(err_raw).encode())
+    assert set(json.loads(C.encode_public_document(
+        "run", None, error=err_doc.error).decode())["error"]) == {
+        "code", "message", "phase", "retryable"}
+
+
+def test_addendum_schema_shapes():
+    root = Path(__file__).resolve().parents[2]
+    schemas = {}
+    for kind in ("run", "plan", "where", "status", "history", "init",
+                 "doctor", "register"):
+        path = root / "docs" / "schemas" / "v1" / f"{kind}.json"
+        schemas[kind] = json.loads(path.read_text(encoding="utf-8"))
+    init_data = schemas["init"]["properties"]["data"]["properties"]
+    assert init_data["action"] == {
+        "type": "string", "enum": ["created", "preview", "existing"]}
+    config = init_data["config"]
+    assert config["type"] == ["object", "null"]
+    assert sorted(config["required"]) == [
+        "closed_inputs", "commands", "project_id", "runner_kind",
+        "selection_enabled", "setup_configured", "setup_lifecycle_scripts",
+        "setup_network", "workers"]
+    commands = config["properties"]["commands"]
+    assert commands["minItems"] == 2
+    assert commands["maxItems"] == 2
+    for kind in ("where", "status"):
+        limits = schemas[kind]["properties"]["data"]["properties"][
+            "effective_limits"]
+        assert sorted(limits["required"]) == [
+            "max_jobs", "max_slots", "memory_mb", "repo_workers"]
+    summaries = schemas["history"]["properties"]["data"]["properties"][
+        "summaries"]["items"]
+    assert "run_id" in summaries["required"]
+    assert "mode" in summaries["required"]
+    assert "sequence" not in summaries["required"]
+    assert "policy_digest" not in summaries.get("properties", {})

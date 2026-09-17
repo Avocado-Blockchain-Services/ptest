@@ -4,9 +4,123 @@
     "data": {
       "properties": {
         "action": {
+          "enum": [
+            "created",
+            "preview",
+            "existing"
+          ],
           "type": "string"
         },
         "config": {
+          "properties": {
+            "closed_inputs": {
+              "type": "boolean"
+            },
+            "commands": {
+              "items": {
+                "properties": {
+                  "argument_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "generated_options": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "enum": [
+                      "pytest",
+                      "vitest",
+                      "go",
+                      "cargo",
+                      "command"
+                    ],
+                    "type": "string"
+                  },
+                  "mode": {
+                    "enum": [
+                      "automatic",
+                      "scoped",
+                      "full",
+                      "shadow",
+                      "probe"
+                    ],
+                    "type": "string"
+                  },
+                  "provenance": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workers": {
+                    "maximum": 64,
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "mode",
+                  "argument_count",
+                  "generated_options",
+                  "workers",
+                  "provenance"
+                ],
+                "type": "object"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "project_id": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "runner_kind": {
+              "enum": [
+                "pytest",
+                "vitest",
+                "go",
+                "cargo",
+                "command"
+              ],
+              "type": "string"
+            },
+            "selection_enabled": {
+              "type": "boolean"
+            },
+            "setup_configured": {
+              "type": "boolean"
+            },
+            "setup_lifecycle_scripts": {
+              "type": "boolean"
+            },
+            "setup_network": {
+              "type": "boolean"
+            },
+            "workers": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "project_id",
+            "runner_kind",
+            "workers",
+            "commands",
+            "setup_configured",
+            "setup_network",
+            "setup_lifecycle_scripts",
+            "selection_enabled",
+            "closed_inputs"
+          ],
           "type": [
             "object",
             "null"

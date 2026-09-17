@@ -103,6 +103,12 @@ class LeaseState(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
+class InitAction(str, Enum):
+    CREATED = "created"
+    PREVIEW = "preview"
+    EXISTING = "existing"
+
+
 MAX_PROMPT_BYTES = 65536
 DEFAULT_QUEUE_TIMEOUT_S = 1800.0
 MAX_QUEUE_TIMEOUT_S = 86400.0
@@ -507,6 +513,83 @@ class Config:
             raise TypeError("config.checkout must be CheckoutIdentity or None")
         if self.config_path is not None:
             object.__setattr__(self, "config_path", _check_path("config.config_path", self.config_path))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ConfigSummary:
+    project_id: str
+    runner_kind: RunnerKind
+    workers: int
+    commands: tuple = ()
+    setup_configured: bool = False
+    setup_network: bool = False
+    setup_lifecycle_scripts: bool = False
+    selection_enabled: bool = False
+    closed_inputs: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "project_id", _check_hex("config_summary.project_id", self.project_id, 32))
+        object.__setattr__(self, "runner_kind", _check_enum("config_summary.runner_kind", self.runner_kind, RunnerKind))
+        object.__setattr__(self, "workers", _check_int("config_summary.workers", self.workers, lo=1, hi=64))
+        items = _check_tuple("config_summary.commands", self.commands)
+        if len(items) != 2:
+            raise ValueError("config_summary.commands must hold exactly scoped then full summaries")
+        for item in items:
+            if not isinstance(item, CommandSummary):
+                raise TypeError("config_summary.commands entries must be CommandSummary")
+        scoped, full = items
+        if scoped.mode != Mode.SCOPED or full.mode != Mode.FULL:
+            raise ValueError("config_summary.commands must be scoped then full")
+        if scoped.kind is not self.runner_kind or full.kind is not self.runner_kind:
+            raise ValueError("config_summary.commands must match runner_kind")
+        object.__setattr__(self, "commands", items)
+        for field in ("setup_configured", "setup_network",
+                      "setup_lifecycle_scripts", "selection_enabled",
+                      "closed_inputs"):
+            object.__setattr__(self, field, _check_bool(f"config_summary.{field}", getattr(self, field)))
+
+
+@dataclass(frozen=True, kw_only=True)
+class EffectiveLimits:
+    max_slots: int | None = None
+    max_jobs: int | None = None
+    memory_mb: int | None = None
+    repo_workers: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_slots is not None:
+            _check_int("limits.max_slots", self.max_slots, lo=1, hi=64)
+        if self.max_jobs is not None:
+            _check_int("limits.max_jobs", self.max_jobs, lo=1, hi=64)
+        if (self.max_slots is None) != (self.max_jobs is None):
+            raise ValueError("limits.max_slots/max_jobs are both known or both null")
+        if (self.max_slots is not None and self.max_jobs is not None
+                and self.max_jobs > self.max_slots):
+            raise ValueError("limits.max_jobs must not exceed max_slots")
+        if self.memory_mb is not None:
+            _check_int("limits.memory_mb", self.memory_mb, lo=64, hi=1048576)
+        if self.repo_workers is not None:
+            _check_int("limits.repo_workers", self.repo_workers, lo=1, hi=64)
+
+
+def summarize_config(config: Config, *, scoped: CommandSummary,
+                     full: CommandSummary) -> ConfigSummary:
+    """Build the allowlisted public config summary; raw argv/env never cross."""
+    if not isinstance(config, Config):
+        raise TypeError("summarize_config requires Config")
+    setup = config.setup
+    return ConfigSummary(
+        project_id=config.project_id,
+        runner_kind=config.runner.kind,
+        workers=config.runner.workers,
+        commands=(scoped, full),
+        setup_configured=setup is not None,
+        setup_network=bool(setup is not None and setup.network),
+        setup_lifecycle_scripts=bool(
+            setup is not None and setup.lifecycle_scripts),
+        selection_enabled=config.selection.enabled,
+        closed_inputs=config.selection.closed_inputs,
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1311,6 +1394,35 @@ def _scan_usage_dict(usage: ScanUsage) -> dict:
     }
 
 
+def _config_summary_dict(summary: ConfigSummary | None) -> dict | None:
+    """Shared ConfigSummary converter: serializer and fixtures use this."""
+    if summary is None:
+        return None
+    return {
+        "project_id": summary.project_id,
+        "runner_kind": summary.runner_kind.value,
+        "workers": summary.workers,
+        "commands": [_command_dict(item) for item in summary.commands],
+        "setup_configured": summary.setup_configured,
+        "setup_network": summary.setup_network,
+        "setup_lifecycle_scripts": summary.setup_lifecycle_scripts,
+        "selection_enabled": summary.selection_enabled,
+        "closed_inputs": summary.closed_inputs,
+    }
+
+
+def _effective_limits_dict(limits: EffectiveLimits) -> dict:
+    """Shared EffectiveLimits converter: serializer and fixtures use this."""
+    if not isinstance(limits, EffectiveLimits):
+        raise TypeError("_effective_limits_dict requires EffectiveLimits")
+    return {
+        "max_slots": limits.max_slots,
+        "max_jobs": limits.max_jobs,
+        "memory_mb": limits.memory_mb,
+        "repo_workers": limits.repo_workers,
+    }
+
+
 @dataclass(frozen=True, kw_only=True)
 class Readiness:
     area: str
@@ -1405,23 +1517,57 @@ class InitOptions:
 
 @dataclass(frozen=True, kw_only=True)
 class InitResult:
-    action: str
+    action: InitAction
     target: Path
     exists: bool
-    config: Config | None
+    config: ConfigSummary | None
     warnings: tuple = ()
 
     def __post_init__(self) -> None:
-        _check_str("init.action", self.action)
+        object.__setattr__(self, "action", _check_enum("init.action", self.action, InitAction))
         object.__setattr__(self, "target", _check_path("init.target", self.target))
         object.__setattr__(self, "exists", _check_bool("init.exists", self.exists))
-        if self.config is not None and not isinstance(self.config, Config):
-            raise TypeError("init.config must be Config or None")
+        if (self.action is InitAction.PREVIEW) == self.exists:
+            raise ValueError(
+                "init.action/exists mismatch: preview needs exists=false, "
+                "created/existing need exists=true")
+        if self.config is not None and not isinstance(self.config, ConfigSummary):
+            raise TypeError("init.config must be ConfigSummary or None")
         items = _check_tuple("init.warnings", self.warnings)
         for item in items:
             if not isinstance(item, Reason):
                 raise TypeError("init.warnings entries must be Reason")
         object.__setattr__(self, "warnings", items)
+
+
+def select_init_action(*, target_exists: bool, dry_run: bool,
+                       created: bool) -> tuple:
+    """Frozen init precedence: existing wins even dry-run, then creation, then preview."""
+    target_exists = _check_bool("init.target_exists", target_exists)
+    dry_run = _check_bool("init.dry_run", dry_run)
+    created = _check_bool("init.created", created)
+    if target_exists:
+        return (InitAction.EXISTING, True)
+    if created:
+        return (InitAction.CREATED, True)
+    if dry_run:
+        return (InitAction.PREVIEW, False)
+    raise ValueError(
+        "absent target without dry-run or creation uses the error "
+        "envelope, not a success action")
+
+
+def serialize_init_result(result: InitResult) -> dict:
+    """Explicit allowlisted public init payload; Config never serialized raw."""
+    if not isinstance(result, InitResult):
+        raise TypeError("serialize_init_result requires InitResult")
+    return {
+        "action": result.action.value,
+        "target": str(result.target),
+        "exists": result.exists,
+        "warnings": [_reason_dict(item) for item in result.warnings],
+        "config": _config_summary_dict(result.config),
+    }
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1835,16 +1981,13 @@ def _check_reason_dict(item: object) -> None:
         raise _invalid("report-invalid", "reason.paths must be a string list")
 
 
-def _check_exact_keys(item: object, allowed: frozenset, ctx: str) -> dict:
-    """Require a frozen subrecord object with exactly its specified fields."""
+def _check_required_keys(item: object, allowed: frozenset, ctx: str) -> dict:
+    """Require every known field; additive unknowns are dropped by projection."""
     if not isinstance(item, dict):
         raise _invalid("report-invalid", f"{ctx} must be an object")
     for key in allowed:
         if key not in item:
             raise _invalid("report-invalid", f"{ctx} is missing {key!r}")
-    for key in item:
-        if key not in allowed:
-            raise _invalid("report-invalid", f"{ctx} carries unknown field {key!r}")
     return item
 
 
@@ -1902,7 +2045,7 @@ _COMMAND_FIELDS = frozenset({
 
 
 def _check_command_dict(item: object, ctx: str = "run.command") -> None:
-    _check_exact_keys(item, _COMMAND_FIELDS, ctx)
+    _check_required_keys(item, _COMMAND_FIELDS, ctx)
     if item["kind"] not in frozenset(entry.value for entry in RunnerKind):
         raise _invalid("report-invalid", f"{ctx} has an unknown kind")
     if item["mode"] not in frozenset(entry.value for entry in Mode):
@@ -1921,7 +2064,7 @@ _CAPABILITY_FIELDS = frozenset({
 def _check_capability_dict(value: object) -> None:
     if value is None:
         return
-    _check_exact_keys(value, _CAPABILITY_FIELDS, "where.capability")
+    _check_required_keys(value, _CAPABILITY_FIELDS, "where.capability")
     if value["execution"] not in frozenset(entry.value for entry in ExecutionTier):
         raise _invalid("report-invalid", "where.capability has an unknown tier")
     if not isinstance(value["selection"], bool):
@@ -1942,7 +2085,7 @@ _COUNTS_FIELDS = frozenset({
 def _check_counts_dict(value: object) -> None:
     if value is None:
         return
-    _check_exact_keys(value, _COUNTS_FIELDS, "run.counts")
+    _check_required_keys(value, _COUNTS_FIELDS, "run.counts")
     for name in ("collected", "executed", "passed", "failed", "skipped",
                  "unknown"):
         _check_int_field(value, name, "run.counts", allow_none=True, lo=0)
@@ -1956,7 +2099,7 @@ _TIMINGS_FIELDS = frozenset({
 def _check_timings_dict(value: object, ctx: str = "run.timings") -> None:
     if value is None:
         return
-    _check_exact_keys(value, _TIMINGS_FIELDS, ctx)
+    _check_required_keys(value, _TIMINGS_FIELDS, ctx)
     for name in ("queue", "setup", "collection", "execution", "finalization"):
         _check_number_field(value, name, ctx, allow_none=True, lo=0)
 
@@ -1968,7 +2111,7 @@ _ATTEMPT_FIELDS = frozenset({
 
 
 def _check_attempt_dict(item: object) -> None:
-    _check_exact_keys(item, _ATTEMPT_FIELDS, "run.attempts entry")
+    _check_required_keys(item, _ATTEMPT_FIELDS, "run.attempts entry")
     _check_str_list([item["attempt_id"]], "run.attempts entry.attempt_id")
     if not ATTEMPT_ID_PATTERN.fullmatch(item["attempt_id"]):
         raise _invalid("report-invalid", "run.attempts entry has a bad attempt_id")
@@ -1992,7 +2135,7 @@ _READINESS_FIELDS = frozenset({"area", "state", "reasons"})
 
 
 def _check_readiness_dict(item: object) -> None:
-    _check_exact_keys(item, _READINESS_FIELDS, "doctor.readiness entry")
+    _check_required_keys(item, _READINESS_FIELDS, "doctor.readiness entry")
     if item["area"] not in READINESS_AREAS:
         raise _invalid("report-invalid", "doctor.readiness entry has an unknown area")
     if item["state"] not in READINESS_STATES:
@@ -2010,7 +2153,7 @@ _FINDING_FIELDS = frozenset({
 
 
 def _check_finding_dict(item: object) -> None:
-    _check_exact_keys(item, _FINDING_FIELDS, "doctor.findings entry")
+    _check_required_keys(item, _FINDING_FIELDS, "doctor.findings entry")
     if item["code"] not in FINDING_CODES:
         raise _invalid("report-invalid", "doctor.findings entry has an unknown code")
     if item["severity"] not in ("low", "medium", "high"):
@@ -2035,7 +2178,7 @@ _LEASE_FIELDS = frozenset({
 
 
 def _check_lease_dict(item: object, ctx: str) -> None:
-    _check_exact_keys(item, _LEASE_FIELDS, ctx)
+    _check_required_keys(item, _LEASE_FIELDS, ctx)
     _check_hex_field(item, "run_id", ctx, 32)
     _check_hex_field(item, "checkout_id", ctx, 32)
     if item["state"] not in frozenset(entry.value for entry in LeaseState):
@@ -2065,7 +2208,7 @@ _OBLIGATION_FIELDS = frozenset({
 
 
 def _check_obligation_dict(item: object) -> None:
-    _check_exact_keys(item, _OBLIGATION_FIELDS, "history.obligations entry")
+    _check_required_keys(item, _OBLIGATION_FIELDS, "history.obligations entry")
     if item["file"] is not None and not isinstance(item["file"], str):
         raise _invalid("report-invalid", "history.obligations entry file bad")
     if item["test_id"] is not None and not isinstance(item["test_id"], str):
@@ -2087,7 +2230,7 @@ _SCAN_LIMITS_FIELDS = frozenset({
 
 
 def _check_scan_limits_dict(item: object) -> None:
-    _check_exact_keys(item, _SCAN_LIMITS_FIELDS, "doctor.limits")
+    _check_required_keys(item, _SCAN_LIMITS_FIELDS, "doctor.limits")
     for name in ("entries", "files", "file_bytes", "total_bytes", "findings",
                  "output_bytes", "depth", "ast_nodes"):
         _check_int_field(item, name, "doctor.limits", lo=0)
@@ -2101,13 +2244,72 @@ _SCAN_USAGE_FIELDS = frozenset({
 
 
 def _check_scan_usage_dict(item: object) -> None:
-    _check_exact_keys(item, _SCAN_USAGE_FIELDS, "doctor.usage")
+    _check_required_keys(item, _SCAN_USAGE_FIELDS, "doctor.usage")
     for name in ("entries", "files", "file_bytes", "total_bytes", "findings",
                  "output_bytes", "skipped"):
         _check_int_field(item, name, "doctor.usage", lo=0)
     _check_number_field(item, "elapsed_s", "doctor.usage", lo=0)
     if not isinstance(item["truncated"], bool):
         raise _invalid("report-invalid", "doctor.usage truncated must be boolean")
+
+
+_CONFIG_SUMMARY_FIELDS = frozenset({
+    "project_id", "runner_kind", "workers", "commands",
+    "setup_configured", "setup_network", "setup_lifecycle_scripts",
+    "selection_enabled", "closed_inputs",
+})
+
+
+def _check_config_summary_dict(value: object, ctx: str) -> None:
+    if value is None:
+        return
+    _check_required_keys(value, _CONFIG_SUMMARY_FIELDS, ctx)
+    _check_hex_field(value, "project_id", ctx, 32)
+    if value["runner_kind"] not in frozenset(
+            item.value for item in RunnerKind):
+        raise _invalid("report-invalid", f"{ctx} has an unknown runner_kind")
+    _check_int_field(value, "workers", ctx, lo=1, hi=64)
+    commands = value["commands"]
+    if not isinstance(commands, list) or len(commands) != 2:
+        raise _invalid(
+            "report-invalid", f"{ctx}.commands must hold scoped then full")
+    _check_command_dict(commands[0], f"{ctx}.commands[0]")
+    _check_command_dict(commands[1], f"{ctx}.commands[1]")
+    if commands[0]["mode"] != "scoped" or commands[1]["mode"] != "full":
+        raise _invalid(
+            "report-invalid", f"{ctx}.commands must be scoped then full")
+    if (commands[0]["kind"] != value["runner_kind"]
+            or commands[1]["kind"] != value["runner_kind"]):
+        raise _invalid(
+            "report-invalid", f"{ctx}.commands must match runner_kind")
+    for name in ("setup_configured", "setup_network",
+                 "setup_lifecycle_scripts", "selection_enabled",
+                 "closed_inputs"):
+        if not isinstance(value[name], bool):
+            raise _invalid(
+                "report-invalid", f"{ctx} field {name!r} must be boolean")
+
+
+_EFFECTIVE_LIMITS_FIELDS = frozenset({
+    "max_slots", "max_jobs", "memory_mb", "repo_workers",
+})
+
+
+def _check_effective_limits_dict(value: object, ctx: str) -> None:
+    _check_required_keys(value, _EFFECTIVE_LIMITS_FIELDS, ctx)
+    _check_int_field(value, "max_slots", ctx, allow_none=True, lo=1, hi=64)
+    _check_int_field(value, "max_jobs", ctx, allow_none=True, lo=1, hi=64)
+    if (value["max_slots"] is None) != (value["max_jobs"] is None):
+        raise _invalid(
+            "report-invalid", f"{ctx} slot/job unknowns must pair")
+    if (value["max_slots"] is not None and value["max_jobs"] is not None
+            and value["max_jobs"] > value["max_slots"]):
+        raise _invalid(
+            "report-invalid", f"{ctx} max_jobs exceeds max_slots")
+    _check_int_field(value, "memory_mb", ctx, allow_none=True,
+                     lo=64, hi=1048576)
+    _check_int_field(value, "repo_workers", ctx, allow_none=True,
+                     lo=1, hi=64)
 
 
 def _check_closed(data: dict, name: str, allowed: frozenset,
@@ -2189,16 +2391,22 @@ def _validate_where_payload(data: dict) -> None:
     _check_capability_dict(data["capability"])
     for entry in _need_list(data, "commands"):
         _check_command_dict(entry, "where.commands entry")
-    if "effective_limits" not in data or not isinstance(data["effective_limits"], dict):
+    if "effective_limits" not in data or not isinstance(
+            data["effective_limits"], dict):
         raise _invalid("report-invalid", "where.effective_limits must be an object")
+    _check_effective_limits_dict(
+        data["effective_limits"], "where.effective_limits")
     _need_list(data, "provenance")
     for item in _need_list(data, "warnings"):
         _check_reason_dict(item)
 
 
 def _validate_status_payload(data: dict) -> None:
-    if "effective_limits" not in data or not isinstance(data["effective_limits"], dict):
+    if "effective_limits" not in data or not isinstance(
+            data["effective_limits"], dict):
         raise _invalid("report-invalid", "status.effective_limits must be an object")
+    _check_effective_limits_dict(
+        data["effective_limits"], "status.effective_limits")
     for entry in _need_list(data, "queued"):
         _check_lease_dict(entry, "status.queued entry")
     for entry in _need_list(data, "active"):
@@ -2206,19 +2414,27 @@ def _validate_status_payload(data: dict) -> None:
 
 
 def _validate_history_payload(data: dict) -> None:
-    _need_list(data, "summaries")
+    for entry in _need_list(data, "summaries"):
+        if not isinstance(entry, dict):
+            raise _invalid(
+                "report-invalid", "history.summaries entries must be objects")
+        _validate_run_payload(entry)
     for entry in _need_list(data, "obligations"):
         _check_obligation_dict(entry)
 
 
 def _validate_init_payload(data: dict) -> None:
-    _need_str(data, "action")
+    if data.get("action") not in _INIT_ACTIONS:
+        raise _invalid("report-invalid", "init.action is unknown")
     _need_str(data, "target")
     _need_bool(data, "exists")
+    if (data["action"] == "preview") == data["exists"]:
+        raise _invalid("report-invalid", "init.action/exists mismatch")
     for item in _need_list(data, "warnings"):
         _check_reason_dict(item)
     if "config" not in data:
         raise _invalid("report-invalid", "missing required field 'config'")
+    _check_config_summary_dict(data["config"], "init.config")
 
 
 def _validate_doctor_payload(data: dict) -> None:
@@ -2273,6 +2489,245 @@ _PAYLOAD_VALIDATORS = {
 }
 
 
+_INIT_ACTIONS = frozenset(item.value for item in InitAction)
+
+
+def _project_reason(item: dict) -> dict:
+    return {"code": item["code"], "message": item["message"],
+            "paths": list(item["paths"])}
+
+
+def _project_command(item: dict) -> dict:
+    return {"kind": item["kind"], "mode": item["mode"],
+            "argument_count": item["argument_count"],
+            "generated_options": list(item["generated_options"]),
+            "workers": item["workers"],
+            "provenance": list(item["provenance"])}
+
+
+def _project_plan(item: dict) -> dict:
+    return {"mode": item["mode"], "execution": item["execution"],
+            "files": list(item["files"]),
+            "reasons": [_project_reason(entry)
+                        for entry in item["reasons"]],
+            "input_digest": item["input_digest"],
+            "compatibility": item["compatibility"],
+            "baseline_run_id": item["baseline_run_id"],
+            "static_preview": item["static_preview"]}
+
+
+def _project_capability(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {"execution": value["execution"],
+            "selection": value["selection"],
+            "lifecycle": value["lifecycle"],
+            "limitations": [_project_reason(entry)
+                            for entry in value["limitations"]]}
+
+
+def _project_counts(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {name: value[name] for name in _COUNTS_FIELDS}
+
+
+def _project_timings(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {name: value[name] for name in _TIMINGS_FIELDS}
+
+
+def _project_attempt(item: dict) -> dict:
+    return {"attempt_id": item["attempt_id"], "phase": item["phase"],
+            "status": item["status"],
+            "raw_exit_code": item["raw_exit_code"],
+            "final_exit_code": item["final_exit_code"],
+            "source_valid": item["source_valid"],
+            "inventory_complete": item["inventory_complete"],
+            "timings": _project_timings(item["timings"])}
+
+
+def _project_readiness(item: dict) -> dict:
+    return {"area": item["area"], "state": item["state"],
+            "reasons": [_project_reason(entry)
+                        for entry in item["reasons"]]}
+
+
+def _project_finding(item: dict) -> dict:
+    return {name: item[name] for name in _FINDING_FIELDS}
+
+
+def _project_lease(item: dict) -> dict:
+    return {
+        "run_id": item["run_id"], "checkout_id": item["checkout_id"],
+        "state": item["state"], "sequence": item["sequence"],
+        "requested_slots": item["requested_slots"],
+        "slots": item["slots"],
+        "memory_estimate_mb": item["memory_estimate_mb"],
+        "reserved_memory_mb": item["reserved_memory_mb"],
+        "phase": item["phase"], "age_s": item["age_s"],
+        "queue_wait_s": item["queue_wait_s"],
+        "ownership": item["ownership"], "fixture": item["fixture"],
+        "reasons": [_project_reason(entry)
+                    for entry in item["reasons"]],
+    }
+
+
+def _project_obligation(item: dict) -> dict:
+    return {name: item[name] for name in _OBLIGATION_FIELDS}
+
+
+def _project_scan_limits(item: dict) -> dict:
+    return {name: item[name] for name in _SCAN_LIMITS_FIELDS}
+
+
+def _project_scan_usage(item: dict) -> dict:
+    return {name: item[name] for name in _SCAN_USAGE_FIELDS}
+
+
+def _project_config_summary(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {
+        "project_id": value["project_id"],
+        "runner_kind": value["runner_kind"],
+        "workers": value["workers"],
+        "commands": [_project_command(entry)
+                     for entry in value["commands"]],
+        "setup_configured": value["setup_configured"],
+        "setup_network": value["setup_network"],
+        "setup_lifecycle_scripts": value["setup_lifecycle_scripts"],
+        "selection_enabled": value["selection_enabled"],
+        "closed_inputs": value["closed_inputs"],
+    }
+
+
+def _project_effective_limits(item: dict) -> dict:
+    return {name: item[name] for name in _EFFECTIVE_LIMITS_FIELDS}
+
+
+def _project_run(item: dict) -> dict:
+    return {
+        "run_id": item["run_id"], "project_id": item["project_id"],
+        "checkout_id": item["checkout_id"], "mode": item["mode"],
+        "status": item["status"], "phase": item["phase"],
+        "started_at": item["started_at"],
+        "finished_at": item["finished_at"],
+        "plan": _project_plan(item["plan"]),
+        "command": _project_command(item["command"]),
+        "granted_workers": item["granted_workers"],
+        "memory_estimate_mb": item["memory_estimate_mb"],
+        "reserved_memory_mb": item["reserved_memory_mb"],
+        "runner_exit_code": item["runner_exit_code"],
+        "exit_code": item["exit_code"],
+        "exit_origin": item["exit_origin"], "signal": item["signal"],
+        "source_valid": item["source_valid"],
+        "full_gate_eligible": item["full_gate_eligible"],
+        "baseline_published": item["baseline_published"],
+        "counts": _project_counts(item["counts"]),
+        "timings": _project_timings(item["timings"]),
+        "attempts": [_project_attempt(entry)
+                     for entry in item["attempts"]],
+        "reasons": [_project_reason(entry)
+                    for entry in item["reasons"]],
+        "limitations": [_project_reason(entry)
+                        for entry in item["limitations"]],
+        "artifact_id": item["artifact_id"],
+    }
+
+
+def _project_where_payload(data: dict) -> dict:
+    return {
+        "root": data["root"], "config_path": data["config_path"],
+        "initialized": data["initialized"],
+        "runner_kind": data["runner_kind"],
+        "capability": _project_capability(data["capability"]),
+        "commands": [_project_command(entry)
+                     for entry in data["commands"]],
+        "effective_limits": _project_effective_limits(
+            data["effective_limits"]),
+        "provenance": list(data["provenance"]),
+        "warnings": [_project_reason(entry)
+                     for entry in data["warnings"]],
+    }
+
+
+def _project_status_payload(data: dict) -> dict:
+    return {
+        "effective_limits": _project_effective_limits(
+            data["effective_limits"]),
+        "queued": [_project_lease(entry) for entry in data["queued"]],
+        "active": [_project_lease(entry) for entry in data["active"]],
+    }
+
+
+def _project_history_payload(data: dict) -> dict:
+    return {
+        "summaries": [_project_run(entry)
+                      for entry in data["summaries"]],
+        "obligations": [_project_obligation(entry)
+                        for entry in data["obligations"]],
+    }
+
+
+def _project_init_payload(data: dict) -> dict:
+    return {
+        "action": data["action"], "target": data["target"],
+        "exists": data["exists"],
+        "warnings": [_project_reason(entry)
+                     for entry in data["warnings"]],
+        "config": _project_config_summary(data["config"]),
+    }
+
+
+def _project_doctor_payload(data: dict) -> dict:
+    return {
+        "scope": list(data["scope"]),
+        "readiness": [_project_readiness(entry)
+                      for entry in data["readiness"]],
+        "findings": [_project_finding(entry)
+                     for entry in data["findings"]],
+        "limits": _project_scan_limits(data["limits"]),
+        "usage": _project_scan_usage(data["usage"]),
+        "limitations": [_project_reason(entry)
+                        for entry in data["limitations"]],
+    }
+
+
+def _project_register_payload(data: dict) -> dict:
+    return {
+        "root": data["root"], "initialized": data["initialized"],
+        "legacy_present": data["legacy_present"],
+        "legacy_local": data["legacy_local"],
+        "proposed_runner": data["proposed_runner"],
+        "commands": [_project_command(entry)
+                     for entry in data["commands"]],
+        "legacy_alias_count": data["legacy_alias_count"],
+        "required_actions": list(data["required_actions"]),
+        "warnings": [_project_reason(entry)
+                     for entry in data["warnings"]],
+    }
+
+
+_PROJECTORS: dict = {
+    "run": _project_run,
+    "plan": _project_plan,
+    "where": _project_where_payload,
+    "status": _project_status_payload,
+    "history": _project_history_payload,
+    "init": _project_init_payload,
+    "doctor": _project_doctor_payload,
+    "register": _project_register_payload,
+}
+
+
+def _project_domain(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {"id": value["id"], "fixture": value["fixture"]}
+
+
 def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
     """Parse and strictly validate one public JSON document."""
     if isinstance(raw, (bytes, bytearray)):
@@ -2313,6 +2768,7 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
             raise _invalid("report-invalid", "domain.id must be 32 hex") from None
         if not isinstance(domain["fixture"], bool):
             raise _invalid("report-invalid", "domain.fixture must be boolean")
+        domain = _project_domain(domain)
     error_raw = envelope.get("error")
     error = None
     if error_raw is not None:
@@ -2339,6 +2795,7 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
         if not isinstance(data, dict):
             raise _invalid("report-invalid", "success documents carry an object payload")
         _PAYLOAD_VALIDATORS[kind](data)
+        data = _PROJECTORS[kind](data)
     return PublicDocument(kind=kind, ptest_version=ptest_version,
                           domain=domain, data=data, error=error)
 
@@ -2686,7 +3143,6 @@ def _capability_schema() -> dict:
             "limitations": {"type": "array", "items": _reason_schema()},
         },
         "required": ["execution", "selection", "lifecycle", "limitations"],
-        "additionalProperties": False,
     }
 
 
@@ -2701,7 +3157,6 @@ def _counts_schema() -> dict:
         },
         "required": ["collected", "executed", "passed", "failed", "skipped",
                      "unknown"],
-        "additionalProperties": False,
     }
 
 
@@ -2716,7 +3171,6 @@ def _timings_schema() -> dict:
         },
         "required": ["queue", "setup", "collection", "execution",
                      "finalization"],
-        "additionalProperties": False,
     }
 
 
@@ -2738,7 +3192,6 @@ def _attempt_schema() -> dict:
         "required": ["attempt_id", "phase", "status", "raw_exit_code",
                      "final_exit_code", "source_valid", "inventory_complete",
                      "timings"],
-        "additionalProperties": False,
     }
 
 
@@ -2752,7 +3205,6 @@ def _readiness_schema() -> dict:
             "reasons": {"type": "array", "items": _reason_schema()},
         },
         "required": ["area", "state", "reasons"],
-        "additionalProperties": False,
     }
 
 
@@ -2776,7 +3228,6 @@ def _finding_schema() -> dict:
         "required": ["code", "severity", "confidence", "path", "line",
                      "evidence_type", "consequence", "remediation",
                      "verification"],
-        "additionalProperties": False,
     }
 
 
@@ -2806,7 +3257,6 @@ def _lease_schema() -> dict:
                      "requested_slots", "slots", "memory_estimate_mb",
                      "reserved_memory_mb", "phase", "age_s", "queue_wait_s",
                      "ownership", "fixture", "reasons"],
-        "additionalProperties": False,
     }
 
 
@@ -2825,7 +3275,6 @@ def _obligation_schema() -> dict:
         },
         "required": ["file", "test_id", "sequence", "source_digest",
                      "compatibility", "reason"],
-        "additionalProperties": False,
     }
 
 
@@ -2843,7 +3292,6 @@ def _scan_limits_schema() -> dict:
         "required": ["entries", "files", "file_bytes", "total_bytes",
                      "findings", "output_bytes", "elapsed_s", "depth",
                      "ast_nodes"],
-        "additionalProperties": False,
     }
 
 
@@ -2862,7 +3310,6 @@ def _scan_usage_schema() -> dict:
         "required": ["entries", "files", "file_bytes", "total_bytes",
                      "findings", "output_bytes", "elapsed_s", "skipped",
                      "truncated"],
-        "additionalProperties": False,
     }
 
 
@@ -2909,6 +3356,49 @@ def _run_data_schema() -> dict:
     }
 
 
+def _config_summary_schema() -> dict:
+    """Shared ConfigSummary descriptor: single authority for schema + decode."""
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            "project_id": {"type": "string",
+                           "pattern": "^[0-9a-f]{32}$"},
+            "runner_kind": {"type": "string",
+                            "enum": [item.value for item in RunnerKind]},
+            "workers": {"type": "integer", "minimum": 1, "maximum": 64},
+            "commands": {"type": "array", "items": _command_schema(),
+                         "minItems": 2, "maxItems": 2},
+            "setup_configured": {"type": "boolean"},
+            "setup_network": {"type": "boolean"},
+            "setup_lifecycle_scripts": {"type": "boolean"},
+            "selection_enabled": {"type": "boolean"},
+            "closed_inputs": {"type": "boolean"},
+        },
+        "required": ["project_id", "runner_kind", "workers", "commands",
+                     "setup_configured", "setup_network",
+                     "setup_lifecycle_scripts", "selection_enabled",
+                     "closed_inputs"],
+    }
+
+
+def _effective_limits_schema() -> dict:
+    """Shared EffectiveLimits descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "max_slots": {"type": ["integer", "null"],
+                          "minimum": 1, "maximum": 64},
+            "max_jobs": {"type": ["integer", "null"],
+                         "minimum": 1, "maximum": 64},
+            "memory_mb": {"type": ["integer", "null"],
+                          "minimum": 64, "maximum": 1048576},
+            "repo_workers": {"type": ["integer", "null"],
+                             "minimum": 1, "maximum": 64},
+        },
+        "required": ["max_slots", "max_jobs", "memory_mb", "repo_workers"],
+    }
+
+
 PUBLIC_SCHEMAS: dict = {
     "run": _envelope_schema("run", _run_data_schema()),
     "plan": _envelope_schema("plan", _plan_schema()),
@@ -2922,7 +3412,7 @@ PUBLIC_SCHEMAS: dict = {
                             "enum": [item.value for item in RunnerKind] + [None]},
             "capability": _capability_schema(),
             "commands": {"type": "array", "items": _command_schema()},
-            "effective_limits": {"type": "object"},
+            "effective_limits": _effective_limits_schema(),
             "provenance": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": _reason_schema()},
         },
@@ -2933,7 +3423,7 @@ PUBLIC_SCHEMAS: dict = {
     "status": _envelope_schema("status", {
         "type": "object",
         "properties": {
-            "effective_limits": {"type": "object"},
+            "effective_limits": _effective_limits_schema(),
             "queued": {"type": "array", "items": _lease_schema()},
             "active": {"type": "array", "items": _lease_schema()},
         },
@@ -2942,7 +3432,8 @@ PUBLIC_SCHEMAS: dict = {
     "history": _envelope_schema("history", {
         "type": "object",
         "properties": {
-            "summaries": {"type": "array", "items": {"type": "object"}},
+            "summaries": {"type": "array",
+                          "items": _run_data_schema()},
             "obligations": {"type": "array", "items": _obligation_schema()},
         },
         "required": ["summaries", "obligations"],
@@ -2950,11 +3441,12 @@ PUBLIC_SCHEMAS: dict = {
     "init": _envelope_schema("init", {
         "type": "object",
         "properties": {
-            "action": {"type": "string"},
+            "action": {"type": "string",
+                       "enum": ["created", "preview", "existing"]},
             "target": {"type": "string"},
             "exists": {"type": "boolean"},
             "warnings": {"type": "array", "items": _reason_schema()},
-            "config": {"type": ["object", "null"]},
+            "config": _config_summary_schema(),
         },
         "required": ["action", "target", "exists", "warnings", "config"],
     }),

@@ -11,7 +11,6 @@
         },
         "attempts": {
           "items": {
-            "additionalProperties": false,
             "properties": {
               "attempt_id": {
                 "pattern": "^a(00[1-9]|010)$",
@@ -58,7 +57,6 @@
                 "type": "string"
               },
               "timings": {
-                "additionalProperties": false,
                 "properties": {
                   "collection": {
                     "minimum": 0,
@@ -188,7 +186,6 @@
           "type": "object"
         },
         "counts": {
-          "additionalProperties": false,
           "properties": {
             "collected": {
               "minimum": 0,
@@ -480,7 +477,6 @@
           "type": "string"
         },
         "timings": {
-          "additionalProperties": false,
           "properties": {
             "collection": {
               "minimum": 0,
