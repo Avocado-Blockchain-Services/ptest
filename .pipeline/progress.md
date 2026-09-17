@@ -385,3 +385,14 @@
   but runtime labelled stream_succeeded/maincompleted. This is NOT implementation
   success. Retained trace; same model/effort/task restarted as task-3-muse-run2,
   session6389. T1/T2 continue; no lost work or silent substitution.
+
+- At22:36UTC allwave1 workers have endedexit1 with provider429 subscriptionquota
+  exhausted; reported reset2026-09-17T23:22:52Z. T1session66311,T2session89618,
+  T3retry6389 all confirmed terminated. No background Muse worker left running.
+  T1 preserves untracked src/ptest/config.py, tests/ng/test_config.py,
+  tests/ng/test_init.py and tests/ng/fixtures/config/ at base60deb4e. NOT accepted,
+  committed or integrated; resume must inspect/preserve these partial bytes.
+  T2/T3 source clean atbase60deb4e, environments/preflight artifacts retained.
+  Root will request wait-vs-routing direction rather than silently substituting
+  the user's explicitly selected implementation model. Task0 remains approved,
+  integrated and verified119passing; overall NG implementation is NOT complete.

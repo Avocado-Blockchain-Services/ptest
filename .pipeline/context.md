@@ -11,6 +11,12 @@ After serial integration and chain checks, wave1 T1/T2/T3 may run in independent
 worktrees. Linux/macOS v1 scope is accepted; release,
 license, main merge, installation, and publication remain separate gates.
 
+CURRENT RUNTIME PAUSE (2026-09-17 22:36 UTC): all three wave1 Muse workers ended
+with provider429 subscription quota exhausted, reset23:22:52 UTC. No model has
+been substituted. T1 has uncommitted/untracked partial config/tests/fixtures;
+T2/T3 source trees remain clean at base60deb4e. Preserve every tree and trace.
+Await user direction to resume Muse after reset or authorize a different routing.
+
 ## User intent
 
 Rebuild ptest in its existing Git repository into a local-first, open-source-ready
