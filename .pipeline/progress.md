@@ -77,3 +77,22 @@
 - JSON parsing and whitespace checks passed; scoped ownership inspected.
 - Repair-only Fable 5.1/high review launched with read/search tools and streamed
   local trace .pipeline/out/spec-rereview-fable.jsonl; no tests or source changes.
+
+## Specification review gate passed; awaiting human approval
+
+- Focused Fable re-review completed: requested claude-fable-5-1/high, 12 turns,
+  exit 0, no permission denials. Verdict approved_with_notes; blocking list empty.
+  Portable result: .pipeline/out/spec-rereview-fable.json. Raw trace kept locally.
+- F1, F2, F3 each resolved; reviewer explicitly accepted Astra's alternatives.
+- All actionable N1–N9 clarifications resolved or deliberately dispositioned;
+  the smaller arbitrary-wrapper reservation was a preference and remains parked.
+- Two nonblocking wording observations remain: T3 could repeat T4's existing rule
+  that failures survive an invalidated run; P2's pre-init command list could repeat
+  the guide availability already explicit in section 9/A1. No requirement gap
+  was established. Carry those references into design, not another speculative loop.
+- Orchestrator updated only the spec's status line to reflect the passed review;
+  no substantive contract edits after the reviewed repair.
+- Next required action is USER APPROVAL of the reviewed product spec. Do not begin
+  detailed design, Muse coding, code removal, installation, main merge, or release
+  on the strength of this report alone. Linux+macOS remains the proposed v1 scope;
+  native Windows is deferred, and license/publication decisions remain M5 gates.

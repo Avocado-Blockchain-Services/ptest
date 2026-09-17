@@ -4,7 +4,7 @@ Created: 2026-09-17 UTC
 
 Author: architect-agent (Astra)
 
-Status: proposed product contract; initial Fable findings addressed, pending repair re-review and user approval
+Status: independently reviewed product contract; Fable repair review passed with no blocking findings; pending user approval
 
 ## 1. Product and decision boundary
 
