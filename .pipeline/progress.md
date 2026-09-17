@@ -180,3 +180,22 @@
   doctor benchmark completion, package-data/ownership, shared storage helpers and
   explicit watchdogs also require dispositions. Alternatives must preserve the
   approved safety contract; untested versions cannot simply be called bounded.
+
+## Design repair integrated; focused re-review running
+
+- Astra repair44c7a9e integrated as e1e4a2b; owned design/plan/report only.
+  Dispositions in `.pipeline/out/design-repair-astra.json`; repair-only diff in
+  `.pipeline/out/design-repair.diff`. JSON/whitespace checks passed, no tests.
+- Research2f6c5e7 integrated as e386c8b: finite basic-serial qualification candidates
+  and verified package metadata. Candidate API inspection is not runtime support.
+  Gitleaks issue2170 was closed with an intentional placeholder-token allowlist
+  explanation; removed an unsupported implication of a blanket scanner regression.
+- Repair covers NG1–9 plus P1 explicit state domains and P2 prefix-only parsing.
+  Native capability checks remain mandatory; compatibility candidates still need
+  real negative tests. Default memory estimates remain unknown, no fake measurements.
+- Shared private write/SQLite/default/frame contracts now belong to T0. Task domains,
+  constructor examples, package-data ownership, lock generation and independent
+  adoption-vs-nested-fixture execution are explicit.
+- Opus high focused re-review launched with `.pipeline/briefs/design-rereview.md`;
+  trace `.pipeline/out/design-rereview-opus.jsonl`. T0 remains NOT STARTED until
+  the required review corrections are closed.
