@@ -355,3 +355,16 @@
   Helper half of Task0 is accepted; public correction and combined final gate remain.
 - Combined checkout AST graph update completedexit0; two JSONschema files produce
   zero nodes (tool warning), no semantic extraction/provider. Labels/wiki not used.
+
+- Public correction8e3d370 completed; cherry-picked into combined ascd572ec.
+  Root119passed/2.72s, schema drift0, diffcheck0, ASTgraphupdate0. Final combined
+  Opus gate53turns/452794ms APPROVED_WITH_NOTES, blocking=[]; allT0-8..11 resolved
+  and accepted helper composition verified. Task0 is now accepted for integration.
+- Nonblocking residual R1 for final integrated/Astra audit and subsequent Sol
+  corrections: _run_data_schema granted_workers has minimum1 but omits maximum64;
+  runtime/frozenrecord/decoder already enforce1..64. Align generated run/history
+  descriptors plus a schema assertion at the next controlled contract repair;
+  no runtime broadening. Do not claim 'no other drift' while R1 remains.
+- Carry forward later-owner duties: T3/T11 enforce history count/byte bounds;
+  T5/T6/T7 bridge codecs enforce private unknown-field rejection; T11 renders
+  typed contract failures versus programmer-misuse errors as one JSON document.
