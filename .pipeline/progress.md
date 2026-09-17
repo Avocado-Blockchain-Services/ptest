@@ -291,3 +291,13 @@
   brief. Actual authorized paths are docs/schemas/v1/*.json and the existing
   src/ptest/runtime/protocol-v1.json, not invented schemas/public directories.
   Same Muse medium resumes with corrected brief; no source edits discarded.
+
+- Helper repair4fe6d27 submitted; root77passed/3.33s, slowest2.01s timeout and1.05s
+  retained pipe, remaining<=0.04s. Exact raw evidence lives in helper worktree
+  .pipeline/local/root-helper-scoped.log. Opus narrow helper review runs in
+  parallel with public-contract completion; no unapproved source integration.
+- Read-only wave1 readiness check found stale T1/T3 extracts after the author
+  addendum; aligned InitAction/config projection and history public-summary reuse.
+  T2 unchanged. Launcher now requires exact approved repaired-T0 SHA/current plan
+  section and explicitly distinguishes local build instructions from product TUI
+  portability/runtime dependencies. No downstream source work launched yet.

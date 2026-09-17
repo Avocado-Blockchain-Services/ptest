@@ -45,3 +45,10 @@ dispatcher identity, implemented/verified/unverified/deferred/discovered split,
 contract gaps and confidence. Commit explicit owned files, never git add .
 Return status, commit SHA, report path and unresolved concerns. Root owns Opus
 review/integration/full gate; do not claim overall product completion.
+
+These orchestration skill/role paths are machine-local build inputs, not ptest
+runtime dependencies or portable TUI configuration. A different build environment
+needs explicitly supplied readable equivalents; never assume an agent inherits
+them. Raw .pipeline/local logs are local-only, unshipped audit artifacts; confirm
+the integrated T0 ignore entries and retain selected evidence in tracked reports.
+The product itself must work without these developer tools, accounts or APIs.
