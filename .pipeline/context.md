@@ -1,8 +1,9 @@
 # ptest NG context and approved workflow
 
-Current phase (2026-09-17): the user explicitly approved the reviewed product
-specification. Proceed to Astra xhigh design and Opus design review, then the
-approved implementation/audit sequence. Linux/macOS v1 scope is accepted; release,
+Current phase (2026-09-17): user-approved product specification and Astra design
+have passed Opus focused re-review (approved_with_notes, no blocking findings).
+Astra is clarifying non-blocking shared-contract notes before Muse Task0, then
+the approved parallel implementation/audit sequence begins. Linux/macOS v1 scope is accepted; release,
 license, main merge, installation, and publication remain separate gates.
 
 ## User intent

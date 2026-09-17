@@ -59,3 +59,8 @@ After Opus returned, root independently checked NG-1's machine-state example:
 returned both directories as mode755 owned by ingmar. They must not be silently
 chmodded/pruned/treated as exclusive NG state. NG-8's example literal length was
 also verified as33 with `printf %s cd58ec6cf99748ce9f15dfce137f044d3 | wc -c`.
+# Gate resolution — 2026-09-17
+
+P1 and P2 below are historical findings, both CLOSED by Astra repair 44c7a9e
+and independently accepted in Opus focused re-review (blocking=[]). Explicit
+DomainPaths and prefix-only CLI parsing remain required implementation tests.

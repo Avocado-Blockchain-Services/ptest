@@ -199,3 +199,20 @@
 - Opus high focused re-review launched with `.pipeline/briefs/design-rereview.md`;
   trace `.pipeline/out/design-rereview-opus.jsonl`. T0 remains NOT STARTED until
   the required review corrections are closed.
+
+## Design gate passed; bootstrap handoff
+
+- Focused Opus high review completed successfully in 30 turns, primary runtime
+  claude-opus-5, verdict approved_with_notes, blocking=[]; structured evidence in
+  `.pipeline/out/design-rereview-opus.json`. All NG1–9 and P1/P2 are closed.
+- Astra is clarifying residual shared-parent creation, capability tier enum,
+  memory unknown translation, prompt limit constant, T2 read-only ownership and
+  adoption baseline traceability before T0. No scope change or runtime edits.
+- Muse 1.3.0 (1.3.0-R3233.1) read-only preflight verified actual muse-spark-1.3
+  and access to the 16-line Muse reference and 143-line Dan role source. Reported
+  the three required passes correctly. No shell/write/web tools enabled. Trace:
+  `.pipeline/out/muse-role-read-preflight.jsonl` (ignored).
+- Frozen bootstrap executable resolves to
+  `/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest`, SHA256
+  `3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68`.
+  Installed CLI and global configuration remain untouched.
