@@ -1,12 +1,17 @@
 {
-  "status": "ready_for_independent_spec_review",
+  "status": "ready_for_repair_only_spec_review",
   "commit": null,
   "commit_note": "The immutable commit containing this manifest and spec is supplied in the author's final handoff; a manifest cannot contain its own Git commit hash.",
   "spec_path": "docs/specs/2026-09-17-ptest-ng-product.md",
-  "summary": "Proposed local-first ptest NG product specification, with shared local admission, conservative selection, static doctor and explicit probes, resource ownership guidance, portable configuration, CLI/JSON semantics, TUI support tiers, negative contracts, and finite release gates. No detailed architecture or implementation is approved by this draft.",
+  "summary": "Proposed local-first ptest NG product specification with Fable F1-F3 and actionable notes addressed. Canonical shared admission, explicit fixture isolation/nested behavior, non-green changed-input full gates, declared non-input artifact handling, and a bounded honest command-display policy are now explicit. No detailed architecture or implementation is approved by this draft.",
+  "initial_author_commit": "feb2b6803c32a07534f0632e91daaa295d7c309b",
+  "repair_dispositions": ".pipeline/out/spec-repair-astra.json",
   "decisions": [
     "Bare ptest requests automatic local selection with full fallback; explicit scopes stay explicit and --full remains the authoritative configured gate.",
     "Coordinate same-host/same-OS-user invocations across repositories, worktrees, shells, and TUIs, with conservative admission, fairness, cancellation, and ownership-aware crash recovery.",
+    "Normal scheduler identity is canonical across environment differences; nested same-domain execution fails immediately, and only explicitly labeled private fixture domains support bounded scheduler acceptance fixtures.",
+    "Changed source/expectations during automatic or full runs yield incomplete/non-green status; only declared non-input outputs are exempt, and raw runner status is retained separately.",
+    "Default command reports withhold arbitrary argv values; explicit unredacted local inspection has a disclosure warning and never enables raw-argv history.",
     "Propose Linux and macOS v1 support; pytest/Vitest are first-class, Go/Cargo retain bounded explicit execution, and arbitrary wrappers have explicit best-effort limitations.",
     "Selection must account for dirty/untracked/configuration changes and unresolved failures; uncertain evidence widens execution and cannot fabricate a pass.",
     "Static doctor never executes repository code; bounded probes are separately explicit; repair prompts are local data for an existing agent.",
@@ -24,7 +29,8 @@
     "Read assigned AGENTS.md and .pipeline/context.md in full.",
     "Read historical ptest_ng.md and inspected legacy/provisional files without modifying source or running their code.",
     "Read final interoperability research and incorporated its generic interface, non-overwriting, trust, and support-evidence requirements.",
+    "Read only the structured_output of the Fable review, checked legacy migration/cwd behaviors in repository source, and recorded evidence-backed F1-F3 and note dispositions.",
     "Specification-only work: no project tests, dependencies, remote operations, source edits, live CLI installation, or graph generation."
   ],
-  "next_gate": "Fable specification review, resolution of findings, then user approval of the reviewed product specification."
+  "next_gate": "Bounded Fable repair-only re-review, then user approval of the reviewed product specification."
 }

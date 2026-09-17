@@ -1,0 +1,119 @@
+{
+  "status": "ready_for_repair_only_spec_review",
+  "author": "Astra",
+  "spec_path": "docs/specs/2026-09-17-ptest-ng-product.md",
+  "initial_author_commit": "feb2b6803c32a07534f0632e91daaa295d7c309b",
+  "review_input": ".pipeline/out/spec-review-fable.json#/structured_output",
+  "review_verdict": "approved_with_notes",
+  "scope": "Product specification corrections only; no source, tests, dependencies, root copies, installed CLI, or external systems changed.",
+  "findings": [
+    {
+      "id": "F1",
+      "disposition": "accepted_and_resolved_in_spec",
+      "evidence": "Original P2 allowed a private state location and S1 referred to resolved scheduler configuration without a canonical identity; neither described nested ptest under the required ptest test harness. AGENTS.md mandates test execution through ptest, so budget-1 parent/child waiting is a real missing contract.",
+      "change": "P2/S1 now fix the normal root/domain by host and OS account rather than per-invocation environment. Same-domain nested executing invocations return 75/nested-invocation before queueing, with live ancestry validation. A sole explicit private fixture-domain mechanism is labeled isolated, cannot activate from repo/env settings, uses bounded synthetic or miniature isolated workloads within the outer allowance, and cannot publish normal history/baselines. A2/A4 require domain/nesting/fixture negative cases.",
+      "spec_sections": ["P2", "S1", "A2", "A4"],
+      "disputed_premise_or_fix": "Do not add a general production alternate-domain override: it would expand scope and weaken same-user coordination. The explicit alternative is limited to controlled fixture validation; state relocation and nested reservation lending are deferred."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted_ambiguity_and_artifact_gap_resolved_with_safer_semantics",
+      "evidence": "Original T3 required no baseline/full-gate evidence after relevant changes but stated no process exit status. Original C3 permitted nonzero operational status for invalid full-gate evidence. Thus the claimed T3 exit-0 promise was not present; the actual gap was optional wording and undefined input/output classification.",
+      "change": "T3, fallback table, and C3 now require incomplete/changed-during-run, full_gate_eligible=false, and final 70 when automatic/full runner_exit_code is 0. Actual nonzero runner status is preserved. Declared coverage/report/cache outputs are exempt only if they do not supply selection, configuration, assertions, or runtime inputs. Source, tracked snapshots/goldens, generated inputs, ambiguous overlaps, and requested expectation updates remain relevant; final inputs need a subsequent unchanged gate. A5/A11 cover both safe output writes and invalidating edits. Coverage-only failures are explicit unresolved full-gate obligations.",
+      "spec_sections": ["T3", "T4", "fallback table", "C3", "A5", "A11"],
+      "disputed_premise_or_fix": "Rejected recommended exit 0 for an invalidated full gate because shell-only consumers would infer false verification. Rejected exemption of snapshot updates merely because the runner requested/owns them; changed expectations need re-verification. T3 ambiguity was corrected without claiming it previously required exit 0."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted_unimplementable_absolute_claim_replaced",
+      "evidence": "Original Exposure/C1 promised that arbitrary secret argv values would not leak while requiring effective-command inspection, without defining a display policy. Unknown names, positional values, URLs, and option-looking secrets cannot all be recognized by a finite secret-name list.",
+      "change": "C1 separates literal execution from display. Defaults expose only a validated command summary and withhold arbitrary configured/caller argv strings, including executable paths and option-looking tokens; parsing errors use the same policy. Explicit local command reveal in where/init preview is labeled unredacted, never retained as argv history, and never dumps environment values. Exposure/A8/A11 now specify exact omission fixtures and explicitly retain OS process listings, raw runner streams, arbitrary test/path names, and intentional reveal as residual exposure surfaces.",
+      "spec_sections": ["P2", "D4", "C1", "C2", "Exposure", "A8", "A11"],
+      "disputed_premise_or_fix": "Did not adopt a deny-list as universal sanitization. Default omission of arbitrary argv is testable without guessing secret names; intentional reveal is explicitly outside that guarantee."
+    }
+  ],
+  "notes": [
+    {
+      "id": "N1",
+      "topic": "Legacy behavior changes and initialization",
+      "disposition": "addressed",
+      "evidence": "Legacy ptest default_commands and main autodetect unregistered repos; main rejects bare/root-scoped runs; README states status exits 1 for attention. resolve_project reads also_roots and cmd_register prints a machine stanza.",
+      "change": "P2/P4/A1 explicitly require init before execution, preserve static pre-init diagnostics, enumerate bare/root/status/register changes, and migrate also_roots as independently adopted configs."
+    },
+    {
+      "id": "N2",
+      "topic": "Cancellation trigger and orphan handling",
+      "disposition": "addressed_without_new_cancel_subsystem",
+      "evidence": "The original S4 named behavior but not signal triggers, and no cancel command was in the required surface.",
+      "change": "S4/A3 name SIGINT/SIGTERM including TUI process-group delivery. Parent-only SIGKILL leaves live work charged with ownership-checked manual guidance; a cancel/reclaim command is explicitly deferred."
+    },
+    {
+      "id": "N3",
+      "topic": "Runner working directory",
+      "disposition": "addressed",
+      "evidence": "Legacy main resolves git_root(cwd) or cwd and passes it to run_local, explicitly avoiding the original source checkout when in a worktree.",
+      "change": "C1/A11 state child cwd is the current resolved project root in the active checkout, with root-relative argv and no silent path rebasing."
+    },
+    {
+      "id": "N4",
+      "topic": "Stable generic guide location",
+      "disposition": "addressed",
+      "evidence": "The original spec required a generic guide and pointer snippets without stating how the target exists before optional repo export.",
+      "change": "CLI/section 9/A13 define bundled ptest guide output before init, optional non-overwriting docs/ptest-agent.md export/recipe, and pointers only to an existing file or the stable command. Plain init does not add guide or native entry files."
+    },
+    {
+      "id": "N5",
+      "topic": "Multiple runners in one repository",
+      "disposition": "addressed_without_aggregate_orchestration",
+      "evidence": "The specified config had a single runner and nearest-project resolution, but root-level multi-runner behavior was unstated.",
+      "change": "P2/A1 explicitly use one runner per project config and separate nested roots; ambiguous root commands fail rather than choosing one, and a project's full gate is not an aggregate monorepo gate."
+    },
+    {
+      "id": "N6",
+      "topic": "Doctor inspection priority and higher budgets",
+      "disposition": "addressed",
+      "evidence": "The original fixed default bounds did not say whether relevant setup/tests received priority or could be inspected with a larger explicitly bounded request.",
+      "change": "D1/A8 prioritize declared test/setup/fixture/config roots deterministically, report traversal-discovery limits honestly, and allow explicit finite higher budgets/narrower scope within design-frozen upper bounds. Unlimited scans remain unsupported."
+    },
+    {
+      "id": "N7",
+      "topic": "Arbitrary-wrapper declared reservation preference",
+      "disposition": "parked_with_rationale",
+      "evidence": "The reviewer labeled this a preference. An arbitrary wrapper has no verified inner concurrency control in the v1 support tier.",
+      "change": "Retain the exclusive whole-capacity reservation and best-effort label. User-attested smaller reservations are deferred until supported by a separate bounded adapter/resource contract; they are not necessary to resolve F1-F3."
+    },
+    {
+      "id": "N8",
+      "topic": "Coverage failure blocks baselines",
+      "disposition": "addressed",
+      "evidence": "T3 already required a successful complete full gate; coverage failure therefore cannot provide a baseline, but the effect on existing selection evidence was not explicit.",
+      "change": "T3/T4/A5 state coverage failure cannot seed a baseline and remains a full-gate obligation forcing full until a complete successful gate, even if an older valid dependency baseline exists."
+    },
+    {
+      "id": "N9",
+      "topic": "Legacy and NG side-by-side operation",
+      "disposition": "addressed",
+      "evidence": "Legacy code registers and caps local invocations but does not implement NG's canonical shared admission domain.",
+      "change": "P4/A1 document that side-by-side binaries do not share a budget, legacy work must be stopped/drained before relying on the NG ceiling, and neither jobs nor the live CLI are automatically replaced."
+    },
+    {
+      "id": "N10",
+      "topic": "Reviewer-confirmed migration and interoperability provenance",
+      "disposition": "acknowledged_no_additional_scope",
+      "evidence": "The reviewer confirmed the cited legacy paths and compatibility research claims; no correction was requested by this note.",
+      "change": "Retained existing provenance and the narrow Muse loading-smoke qualification. No new native integration claims or provider calls."
+    }
+  ],
+  "validation": {
+    "kind": "documentation_only",
+    "checks": ["git diff --check", "JSON parsing and expected F1-F3/N1-N10 disposition keys", "owned-file diff and staged-file inspection"],
+    "runtime_claims": "None: acceptance and negative cases are requirements for later implementation, not executed tests."
+  },
+  "tests_run": [],
+  "remaining_decisions": [
+    "Linux+macOS remains the proposed v1 target pending the user's platform preference.",
+    "User approval of the reviewed spec remains mandatory before detailed design.",
+    "License choice and publication/live-install approval remain separate release gates."
+  ],
+  "next_gate": "Fable bounded repair-only re-review."
+}
