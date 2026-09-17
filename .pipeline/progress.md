@@ -59,3 +59,21 @@
   accepted when they weaken correctness (notably exempting tracked snapshots or
   returning a misleading full-gate success on changed source).
 - Next: scoped Fable re-review of the repair, then present spec for user approval.
+
+## Astra specification repair
+
+- Worker commit 1370334 integrated as e87e58c; exact dispositions in
+  .pipeline/out/spec-repair-astra.json. Only specification/author-report files changed.
+- F1: canonical host/account domain; immediate same-domain nested execution error;
+  explicit isolated synthetic/miniature fixture domain, never silent env activation.
+- F2: changed relevant input invalidates automatic/full evidence (child 0 -> final
+  70); original child failure codes retained; only non-input outputs are exempt.
+  Snapshot/source/expectation updates require a subsequent unchanged full gate.
+- F3: default command summaries omit arbitrary argv; explicit local unredacted
+  reveal is warned, not retained, and never includes an environment dump.
+- Clarified initialization/migration, cwd, signals, guide availability, scan order,
+  coverage-failure obligations and side-by-side legacy limits. Smaller arbitrary-
+  wrapper reservations remain deliberately deferred with a rationale.
+- JSON parsing and whitespace checks passed; scoped ownership inspected.
+- Repair-only Fable 5.1/high review launched with read/search tools and streamed
+  local trace .pipeline/out/spec-rereview-fable.jsonl; no tests or source changes.
