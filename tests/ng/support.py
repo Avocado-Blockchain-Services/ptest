@@ -32,21 +32,35 @@ CONTROL_VARS = (
     "PTEST_HOME",
     "PTEST_FIXTURE_DOMAIN",
 )
-# Wrapper options the helper itself generates or consumes. Prefix-only: only
-# these leading tokens (and their consumed values) belong to ptest. Scanning
-# stops at the first unknown/native token or "--", which starts the untouched
-# native tail. Never infer runner option arity inside that suffix.
-_WRAPPER_VALUE_OPTS = ("--fixture-domain", "--result-json")
+# Frozen execution grammar (design section 4): leading wrapper options only.
+# Value flags consume one following token; boolean flags consume none.
+# Scanning stops at the first unknown/native token or "--", which starts the
+# untouched native tail. Never infer runner option arity inside that suffix.
+_WRAPPER_VALUE_OPTS = (
+    "--fixture-domain", "--base", "--workers", "--queue-timeout",
+    "--result-json",
+)
+_WRAPPER_BOOL_OPTS = (
+    "--changed", "--full", "--no-setup", "--fresh", "--local", "--shadow",
+)
 def _prefix_result_json(args: tuple) -> str | None:
+    found = None
     index = 0
     while index < len(args):
         token = args[index]
-        if token == "--" or token not in _WRAPPER_VALUE_OPTS:
-            return None
-        if token == "--result-json" and index + 1 < len(args):
-            return args[index + 1]
+        if token == "--":
+            return found
+        if token in _WRAPPER_BOOL_OPTS:
+            index += 1
+            continue
+        if token not in _WRAPPER_VALUE_OPTS:
+            return found
+        if index + 1 >= len(args):
+            return found
+        if token == "--result-json":
+            found = args[index + 1]
         index += 2
-    return None
+    return found
 
 
 _READ_CHUNK = 65536
@@ -73,21 +87,33 @@ def _kill_owned_group(proc: subprocess.Popen) -> None:
     except (OSError, ValueError):
         pass
 def _read_export_file(root: Path, name: str):
-    candidate = Path(name)
+    """Read back a project-relative result export.
+
+    Returns the parsed dict, or None when the export is legitimately
+    absent (missing file), rejected as unsafe (absolute path, symlink,
+    FIFO, escape), or not a JSON dict (malformed, scalar, list).
+    Raises ValueError when the export exceeds the bound: truncated
+    bytes are incomplete evidence, never a missing file. All reads go
+    through the shared non-blocking regular-file reader; absolute
+    names are rejected without opening them, so a FIFO can never wedge
+    the caller.
+    """
     try:
-        if candidate.is_absolute():
-            with open(candidate, "rb") as handle:
-                raw = handle.read(BOUND_OUTPUT_BYTES + 1)
-        else:
-            raw = F.read_regular(root, name, BOUND_OUTPUT_BYTES + 1)
+        raw = F.read_regular(root, name, BOUND_OUTPUT_BYTES + 1)
     except (OSError, ValueError, C.Problem):
         return None
     if len(raw) > BOUND_OUTPUT_BYTES:
-        return None
+        raise ValueError(
+            f"invoke result export exceeded {BOUND_OUTPUT_BYTES}-byte bound; "
+            "captured output is incomplete evidence, not a complete result"
+        )
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except ValueError:
         return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 def _drain_bounded(proc: subprocess.Popen, deadline_s: float) -> tuple:
     deadline = time.monotonic() + deadline_s
     buffers = [bytearray(), bytearray()]
@@ -126,17 +152,31 @@ def _drain_bounded(proc: subprocess.Popen, deadline_s: float) -> tuple:
             wait = min(0.05, remaining)
         try:
             ready, _, _ = select.select([s for s, flag in zip(streams, live) if flag], [], [], wait)
-        except (OSError, ValueError):
-            break
+        except (OSError, ValueError) as exc:
+            _kill_owned_group(proc)
+            _close_stream(proc.stdout)
+            _close_stream(proc.stderr)
+            try:
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise OSError(f"invoke stream select failure ({exc}); owned child session killed") from exc
         for stream in ready:
             index = 0 if stream is proc.stdout else 1
             try:
                 piece = os.read(stream.fileno(), _READ_CHUNK)
             except BlockingIOError:
                 continue
-            except (OSError, ValueError):
-                live[index] = False
-                continue
+            except (OSError, ValueError) as exc:
+                name = "stdout" if index == 0 else "stderr"
+                _kill_owned_group(proc)
+                _close_stream(proc.stdout)
+                _close_stream(proc.stderr)
+                try:
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise OSError(f"invoke stream {name} read failure ({exc}); owned child session killed") from exc
             if not piece:
                 live[index] = False
                 continue
@@ -196,8 +236,6 @@ class PipeBarrier:
         os.write(self._write, b"\x00")
 
     def wait(self, timeout: float) -> bool:
-        import select
-
         ready, _, _ = select.select([self._read], [], [], timeout)
         if not ready:
             return False
@@ -491,11 +529,15 @@ class CaseFactory:
         if export_rel is not None:
             cmd += ["--result-json", export_rel]
         cmd += list(args)
-        child_env = dict(os.environ)
+        # Purge inherited control variables first so the fixture child
+        # never inherits orchestrator state; explicit env= overrides are
+        # applied after, letting negative tests deliberately pass one.
+        child_env = {
+            key: value for key, value in os.environ.items()
+            if key not in CONTROL_VARS
+        }
         for key, value in (env or {}).items():
             child_env[key] = value
-        for var in CONTROL_VARS:
-            child_env.pop(var, None)
         proc = subprocess.Popen(
             cmd, cwd=str(root), env=child_env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,

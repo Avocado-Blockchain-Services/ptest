@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 import os
+import select
 import stat
 import subprocess
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
 from ptest.contracts import Problem
-from support import BOUND_OUTPUT_BYTES, CONTROL_VARS
+from support import BOUND_OUTPUT_BYTES, CONTROL_VARS, _read_export_file
 from ptest.files import (
     create_exclusive,
     ensure_private_dir,
@@ -438,14 +437,14 @@ def test_invoke_watchdog_bounded_with_retained_pipe(case, tmp_path):
     try:
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="timeout"):
-            case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=2.0)
+            case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=1.0)
         elapsed = time.monotonic() - start
     finally:
         sentinel_alive = sentinel.poll() is None
         sentinel.terminate()
         sentinel.wait(timeout=10)
     assert sentinel_alive, "watchdog cleanup must not kill unrelated jobs"
-    assert elapsed < 20.0, elapsed
+    assert 0.5 <= elapsed < 6.0, elapsed
 def test_invoke_returns_when_child_exits_despite_retained_pipe(case, tmp_path):
     domain = case.domain()
     project = case.project(domain)
@@ -455,7 +454,7 @@ def test_invoke_returns_when_child_exits_despite_retained_pipe(case, tmp_path):
     elapsed = time.monotonic() - start
     assert completed.code == 0
     assert completed.result == {"ok": True}
-    assert elapsed < 15.0, elapsed
+    assert elapsed < 5.0, elapsed
 def test_invoke_parses_caller_result_json_with_existing_parent(case, tmp_path):
     domain = case.domain()
     project = case.project(domain)
@@ -472,7 +471,13 @@ MINI_PREFIX_MAIN = """
 import json
 import sys
 from pathlib import Path
-WRAPPER_VALUE_OPTS = ("--fixture-domain", "--result-json")
+WRAPPER_VALUE_OPTS = (
+    "--fixture-domain", "--base", "--workers", "--queue-timeout",
+    "--result-json",
+)
+WRAPPER_BOOL_OPTS = (
+    "--changed", "--full", "--no-setup", "--fresh", "--local", "--shadow",
+)
 def main():
     argv = sys.argv[1:]
     wrapper = {}
@@ -483,6 +488,10 @@ def main():
         if token == "--":
             native = argv[index + 1:]
             break
+        if token in WRAPPER_BOOL_OPTS:
+            wrapper[token] = True
+            index += 1
+            continue
         if token not in WRAPPER_VALUE_OPTS:
             native = argv[index:]
             break
@@ -559,3 +568,181 @@ def test_invoke_leading_explicit_result_path_read_back(case, tmp_path):
     assert completed.result["native"] == []
     assert (sub / "result.json").is_file()
     assert list(project.glob("ptest-result-*.json")) == []
+def _stream_main(stream, size):
+    """Test-only miniature target writing size bytes to one stream."""
+    assert stream in ("stdout", "stderr")
+    target = "sys.stdout.buffer" if stream == "stdout" else "sys.stderr.buffer"
+    byte = "O" if stream == "stdout" else "E"
+    return (
+        "import json\nimport sys\nfrom pathlib import Path\n"
+        "def main():\n"
+        "    argv = sys.argv[1:]\n"
+        "    export = None\n"
+        "    for index, token in enumerate(argv):\n"
+        "        if token == \"--result-json\" and index + 1 < len(argv):\n"
+        "            export = argv[index + 1]\n"
+        "    assert export is not None, \"mini target requires --result-json\"\n"
+        f"    {target}.write(b{byte!r} * {int(size)})\n"
+        f"    {target}.flush()\n"
+        "    Path.cwd().joinpath(export).write_text(json.dumps({\"ok\": True}))\n"
+        "    return 0\n"
+        "raise SystemExit(main())\n"
+    )
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_invoke_stream_exact_bound_succeeds(case, tmp_path, stream):
+    """Exactly BOUND_OUTPUT_BYTES on either stream must succeed intact."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(
+        tmp_path, _stream_main(stream, BOUND_OUTPUT_BYTES))
+    completed = case.invoke(
+        domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
+    assert completed.code == 0
+    assert len(getattr(completed, stream)) == BOUND_OUTPUT_BYTES
+    assert completed.result == {"ok": True}
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_invoke_stream_past_cap_reports_named_stream(case, tmp_path, stream):
+    """BOUND+1 on either stream must name the offending stream."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(
+        tmp_path, _stream_main(stream, BOUND_OUTPUT_BYTES + 1))
+    with pytest.raises(ValueError, match=f"invoke {stream}.*bound"):
+        case.invoke(
+            domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
+def test_export_read_malformed_scalar_list_are_absent(tmp_path):
+    """Malformed/scalar/list exports are not dicts, so read as absent."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "bad.json").write_bytes(b"{not json")
+    assert _read_export_file(root, "bad.json") is None
+    (root / "scalar.json").write_bytes(b"42")
+    assert _read_export_file(root, "scalar.json") is None
+    (root / "lst.json").write_bytes(b"[1, 2]")
+    assert _read_export_file(root, "lst.json") is None
+    assert _read_export_file(root, "absent.json") is None
+def test_export_read_oversize_raises_bounded_failure(tmp_path):
+    """An oversize export is incomplete evidence, not a missing file."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "big.json").write_bytes(b"x" * (BOUND_OUTPUT_BYTES + 5))
+    with pytest.raises(ValueError, match="bound"):
+        _read_export_file(root, "big.json")
+def test_export_read_rejects_absolute_path_without_opening(tmp_path):
+    """Absolute export names are rejected; never opened as host paths."""
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b'{"ok": true}')
+    assert _read_export_file(root, str(outside)) is None
+def test_export_read_absolute_fifo_never_blocks(tmp_path):
+    """An absolute FIFO export name must not wedge the reader."""
+    root = tmp_path / "project"
+    root.mkdir()
+    fifo = tmp_path / "stuck"
+    os.mkfifo(fifo)
+    start = time.monotonic()
+    assert _read_export_file(root, str(fifo)) is None
+    assert time.monotonic() - start < 5.0
+def test_export_read_rejects_symlink_and_fifo(tmp_path):
+    """Symlink and FIFO exports inside the root read as absent."""
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b'{"ok": true}')
+    (root / "link.json").symlink_to(outside)
+    assert _read_export_file(root, "link.json") is None
+    os.mkfifo(root / "pipe.json")
+    start = time.monotonic()
+    assert _read_export_file(root, "pipe.json") is None
+    assert time.monotonic() - start < 5.0
+def test_invoke_shadow_prefix_result_json_read_back(case, tmp_path):
+    """A leading --shadow must not duplicate the caller export."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    sub = project / "sub"
+    sub.mkdir()
+    completed = case.invoke(
+        domain, project, "--shadow", "--result-json", "sub/result.json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["wrapper"]["--result-json"] == "sub/result.json"
+    assert completed.result["wrapper"].get("--shadow") is True
+    assert completed.result["native"] == []
+    assert (sub / "result.json").is_file()
+    assert list(project.glob("ptest-result-*.json")) == []
+def test_invoke_workers_prefix_result_json_read_back(case, tmp_path):
+    """A leading --workers value must not duplicate the caller export."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    sub = project / "sub"
+    sub.mkdir()
+    completed = case.invoke(
+        domain, project, "--workers", "1", "--result-json", "sub/result.json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["wrapper"]["--result-json"] == "sub/result.json"
+    assert completed.result["wrapper"]["--workers"] == "1"
+    assert completed.result["native"] == []
+    assert (sub / "result.json").is_file()
+    assert list(project.glob("ptest-result-*.json")) == []
+def test_invoke_leading_wrapper_opts_keep_native_verbatim(case, tmp_path):
+    """Wrapper prefix is consumed; the native tail stays literal."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    completed = case.invoke(
+        domain, project, "--shadow", "--workers", "1", "-k", "--result-json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["wrapper"].get("--shadow") is True
+    assert completed.result["wrapper"]["--workers"] == "1"
+    assert completed.result["native"] == ["-k", "--result-json"]
+    assert len(list(project.glob("ptest-result-*.json"))) == 1
+def test_invoke_purges_inherited_control_vars(case, tmp_path, monkeypatch):
+    """Inherited control vars must not leak into the fixture child."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
+    monkeypatch.setenv("PTEST_RUN_ID", "inherited-contamination")
+    completed = case.invoke(
+        domain, project,
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert "PTEST_RUN_ID" not in completed.result["leaked_control_vars"]
+def test_invoke_explicit_env_override_passes_through(case, tmp_path):
+    """Explicit env= control vars reach the child for override tests."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
+    completed = case.invoke(
+        domain, project,
+        env={"PYTHONPATH": pythonpath, "PTEST_RUN_ID": "explicit-override"},
+        timeout=20.0,
+    )
+    assert completed.code == 0
+    assert "PTEST_RUN_ID" in completed.result["leaked_control_vars"]
+def test_invoke_stream_select_failure_raises_fixture_error(
+        case, tmp_path, monkeypatch):
+    """A select/read failure must not look like a normal empty result."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
+    def _boom(*args, **kwargs):
+        raise OSError("injected select failure")
+    monkeypatch.setattr(select, "select", _boom)
+    with pytest.raises(OSError, match="stream"):
+        case.invoke(
+            domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
