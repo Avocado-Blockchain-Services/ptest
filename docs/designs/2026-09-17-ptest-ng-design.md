@@ -1,0 +1,349 @@
+# ptest NG implementation design
+
+Date: 2026-09-17. Author: Astra xhigh. Status: proposed architecture for Opus review; the [product specification](../specs/2026-09-17-ptest-ng-product.md) is user-approved. No implementation or test evidence is asserted here. `.pipeline/context.md` resolves the former platform question: Linux and macOS are the v1 targets. Publication, a license choice, and replacement of the live installation remain separate decisions.
+
+## 1. Questions answered and scope
+
+The design question is how to deliver safe local execution, cooperative scheduling, explainable selection, and useful diagnosis without becoming a distributed service, an agent launcher, or a universal language analyzer.
+
+| Question | Decision |
+|---|---|
+| What coordinates independently launched clients? | One account-derived local SQLite ledger, atomic admission, and one short-lived foreground process-group guard per admitted job. No daemon. |
+| What proves work is finished? | Runner facts are provisional until the guard exits, its cooperative process group is absent, and the caller verifies final inputs and publishes the outcome while still holding the lease. |
+| What permits skipping tests? | Reviewed explicit source-to-test-file groups, complete compatible full inventory, bounded input fingerprints, and durable failure obligations. No coverage-only dependency inference. |
+| How are runners bounded without breaking config? | Small native Python/Node bridges validate the actual initialized runner. Native parsers own their configuration; arbitrary wrappers remain explicitly exclusive/best-effort. |
+| What can doctor promise? | Bounded static hypotheses and recorded timings. Separately authorized, scoped, isolated probes give observations, not certification. |
+| What is the maintenance boundary? | A Python package, one shipped Node bridge, stdlib SQLite/TOML/JSON, one runtime observation dependency, and finite runner profiles. No remote backend, agent API, service provisioner, or adapter marketplace. |
+| How is legacy replaced? | A frozen installed legacy `ptest` bootstraps local-only scoped tests; new modules are integrated behind a separate package entrypoint. Explicit cutover/deletion follows equivalent local-contract tests and an audit. |
+
+The authority order is approved product spec, this design's contract catalog, then the task plan. Research establishes feasibility, not passing support claims. The provisional foundation is read-only candidate material: bounded-file helpers, configuration validation and doctor recipe ideas may be adapted with new tests; its mandatory-xdist serial behavior, direct unscheduled execution, and Linux-only installer must not be imported.
+
+## 2. Layout and ownership boundaries
+
+```text
+CLI -> config / static inspection -> source + history -> selection plan
+    -> scheduler admission -> guard -> setup -> native runner bridge
+    -> guard drain + group-absence proof -> final source check -> history -> release
+```
+
+Production package: `src/ptest/`. `contracts.py` owns public records/enums/codecs; `files.py` owns safe bounded file primitives; `config.py` owns resolution/init/migration; `platform.py` owns account/filesystem/process identity; `scheduler.py` owns all ledger transitions; `guard.py` owns the execution process group; `runners.py` owns the small adapter registry; `adapters/pytest.py`, `adapters/vitest.py`, `adapters/simple.py` own runner preparation; `runtime/pytest_bridge.py` and `runtime/vitest_bridge.mjs` own native instrumentation; `source.py`, `selection.py`, `history.py` own input evidence, pure planning, and mutable observations respectively; `doctor.py` owns static findings; `operations.py` owns run/shadow/probe orchestration; `render.py` owns safe presentation; `cli.py` owns parsing and dispatch. Resource recipes and the one agent guide are package data under `resources/`.
+
+No plugin registration mechanism is public in v1. Only the integration task edits `runners.py`, `operations.py`, `cli.py`, package entrypoints and CLI registration. Shared contract changes after the bootstrap barrier require an orchestrator-reviewed patch before dependent writers proceed. Tests use component-specific files and fixture directories; no parallel writer modifies shared `tests/ng/conftest.py`.
+
+## 3. Versions, execution tiers, and dependencies
+
+Package version starts `0.1.0`; distribution name is provisionally `ptest-ng`, console command `ptest`, import package `ptest`. Build a local wheel without inventing a public license declaration. Name availability/license are publication gates. Python support target is CPython 3.11–3.14; platform acceptance is native Linux and macOS with a local, ownership-preserving filesystem. Windows fails before creating state. WSL/container configurations are unverified until the same lifecycle matrix passes there.
+
+Runtime dependencies: Python stdlib plus `psutil==7.2.2` for process birth, ancestry, and conservative observations. It is not proof of complete descendant tracking or a sandbox. Build backend `setuptools>=77,<83`; `uv.lock` pins build/dev/security resolution at implementation. No Node package is bundled or downloaded by ordinary diagnostics. The project's own Node and Vitest supply the bridge runtime. [psutil package](https://pypi.org/project/psutil/).
+
+| Profile | Initial acceptance tuple / policy | Capability after evidence passes |
+|---|---|---|
+| pytest | pytest 9.1.1; xdist 3.8.0 optional; pytest-cov 7.1.0 and coverage 7.15.0 when coverage is configured | Serial without xdist; bounded local xdist; complete IDs/timings; file-group selection. |
+| Vitest | Release target Vitest and coverage-v8 3.2.7; 3.2.6 is the inspected API reference, not a promised patched release tuple. Reference Node 26.8.2; additional Node versions need recorded matrix evidence. | One project, standard forks pool, no watch/browser/custom pool/API listener; exact native specifications and additive results. |
+| Go | Reference Go 1.27.1; native foreground `go test`, standard local packages | Bounded build/package/test parallel dimensions; explicit/full execution, never automatic narrowing. |
+| Cargo | Reference Cargo 1.98.1; standard libtest harness, explicit lib/bin/test targets | Bounded build jobs and test threads; no claimed bound for custom harness/doctest/service launchers. No selector. |
+| command | Explicit literal argv, foreground lifecycle declaration | Reserves the entire shared slot budget and one job exclusively. Inner parallelism, inventory, and coverage semantics remain unverified. |
+
+These are finite acceptance targets, not an already-tested compatibility range. A differing runner or critical plugin version is `unsupported-capability` for that first-class profile until its matrix is added; no guessed worker injection. The user can deliberately adopt `command` for an otherwise valid wrapper, with an exclusive/best-effort warning. Execution capability and selection capability are separate: unsupported selection evidence causes full; unsafe execution configuration errors before tests.
+
+The bridges follow the [runner research](../research/2026-09-17-runner-capabilities.md), including the versioned [Vitest v3 API](https://v3.vitest.dev/advanced/api/vitest). Runner config, test code, hooks and setup are trusted *only when explicitly executed*; arbitrary malicious same-user code is outside process containment.
+
+## 4. Frozen CLI grammar
+
+```text
+ptest [--fixture-domain ABS_DIR] [--changed [--base REV] | --full]
+      [--workers N] [--queue-timeout SECONDS] [--no-setup] [--fresh] [--local]
+      [--shadow] [--result-json REL_FILE] [--] [RUNNER_ARG ...]
+ptest init [--runner pytest|vitest|go|cargo|command] [--dry-run]
+           [--reveal-command] [--adopt-local]
+ptest plan [--base REV] [--json]
+ptest changed [--base REV] [--workers N] [--queue-timeout SECONDS]
+              [--no-setup] [--fresh] [--local] [--shadow] [--result-json REL_FILE]
+ptest where [--json] [--reveal-command]
+ptest status [--json]
+ptest history [TEST_OR_FILE] [--limit N] [--json]
+ptest doctor [--scope REL_DIR] [--max-entries N] [--max-files N]
+             [--max-file-bytes N] [--max-total-bytes N] [--json | --prompt]
+ptest doctor --probe --scope REL_TEST [--workers N] [--repeat N]
+             [--attempt-timeout SECONDS] [--no-setup] [--result-json REL_FILE]
+ptest guide [--write REL_FILE]
+ptest register [--json]
+ptest --help | --version
+```
+
+`--fixture-domain` is a leading global option on inspection and execution; it is never accepted from environment/config. `--` ends ptest option parsing, preserving every subsequent token. Before it, recognized ptest switches are consumed; unrecognized tokens on the bare execution form are runner tokens, not interpolated strings. Reserved subcommand names are disambiguated by `--` for a test path named `status`, etc. Options requiring values reject missing/invalid values with a withheld-value error. No shell joining/reparsing.
+
+Bare `ptest`, `ptest changed`, and `--changed` are automatic; any explicit runner arguments without `--changed`/`--full` mean scoped execution. `--changed` rejects additional runner arguments in v1, keeping the automatic safety domain fixed. `--full` rejects user narrowing tokens and uses the configured whole gate. `--shadow` only combines with automatic mode and requires a valid selectable plan. `--fresh` means execute again, never reuse a prior pass (all runs already do this); `--local` is a documented compatibility alias. `--workers` is an upper request, not authority to exceed account/repo bounds. `--base` resolves locally, never fetches. `history` defaults to20 summaries, accepts limit1–200, and optionally matches one exact recorded test ID or normalized project-relative file (no executable query/regex). No implicit aggregate across nested projects.
+
+All executing modes require `.ptest.toml`. Uninitialized execution returns `2`, `initialization-required`. Static commands work before init and disclose unknowns. `init --runner command` cannot invent an argv: it emits a non-overwriting editable template in dry-run form and exits `2`, `command-required`, until a valid explicit config is supplied. Init on mixed runner evidence requires `--runner`; adopted nested roots remain separate. No prompt/PTY/stdin requirement.
+
+Runner cwd is the resolved project root in the active checkout, including when invoked in a subdirectory. User arguments are not rebased. `--result-json` and `guide --write` are project-relative, validated non-symlink paths; output creation is exclusive, never overwrites an existing file. Result export failure does not hide a runner failure; if the runner passed, a requested export failure is final `70`. Normal run artifacts always have private generated paths independent of this optional export.
+
+Inspection `--json` emits exactly one UTF-8 JSON document on stdout, including errors; no banner/progress/raw traceback. Execution emits original child stdout/stderr bytes to their corresponding streams, ptest messages only to stderr, and machine data only to the result artifact. Do not buffer or filter child output. Inspectors may return `0` while reporting blocked/unknown readiness; that means inspection succeeded, not tests passed.
+
+Final status precedence: retain the first failed setup/runner/compound phase's actual nonzero code; otherwise cancellation is `128+signal`; otherwise required incomplete operation is `70`; otherwise success is `0`. Prelaunch usage/config/unsupported = `2`; scheduler/nesting/queue = `75`; executable absent = `127`. Native negative subprocess codes convert to `128+signal`. Never substitute a telemetry code for a runner failure. Failed setup is phase `setup`, not a passing test run. A changed-input automatic/full run with runner `0` is incomplete `70`; scoped observation preserves runner `0` but marks invalid input identity and cannot become a gate.
+
+## 5. Portable configuration and resolution
+
+One `.ptest.toml`, UTF-8, maximum 256 KiB, `version=1`; unknown keys, duplicate keys, wrong types, control characters, and out-of-range integers error. A syntactically valid file with an invalid **selection-only** subtree may retain independently validated runner/setup/resources and disable narrowing with policy-invalid; malformed TOML or invalid execution fields cannot be partially recovered. Relative paths use `/`, no `..`, empty components, absolute paths or symlink escapes. Literal argv tokens may contain spaces/metacharacters but not NUL; at most 256 tokens, 16 KiB/token and 128 KiB total per command. Static errors never echo token values. A maximum of 256 groups and 4,096 path entries keeps policy bounded. Roots are path prefixes, not regex/glob programs.
+
+```toml
+version = 1
+project_id = "cd58ec6cf99748ce9f15dfce137f044d3" # generated 128-bit hex at init
+
+[runner]
+kind = "pytest"
+launcher = ["uv", "run", "--locked", "--no-sync", "python"]
+args = []
+full_args = ["--cov=sample", "--cov-fail-under=85"]
+test_roots = ["tests"]
+workers = 1
+lifecycle = "cooperative-process-group"
+
+[setup]
+argv = ["uv", "sync", "--locked"]
+required_paths = [".venv/bin/python"]
+network = true
+lifecycle_scripts = false
+
+[resources]
+locks = []
+memory_mb_per_worker = 0 # 0 means unknown, not free memory
+probe_isolation = "undeclared" # or "run-worker-namespaced"
+
+[selection]
+enabled = false
+closed_inputs = false
+input_roots = ["src", "tests"]
+ignored_inputs = []
+environment = []
+full_triggers = ["pyproject.toml", "uv.lock", "conftest.py"]
+always = []
+no_tests = []
+non_input_outputs = []
+full_ratio = 0.70
+
+[[selection.groups]]
+name = "sample"
+sources = ["src/sample"]
+tests = ["tests/sample"]
+```
+
+Exact field domains: `kind` is the five-profile enum; `launcher` is a nonempty argv prefix; `args` is common runner arguments, `full_args` is full-only additional arguments, both default empty. `test_roots` is nonempty for first-class profiles; `workers` integer 1–64, default 1. `lifecycle` only accepts the shown value. `setup` is optional, with nonempty `argv`, nonempty `required_paths`, both booleans mandatory when present. `locks` is 0–32 unique machine-wide identifiers matching `[a-z][a-z0-9_.:-]{0,63}`; names are explicitly chosen to identify the actual shared service, not automatically salted by checkout. Memory estimate is integer 0–1,048,576. `probe_isolation` has the two listed values. Selection booleans default false, lists empty, ratio finite 0.1–1.0. Each group has a unique 1–64 character safe name and nonempty source/test prefix lists. `project_id` is exactly 32 lowercase hex characters.
+
+For pytest the launcher is `python` (or validated interpreter path) or the exact fixed `uv run --locked --no-sync python` family; the bridge replaces only the `-m pytest` operation, not arbitrary command prefixes. Vitest uses `["node"]` or a validated Node path; project-local `node_modules/vitest` is resolved without global fallback. Go uses `["go"]`; Cargo `["cargo"]`. A command profile's `launcher + args` is the entire scoped command and `launcher + args + full_args` its full command. First-class full gates are defined by configured test roots/native inventory, not an arbitrary command that may already contain a narrowing selector. Common config/addopts narrowing options are rejected for full/automatic gates unless the adapter can prove they describe the full configured inventory; scoped runs preserve them. Coverage options and supported reporters/plugins are not stripped.
+
+Init detects candidates from bounded manifests/config files, never imports code. It preserves existing native runner configuration; it does not migrate addopts into a second source of truth. It proposes locked setup only for recognized `uv.lock` or `package-lock.json` projects, declaring npm lifecycle scripts/network explicitly. Unknown/compound launchers, missing lock semantics, multiple runners, or legacy remote registration require a choice instead of silent adoption. File creation uses exclusive no-follow open; repeated init reports existing and leaves bytes unchanged. A project without a supported setup command may initialize without setup and manage dependencies itself.
+
+Resolution walks upward from physical cwd to the nearest `.ptest.toml`, stopping at the enclosing Git worktree boundary; no config from a parent checkout applies accidentally. Without Git, nearest config establishes root. Before init, discovery stays within the same Git root, or cwd if no Git root. No `also_roots`, global project commands, remote configuration, or environment override can substitute another checkout. Environment cannot relocate coordination. HOME/XDG differences are ignored for domain selection and shown as non-authoritative provenance. Explicit unsupported `PTEST_CONFIG`, `PTEST_STATE_DIR`, or `PTEST_HOME` overrides return2/invalid-config with a safe migration explanation; they never redirect or silently disappear. Legacy backend variables cannot select remote execution. The bootstrap test harness must remove its legacy-only PTEST_CONFIG before launching a candidate child; a separate negative case deliberately retains it and verifies rejection.
+
+Legacy `~/.config/ptest/config.toml` is read only for bounded migration warnings using the account home. `register` prints a redacted migration/config preview without writing. Remote/ambiguous entries require `init --adopt-local` plus an unambiguous supported runner or an explicitly authored config; shell strings are not executed or silently converted. Config output warns about changed bare behavior, project-root cwd, init requirement, coverage/full semantics, removed `also_roots` routing and separate old/new budgets. Legacy processes must drain before claiming the NG ceiling; no tool discovers/kills them by name.
+
+## 6. Shared contracts: one source of truth
+
+`contracts.py` is the only Python definition of the following frozen, keyword-only records. Enums are string enums; collections stored internally are tuples/frozensets. `Path` exists only internally; JSON paths are escaped project-relative strings or opaque private artifact IDs. There is no untyped arbitrary `dict` at module boundaries. Each record validates construction. `Config` is the exact typed tree in section 5 (RunnerConfig, SetupConfig, ResourceConfig, SelectionPolicy, Group), plus internal `checkout: CheckoutIdentity` and `config_path: Path`, not a second schema. `Problem` is a typed `Exception` subclass (not a frozen dataclass exception), exposing `code: str`, `message: str`, `phase: str`, `retryable: bool`; `str(problem)` is the safe `code: message`. It carries no raw exception text/argv or arbitrary details. Functions raise Problem for owned failures; the CLI serializes exactly its four allowlisted fields.
+
+```python
+resolve_config(cwd: Path) -> ConfigResolution                 # config.py
+init_project(cwd: Path, options: InitOptions) -> InitResult    # config.py
+read_regular(root: Path, relative: str, limit: int) -> bytes   # files.py
+domain_paths(fixture: Path | None) -> DomainPaths              # platform.py
+process_identity(pid: int) -> ProcessIdentity | None          # platform.py
+probe_group(pgid: int) -> GroupObservation                    # platform.py
+boot_identity() -> str                                       # platform.py
+snapshot(config: Config, baseline: Baseline | None,
+         base: str | None) -> InputSnapshot                  # source.py
+choose_plan(config: Config, snapshot: InputSnapshot,
+            history: HistoryView, request: RunRequest) -> Plan # selection.py
+read_history(checkout: CheckoutIdentity) -> HistoryView        # history.py
+publish_outcome(checkout: CheckoutIdentity, result: RunResult,
+                inventory: Inventory | None) -> PublishResult # history.py
+enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket # scheduler.py
+poll(domain: DomainPaths, ticket: Ticket) -> AdmissionState    # scheduler.py
+register_guard(domain: DomainPaths, grant: Grant,
+               guard: ProcessIdentity) -> bool               # scheduler.py
+reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]        # scheduler.py
+finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
+       final: Finalization) -> None                          # scheduler.py
+run_guard(control_fd: int, manifest_fd: int) -> int           # guard.py
+prepare(config: Config, plan: Plan, grant: Grant,
+        attempt: AttemptIdentity) -> PreparedRun             # each adapter
+adapter_for(kind: RunnerKind) -> RunnerAdapter                # runners.py
+inspect(config: ConfigResolution, limits: ScanLimits,
+        scope: str | None) -> DoctorReport                   # doctor.py
+execute(config: Config, request: RunRequest) -> RunResult      # operations.py
+render_json(document: PublicDocument) -> bytes               # render.py
+repair_prompt(report: DoctorReport) -> str                   # render.py
+main(argv: Sequence[str] | None = None) -> int                # cli.py
+```
+
+Other shared record fields are frozen here. Local private helpers may differ; inter-task names/types may not:
+
+| Record | Fields |
+|---|---|
+| `CheckoutIdentity` | `project_id: str`, `checkout_id: str`, `root: Path` |
+| `ProcessIdentity` | `pid: int`, `birth: float`, `uid: int`, `pgid: int` |
+| `RunRequest` | `mode: Mode`, `argv: tuple[str,...]` (ephemeral only), `base: str|None`, `workers: int|None`, `queue_timeout_s: float`, `no_setup: bool`, `shadow: bool`, `result_path: str|None`, `fixture_domain: Path|None`, `probe: ProbeOptions|None` |
+| `InputSnapshot` | `digest: str|None`, `compatibility: str|None`, `head: str|None`, `clean: bool`, `changes: tuple[Change,...]`, `limitations: tuple[Reason,...]`, `files: tuple[FileFingerprint,...]` |
+| `Change` / `FileFingerprint` | `Change(old: str|None, new: str|None, kind: str)`; `FileFingerprint(path: str, digest: str, mode: int, size: int)` |
+| `Inventory` / `TestRecord` | `Inventory(adapter: str, version: str, complete: bool, tests: tuple[TestRecord,...], digest: str)`; `TestRecord(id: str, file: str, outcome: Outcome, setup_s: float|None, call_s: float|None, teardown_s: float|None)` |
+| `Baseline` | `run_id: str`, `head: str`, `input_digest: str`, `compatibility: str`, `inventory: Inventory`, `policy_digest: str`, `created_at: str` |
+| `Obligation` / `HistoryView` | `Obligation(file: str|None, test_id: str|None, sequence: int, source_digest: str|None, compatibility: str|None, reason: str)`; `HistoryView(baseline: Baseline|None, obligations: tuple[Obligation,...], selection_disabled: bool, limitations: tuple[Reason,...])` |
+| `Plan` | `mode: Mode`, `execution: full|selected|scoped|none`, `files: tuple[str,...]`, `reasons: tuple[Reason,...]`, `input_digest: str|None`, `compatibility: str|None`, `baseline_run_id: str|None`, `static_preview: bool` |
+| `AdmissionRequest` | `run_id: str`, `checkout: CheckoutIdentity`, `owner: ProcessIdentity`, `slots: int`, `exclusive: bool`, `locks: tuple[str,...]`, `memory_mb: int|None`, `deadline: float`, `fixture: bool` |
+| `Ticket` / `Grant` | `Ticket(run_id: str, sequence: int)`; `Grant(run_id: str, nonce: str, slots: int, generation: int, domain_id: str)` |
+| `AttemptIdentity` | `run_id: str`, `attempt_id: str`, `resource_prefix: str`, `worker_count: int` |
+| `PreparedRun` | `argv: tuple[str,...]`, `cwd: Path`, `env_updates: tuple[tuple[str,str],...]`, `report_path: Path`, `capability: Capability`, `summary: CommandSummary` (all argv/env transient) |
+| `RunResult` | Exact run-document payload below, plus internal `sequence: int`, `input_before: InputSnapshot|None`, `input_after: InputSnapshot|None`, `policy_digest: str|None`. These four fields are explicitly excluded from public serialization; they provide admitted ordering and baseline eligibility to history. Inventory is passed separately to publish_outcome. |
+| `DoctorReport` | `scope: tuple[str,...]`, `readiness: tuple[Readiness,...]`, `findings: tuple[Finding,...]`, `limits: ScanLimits`, `usage: ScanUsage`, `limitations: tuple[Reason,...]` |
+| `Finding` | `code`, `severity`, `confidence`, `path|None`, `line|None`, `evidence_type`, `consequence`, `remediation`, `verification` (bounded strings; no source snippets) |
+
+`Reason(code: str, message: str, paths: tuple[str,...])`; `Capability(execution: str, selection: bool, lifecycle: str, limitations: tuple[Reason,...])`; `CommandSummary(kind: RunnerKind, mode: Mode, argument_count: int, generated_options: tuple[str,...], workers: int|None, provenance: tuple[str,...])`. Generated options contain only ptest-generated validated numbers/enum names, never user token values. `Outcome` = passed/failed/error/skipped/xfail/xpass/unknown; `Mode` = automatic/scoped/full/shadow/probe. Remaining shared records are frozen as follows; T0 publishes all definitions and strict codecs before parallel tasks.
+
+| Record | Fields |
+|---|---|
+| `InitOptions` / `InitResult` | `InitOptions(runner: RunnerKind|None, dry_run: bool, reveal_command: bool, adopt_local: bool)`; `InitResult(action: str, target: Path, exists: bool, config: Config|None, warnings: tuple[Reason,...])` |
+| `ConfigResolution` | `root: Path`, `path: Path|None`, `config: Config|None`, `provenance: tuple[str,...]`, `warnings: tuple[Reason,...]`, `problem: Problem|None` |
+| `DomainPaths` | `root: Path`, `machine_config: Path`, `ledger: Path`, `marker: Path`, `fixture: bool`, `domain_id: str|None` |
+| `GroupObservation` | `exists: bool|None`, `permission: bool`, `checked_at: float`; exists=false only on ESRCH, null on an indeterminate probe |
+| `ScanLimits` / `ScanUsage` | Both carry `entries: int`, `files: int`, `file_bytes: int`, `total_bytes: int`, `findings: int`, `output_bytes: int`, `elapsed_s: float`; limits additionally `depth: int`, `ast_nodes: int`; usage additionally `skipped: int`, `truncated: bool` |
+| `ProbeOptions` | `scope: str`, `repeat: int`, `workers: int`, `attempt_timeout_s: float` |
+| `PublishResult` | `committed: bool`, `baseline_published: bool`, `selection_disabled: bool`, `reasons: tuple[Reason,...]` |
+| `QuiescenceProof` | `run_id: str`, `generation: int`, `pgid: int`, `checked_at: float`, `group_absent: bool`, `escaped_survivors: bool` |
+| `Finalization` | `outcome_id: str|None`, `status: Status`, `exit_code: int`, `source_valid: bool`, `committed: bool` |
+| `AdmissionState` | `state: LeaseState`, `grant: Grant|None`, `problem: Problem|None`, `position: int|None` |
+| `LeaseView` | `run_id: str`, `checkout_id: str`, `state: LeaseState`, `sequence: int`, `slots: int`, `phase: str`, `ownership: certain|uncertain|gone`, `fixture: bool`, `reasons: tuple[Reason,...]` |
+| `Readiness` | `area: execution|parallel|selection|timing`, `state: ready-for-declared-capability|blocked|unknown`, `reasons: tuple[Reason,...]` |
+
+`Status` is the run-status enum below; `LeaseState` is the state-machine enum in section7, including CANCELLED and UNCERTAIN. `RunnerAdapter` is a structural protocol exposing the exact `prepare(...) -> PreparedRun` signature. `PublicDocument` is the tagged union of the seven public payloads; no arbitrary subclass serialization. `QuiescenceProof` is issued only by the platform/scheduler verification helper, binds run/generation/pgid, and is rechecked within finalization; a boolean constructed by an arbitrary caller is not release authority. Monotonic timestamps/deadlines are process-lifetime observations, not cross-boot identities. Ledger boot identity uses Linux boot_id or macOS boot-time kernel observation; a changed boot proves old processes absent, marks unfinished jobs incomplete and invalidates old monotonic deadlines before accepting new work. Inaccessible boot identity fails closed; wall-clock jumps never reclaim a live lease.
+
+### Public JSON version 1
+
+All documents: `{ "schema_version": 1, "kind": KIND, "ptest_version": "0.1.0", "domain": DOMAIN_OR_NULL, "data": PAYLOAD, "error": PROBLEM_OR_NULL }`. `kind` is init/plan/where/status/history/doctor/run. `DOMAIN={"id":hex32,"fixture":bool}`; absent state during static inspection yields null, not creation. Consumers reject unsupported major versions; additive unknown fields are ignorable, but required fields/types/enums are strict. Internal consumers never accept arbitrary command fields in imported documents. `Problem={code,message,phase,retryable}`; all four required. Null payload on error.
+
+Run payload required fields: `run_id`, `project_id`, `checkout_id`, `mode`, `status`, `phase`, `started_at`, `finished_at`, `plan`, `command`, `granted_workers`, `runner_exit_code` (integer/null), `exit_code`, `exit_origin` (ptest/setup/runner/signal), `signal` (integer/null), `source_valid` (boolean), `full_gate_eligible` (boolean), `baseline_published` (boolean), `counts` (collected/executed/passed/failed/skipped/unknown integers or null), `timings` (queue/setup/collection/execution/finalization seconds or null), `attempts` (bounded phase results), `reasons`, `limitations`, `artifact_id` (opaque/null). `status` is passed/failed/cancelled/incomplete/no-tests-needed/not-run. Counts unknown are null, never guessed zero. A missing optional timing is null, never invented. `phase` is admission/setup/discovery/execution/finalization/complete. Each attempt records attempt_id, phase, status, raw_exit_code, final_exit_code, source_valid, inventory_complete and timings; no argv or source excerpts.
+
+Other payloads: plan is the public Plan fields; where = root, config_path, initialized, runner_kind, capability, command summaries, effective_limits, provenance, warnings; status = effective_limits, queued and active LeaseViews (opaque IDs, state, counts, safe phases, ownership certainty, no argv); history = newest bounded run summaries and obligations; init = action, target, exists, warnings and redacted config summary; doctor = DoctorReport. The full field/type catalog lives in `contracts.py`; JSON Schema files are **generated** from its checked descriptors by `scripts/export-schemas.py`, checked in under `docs/schemas/v1/`, and a drift test compares regeneration. No independently hand-maintained parallel schemas. Native bridge event JSON has a separate private `protocol=1` descriptor in the same catalog, bounded line records carrying run/attempt nonce, inventory records, test outcomes and terminal completeness. Nonce binds a report to the current attempt, not a hostile-code trust boundary.
+
+Catalogued machine reason codes include initialization-required, unsupported-platform, unsupported-capability, invalid-config, unsafe-path, legacy-adoption-required, missing-executable, nested-invocation, queue-timeout, coordinator-unavailable, coordinator-corrupt, protocol-mismatch, capacity-exceeded, ownership-uncertain, unsupported-detached-descendant, no-baseline, incompatible-baseline, unknown-input, policy-invalid, policy-changed, prior-failure, full-gate-obligation, changed-during-run, incomplete-inventory, report-invalid, state-unavailable, no-tests-needed, selection-disabled, scan-limit, probe-isolation-required, unredacted-command-disclosure. New stable codes are additive; do not encode arbitrary exception messages as codes.
+
+## 7. Scheduling, process ownership and recovery
+
+Canonical account home comes from `pwd.getpwuid(os.getuid()).pw_dir`, not HOME/XDG. Linux roots: `<account>/.config/ptest/machine.toml` and `<account>/.local/state/ptest`; macOS: `<account>/Library/Application Support/ptest/machine.toml` and its `state/` child. No version suffix or alternative production root. Validate owned private directories (0700), regular files (0600), no symlink components below account home, and native local filesystem before creating state. Use native filesystem identification to admit ext4/xfs/btrfs/tmpfs on Linux and apfs/hfs on macOS; overlay/other filesystems require a separately recorded capability matrix, not guessed support. Network/shared home state is unsupported and errors before execution. Static inspection may explain the failure without creating files.
+
+`machine.toml` schema 1 has `max_slots`, `max_jobs`, optional `memory_mb`, and no commands/paths: slots/jobs 1–64, jobs≤slots, memory 64–1,048,576 MiB. Initial missing configuration uses and persists `slots=min(4,max(1,floor(usable_cpus/2)))`, `jobs=min(2,slots)`; usable CPUs is the minimum available affinity/CPU observation, including supported Linux cgroup-v2 ancestor cpu.max/cpuset bounds, never a request to consume every core. Unknown CPU count/unreadable quota layout =>1 with diagnostic. macOS uses observed logical CPUs and the conservative ceiling; no Linux-style quota claim. New repo workers=1. Later observed CPU reductions lower effective admission, never automatically increase the persisted ceiling. Invalid changed limits fail admission; decreases wait for existing grants, never kill them. Explicit increases are applied only when there are no active/pending grants, and must be visible as a new ledger configuration generation. No per-TUI or repo budget multiplier. Unknown memory estimates allow at most one unknown-memory job at a time; configured memory reservations and global job/slot limits still apply. This is scheduling, not a hard process RAM limiter.
+
+`coordinator.sqlite3` uses rollback `DELETE` journal, synchronous FULL, foreign_keys ON, bounded busy timeout 2 s, and fullfsync ON on macOS. Bound DB to16MiB and journal/metadata allowance to another16MiB; approaching the limit refuses enqueue, never evicts live claims. Capacity/resource/checkout transitions use a single `BEGIN IMMEDIATE` transaction; no second lock manager. A small permanent `bootstrap.lock` with OS flock protects first-create/identity validation only. A private immutable `domain.json` records schema/protocol/domain UUID and ledger device/inode; the DB contains the same identity. Existing marker with absent/replaced/incompatible DB fails closed. Reject unexpected hard links/owners/nonregular state files as well as symlinks. Never auto-create a new empty ledger over uncertain active ownership; no auto-vacuum/rename that invalidates inode identity. Migration while live work exists is refused.
+
+Tables: `domain` (singleton identity/protocol/config generation); `jobs` (run PK, sequence, state, owner identity, guard identity nullable, grant nonce/generation, checkout ID, slots, exclusive, memory estimate, enqueue/deadline, phase); `job_resources` (run FK, key); `observations` (run FK, observed escaped process identity/uncertainty). Bound pending jobs=256, active≤max_jobs; terminal ledger summaries retain only 256 and no selection evidence. State machine:
+
+```text
+QUEUED -> GRANTED -> RUNNING -> DRAINING -> FINALIZING -> RELEASED
+   |         |          |          |            |
+CANCELLED   revoked   CANCELLING / UNCERTAIN -> proof of absence -> incomplete/release
+```
+
+Strict FIFO sequence, including head blocked on a resource. Acquire all requested slot/job/memory/checkout/resource claims atomically, never hold one while waiting for another. No small-job bypass. A request larger than machine capacity is reduced to allowed worker grant before enqueue; command profile takes exclusive budget and starts only with zero active jobs. Checkout is locked from setup through final publication. Queue default timeout300s, accepted1–3,600s, poll250ms with bounded jitter≤50ms; cancellation of queued owner removes it without launch. Reconcile on every admission poll. Status only computes an ownership/recovery view and never mutates the ledger or starts a guard. No unbounded background polling or daemon.
+
+Live ancestry against active registered guards/managed process groups identifies same-domain nested execution before enqueue. Inherited `PTEST_RUN_ID` is only a hint, not proof; stale/malformed markers do not authorize anything or cause false nesting. Positive live ancestry returns75/nested-invocation even at capacity1. Read-only subcommands are allowed. If ancestry inspection is inaccessible while inherited active identity is plausible, fail75/ownership-uncertain rather than queue behind it.
+
+For GRANTED, the CLI creates private manifest/control pipes and launches the installed guard using `start_new_session=True`. The guard registers its PID, psutil birth/uid, own pgid and nonce by compare-and-swap in the ledger **before executing setup/importing repository code/spawning anything**. A dead owner before registration may have its pending grant revoked in the same transaction; a delayed guard that loses registration exits without launch. Raw argv/env travel only through the inherited manifest pipe, never disk/ledger/process command arguments of the guard. The guard inherits runner stdout/stderr unchanged and launches children in its own group, with no new sessions.
+
+Control protocol1 messages are bounded length-prefixed JSON: cancel(signal=2|15), parent-closing; guard emits registered/phase/runner-facts/draining notifications. EOF from a killed parent does not free capacity: guard may finish existing work, must not begin a next compound attempt, and leaves provisional facts. Guard handles SIGINT/SIGTERM and cancels its own anchored group, gives 3s grace, then sends SIGKILL to its own group if necessary; it never signals a stored external PID/PGID from a stale record. Signal handlers only set cancellation state; cleanup is idempotent. Calling CLI forwards cancellation through the pipe and waits; direct group-delivered signal follows the same state machine. Queued cancellation exits128+signal. Fixture owned descendants must be gone within10s; actual inaccessible/escaped work remains charged and reported uncertain.
+
+Supported lifecycle is explicitly `cooperative-process-group`: setup/tests/probes stay foreground, preserve inherited process group, and join/reap owned services. psutil observations may identify escaping descendants but cannot prove arbitrary daemon containment. Known detach/daemon launch config is rejected. Observed live escaped descendants retain charge as unsupported-detached-descendant; do not kill by name/PID guess. Unobserved malicious/daemonizing descendants are outside the guarantee. No cgroup/root/macOS service manager requirement is smuggled in.
+
+After all direct children are waited, guard writes bounded **provisional** runner facts, marks DRAINING/no-more-spawns and exits. CLI reaps guard, then obtains non-signalling `killpg(pgid,0)` ESRCH plus no live/unknown observed escape. Existing group (including possible reuse), EPERM or unknown observation retains charge. A snapshot containing only the guard is never sufficient. Under the still-held lease, CLI moves FINALIZING, checks final source/config, validates reports, publishes outcome/baseline, then releases. If CLI dies, a reconciler may prove the group absent and mark the run incomplete/release, but never promotes provisional pass facts to a baseline. A result published just before CLI death is accepted only through its already-committed finalization token and source-valid transaction; otherwise conservative incomplete.
+
+Reapers never signal stored processes. Parent-only SIGKILL cannot free running work. Recovery of proven-gone work occurs on an active waiter/new admission within30s; status reports the equivalent recoverable state without writing. No activity means no daemon is promised. Coordinator corruption/unavailable disk/protocol conflicts stop new execution, not an uncapped local fallback. Status supplies ownership facts and manual recovery guidance, not a force-unlock/cancel command.
+
+### Isolated scheduler fixtures
+
+Only `--fixture-domain ABS_DIR` enables another domain. Directory must already exist, be private/owned/non-symlink, and contain a strict `fixture-domain.toml` with `version=1`, `fixture=true`, `max_slots`1–4, `max_jobs`1–4, `uid` matching the account, `directory_device`/`directory_inode`, `fixture_id`32hex, and `workload="synthetic-or-miniature"`. The test harness creates it exclusively in a new private temporary directory; all fixture project roots and mutable outputs must stay under that directory without symlink escape. This is a test capability, not production relocation. It must be explicit on every child command; it cannot be inherited solely through env. Artifacts/status/where always label fixture=true; all baseline/history stays inside this directory and is never reusable normally. Nested fixture workloads use bounded sleeps/IPC or miniature test suites whose real CPU work remains within the outer grant; logical budget4 is not permission to consume four physical cores beneath a one-slot test. Tests asserting the canonical normal domain compare read-only path/identity resolution under differing environments, not create competing real machine budgets.
+
+## 8. Execution bridges and setup
+
+Setup runs once per checkout lease only if declared required_paths are absent; successful setup is revalidated and native dependency lock digests must not change. If dependencies exist but lock/tool fingerprints changed, run the declared locked setup before tests. `--no-setup` forbids it and reports missing/stale dependencies. Setup is an argv subprocess under the same guard, never shell=True, with declared network/lifecycle warnings in the plan. npm ci's scripts count as executed repo code; uv sync may access package indexes. No downloads in static commands, no global installs, no .venv/node_modules sharing. A setup timeout is300s default with no automatic retry; cooperative children are cancelled before release. No lockfile edits accepted as an invisible setup side effect.
+
+Pytest bridge uses the selected interpreter and `pytest.main(list(argv), plugins=[OwnedPlugin])`. Native parsing preserves pytest9 config precedence, PYTEST_ADDOPTS, literal tokens, coverage and supported reporters. With no xdist and valid serial config, pass no `-n` and no `-p no:xdist`; absent-plugin xdist flags produce a clear native configuration failure, not a rewrite. With pinned xdist, an owned `pytest_cmdline_main(wrapper=True)` normalizes effective numprocesses/maxprocesses to the grant before yielding, and rejects remote/proxy `tx`/`px`/rsync before NodeManager construction. Validate again before gateway startup using the setupnodes boundary. Reject untested critical hook owners/settings instead of disabling plugins silently. Builtin hooks, the owned plugin and the pinned xdist/cov profile are the initial critical-hook allowlist; ordinary repository fixtures remain executable trusted code. This restriction is not a claim that arbitrary trusted code cannot spawn processes.
+
+Owned additive events use exact nodeid and file, collection completeness, collect errors, setup/call/teardown outcomes/durations and sessionfinish. xdist controller consumes `pytest_xdist_node_collection_finished` and compares worker inventories. A failure in teardown is a failure; skip/xfail does not clear an obligation. No JUnit-only reconstruction of parameter IDs. Full mode rejects effective -k/-m/deselect/last-failed/testmon-style narrowing; explicit configured test roots delimit the gate. A test file selection runs all collected cases from that file; collecting a selected subset cannot establish complete full inventory. Missing plugin/report evidence changes successful automatic/full to incomplete, not green.
+
+Vitest bridge runs in the project's Node environment and resolves the exact supported local Vitest module. Use public `parseCLI(argvArray)` (never a joined string), then one `createVitest('test', options, viteOverrides)` instance. Forced watch=false, browser disabled and API=false are applied before initialization; reject conflicting explicit user requests and known config profiles instead of transiently listening. Repository Vite hooks are admitted executed code. Validate resulting ctx.config and ctx.projects before any tests: one project, standard forks, compatible coverage provider, no custom pool/workspaces. Own max/minWorkers, poolOptions.forks max/minForks and relevant VITEST_MAX/MIN_THREADS/FORKS environment settings; validate effective settings equal the grant. Preserve fileParallelism and bound maxConcurrency to the grant for concurrent test cases; changes are declared generated worker controls.
+
+Obtain `ctx.globTestSpecifications()`, choose exact moduleId/project/pool specifications (not CLI substring paths), then `ctx.init()` and `ctx.runTestSpecifications(specs, allTestsRun)`, finally `ctx.close()`. `allTestsRun=true` only for the actual full inventory; never call start after init. Inject the owned Vite plugin through `viteOverrides.plugins`; its public experimental `configureVitest({vitest})` hook appends the reporter to resolved `vitest.config.reporters`, retaining default/current entries before instantiation. Reject other untested configureVitest hook owners because these hooks are concurrent, and revalidate after creation; do not rely on configResolved ordering or private ctx.reporters mutation. [Public plugin API](https://v3.vitest.dev/advanced/api/plugin). The reporter records native task/TestCase IDs scoped by project+file, file inventory and exact outcomes; duplicate titles stay distinct. Collection can execute test files and is therefore scheduled. Any API incompatibility or inability to preserve native reporter/coverage behavior fails the profile's acceptance gate, not a private API workaround.
+
+Init may recognize a plain Vitest npm test script for a conversion preview, but must not bypass pretest/posttest, custom shell, workspace or compound script behavior. Those remain explicit exclusive command profile unless the user adopts a direct bridge configuration. npm arguments reaching only the main script do not bound lifecycle hooks.
+
+Go adapter owns `-p=1`, `-parallel=grant`, `GOMAXPROCS=grant`, `-cpu=grant` and `-count=1`; reject conflicting unsupported forms rather than parse arbitrary shell. Preserve tests' output/exit, no cached-passed substitution. Cargo owns `-j=grant` and libtest `--test-threads=grant`; standard lib/bin/integration targets only, doctests/custom harnesses require explicit command profile. Both are non-selecting: automatic invokes full, never claims per-test inventory from guessed text. General wrappers reserve exclusive budget; their nonzero code is preserved and unknown counts remain null. Do not present exclusive reservation as hard inner-process containment.
+
+## 9. Source identity, selection and failure ledger
+
+No custom dependency graph. `.ptest.toml` must explicitly enable selection and declare `closed_inputs=true`; this is the repository maintainer's reviewed input/group contract. Init leaves it false. Policy changes always full. The policy must map every runtime/test input root; shared helpers, root conftest, setup/teardown, generated/runtime input, build/plugin config and environment influences must be full triggers or deliberately broad groups. A changed test file runs all its current cases **and** all groups in which it can be a dependency; an unclassified test helper/config/global fixture forces full. New unclassified files/roots force full even if ignored by Git. No-test rules are only explicit non-runtime document prefixes, cannot overlap any input/test/trigger/group/output uncertainty, and cannot override failures. Group overlap unions, never last-match-wins.
+
+`source.py` uses local Git argv operations with NUL-delimited paths, no shell or network: root/common-dir/head, ancestor checks, tracked status including staged/unstaged/untracked/deleted/renamed paths. Both rename sides matter; mode/symlink/submodule/conflict/unreadable/unsupported encoding is a limitation/full fallback. Compatible baseline must be an available ancestor. Explicit base never narrows the range after the baseline; use the union of changes since both. No baseline/unknown history =>full. Non-Git repositories can execute/doctor but do not narrow in v1.
+
+Fingerprint actual relevant contents, not just mtime: tracked inputs, untracked candidates, declared ignored/generated inputs, native config/lockfiles and test roots. Input envelope default≤100,000 files, individual≤16MiB, total read≤512MiB, elapsed≤10s; exceeding disables narrowing and final gate identity eligibility, not arbitrary command execution. Existing static plan inventory cap10,000 tests is a performance fixture, not permission to ignore others. Relevant environment names are declared; values are HMAC-SHA256 with a private per-domain key and never persisted verbatim. Native runner version, interpreter/platform, instrumentation protocol, effective plugin/config/coverage/dependency fingerprints and policy digest comprise compatibility. Unknown external influence =>full; no model guesses.
+
+Declared non-input outputs must be exact files or narrowly validated generated directories disjoint from source/tests/fixture/expectation/config/selection inputs. Git ignore status, runner ownership and filenames alone are insufficient. Tracked snapshots/goldens/source/config and any overlap always remain inputs; broad `tests/` or repository-root cache exclusions are invalid. Coverage/report/runner cache defaults are only exempt after the profile establishes they are not consumed by that gate. The bridge/report output path is private outside the checkout. Recompute after queue wait and after group quiescence. A changed plan before execution is rebuilt/full and printed; changed inputs during automatic/full cause incomplete70 on runner0 and no baseline. Snapshot-update runs require another unchanged gate.
+
+Selection algorithm, in order: validate execution config; honor explicit scoped/full; load compatible full baseline; honor disabled/full-gate obligation; validate input/policy compatibility; collect changed paths and mandatory failures; union groups and all changed tests; add always files; reject uncertain/missing inventory/zero runtime mapping to full; if selected file count/full inventory count≥full_ratio, choose the **actual full gate**; if no relevant changes and no obligations, return no-tests-needed, not passed; otherwise select exact test files. Static plan never imports/collects; any required discovery is a visible full/unknown preview. After admission, actual native inventory may widen before tests; missing planned tests after execution yield incomplete and an explicit full rerun, not silently rerun-to-green.
+
+Per-checkout `history.sqlite3` is separate from the coordinator, keyed by SHA256(real root bytes) truncated to32hex plus project_id. Moved checkout gets new mutable state and first-run full; portable config needs no path edit. No cross-worktree mutable failure sharing and no cross-checkout baseline reuse in v1 (permitted later, unnecessary now). Tables: immutable run summaries + sequence, baselines, obligations and selection-disabled reason. New outcomes use monotonic admitted sequence and source/compatibility identity; an older/overlapping/incompatible pass cannot clear a newer failure. Clear an individual obligation only on a complete conclusively passing applicable test; skip/xfail/incomplete/unrelated pass retains it. Changed/renamed/missing ID forces full unless a successful complete full inventory proves deliberate removal, recorded removed not passed. Coverage/collection/fullgate failure with no test ID is a whole-gate obligation. Only successful source-valid clean full can publish baseline and clear gate obligation. Dirty full can execute/pass but never seed; changed-during-run can never pass the gate.
+
+History corruption/size/unavailability disables narrowing and preserves a visible uncertainty marker outside that DB; independently valid `--full` still executes. A failed required final result export or inability to commit required correctness evidence is incomplete70 on runner0. Successful full can rebuild lost optional history only into a fresh validated private store while retaining the corruption marker until complete reconciliation; no arbitrary deletes or old obligation guessing. Bounded quarantine retains only one damaged store; if quota cannot accommodate it, keep selection disabled and require owner-directed state recovery.
+
+Shadow holds one checkout/resource lease for selected then full attempts on the same unchanged input; first failure survives. Both attempts execute, unless cancellation/source change makes further execution invalid. A full failure absent from selected work marks suspected miss and disables narrowing immediately; explicit focused reproduction classifies deterministic miss vs nondeterminism. Both unclassified divergence and confirmed miss block selection. Re-enable only after corrected policy/input compatibility and a new successful explicit shadow comparison, never elapsed time or a later ordinary pass. Each attempt has unique resources and all results retained.
+
+## 10. Doctor, probes, resources and privacy
+
+Static doctor uses no runner imports, subprocess/package manager/network, or repo writes. Descriptor-relative no-follow opens validate each path component and final regular-file stat after open; symlink swaps/special files are skipped. Secret/dotenv, .git, dependencies, generated dirs and binary files are excluded. Deterministic priority: declared tests, conftest/fixture/setup files, runner/ptest config, then app sources. Bounded traversal still reports if discovery never reached a priority root.
+
+Default limits: entries20,000; files2,000; per-file256KiB; total16MiB; findings200; prompt64KiB; output256KiB; elapsed5s. Explicit scan overrides cap at entries100,000/files10,000/file1MiB/total64MiB; deadline remains5s, so larger requests do not promise completion. Nested lexical depth256 and AST node count50,000 perfile; reject deeper/unparseable input before expensive analysis. Use token-depth precheck and bounded AST for Python; bounded line/token patterns for TS/JS/config, not executing parsers. Deadline/cap interruption returns useful partial report with limitations. No unsafe regex backtracking or raw snippets. Timings come only from validated recorded events.
+
+Initial finding codes: `db.per-test-initialization`, `db.cleanup-ownership`, `cache.global-flush`, `resource.fixed-name`, `network.fixed-port`, `time.blocking-sleep`, `network.live-target`, `process.detached-child`, `fixture.shared-mutation`, `timing.slow-test`, `selection.unknown-input`. Static detections are suspected/medium-or-low confidence unless a specific syntax establishes the operation; missing patterns never certify isolation. Readiness has separate execution/parallel/selection/timing entries, each ready-for-declared-capability/blocked/unknown with reasons. Timing buckets follow the spec (<0.5s healthy,0.5–2 inspect,2–3 optimize,>3 investigate) and keep integration justification, not an arbitrary speed-fail gate.
+
+`doctor --prompt` is a deterministic template plus bounded, escaped, delimited untrusted findings and relevant recipes; no comments/source code/env values/raw commands inserted. It requests verification, minimal maintainable correction, preservation of tests/assertions/coverage, scoped ptest then full gate; explicitly forbids blanket flush/drop, sleep-based synchronization, failure suppression, native-agent config/trust changes and cleanup outside ownership. It never invokes a model. Exported guide is exactly the bundled `resources/agent-guide.md`; no overwrite. Optional printed native snippets point to existing `docs/ptest-agent.md` or `ptest guide`, never claim universal AGENTS loading. Evidence tiers for Codex/Claude/Gemini/OpenCode/Aider/Muse remain as in [interoperability research](../research/2026-09-17-agent-interoperability.md).
+
+Probe requires `--scope` resolving within configured tests, supported first-class profile, and `resources.probe_isolation="run-worker-namespaced"`. Default repeat2 (range1–5), workers2 capped by grant, per-attempt30s (range1–120), hard compound600s. Each repetition runs one serial and one parallel attempt, all retained; max10 attempts. Fewer than2 available workers reports parallel portion blocked, not successful parallel proof. No service provisioning or inferred production target, and no prompt-based hidden authorization. Setup side effects and plan displayed before execution. Conflicts/failures/timeouts cannot be hidden by later pass. `doctor --probe` uses the same guard/bridge path, not a second executor.
+
+Environment identity contract: `PTEST_PROJECT_ID`32hex, `PTEST_CHECKOUT_ID`32hex, `PTEST_RUN_ID`32hex, `PTEST_ATTEMPT_ID`a001–a010, `PTEST_WORKER_ID`w000–w063, `PTEST_RESOURCE_PREFIX="pt_<checkout8>_<run32>_<attempt4>_<worker4>"` (≤54 ASCII). Values are identifiers, never secrets or proof of current authority. Bridge overwrites stale inherited values; pytest workers receive worker-specific IDs, Vitest forks receive stable pool-worker identities via supported worker hooks/setup. If a profile cannot establish distinct worker identity, parallel resource-dependent probes are unsupported, never use a shared fallback ID. Generic command receives run identity plus w000 and documents no inner-worker injection.
+
+Recipes cover owned DB/schema/template initialization once per run/worker and per-test rollback/reset, including committed/background connections; SQLite paths; cache key prefixes/owned instance cleanup with no shared flush; private files/coverage; kernel-assigned ports with listener lifetime ownership; joined processes; fake time/network; factories/builders with minimal state. Opaque IDs are inputs to application fixtures, not magic DB/cache provisioning. No DB credentials or external fixture servers required in deterministic tests: use in-memory service models and local SQLite/socket subprocess fixtures, preserving a neighbor sentinel. Real DB/cache probes require separate declared disposable infrastructure, not this implementation workflow.
+
+All ptest default command displays omit **every arbitrary token**, including executable path, positional/option-looking tokens and unknown flags. Render only runner kind/mode/generated bounds/argument count/provenance; parser errors same. `where --reveal-command` and `init --dry-run --reveal-command` may disclose exact command only to that explicitly requested output with `unredacted-command-disclosure`; never persist it, include env dumps, or add it to prompts/status/history. Raw child output, OS process listings and arbitrary user-named tests/paths remain residual exposure, not secretly filtered. ptest-owned path/evidence display escapes terminal controls and bounds length. Avoid raw exception repr/traceback in default diagnostics.
+
+## 11. Bounds, retention, and security verification
+
+Private state defaults: per run native report16MiB,100,000 test records, IDs≤4KiB; line64KiB; depth32; protocol events≤500,000; per checkout history128MiB/200 summaries/30days; shared total state1GiB; pending256; terminal coordinator summaries256. Current active evidence, usable baseline and compact obligations are never evicted. Prune only validated owned inactive records oldest-first; SQLite pages count toward quotas, incremental compaction occurs only offline under checkout lock and never replaces coordinator inode. If protected data exceeds budget, disable narrowing/report capacity error instead of dropping failures. Result writer checks budget incrementally; report truncation means incomplete, not a guessed pass. User child stdout is streamed rather than retained, so ptest does not bound arbitrary runner output volume itself.
+
+No source/executable/report path supplied by imported evidence is trusted for execution. Use safe root-contained lookup and matching run nonce/protocol; random/corrupt/oversized reports fail before deserialization into public records. IDs are data, never filenames/SQL/shell fragments. SQL is parameterized. Atomic private outcome creation is fsync+rename within owned directory, with no overwrite outside generated identity. Init/guide/result exports use exclusive creation. Same-user executed repository code is not sandboxed; inspection and accidental cross-run boundaries remain protected.
+
+All secure-by-spec axes are applicable:
+
+| Axis | Mechanism | Required negative twin |
+|---|---|---|
+| Identity | Account-derived domain, nonce/birth/pgid, checkout/run/worker identity | PID reuse, stale env, foreign/malformed owner cannot cancel/release/nest/clean. |
+| Authorization | Explicit execution boundary, static-only doctor/plan/init, no implicit model calls | Hostile config/comments/report prompt cannot execute, probe, grant trust or overwrite. |
+| Tenancy | Atomic checkout/resources and isolated fixture/run/worker namespaces | Same basename/worktree/branch cannot clear obligations or destroy neighbor resource. |
+| Input | Literal argv, strict codecs/bounds, descriptor-relative file operations | Metacharacters, traversal/raced symlink, deep JSON/TOML/AST, giant IDs cannot escape or exhaust. |
+| State | CAS admission/registration, provisional facts, quiescent finalization, durable obligations | Crash at each transition/late pass/repeated cancellation never overgrants or seeds false baseline. |
+| Exposure | All arbitrary argv withheld, no env/source snippets, private state | Distinct sentinels in all token forms/argv0/dotenv/env absent from default outputs; child still receives literal values. |
+| Availability | Queue/deadline/scan/report/disk quotas and no unsafe fallback | Flood, stuck child/reporter, corruption or full disk cannot launch uncapped work or silently truncate success. |
+| Dependencies | Exact runner profiles, locked setup, no shell, local security gates | Missing/unsupported tool/plugin, remote launcher, stale lock or setup failure cannot trigger guessed execution/green. |
+
+Implementation adds local security gates because none currently exist: Bandit1.9.4 on owned Python production code at medium-or-higher severity/confidence; pip-audit2.10.1 against locked runtime/build/dev dependencies (advisory metadata only; explicit network gate, no source upload); Gitleaks8.30.1 official checksum-verified binary for working tree and new Git history with redacted results. Each tool must first fail its isolated synthetic sensitivity fixture, then pass the intended production scope. A reported upstream Gitleaks regression makes that sensitivity proof especially important; an unavailable/broken detector is **not** a green secret scan. If that pinned binary fails the fixture, stop the gate, select a reviewed verified replacement version and record the contract change. [Bandit](https://pypi.org/project/bandit/), [pip-audit](https://pypi.org/project/pip-audit/), [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases), [upstream reported issue](https://github.com/gitleaks/gitleaks/issues/2170).
+
+Deterministic seeded property tests generate argv/path/schema/transition cases through ptest; no extra property dependency is necessary initially. Include JS bridge code in explicit sink review (no exec/shell/dynamic downloaded code); lockfile advisory audit covers Vitest fixture dependencies. Any exception is narrow, owned, reasoned and reviewed, never a global scanner disable. Scanner fixtures are generated into private temporary directories and removed after checks, not committed credentials. New CI, if added in release preparation, uses read-only permissions and exact action SHAs; no CI provider is required for local runtime or this task.
+
+## 12. Migration, acceptance, and release boundary
+
+Keep `legacy/pre-ng-2026-09-17` as recovery reference. Do not copy/cherry-pick the provisional foundation wholesale. Before deletion, inventory callers via rg/import/script references, test equivalents and external operational documentation. Replace root `ptest`, `install.sh`, `config.example.toml`, README and legacy test fixture imports only in the reviewed cutover task. Local installation uses an explicit destination and a versioned private bundle, builds/validates the wheel first, then atomically changes a same-directory symlink with Python os.replace; no Linux-only `mv -T`. Refuse non-owned/non-symlink conflicting destination. Upgrade interruption leaves old executable usable; temporary-destination tests only. Development uses `uv sync --locked` in each own worktree; users may use uv tool/pipx installation after release approval. No mandatory cloud SDK/deployment step.
+
+Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh`, `provision.sh`, `provision-vitest.sh`, `smoke.sh`, `outsource_tests.md`; four `Dockerfile.*` (pytest/vitest/spot-controller/spot-worker); four `cloudbuild.*.yaml` (pytest/vitest/spot-controller/spot-worker); `scripts/spot-worker-startup.sh`; `terraform/{main,outputs,providers,spot_queue,variables}.tf` and `terraform/spot/{backend,main,outputs,providers,variables}.tf`. Remove obsolete remote-only tests explicitly after mapping local behaviors; exact filenames are in plan T12. Historical docs/research/specs remain as history with a clear legacy index; never run Terraform/destroy or alter remote infrastructure. Git deletion is not cloud teardown. Archive historical config samples in documentation only when needed to explain migration.
+
+Acceptance traceability and evidence ownership are in the plan's A1–A14 matrix. Required subprocess evidence includes six independent clients/two repos/three worktrees at budgets4 and1; SIGINT/SIGTERM/SIGKILL at transition barriers; normal-domain env independence; nested deadlock refusal; real runner caps/config/env/report/coverage tests; adversarial selection and failure history; doctor no-execution/symlink/limits; isolated DB/cache/file/socket recipes; command privacy and stream/exit fidelity; temporary install/upgrade; finite quotas. Use fake clocks and deterministic IPC barriers, not sleep-based race assertions. No test may invoke pytest/vitest/npm test/go test/cargo test directly: the frozen bootstrap ptest runs test suites, and tests launch candidate ptest (fixture-domain where nested), which alone launches native runners.
+
+Performance measurement follows the approved targets and sample counts exactly:20warm samples wrapper≤250ms p95; plan10kfiles/10ktests≤2s p95; doctor2kfiles/16MiB≤5s p95 and≤256MiB RSS;5alternating full/selected pairs on each independent adoption repo, median≥20% benefit or keep that workload full. Include all attempts, setup/queue phases, equal inventories/assertions/coverage, versions/hardware/source commits. No speed claim before measurements.
+
+M2 must not advertise incomplete selection/probes; M3 requires their negative tests. M4 requires non-Persea pytest and Vitest adoption plus Linux **and macOS** lifecycle/install matrix and security evidence, integrated Opus review, independent Astra audit, and reverified Sol repairs if needed. If macOS infrastructure or an independent adoption repository is unavailable, complete only the observed implementation milestone and label the release gate blocked/unverified; do not claim all A1–A14 or cross-platform support passed. Publication/license/live install/main merge remain M5 and explicitly unauthorized here.

@@ -1,0 +1,57 @@
+{
+  "status": "ready_for_opus_design_review",
+  "author_model": "Astra xhigh",
+  "design_path": "docs/designs/2026-09-17-ptest-ng-design.md",
+  "plan_path": "docs/plans/2026-09-17-ptest-ng.md",
+  "product_spec_path": "docs/specs/2026-09-17-ptest-ng-product.md",
+  "summary": "Frozen local-first architecture, CLI/config/result/helper contracts, conservative selection and lifecycle boundaries, plus 15 owned test-first tasks with a local-only legacy bootstrap barrier and A1-A14 traceability. No runtime code changed.",
+  "decisions": [
+    "One account-derived SQLite coordinator, atomic FIFO all-resource admission, private per-run guard and cooperative process-group lifecycle; no daemon or per-TUI budget.",
+    "Guard facts remain provisional until group absence and caller finalization while charged; dead-caller recovery cannot manufacture a successful baseline.",
+    "Explicit source-to-test file groups and complete compatible native inventories; unknown inputs, changed policy/config, shared test dependencies and unresolved failures widen to full.",
+    "Native pytest bridge retains native configuration and serial without xdist; supported xdist controls and critical hook owners are validated before gateways.",
+    "Vitest 3.2.7 is the release acceptance target, with one initialized native instance, public configureVitest reporter append and exact test specifications; inspected 3.2.6 is not a patched support claim.",
+    "Go/Cargo retain bounded execution-only subsets; arbitrary wrappers require explicit exclusive best-effort profile rather than a guessed cap.",
+    "All arbitrary argv is withheld from default owned output; explicit reveal is labeled and unpersisted, raw child streams remain unchanged.",
+    "Static doctor, explicit bounded probes, generic ownership recipes and one installed guide do not launch agents, import repository code during inspection, or change TUI trust/config.",
+    "One shared contract catalog generates JSON schemas; bootstrap freezes records and helper signatures before independent writers. Sequential CLI ownership transfers avoid registration conflicts.",
+    "Legacy local contracts are mapped before explicit source/test deletion; installed live CLI, recovery tag, remote infrastructure and provisional worktree remain untouched."
+  ],
+  "review_preflight_dispositions": [
+    "Added ptest changed alias and history test-or-file filter to match the approved CLI contract.",
+    "Defined auxiliary record fields, GroupObservation, typed Problem exception, internal RunResult admission sequence/input identities, and fixture helper aliases explicitly.",
+    "Distinguished ignored HOME/XDG from explicit unsupported PTEST location overrides, which fail visibly; bootstrap clears legacy-only overrides before candidate child invocation.",
+    "Fixture domains validate private directory ownership/device/inode/identity and contain every fixture project/output; normal evidence cannot be seeded from them.",
+    "Status is non-mutating; active admission drives recovery while status reports the computed ownership/recoverability view.",
+    "Adoption projects are distinct from generated fixtures; any isolated dependency alignment is disclosed and must preserve assertions/inventory/coverage."
+  ],
+  "open_product_questions": [],
+  "implementation_acceptance_risks": [
+    "Native pytest critical-hook/worker bootstrap and Vitest public experimental reporter/worker identity behavior require actual pinned subprocess evidence; no tests ran during design.",
+    "Cooperative groups cannot contain arbitrary malicious or unobserved daemonized descendants. Observed escape retains uncertainty/charge; no PID-based reaper signals.",
+    "No actual macOS lifecycle, installer, filesystem or runner matrix has run; M4 cannot claim cross-platform completion without it.",
+    "Independent apispec and tailwind-merge are research candidates, not completed adoption. The latter requires a disclosed derivative dependency alignment or a replacement matching candidate.",
+    "Local security tools are absent. Pinned scanners must demonstrate sensitivity; a reported Gitleaks issue means a zero exit alone is not evidence.",
+    "Performance targets and quotas are contracts to measure, not current speed or security claims."
+  ],
+  "release_gates": [
+    "Opus design review and required repairs before source implementation.",
+    "Real native runner, crash/signal/resource/selection/privacy/doctor and bounded-state acceptance across A1-A14.",
+    "Independent adoption, actual Linux and macOS matrix, security sensitivity/passing gates and specified performance samples.",
+    "Integrated Opus audit, independent Astra audit and reverified Sol corrections when needed.",
+    "Separate user license, distribution-name, publication, main merge and live installation decisions."
+  ],
+  "documentation_checks": [
+    "Read approved product/context, earlier review dispositions, interoperability and runner/scheduler research.",
+    "Inspected legacy bootstrap/config/test/install and read-only provisional candidate patterns.",
+    "Checked task ownership, shared signature consistency, placeholder terms, A1-A14 and all eight security axes.",
+    "JSON parse and git diff --check; source tests deliberately not run for docs-only changes."
+  ],
+  "tests_run": [],
+  "source_changes": false,
+  "dependency_installs": false,
+  "live_installation_changed": false,
+  "skills_used": ["writing-plans", "secure-by-spec", "verification-before-completion"],
+  "commit": null,
+  "commit_note": "The immutable commit SHA is supplied in the parent handoff; this file is part of that commit."
+}
