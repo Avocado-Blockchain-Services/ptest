@@ -1,0 +1,471 @@
+{
+  "task": "task-0",
+  "status": "complete",
+  "base": "042dde1",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+  "branch": "cx-ng-product-task-0",
+  "commit_message": "build: establish local NG contract bootstrap",
+  "repair_round1": {
+    "review": ".pipeline/local/review-1/opus-findings.json",
+    "reviewed_head": "c545671cc13d8cf98be5f67bb263c699ebb0c0a7",
+    "verdict_in": "rejected with T0-1..T0-7",
+    "verdict_out": "all seven resolved against the reviewed bytes; approved design and working behavior preserved; no redesign, no weakened tests",
+    "dispositions": [
+      {
+        "id": "T0-1",
+        "status": "implemented+verified",
+        "change": "src/ptest/files.py validate_single_name is now the structural check the design specifies: rejects non-str/empty, '.', '..', '/', NUL and other C0 controls/DEL; accepts spaces, Unicode, brackets. O_NOFOLLOW descriptor-relative traversal is unchanged as the safety boundary.",
+        "tests": "tests/ng/test_files.py: test_ensure_shared_dir_supports_application_support, test_read_regular_supports_spaces_brackets_unicode, test_validate_single_name_structural_boundary",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: unsafe-path on Application Support and spaced/bracketed names) then .pipeline/local/green-repair.log (GREEN 68 passed)"
+      },
+      {
+        "id": "T0-2",
+        "status": "implemented+verified",
+        "change": "src/ptest/files.py _walk_to_parent now closes every intermediate descriptor on the success path; only the returned parent fd (or root_fd for single-component paths) stays open for the caller. Error-path cleanup unchanged.",
+        "tests": "tests/ng/test_files.py: test_nested_read_success_keeps_descriptors_stable (200 depth-3 reads), test_nested_failure_keeps_descriptors_stable (100 failed reads + 100 failed creates); small deterministic /proc/self/fd accounting, no fsync loops",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: ~300 leaked fds) then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-3",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py serialize_run_result emits the document top-level mode from result.mode (was plan.mode); plan.mode stays in the nested plan object.",
+        "tests": "tests/ng/test_contracts.py: test_command_summary_withholds_every_token_form now builds a RunResult (mode SHADOW vs plan AUTOMATIC, secret argv, populated sequence/input_before/input_after/policy_digest) and runs it through serialize_run_result + encode + decode, asserting round-tripped mode, internal-field absence and sentinel absence",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: published 'automatic') then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-4",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py is now one descriptor authority: shared schema builders (_capability/_counts/_timings/_attempt/_readiness/_finding/_lease/_obligation/_scan_limits/_scan_usage schemas) reused by PUBLIC_SCHEMAS, matching strict decode validators (_check_capability_dict et al. with exact required keys, no extras), and shared record converters (_capability_dict/_command_dict/_plan_dict/_counts_dict/_timings_dict/_attempt_dict/_readiness_dict/_finding_dict/_lease_dict/_obligation_dict/_scan_limits_dict/_scan_usage_dict) reused by serialize_run_result/_prepared_dict and test fixtures. where.capability is the frozen Capability object (execution/selection/lifecycle/limitations) instead of a bare tier string. Unspecified shapes stay objects: where/status effective_limits, history summaries, init config. Regenerated docs/schemas/v1/*.json via scripts/export-schemas.py.",
+        "tests": "tests/ng/test_contracts.py: test_eight_public_documents_parse uses fully populated record-built fixtures of all eight kinds; test_generated_schema_files_match_frozen_shapes asserts independent on-disk schema expectations; test_frozen_subrecord_negatives_rejected (string capability, empty lease, bad severity, mistyped counts, timings-less attempt, unknown reason code, smuggled extra key)",
+        "evidence": ".pipeline/local/t07-cli-absent.log context; .pipeline/local/green-repair.log (GREEN); schema --check exit 0 in .pipeline/local/schema-check-repair.log"
+      },
+      {
+        "id": "T0-5",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py decode_public_document/decode_control_frame/decode_launch_manifest catch RecursionError alongside ValueError/UnicodeDecodeError and map it to the same typed Problem; _check_nesting is iterative so the bound check itself cannot recurse. Strict length/nonce/version checks retained.",
+        "tests": "tests/ng/test_contracts.py: test_frame_nesting_past_declared_bound_rejected (20-deep vs bound 16), test_frame_pathological_nesting_is_typed_rejection, test_document_pathological_nesting_is_typed_rejection, test_manifest_pathological_nesting_is_typed_rejection (20000-deep, bodies inside byte limits)",
+        "evidence": "pre-fix direct probe: 20000-deep frame raised bare RecursionError (see repair evidence); post-fix .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-6",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py five private decoder sites now raise fixed machine messages (control frame payload / manifest domain / grant / attempt / body failed validation) instead of interpolating constructor exception text; encode_public_document still copies only the four allowlisted Problem fields.",
+        "tests": "tests/ng/test_contracts.py: test_manifest_decoder_hides_offending_values (tampered manifest with sentinel-bearing option asserts sentinel absent from str(problem) and from the encoded public error document), test_control_frame_decoder_hides_offending_values",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: sentinel present in message) then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-7",
+        "status": "implemented+verified",
+        "change": "tests/ng/support.py CaseFactory.invoke keeps its mandated default --result-json injection but now targets a project-root unique file (ptest-result-<hex>.json) whose parent already exists, so exclusive creation needs no mkdir chain and no longer reuses the orchestrator .pipeline/local name. No production CLI/scheduler stub was added; ptest.cli:main stays the T11-owned declaration and no code depends on an absent ptest.__main__.",
+        "tests": "tests/ng/test_files.py: test_invoke_default_export_roundtrip_with_miniature_target exercises argument assembly (--fixture-domain, default --result-json), CONTROL_VARS stripping (PTEST_CONFIG deliberately set to bogus-override) and export read-back against a test-only miniature ptest package served via PYTHONPATH with an explicit 20s timeout",
+        "evidence": ".pipeline/local/t07-cli-absent.log (python -m ptest exit 1: No module named ptest.__main__); .pipeline/local/green-repair.log (GREEN)"
+      }
+    ],
+    "review_notes_closed": [
+      "ControlFrame payload values validated for every kind in _require_frame_keys (cancel signal, parent-closing empty, registered guard identity, phase values, runner-facts field types, draining artifact id); covered by test_control_frame_values_validated_per_kind",
+      "Capability.limitations now requires Reason entries (TypeError otherwise); covered by test_capability_limitations_require_reason_records",
+      "storage.open_database closes the connection on typed pragma failures too (except Problem re-raise path) and read-only file: URIs are percent-escaped; covered by test_open_database_closes_connection_on_pragma_rejection and test_open_database_read_only_escapes_special_characters",
+      "create_exclusive maps ENOENT to state-unavailable, EACCES/EPERM/EROFS to state-unavailable, ENOSPC/EDQUOT to capacity-exceeded; ELOOP stays unsafe-path; covered by test_create_exclusive_missing_parent_is_typed_absence",
+      ".gitignore now ignores *.egg-info/ and graphify-out/; generated artifacts no longer show as untracked",
+      "bootstrap frozen-hash routing and --full refusal untouched"
+    ]
+  },
+  "dispatcher": {
+    "path": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "verified": "sha256sum exit 0, hash matches recorded value; wrapper re-hashes every invocation and refuses on mismatch"
+  },
+  "runtime": {
+    "venv_python": "CPython 3.13.11 (.venv, uv-managed, project-local)",
+    "pytest": "9.1.1",
+    "psutil": "7.2.2",
+    "pytest_xdist": "3.8.0 (locked test extra, not installed; serial runs use -p no:xdist)",
+    "uv": "0.9.26",
+    "build_backend": "setuptools>=77,<83 (declared; runtime venv carries no setuptools)"
+  },
+  "owned_files": [
+    "pyproject.toml",
+    "uv.lock",
+    "src/ptest/__init__.py",
+    "src/ptest/adapters/__init__.py",
+    "src/ptest/runtime/__init__.py",
+    "src/ptest/contracts.py",
+    "src/ptest/files.py",
+    "src/ptest/storage.py",
+    "scripts/ptest-bootstrap",
+    "scripts/export-schemas.py",
+    "tests/ng/conftest.py",
+    "tests/ng/support.py",
+    "tests/ng/test_contracts.py",
+    "tests/ng/test_files.py",
+    "tests/ng/test_storage.py",
+    "docs/schemas/v1/doctor.json",
+    "docs/schemas/v1/history.json",
+    "docs/schemas/v1/init.json",
+    "docs/schemas/v1/plan.json",
+    "docs/schemas/v1/register.json",
+    "docs/schemas/v1/run.json",
+    "docs/schemas/v1/status.json",
+    "docs/schemas/v1/where.json",
+    "src/ptest/runtime/protocol-v1.json",
+    ".gitignore",
+    ".pipeline/out/task-0.json"
+  ],
+  "touched_not_owned": [],
+  "not_committed": ["graphify-out/ (regenerated AST graph, local only)", ".pipeline/local/ (raw logs, gitignored)"],
+  "pyproject_note": "pyproject.toml was untracked prior work from the interrupted attempt; inspected, preserved byte-identical, adopted as the Task0 manifest (pytest 9.1.1 dev, xdist 3.8.0 test extra, psutil 7.2.2, package-data globs, ptest entrypoint declaration)",
+  "evidence": [
+    {
+      "command": "sha256sum $PTEST_BOOTSTRAP && $PTEST_BOOTSTRAP --version",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68; legacy prints bare-ptest guard notice"
+    },
+    {
+      "command": "uv lock && uv sync",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Resolved 10 packages; initial failure (read-only $HOME/.cache/uv, missing src/) fixed with UV_CACHE_DIR=/tmp/uv-cache-task0 plus owned package stubs; sync installed ptest-ng 0.1.0 editable, pytest 9.1.1, psutil 7.2.2"
+    },
+    {
+      "command": "scripts/ptest-bootstrap where",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "project ng_bootstrap; runs in worktree; worktree of /home/ingmar/code/tools/ptest; kind pytest; workers 1; backend local; here: uv run --locked --no-sync python -m pytest -p no:xdist"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_files.py -k rejects_escape",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": "nonzero",
+      "output": "RED baseline: collection ImportError (ptest.contracts missing) - an import failure, not a behavioral assertion failure"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "49 passed in 0.06s (raw: .pipeline/local/green-final2.log). Intermediate finds fixed along the way: FIFO blocking open -> O_NONBLOCK; test-side non-hex nonces; cancel-shape oversize probe",
+      "durations": "first full attempt 64s including FIFO-hang interrupt; final GREEN 0.06s"
+    },
+    {
+      "command": "uv run --locked --no-sync python scripts/export-schemas.py --check",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "no drift across 8 public schemas + runtime/protocol-v1.json"
+    },
+    {
+      "command": "scripts/ptest-bootstrap /tmp/.../test_sensitivity.py -k probe",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "3 passed: no-op read_regular, permissive validate_private_dir, and nonce-bypass sabotage are each detected (pytest.raises fails under sabotage)",
+      "correction": "raw log for this probe was not retained and the path above is abbreviated; retained as stated history only, per .pipeline/local/review-1/opus-findings.json notes"
+    },
+    {
+      "command": "scripts/ptest-bootstrap --full tests/ng/test_files.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 2,
+      "output": "ptest-bootstrap refuses --full: scoped runs only until the final-gate switch"
+    },
+    {
+      "command": "/tmp/.../bootstrap-tampered.py where (scratch copy with wrong pinned hash)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "bootstrap unavailable: frozen ptest hash mismatch (got 3cab2091...); refusing to run against a changed dispatcher",
+      "correction": "raw log for this probe was not retained and the path above is abbreviated; retained as stated history only, per .pipeline/local/review-1/opus-findings.json notes"
+    },
+    {
+      "command": "stat -c %a .pipeline/local ptest-bootstrap.toml",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "700 .pipeline/local; 600 ptest-bootstrap.toml"
+    },
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Rebuilt: 2368 nodes, 4125 edges, 181 communities; AST-only, no LLM, no semantic extraction"
+    },
+    {
+      "command": "scripts/ptest-bootstrap /tmp/t0r1-red/test_red.py (scratch RED probes for T0-1/2/3/5/6, repair round 1)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "5 failed, 1 passed in 0.12s: Application Support rejected, spaced/bracketed read rejected, ~300 leaked fds, mode published as plan mode, sentinel present in decoder message; declared-depth 20-nesting already typed-rejected",
+      "raw": ".pipeline/local/red-repair1-findings.log"
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py (repair round 1 GREEN)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "68 passed in 0.14s (first repair GREEN attempt: 67 passed + 1 failed on PTEST_BOOTSTRAP env assertion, fixed by scoping the assertion to documented CONTROL_VARS)",
+      "raw": ".pipeline/local/green-repair.log",
+      "durations": "scoped GREEN 0.14s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap /tmp/t0r1-red/test_red.py (same scratch probes post-fix)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "6 passed in 0.05s",
+      "raw": ".pipeline/local/green-repair-probes.log"
+    },
+    {
+      "command": "uv run --locked --no-sync python scripts/export-schemas.py --check (post-regeneration)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "no drift across 8 public schemas + runtime/protocol-v1.json",
+      "raw": ".pipeline/local/schema-check-repair.log"
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py (repair round 1 final re-run)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "68 passed in 0.12s",
+      "raw": ".pipeline/local/green-repair-final.log"
+    },
+    {
+      "command": ".venv/bin/python -m ptest --help (T0-7 absence probe)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "No module named ptest.__main__; 'ptest' is a package and cannot be directly executed",
+      "raw": ".pipeline/local/t07-cli-absent.log"
+    },
+    {
+      "command": "graphify update . (repair round 1)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Rebuilt: 2643 nodes, 4586 edges, 187 communities; AST-only, no LLM, no semantic extraction",
+      "raw": ".pipeline/local/graphify-update-repair.log",
+      "durations": "2.7s"
+    },
+    {
+      "command": "git diff --check + trailing-whitespace grep over owned files",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "clean"
+    }
+  ],
+  "raw_logs": [
+    ".pipeline/local/ptest-bootstrap.toml",
+    ".pipeline/local/green-final.log",
+    ".pipeline/local/green-final2.log",
+    ".pipeline/local/schema-check.log",
+    ".pipeline/local/schema-check2.log",
+    ".pipeline/local/graphify-update.log",
+    ".pipeline/local/red-repair1-findings.log",
+    ".pipeline/local/green-repair.log",
+    ".pipeline/local/green-repair-probes.log",
+    ".pipeline/local/schema-check-repair.log",
+    ".pipeline/local/t07-cli-absent.log",
+    ".pipeline/local/graphify-update-repair.log",
+    ".pipeline/local/green-repair-final.log"
+  ],
+  "acceptance": {
+    "bootstrap_barrier": "MET: where shows worktree, local backend, 1 worker; bootstrap_smoke passes via -k bootstrap_smoke path",
+    "negative_red": "MET: escape/redaction/version/frame/mode/overwrite/corruption negatives written first; RED recorded as collection ImportError; assertion sensitivity proven by sabotage probes",
+    "shared_apis": "MET: all 7 files.py functions + storage.open_database with descriptor-relative, no-follow, exclusive, fsync semantics",
+    "contracts_codecs": "MET (repair round 1): all frozen records/enums/defaults (ExecutionTier closed, MAX_PROMPT_BYTES=65536); 8 documents parse with fully populated record-built fixtures; register error schema; unknown-major/truncation/nonce/oversize/depth rejection; boundary integers; default drift; serialize_run_result output (not a hand dict) proves no argv/env/internal fields in command summaries and correct result.mode",
+    "schema_drift": "MET: export --check exit 0",
+    "provenance": "MET: frozen absolute dispatcher + per-run SHA256 gate (tamper probe exit 1), --full refused exit 2, 0700/0600 generated config"
+  },
+  "dan_passes": {
+    "pass1_reread": "Re-read bootstrap/storage/files bytes end-to-end (initial). New observations: os.write partial-write risk in wrapper config (fixed with write loop); FIFO read-open wedge (fixed with O_NONBLOCK); obscure manifest decode expression (fixed to iterate attempts directly, 1-line diff proven vs backup); unused except variable (fixed). Repair round 1 re-read of the full git diff: intermediate-fd close guard (item is not fd) is defensive but harmless; _check_attempt_dict reuses _check_str_list on a singleton for the id type check; schema builders and validators share the same field sets; no leftover allowlist references; no unrelated edits.",
+    "pass2_reanchor": "All 5 Task0 checkboxes MET with file:line evidence: wrapper scripts/ptest-bootstrap:100-128; 7 APIs src/ptest/files.py; opener src/ptest/storage.py; records/codecs src/ptest/contracts.py; helpers tests/ng/support.py + conftest.py; exporter scripts/export-schemas.py; schemas docs/schemas/v1/*.json + runtime/protocol-v1.json. No scope expansion: no scheduler/runner/config/platform/cli code; T0-4 subrecord freeze restores design section 6 shapes without new public surface (converters are underscore-private); T0-7 keeps the mandated default export, no production stub.",
+    "pass3_smells": "Single definitions verified by search; no duplicate sqlite3.connect outside storage.py; support.py imports only contracts+files (no T2 platform); no TODO/stubs; 2 additive codes (already-exists, invalid-bound) documented in REASON_CODES; CORRECTION to the prior claim: private protocol decoders DID interpolate constructor text into Problem.message (Opus T0-6) — now fixed to five constant messages, verified by sentinel tests; files.py messages carry only caller-supplied names/paths, never exception text or argv. Empty/error/repeat paths covered by tests; no new dependencies; no shims."
+  },
+  "contract_notes": [
+    "encode_public_document validates then projects through the shared payload validators/projectors (first emitted bytes already allowlisted, additive unknowns including argv/env-like keys dropped); decode validates strictly and projects; private frame/manifest codecs reject unknown fields at every level",
+    "Two additive machine codes beyond the design catalog: already-exists, invalid-bound",
+    "AttemptIdentity attempt_id pattern a001-a010 enforced; resource_prefix max 54 ASCII"
+  ],
+  "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries", "repair round 1: T0-1 structural names, T0-2 success-path FD close, T0-3 result.mode, T0-4 frozen subrecord authority + regenerated schemas, T0-5 RecursionError mapping + iterative nesting, T0-6 fixed decoder messages, T0-7 project-root default export; frame value validation, limitations typing, storage cleanup + URI escaping, errno mapping, egg-info/graph gitignore"],
+  "verified": ["49 passed exit 0 in 0.06s via frozen bootstrap (initial)", "68 passed exit 0 in 0.14s via frozen bootstrap (repair round 1)", "schema --check exit 0 (initial and post-regeneration)", "3 sabotage-sensitivity probes (initial; raw logs unretained, see correction)", "--full refusal exit 2", "hash-tamper refusal exit 1 (raw log unretained, see correction)", "where local/1-worker provenance", "scratch RED probes 5 failed/1 passed pre-fix then 6 passed post-fix", "graphify AST update exit 0 (initial and repair)", "diff --check clean"],
+  "not_verified": ["macOS fullfsync branch (linux host)", "foreign-uid branches (single-user env)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "real T11 CLI integration (invoke exercised against a test-only miniature target only; python -m ptest still exits 1 without __main__)", "requested model identity (root checks independently)"],
+  "deferred": [],
+  "discovered_not_fixed": ["raise AssertionError(unreachable) after _fail is verbose by design (aids type narrowing); kept deliberately", "history.summaries, where/status effective_limits and init.config stay bare objects: their JSON field shapes are not frozen anywhere in the approved design, so no authority exists to freeze them at this barrier; noted for the owning tasks"],
+  "failed_attempts_retained": ["initial full attempt wedged on FIFO blocking open (64s, interrupted only the owned test; fixed with O_NONBLOCK)", "repair GREEN attempt 1: 67 passed + 1 failed when the miniature target observed PTEST_BOOTSTRAP in its environment; the assertion was scoped to the documented CONTROL_VARS instead of every PTEST_* var (PTEST_BOOTSTRAP is orchestrator shell env, outside the fixture contract)"],
+  "confidence": "medium: every Task0 behavior is implemented and green with focused regression evidence, but cross-task consumption has not run yet",
+  "blockers": [],
+  "addendum_round": {
+    "base": "071d4af",
+    "scope": "Author-frozen public-summary addendum (design section 6 + plan T0/T1/T3/T4/T11 notes): InitAction, ConfigSummary, EffectiveLimits, history RunResult reuse, init precedence/relations, allowlisted producers, recursive consumer projection. No redesign; previous T0-1..T0-7 repairs preserved byte-for-behavior.",
+    "change": "src/ptest/contracts.py: InitAction closed enum; ConfigSummary (hex32 project_id, RunnerKind, workers 1-64, exactly scoped-then-full kind-matched CommandSummary pair, five bools) + summarize_config allowlisted builder; EffectiveLimits (nullable max_slots/max_jobs 1-64 paired, memory_mb 64-1048576, repo_workers 1-64, max_jobs<=max_slots) + converters; InitResult.action is InitAction with preview/exists consistency + select_init_action precedence (existing wins even dry-run, then created, then preview, else error-envelope ValueError) + serialize_init_result; _check_exact_keys renamed to _check_required_keys (additive unknowns tolerated); _check_config_summary_dict/_check_effective_limits_dict; where/status/history/init validators tightened (history summaries reuse _validate_run_payload); _PROJECTORS recursive known-field projection wired into decode_public_document plus domain projection; generated schemas allow additive properties (10 additionalProperties:false removed) and type the new shapes (_config_summary_schema with min/maxItems 2, _effective_limits_schema, history items reuse _run_data_schema, init action enum). Private control/launch/bridge codecs untouched and still strict.",
+    "tests": "tests/ng/test_contracts.py: 10 new tests (closed enum + coercion + action/exists consistency, precedence 4 branches + error case, scoped-then-full ordering/kind/count negatives, absent-setup flags, limits pairing/bounds 6 negatives, init round-trip exact key sets + 6-sentinel absence, init/where/status negatives, history reuse + tampered-mode rejection + smuggled-sequence drop + empty history, all-8-kinds recursive drop incl. envelope/domain/error extras + re-encode sentinel absence, generated-shape assertions); _full_payloads now uses production serializers (_effective_limits_dict, serialize_run_result, serialize_init_result, summarize_config); smuggled-extra-key rejection block replaced by projection coverage per the author ruling.",
+    "evidence": [
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "12 failed, 28 passed in 0.34s: 2 behavioral REDs (unknown init.action accepted, tampered history summary accepted), 1 schema-shape RED, 9 missing-symbol errors for the unimplemented surface",
+        "raw": ".pipeline/local/red-addendum.log + .pipeline/local/red-addendum.exit"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "1 failed, 39 passed in 0.08s: only test_addendum_schema_shapes, pending regeneration",
+        "raw": ".pipeline/local/green-addendum1.log + .pipeline/local/green-addendum1.exit"
+      },
+      {
+        "command": "uv run --locked --no-sync python scripts/export-schemas.py && uv run --locked --no-sync python scripts/export-schemas.py --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "regenerated 8 schemas + protocol-v1.json; only doctor/history/init/run/status/where changed; --check clean",
+        "raw": ".pipeline/local/schema-export-addendum.log, .pipeline/local/schema-check-addendum.log"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "78 passed in 0.14s (final re-runs 0.14s/0.21s); test_files/test_storage run read-only as sibling-owned verification",
+        "raw": ".pipeline/local/green-addendum.log, green-addendum-final.log, green-addendum-final2.log, green-addendum-final3.log (+ .exit files)"
+      },
+      {
+        "command": "sabotage probes via apply_patch then immediate restore",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "sabotage1 (InitAction coercion removed): closed_enum fails; sabotage2 (projection bypassed): drops_additive + history_summaries fail; sabotage3 (max_jobs<=max_slots removed): pairing fails; all restored, 78 passed after",
+        "raw": ".pipeline/local/sabotage1.log, sabotage2.log, sabotage3.log"
+      },
+      {
+        "command": "graphify update .",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "AST-only update, no semantic extraction (no API key configured)",
+        "raw": ".pipeline/local/graphify-update-addendum.log"
+      },
+      {
+        "command": "git diff --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "clean"
+      }
+    ],
+    "acceptance": {
+      "init_action_precedence": "MET: closed enum, constructor/exists relations, pure precedence helper, decode enforcement; unknown actions rejected",
+      "config_summary": "MET: frozen record + allowlisted builder/serializer/validator/schema; scoped-then-full kind-matched ordering; absent-setup clears flags; 6-sentinel redaction incl. re-encode",
+      "effective_limits": "MET: nullable fields, bounds, paired slot/job unknowns, max_jobs<=max_slots; shared by where/status validators and schemas",
+      "history_reuse": "MET: summaries validated by _validate_run_payload, schema items are the run payload, fixtures serialize via serialize_run_result; internal fields absent; empty history is an empty array",
+      "projection": "MET: all 8 kinds plus domain/error project to known fields; additive unknowns dropped never re-emitted; bad known values still rejected; private protocols untouched",
+      "projection_boundary": "MET (boundary round): producer first bytes already allowlisted for all 8 kinds plus domain (validate+project inside encode_public_document, no divergent serializer family); consumer tests rebuilt on hostile test-side json.dumps envelopes; argv/env-like additive fields dropped by projection on both sides per the author ruling; private frame/manifest/domain/grant/prepared-run/nested authority records reject unknown keys",
+      "schema_drift": "MET: export --check exit 0; protocol-v1.json byte-identical (private surface unchanged)"
+    },
+    "dan_passes": {
+      "pass1_reread": "Re-read the full contracts diff twice. Observations: _INIT_ACTIONS comment claimed validator proximity it did not have (comment removed, one-liner kept); a probe patch briefly added a bogus run-schema field and was reverted immediately (verified gone); a builder insert duplicated the run body and the stub was deleted (verified gone). No other findings.",
+      "pass2_reanchor": "All 5 addendum contracts MET with file evidence above; prior T0-1..T0-7 behaviors preserved (scoped suite green incl. sibling-owned files/storage tests run read-only). No scope expansion: no scheduler/runner/config/platform/CLI code, no new dependencies, no private-codec changes.",
+      "pass3_smells": "No TODOs/stubs; new names have no synonyms in the tree (InitAction/ConfigSummary/EffectiveLimits/summarize_config/select_init_action/serialize_init_result/_PROJECTORS are the only owners); validators run before projectors so KeyError paths are unreachable on accepted shapes; None-passthrough preserved for capability/counts/timings/config; argv/env in run.command still rejected (stronger than ignore, consistent with never-trusted); happy/empty/error paths covered, cancellation/repeat N/A for pure codecs (no I/O added). SUPERSEDED by the boundary round: the argv/env special rejection is removed and argv/env-like additive fields are dropped by projection per the author ruling; private strictness is now enforced, not merely untouched."
+    },
+    "implemented": ["InitAction + select_init_action + InitResult relations + serialize_init_result", "ConfigSummary + summarize_config + converter/validator/schema", "EffectiveLimits + converter/validator/schema shared by where/status", "history RunResult payload reuse (validator + schema + serializer fixtures)", "recursive public projection in decode + additive schema properties", "10 addendum regression tests + production-serializer fixtures + empty-history edge"],
+    "verified": ["78 passed exit 0 scoped via frozen bootstrap", "schema --check exit 0", "RED exit 1 with 2 behavioral + 1 shape + 9 missing-symbol failures", "3 sabotage mutations each detected then restored", "graphify AST exit 0", "diff --check clean"],
+    "not_verified": ["macOS branches (linux host)", "consumption by T1/T3/T4/T11 (later waves build on these records)", "requested model identity (root checks independently)"],
+    "deferred": [],
+    "discovered_not_fixed": [],
+    "failed_attempts_retained": ["probe patch added a bogus run-schema 'note' field to test mechanics; reverted immediately in the next command and verified absent via grep", "builder insert duplicated the _run_data_schema body as _run_payload_schema stub; stub deleted, verified absent; final diff contains each builder once", "one validator patch failed on a mistranscribed context line (findings placement); retried with minimal anchor, no source touched by the failure"],
+    "confidence": "high for the addendum surface: every frozen behavior is implemented, red-then-green with sabotage sensitivity, and the full owned-plus-sibling scoped suite is green",
+    "owned_files_committed": ["src/ptest/contracts.py", "tests/ng/test_contracts.py", "docs/schemas/v1/doctor.json", "docs/schemas/v1/history.json", "docs/schemas/v1/init.json", "docs/schemas/v1/run.json", "docs/schemas/v1/status.json", "docs/schemas/v1/where.json", ".pipeline/out/task-0.json"]
+  },
+  "boundary_round": {
+    "base": "dbac887",
+    "review": ".pipeline/local/public-review-1.json",
+    "verdict_in": "rejected with T0-8/HIGH producer privacy, T0-9/HIGH known-field validation holes, T0-10/MEDIUM unhashable enum crashes, T0-11/MEDIUM private unknown fields accepted; T0-1..T0-6 confirmed fixed",
+    "scope": "Opus public-boundary correction on the task-0 worktree. Owns only src/ptest/contracts.py, tests/ng/test_contracts.py and .pipeline/out/task-0.json (generated schemas/protocol descriptor untouched: no descriptor changed). No shared-file edits, no merge/integration, no production CLI stub. T0-1..T0-6 repairs preserved.",
+    "dispositions": [
+      {
+        "id": "T0-8",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py encode_public_document now runs success payloads through _PAYLOAD_VALIDATORS then _PROJECTORS and domains through the shared _validate_domain, so first emitted bytes carry exactly the descriptor field set; no divergent serializer family. Invalid content raises Problem.",
+        "tests": "tests/ng/test_contracts.py: test_public_producer_emits_allowlisted_fields_first_encode (exact key sets per kind + nested + domain + non-mutation + bad-domain Problem); test_public_decode_drops_additive_unknowns rebuilt on hostile test-side json.dumps envelopes with run.command argv/env drop assertions"
+      },
+      {
+        "id": "T0-9",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py: run_id/project_id/checkout_id now hex32-checked on decode; granted_workers 1-64 and memory_estimate_mb/reserved_memory_mb >= 0 enforced; artifact_id required str-or-null nonempty; where.provenance and doctor.scope string-list checked; register legacy_alias_count >= 0. Full known-field catalog re-audited: all other validators already match record+schema bounds (counts/timings lo=0, lease slots, finding line, obligation digest, effective limits).",
+        "tests": "tests/ng/test_contracts.py: test_known_string_list_fields_reject_nested_objects (provenance/scope/artifact_id object injection, non-hex run_id direct + via history.summaries, bound negatives, valid positive control)"
+      },
+      {
+        "id": "T0-10",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py: new _is_known str-guard used at all 13 frozenset decode sites (command kind/mode, capability tier, attempt phase/status, readiness area/state, finding code, lease state, config runner_kind, init action, register proposed_runner/required_actions, control frame kind, ControlFrame record). No broad catch added.",
+        "tests": "tests/ng/test_contracts.py: test_closed_enums_reject_malformed_values (23 payload paths x dict/list/bool/null/int/bogus) + test_control_frame_kind_rejects_malformed_values"
+      },
+      {
+        "id": "T0-11",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py: decode_control_frame rejects unknown top-level keys; _require_frame_keys rejects unknown per-kind payload keys, guard keys and runner-facts problem keys (parent-closing empty check subsumed); manifest/domain/grant/prepared-run/capability/limitation/summary/top-level unknown keys rejected with fixed protocol-mismatch messages. Version/length/nonce bounds, requiredness and defaults unchanged.",
+        "tests": "tests/ng/test_contracts.py: test_private_frame_rejects_unknown_fields (top + all 6 kinds + guard + problem extras, valid positives) + test_private_manifest_rejects_unknown_fields (6 levels)"
+      }
+    ],
+    "related_notes_closed": [
+      "run.command argv/env special rejection removed; argv/env-like additive unknowns dropped by projection on producer and consumer per the author ruling; drops test extended with argv/env assertions",
+      "decoder messages fixed: _check_closed value echo, register action echo, document kind echo, schema version echo, reason key echo, control kind echo; test_decoder_messages_never_echo_input sentinel negatives incl. rendered error document",
+      "duplicate implemented key deduplicated into one merged list; producer-liberal/private-strict overclaims corrected in contract_notes, acceptance and dan_passes"
+    ],
+    "evidence": [
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k '<7 new boundary tests>'",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "6 failed + 1 failed in 0.31s/0.09s: first-encode sentinel leak bytes, 3x DID NOT RAISE, 2x TypeError unhashable, 1x sentinel echo; all behavioral, no import errors",
+        "raw": ".pipeline/local/red-boundary.log + .pipeline/local/red-boundary.exit + .pipeline/local/red-boundary-kind.log + .pipeline/local/red-boundary-kind.exit"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "47 passed in 0.16s",
+        "raw": ".pipeline/local/green-boundary.log + .pipeline/local/green-boundary.exit"
+      },
+      {
+        "command": "sabotage probes via apply_patch then immediate restore",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 1,
+        "output": "sabotage-boundary1 (projection bypassed with dict copy): producer test fails; sabotage-boundary2 (granted_workers lo relaxed 1->0): known-field test fails; both restored, suite green after",
+        "raw": ".pipeline/local/sabotage-boundary1.log + .pipeline/local/sabotage-boundary2.log (+ .exit files)"
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "85 passed in 0.18s; test_files/test_storage run read-only as sibling-owned verification",
+        "raw": ".pipeline/local/green-boundary-full.log + .pipeline/local/green-boundary-full.exit"
+      },
+      {
+        "command": "uv run --locked --no-sync python scripts/export-schemas.py && uv run --locked --no-sync python scripts/export-schemas.py --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "no descriptor changed: regeneration byte-identical, --check clean, no schema files touched",
+        "raw": ".pipeline/local/schema-export-boundary.log + .pipeline/local/schema-check-boundary.log + .pipeline/local/schema-check-boundary.exit"
+      },
+      {
+        "command": "graphify update .",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "AST-only update, no semantic extraction (no API key configured)",
+        "raw": ".pipeline/local/graphify-update-boundary.log + .pipeline/local/graphify-update-boundary.exit"
+      },
+      {
+        "command": "git diff --check",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+        "exit": 0,
+        "output": "clean"
+      }
+    ],
+    "acceptance": {
+      "T0-8": "MET: first-encode bytes pinned to exact descriptor key sets for all 8 kinds + nested + domain; caller payloads never mutated; bad payload content raises Problem",
+      "T0-9": "MET: provenance/scope/artifact_id, hex32 ids, worker/memory bounds, alias bound enforced to typed Problems; known-field catalog audited, no other drift",
+      "T0-10": "MET: every frozenset decode site maps unhashable input to typed Problems; scalar negatives pinned",
+      "T0-11": "MET: frame top/per-kind/guard/problem, manifest top/domain/grant/prepared/capability/limitation/summary unknown keys rejected; bounds and defaults kept",
+      "T0-1..T0-6": "PRESERVED: full scoped suite green incl. sibling-owned files/storage tests run read-only; no schema drift"
+    },
+    "dan_passes": {
+      "pass1_reread": "Re-read the full contracts diff. Observations: one patch hunk duplicated the register proposed_runner condition (stale line removed, syntax verified); the parent-closing empty-payload special case is subsumed by the unknown-field check (equivalent ValueError, kept test green); _check_int_field calls after _need_int are redundant-but-harmless authority reuse; _is_known/_validate_domain are used before their definition lines (runtime resolution, suite proves it).",
+      "pass2_reanchor": "Plan T0 checkboxes for allowlisted serialization and same-major drop/private-reject are now MET with file:line evidence above; design line 248 producer/consumer/private-asymmetry contracts all enforced; no scope expansion (no scheduler/runner/config/platform/CLI, no dependencies, no descriptor changes).",
+      "pass3_smells": "No TODOs/stubs; _is_known/_validate_domain are the only new names with no synonyms; sweep shows no remaining frozenset decode site unguarded and no decoder Problem echoes caller data (remaining interpolations are code constants, validated kinds or programmer-API ValueErrors); validators run before projectors; happy/empty/error/repeat paths covered (re-encode idempotent); history summary count unboundedness is pre-existing T3/T11 scope, unchanged."
+    },
+    "implemented": ["first-encode validate+project for data and domain", "hex32 run identifiers + worker/memory/alias bounds + str-list provenance/scope + str/null artifact_id", "_is_known unhashable-safe enum guards at 13 decode sites", "private frame/manifest unknown-key rejection at every level", "fixed decoder messages + sentinel no-echo tests", "consumer tests on hostile test-side JSON; argv/env special rejection removed", "report dedupe + overclaim corrections"],
+    "verified": ["85 passed exit 0 scoped via frozen bootstrap (47 contracts + 28 files + 10 storage)", "schema regen byte-identical + --check exit 0", "RED exit 1 with 7 behavioral failures, no import errors", "2 sabotage mutations each detected then restored", "graphify AST exit 0", "diff --check clean"],
+    "not_verified": ["macOS branches (linux host)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "requested model identity and independent re-review (root owns)"],
+    "deferred": [],
+    "discovered_not_fixed": [],
+    "failed_attempts_retained": ["one register patch hunk duplicated the proposed_runner condition line; stale line removed immediately and syntax verified via ast.parse", "one report patch used a trailing comma mismatching the final dan_passes line; retried against the exact line ending"],
+    "confidence": "high for the boundary surface: RED-then-GREEN with sabotage sensitivity, full scoped suite green, no schema drift; cross-task consumption still later-wave scope",
+    "owned_files_committed": ["src/ptest/contracts.py", "tests/ng/test_contracts.py", ".pipeline/out/task-0.json"]
+  }
+}

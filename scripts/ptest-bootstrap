@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Task0 local-only bootstrap wrapper (Task0 owned).
+
+Runs scoped NG tests through the frozen installed legacy ``ptest`` without
+replacing it. The wrapper:
+
+* resolves the frozen legacy executable read-only (absolute path, SHA256
+  pinned) and never consults PATH for it;
+* derives the legacy project ``root`` from ``git rev-parse --git-common-dir``
+  (the original repo, correct inside worktrees);
+* writes a private generated config under ``.pipeline/local/`` (0600 file in
+  a 0700 directory) with one worker and local backend only;
+* invokes the frozen executable with ``PTEST_CONFIG`` pointed at that file,
+  forwarding only scoped caller arguments plus ``--local`` for test runs.
+
+``--full`` is refused: the wrapper accepts scoped runs only until the root's
+final-gate switch. Raw test runners are never used.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+FROZEN_PTEST = "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest"
+FROZEN_SHA256 = "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68"
+PYTEST_CMD = "uv run --locked --no-sync python -m pytest"
+INSPECTION = {"where", "doctor", "register", "status"}
+
+
+def worktree_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def verify_frozen(path: Path) -> str:
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise SystemExit(f"bootstrap unavailable: cannot read {path}: {exc}")
+    if digest != FROZEN_SHA256:
+        raise SystemExit(
+            "bootstrap unavailable: frozen ptest hash mismatch "
+            f"(got {digest}); refusing to run against a changed dispatcher"
+        )
+    return digest
+
+
+def git_common_parent(cwd: Path) -> Path:
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise SystemExit("bootstrap unavailable: not inside a git worktree")
+    common = Path(proc.stdout.strip())
+    if not common.is_absolute():
+        common = (cwd / common).resolve()
+    if common.name == ".git":
+        return common.parent
+    return common
+
+
+def quote_toml(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_config(root: Path, local_dir: Path, repo_root: Path) -> Path:
+    local_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(local_dir, 0o700)
+    except OSError:
+        pass
+    path = local_dir / "ptest-bootstrap.toml"
+    body = (
+        "[defaults]\n"
+        "workers = 1\n"
+        "[projects.ng_bootstrap]\n"
+        f"root = {quote_toml(str(repo_root))}\n"
+        'kind = "pytest"\n'
+        'backend = "local"\n'
+        "workers = 1\n"
+        f"scoped = {quote_toml(PYTEST_CMD)}\n"
+        f"full = {quote_toml(PYTEST_CMD)}\n"
+    )
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        view = memoryview(body.encode("utf-8"))
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def main(argv: list[str]) -> int:
+    root = worktree_root()
+    frozen = Path(FROZEN_PTEST)
+    digest = verify_frozen(frozen)
+    if "--full" in argv:
+        print(
+            "ptest-bootstrap refuses --full: scoped runs only "
+            "until the final-gate switch",
+            file=sys.stderr,
+        )
+        return 2
+    repo_root = git_common_parent(root)
+    config_path = write_config(root, root / ".pipeline" / "local", repo_root)
+    env = dict(os.environ)
+    env["PTEST_CONFIG"] = str(config_path)
+    env.setdefault("UV_CACHE_DIR", str(root / ".pipeline" / "local" / "uv-cache"))
+    print(
+        f"[ptest-bootstrap] dispatcher={frozen} sha256={digest} "
+        f"config={config_path} backend=local workers=1",
+        file=sys.stderr,
+    )
+    # Inspection subcommands dispatch on argv[0]; keep them first and pass
+    # --local only for test runs (legacy strips it anywhere there).
+    if argv and argv[0] in INSPECTION:
+        cmd = [str(frozen), *argv]
+    else:
+        cmd = [str(frozen), *argv, "--local"]
+    proc = subprocess.run(cmd, cwd=str(root), env=env)
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

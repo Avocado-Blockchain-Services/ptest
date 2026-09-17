@@ -17,3 +17,10 @@ config.toml
 
 __pycache__/
 *.pyc
+
+# Task0 local-only artifacts (never committed: env, caches, raw logs)
+.venv/
+.pytest_cache/
+.pipeline/local/
+*.egg-info/
+graphify-out/

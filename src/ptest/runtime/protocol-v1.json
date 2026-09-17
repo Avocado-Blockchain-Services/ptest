@@ -1,0 +1,87 @@
+{
+  "bridge_event": {
+    "encoding": "utf-8-json-lines",
+    "events": [
+      "inventory",
+      "test-outcome",
+      "terminal"
+    ],
+    "max_depth": 32,
+    "max_events": 500000,
+    "max_line_bytes": 65536,
+    "protocol": 1,
+    "required": [
+      "protocol",
+      "run_id",
+      "nonce",
+      "event"
+    ]
+  },
+  "control_frame": {
+    "encoding": "utf-8-json-object",
+    "kinds": {
+      "cancel": {
+        "signal": [
+          2,
+          15
+        ]
+      },
+      "draining": {
+        "provisional_artifact_id": "string|null"
+      },
+      "parent-closing": {},
+      "phase": {
+        "attempt_id": "string|null",
+        "phase": "setup|discovery|execution|finalization"
+      },
+      "registered": {
+        "guard": "ProcessIdentity"
+      },
+      "runner-facts": {
+        "attempt_id": "string",
+        "phase": "setup|execution",
+        "problem": "Problem|null",
+        "raw_exit_code": "integer|null",
+        "report_name": "string|null"
+      }
+    },
+    "max_bytes": 65536,
+    "max_nesting": 16,
+    "prefix": "uint32-big-endian-byte-length",
+    "required": [
+      "protocol",
+      "run_id",
+      "nonce",
+      "kind",
+      "payload"
+    ]
+  },
+  "launch_manifest": {
+    "attempts": {
+      "max_items": 10,
+      "min_items": 1
+    },
+    "encoding": "utf-8-json-object",
+    "max_bytes": 4194304,
+    "max_nesting": 32,
+    "prefix": "uint32-big-endian-byte-length",
+    "required": [
+      "protocol",
+      "domain",
+      "grant",
+      "setup",
+      "attempts",
+      "attempt_ids",
+      "setup_timeout_s",
+      "attempt_timeout_s",
+      "compound_timeout_s"
+    ]
+  },
+  "limits": {
+    "max_prompt_bytes": 65536,
+    "native_report_max_bytes": 16777216,
+    "native_report_max_tests": 100000,
+    "test_id_max_bytes": 4096
+  },
+  "protocol": 1
+}
