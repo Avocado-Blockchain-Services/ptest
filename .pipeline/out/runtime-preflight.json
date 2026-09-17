@@ -1,0 +1,61 @@
+{
+  "kind": "selected-fields-from-live-cli-output",
+  "date": "2026-09-17",
+  "probes": [
+    {
+      "runtime": "Claude Code",
+      "requested_model": "claude-fable-5-1",
+      "effort": "high",
+      "flags": ["-p", "--safe-mode", "--strict-mcp-config", "--tools", "", "--no-session-persistence", "--output-format", "json"],
+      "prompt": "Reply exactly READY. Do not use tools.",
+      "exit_code": 0,
+      "result": "READY",
+      "modelUsage_primary": "claude-fable-5-1",
+      "is_error": false
+    },
+    {
+      "runtime": "Claude Code",
+      "requested_model": "opus",
+      "effort": "high",
+      "flags": ["-p", "--safe-mode", "--strict-mcp-config", "--tools", "", "--no-session-persistence", "--output-format", "json"],
+      "prompt": "Reply exactly READY. Do not use tools.",
+      "exit_code": 0,
+      "result": "READY",
+      "modelUsage_primary": "claude-opus-5",
+      "is_error": false
+    },
+    {
+      "runtime": "Muse Code",
+      "requested_model": "configured default",
+      "reported_model": "muse-spark-1.3",
+      "reported_provider": "meta",
+      "flags": ["exec", "--disable-shell", "--disable-write", "--disable-web-tools", "--no-foreign-personal-context", "--approval-mode", "never", "--max-model-steps", "1", "--no-session-log", "--json"],
+      "prompt": "Reply exactly READY. Do not use tools.",
+      "exit_code": 0,
+      "terminal": "completed",
+      "result": "READY",
+      "workspace_warning": "rules file at /home/ingmar/worktrees/ptest/cx-ng-product/ptest/AGENTS.md exists, but the workspace is untrusted, so it is skipped for this session; restart with --trust-workspace to load project rules"
+    },
+    {
+      "runtime": "Muse Code trusted instruction probe",
+      "reported_model": "muse-spark-1.3",
+      "flags": ["exec", "--trust-workspace", "--disable-shell", "--disable-write", "--disable-web-tools", "--no-foreign-personal-context", "--approval-mode", "never", "--max-model-steps", "1", "--no-session-log", "--json"],
+      "prompt": "Without using any tools, return the exact first heading of the project AGENTS.md rules already supplied in your context. If none were supplied, say NO_RULES. This is a read-only instruction-loading probe, not an implementation request.",
+      "exit_code": 0,
+      "terminal": "completed",
+      "result": "# ptest NG product workflow",
+      "expected_first_heading": "# ptest NG product workflow",
+      "stderr_excerpt": "muse: workspace trust: trusted source=run-flag",
+      "raw_artifacts": [".pipeline/out/muse-trust-preflight.jsonl", ".pipeline/out/muse-trust-preflight.stderr"],
+      "verified": "Assigned worktree AGENTS.md was loaded in a trusted, no-tools Muse session."
+    },
+    {
+      "runtime": "Muse Code",
+      "command": "muse init --dry-run",
+      "exit_code": 0,
+      "output_excerpt": "# AGENTS.md\n\nMuse Code reads this file as project rules when it runs in this directory.",
+      "mutations": "none (dry run)"
+    }
+  ],
+  "limits": "Availability and documented instruction discovery only; not product tests or native-role-schema verification. No credentials inspected."
+}
