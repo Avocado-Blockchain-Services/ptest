@@ -237,3 +237,10 @@
   Muse headless session-message ingress was unavailable (external_agent_ingress_closed).
   Restart uses --disable-write so local edits must use shell apply_patch, same
   model/effort/task/base. All attempts retained; no silent substitution or reset.
+
+- Muse attempt3 completed exit0 at c545671 (task-0 only, not integrated). Root
+  scoped verification49passed/0.05s, all ten slowest<0.005s; standalone schema drift
+  check exit0;26owned committed paths/clean diff check. Worker graph update exit0.
+- Mechanical gate passed but root observed potential acceptance gaps; independent
+  Opus Task0 audit receives exact base/head diff, root evidence, report and
+  provisional notes. No wave1 dispatch until required findings are closed.
