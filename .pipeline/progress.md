@@ -105,3 +105,24 @@
   parallel design research, then Opus review before Muse/Dan implementation.
 - No runtime edits, tests, dependency installation, or legacy removal at this gate.
 - Final integrated review remains Opus then Astra; subsequent corrections use Sol.
+
+## Design dispatch and implementation-runtime preparation
+
+- Astra xhigh architect owns design + plan in `cx-ng-product/design`; independent
+  Astra runner and scheduler researchers own documentation in `runners` and
+  `scheduler-research` worktrees. All started from approved-spec commit 1ca3223.
+- Prepared `.pipeline/briefs/design-review.md` for read-only Opus gate and
+  `.pipeline/briefs/muse-dan-common.md` translating the actual Dan role, with
+  project-specific test/worktree/ownership rules overriding generic examples.
+- Muse 1.3.0-R3233.1 local help and offline schema export inspected. `exec --agents`
+  accepts overlays, but an offline negative unknown-field probe was also accepted;
+  parsing alone is NOT proof of native role loading. Implementation will receive
+  Dan's actual source and explicit translated instructions in its prompt. The
+  previously observed trusted AGENTS loading and actual muse-spark-1.3 model
+  preflight remain the evidence, not an assumed Codex-role import.
+- No live credentials were read; offline probes made no provider requests.
+- Legacy checkout contains no Python package/lock or existing `.github` security
+  gates; gitleaks/bandit/osv-scanner were absent from PATH in read-only inventory.
+  Tool availability: uv 0.9.26, Node 26.8.2, npm 12.0.2, Go 1.27.1, Cargo 1.98.1.
+- No feature code, dependency installs, tests, cloud operations, or live CLI edits
+  at this documentation gate. Provisional foundation remains untouched.
