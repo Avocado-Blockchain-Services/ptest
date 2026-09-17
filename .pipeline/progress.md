@@ -333,3 +333,16 @@
   Retained in raw trace and reviewer brief; not perfect patch-only compliance.
   Do not mistake initial malformed miniature-target RED for product evidence;
   corrected red-repair2b carries the meaningful behavioral failures.
+
+- Public Opus review43turns REJECTED dbac887: T0-8/HIGH first-encode raw dict
+  publication, T0-9/HIGH known-field/schema parity holes, T0-10/MEDIUM unhashable
+  enum crashes, T0-11/MEDIUM private protocols accepting unknown fields. Original
+  T0-1..T0-6 confirmed fixed. SameMusemedium correction launched with exact report
+  at task0/.pipeline/local/public-review-1.json; requires independent consumer
+  hostile-JSON tests so new producer sanitation cannot make decoder tests vacuous.
+- Separate root-only combined-check worktree created under approved root:
+  task-0-combined branchcx-ng-product-task-0-combined at5f5e501 (dbac887 plus
+  helper4fe6d27->d61b142 and0f41c78->5f5e501). No changes to review worktrees.
+  Own uv environment/cache; combined112passed/2.80s, schema drift0, clean diff.
+  This proves composition of SUBMITTED bytes only, NOT acceptance; public findings
+  remain. Normal chain/main/installed CLI are untouched by this check.
