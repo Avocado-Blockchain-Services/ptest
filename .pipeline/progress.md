@@ -216,3 +216,11 @@
   `/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest`, SHA256
   `3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68`.
   Installed CLI and global configuration remain untouched.
+
+- Astra clarification a001145 integrated: explicit shared-parent creation helper,
+  finite execution tier, single unknown-memory translation, bounded prompt default,
+  read-only platform ownership and honest adoption-baseline traceability. No new
+  product choice; Opus's passed gate stands. Regenerated T0 brief from final plan.
+- Task0 Muse implementation authorized in its own task-0 worktree. Bootstrap is
+  the frozen legacy target above; dependency setup is now within the passed gate.
+  Root owns mechanical verification, Opus task review and chain integration.
