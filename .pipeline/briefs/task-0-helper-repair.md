@@ -61,6 +61,13 @@ will repair public schema shapes in a different worktree. Own ONLY:
 Do not edit contracts.py, schemas, plan/design, common task0 report, or other tests.
 Do not integrate any other branch; root combines the disjoint repairs for review.
 
+RESUME: root interrupted the first helper run to add the argument-ordering case
+below. Existing edits in support.py/test_files.py are YOUR prior attempt, preserve
+and inspect them and retained .pipeline/local logs. Do not revert them or claim a
+fresh RED for behavior already repaired. Trace is retained by root as
+.pipeline/out/task-0-helper-muse.jsonl; SIGINT exit130 was root-directed, not a test
+failure. Finish the original repair plus this additional verified contract case.
+
 Read your original task0 launch/brief/common/Dan source and the approved design.
 This is a narrow completion of the frozen test-helper interface (plan lines59–63),
 not a production CLI or process supervisor. T11 owns src/ptest/__main__.py and the
@@ -94,6 +101,19 @@ existing result-export/read-back behavior and clean inherited control variables.
 A declared caller --result-json should be parsed too per the frozen plan, not
 silently result=None; add a positive test with an explicit existing-parent path.
 
+3. The original helper appends generated --result-json AFTER *args. The approved
+   CLI is prefix-only: parsing stops at the first unknown/native argument or --.
+   Thus case.invoke(project, 'tests/test_x.py', timeout=...) currently sends the
+   generated export option to the native runner, not ptest. Put generated wrapper
+   options before the native tail, preserve every caller argument byte/order, and
+   recognize explicit result overrides ONLY in the leading wrapper prefix.
+   Membership checks across all args are wrong: ['-k', '--result-json'] and tokens
+   after '--' are literal native values. Do not create a second full CLI parser;
+   use the smallest shared/helper boundary consistent with the frozen interface.
+   Add a miniature prefix-only parser target regression, not permissive argparse
+   that would hide the real bug. Cover scoped path, -- delimiter, option-looking
+   native values, and genuine leading explicit result path read-back.
+
 Use YOUR own uv sync --locked and private UV_CACHE_DIR under .pipeline/local.
 PTEST_BOOTSTRAP is supplied. Run only scoped scripts/ptest-bootstrap tests/ng/test_files.py
 (and tests/ng/test_contracts.py if the fixture changes could affect it). Capture
@@ -103,4 +123,3 @@ Update your unique report with exact commands/exits/paths, findings and Dan pass
 Run graphify update . AST-only and git diff --check; commit explicit owned files.
 Return SHA, test evidence, limitations. Root owns combined review; no full suite,
 main merge/push/install, code outside ownership, or self-delegation.
-
