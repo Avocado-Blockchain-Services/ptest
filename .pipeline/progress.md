@@ -403,3 +403,8 @@
   overrides old Muse-medium routing only. Opus task/integrated audits, independent
   Astra xhigh final audit and Sol post-Astra corrections remain unchanged.
   T1 partial source/tests preserved; T2/T3 confirmed clean. Main/live CLI untouched.
+- Luna launches confirmed active: T1 exec81100/thread01a0b18a-e2e2-74e0-96ac-7d8cbd096a0f;
+  T2 exec43145; T3 exec37806. Traces task-N-luna.jsonl/.stderr, final schema
+  output task-N-luna-final.json. All requested gpt-5.6-luna/xhigh explicitly.
+  Root pre-extracted next-wave T4/T5/T6 briefs; not authorized to launch before
+  wave1 review/integration gate. Wave1 audit checklist prepared without verdict.
