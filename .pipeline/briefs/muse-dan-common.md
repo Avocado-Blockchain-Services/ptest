@@ -24,6 +24,9 @@ owned files. Do not revert other changes, edit shared frozen contracts, launch
 other agents, or silently expand scope. Report a required interface change to
 the orchestrator. Do not merge main, push, publish, deploy, mutate live services,
 or replace the installed ptest. Never share another worktree's dependencies.
+Use apply_patch for local edits (native tool or the existing apply_patch command).
+Do not write/edit source using shell heredocs, cat, or Python file-writing tricks.
+Normal generated build files, lockfiles and captured command logs are exceptions.
 
 ## Test-first and negative contracts
 
