@@ -126,3 +126,25 @@
   Tool availability: uv 0.9.26, Node 26.8.2, npm 12.0.2, Go 1.27.1, Cargo 1.98.1.
 - No feature code, dependency installs, tests, cloud operations, or live CLI edits
   at this documentation gate. Provisional foundation remains untouched.
+
+## Parallel research integrated
+
+- Scheduler author fca24b8 integrated as 46e2301; runner author b673239 integrated
+  as b0371c2. Both changes contain only their two owned research/report files.
+  JSON parse and whitespace checks passed; no runtime tests were run or claimed.
+- Scheduler recommendation uses cooperative foreground groups, a guarded launch
+  handshake, and a shared SQLite transaction ledger. Arbitrary unobserved detached
+  descendants are explicitly outside portable containment; uncertainty holds slots.
+- Runner input recommends native parsed-config bridges, additive reporting,
+  optional serial pytest without xdist, exact supported profiles and full fallback.
+  Locally inspected Vitest 3.2.6 is not promoted to tested support; maintenance
+  candidate 3.2.7 needs actual acceptance evidence.
+- Focused independent adoption search found MIT `marshmallow-code/apispec` at
+  bfac55c9bfbc4edbdde505d29d8c20c62133fc10, with uv.lock pytest 9.1.1. Proposed setup:
+  `uv sync --locked --no-default-groups --group tests --extra yaml --extra marshmallow`.
+  Its no-xdist environment is useful serial-path evidence, not parallel evidence.
+- Node fallback `dcastil/tailwind-merge` v3.3.1 at
+  71218a58edc9e5ad36e5a3233b51c893782a411d has meaningful pure unit tests but uses
+  Yarn 1.22.22 and locked Vitest/coverage 3.1.4, so it is NOT qualified for the
+  proposed frozen adapter matrix. Matching Vitest adoption remains unresolved.
+  No candidate was cloned, installed, executed, or represented as passing.
