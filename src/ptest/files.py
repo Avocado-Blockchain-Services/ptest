@@ -21,9 +21,7 @@ from .contracts import Problem
 
 _PHASE = "files"
 _READ_CHUNK = 8192
-_COMPONENT_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-)
+_CONTROL_CHARS = frozenset(chr(code) for code in list(range(0x00, 0x20)) + [0x7F])
 
 
 def _fail(code: str, message: str) -> None:
@@ -31,15 +29,21 @@ def _fail(code: str, message: str) -> None:
 
 
 def validate_single_name(name: object) -> str:
-    """Validate one safe single-component directory or file name."""
+    """Validate one structural single-component directory or file name.
+
+    Only structure is checked: the name must be a nonempty string without
+    path separators, NUL or other C0 controls, and must not be ``.``/``..``.
+    Spaces, non-ASCII and brackets are accepted; descriptor-relative
+    no-follow traversal remains the real safety boundary.
+    """
     if not isinstance(name, str) or not name:
         _fail("unsafe-path", "name must be a nonempty string")
         raise AssertionError("unreachable")
     if name in (".", "..") or "/" in name or "\x00" in name:
         _fail("unsafe-path", f"name {name!r} is not a single component")
         raise AssertionError("unreachable")
-    if any(char not in _COMPONENT_CHARS for char in name):
-        _fail("unsafe-path", f"name {name!r} uses unsafe characters")
+    if any(char in _CONTROL_CHARS for char in name):
+        _fail("unsafe-path", f"name {name!r} uses control characters")
         raise AssertionError("unreachable")
     return name
 
@@ -72,7 +76,12 @@ def _open_dir(path: Path):
 
 
 def _walk_to_parent(root_fd: int, parts: list) -> int:
-    """Open every intermediate component; returns the parent fd."""
+    """Open every intermediate component; returns the parent fd.
+
+    Intermediate descriptors are closed before return; only the returned
+    parent fd (or ``root_fd`` for a single-component path) stays open for
+    the caller to close.
+    """
     opened = []
     fd = root_fd
     try:
@@ -95,6 +104,9 @@ def _walk_to_parent(root_fd: int, parts: list) -> int:
             else:
                 opened.append(None)
             fd = child
+        for item in opened:
+            if item is not None and item is not fd:
+                _close_quietly(item)
         return fd
     except Exception:
         for item in opened:
@@ -321,6 +333,15 @@ def create_exclusive(root: Path, relative: str, data: bytes, *,
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 _fail("unsafe-path", f"file {relative!r} is a symlink")
+            if exc.errno == errno.ENOENT:
+                _fail("state-unavailable",
+                      f"parent for file {relative!r} does not exist")
+            if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                _fail("state-unavailable",
+                      f"cannot create file {relative!r}: permission denied")
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                _fail("capacity-exceeded",
+                      f"cannot create file {relative!r}: no space left")
             _fail("unsafe-path", f"cannot create file {relative!r}")
         try:
             view = memoryview(payload)

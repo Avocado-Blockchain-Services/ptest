@@ -11,6 +11,114 @@
         },
         "attempts": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "attempt_id": {
+                "pattern": "^a(00[1-9]|010)$",
+                "type": "string"
+              },
+              "final_exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "inventory_complete": {
+                "type": "boolean"
+              },
+              "phase": {
+                "enum": [
+                  "admission",
+                  "complete",
+                  "discovery",
+                  "execution",
+                  "finalization",
+                  "setup"
+                ],
+                "type": "string"
+              },
+              "raw_exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source_valid": {
+                "type": "boolean"
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "cancelled",
+                  "incomplete",
+                  "no-tests-needed",
+                  "not-run"
+                ],
+                "type": "string"
+              },
+              "timings": {
+                "additionalProperties": false,
+                "properties": {
+                  "collection": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "execution": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "finalization": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "queue": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "setup": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "queue",
+                  "setup",
+                  "collection",
+                  "execution",
+                  "finalization"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "attempt_id",
+              "phase",
+              "status",
+              "raw_exit_code",
+              "final_exit_code",
+              "source_valid",
+              "inventory_complete",
+              "timings"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -80,6 +188,59 @@
           "type": "object"
         },
         "counts": {
+          "additionalProperties": false,
+          "properties": {
+            "collected": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "executed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "failed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "passed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "skipped": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unknown": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "collected",
+            "executed",
+            "passed",
+            "failed",
+            "skipped",
+            "unknown"
+          ],
           "type": [
             "object",
             "null"
@@ -319,6 +480,51 @@
           "type": "string"
         },
         "timings": {
+          "additionalProperties": false,
+          "properties": {
+            "collection": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "execution": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "finalization": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "queue": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "setup": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "queue",
+            "setup",
+            "collection",
+            "execution",
+            "finalization"
+          ],
           "type": [
             "object",
             "null"

@@ -5,6 +5,77 @@
       "properties": {
         "findings": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "cache.global-flush",
+                  "db.cleanup-ownership",
+                  "db.per-test-initialization",
+                  "fixture.shared-mutation",
+                  "network.fixed-port",
+                  "network.live-target",
+                  "process.detached-child",
+                  "resource.fixed-name",
+                  "selection.unknown-input",
+                  "time.blocking-sleep",
+                  "timing.slow-test"
+                ],
+                "type": "string"
+              },
+              "confidence": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ],
+                "type": "string"
+              },
+              "consequence": {
+                "type": "string"
+              },
+              "evidence_type": {
+                "type": "string"
+              },
+              "line": {
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "remediation": {
+                "type": "string"
+              },
+              "severity": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ],
+                "type": "string"
+              },
+              "verification": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "severity",
+              "confidence",
+              "path",
+              "line",
+              "evidence_type",
+              "consequence",
+              "remediation",
+              "verification"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -35,10 +106,110 @@
           "type": "array"
         },
         "limits": {
+          "additionalProperties": false,
+          "properties": {
+            "ast_nodes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "depth": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "elapsed_s": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "entries": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "file_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "findings": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "output_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "entries",
+            "files",
+            "file_bytes",
+            "total_bytes",
+            "findings",
+            "output_bytes",
+            "elapsed_s",
+            "depth",
+            "ast_nodes"
+          ],
           "type": "object"
         },
         "readiness": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "area": {
+                "enum": [
+                  "execution",
+                  "parallel",
+                  "selection",
+                  "timing"
+                ],
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "state": {
+                "enum": [
+                  "blocked",
+                  "ready-for-declared-capability",
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "area",
+              "state",
+              "reasons"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -50,6 +221,55 @@
           "type": "array"
         },
         "usage": {
+          "additionalProperties": false,
+          "properties": {
+            "elapsed_s": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "entries": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "file_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "findings": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "output_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "entries",
+            "files",
+            "file_bytes",
+            "total_bytes",
+            "findings",
+            "output_bytes",
+            "elapsed_s",
+            "skipped",
+            "truncated"
+          ],
           "type": "object"
         }
       },

@@ -5,6 +5,49 @@
       "properties": {
         "obligations": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "compatibility": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "sequence": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "source_digest": {
+                "pattern": "^([0-9a-f]{64})$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "test_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "file",
+              "test_id",
+              "sequence",
+              "source_digest",
+              "compatibility",
+              "reason"
+            ],
             "type": "object"
           },
           "type": "array"

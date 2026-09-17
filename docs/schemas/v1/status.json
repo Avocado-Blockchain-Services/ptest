@@ -5,6 +5,122 @@
       "properties": {
         "active": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "age_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "checkout_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "fixture": {
+                "type": "boolean"
+              },
+              "memory_estimate_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ownership": {
+                "enum": [
+                  "certain",
+                  "uncertain",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "queue_wait_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "reasons": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "requested_slots": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "reserved_memory_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "run_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "sequence": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "slots": {
+                "maximum": 64,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "enum": [
+                  "QUEUED",
+                  "GRANTED",
+                  "RUNNING",
+                  "DRAINING",
+                  "FINALIZING",
+                  "RELEASED",
+                  "CANCELLED",
+                  "CANCELLING",
+                  "UNCERTAIN"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "checkout_id",
+              "state",
+              "sequence",
+              "requested_slots",
+              "slots",
+              "memory_estimate_mb",
+              "reserved_memory_mb",
+              "phase",
+              "age_s",
+              "queue_wait_s",
+              "ownership",
+              "fixture",
+              "reasons"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -14,6 +130,122 @@
         },
         "queued": {
           "items": {
+            "additionalProperties": false,
+            "properties": {
+              "age_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "checkout_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "fixture": {
+                "type": "boolean"
+              },
+              "memory_estimate_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ownership": {
+                "enum": [
+                  "certain",
+                  "uncertain",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "queue_wait_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "reasons": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "requested_slots": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "reserved_memory_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "run_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "sequence": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "slots": {
+                "maximum": 64,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "enum": [
+                  "QUEUED",
+                  "GRANTED",
+                  "RUNNING",
+                  "DRAINING",
+                  "FINALIZING",
+                  "RELEASED",
+                  "CANCELLED",
+                  "CANCELLING",
+                  "UNCERTAIN"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "checkout_id",
+              "state",
+              "sequence",
+              "requested_slots",
+              "slots",
+              "memory_estimate_mb",
+              "reserved_memory_mb",
+              "phase",
+              "age_s",
+              "queue_wait_s",
+              "ownership",
+              "fixture",
+              "reasons"
+            ],
             "type": "object"
           },
           "type": "array"

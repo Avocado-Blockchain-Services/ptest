@@ -104,3 +104,48 @@ def test_open_database_requires_private_root(tmp_path):
     root.mkdir(mode=0o755)
     with pytest.raises(Problem, match="unsafe-path"):
         open_database(root, "data.sqlite3", max_bytes=16 << 20)
+
+
+def test_open_database_read_only_escapes_special_characters(tmp_path):
+    root = _private_root(tmp_path, "we?ird#name")
+    conn = open_database(root, "data.sqlite3", max_bytes=16 << 20)
+    try:
+        conn.execute("CREATE TABLE t(x TEXT)")
+        conn.execute("INSERT INTO t VALUES ('ok')")
+        conn.commit()
+    finally:
+        conn.close()
+    reader = open_database(root, "data.sqlite3", max_bytes=16 << 20,
+                           read_only=True)
+    try:
+        assert reader.execute("SELECT x FROM t").fetchone()[0] == "ok"
+    finally:
+        reader.close()
+
+
+def _fd_count():
+    return len(os.listdir("/proc/self/fd"))
+
+
+needs_proc_fd = pytest.mark.skipif(
+    not os.path.exists("/proc/self/fd"),
+    reason="descriptor accounting needs /proc/self/fd",
+)
+
+
+@needs_proc_fd
+def test_open_database_closes_connection_on_pragma_rejection(tmp_path):
+    root = _private_root(tmp_path)
+    conn = open_database(root, "wal.sqlite3", max_bytes=16 << 20)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t(x TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    base = _fd_count()
+    for _ in range(50):
+        with pytest.raises(Problem, match="coordinator-corrupt"):
+            open_database(root, "wal.sqlite3", max_bytes=16 << 20,
+                          read_only=True)
+    assert _fd_count() - base <= 2

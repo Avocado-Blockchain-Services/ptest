@@ -15,7 +15,7 @@ from ptest import contracts as C
 from ptest import files as F
 
 BOUND_OUTPUT_BYTES = 1 << 20
-RESULT_EXPORT_DIR = ".pipeline/local"
+RESULT_EXPORT_PREFIX = "ptest-result-"
 
 CONTROL_VARS = (
     "PTEST_CONFIG",
@@ -337,7 +337,9 @@ class CaseFactory:
         ]
         export_rel = None
         if "--result-json" not in args:
-            export_rel = f"{RESULT_EXPORT_DIR}/result-{secrets.token_hex(4)}.json"
+            # Project-root unique file: the parent (the project root itself)
+            # already exists, so exclusive creation never needs a mkdir chain.
+            export_rel = f"{RESULT_EXPORT_PREFIX}{secrets.token_hex(4)}.json"
             cmd += ["--result-json", export_rel]
         child_env = dict(os.environ)
         for key, value in (env or {}).items():

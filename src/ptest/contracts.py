@@ -318,7 +318,12 @@ class Capability:
         object.__setattr__(self, "selection", _check_bool("capability.selection", self.selection))
         if self.lifecycle != "cooperative-process-group":
             raise ValueError("capability.lifecycle must be cooperative-process-group")
-        object.__setattr__(self, "limitations", _check_tuple("capability.limitations", self.limitations))
+        def _check_limitation(item: object) -> None:
+            if not isinstance(item, Reason):
+                raise TypeError("capability.limitations entries must be Reason")
+        object.__setattr__(self, "limitations",
+                           _check_tuple("capability.limitations", self.limitations,
+                                        elem=_check_limitation))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1107,29 +1112,13 @@ def serialize_run_result(result: RunResult) -> dict:
         "run_id": result.run_id,
         "project_id": result.project_id,
         "checkout_id": result.checkout_id,
-        "mode": plan.mode.value if isinstance(plan.mode, Mode) else plan.mode,
+        "mode": result.mode.value if isinstance(result.mode, Mode) else result.mode,
         "status": result.status.value,
         "phase": result.phase,
         "started_at": result.started_at,
         "finished_at": result.finished_at,
-        "plan": {
-            "mode": plan.mode.value,
-            "execution": plan.execution,
-            "files": list(plan.files),
-            "reasons": [_reason_dict(item) for item in plan.reasons],
-            "input_digest": plan.input_digest,
-            "compatibility": plan.compatibility,
-            "baseline_run_id": plan.baseline_run_id,
-            "static_preview": plan.static_preview,
-        },
-        "command": {
-            "kind": command.kind.value,
-            "mode": command.mode.value,
-            "argument_count": command.argument_count,
-            "generated_options": list(command.generated_options),
-            "workers": command.workers,
-            "provenance": list(command.provenance),
-        },
+        "plan": _plan_dict(plan),
+        "command": _command_dict(command),
         "granted_workers": result.granted_workers,
         "memory_estimate_mb": result.memory_estimate_mb,
         "reserved_memory_mb": result.reserved_memory_mb,
@@ -1140,40 +1129,9 @@ def serialize_run_result(result: RunResult) -> dict:
         "source_valid": result.source_valid,
         "full_gate_eligible": result.full_gate_eligible,
         "baseline_published": result.baseline_published,
-        "counts": None if result.counts is None else {
-            "collected": result.counts.collected,
-            "executed": result.counts.executed,
-            "passed": result.counts.passed,
-            "failed": result.counts.failed,
-            "skipped": result.counts.skipped,
-            "unknown": result.counts.unknown,
-        },
-        "timings": None if result.timings is None else {
-            "queue": result.timings.queue_s,
-            "setup": result.timings.setup_s,
-            "collection": result.timings.collection_s,
-            "execution": result.timings.execution_s,
-            "finalization": result.timings.finalization_s,
-        },
-        "attempts": [
-            {
-                "attempt_id": item.attempt_id,
-                "phase": item.phase,
-                "status": item.status.value,
-                "raw_exit_code": item.raw_exit_code,
-                "final_exit_code": item.final_exit_code,
-                "source_valid": item.source_valid,
-                "inventory_complete": item.inventory_complete,
-                "timings": None if item.timings is None else {
-                    "queue": item.timings.queue_s,
-                    "setup": item.timings.setup_s,
-                    "collection": item.timings.collection_s,
-                    "execution": item.timings.execution_s,
-                    "finalization": item.timings.finalization_s,
-                },
-            }
-            for item in result.attempts
-        ],
+        "counts": _counts_dict(result.counts),
+        "timings": _timings_dict(result.timings),
+        "attempts": [_attempt_dict(item) for item in result.attempts],
         "reasons": [_reason_dict(item) for item in result.reasons],
         "limitations": [_reason_dict(item) for item in result.limitations],
         "artifact_id": result.artifact_id,
@@ -1185,6 +1143,171 @@ def _reason_dict(reason: Reason) -> dict:
         "code": reason.code,
         "message": reason.message,
         "paths": list(reason.paths),
+    }
+
+
+def _command_dict(command: CommandSummary) -> dict:
+    """Shared CommandSummary converter: serializer and fixtures use this."""
+    return {
+        "kind": command.kind.value,
+        "mode": command.mode.value,
+        "argument_count": command.argument_count,
+        "generated_options": list(command.generated_options),
+        "workers": command.workers,
+        "provenance": list(command.provenance),
+    }
+
+
+def _plan_dict(plan: Plan) -> dict:
+    """Shared Plan converter: serializer and fixtures use this."""
+    return {
+        "mode": plan.mode.value,
+        "execution": plan.execution,
+        "files": list(plan.files),
+        "reasons": [_reason_dict(item) for item in plan.reasons],
+        "input_digest": plan.input_digest,
+        "compatibility": plan.compatibility,
+        "baseline_run_id": plan.baseline_run_id,
+        "static_preview": plan.static_preview,
+    }
+
+
+def _capability_dict(capability: Capability | None) -> dict | None:
+    """Shared Capability converter: fixtures and manifest codec use this."""
+    if capability is None:
+        return None
+    return {
+        "execution": capability.execution.value,
+        "selection": capability.selection,
+        "lifecycle": capability.lifecycle,
+        "limitations": [_reason_dict(item) for item in capability.limitations],
+    }
+
+
+def _counts_dict(counts: Counts | None) -> dict | None:
+    """Shared Counts converter: serializer and fixtures use this."""
+    if counts is None:
+        return None
+    return {
+        "collected": counts.collected,
+        "executed": counts.executed,
+        "passed": counts.passed,
+        "failed": counts.failed,
+        "skipped": counts.skipped,
+        "unknown": counts.unknown,
+    }
+
+
+def _timings_dict(timings: Timings | None) -> dict | None:
+    """Shared Timings converter: serializer and fixtures use this."""
+    if timings is None:
+        return None
+    return {
+        "queue": timings.queue_s,
+        "setup": timings.setup_s,
+        "collection": timings.collection_s,
+        "execution": timings.execution_s,
+        "finalization": timings.finalization_s,
+    }
+
+
+def _attempt_dict(item: AttemptResult) -> dict:
+    """Shared attempt-record converter: serializer and fixtures use this."""
+    return {
+        "attempt_id": item.attempt_id,
+        "phase": item.phase,
+        "status": item.status.value,
+        "raw_exit_code": item.raw_exit_code,
+        "final_exit_code": item.final_exit_code,
+        "source_valid": item.source_valid,
+        "inventory_complete": item.inventory_complete,
+        "timings": _timings_dict(item.timings),
+    }
+
+
+def _readiness_dict(item: Readiness) -> dict:
+    """Shared Readiness converter for fixtures."""
+    return {
+        "area": item.area,
+        "state": item.state,
+        "reasons": [_reason_dict(entry) for entry in item.reasons],
+    }
+
+
+def _finding_dict(item: Finding) -> dict:
+    """Shared Finding converter for fixtures."""
+    return {
+        "code": item.code,
+        "severity": item.severity,
+        "confidence": item.confidence,
+        "path": item.path,
+        "line": item.line,
+        "evidence_type": item.evidence_type,
+        "consequence": item.consequence,
+        "remediation": item.remediation,
+        "verification": item.verification,
+    }
+
+
+def _lease_dict(item: LeaseView) -> dict:
+    """Shared LeaseView converter for fixtures."""
+    return {
+        "run_id": item.run_id,
+        "checkout_id": item.checkout_id,
+        "state": item.state.value,
+        "sequence": item.sequence,
+        "requested_slots": item.requested_slots,
+        "slots": item.slots,
+        "memory_estimate_mb": item.memory_estimate_mb,
+        "reserved_memory_mb": item.reserved_memory_mb,
+        "phase": item.phase,
+        "age_s": item.age_s,
+        "queue_wait_s": item.queue_wait_s,
+        "ownership": item.ownership,
+        "fixture": item.fixture,
+        "reasons": [_reason_dict(entry) for entry in item.reasons],
+    }
+
+
+def _obligation_dict(item: Obligation) -> dict:
+    """Shared Obligation converter for fixtures."""
+    return {
+        "file": item.file,
+        "test_id": item.test_id,
+        "sequence": item.sequence,
+        "source_digest": item.source_digest,
+        "compatibility": item.compatibility,
+        "reason": item.reason,
+    }
+
+
+def _scan_limits_dict(limits: ScanLimits) -> dict:
+    """Shared ScanLimits converter for fixtures."""
+    return {
+        "entries": limits.entries,
+        "files": limits.files,
+        "file_bytes": limits.file_bytes,
+        "total_bytes": limits.total_bytes,
+        "findings": limits.findings,
+        "output_bytes": limits.output_bytes,
+        "elapsed_s": limits.elapsed_s,
+        "depth": limits.depth,
+        "ast_nodes": limits.ast_nodes,
+    }
+
+
+def _scan_usage_dict(usage: ScanUsage) -> dict:
+    """Shared ScanUsage converter for fixtures."""
+    return {
+        "entries": usage.entries,
+        "files": usage.files,
+        "file_bytes": usage.file_bytes,
+        "total_bytes": usage.total_bytes,
+        "findings": usage.findings,
+        "output_bytes": usage.output_bytes,
+        "elapsed_s": usage.elapsed_s,
+        "skipped": usage.skipped,
+        "truncated": usage.truncated,
     }
 
 
@@ -1512,6 +1635,44 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
             raise ValueError(f"control frame {kind!r} requires {key!r}")
     if kind == "cancel" and payload["signal"] not in (2, 15):
         raise ValueError("cancel signal must be 2 or 15")
+    if kind == "parent-closing" and payload != {}:
+        raise ValueError("parent-closing payload must be empty")
+    if kind == "registered":
+        guard = payload["guard"]
+        if not isinstance(guard, dict):
+            raise TypeError("registered guard must be an object")
+        for key in ("pid", "birth", "uid", "pgid"):
+            if key not in guard:
+                raise ValueError(f"registered guard requires {key!r}")
+        _check_int("registered.guard.pid", guard["pid"], lo=1)
+        _check_float("registered.guard.birth", guard["birth"], lo=0)
+        _check_int("registered.guard.uid", guard["uid"], lo=0)
+        _check_int("registered.guard.pgid", guard["pgid"], lo=1)
+    if kind == "phase":
+        if payload["phase"] not in ("setup", "discovery", "execution",
+                                    "finalization"):
+            raise ValueError("phase payload has an unknown phase")
+        if payload["attempt_id"] is not None and not isinstance(
+                payload["attempt_id"], str):
+            raise TypeError("phase attempt_id must be a string or null")
+    if kind == "runner-facts":
+        if not isinstance(payload["attempt_id"], str):
+            raise TypeError("runner-facts attempt_id must be a string")
+        if payload["phase"] not in ("setup", "execution"):
+            raise ValueError("runner-facts phase must be setup or execution")
+        for key in ("raw_exit_code",):
+            if payload[key] is not None and not _is_int(payload[key]):
+                raise TypeError(f"runner-facts {key} must be an integer or null")
+        if payload["report_name"] is not None and not isinstance(
+                payload["report_name"], str):
+            raise TypeError("runner-facts report_name must be a string or null")
+        if payload["problem"] is not None and not isinstance(
+                payload["problem"], dict):
+            raise TypeError("runner-facts problem must be an object or null")
+    if kind == "draining" and payload["provisional_artifact_id"] is not None:
+        if not isinstance(payload["provisional_artifact_id"], str):
+            raise TypeError(
+                "draining provisional_artifact_id must be a string or null")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1660,13 +1821,293 @@ def _check_reason_dict(item: object) -> None:
     for key in ("code", "message", "paths"):
         if key not in item:
             raise _invalid("report-invalid", f"reason is missing {key!r}")
+    for key in item:
+        if key not in ("code", "message", "paths"):
+            raise _invalid("report-invalid", f"reason carries unknown field {key!r}")
     if not isinstance(item["code"], str) or not item["code"]:
         raise _invalid("report-invalid", "reason.code must be a nonempty string")
+    if item["code"] not in REASON_CODES:
+        raise _invalid("report-invalid", "reason.code is unknown")
     if not isinstance(item["message"], str):
         raise _invalid("report-invalid", "reason.message must be a string")
     if not isinstance(item["paths"], list) or any(
             not isinstance(path, str) for path in item["paths"]):
         raise _invalid("report-invalid", "reason.paths must be a string list")
+
+
+def _check_exact_keys(item: object, allowed: frozenset, ctx: str) -> dict:
+    """Require a frozen subrecord object with exactly its specified fields."""
+    if not isinstance(item, dict):
+        raise _invalid("report-invalid", f"{ctx} must be an object")
+    for key in allowed:
+        if key not in item:
+            raise _invalid("report-invalid", f"{ctx} is missing {key!r}")
+    for key in item:
+        if key not in allowed:
+            raise _invalid("report-invalid", f"{ctx} carries unknown field {key!r}")
+    return item
+
+
+def _check_str_list(value: object, ctx: str) -> list:
+    if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
+        raise _invalid("report-invalid", f"{ctx} must be a string list")
+    return value
+
+
+def _check_number_field(item: dict, name: str, ctx: str, *,
+                        allow_none: bool = False, lo: float | None = None):
+    value = item[name]
+    if allow_none and value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid("report-invalid", f"{ctx} field {name!r} must be a number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise _invalid("report-invalid", f"{ctx} field {name!r} must be finite")
+    if lo is not None and result < lo:
+        raise _invalid("report-invalid", f"{ctx} field {name!r} is out of range")
+    return value
+
+
+def _check_int_field(item: dict, name: str, ctx: str, *,
+                     allow_none: bool = False, lo: int | None = None,
+                     hi: int | None = None):
+    value = item[name]
+    if allow_none and value is None:
+        return None
+    if not _is_int(value):
+        raise _invalid("report-invalid", f"{ctx} field {name!r} must be an integer")
+    if lo is not None and value < lo:
+        raise _invalid("report-invalid", f"{ctx} field {name!r} is out of range")
+    if hi is not None and value > hi:
+        raise _invalid("report-invalid", f"{ctx} field {name!r} is out of range")
+    return value
+
+
+def _check_hex_field(item: dict, name: str, ctx: str, length: int, *,
+                     allow_none: bool = False):
+    value = item[name]
+    if allow_none and value is None:
+        return None
+    if (not isinstance(value, str) or len(value) != length
+            or any(char not in HEX_LOWER for char in value)):
+        raise _invalid("report-invalid", f"{ctx} field {name!r} must be hex")
+    return value
+
+
+_COMMAND_FIELDS = frozenset({
+    "kind", "mode", "argument_count", "generated_options", "workers",
+    "provenance",
+})
+
+
+def _check_command_dict(item: object, ctx: str = "run.command") -> None:
+    _check_exact_keys(item, _COMMAND_FIELDS, ctx)
+    if item["kind"] not in frozenset(entry.value for entry in RunnerKind):
+        raise _invalid("report-invalid", f"{ctx} has an unknown kind")
+    if item["mode"] not in frozenset(entry.value for entry in Mode):
+        raise _invalid("report-invalid", f"{ctx} has an unknown mode")
+    _check_int_field(item, "argument_count", ctx, lo=0)
+    _check_str_list(item["generated_options"], f"{ctx}.generated_options")
+    _check_int_field(item, "workers", ctx, allow_none=True, lo=1, hi=64)
+    _check_str_list(item["provenance"], f"{ctx}.provenance")
+
+
+_CAPABILITY_FIELDS = frozenset({
+    "execution", "selection", "lifecycle", "limitations",
+})
+
+
+def _check_capability_dict(value: object) -> None:
+    if value is None:
+        return
+    _check_exact_keys(value, _CAPABILITY_FIELDS, "where.capability")
+    if value["execution"] not in frozenset(entry.value for entry in ExecutionTier):
+        raise _invalid("report-invalid", "where.capability has an unknown tier")
+    if not isinstance(value["selection"], bool):
+        raise _invalid("report-invalid", "where.capability.selection must be boolean")
+    if value["lifecycle"] != "cooperative-process-group":
+        raise _invalid("report-invalid", "where.capability has an unknown lifecycle")
+    if not isinstance(value["limitations"], list):
+        raise _invalid("report-invalid", "where.capability.limitations must be a list")
+    for entry in value["limitations"]:
+        _check_reason_dict(entry)
+
+
+_COUNTS_FIELDS = frozenset({
+    "collected", "executed", "passed", "failed", "skipped", "unknown",
+})
+
+
+def _check_counts_dict(value: object) -> None:
+    if value is None:
+        return
+    _check_exact_keys(value, _COUNTS_FIELDS, "run.counts")
+    for name in ("collected", "executed", "passed", "failed", "skipped",
+                 "unknown"):
+        _check_int_field(value, name, "run.counts", allow_none=True, lo=0)
+
+
+_TIMINGS_FIELDS = frozenset({
+    "queue", "setup", "collection", "execution", "finalization",
+})
+
+
+def _check_timings_dict(value: object, ctx: str = "run.timings") -> None:
+    if value is None:
+        return
+    _check_exact_keys(value, _TIMINGS_FIELDS, ctx)
+    for name in ("queue", "setup", "collection", "execution", "finalization"):
+        _check_number_field(value, name, ctx, allow_none=True, lo=0)
+
+
+_ATTEMPT_FIELDS = frozenset({
+    "attempt_id", "phase", "status", "raw_exit_code", "final_exit_code",
+    "source_valid", "inventory_complete", "timings",
+})
+
+
+def _check_attempt_dict(item: object) -> None:
+    _check_exact_keys(item, _ATTEMPT_FIELDS, "run.attempts entry")
+    _check_str_list([item["attempt_id"]], "run.attempts entry.attempt_id")
+    if not ATTEMPT_ID_PATTERN.fullmatch(item["attempt_id"]):
+        raise _invalid("report-invalid", "run.attempts entry has a bad attempt_id")
+    if item["phase"] not in RUN_PHASES:
+        raise _invalid("report-invalid", "run.attempts entry has an unknown phase")
+    if item["status"] not in frozenset(entry.value for entry in Status):
+        raise _invalid("report-invalid", "run.attempts entry has an unknown status")
+    _check_int_field(item, "raw_exit_code", "run.attempts entry", allow_none=True)
+    _check_int_field(item, "final_exit_code", "run.attempts entry", allow_none=True)
+    for name in ("source_valid", "inventory_complete"):
+        if not isinstance(item[name], bool):
+            raise _invalid(
+                "report-invalid",
+                f"run.attempts entry field {name!r} must be boolean")
+    if "timings" not in item:
+        raise _invalid("report-invalid", "run.attempts entry is missing 'timings'")
+    _check_timings_dict(item["timings"], "run.attempts entry.timings")
+
+
+_READINESS_FIELDS = frozenset({"area", "state", "reasons"})
+
+
+def _check_readiness_dict(item: object) -> None:
+    _check_exact_keys(item, _READINESS_FIELDS, "doctor.readiness entry")
+    if item["area"] not in READINESS_AREAS:
+        raise _invalid("report-invalid", "doctor.readiness entry has an unknown area")
+    if item["state"] not in READINESS_STATES:
+        raise _invalid("report-invalid", "doctor.readiness entry has an unknown state")
+    if not isinstance(item["reasons"], list):
+        raise _invalid("report-invalid", "doctor.readiness entry reasons must be a list")
+    for entry in item["reasons"]:
+        _check_reason_dict(entry)
+
+
+_FINDING_FIELDS = frozenset({
+    "code", "severity", "confidence", "path", "line", "evidence_type",
+    "consequence", "remediation", "verification",
+})
+
+
+def _check_finding_dict(item: object) -> None:
+    _check_exact_keys(item, _FINDING_FIELDS, "doctor.findings entry")
+    if item["code"] not in FINDING_CODES:
+        raise _invalid("report-invalid", "doctor.findings entry has an unknown code")
+    if item["severity"] not in ("low", "medium", "high"):
+        raise _invalid("report-invalid", "doctor.findings entry has a bad severity")
+    if item["confidence"] not in ("low", "medium", "high"):
+        raise _invalid("report-invalid", "doctor.findings entry has a bad confidence")
+    if item["path"] is not None and not isinstance(item["path"], str):
+        raise _invalid("report-invalid", "doctor.findings entry path must be str/null")
+    _check_int_field(item, "line", "doctor.findings entry", allow_none=True, lo=1)
+    for name in ("evidence_type", "consequence", "remediation", "verification"):
+        if not isinstance(item[name], str):
+            raise _invalid(
+                "report-invalid",
+                f"doctor.findings entry field {name!r} must be a string")
+
+
+_LEASE_FIELDS = frozenset({
+    "run_id", "checkout_id", "state", "sequence", "requested_slots", "slots",
+    "memory_estimate_mb", "reserved_memory_mb", "phase", "age_s",
+    "queue_wait_s", "ownership", "fixture", "reasons",
+})
+
+
+def _check_lease_dict(item: object, ctx: str) -> None:
+    _check_exact_keys(item, _LEASE_FIELDS, ctx)
+    _check_hex_field(item, "run_id", ctx, 32)
+    _check_hex_field(item, "checkout_id", ctx, 32)
+    if item["state"] not in frozenset(entry.value for entry in LeaseState):
+        raise _invalid("report-invalid", f"{ctx} has an unknown state")
+    _check_int_field(item, "sequence", ctx, lo=0)
+    _check_int_field(item, "requested_slots", ctx, lo=1, hi=64)
+    _check_int_field(item, "slots", ctx, lo=0, hi=64)
+    _check_int_field(item, "memory_estimate_mb", ctx, allow_none=True, lo=0)
+    _check_int_field(item, "reserved_memory_mb", ctx, allow_none=True, lo=0)
+    if not isinstance(item["phase"], str) or not item["phase"]:
+        raise _invalid("report-invalid", f"{ctx} phase must be a nonempty string")
+    _check_number_field(item, "age_s", ctx, lo=0)
+    _check_number_field(item, "queue_wait_s", ctx, lo=0)
+    if item["ownership"] not in ("certain", "uncertain", "gone"):
+        raise _invalid("report-invalid", f"{ctx} has an unknown ownership")
+    if not isinstance(item["fixture"], bool):
+        raise _invalid("report-invalid", f"{ctx} fixture must be boolean")
+    if not isinstance(item["reasons"], list):
+        raise _invalid("report-invalid", f"{ctx} reasons must be a list")
+    for entry in item["reasons"]:
+        _check_reason_dict(entry)
+
+
+_OBLIGATION_FIELDS = frozenset({
+    "file", "test_id", "sequence", "source_digest", "compatibility", "reason",
+})
+
+
+def _check_obligation_dict(item: object) -> None:
+    _check_exact_keys(item, _OBLIGATION_FIELDS, "history.obligations entry")
+    if item["file"] is not None and not isinstance(item["file"], str):
+        raise _invalid("report-invalid", "history.obligations entry file bad")
+    if item["test_id"] is not None and not isinstance(item["test_id"], str):
+        raise _invalid("report-invalid", "history.obligations entry test_id bad")
+    _check_int_field(item, "sequence", "history.obligations entry", lo=0)
+    _check_hex_field(item, "source_digest", "history.obligations entry", 64,
+                     allow_none=True)
+    if item["compatibility"] is not None and not isinstance(
+            item["compatibility"], str):
+        raise _invalid("report-invalid", "history.obligations entry compat bad")
+    if not isinstance(item["reason"], str):
+        raise _invalid("report-invalid", "history.obligations entry reason bad")
+
+
+_SCAN_LIMITS_FIELDS = frozenset({
+    "entries", "files", "file_bytes", "total_bytes", "findings",
+    "output_bytes", "elapsed_s", "depth", "ast_nodes",
+})
+
+
+def _check_scan_limits_dict(item: object) -> None:
+    _check_exact_keys(item, _SCAN_LIMITS_FIELDS, "doctor.limits")
+    for name in ("entries", "files", "file_bytes", "total_bytes", "findings",
+                 "output_bytes", "depth", "ast_nodes"):
+        _check_int_field(item, name, "doctor.limits", lo=0)
+    _check_number_field(item, "elapsed_s", "doctor.limits", lo=0)
+
+
+_SCAN_USAGE_FIELDS = frozenset({
+    "entries", "files", "file_bytes", "total_bytes", "findings",
+    "output_bytes", "elapsed_s", "skipped", "truncated",
+})
+
+
+def _check_scan_usage_dict(item: object) -> None:
+    _check_exact_keys(item, _SCAN_USAGE_FIELDS, "doctor.usage")
+    for name in ("entries", "files", "file_bytes", "total_bytes", "findings",
+                 "output_bytes", "skipped"):
+        _check_int_field(item, name, "doctor.usage", lo=0)
+    _check_number_field(item, "elapsed_s", "doctor.usage", lo=0)
+    if not isinstance(item["truncated"], bool):
+        raise _invalid("report-invalid", "doctor.usage truncated must be boolean")
 
 
 def _check_closed(data: dict, name: str, allowed: frozenset,
@@ -1692,14 +2133,8 @@ def _validate_run_payload(data: dict) -> None:
     _validate_plan_payload(data["plan"])
     if "command" not in data or not isinstance(data["command"], dict):
         raise _invalid("report-invalid", "run.command must be an object")
+    _check_command_dict(data["command"])
     command = data["command"]
-    for name in ("kind", "mode"):
-        if name not in command:
-            raise _invalid("report-invalid", f"run.command is missing {name!r}")
-    kinds = frozenset(item.value for item in RunnerKind)
-    modes = frozenset(item.value for item in Mode)
-    if command["kind"] not in kinds or command["mode"] not in modes:
-        raise _invalid("report-invalid", "run.command has an unknown kind or mode")
     if "argv" in command or "env" in command:
         raise _invalid("report-invalid", "run.command must not carry argv or env")
     _need_int(data, "exit_code")
@@ -1712,18 +2147,11 @@ def _validate_run_payload(data: dict) -> None:
     for name in ("counts", "timings", "artifact_id"):
         if name not in data:
             raise _invalid("report-invalid", f"missing required field {name!r}")
-    if data["counts"] is not None and not isinstance(data["counts"], dict):
-        raise _invalid("report-invalid", "run.counts must be an object or null")
-    if data["timings"] is not None and not isinstance(data["timings"], dict):
-        raise _invalid("report-invalid", "run.timings must be an object or null")
+    _check_counts_dict(data["counts"])
+    _check_timings_dict(data["timings"])
     attempts = _need_list(data, "attempts")
     for attempt in attempts:
-        if not isinstance(attempt, dict):
-            raise _invalid("report-invalid", "run.attempts entries must be objects")
-        for key in ("attempt_id", "phase", "status", "raw_exit_code",
-                    "final_exit_code", "source_valid", "inventory_complete"):
-            if key not in attempt:
-                raise _invalid("report-invalid", f"run.attempts entry is missing {key!r}")
+        _check_attempt_dict(attempt)
     for name in ("reasons", "limitations"):
         for item in _need_list(data, name):
             _check_reason_dict(item)
@@ -1742,6 +2170,8 @@ def _validate_plan_payload(data: dict) -> None:
     for name in ("input_digest", "compatibility", "baseline_run_id"):
         if name not in data:
             raise _invalid("report-invalid", f"missing required field {name!r}")
+        if data[name] is not None and not isinstance(data[name], str):
+            raise _invalid("report-invalid", f"plan field {name!r} must be str/null")
     _need_bool(data, "static_preview")
 
 
@@ -1754,9 +2184,11 @@ def _validate_where_payload(data: dict) -> None:
     _need_bool(data, "initialized")
     _check_closed(data, "runner_kind", frozenset(item.value for item in RunnerKind),
                   allow_none=True)
-    _check_closed(data, "capability",
-                  frozenset(item.value for item in ExecutionTier), allow_none=True)
-    _need_list(data, "commands")
+    if "capability" not in data:
+        raise _invalid("report-invalid", "missing required field 'capability'")
+    _check_capability_dict(data["capability"])
+    for entry in _need_list(data, "commands"):
+        _check_command_dict(entry, "where.commands entry")
     if "effective_limits" not in data or not isinstance(data["effective_limits"], dict):
         raise _invalid("report-invalid", "where.effective_limits must be an object")
     _need_list(data, "provenance")
@@ -1767,13 +2199,16 @@ def _validate_where_payload(data: dict) -> None:
 def _validate_status_payload(data: dict) -> None:
     if "effective_limits" not in data or not isinstance(data["effective_limits"], dict):
         raise _invalid("report-invalid", "status.effective_limits must be an object")
-    _need_list(data, "queued")
-    _need_list(data, "active")
+    for entry in _need_list(data, "queued"):
+        _check_lease_dict(entry, "status.queued entry")
+    for entry in _need_list(data, "active"):
+        _check_lease_dict(entry, "status.active entry")
 
 
 def _validate_history_payload(data: dict) -> None:
     _need_list(data, "summaries")
-    _need_list(data, "obligations")
+    for entry in _need_list(data, "obligations"):
+        _check_obligation_dict(entry)
 
 
 def _validate_init_payload(data: dict) -> None:
@@ -1788,12 +2223,16 @@ def _validate_init_payload(data: dict) -> None:
 
 def _validate_doctor_payload(data: dict) -> None:
     _need_list(data, "scope")
-    _need_list(data, "readiness")
-    _need_list(data, "findings")
-    if "limits" not in data or not isinstance(data["limits"], dict):
-        raise _invalid("report-invalid", "doctor.limits must be an object")
-    if "usage" not in data or not isinstance(data["usage"], dict):
-        raise _invalid("report-invalid", "doctor.usage must be an object")
+    for entry in _need_list(data, "readiness"):
+        _check_readiness_dict(entry)
+    for entry in _need_list(data, "findings"):
+        _check_finding_dict(entry)
+    if "limits" not in data:
+        raise _invalid("report-invalid", "missing required field 'limits'")
+    _check_scan_limits_dict(data["limits"])
+    if "usage" not in data:
+        raise _invalid("report-invalid", "missing required field 'usage'")
+    _check_scan_usage_dict(data["usage"])
     for item in _need_list(data, "limitations"):
         _check_reason_dict(item)
 
@@ -1811,7 +2250,8 @@ def _validate_register_payload(data: dict) -> None:
     if data["proposed_runner"] is not None and data["proposed_runner"] not in frozenset(
             item.value for item in RunnerKind):
         raise _invalid("report-invalid", "register.proposed_runner is unknown")
-    _need_list(data, "commands")
+    for entry in _need_list(data, "commands"):
+        _check_command_dict(entry, "register.commands entry")
     _need_int(data, "legacy_alias_count")
     actions = _need_list(data, "required_actions")
     for action in actions:
@@ -1846,7 +2286,7 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
         raise TypeError("document must be bytes or str")
     try:
         envelope = json.loads(text)
-    except ValueError:
+    except (RecursionError, ValueError):
         raise _invalid("report-invalid", "document is not JSON") from None
     if not isinstance(envelope, dict):
         raise _invalid("report-invalid", "document must be a JSON object")
@@ -1904,16 +2344,20 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
 
 
 def _check_nesting(value: object, limit: int, depth: int = 0) -> None:
-    if isinstance(value, dict):
-        items = value.values()
-    elif isinstance(value, (list, tuple)):
-        items = value
-    else:
-        return
-    if depth >= limit:
-        raise _invalid("protocol-mismatch", "frame nesting exceeds the bound")
-    for item in items:
-        _check_nesting(item, limit, depth + 1)
+    """Reject nesting past ``limit`` without recursing (parser-safe)."""
+    stack = [(value, depth)]
+    while stack:
+        node, at = stack.pop()
+        if isinstance(node, dict):
+            items = node.values()
+        elif isinstance(node, (list, tuple)):
+            items = node
+        else:
+            continue
+        if at >= limit:
+            raise _invalid("protocol-mismatch", "frame nesting exceeds the bound")
+        for item in items:
+            stack.append((item, at + 1))
 
 
 def _frame_object(frame: ControlFrame) -> dict:
@@ -1954,7 +2398,7 @@ def decode_control_frame(data: bytes | bytearray, *,
         raise _invalid("protocol-mismatch", "control frame has trailing data")
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (RecursionError, UnicodeDecodeError, ValueError):
         raise _invalid("protocol-mismatch", "control frame is not JSON") from None
     if not isinstance(obj, dict):
         raise _invalid("protocol-mismatch", "control frame must be an object")
@@ -1977,8 +2421,9 @@ def decode_control_frame(data: bytes | bytearray, *,
     try:
         return ControlFrame(protocol=1, run_id=obj["run_id"], nonce=obj["nonce"],
                             kind=kind, payload=payload)
-    except (TypeError, ValueError) as exc:
-        raise _invalid("protocol-mismatch", f"control frame invalid: {exc}") from None
+    except (TypeError, ValueError):
+        raise _invalid("protocol-mismatch",
+                       "control frame payload failed validation") from None
 
 
 def _prepared_dict(prepared: PreparedRun) -> dict:
@@ -1987,20 +2432,9 @@ def _prepared_dict(prepared: PreparedRun) -> dict:
         "cwd": str(prepared.cwd),
         "env_updates": [[key, value] for key, value in prepared.env_updates],
         "report_path": None if prepared.report_path is None else str(prepared.report_path),
-        "capability": None if prepared.capability is None else {
-            "execution": prepared.capability.execution.value,
-            "selection": prepared.capability.selection,
-            "lifecycle": prepared.capability.lifecycle,
-            "limitations": [_reason_dict(item) for item in prepared.capability.limitations],
-        },
-        "summary": None if prepared.summary is None else {
-            "kind": prepared.summary.kind.value,
-            "mode": prepared.summary.mode.value,
-            "argument_count": prepared.summary.argument_count,
-            "generated_options": list(prepared.summary.generated_options),
-            "workers": prepared.summary.workers,
-            "provenance": list(prepared.summary.provenance),
-        },
+        "capability": _capability_dict(prepared.capability),
+        "summary": (None if prepared.summary is None
+                    else _command_dict(prepared.summary)),
     }
 
 
@@ -2063,8 +2497,9 @@ def _build_domain(raw: object) -> DomainPaths:
             ledger=raw["ledger"], marker=raw["marker"],
             fixture=raw["fixture"], domain_id=raw["domain_id"],
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid("protocol-mismatch", f"manifest domain invalid: {exc}") from None
+    except (KeyError, TypeError, ValueError):
+        raise _invalid("protocol-mismatch",
+                       "manifest domain failed validation") from None
 
 
 def _build_grant(raw: object) -> Grant:
@@ -2077,8 +2512,9 @@ def _build_grant(raw: object) -> Grant:
             reserved_memory_mb=raw["reserved_memory_mb"],
             generation=raw["generation"], domain_id=raw["domain_id"],
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid("protocol-mismatch", f"manifest grant invalid: {exc}") from None
+    except (KeyError, TypeError, ValueError):
+        raise _invalid("protocol-mismatch",
+                       "manifest grant failed validation") from None
 
 
 def _build_prepared(raw: object) -> PreparedRun:
@@ -2113,8 +2549,9 @@ def _build_prepared(raw: object) -> PreparedRun:
             report_path=raw.get("report_path"),
             capability=capability, summary=summary,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid("protocol-mismatch", f"manifest attempt invalid: {exc}") from None
+    except (KeyError, TypeError, ValueError):
+        raise _invalid("protocol-mismatch",
+                       "manifest attempt failed validation") from None
 
 
 def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
@@ -2132,7 +2569,7 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
         raise _invalid("protocol-mismatch", "manifest has trailing data")
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (RecursionError, UnicodeDecodeError, ValueError):
         raise _invalid("protocol-mismatch", "manifest is not JSON") from None
     if not isinstance(obj, dict) or obj.get("protocol") != PROTOCOL_VERSION:
         raise _invalid("protocol-mismatch", "manifest has the wrong protocol")
@@ -2150,8 +2587,9 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
             attempt_timeout_s=obj.get("attempt_timeout_s"),
             compound_timeout_s=obj.get("compound_timeout_s"),
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid("protocol-mismatch", f"manifest invalid: {exc}") from None
+    except (KeyError, TypeError, ValueError):
+        raise _invalid("protocol-mismatch",
+                       "manifest body failed validation") from None
 
 
 def _envelope_schema(kind: str, data_schema: dict) -> dict:
@@ -2235,6 +2673,199 @@ def _plan_schema() -> dict:
     }
 
 
+def _capability_schema() -> dict:
+    """Shared Capability descriptor: single authority for schema + decode."""
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            "execution": {"type": "string",
+                          "enum": [item.value for item in ExecutionTier]},
+            "selection": {"type": "boolean"},
+            "lifecycle": {"type": "string",
+                          "const": "cooperative-process-group"},
+            "limitations": {"type": "array", "items": _reason_schema()},
+        },
+        "required": ["execution", "selection", "lifecycle", "limitations"],
+        "additionalProperties": False,
+    }
+
+
+def _counts_schema() -> dict:
+    """Shared Counts descriptor: single authority for schema + decode."""
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            name: {"type": ["integer", "null"], "minimum": 0}
+            for name in ("collected", "executed", "passed", "failed",
+                         "skipped", "unknown")
+        },
+        "required": ["collected", "executed", "passed", "failed", "skipped",
+                     "unknown"],
+        "additionalProperties": False,
+    }
+
+
+def _timings_schema() -> dict:
+    """Shared Timings descriptor: single authority for schema + decode."""
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            name: {"type": ["number", "null"], "minimum": 0}
+            for name in ("queue", "setup", "collection", "execution",
+                         "finalization")
+        },
+        "required": ["queue", "setup", "collection", "execution",
+                     "finalization"],
+        "additionalProperties": False,
+    }
+
+
+def _attempt_schema() -> dict:
+    """Shared attempt-record descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "attempt_id": {"type": "string", "pattern": "^a(00[1-9]|010)$"},
+            "phase": {"type": "string", "enum": sorted(RUN_PHASES)},
+            "status": {"type": "string",
+                       "enum": [item.value for item in Status]},
+            "raw_exit_code": {"type": ["integer", "null"]},
+            "final_exit_code": {"type": ["integer", "null"]},
+            "source_valid": {"type": "boolean"},
+            "inventory_complete": {"type": "boolean"},
+            "timings": _timings_schema(),
+        },
+        "required": ["attempt_id", "phase", "status", "raw_exit_code",
+                     "final_exit_code", "source_valid", "inventory_complete",
+                     "timings"],
+        "additionalProperties": False,
+    }
+
+
+def _readiness_schema() -> dict:
+    """Shared Readiness descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "area": {"type": "string", "enum": sorted(READINESS_AREAS)},
+            "state": {"type": "string", "enum": sorted(READINESS_STATES)},
+            "reasons": {"type": "array", "items": _reason_schema()},
+        },
+        "required": ["area", "state", "reasons"],
+        "additionalProperties": False,
+    }
+
+
+def _finding_schema() -> dict:
+    """Shared Finding descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "enum": sorted(FINDING_CODES)},
+            "severity": {"type": "string",
+                         "enum": ["low", "medium", "high"]},
+            "confidence": {"type": "string",
+                           "enum": ["low", "medium", "high"]},
+            "path": {"type": ["string", "null"]},
+            "line": {"type": ["integer", "null"], "minimum": 1},
+            "evidence_type": {"type": "string"},
+            "consequence": {"type": "string"},
+            "remediation": {"type": "string"},
+            "verification": {"type": "string"},
+        },
+        "required": ["code", "severity", "confidence", "path", "line",
+                     "evidence_type", "consequence", "remediation",
+                     "verification"],
+        "additionalProperties": False,
+    }
+
+
+def _lease_schema() -> dict:
+    """Shared LeaseView descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "checkout_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "state": {"type": "string",
+                      "enum": [item.value for item in LeaseState]},
+            "sequence": {"type": "integer", "minimum": 0},
+            "requested_slots": {"type": "integer", "minimum": 1, "maximum": 64},
+            "slots": {"type": "integer", "minimum": 0, "maximum": 64},
+            "memory_estimate_mb": {"type": ["integer", "null"], "minimum": 0},
+            "reserved_memory_mb": {"type": ["integer", "null"], "minimum": 0},
+            "phase": {"type": "string"},
+            "age_s": {"type": "number", "minimum": 0},
+            "queue_wait_s": {"type": "number", "minimum": 0},
+            "ownership": {"type": "string",
+                          "enum": ["certain", "uncertain", "gone"]},
+            "fixture": {"type": "boolean"},
+            "reasons": {"type": "array", "items": _reason_schema()},
+        },
+        "required": ["run_id", "checkout_id", "state", "sequence",
+                     "requested_slots", "slots", "memory_estimate_mb",
+                     "reserved_memory_mb", "phase", "age_s", "queue_wait_s",
+                     "ownership", "fixture", "reasons"],
+        "additionalProperties": False,
+    }
+
+
+def _obligation_schema() -> dict:
+    """Shared Obligation descriptor: single authority for schema + decode."""
+    return {
+        "type": "object",
+        "properties": {
+            "file": {"type": ["string", "null"]},
+            "test_id": {"type": ["string", "null"]},
+            "sequence": {"type": "integer", "minimum": 0},
+            "source_digest": {"type": ["string", "null"],
+                              "pattern": "^([0-9a-f]{64})$"},
+            "compatibility": {"type": ["string", "null"]},
+            "reason": {"type": "string"},
+        },
+        "required": ["file", "test_id", "sequence", "source_digest",
+                     "compatibility", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def _scan_limits_schema() -> dict:
+    """Shared ScanLimits descriptor: single authority for schema + decode."""
+    fields = {
+        name: {"type": "integer", "minimum": 0}
+        for name in ("entries", "files", "file_bytes", "total_bytes",
+                     "findings", "output_bytes", "depth", "ast_nodes")
+    }
+    fields["elapsed_s"] = {"type": "number", "minimum": 0}
+    return {
+        "type": "object",
+        "properties": fields,
+        "required": ["entries", "files", "file_bytes", "total_bytes",
+                     "findings", "output_bytes", "elapsed_s", "depth",
+                     "ast_nodes"],
+        "additionalProperties": False,
+    }
+
+
+def _scan_usage_schema() -> dict:
+    """Shared ScanUsage descriptor: single authority for schema + decode."""
+    fields = {
+        name: {"type": "integer", "minimum": 0}
+        for name in ("entries", "files", "file_bytes", "total_bytes",
+                     "findings", "output_bytes", "skipped")
+    }
+    fields["elapsed_s"] = {"type": "number", "minimum": 0}
+    fields["truncated"] = {"type": "boolean"}
+    return {
+        "type": "object",
+        "properties": fields,
+        "required": ["entries", "files", "file_bytes", "total_bytes",
+                     "findings", "output_bytes", "elapsed_s", "skipped",
+                     "truncated"],
+        "additionalProperties": False,
+    }
+
+
 def _run_data_schema() -> dict:
     return {
         "type": "object",
@@ -2260,9 +2891,9 @@ def _run_data_schema() -> dict:
             "source_valid": {"type": "boolean"},
             "full_gate_eligible": {"type": "boolean"},
             "baseline_published": {"type": "boolean"},
-            "counts": {"type": ["object", "null"]},
-            "timings": {"type": ["object", "null"]},
-            "attempts": {"type": "array", "items": {"type": "object"}},
+            "counts": _counts_schema(),
+            "timings": _timings_schema(),
+            "attempts": {"type": "array", "items": _attempt_schema()},
             "reasons": {"type": "array", "items": _reason_schema()},
             "limitations": {"type": "array", "items": _reason_schema()},
             "artifact_id": {"type": ["string", "null"]},
@@ -2289,8 +2920,7 @@ PUBLIC_SCHEMAS: dict = {
             "initialized": {"type": "boolean"},
             "runner_kind": {"type": ["string", "null"],
                             "enum": [item.value for item in RunnerKind] + [None]},
-            "capability": {"type": ["string", "null"],
-                           "enum": [item.value for item in ExecutionTier] + [None]},
+            "capability": _capability_schema(),
             "commands": {"type": "array", "items": _command_schema()},
             "effective_limits": {"type": "object"},
             "provenance": {"type": "array", "items": {"type": "string"}},
@@ -2304,8 +2934,8 @@ PUBLIC_SCHEMAS: dict = {
         "type": "object",
         "properties": {
             "effective_limits": {"type": "object"},
-            "queued": {"type": "array", "items": {"type": "object"}},
-            "active": {"type": "array", "items": {"type": "object"}},
+            "queued": {"type": "array", "items": _lease_schema()},
+            "active": {"type": "array", "items": _lease_schema()},
         },
         "required": ["effective_limits", "queued", "active"],
     }),
@@ -2313,7 +2943,7 @@ PUBLIC_SCHEMAS: dict = {
         "type": "object",
         "properties": {
             "summaries": {"type": "array", "items": {"type": "object"}},
-            "obligations": {"type": "array", "items": {"type": "object"}},
+            "obligations": {"type": "array", "items": _obligation_schema()},
         },
         "required": ["summaries", "obligations"],
     }),
@@ -2332,10 +2962,10 @@ PUBLIC_SCHEMAS: dict = {
         "type": "object",
         "properties": {
             "scope": {"type": "array", "items": {"type": "string"}},
-            "readiness": {"type": "array", "items": {"type": "object"}},
-            "findings": {"type": "array", "items": {"type": "object"}},
-            "limits": {"type": "object"},
-            "usage": {"type": "object"},
+            "readiness": {"type": "array", "items": _readiness_schema()},
+            "findings": {"type": "array", "items": _finding_schema()},
+            "limits": _scan_limits_schema(),
+            "usage": _scan_usage_schema(),
             "limitations": {"type": "array", "items": _reason_schema()},
         },
         "required": ["scope", "readiness", "findings", "limits", "usage",

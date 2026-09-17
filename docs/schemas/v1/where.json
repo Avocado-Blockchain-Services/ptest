@@ -4,16 +4,59 @@
     "data": {
       "properties": {
         "capability": {
-          "enum": [
-            "advanced",
-            "basic_serial",
-            "bounded_native",
-            "exclusive_command",
-            "unavailable",
-            null
+          "additionalProperties": false,
+          "properties": {
+            "execution": {
+              "enum": [
+                "advanced",
+                "basic_serial",
+                "bounded_native",
+                "exclusive_command",
+                "unavailable"
+              ],
+              "type": "string"
+            },
+            "lifecycle": {
+              "const": "cooperative-process-group",
+              "type": "string"
+            },
+            "limitations": {
+              "items": {
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message",
+                  "paths"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "selection": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "execution",
+            "selection",
+            "lifecycle",
+            "limitations"
           ],
           "type": [
-            "string",
+            "object",
             "null"
           ]
         },

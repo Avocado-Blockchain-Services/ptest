@@ -22,3 +22,5 @@ __pycache__/
 .venv/
 .pytest_cache/
 .pipeline/local/
+*.egg-info/
+graphify-out/

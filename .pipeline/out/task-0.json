@@ -5,6 +5,71 @@
   "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
   "branch": "cx-ng-product-task-0",
   "commit_message": "build: establish local NG contract bootstrap",
+  "repair_round1": {
+    "review": ".pipeline/local/review-1/opus-findings.json",
+    "reviewed_head": "c545671cc13d8cf98be5f67bb263c699ebb0c0a7",
+    "verdict_in": "rejected with T0-1..T0-7",
+    "verdict_out": "all seven resolved against the reviewed bytes; approved design and working behavior preserved; no redesign, no weakened tests",
+    "dispositions": [
+      {
+        "id": "T0-1",
+        "status": "implemented+verified",
+        "change": "src/ptest/files.py validate_single_name is now the structural check the design specifies: rejects non-str/empty, '.', '..', '/', NUL and other C0 controls/DEL; accepts spaces, Unicode, brackets. O_NOFOLLOW descriptor-relative traversal is unchanged as the safety boundary.",
+        "tests": "tests/ng/test_files.py: test_ensure_shared_dir_supports_application_support, test_read_regular_supports_spaces_brackets_unicode, test_validate_single_name_structural_boundary",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: unsafe-path on Application Support and spaced/bracketed names) then .pipeline/local/green-repair.log (GREEN 68 passed)"
+      },
+      {
+        "id": "T0-2",
+        "status": "implemented+verified",
+        "change": "src/ptest/files.py _walk_to_parent now closes every intermediate descriptor on the success path; only the returned parent fd (or root_fd for single-component paths) stays open for the caller. Error-path cleanup unchanged.",
+        "tests": "tests/ng/test_files.py: test_nested_read_success_keeps_descriptors_stable (200 depth-3 reads), test_nested_failure_keeps_descriptors_stable (100 failed reads + 100 failed creates); small deterministic /proc/self/fd accounting, no fsync loops",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: ~300 leaked fds) then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-3",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py serialize_run_result emits the document top-level mode from result.mode (was plan.mode); plan.mode stays in the nested plan object.",
+        "tests": "tests/ng/test_contracts.py: test_command_summary_withholds_every_token_form now builds a RunResult (mode SHADOW vs plan AUTOMATIC, secret argv, populated sequence/input_before/input_after/policy_digest) and runs it through serialize_run_result + encode + decode, asserting round-tripped mode, internal-field absence and sentinel absence",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: published 'automatic') then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-4",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py is now one descriptor authority: shared schema builders (_capability/_counts/_timings/_attempt/_readiness/_finding/_lease/_obligation/_scan_limits/_scan_usage schemas) reused by PUBLIC_SCHEMAS, matching strict decode validators (_check_capability_dict et al. with exact required keys, no extras), and shared record converters (_capability_dict/_command_dict/_plan_dict/_counts_dict/_timings_dict/_attempt_dict/_readiness_dict/_finding_dict/_lease_dict/_obligation_dict/_scan_limits_dict/_scan_usage_dict) reused by serialize_run_result/_prepared_dict and test fixtures. where.capability is the frozen Capability object (execution/selection/lifecycle/limitations) instead of a bare tier string. Unspecified shapes stay objects: where/status effective_limits, history summaries, init config. Regenerated docs/schemas/v1/*.json via scripts/export-schemas.py.",
+        "tests": "tests/ng/test_contracts.py: test_eight_public_documents_parse uses fully populated record-built fixtures of all eight kinds; test_generated_schema_files_match_frozen_shapes asserts independent on-disk schema expectations; test_frozen_subrecord_negatives_rejected (string capability, empty lease, bad severity, mistyped counts, timings-less attempt, unknown reason code, smuggled extra key)",
+        "evidence": ".pipeline/local/t07-cli-absent.log context; .pipeline/local/green-repair.log (GREEN); schema --check exit 0 in .pipeline/local/schema-check-repair.log"
+      },
+      {
+        "id": "T0-5",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py decode_public_document/decode_control_frame/decode_launch_manifest catch RecursionError alongside ValueError/UnicodeDecodeError and map it to the same typed Problem; _check_nesting is iterative so the bound check itself cannot recurse. Strict length/nonce/version checks retained.",
+        "tests": "tests/ng/test_contracts.py: test_frame_nesting_past_declared_bound_rejected (20-deep vs bound 16), test_frame_pathological_nesting_is_typed_rejection, test_document_pathological_nesting_is_typed_rejection, test_manifest_pathological_nesting_is_typed_rejection (20000-deep, bodies inside byte limits)",
+        "evidence": "pre-fix direct probe: 20000-deep frame raised bare RecursionError (see repair evidence); post-fix .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-6",
+        "status": "implemented+verified",
+        "change": "src/ptest/contracts.py five private decoder sites now raise fixed machine messages (control frame payload / manifest domain / grant / attempt / body failed validation) instead of interpolating constructor exception text; encode_public_document still copies only the four allowlisted Problem fields.",
+        "tests": "tests/ng/test_contracts.py: test_manifest_decoder_hides_offending_values (tampered manifest with sentinel-bearing option asserts sentinel absent from str(problem) and from the encoded public error document), test_control_frame_decoder_hides_offending_values",
+        "evidence": ".pipeline/local/red-repair1-findings.log (RED: sentinel present in message) then .pipeline/local/green-repair.log (GREEN)"
+      },
+      {
+        "id": "T0-7",
+        "status": "implemented+verified",
+        "change": "tests/ng/support.py CaseFactory.invoke keeps its mandated default --result-json injection but now targets a project-root unique file (ptest-result-<hex>.json) whose parent already exists, so exclusive creation needs no mkdir chain and no longer reuses the orchestrator .pipeline/local name. No production CLI/scheduler stub was added; ptest.cli:main stays the T11-owned declaration and no code depends on an absent ptest.__main__.",
+        "tests": "tests/ng/test_files.py: test_invoke_default_export_roundtrip_with_miniature_target exercises argument assembly (--fixture-domain, default --result-json), CONTROL_VARS stripping (PTEST_CONFIG deliberately set to bogus-override) and export read-back against a test-only miniature ptest package served via PYTHONPATH with an explicit 20s timeout",
+        "evidence": ".pipeline/local/t07-cli-absent.log (python -m ptest exit 1: No module named ptest.__main__); .pipeline/local/green-repair.log (GREEN)"
+      }
+    ],
+    "review_notes_closed": [
+      "ControlFrame payload values validated for every kind in _require_frame_keys (cancel signal, parent-closing empty, registered guard identity, phase values, runner-facts field types, draining artifact id); covered by test_control_frame_values_validated_per_kind",
+      "Capability.limitations now requires Reason entries (TypeError otherwise); covered by test_capability_limitations_require_reason_records",
+      "storage.open_database closes the connection on typed pragma failures too (except Problem re-raise path) and read-only file: URIs are percent-escaped; covered by test_open_database_closes_connection_on_pragma_rejection and test_open_database_read_only_escapes_special_characters",
+      "create_exclusive maps ENOENT to state-unavailable, EACCES/EPERM/EROFS to state-unavailable, ENOSPC/EDQUOT to capacity-exceeded; ELOOP stays unsafe-path; covered by test_create_exclusive_missing_parent_is_typed_absence",
+      ".gitignore now ignores *.egg-info/ and graphify-out/; generated artifacts no longer show as untracked",
+      "bootstrap frozen-hash routing and --full refusal untouched"
+    ]
+  },
   "dispatcher": {
     "path": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
     "sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
@@ -91,7 +156,8 @@
       "command": "scripts/ptest-bootstrap /tmp/.../test_sensitivity.py -k probe",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
       "exit": 0,
-      "output": "3 passed: no-op read_regular, permissive validate_private_dir, and nonce-bypass sabotage are each detected (pytest.raises fails under sabotage)"
+      "output": "3 passed: no-op read_regular, permissive validate_private_dir, and nonce-bypass sabotage are each detected (pytest.raises fails under sabotage)",
+      "correction": "raw log for this probe was not retained and the path above is abbreviated; retained as stated history only, per .pipeline/local/review-1/opus-findings.json notes"
     },
     {
       "command": "scripts/ptest-bootstrap --full tests/ng/test_files.py",
@@ -103,7 +169,8 @@
       "command": "/tmp/.../bootstrap-tampered.py where (scratch copy with wrong pinned hash)",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
       "exit": 1,
-      "output": "bootstrap unavailable: frozen ptest hash mismatch (got 3cab2091...); refusing to run against a changed dispatcher"
+      "output": "bootstrap unavailable: frozen ptest hash mismatch (got 3cab2091...); refusing to run against a changed dispatcher",
+      "correction": "raw log for this probe was not retained and the path above is abbreviated; retained as stated history only, per .pipeline/local/review-1/opus-findings.json notes"
     },
     {
       "command": "stat -c %a .pipeline/local ptest-bootstrap.toml",
@@ -118,6 +185,57 @@
       "output": "Rebuilt: 2368 nodes, 4125 edges, 181 communities; AST-only, no LLM, no semantic extraction"
     },
     {
+      "command": "scripts/ptest-bootstrap /tmp/t0r1-red/test_red.py (scratch RED probes for T0-1/2/3/5/6, repair round 1)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "5 failed, 1 passed in 0.12s: Application Support rejected, spaced/bracketed read rejected, ~300 leaked fds, mode published as plan mode, sentinel present in decoder message; declared-depth 20-nesting already typed-rejected",
+      "raw": ".pipeline/local/red-repair1-findings.log"
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py (repair round 1 GREEN)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "68 passed in 0.14s (first repair GREEN attempt: 67 passed + 1 failed on PTEST_BOOTSTRAP env assertion, fixed by scoping the assertion to documented CONTROL_VARS)",
+      "raw": ".pipeline/local/green-repair.log",
+      "durations": "scoped GREEN 0.14s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap /tmp/t0r1-red/test_red.py (same scratch probes post-fix)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "6 passed in 0.05s",
+      "raw": ".pipeline/local/green-repair-probes.log"
+    },
+    {
+      "command": "uv run --locked --no-sync python scripts/export-schemas.py --check (post-regeneration)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "no drift across 8 public schemas + runtime/protocol-v1.json",
+      "raw": ".pipeline/local/schema-check-repair.log"
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py (repair round 1 final re-run)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "68 passed in 0.12s",
+      "raw": ".pipeline/local/green-repair-final.log"
+    },
+    {
+      "command": ".venv/bin/python -m ptest --help (T0-7 absence probe)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 1,
+      "output": "No module named ptest.__main__; 'ptest' is a package and cannot be directly executed",
+      "raw": ".pipeline/local/t07-cli-absent.log"
+    },
+    {
+      "command": "graphify update . (repair round 1)",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
+      "exit": 0,
+      "output": "Rebuilt: 2643 nodes, 4586 edges, 187 communities; AST-only, no LLM, no semantic extraction",
+      "raw": ".pipeline/local/graphify-update-repair.log",
+      "durations": "2.7s"
+    },
+    {
       "command": "git diff --check + trailing-whitespace grep over owned files",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
       "exit": 0,
@@ -130,20 +248,27 @@
     ".pipeline/local/green-final2.log",
     ".pipeline/local/schema-check.log",
     ".pipeline/local/schema-check2.log",
-    ".pipeline/local/graphify-update.log"
+    ".pipeline/local/graphify-update.log",
+    ".pipeline/local/red-repair1-findings.log",
+    ".pipeline/local/green-repair.log",
+    ".pipeline/local/green-repair-probes.log",
+    ".pipeline/local/schema-check-repair.log",
+    ".pipeline/local/t07-cli-absent.log",
+    ".pipeline/local/graphify-update-repair.log",
+    ".pipeline/local/green-repair-final.log"
   ],
   "acceptance": {
     "bootstrap_barrier": "MET: where shows worktree, local backend, 1 worker; bootstrap_smoke passes via -k bootstrap_smoke path",
     "negative_red": "MET: escape/redaction/version/frame/mode/overwrite/corruption negatives written first; RED recorded as collection ImportError; assertion sensitivity proven by sabotage probes",
     "shared_apis": "MET: all 7 files.py functions + storage.open_database with descriptor-relative, no-follow, exclusive, fsync semantics",
-    "contracts_codecs": "MET: all frozen records/enums/defaults (ExecutionTier closed, MAX_PROMPT_BYTES=65536), 8 documents parse, register error schema, unknown-major/truncation/nonce/oversize rejection, boundary integers, default drift, no argv/env in command summaries",
+    "contracts_codecs": "MET (repair round 1): all frozen records/enums/defaults (ExecutionTier closed, MAX_PROMPT_BYTES=65536); 8 documents parse with fully populated record-built fixtures; register error schema; unknown-major/truncation/nonce/oversize/depth rejection; boundary integers; default drift; serialize_run_result output (not a hand dict) proves no argv/env/internal fields in command summaries and correct result.mode",
     "schema_drift": "MET: export --check exit 0",
     "provenance": "MET: frozen absolute dispatcher + per-run SHA256 gate (tamper probe exit 1), --full refused exit 2, 0700/0600 generated config"
   },
   "dan_passes": {
-    "pass1_reread": "Re-read bootstrap/storage/files bytes end-to-end. New observations: os.write partial-write risk in wrapper config (fixed with write loop); FIFO read-open wedge (fixed with O_NONBLOCK); obscure manifest decode expression (fixed to iterate attempts directly, 1-line diff proven vs backup); unused except variable (fixed). No findings left unaddressed.",
-    "pass2_reanchor": "All 5 Task0 checkboxes MET with file:line evidence: wrapper scripts/ptest-bootstrap:100-128; 7 APIs src/ptest/files.py:123-393; opener src/ptest/storage.py:31-131; records/codecs src/ptest/contracts.py; helpers tests/ng/support.py + conftest.py; exporter scripts/export-schemas.py; schemas docs/schemas/v1/*.json + runtime/protocol-v1.json. No scope expansion: no scheduler/runner/config/platform code.",
-    "pass3_smells": "Single definitions verified by search (files.py:123-354, storage.py:31); no duplicate sqlite3.connect outside storage.py; support.py imports only contracts+files (no T2 platform); no TODO/stubs; 2 additive codes (already-exists, invalid-bound) documented in REASON_CODES; Problem messages carry validated relative names only, no raw exception text; empty/error/repeat paths covered by tests; no new dependencies; no shims."
+    "pass1_reread": "Re-read bootstrap/storage/files bytes end-to-end (initial). New observations: os.write partial-write risk in wrapper config (fixed with write loop); FIFO read-open wedge (fixed with O_NONBLOCK); obscure manifest decode expression (fixed to iterate attempts directly, 1-line diff proven vs backup); unused except variable (fixed). Repair round 1 re-read of the full git diff: intermediate-fd close guard (item is not fd) is defensive but harmless; _check_attempt_dict reuses _check_str_list on a singleton for the id type check; schema builders and validators share the same field sets; no leftover allowlist references; no unrelated edits.",
+    "pass2_reanchor": "All 5 Task0 checkboxes MET with file:line evidence: wrapper scripts/ptest-bootstrap:100-128; 7 APIs src/ptest/files.py; opener src/ptest/storage.py; records/codecs src/ptest/contracts.py; helpers tests/ng/support.py + conftest.py; exporter scripts/export-schemas.py; schemas docs/schemas/v1/*.json + runtime/protocol-v1.json. No scope expansion: no scheduler/runner/config/platform/cli code; T0-4 subrecord freeze restores design section 6 shapes without new public surface (converters are underscore-private); T0-7 keeps the mandated default export, no production stub.",
+    "pass3_smells": "Single definitions verified by search; no duplicate sqlite3.connect outside storage.py; support.py imports only contracts+files (no T2 platform); no TODO/stubs; 2 additive codes (already-exists, invalid-bound) documented in REASON_CODES; CORRECTION to the prior claim: private protocol decoders DID interpolate constructor text into Problem.message (Opus T0-6) — now fixed to five constant messages, verified by sentinel tests; files.py messages carry only caller-supplied names/paths, never exception text or argv. Empty/error/repeat paths covered by tests; no new dependencies; no shims."
   },
   "contract_notes": [
     "encode_public_document validates kind/shape/exclusivity only; decode validates payloads strictly (producer-liberal, consumer-strict split)",
@@ -151,10 +276,12 @@
     "AttemptIdentity attempt_id pattern a001-a010 enforced; resource_prefix max 54 ASCII"
   ],
   "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries"],
-  "verified": ["49 passed exit 0 in 0.06s via frozen bootstrap", "schema --check exit 0", "3 sabotage-sensitivity probes", "--full refusal exit 2", "hash-tamper refusal exit 1", "where local/1-worker provenance", "graphify AST update exit 0", "diff --check clean"],
-  "not_verified": ["macOS fullfsync branch (linux host)", "foreign-uid branches (single-user env)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "requested model identity (root checks independently)"],
+  "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries", "repair round 1: T0-1 structural names, T0-2 success-path FD close, T0-3 result.mode, T0-4 frozen subrecord authority + regenerated schemas, T0-5 RecursionError mapping + iterative nesting, T0-6 fixed decoder messages, T0-7 project-root default export; frame value validation, limitations typing, storage cleanup + URI escaping, errno mapping, egg-info/graph gitignore"],
+  "verified": ["49 passed exit 0 in 0.06s via frozen bootstrap (initial)", "68 passed exit 0 in 0.14s via frozen bootstrap (repair round 1)", "schema --check exit 0 (initial and post-regeneration)", "3 sabotage-sensitivity probes (initial; raw logs unretained, see correction)", "--full refusal exit 2", "hash-tamper refusal exit 1 (raw log unretained, see correction)", "where local/1-worker provenance", "scratch RED probes 5 failed/1 passed pre-fix then 6 passed post-fix", "graphify AST update exit 0 (initial and repair)", "diff --check clean"],
+  "not_verified": ["macOS fullfsync branch (linux host)", "foreign-uid branches (single-user env)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "real T11 CLI integration (invoke exercised against a test-only miniature target only; python -m ptest still exits 1 without __main__)", "requested model identity (root checks independently)"],
   "deferred": [],
-  "discovered_not_fixed": ["raise AssertionError(unreachable) after _fail is verbose by design (aids type narrowing); kept deliberately"],
-  "confidence": "medium: every Task0 behavior is implemented and green with sensitivity evidence, but cross-task consumption has not run yet",
+  "discovered_not_fixed": ["raise AssertionError(unreachable) after _fail is verbose by design (aids type narrowing); kept deliberately", "history.summaries, where/status effective_limits and init.config stay bare objects: their JSON field shapes are not frozen anywhere in the approved design, so no authority exists to freeze them at this barrier; noted for the owning tasks"],
+  "failed_attempts_retained": ["initial full attempt wedged on FIFO blocking open (64s, interrupted only the owned test; fixed with O_NONBLOCK)", "repair GREEN attempt 1: 67 passed + 1 failed when the miniature target observed PTEST_BOOTSTRAP in its environment; the assertion was scoped to the documented CONTROL_VARS instead of every PTEST_* var (PTEST_BOOTSTRAP is orchestrator shell env, outside the fixture contract)"],
+  "confidence": "medium: every Task0 behavior is implemented and green with focused regression evidence, but cross-task consumption has not run yet",
   "blockers": []
 }

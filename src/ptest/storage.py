@@ -10,6 +10,7 @@ import os
 import sqlite3
 import stat
 import sys
+import urllib.parse
 from pathlib import Path
 
 from .contracts import Problem
@@ -75,7 +76,7 @@ def open_database(root: Path, name: str, *, max_bytes: int,
             _fail("capacity-exceeded", f"database {name!r} exceeds max_bytes")
     if read_only:
         absolute = path if path.is_absolute() else Path(os.path.abspath(path))
-        target = f"file:{absolute}?mode=ro"
+        target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=ro"
         try:
             conn = sqlite3.connect(target, uri=True)
         except sqlite3.Error:
@@ -106,6 +107,12 @@ def open_database(root: Path, name: str, *, max_bytes: int,
                 or foreign != 1 or busy != _BUSY_TIMEOUT_MS):
             _fail("coordinator-corrupt", f"database {name!r} rejected safe pragmas")
         conn.execute("SELECT 1").fetchone()
+    except Problem:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        raise
     except sqlite3.Error:
         try:
             conn.close()

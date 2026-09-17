@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import struct
+from pathlib import Path
 
 import pytest
 
@@ -83,40 +84,127 @@ def test_command_summary_withholds_every_token_form():
         "--env-file=dotenv-secret-token",
         "TOKEN=env-value-secret-token",
     ]
-    summary = C.summarize_command(
-        C.RunnerKind.PYTEST, C.Mode.SCOPED, argv,
-        generated_options=("-q",), workers=1, provenance=("adapter",),
-    )
-    assert summary.argument_count == 6
-    assert summary.generated_options == ("-q",)
-    data = _run_data()
-    data["command"] = {
-        "kind": summary.kind.value,
-        "mode": summary.mode.value,
-        "argument_count": summary.argument_count,
-        "generated_options": list(summary.generated_options),
-        "workers": summary.workers,
-        "provenance": list(summary.provenance),
-    }
-    rendered = C.encode_public_document("run", data).decode()
-    for sentinel in (
+    sentinels = (
         "argv0-secret-token",
         "positional-secret-token",
         "--option-secret-token",
         "--unknown-flag-secret-token",
         "dotenv-secret-token",
         "env-value-secret-token",
-    ):
-        assert sentinel not in rendered
-    payload = json.loads(C.encode_public_document("run", data))["data"]
+    )
+    for token in argv:
+        assert token not in ("-q",)
+    result = _secret_result(argv)
+    payload = C.serialize_run_result(result)
+    assert payload["command"]["argument_count"] == 6
+    assert payload["command"]["generated_options"] == ["-q"]
     assert "argv" not in payload["command"]
     assert "env" not in payload["command"]
-    assert payload["command"]["argument_count"] == 6
+    for internal in ("sequence", "input_before", "input_after",
+                     "policy_digest"):
+        assert internal not in payload, internal
+    assert payload["mode"] == "shadow"
+    assert payload["plan"]["mode"] == "automatic"
+    rendered = C.encode_public_document("run", payload).decode()
+    for sentinel in sentinels:
+        assert sentinel not in rendered
+    revived = C.decode_public_document(
+        C.encode_public_document("run", payload))
+    assert revived.data["mode"] == "shadow"
+    assert revived.data["command"]["argument_count"] == 6
 
 
-def test_eight_public_documents_parse():
-    payloads = {
-        "run": _run_data(),
+def _secret_result(argv):
+    summary = C.summarize_command(
+        C.RunnerKind.PYTEST, C.Mode.SCOPED, argv,
+        generated_options=("-q",), workers=1, provenance=("adapter",),
+    )
+    assert summary.argument_count == len(argv)
+    assert summary.generated_options == ("-q",)
+    plan = C.Plan(
+        mode=C.Mode.AUTOMATIC, execution="full", files=(), reasons=(),
+        input_digest=None, compatibility=None, baseline_run_id=None,
+        static_preview=False,
+    )
+    snapshot = C.InputSnapshot(
+        digest="e" * 64, compatibility="c", head="a" * 40, clean=True,
+        changes=(), limitations=(), files=(),
+    )
+    return C.RunResult(
+        run_id=RUN_ID, project_id="ab" * 16, checkout_id="d" * 32,
+        mode=C.Mode.SHADOW, status="passed", phase="complete",
+        started_at="2026-09-17T00:00:00+00:00",
+        finished_at="2026-09-17T00:00:01+00:00",
+        plan=plan, command=summary,
+        counts=C.Counts(collected=6, executed=6, passed=6, failed=0,
+                        skipped=0, unknown=None),
+        timings=C.Timings(queue_s=0.1, setup_s=0.2, collection_s=0.3,
+                          execution_s=0.4, finalization_s=0.5),
+        attempts=(C.AttemptResult(
+            attempt_id="a001", phase="execution", status="passed",
+            raw_exit_code=0, final_exit_code=0, source_valid=True,
+            inventory_complete=True, timings=None,
+        ),),
+        sequence=7, input_before=snapshot, input_after=snapshot,
+        policy_digest="f" * 64,
+    )
+
+
+def _capability_data():
+    capability = C.Capability(
+        execution=C.ExecutionTier.ADVANCED, selection=True,
+        lifecycle="cooperative-process-group", limitations=(),
+    )
+    return C._capability_dict(capability)
+
+
+def _full_command_data():
+    summary = C.summarize_command(
+        C.RunnerKind.PYTEST, C.Mode.FULL, ["-q"],
+        workers=1, provenance=("test",),
+    )
+    return C._command_dict(summary)
+
+
+def _lease_data():
+    lease = C.LeaseView(
+        run_id=RUN_ID, checkout_id="d" * 32, state=C.LeaseState.QUEUED,
+        sequence=0, requested_slots=1, slots=1, memory_estimate_mb=None,
+        reserved_memory_mb=None, phase="execution", age_s=0.5,
+        queue_wait_s=0.25, ownership="certain", fixture=True, reasons=(),
+    )
+    return C._lease_dict(lease)
+
+
+def _obligation_data():
+    obligation = C.Obligation(
+        file="tests/test_a.py", test_id=None, sequence=0,
+        source_digest="e" * 64, compatibility="c",
+        reason="full-gate-obligation",
+    )
+    return C._obligation_dict(obligation)
+
+
+def _readiness_data():
+    readiness = C.Readiness(
+        area="execution", state="ready-for-declared-capability", reasons=(),
+    )
+    return C._readiness_dict(readiness)
+
+
+def _finding_data():
+    finding = C.Finding(
+        code="timing.slow-test", severity="medium", confidence="high",
+        path="tests/test_a.py", line=12, evidence_type="static",
+        consequence="slow suite", remediation="split the file",
+        verification="timer",
+    )
+    return C._finding_dict(finding)
+
+
+def _full_payloads():
+    return {
+        "run": C.serialize_run_result(_secret_result(["-q"])),
         "plan": {
             "mode": "automatic", "execution": "selected",
             "files": ["tests/test_a.py"], "reasons": [],
@@ -126,39 +214,145 @@ def test_eight_public_documents_parse():
         "where": {
             "root": "/repo", "config_path": "/repo/.ptest.toml",
             "initialized": True, "runner_kind": "pytest",
-            "capability": "advanced", "commands": [],
+            "capability": _capability_data(),
+            "commands": [_full_command_data()],
             "effective_limits": {"workers": 1},
             "provenance": ["config"], "warnings": [],
         },
         "status": {
             "effective_limits": {"workers": 1},
-            "queued": [], "active": [],
+            "queued": [_lease_data()], "active": [],
         },
-        "history": {"summaries": [], "obligations": []},
+        "history": {
+            "summaries": [{"run_id": RUN_ID}],
+            "obligations": [_obligation_data()],
+        },
         "init": {
             "action": "created", "target": "/repo/.ptest.toml",
             "exists": False, "warnings": [], "config": None,
         },
         "doctor": {
-            "scope": ["tests"], "readiness": [], "findings": [],
-            "limits": {"entries": 1}, "usage": {"entries": 0},
+            "scope": ["tests"], "readiness": [_readiness_data()],
+            "findings": [_finding_data()],
+            "limits": C._scan_limits_dict(C.DEFAULT_SCAN_LIMITS),
+            "usage": C._scan_usage_dict(C.ScanUsage(
+                entries=2, files=1, file_bytes=128, total_bytes=256,
+                findings=1, output_bytes=512, elapsed_s=0.5, skipped=0,
+                truncated=False,
+            )),
             "limitations": [],
         },
         "register": {
             "root": "/repo", "initialized": False,
             "legacy_present": True, "legacy_local": None,
-            "proposed_runner": "pytest", "commands": [],
+            "proposed_runner": "pytest", "commands": [_full_command_data()],
             "legacy_alias_count": 0,
             "required_actions": ["initialize"], "warnings": [],
         },
     }
-    for kind, data in payloads.items():
+
+
+def test_eight_public_documents_parse():
+    for kind, data in _full_payloads().items():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
         assert doc.ptest_version == "0.1.0"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
+    full = C.decode_public_document(
+        C.encode_public_document("run", _full_payloads()["run"]))
+    assert full.data["mode"] == "shadow"
+    assert full.data["counts"]["collected"] == 6
+    assert full.data["attempts"][0]["attempt_id"] == "a001"
+    assert full.data["attempts"][0]["timings"] is None
+    where_doc = C.decode_public_document(
+        C.encode_public_document("where", _full_payloads()["where"]))
+    assert where_doc.data["capability"]["selection"] is True
+    assert where_doc.data["capability"]["execution"] == "advanced"
+    status_doc = C.decode_public_document(
+        C.encode_public_document("status", _full_payloads()["status"]))
+    assert status_doc.data["queued"][0]["state"] == "QUEUED"
+    doctor_doc = C.decode_public_document(
+        C.encode_public_document("doctor", _full_payloads()["doctor"]))
+    assert doctor_doc.data["findings"][0]["code"] == "timing.slow-test"
+    assert doctor_doc.data["limits"]["ast_nodes"] == 50000
+
+
+def test_generated_schema_files_match_frozen_shapes():
+    root = Path(__file__).resolve().parents[2]
+    schemas = {}
+    for kind in ("run", "plan", "where", "status", "history", "init",
+                 "doctor", "register"):
+        path = root / "docs" / "schemas" / "v1" / f"{kind}.json"
+        schemas[kind] = json.loads(path.read_text(encoding="utf-8"))
+    capability = schemas["where"]["properties"]["data"]["properties"][
+        "capability"]
+    assert capability["type"] == ["object", "null"]
+    assert sorted(capability["required"]) == [
+        "execution", "lifecycle", "limitations", "selection"]
+    attempts = schemas["run"]["properties"]["data"]["properties"][
+        "attempts"]["items"]
+    assert "timings" in attempts["required"]
+    assert sorted(attempts["properties"]["timings"]["required"]) == [
+        "collection", "execution", "finalization", "queue", "setup"]
+    counts = schemas["run"]["properties"]["data"]["properties"]["counts"]
+    assert sorted(counts["required"]) == [
+        "collected", "executed", "failed", "passed", "skipped", "unknown"]
+    queued = schemas["status"]["properties"]["data"]["properties"][
+        "queued"]["items"]
+    assert "ownership" in queued["required"]
+    obligations = schemas["history"]["properties"]["data"]["properties"][
+        "obligations"]["items"]
+    assert "source_digest" in obligations["required"]
+    limits = schemas["doctor"]["properties"]["data"]["properties"]["limits"]
+    assert "ast_nodes" in limits["required"]
+    findings = schemas["doctor"]["properties"]["data"]["properties"][
+        "findings"]["items"]
+    assert findings["properties"]["code"]["enum"] == sorted(
+        C.FINDING_CODES)
+
+
+def test_frozen_subrecord_negatives_rejected():
+    where = _full_payloads()["where"]
+    where["capability"] = "advanced"
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("where", where))
+    status = _full_payloads()["status"]
+    status["queued"] = [{}]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("status", status))
+    doctor = _full_payloads()["doctor"]
+    doctor["findings"] = [dict(_finding_data(), severity="critical")]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("doctor", doctor))
+    run = _full_payloads()["run"]
+    run["counts"] = dict(run["counts"], collected="many")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("run", run))
+    run = _full_payloads()["run"]
+    entry = _attempt_dict_for_negative()
+    entry.pop("timings")
+    run["attempts"] = [entry]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("run", run))
+    run = _full_payloads()["run"]
+    run["reasons"] = [{"code": "not-a-reason", "message": "x",
+                       "paths": []}]
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("run", run))
+    where = _full_payloads()["where"]
+    where["capability"] = dict(_capability_data(), smuggled=True)
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("where", where))
+
+
+def _attempt_dict_for_negative():
+    return C._attempt_dict(C.AttemptResult(
+        attempt_id="a001", phase="execution", status="passed",
+        raw_exit_code=0, final_exit_code=0, source_valid=True,
+        inventory_complete=True, timings=None,
+    ))
 
 
 def test_register_error_matches_schema():
@@ -237,6 +431,153 @@ def test_frame_wrong_kind_shape_rejected():
         C.ControlFrame(
             protocol=1, run_id=RUN_ID, nonce=NONCE,
             kind="cancel", payload={"blob": "x"},
+        )
+
+
+def _nested_frame_raw(depth):
+    pad = "[" * depth + "]" * depth
+    body = (
+        '{"protocol":1,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
+        + '","kind":"cancel","payload":{"signal":2,"pad":' + pad + "}}"
+    ).encode()
+    assert len(body) <= C.CONTROL_FRAME_MAX_BYTES
+    return struct.pack(">I", len(body)) + body
+
+
+def test_frame_nesting_past_declared_bound_rejected():
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(_nested_frame_raw(20))
+
+
+def test_frame_pathological_nesting_is_typed_rejection():
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(_nested_frame_raw(20000))
+
+
+def test_document_pathological_nesting_is_typed_rejection():
+    pad = "[" * 20000 + "]" * 20000
+    raw = (
+        '{"schema_version":1,"kind":"run","ptest_version":"0.1.0",'
+        '"domain":null,"data":{"x":' + pad + '},"error":null}'
+    ).encode()
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(raw)
+
+
+def test_manifest_pathological_nesting_is_typed_rejection(case):
+    domain = case.domain()
+    grant = C.Grant(
+        run_id=RUN_ID, nonce=NONCE, slots=1,
+        memory_estimate_mb=None, reserved_memory_mb=None,
+        generation=1, domain_id="d" * 32,
+    )
+    prepared = C.PreparedRun(
+        argv=("true",), cwd=domain.root, env_updates=(),
+        report_path=domain.root / "report.json",
+        capability=None, summary=None,
+    )
+    manifest = C.LaunchManifest(
+        protocol=1, domain=domain, grant=grant, setup=None,
+        attempts=(prepared,), attempt_ids=("a001",),
+        setup_timeout_s=300.0, attempt_timeout_s=30.0,
+        compound_timeout_s=600.0,
+    )
+    body = json.loads(C.encode_launch_manifest(manifest)[4:])
+    base = json.dumps(body).encode()
+    pad = ("[" * 20000 + "]" * 20000).encode()
+    tampered = base.replace(b'"env_updates": []',
+                            b'"env_updates": ' + pad, 1)
+    assert tampered != base
+    assert len(tampered) <= C.MANIFEST_MAX_BYTES
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_launch_manifest(struct.pack(">I", len(tampered)) + tampered)
+
+
+def test_control_frame_values_validated_per_kind():
+    guard = {"pid": 1, "birth": 0.0, "uid": 0, "pgid": 1}
+    frame = C.ControlFrame(
+        protocol=1, run_id=RUN_ID, nonce=NONCE,
+        kind="registered", payload={"guard": guard},
+    )
+    assert C.decode_control_frame(
+        C.encode_control_frame(frame)).payload == {"guard": guard}
+    for kind, payload in (
+        ("parent-closing", {"extra": 1}),
+        ("phase", {"phase": "launch", "attempt_id": None}),
+        ("phase", {"phase": "execution", "attempt_id": 7}),
+        ("runner-facts", {"attempt_id": "a001", "phase": "finalization",
+                          "raw_exit_code": None, "report_name": None,
+                          "problem": None}),
+        ("runner-facts", {"attempt_id": "a001", "phase": "execution",
+                          "raw_exit_code": "0", "report_name": None,
+                          "problem": None}),
+        ("registered", {"guard": {"pid": 1}}),
+        ("draining", {"provisional_artifact_id": 7}),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            C.ControlFrame(
+                protocol=1, run_id=RUN_ID, nonce=NONCE,
+                kind=kind, payload=payload,
+            )
+
+
+def test_manifest_decoder_hides_offending_values(case):
+    domain = case.domain()
+    grant = C.Grant(
+        run_id=RUN_ID, nonce=NONCE, slots=1,
+        memory_estimate_mb=None, reserved_memory_mb=None,
+        generation=1, domain_id="d" * 32,
+    )
+    prepared = C.PreparedRun(
+        argv=("true",), cwd=domain.root, env_updates=(),
+        report_path=domain.root / "report.json",
+        capability=None, summary=None,
+    )
+    manifest = C.LaunchManifest(
+        protocol=1, domain=domain, grant=grant, setup=None,
+        attempts=(prepared,), attempt_ids=("a001",),
+        setup_timeout_s=300.0, attempt_timeout_s=30.0,
+        compound_timeout_s=600.0,
+    )
+    body = json.loads(C.encode_launch_manifest(manifest)[4:])
+    sentinel = "SECRET-SENTINEL-9f2c"
+    body["attempts"][0]["summary"] = {
+        "kind": "command", "mode": "scoped", "argument_count": 1,
+        "generated_options": ["not-an-option!! " + sentinel],
+        "workers": 1, "provenance": [],
+    }
+    tampered = json.dumps(body).encode()
+    raw = struct.pack(">I", len(tampered)) + tampered
+    with pytest.raises(Problem) as caught:
+        C.decode_launch_manifest(raw)
+    assert caught.value.code == "protocol-mismatch"
+    assert caught.value.message == "manifest attempt failed validation"
+    assert sentinel not in str(caught.value)
+    rendered = C.encode_public_document(
+        "register", None, error=caught.value).decode()
+    assert sentinel not in rendered
+
+
+def test_control_frame_decoder_hides_offending_values():
+    body = (
+        '{"protocol":1,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
+        + '","kind":"cancel","payload":{"signal":999}}'
+    ).encode()
+    raw = struct.pack(">I", len(body)) + body
+    with pytest.raises(Problem) as caught:
+        C.decode_control_frame(raw)
+    assert caught.value.code == "protocol-mismatch"
+    assert caught.value.message == "control frame payload failed validation"
+    assert "999" not in str(caught.value)
+
+
+def test_capability_limitations_require_reason_records():
+    with pytest.raises(TypeError):
+        C.Capability(
+            execution="advanced", selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=({"code": "scan-limit", "message": "x",
+                         "paths": []},),
         )
 
 

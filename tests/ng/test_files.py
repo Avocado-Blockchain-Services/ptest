@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ptest.contracts import Problem
+from support import CONTROL_VARS
 from ptest.files import (
     create_exclusive,
     ensure_private_dir,
@@ -16,6 +17,7 @@ from ptest.files import (
     read_regular,
     validate_private_dir,
     validate_private_file,
+    validate_single_name,
 )
 
 
@@ -217,3 +219,140 @@ def test_fixture_domain_helpers_use_private_primitives(case):
     project = case.project(domain)
     assert (project / ".ptest.toml").exists()
     assert stat.S_IMODE(os.stat(project / ".ptest.toml").st_mode) == 0o644
+
+
+def test_ensure_shared_dir_supports_application_support(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    created = ensure_shared_dir(parent, "Application Support")
+    assert created == parent / "Application Support"
+    assert stat.S_IMODE(os.stat(created).st_mode) == 0o700
+    again = ensure_shared_dir(parent, "Application Support")
+    assert again == created
+
+
+def test_read_regular_supports_spaces_brackets_unicode(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "test data").mkdir()
+    name = "[slug].tést-文件.txt"
+    (root / "test data" / name).write_bytes(b"payload")
+    assert read_regular(root, f"test data/{name}", 1024) == b"payload"
+
+
+def test_validate_single_name_structural_boundary():
+    for good in ("Application Support", "test data", "[slug].test.ts",
+                 "tést-文件.txt", "a b", ".hidden", "a.b-c_d", "a+b=c"):
+        assert validate_single_name(good) == good
+    for bad in ("", ".", "..", "a/b", "/abs", "a\x00b", "a\nb", "a\x1fb",
+                "a\x7fb", "trailing/"):
+        with pytest.raises(Problem, match="unsafe-path"):
+            validate_single_name(bad)
+    for bad in (None, 123, b"bytes", ["x"]):
+        with pytest.raises(Problem, match="unsafe-path"):
+            validate_single_name(bad)
+
+
+def _fd_count():
+    return len(os.listdir("/proc/self/fd"))
+
+
+needs_proc_fd = pytest.mark.skipif(
+    not os.path.exists("/proc/self/fd"),
+    reason="descriptor accounting needs /proc/self/fd",
+)
+
+
+@needs_proc_fd
+def test_nested_read_success_keeps_descriptors_stable(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a").mkdir()
+    (root / "a" / "b").mkdir()
+    (root / "a" / "b" / "note.txt").write_bytes(b"hello")
+    assert read_regular(root, "a/b/note.txt", 1024) == b"hello"
+    base = _fd_count()
+    for _ in range(200):
+        assert read_regular(root, "a/b/note.txt", 1024) == b"hello"
+    assert _fd_count() - base <= 2
+
+
+@needs_proc_fd
+def test_nested_failure_keeps_descriptors_stable(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a").mkdir()
+    (root / "a" / "b").mkdir()
+    base = _fd_count()
+    for _ in range(100):
+        with pytest.raises(Problem, match="state-unavailable"):
+            read_regular(root, "a/b/absent.txt", 1024)
+    for _ in range(100):
+        with pytest.raises(Problem, match="state-unavailable"):
+            create_exclusive(root, "a/b/c/missing.txt", b"x")
+    assert _fd_count() - base <= 2
+
+
+def test_create_exclusive_missing_parent_is_typed_absence(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    with pytest.raises(Problem, match="state-unavailable"):
+        create_exclusive(root, "nodir/file.txt", b"x")
+
+
+MINI_MAIN = """\
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def main():
+    argv = sys.argv[1:]
+    export = None
+    fixture = None
+    for index, token in enumerate(argv):
+        if token == "--result-json" and index + 1 < len(argv):
+            export = argv[index + 1]
+        if token == "--fixture-domain" and index + 1 < len(argv):
+            fixture = argv[index + 1]
+    assert export is not None, "mini target requires --result-json"
+    payload = {
+        "ok": True,
+        "argv": argv,
+        "fixture_domain": fixture,
+        "leaked_control_vars": sorted(
+            var for var in os.environ if var.startswith("PTEST_")),
+    }
+    Path.cwd().joinpath(export).write_text(json.dumps(payload))
+    return 0
+
+
+raise SystemExit(main())
+"""
+
+
+def test_invoke_default_export_roundtrip_with_miniature_target(
+        case, tmp_path, monkeypatch):
+    """The frozen invoke default export must succeed and round-trip."""
+    domain = case.domain()
+    project = case.project(domain)
+    stub = tmp_path / "mini-target" / "ptest"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("")
+    (stub / "__main__.py").write_text(MINI_MAIN)
+    monkeypatch.setenv("PTEST_CONFIG", "bogus-override")
+    completed = case.invoke(
+        domain, project,
+        env={"PYTHONPATH": str(stub.parent)}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["fixture_domain"] == str(domain.root)
+    leaked = completed.result["leaked_control_vars"]
+    for var in CONTROL_VARS:
+        assert var not in leaked, var
+    assert "--result-json" in completed.result["argv"]
+    exported = list(project.glob("ptest-result-*.json"))
+    assert len(exported) == 1
