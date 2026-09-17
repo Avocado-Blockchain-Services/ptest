@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
+import select
+import signal
 import subprocess
 import sys
 import time
@@ -29,8 +32,153 @@ CONTROL_VARS = (
     "PTEST_HOME",
     "PTEST_FIXTURE_DOMAIN",
 )
+# Wrapper options the helper itself generates or consumes. Prefix-only: only
+# these leading tokens (and their consumed values) belong to ptest. Scanning
+# stops at the first unknown/native token or "--", which starts the untouched
+# native tail. Never infer runner option arity inside that suffix.
+_WRAPPER_VALUE_OPTS = ("--fixture-domain", "--result-json")
+def _prefix_result_json(args: tuple) -> str | None:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--" or token not in _WRAPPER_VALUE_OPTS:
+            return None
+        if token == "--result-json" and index + 1 < len(args):
+            return args[index + 1]
+        index += 2
+    return None
 
 
+_READ_CHUNK = 65536
+_EXIT_DRAIN_GRACE_S = 1.0
+def _check_timeout(timeout: float) -> float:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("invoke requires an explicit positive finite keyword timeout")
+    deadline_s = float(timeout)
+    if not math.isfinite(deadline_s) or deadline_s <= 0:
+        raise ValueError("invoke requires an explicit positive finite keyword timeout")
+    return deadline_s
+def _close_stream(stream) -> None:
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+def _kill_owned_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.kill()
+    except (OSError, ValueError):
+        pass
+def _read_export_file(root: Path, name: str):
+    candidate = Path(name)
+    try:
+        if candidate.is_absolute():
+            with open(candidate, "rb") as handle:
+                raw = handle.read(BOUND_OUTPUT_BYTES + 1)
+        else:
+            raw = F.read_regular(root, name, BOUND_OUTPUT_BYTES + 1)
+    except (OSError, ValueError, C.Problem):
+        return None
+    if len(raw) > BOUND_OUTPUT_BYTES:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+def _drain_bounded(proc: subprocess.Popen, deadline_s: float) -> tuple:
+    deadline = time.monotonic() + deadline_s
+    buffers = [bytearray(), bytearray()]
+    streams = (proc.stdout, proc.stderr)
+    for stream in streams:
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except (OSError, ValueError):
+            pass
+    live = [True, True]
+    exited_at = None
+    while True:
+        now = time.monotonic()
+        if proc.poll() is not None and exited_at is None:
+            exited_at = now
+        if exited_at is not None:
+            if not any(live):
+                break
+            if now - exited_at >= _EXIT_DRAIN_GRACE_S:
+                break
+            wait = min(0.05, _EXIT_DRAIN_GRACE_S - (now - exited_at))
+            if deadline - now <= 0:
+                break
+            wait = min(wait, deadline - now)
+        else:
+            remaining = deadline - now
+            if remaining <= 0:
+                _kill_owned_group(proc)
+                _close_stream(proc.stdout)
+                _close_stream(proc.stderr)
+                try:
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise TimeoutError(f"invoke timeout after {deadline_s}s; owned child session killed")
+            wait = min(0.05, remaining)
+        try:
+            ready, _, _ = select.select([s for s, flag in zip(streams, live) if flag], [], [], wait)
+        except (OSError, ValueError):
+            break
+        for stream in ready:
+            index = 0 if stream is proc.stdout else 1
+            try:
+                piece = os.read(stream.fileno(), _READ_CHUNK)
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError):
+                live[index] = False
+                continue
+            if not piece:
+                live[index] = False
+                continue
+            room = BOUND_OUTPUT_BYTES - len(buffers[index])
+            if room > 0:
+                buffers[index] += piece[:room]
+            if len(piece) > max(room, 0):
+                name = "stdout" if index == 0 else "stderr"
+                _kill_owned_group(proc)
+                _close_stream(proc.stdout)
+                _close_stream(proc.stderr)
+                try:
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise ValueError(f"invoke {name} exceeded {BOUND_OUTPUT_BYTES}-byte bound; captured output is incomplete evidence, not a complete result")
+    for stream in streams:
+        _close_stream(stream)
+    if proc.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill_owned_group(proc)
+            try:
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise TimeoutError(f"invoke timeout after {deadline_s}s; owned child session killed")
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _kill_owned_group(proc)
+            try:
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise TimeoutError(f"invoke timeout after {deadline_s}s; owned child session killed")
+    _kill_owned_group(proc)
+    try:
+        proc.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return bytes(buffers[0]), bytes(buffers[1])
 class Completed(NamedTuple):
     code: int
     stdout: bytes
@@ -328,40 +476,50 @@ class CaseFactory:
         return path
 
     def invoke(self, domain: C.DomainPaths, root: Path, *args: str,
-               env: dict | None = None, timeout: float = 10.0) -> Completed:
-        if timeout is None or timeout <= 0:
-            raise ValueError("invoke requires an explicit positive keyword timeout")
-        cmd = [
-            sys.executable, "-m", "ptest",
-            "--fixture-domain", str(domain.root), *args,
-        ]
+               env: dict | None = None, timeout: float) -> Completed:
+        deadline_s = _check_timeout(timeout)
+        caller_export = _prefix_result_json(args)
         export_rel = None
-        if "--result-json" not in args:
+        if caller_export is None:
             # Project-root unique file: the parent (the project root itself)
             # already exists, so exclusive creation never needs a mkdir chain.
             export_rel = f"{RESULT_EXPORT_PREFIX}{secrets.token_hex(4)}.json"
+        cmd = [
+            sys.executable, "-m", "ptest",
+            "--fixture-domain", str(domain.root),
+        ]
+        if export_rel is not None:
             cmd += ["--result-json", export_rel]
+        cmd += list(args)
         child_env = dict(os.environ)
         for key, value in (env or {}).items():
             child_env[key] = value
         for var in CONTROL_VARS:
             child_env.pop(var, None)
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd, cwd=str(root), env=child_env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-        parsed = None
-        if export_rel is not None:
-            exported = Path(root) / export_rel
+        try:
+            stdout, stderr = _drain_bounded(proc, deadline_s)
+        except BaseException:
+            _kill_owned_group(proc)
+            _close_stream(proc.stdout)
+            _close_stream(proc.stderr)
             try:
-                if exported.is_file():
-                    parsed = json.loads(exported.read_bytes()[:BOUND_OUTPUT_BYTES])
-            except (OSError, ValueError):
-                parsed = None
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise
+        parsed = None
+        export_name = export_rel if export_rel is not None else caller_export
+        if export_name is not None:
+            parsed = _read_export_file(Path(root), export_name)
         return Completed(
             code=proc.returncode,
-            stdout=proc.stdout[:BOUND_OUTPUT_BYTES],
-            stderr=proc.stderr[:BOUND_OUTPUT_BYTES],
+            stdout=stdout,
+            stderr=stderr,
             result=parsed,
         )
 
@@ -370,10 +528,9 @@ class CaseFactory:
         return PipeBarrier()
 
     def events(self, domain: C.DomainPaths) -> tuple:
-        path = Path(domain.root) / "events.jsonl"
         try:
-            raw = path.read_bytes()[:BOUND_OUTPUT_BYTES]
-        except OSError:
+            raw = F.read_regular(Path(domain.root), "events.jsonl", BOUND_OUTPUT_BYTES)
+        except (OSError, ValueError, C.Problem):
             return ()
         items = []
         for line in raw.splitlines():

@@ -1,0 +1,32 @@
+{
+  "task": "task-0-helper-repair",
+  "status": "complete",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0-helper",
+  "base": "ced109bea3d91a15c942de26247b8fa2f187b5a9",
+  "model": "muse-spark-1.3, medium effort, no delegation or substitution",
+  "ownership": ["tests/ng/support.py", "tests/ng/test_files.py", ".pipeline/out/task-0-helper-repair.json"],
+  "not_owned_not_edited": ["src/ptest/contracts.py", "src/ptest/__main__.py (absent; T11 owns)", "docs/plans/2026-09-17-ptest-ng.md", "docs/designs/2026-09-17-ptest-ng-design.md", ".pipeline/out/task-0.json"],
+  "resume_note": "Prior support.py/test_files.py edits are the interrupted first helper attempt; preserved and inspected, not reverted. Root SIGINT exit130 was root-directed, not a test failure.",
+  "skill_notes": "secure-by-spec read before implementation. read_skill for receiving-code-review and systematic-debugging returned unknown-skill; used the brief Dan three-pass discipline.",
+  "findings": [
+    {"id": 1, "title": "invoke timeout must be an explicit keyword watchdog, no default", "disposition": "implemented+verified (first attempt, preserved; re-verified this run)", "change": "invoke(domain, root, *args, env=None, timeout: float): keyword-only, no default -> TypeError on omission before launch; _check_timeout rejects bool/non-numeric/non-finite/non-positive with ValueError naming timeout.", "tests": "test_invoke_missing_timeout_fails_before_launch; test_invoke_invalid_timeout_fails_before_launch (10 params)", "evidence": ".pipeline/local/green-helper-prefix.log: 47 passed, exit 0; historical RED in .pipeline/local/red-helper.log"},
+    {"id": 2, "title": "bound must apply while reading; bounded export read-back", "disposition": "implemented+verified (first attempt, preserved; re-verified this run)", "change": "_drain_bounded: non-blocking 64KiB reads, at most 1MiB RAM per stream, typed incomplete-evidence ValueError at cap, owned-session-only kill; _read_export_file reads at most BOUND+1 bytes via shared F.read_regular, None past cap; no disk sink.", "tests": "test_invoke_output_past_cap_is_typed_failure; test_invoke_watchdog_bounded_with_retained_pipe (unrelated sleep-60 sentinel survives); test_invoke_returns_when_child_exits_despite_retained_pipe; test_invoke_parses_caller_result_json_with_existing_parent", "evidence": ".pipeline/local/green-helper-prefix.log: 47 passed, exit 0; file 3.30s"},
+    {"id": 3, "title": "generated --result-json appended after native tail; membership scan misreads native values", "disposition": "implemented+verified this run (reproduced first, then fixed)", "change": "New _prefix_result_json scans only the leading wrapper prefix (--fixture-domain/--result-json, stops at -- or first other token, no runner arity inference); generated --result-json now prepended after --fixture-domain before the preserved caller tail; leading caller --result-json still suppresses default and is read back.", "tests": "test_invoke_generated_export_precedes_native_tail; test_invoke_native_option_looking_tokens_are_not_overrides; test_invoke_delimiter_hides_native_result_token; test_invoke_leading_explicit_result_path_read_back", "evidence": ".pipeline/local/red-prefix.log: 3 failed, 1 passed, exit 1; .pipeline/local/green-helper-prefix.log: 47 passed, exit 0; .pipeline/local/green-contracts-prefix.log: 30 passed, exit 0"}
+  ],
+  "commands": [
+    {"command": "scripts/ptest-bootstrap tests/ng/test_files.py -k 'precedes_native_tail or not_overrides or hides_native or leading_explicit' (UV_CACHE_DIR=.pipeline/local/uv-cache)", "exit": 1, "output": "3 failed, 1 passed, 43 deselected", "raw": ".pipeline/local/red-prefix.log"},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_files.py (same env)", "exit": 0, "output": "47 passed in 3.30s", "raw": ".pipeline/local/green-helper-prefix.log"},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_contracts.py (same env)", "exit": 0, "output": "30 passed in 0.04s", "raw": ".pipeline/local/green-contracts-prefix.log"},
+    {"command": "graphify update .", "exit": 0, "raw": ".pipeline/local/graphify-helper-prefix.log"},
+    {"command": "git diff --check", "exit": 0, "output": "clean"}
+  ],
+  "dan_passes": {
+    "pass1_reread": "Fresh observations: post-exit _kill_owned_group reaps owned-group leftovers while sentinel test proves unrelated sessions survive; events() BOUND cap untouched as out of scope; dangling caller wrapper tokens pass through honestly.",
+    "pass2_reanchor": "Plan frozen helper interface (lines 59-63) and design prefix-only parsing (lines 56-76) MET; no redesign, no weakened tests, no new dependency or scheduler.",
+    "pass3_smells": "Single _prefix_result_json; no membership scan left in support.py; Completed shape unchanged; caller argv preserved by construction and asserted via native-tail equality."
+  },
+  "schema_drift": "N/A with reason: no contracts/descriptor/schema touched.",
+  "durations": "RED scoped 0.17s; GREEN test_files.py 3.30s (justified short real watchdogs); contracts 0.04s",
+  "not_verified": ["macOS branches (linux host)", "real T11 CLI integration (miniature target stands in for frozen grammar)", "other genuine wrapper flags (e.g. --shadow) ahead of --result-json: minimal scanner stops at first unrecognized token; documented boundary"],
+  "blockers": []
+}

@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from ptest.contracts import Problem
-from support import CONTROL_VARS
+from support import BOUND_OUTPUT_BYTES, CONTROL_VARS
 from ptest.files import (
     create_exclusive,
     ensure_private_dir,
@@ -356,3 +359,203 @@ def test_invoke_default_export_roundtrip_with_miniature_target(
     assert "--result-json" in completed.result["argv"]
     exported = list(project.glob("ptest-result-*.json"))
     assert len(exported) == 1
+MINI_BIG_MAIN = """
+import json
+import sys
+from pathlib import Path
+def main():
+    argv = sys.argv[1:]
+    export = None
+    for index, token in enumerate(argv):
+        if token == "--result-json" and index + 1 < len(argv):
+            export = argv[index + 1]
+    assert export is not None, "mini target requires --result-json"
+    sys.stdout.buffer.write(b"O" * 1572864)
+    sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(b"E" * 1572864)
+    sys.stderr.buffer.flush()
+    Path.cwd().joinpath(export).write_text(json.dumps({"ok": True}))
+    return 0
+raise SystemExit(main())
+"""
+MINI_HANG_MAIN = """
+import subprocess
+import sys
+import time
+def main():
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    time.sleep(60)
+    return 0
+raise SystemExit(main())
+"""
+MINI_EXIT_RETAIN_MAIN = """
+import json
+import subprocess
+import sys
+from pathlib import Path
+def main():
+    argv = sys.argv[1:]
+    export = None
+    for index, token in enumerate(argv):
+        if token == "--result-json" and index + 1 < len(argv):
+            export = argv[index + 1]
+    assert export is not None, "mini target requires --result-json"
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    Path.cwd().joinpath(export).write_text(json.dumps({"ok": True}))
+    return 0
+raise SystemExit(main())
+"""
+def _write_mini_target(tmp_path, body):
+    stub = tmp_path / "mini-target" / "ptest"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("")
+    (stub / "__main__.py").write_text(body)
+    return str(stub.parent)
+def test_invoke_missing_timeout_fails_before_launch(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    with pytest.raises(TypeError):
+        case.invoke(domain, project)
+    assert list(project.glob("ptest-result-*.json")) == []
+@pytest.mark.parametrize("bad", [None, 0, -5, 0.0, float("nan"), float("inf"), True, False, "10", (10,)])
+def test_invoke_invalid_timeout_fails_before_launch(case, tmp_path, bad):
+    domain = case.domain()
+    project = case.project(domain)
+    with pytest.raises(ValueError, match="timeout"):
+        case.invoke(domain, project, timeout=bad)
+    assert list(project.glob("ptest-result-*.json")) == []
+def test_invoke_output_past_cap_is_typed_failure(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_BIG_MAIN)
+    with pytest.raises(ValueError, match="bound"):
+        case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
+def test_invoke_watchdog_bounded_with_retained_pipe(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_HANG_MAIN)
+    sentinel = subprocess.Popen(["sleep", "60"])
+    try:
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="timeout"):
+            case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=2.0)
+        elapsed = time.monotonic() - start
+    finally:
+        sentinel_alive = sentinel.poll() is None
+        sentinel.terminate()
+        sentinel.wait(timeout=10)
+    assert sentinel_alive, "watchdog cleanup must not kill unrelated jobs"
+    assert elapsed < 20.0, elapsed
+def test_invoke_returns_when_child_exits_despite_retained_pipe(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_EXIT_RETAIN_MAIN)
+    start = time.monotonic()
+    completed = case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=15.0)
+    elapsed = time.monotonic() - start
+    assert completed.code == 0
+    assert completed.result == {"ok": True}
+    assert elapsed < 15.0, elapsed
+def test_invoke_parses_caller_result_json_with_existing_parent(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
+    sub = project / "sub"
+    sub.mkdir()
+    completed = case.invoke(domain, project, "--result-json", "sub/result.json", env={"PYTHONPATH": pythonpath}, timeout=20.0)
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert (sub / "result.json").is_file()
+    assert list(project.glob("ptest-result-*.json")) == []
+MINI_PREFIX_MAIN = """
+import json
+import sys
+from pathlib import Path
+WRAPPER_VALUE_OPTS = ("--fixture-domain", "--result-json")
+def main():
+    argv = sys.argv[1:]
+    wrapper = {}
+    index = 0
+    native = []
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            native = argv[index + 1:]
+            break
+        if token not in WRAPPER_VALUE_OPTS:
+            native = argv[index:]
+            break
+        if index + 1 >= len(argv):
+            sys.stderr.write("missing wrapper value\\n")
+            return 2
+        wrapper[token] = argv[index + 1]
+        index += 2
+    export = wrapper.get("--result-json")
+    if export is None:
+        sys.stderr.write("mini target requires wrapper --result-json\\n")
+        return 2
+    Path.cwd().joinpath(export).write_text(json.dumps(
+        {"ok": True, "wrapper": wrapper, "native": native}))
+    return 0
+raise SystemExit(main())
+"""
+def test_invoke_generated_export_precedes_native_tail(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    completed = case.invoke(
+        domain, project, "tests/test_x.py",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["native"] == ["tests/test_x.py"]
+    assert completed.result["wrapper"]["--result-json"].startswith(
+        "ptest-result-")
+    assert len(list(project.glob("ptest-result-*.json"))) == 1
+def test_invoke_native_option_looking_tokens_are_not_overrides(
+        case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    completed = case.invoke(
+        domain, project, "-k", "--result-json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["native"] == ["-k", "--result-json"]
+    assert len(list(project.glob("ptest-result-*.json"))) == 1
+def test_invoke_delimiter_hides_native_result_token(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    completed = case.invoke(
+        domain, project, "--", "--result-json", "evil.json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["native"] == ["--result-json", "evil.json"]
+    assert not (project / "evil.json").exists()
+    assert len(list(project.glob("ptest-result-*.json"))) == 1
+def test_invoke_leading_explicit_result_path_read_back(case, tmp_path):
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    sub = project / "sub"
+    sub.mkdir()
+    completed = case.invoke(
+        domain, project, "--result-json", "sub/result.json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["ok"] is True
+    assert completed.result["native"] == []
+    assert (sub / "result.json").is_file()
+    assert list(project.glob("ptest-result-*.json")) == []
