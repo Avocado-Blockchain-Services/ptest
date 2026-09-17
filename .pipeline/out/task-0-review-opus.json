@@ -1,0 +1,160 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "num_turns": 44,
+  "permission_denials": [],
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 1280,
+      "outputTokens": 15,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.001355,
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "thinkingTokens": 0,
+      "canonicalModel": "claude-haiku-4-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    },
+    "claude-opus-5": {
+      "inputTokens": 64,
+      "outputTokens": 39582,
+      "cacheReadInputTokens": 3047486,
+      "cacheCreationInputTokens": 168808,
+      "webSearchRequests": 0,
+      "costUSD": 4.201693,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "thinkingTokens": 23209,
+      "canonicalModel": "claude-opus-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "structured_output": {
+    "verdict": "rejected",
+    "scope": "Task0 at submitted HEAD c545671cc13d8cf98be5f67bb263c699ebb0c0a7 (recorded base 042dde1) in /home/ingmar/worktrees/ptest/cx-ng-product/task-0, audited against the approved product spec, the approved design (docs/designs/2026-09-17-ptest-ng-design.md sections 3-7 and 9-10), the extracted task-0 brief, .pipeline/context.md, the task-0 report, and the audit-spec skill. Read-only; no delegation, no edits, no runs.",
+    "coverage": "CHECKED by reading submitted bytes (worktree equals HEAD; git status showed only untracked graphify-out/ and src/ptest_ng.egg-info/): src/ptest/files.py, storage.py, contracts.py (all 2417 lines), the three package __init__.py files, scripts/ptest-bootstrap, scripts/export-schemas.py, tests/ng/{conftest,support,test_contracts,test_files,test_storage}.py, pyproject.toml, uv.lock (package/version set), .gitignore, .pipeline/out/task-0.json. Dimensions swept: frozen record/enum/default fidelity vs design section 6; public allowlisted document codec vs private argv-bearing ControlFrame/LaunchManifest protocol; strict decode boundaries; generated-schema parity; finite ExecutionTier and memory units; fixture explicit domain routing; future-module import hygiene; presence of production scheduler/CLI stubs; file primitives (descriptor-relative paths, symlink/FIFO/hardlink, modes/owners, directory swap, no-overwrite, temp cleanup, fsync durability, FD lifetime); shared-parent vs exclusive-private-child rules and static no-create semantics; storage size/identity/corruption/read-only/pragmas; bootstrap frozen-hash gate, --full refusal, exit/output preservation, worktree scoping and PATH exposure; negative-test non-vacuity by inspection; packaging/consumer impact. RAW EVIDENCE READ: .pipeline/local/root-scoped.log (49 passed, 0.05s, rootdir=task-0, unmasked), green-final.log, green-final2.log, and the retained log inventory. NOT CHECKED: nothing was executed (read-only reviewer; Bash is disabled in this session), so no claim here is runtime-reproduced except where the retained logs show it; the 8 docs/schemas/v1/*.json and runtime/protocol-v1.json were verified against their generating descriptors in contracts.py plus root's standalone `export-schemas.py --check` exit 0 and the diff excerpts for doctor/history/init/plan/register/run — where.json and status.json bytes were not read directly; macOS runtime behavior, foreign-uid branches, the legacy dispatcher binary bytes, and uv.lock hash integrity were not verified; cross-task consumption (T1/T3/T4/T8/T11/T13) is unbuilt and was judged only against the design's declared interfaces; the three sabotage-sensitivity probes, the RED baseline, the --full refusal run, the hash-tamper run and the `where` run have NO retained raw logs and could not be inspected (see notes).",
+    "blocking": [
+      {
+        "id": "T0-1",
+        "severity": "BLOCKER",
+        "confidence": "CONFIRMED",
+        "issue": "validate_single_name enforces an ASCII [A-Za-z0-9._-] character allowlist, which makes the design's macOS canonical state chain impossible to create and makes the shared read primitive reject ordinary repository filenames. Structural single-component safety is not that allowlist.",
+        "location": "src/ptest/files.py:24-26 (_COMPONENT_CHARS), :33-44 (validate_single_name), :47-57 (_split_relative, applied to every component of every relative path), :217-221 (ensure_shared_dir), :258-262 (ensure_private_dir), :299-307 (create_exclusive), :123-133 (read_regular)",
+        "evidence": "_COMPONENT_CHARS = frozenset(\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-\") and validate_single_name raises Problem(\"unsafe-path\", \"name ... uses unsafe characters\") for any other character, including SPACE and all non-ASCII. Design section 7 states verbatim: \"macOS uses <account>/Library/Application Support/ptest/machine.toml\" and \"On first executing admission, T4 creates missing canonical shared-parent components one at a time via ensure_shared_dir: Linux .local->state->ptest and .config->ptest, or macOS Library->'Application Support'->ptest\". Concrete failure: ensure_shared_dir(Path(account_home)/\"Library\", \"Application Support\") raises Problem unsafe-path before any mkdir, so on macOS the coordination root can never be created and every executing admission fails; macOS is in the user-approved v1 platform scope (.pipeline/context.md, design section 3). Second concrete failure: _split_relative validates every component with the same allowlist, so read_regular(root, \"tests/test data/test_api.py\", n) and read_regular(root, \"app/routes/[slug].test.ts\", n) both raise unsafe-path. Design section 9 requires source.py to fingerprint \"tracked inputs, untracked candidates, declared ignored/generated inputs, native config/lockfiles and test roots\" and section 10 requires doctor to scan \"declared tests, conftest/fixture/setup files, runner/ptest config, then app sources\" through exactly these descriptor-relative no-follow reads; bracketed and spaced filenames are routine in the Vitest/JS profile the design commits to. tests/ng/test_files.py contains no case for a name with a space, non-ASCII, or a bracket, so all 49 green tests pass over this gap.",
+        "whyItFailsDoD": "Task0 is the shared runnable barrier that freezes the file primitives every later task must consume without duplicating them ('T1/T3/T4/T8/T11/T13 consume these shared APIs; no independent unsafe writer/SQLite-opening implementation'). The frozen API contradicts the approved design's macOS canonical chain and cannot service the approved source/doctor scanning contract, so the barrier is not correct to hand to parallel writers; correcting it after wave 1 starts would require a shared-contract barrier repair across already-running tasks.",
+        "fix": "Replace the character allowlist with the structural check the design actually specifies: reject non-str/empty, \".\", \"..\", any \"/\" and any NUL, and (defensibly) other C0 control characters; accept every remaining byte sequence, including spaces and non-ASCII. Keep the existing O_NOFOLLOW/O_DIRECTORY descriptor-relative traversal as the real safety boundary. Add regression tests for ensure_shared_dir(parent, \"Application Support\") and read_regular over \"test data/[slug].test.ts\"."
+      },
+      {
+        "id": "T0-2",
+        "severity": "HIGH",
+        "confidence": "CONFIRMED",
+        "issue": "_walk_to_parent leaks every intermediate directory descriptor on the SUCCESS path; only the error path closes them. Any relative path with two or more leading components leaks one FD per extra component per call.",
+        "location": "src/ptest/files.py:74-111 (_walk_to_parent), consumed at :138-165 (read_regular finally block) and :313-351 (create_exclusive finally block)",
+        "evidence": "In the loop, after opening `child`, the code does `if fd is not root_fd: opened.append(fd) else: opened.append(None)` and then `fd = child`; on normal completion it executes `return fd` and the `opened` list is discarded without closing anything. The `for item in opened: os.close(item)` cleanup lives only in `except Exception:`. Callers close exactly three descriptors: the final fd, parent_fd (when it differs from root_fd) and root_fd. Trace for read_regular(root, \"src/pkg/mod.py\", n): parts[:-1] = [\"src\",\"pkg\"]; iteration 1 appends None and sets fd=fd_src; iteration 2 appends fd_src and sets fd=fd_pkg; returns fd_pkg. fd_src is never closed. tests/ng/test_files.py:32-38 is the only nested-success case and uses depth 2 (\"sub/note.txt\"), which leaks nothing, so the green suite cannot detect this. Consequence: design section 9 sizes the input envelope at up to 100,000 files read through this exact primitive; after roughly 1,000 nested reads the process hits the default RLIMIT_NOFILE and _open_dir's `except OSError` converts EMFILE into Problem(\"state-unavailable\", \"cannot open directory ...\"), i.e. selection/doctor abort partway with a misleading state error and no bound is respected.",
+        "whyItFailsDoD": "'Bounded memory/disk/scan growth' is an explicit approved acceptance priority and the brief requires tracing FD lifetime in the shared primitives. A resource leak in the one shared reader/writer that T3, T8, T11 and T13 are forbidden to reimplement fails the barrier, and the leak is invisible to the committed test suite.",
+        "fix": "Close intermediate descriptors on the success path too: keep a list of the descriptors actually opened inside the loop (excluding root_fd), and in a `finally`/post-loop step close every one except the descriptor being returned. Add a test that calls read_regular repeatedly (e.g. 2,000 iterations) on a depth-3 relative path and asserts the open-descriptor count in /proc/self/fd (or resource-limit stability) does not grow."
+      },
+      {
+        "id": "T0-3",
+        "severity": "MEDIUM",
+        "confidence": "CONFIRMED",
+        "issue": "serialize_run_result emits the run document's top-level `mode` from plan.mode instead of result.mode, and the function is never executed by any committed test, so the brief's explicit allowlisted-serialization requirement and the report's 'no argv/env in command summaries' acceptance claim are not exercised against the production code path.",
+        "location": "src/ptest/contracts.py:1100-1180 (serialize_run_result), specifically :1110; tests/ng/test_contracts.py:24-60 (_run_data), :77-114 (test_command_summary_withholds_every_token_form); tests/ng/support.py:196-249 (CaseFactory.result)",
+        "evidence": "Line 1110 reads `\"mode\": plan.mode.value if isinstance(plan.mode, Mode) else plan.mode,` while `result.mode` is a separately validated frozen field (contracts.py:1014, :1046) required by design section 6's run payload list. RunResult(mode=Mode.SHADOW, plan=Plan(mode=Mode.AUTOMATIC, ...)) therefore publishes \"mode\": \"automatic\" at both levels and result.mode is dropped from the public document entirely. A repository-wide grep shows serialize_run_result has zero call sites outside its own definition: every test builds the run payload as a hand-written dict (_run_data) or builds a RunResult that is never serialized (support.CaseFactory.result is only used by test_unknown_config_alias_raises). test_command_summary_withholds_every_token_form hand-assembles data[\"command\"] from the CommandSummary fields and then asserts the six secret sentinels are absent — with argv never reaching a serializer, that assertion cannot fail no matter what serialize_run_result does. The brief's requirement was 'Serialize explicit allowlisted public fields, not asdict on a transient argv/env record', and the report records acceptance contracts_codecs as MET including 'no argv/env in command summaries'.",
+        "whyItFailsDoD": "The public run codec is a frozen T0 contract consumed by T11 render and T13 packaging tests; it currently misreports a required public field and carries no execution evidence, so 'the negative test proves the intended assertion' is not satisfied for the redaction case.",
+        "fix": "Use result.mode for the document's top-level \"mode\" (keep plan.mode inside the nested plan object). Add a test that constructs a RunResult with mode != plan.mode plus populated internal fields (sequence, input_before, input_after, policy_digest) and a CommandSummary derived from secret-bearing argv, runs it through serialize_run_result + encode_public_document + decode_public_document, and asserts the round-tripped mode, the absence of the four internal fields, and the absence of every argv sentinel."
+      },
+      {
+        "id": "T0-4",
+        "severity": "MEDIUM",
+        "confidence": "CONFIRMED",
+        "issue": "The generated public schemas and the strict decoders erase the frozen shapes of records the design catalogues, including degrading `where.capability` from the Capability record to a bare ExecutionTier string. Six of the eight kinds carry untyped object islands at the frozen boundary.",
+        "location": "src/ptest/contracts.py:1748-1764 (_validate_where_payload), :1767-1798 (status/history/init/doctor validators), :2281-2366 (PUBLIC_SCHEMAS), :2263-2265 (run counts/timings/attempts descriptors); generated docs/schemas/v1/*.json",
+        "evidence": "_validate_where_payload checks `capability` with _check_closed(..., frozenset(item.value for item in ExecutionTier)) and PUBLIC_SCHEMAS[\"where\"] declares capability as {\"type\":[\"string\",\"null\"], \"enum\":[tier values]+[None]}, so Capability.selection, Capability.lifecycle and Capability.limitations (contracts.py:309-321, design section 6: 'Capability(execution: ExecutionTier, selection: bool, lifecycle: str, limitations: tuple[Reason,...])') are unrepresentable in the public where document even though design section 6 lists `capability` as a where payload field and 'Only advanced may have selection=true' is a user-visible support-level distinction. Similarly: doctor.readiness/findings, status.queued/active, history.summaries/obligations and run.attempts are `{\"type\":\"object\"}` arrays; run.counts/timings, where.effective_limits, doctor.limits/usage and init.config are bare `object`, while the design freezes Readiness, Finding, LeaseView, Obligation, the six counts keys and the five timings keys by name. test_eight_public_documents_parse passes payloads such as \"limits\": {\"entries\": 1} and \"queued\": [] that satisfy the validators without exercising any of those shapes. Consequence: T8, T11 and T13 each get to invent their own serialization of the same frozen records, the drift gate cannot detect divergence, and design section 6's 'There is no untyped arbitrary dict at module boundaries' / 'No independently hand-maintained parallel schemas' is not achieved at the freeze point.",
+        "whyItFailsDoD": "The brief requires 'public allowlisted schema vs private argv-bearing protocol, strict decode boundaries and generated-schema parity' and the design makes contracts.py the single source of truth that later tasks consume. Shipping object placeholders for records the design already froze defers the contract instead of freezing it, which is exactly what the barrier exists to prevent.",
+        "fix": "Add descriptor builders and decode validation for the already-frozen sub-records — Capability (object with execution/selection/lifecycle/limitations), Readiness, Finding, LeaseView, Obligation, Counts, Timings and the attempt record — reuse them in PUBLIC_SCHEMAS and the payload validators, regenerate docs/schemas/v1/*.json, and extend the parse test with a fully populated instance of each kind rather than empty lists."
+      },
+      {
+        "id": "T0-5",
+        "severity": "MEDIUM",
+        "confidence": "CONFIRMED",
+        "issue": "Decode entry points translate only ValueError/UnicodeDecodeError from json.loads, so deeply nested input raises an unhandled RecursionError instead of the declared typed rejection, and the declared nesting bound is never reached.",
+        "location": "src/ptest/contracts.py:1847-1850 (decode_public_document), :1955-1958 (decode_control_frame), :2133-2139 (decode_launch_manifest), with _check_nesting at :1906-1916 applied only after parsing",
+        "evidence": "Each decoder wraps json.loads in `except (UnicodeDecodeError, ValueError)` and only afterwards calls _check_nesting(..., CONTROL_FRAME_MAX_NESTING=16 / MANIFEST_MAX_NESTING=32). CPython's json parser raises RecursionError (not a ValueError) once nesting exceeds the interpreter recursion limit, which defaults to 1000. A 2,002-byte body of '['*1000 + ']'*1000 is far inside CONTROL_FRAME_MAX_BYTES=65536, so decode_control_frame propagates RecursionError to the guard/caller rather than Problem('protocol-mismatch'). Design section 6 requires 'Control frame max 65536 bytes, nesting<=16 ... Reject truncated/oversized/wrong-protocol/wrong-nonce frames with no execution', and the same hole exists for decode_public_document, which is the consumer-strict boundary for imported documents and --result-json artifacts. tests/ng/test_contracts.py exercises truncation, oversize, wrong protocol, wrong nonce and wrong kind shape, but no nesting case at all.",
+        "whyItFailsDoD": "Error truth and typed rejection at the protocol boundary are T0 acceptance items ('unknown-major/frame-truncation/wrong-nonce/oversize rejection'); an unhandled RecursionError in the guard channel is a crash path, not a rejection, and the advertised nesting bound is unenforceable as written.",
+        "fix": "Catch RecursionError alongside ValueError/UnicodeDecodeError in all three decoders and map it to the same protocol-mismatch/report-invalid Problem, or pre-scan the raw bytes for bracket depth before parsing. Add negative tests asserting Problem for a frame and a public document nested past both the declared limit (16/32) and the interpreter recursion limit."
+      },
+      {
+        "id": "T0-6",
+        "severity": "MEDIUM",
+        "confidence": "CONFIRMED",
+        "issue": "Private protocol decoders interpolate raw Python exception text into Problem.message, contradicting the design's Problem contract and the task report's own Pass-3 claim; those messages are then serialized verbatim into the public document error field.",
+        "location": "src/ptest/contracts.py:1980-1981, :2066-2067, :2080-2081, :2116-2117, :2153-2154; serialized at :1602-1607 (encode_public_document error branch); report claim in .pipeline/out/task-0.json dan_passes.pass3_smells",
+        "evidence": "Five decode helpers raise `_invalid(\"protocol-mismatch\", f\"control frame invalid: {exc}\")` / `f\"manifest domain invalid: {exc}\"` / `f\"manifest grant invalid: {exc}\"` / `f\"manifest attempt invalid: {exc}\"` / `f\"manifest invalid: {exc}\"`, where exc is the TypeError/ValueError raised by the record constructors. Those constructor messages embed offending values, e.g. _check_enum at :238 raises f\"{name} {value!r} is not a {cls.__name__}\" and CommandSummary at :339 raises f\"generated option {option!r} is not ptest-generated\"; _build_prepared (:2084-2117) runs exactly those validators over a PreparedRun whose argv/env are, per design section 6, 'ephemeral only' and pipe-private. Design section 6 states Problem 'carries no raw exception text/argv or arbitrary details' and 'the CLI serializes exactly its four allowlisted fields'; encode_public_document copies error.message unchanged into the public JSON. The report asserts the opposite: 'Problem messages carry validated relative names only, no raw exception text'.",
+        "whyItFailsDoD": "Privacy/redaction of the argv-bearing private protocol is an explicit T0 contract and an approved-spec priority (default command summaries omit arbitrary argv). A decoder that pastes constructor text into a field that reaches public output breaks that contract, and the report records it as verified when it is not.",
+        "fix": "Replace the f-string interpolations with fixed machine messages (e.g. 'manifest attempt failed validation'), optionally logging the underlying exception to a private diagnostic channel only, and add a negative test that decodes a manifest carrying a deliberately invalid summary/capability value and asserts the value does not appear in str(problem) or in the encoded public document."
+      },
+      {
+        "id": "T0-7",
+        "severity": "MEDIUM",
+        "confidence": "SUSPECTED",
+        "issue": "The shared fixture helper CaseFactory.invoke always injects a --result-json path under .pipeline/local/ inside the fixture project, but no fixture project ever contains that directory and the shared exclusive writer does not create parents, so every downstream consumer of this helper is set up to hit the export-failure path.",
+        "location": "tests/ng/support.py:18 (RESULT_EXPORT_DIR = \".pipeline/local\"), :338-341 (export_rel injection), :352-358 (read-back), :309-328 (CaseFactory.project); producer contract at src/ptest/files.py:299-307 (create_exclusive, 'Parents must already exist; no implicit arbitrary mkdir chain')",
+        "evidence": "invoke() runs `python -m ptest --fixture-domain <root> ... --result-json .pipeline/local/result-<hex>.json` with cwd set to the fixture project directory. CaseFactory.project() creates only `.ptest.toml` inside a fresh private dir, so `.pipeline/local` does not exist there. Design section 4 specifies --result-json as a project-relative path whose 'output creation is exclusive, never overwrites an existing file' and states 'if the runner passed, a requested export failure is final 70'. The consequence is that T3/T8/T11/T13 tests calling case.invoke() without their own --result-json would observe exit 70 and result=None regardless of the behavior under test, and Completed.result would silently be None (the read-back swallows OSError at :357). Marked SUSPECTED because T11's export implementation does not exist yet and I could not execute anything; no T0 test calls invoke(), barrier() or events(), so none of these helpers has any execution evidence.",
+        "whyItFailsDoD": "The brief makes T0 the owner of fixture helpers that later tasks consume, and the reviewer brief forbids presenting unexercised scaffolding as verified functionality. A helper whose default path cannot succeed would push a systematic false failure into every wave-1 consumer.",
+        "fix": "Either have invoke() create the export directory inside the fixture project before launching (e.g. F.ensure_private_dir/mkdir of a plain 'ptest-out' directory) or drop the injected default and let callers pass --result-json explicitly; also stop reusing the orchestrator's '.pipeline/local' name inside fixture projects. Add one T0 test that exercises invoke()'s argument assembly and export read-back against a trivial stub target so the helper is not shipped unexecuted."
+      }
+    ],
+    "notes": [
+      "EVIDENCE GAP (not a finding, but it bounds what I could confirm): .pipeline/local/ contains only green-final.log, green-final2.log, green-postcommit.log, root-scoped.log, schema-check.log, schema-check2.log, graphify-update.log, ptest-bootstrap.toml and the uv cache. There is NO retained raw log for the RED baseline, the three /tmp sabotage-sensitivity probes, the --full refusal, the hash-tamper probe or the `where` run, and the report cites them with abbreviated /tmp/... paths. The report is honest that the RED baseline was a collection ImportError rather than a behavioral assertion failure, which is exactly what the brief told the worker to distinguish; its 'negative_red: MET' therefore rests on unretained evidence. I re-derived non-vacuity by inspection instead: the escape/directory-swap/FIFO/hardlink/symlink/0700/no-overwrite/oversize/corruption/read-only negatives in test_files.py and test_storage.py each fail if the guard is removed. The one exception is the redaction negative, which is genuinely vacuous as written (finding T0-3).",
+      "VERIFIED GOOD — bootstrap: scripts/ptest-bootstrap:27-47 pins the absolute frozen dispatcher and re-hashes it on every invocation, raising SystemExit(message) (exit 1) on mismatch; :107-113 returns 2 for --full; :126-131 preserves the child exit code via proc.returncode and does not capture stdout/stderr, so child output passes through unchanged. The only other executable it invokes is `git`; it never consults PATH for ptest, so a future NG entrypoint cannot be reached accidentally. root-scoped.log confirms rootdir=/home/ingmar/worktrees/ptest/cx-ng-product/task-0, backend=local, workers=1, `-p no:xdist`, 49 passed in 0.05s unmasked. The --full and hash-mismatch refusals are confirmable from the code even without their logs.",
+      "VERIFIED GOOD — no stub or fake runnable state: src/ptest/ contains only __init__.py (empty), adapters/__init__.py, runtime/__init__.py, contracts.py, files.py, storage.py. No scheduler, runner, config, platform, cli or operations module, no TODO/NotImplemented, no skipped tests. tests/ng/support.py imports only ptest.contracts and ptest.files, so no future-task module is pulled in. The `ptest = ptest.cli:main` console script is declared ahead of T11, which the brief explicitly permits.",
+      "VERIFIED GOOD — fixture domain routing is explicit: CaseFactory.domain() builds the domain through the owned private primitives, writes a fixture-domain.toml marker with uid/device/inode/fixture_id, and returns DomainPaths(fixture=True, domain_id=...); conftest.py autouse-clears all ten PTEST_* control variables and invoke() re-strips them from the child environment and passes --fixture-domain explicitly. This matches design section 6's 'never silent env activation' requirement.",
+      "VERIFIED GOOD — versions and packaging match the design table: uv.lock resolves 10 packages with pytest 9.1.1, psutil 7.2.2, pytest-xdist 3.8.0, requires-python '>=3.11, <3.15'; pyproject declares setuptools>=77,<83, no license (correctly deferred to the publication gate), and package-data globs already covering runtime/*.py, runtime/*.mjs, runtime/protocol-v1.json, resources/agent-guide.md and resources/recipes/*.md for the T13 wheel test. DEFAULT_SCAN_LIMITS / MAX_SCAN_LIMITS / MAX_PROMPT_BYTES=65536 / the timeout and poll constants / the closed ExecutionTier all match design section 6 exactly, and test_default_constants_match_design asserts them.",
+      "ControlFrame payload validation checks key presence only (contracts.py:1500-1514); apart from cancel.signal in (2,15), the values documented in PROTOCOL_V1_DESCRIPTOR (phase in setup|discovery|execution|finalization, runner-facts field types) are not enforced on construct or decode. T7 must not assume the shared decoder validated them. Non-blocking at this barrier, but worth closing while the contract is open.",
+      "Capability.limitations is the only collection in contracts.py accepted without element type-checking (:321 uses _check_tuple with no elem), yet _prepared_dict (:1994) calls _reason_dict on each entry and would raise AttributeError on a dict. Cheap consistency fix.",
+      "storage.open_database leaks the sqlite3 connection on two failure paths: _fail() raises Problem, which is not an sqlite3.Error, so the `except sqlite3.Error` handler at :109-115 never runs for the 'reports no page size' (:98-99) and 'rejected safe pragmas' (:105-107) branches and conn is left open until GC. Also, the read-only URI at :77-78 interpolates the absolute path into `file:{path}?mode=ro` without URI-escaping, so an account home containing '?' or '#' would misparse.",
+      "create_exclusive maps every non-ELOOP OSError to Problem('unsafe-path', 'cannot create file ...') (files.py:321-324), so ENOSPC, EACCES and EROFS are all reported as path-safety violations. Minor error-truth erosion in a shared primitive.",
+      ".gitignore gained .venv/, .pytest_cache/ and .pipeline/local/ but not *.egg-info/ or graphify-out/, and both are currently present as untracked directories in this worktree. T0 owns .gitignore for local artifact/env entries; adding the two entries would stop a wave-1 worker from committing build artifacts.",
+      "The bootstrap writes `root = <git common dir parent>` (the original repo /home/ingmar/code/tools/ptest) into the generated legacy config, not the task worktree. The retained root-scoped.log shows the legacy dispatcher nevertheless ran with rootdir=task-0, so scoping is correct in practice, but it depends on legacy worktree handling rather than on the config value. Also, `if '--full' in argv` matches the token anywhere in the argument list.",
+      "Not reopened, per the brief: the approved design choices themselves, the retention of the root legacy launcher and cloud code until T13, the deliberate `raise AssertionError('unreachable')` narrowing idiom, and the two additive reason codes (already-exists, invalid-bound), which are consistent with design section 6's 'New stable codes are additive'."
+    ],
+    "reviewed_files": [
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/files.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/contracts.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/storage.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/__init__.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/adapters/__init__.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/src/ptest/runtime/__init__.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/scripts/ptest-bootstrap",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/scripts/export-schemas.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/tests/ng/conftest.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/tests/ng/support.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/tests/ng/test_contracts.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/tests/ng/test_files.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/tests/ng/test_storage.py",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/pyproject.toml",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/uv.lock",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.gitignore",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/out/task-0.json",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/root-scoped.log",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/green-final.log",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/task-0/.pipeline/local/green-final2.log",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/out/task-0-review.diff",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/out/task-0-root-checks.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/out/task-0-inflight-observations.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/briefs/task-0-review.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/briefs/task-review-common.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/briefs/task-0-brief.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/context.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/progress.md",
+      "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/docs/designs/2026-09-17-ptest-ng-design.md",
+      "/home/ingmar/.agents/skills/audit-spec/SKILL.md"
+    ]
+  }
+}

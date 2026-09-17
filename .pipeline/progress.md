@@ -244,3 +244,14 @@
 - Mechanical gate passed but root observed potential acceptance gaps; independent
   Opus Task0 audit receives exact base/head diff, root evidence, report and
   provisional notes. No wave1 dispatch until required findings are closed.
+
+- Opus Task0 audit completed44turns, exit0, primary claude-opus-5/high, rejected:
+  T0-1 path vocabulary/macOS blocker; T0-2 successful-walk FD leak; T0-3 wrong
+  serialized run mode and vacuous privacy test; T0-4 incomplete frozen public
+  subrecords; T0-5 untyped nesting crashes; T0-6 raw exception text exposure;
+  T0-7 suspected default helper export-parent failure. Full structured report
+  saved as task-0-review-opus.json. One unavailable Bash call was read-only and
+  rejected; no reviewer shell/test/file mutation occurred.
+- Muse repair1 receives all seven plus closely related owned protocol/storage/
+  artifact/evidence notes. Regression-first, same task worktree/model/effort,
+  patch-only tools. No design reopening, full suite, or wave1 dispatch yet.

@@ -3,7 +3,8 @@
 Current phase (2026-09-17): user-approved product specification and Astra design
 have passed Opus focused re-review (approved_with_notes, no blocking findings).
 Astra clarified the non-blocking shared-contract notes in a001145. Muse Task0
-is authorized; the approved parallel implementation/audit sequence follows its
+first submission c545671 passed49 scoped tests but Opus rejected seven required
+acceptance gaps. Muse repair round1 is authorized; wave1 waits for the corrected
 runnable barrier. Linux/macOS v1 scope is accepted; release,
 license, main merge, installation, and publication remain separate gates.
 
