@@ -44,3 +44,18 @@
   only Read/Glob/Grep tools. Output: .pipeline/out/spec-review-fable.json.
 - Human gate remains pending: reviewed product spec approval. The Linux/macOS
   preference question is optional; proposed default remains Linux+macOS v1.
+
+## Fable specification review — round 1
+
+- Completed with requested claude-fable-5-1/high; 23 turns, no permission denials,
+  exit 0. Raw structured result retained at .pipeline/out/spec-review-fable.json.
+- Verdict label: approved_with_notes. Required-correction array contains F1–F3,
+  so the spec gate is NOT treated as passed yet.
+- F1: admission-domain identity / nested ptest fixture deadlock.
+- F2: changed-during-run/full-gate semantics and separating outputs from inputs.
+- F3: define implementable command redaction and honest residual limitations.
+- Astra xhigh author resumed to repair/disposition the findings and actionable
+  clarification notes; no code or tests. Suggested fixes are not automatically
+  accepted when they weaken correctness (notably exempting tracked snapshots or
+  returning a misleading full-gate success on changed source).
+- Next: scoped Fable re-review of the repair, then present spec for user approval.
