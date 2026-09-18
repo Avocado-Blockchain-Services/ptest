@@ -1,7 +1,7 @@
 {
   "task": 5,
-  "status": "sol-repair2-ready-for-controller-review",
-  "commit": "NOT COMMITTED (requested)",
+  "status": "sol-repair3-ready-for-controller-review",
+  "commit": "source/tests 9676a9c; evidence committed separately",
   "scope": "Unit-tested unpromoted preparation foundation. No native runner subprocess was executed. UNAVAILABLE means consumers must not launch this as a supported profile or publish a full gate.",
   "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-5/92d24f7c-7591-4bb2-a299-a3b29791bbae.jsonl final StructuredOutput",
   "repaired": [
@@ -24,6 +24,10 @@
     {
       "id": "T5R-2",
       "change": "Full plans now reject setup-only, setup-plan, fixture/marker/cache display, help and version modes both in prepared literal argv and in the effective native option state before yielding to pytest. Existing collection and selector refusal remains."
+    },
+    {
+      "id": "T5R2-1",
+      "change": "Full-plan literal control validation now includes configured test_roots before bridge preparation, rejecting -V, --version, --co and @args.txt before pytest can execute an early exit or expand a response file; ordinary roots remain literal argv and exported scope values."
     },
     {
       "id": "notes",
@@ -110,10 +114,43 @@
       "stage": "Sol repair 2 task-file unit scope; no native_cli process executed"
     },
     {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'full_preparation_refuses_control_test_roots' --tb=short --durations=10",
+      "exit_code": 1,
+      "output": "4 failed in 0.57s",
+      "raw_log": ".pipeline/local/task-5-sol-repair3-red.log",
+      "stage": "Sol repair 3 RED: each hostile full-plan test root bypassed preparation before the adapter fix"
+    },
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'full_preparation_refuses_control_test_roots' --tb=short --durations=10",
+      "exit_code": 0,
+      "output": "4 passed in 0.50s",
+      "raw_log": ".pipeline/local/task-5-sol-repair3-green.log",
+      "stage": "Sol repair 3 GREEN: each hostile full-plan test root is refused at preparation"
+    },
+    {
       "command": "graphify update .",
       "exit_code": 0,
       "output": "Code graph updated: 3429 nodes, 6500 edges, 237 communities.",
       "warning": "implementation.json, review.json and protocol-v1.json produced zero AST nodes. AST-only update; no semantic extraction or external model call."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k 'not native_cli' --tb=short --durations=10",
+      "exit_code": 0,
+      "output": "147 passed, 22 deselected in 0.23s",
+      "stage": "Sol repair 3 required Task5 unit scope; native_cli remained excluded and no native runner subprocess executed"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "output": "no output",
+      "stage": "Sol repair 3 source/test diff check"
+    },
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "output": "[graphify watch] Rebuilt: 3435 nodes, 6512 edges, 241 communities",
+      "warning": "Three JSON descriptors produced zero AST nodes; AST-only update, no semantic extraction or external model call.",
+      "stage": "Sol repair 3 post-source-change graph refresh"
     }
   ],
   "dependency_metadata_resolution": {
@@ -152,7 +189,7 @@
     "dependency_advisory": "No advisory scan in this repair; uv lock resolution is not a vulnerability scan.",
     "fuzz": "No property/fuzz dependency or gate present; parametrized hostile inputs tested without adding dependencies."
   },
-  "cleanup": "Removed the obsolete string-only gateway assertion in favor of the real generated XSpec boundary, closed -f/-d short and long control gaps, and kept shared contracts/registry/CLI/scheduler untouched. Existing unrelated untracked repair/review briefs were preserved.",
+  "cleanup": "Removed the obsolete string-only gateway assertion in favor of the real generated XSpec boundary, closed -f/-d short and long control gaps, included full-plan test_roots in the literal control scan, and kept shared contracts/registry/CLI/scheduler untouched. Existing unrelated untracked repair/review briefs were preserved.",
   "owned_files": [
     "src/ptest/adapters/pytest.py",
     "src/ptest/runtime/pytest_bridge.py",
