@@ -1,6 +1,6 @@
 {
   "task": "task-12-astra-amendment",
-  "status": "design-amendment-ready-for-review",
+  "status": "design-amendment-review-repair-ready",
   "author": "architect-agent (Astra)",
   "created": "2026-09-18",
   "base": "71fb7399a49f34cd27c5737fe375a461988fc001",
@@ -8,6 +8,19 @@
   "branch": "cx-ng-task12-design",
   "documentation_only": true,
   "task_12_implementation_complete": false,
+  "review_repair": {
+    "reviewer": "Opus",
+    "reported_high_blockers": 0,
+    "repair_base": "854e6b34e155bcf571494361b619dd8a624cf0a8",
+    "addressed": [
+      "First-gate invalidation stops without replanning under the same grant; exact ordinary, shadow and probe outcomes are frozen",
+      "Native shadow S1 uses complete authenticated test failure exit 1; arbitrary exit 23 remains guard-level only",
+      "Guard observes preceding-phase quiescence/uncertainty before emitting ready",
+      "Setup frames use phase setup and attempt_id a001, separately from execution a001",
+      "Focused reproduction explicitly supersedes design section 9: ordinary caller-requested scoped evidence, no built-in replay/classifier",
+      "Four-file sensitivity/recovery uses full_ratio 0.75; separate equality case at 0.50 widens to full"
+    ]
+  },
   "owned_files": [
     "docs/designs/2026-09-18-ptest-ng-task12-amendment.md",
     "docs/plans/2026-09-17-ptest-ng.md",
@@ -44,11 +57,21 @@
       "authentication": ["run_id", "grant_nonce", "grant_generation", "attempt_id", "one_use_gate_token"],
       "decision_timeout_s": 30,
       "frame_transfer_timeout_s": 2,
+      "setup_identity": {"phase": "setup", "attempt_id": "a001", "consumes_execution_entry": false},
+      "before_ready": "Guard reaps direct child and observes no live non-guard group member or live/unknown recorded escape; uncertainty closes spawning",
       "gates": "Every execution attempt; no ungated fallback; EOF, stop, cancellation, timeout or invalid frames close subsequent spawning"
+    },
+    "first_gate_invalidation": {
+      "same_grant_replan": false,
+      "ordinary_and_probe": "Incomplete 70, ptest origin, changed-during-run for observed change or unknown-input for lost required identity",
+      "shadow": "Not-run 2, ptest origin, unsupported-capability plus changed-during-run or unknown-input",
+      "execution_attempts_started": 0,
+      "replan": "New caller invocation and fresh admission; automatic readmission is outside Task 12"
     },
     "shadow": {
       "requires": "Qualified advanced first-class profile and genuine nonempty strict selected plan with compatible complete baseline",
       "ordinary_selected_failure": "Full still executes; first nonzero remains",
+      "native_s1": "Complete authenticated selected native test failure exit 1, then full exit 0 or 1, final exit 1",
       "attempt_timeout_s": null,
       "compound_timeout_s": 600,
       "changed_grammar": "--shadow --changed is valid automatic grammar",
@@ -97,5 +120,5 @@
     "commit_scope": "Only the three declared documentation/artifact files; supplied untracked brief remains untouched"
   },
   "unresolved_product_ambiguities": [],
-  "next_gate": "Existing Opus design review before implementation consumes the new shared contracts"
+  "next_gate": "Controller verifies the required Opus documentation repairs before implementation consumes the shared contracts"
 }
