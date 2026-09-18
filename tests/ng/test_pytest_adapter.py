@@ -511,21 +511,19 @@ def test_native_fixture_is_resolvable_with_isolated_locked_dependencies(case, ve
 
 
 @pytest.mark.parametrize("version", ["8.4.2", "9.0.3", "9.1.0", "9.1.1"])
-@pytest.mark.parametrize("mode", [(), ("--full",)], ids=["automatic", "full"])
-@pytest.mark.parametrize("failure", [False, True], ids=["pass", "failure"])
-def test_native_cli_basic_serial_preserves_result_without_baseline(case, version, mode, failure):
+@pytest.mark.parametrize("mode", [(), ("--full",), ("--", "tests")],
+                         ids=["automatic", "full", "scoped-setup"])
+def test_native_cli_deferred_modes_and_setup_refuse_before_dependencies(case, version, mode):
+    # Full/native failure acceptance remains pending in fixtures/pytest/README.md.
+    # Task 11D executes only already-provisioned scoped projects.
     domain, root = _native_project(case, version)
-    result = case.invoke(domain, root, *mode,
-                         env={"FIXTURE_FAILURE": "1" if failure else "0"}, timeout=60)
-    assert result.code == (1 if failure else 0), result.stderr
-    assert b"native-output:quoted [x];$HOME" in result.stdout
-    assert (root / "tests-ran").read_text() == "yes"
-    assert result.result is not None
-    payload = result.result["data"]
-    assert payload["runner_exit_code"] == (1 if failure else 0)
-    assert payload["granted_workers"] == 1
-    assert payload["plan"]["execution"] == "full"
-    assert payload["baseline_published"] is False
+    result = case.invoke(domain, root, *mode, timeout=10)
+    assert result.code == 2, result.stderr
+    assert b"unsupported-capability" in result.stderr
+    assert not (root / "tests-ran").exists()
+    assert not (root / ".venv").exists()
+    assert not domain.ledger.exists()
+    assert result.result is None
 
 
 @pytest.mark.parametrize("source,args", [
@@ -533,7 +531,7 @@ def test_native_cli_basic_serial_preserves_result_without_baseline(case, version
     ("argv", ("-qn4",)), ("argv", ("--tx=popen",)),
     ("argv", ("--px=popen",)), ("argv", ("@native-args.txt",)),
 ])
-def test_native_cli_hostile_controls_do_not_execute_tests(case, source, args):
+def test_native_cli_deferred_full_cannot_bypass_refusal_with_native_controls(case, source, args):
     domain, root = _native_project(case, "9.1.1")
     env = {}
     if source == "ini":
@@ -544,7 +542,9 @@ def test_native_cli_hostile_controls_do_not_execute_tests(case, source, args):
         (root / "native-args.txt").write_text("-n\n4\n")
     native = ("--", *args) if source == "argv" else ()
     result = case.invoke(domain, root, "--full", *native, env=env, timeout=60)
-    assert result.code != 0
+    assert result.code == 2
     assert not (root / "tests-ran").exists()
-    assert b"native-config-invalid" in result.stderr
+    assert (b"invalid-config" if source == "argv" else b"unsupported-capability") in result.stderr
+    assert not (root / ".venv").exists()
+    assert not domain.ledger.exists()
     assert b"INTERNALERROR" not in result.stderr

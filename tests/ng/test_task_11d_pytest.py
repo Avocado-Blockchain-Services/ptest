@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from ptest import contracts as C, files, operations
+from ptest import contracts as C, operations
 from ptest.adapters.pytest import prepare
 from ptest.runtime import pytest_bridge
 
@@ -80,69 +78,6 @@ def test_pytest_setup_is_refused_before_admission(case, monkeypatch):
 
     with pytest.raises(C.Problem, match="unsupported-capability"):
         operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
-
-
-def test_scoped_execute_binds_and_consumes_exact_private_report(case, monkeypatch):
-    domain = case.domain()
-    root = case.project(domain, kind="pytest")
-    config = C.Config(
-        runner=C.RunnerConfig(
-            kind=C.RunnerKind.PYTEST, launcher=("python",),
-            args=(), full_args=(), test_roots=("tests",), workers=8,
-        ),
-        setup=None, resources=C.ResourceConfig(),
-        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
-        project_id="ab" * 16, config_path=root / ".ptest.toml",
-    )
-    seen = {}
-
-    def fake_guard(_domain, grant, prepared, _signals):
-        del _signals
-        seen["prepared"] = prepared
-        payload = {
-            "protocol": 1, "run_id": grant.run_id, "nonce": grant.nonce,
-            "attempt_id": "a001", "runner": "pytest",
-            "observed_runtime_version": "9.1.1", "execution_mode": "scoped",
-            "effective_profile": "basic_serial", "terminal_complete": True,
-            "native_exit_code": 0, "bridge_exit_code": 0, "problem": None,
-        }
-        files.create_exclusive(
-            prepared.report_path.parent, prepared.report_path.name,
-            (json.dumps(payload, separators=(",", ":")) + "\n").encode(),
-        )
-        return 0, SimpleNamespace(
-            invalid=None, registered=True, phase=True,
-            facts={"raw_exit_code": 0, "problem": None,
-                   "report_name": prepared.report_path.name},
-            draining=True, eof=True,
-        ), 0.01
-
-    monkeypatch.setattr(operations, "_run_guard", fake_guard)
-    monkeypatch.setattr(
-        operations.scheduler, "begin_finalization",
-        lambda *_: C.QuiescenceProof(
-            run_id="0" * 32, generation=0, pgid=os.getpgrp(),
-            checked_at=0.0, group_absent=True, escaped_survivors=False,
-        ),
-    )
-    monkeypatch.setattr(operations.scheduler, "finish", lambda *_: None)
-
-    result = operations.execute(
-        domain, config,
-        C.RunRequest(mode=C.Mode.SCOPED, workers=8),
-    )
-
-    prepared = seen["prepared"]
-    assert result.status is C.Status.PASSED
-    assert result.granted_workers == 1
-    assert result.source_valid is False
-    assert result.full_gate_eligible is False
-    assert result.baseline_published is False
-    assert prepared.report_path is not None
-    assert prepared.report_path.name.startswith("native-a001-")
-    assert dict(prepared.env_updates)["PTEST_PYTEST_REPORT_PATH"] == str(prepared.report_path)
-    assert dict(prepared.env_updates)["PTEST_GRANT_NONCE"]
-    assert not prepared.report_path.exists()
 
 
 def test_pytest_scoped_preparation_is_basic_serial_and_never_adds_xdist():

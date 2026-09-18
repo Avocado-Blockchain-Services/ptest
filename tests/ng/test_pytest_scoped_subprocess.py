@@ -7,6 +7,7 @@ Unavailable tuples are skipped and remain unqualified, never installed here.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -96,6 +97,7 @@ def test_real_scoped_native_tuple_preserves_stream_exit_and_consumes_report(case
     _no_claims(data)
     _released(domain)
     assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    assert not list((domain.root / "checkouts").glob("*/history.sqlite3"))
 
 
 def test_real_scoped_literal_suffix_is_not_reparsed_or_shell_expanded(case):
@@ -135,7 +137,8 @@ def test_real_unowned_execution_hook_is_refused_before_collection(case, hook):
     assert data["status"] == "incomplete"
     assert data["exit_origin"] == "ptest"
     assert data["runner_exit_code"] == 4
-    assert any(r["code"] == "native-config-invalid" for r in data["reasons"])
+    assert any(r["code"] == "unsupported-capability" for r in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
     assert (root / "conftest-loaded").exists()  # Qualification is before collection, not conftest import.
     assert not (root / "collected").exists()
     assert not (root / "unowned-hook-ran").exists()
@@ -172,6 +175,8 @@ def alter_report():
     if mode == 'attempt': value['attempt_id'] = 'a002'
     if mode == 'exit':
         value.update(native_exit_code=23, bridge_exit_code=23, problem='native-failure')
+    if mode == 'refused':
+        value.update(terminal_complete=False, native_exit_code=None, bridge_exit_code=4, problem='bridge-refused')
     if mode == 'save': Path('previous-report.json').write_text(json.dumps(value))
     if mode == 'replay': value = json.loads(Path('previous-report.json').read_text())
     path.write_text(json.dumps(value))
@@ -206,6 +211,19 @@ def test_real_report_from_previous_grant_cannot_be_replayed(case):
     assert _data(second)["status"] == "incomplete"
     assert any(r["code"] == "report-invalid" for r in _data(second)["reasons"])
     _released(domain, 2)
+
+
+def test_real_disagreeing_refusal_report_keeps_observed_native_exit_origin(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=_TAMPER)
+    result = case.invoke(domain, root, "--", "tests", timeout=10,
+                         env={"REPORT_FAULT": "refused", "FIXTURE_FAILURE": "1"})
+    data = _data(result)
+    assert result.code == data["runner_exit_code"] == 1
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "runner"
+    assert any(reason["code"] == "report-invalid" for reason in data["reasons"])
+    _released(domain)
 
 
 def _wait_for(predicate, timeout=5):
@@ -295,7 +313,8 @@ def test_real_cancellation_reaps_guard_and_releases_checkout(case):
         cancel.result(timeout=5)
     data = C.serialize_run_result(result)
     assert result.exit_code == result.runner_exit_code == 2
-    assert data["status"] != "passed"
+    assert data["status"] == "failed"  # Genuine pytest KeyboardInterrupt exit 2 wins.
+    assert data["exit_origin"] == "runner"
     _no_claims(data)
     _released(domain)
     (root / "first-release").touch()
@@ -322,4 +341,183 @@ def test_real_report_is_consumed_after_quiescence_and_only_once(case, monkeypatc
     assert not binding.path.exists()
     with pytest.raises(C.Problem):
         consume(binding)
+    _released(domain)
+
+
+def test_real_early_bridge_refusal_is_not_a_native_test_failure(case, monkeypatch):
+    domain = case.domain()
+    root = _project(case, domain)
+    launch = operations._launch_guard
+    def invalid_grant(domain, grant, prepared):
+        prepared = replace(prepared, env_updates=prepared.env_updates + (("PTEST_GRANT_WORKERS", "0"),))
+        return launch(domain, grant, prepared)
+    monkeypatch.setattr(operations, "_launch_guard", invalid_grant)
+    result = operations.execute(domain, config_api.resolve_config(root).config,
+                                C.RunRequest(mode=C.Mode.SCOPED, argv=("tests",)))
+    assert result.status is C.Status.INCOMPLETE
+    assert result.runner_exit_code == result.exit_code == 4
+    assert result.exit_origin == "ptest"
+    assert any(reason.code == "unsupported-capability" for reason in result.reasons)
+    assert not (root / "tests-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _released(domain)
+
+
+def test_real_guard_report_name_mismatch_is_incomplete(case, monkeypatch):
+    domain = case.domain()
+    root = _project(case, domain)
+    launch = operations._launch_guard
+    def mismatch(*args):
+        child, control, frames = launch(*args)
+        frames.expected_report_name = "native-a001-" + "0" * 32 + ".json"
+        return child, control, frames
+    monkeypatch.setattr(operations, "_launch_guard", mismatch)
+    result = operations.execute(domain, config_api.resolve_config(root).config,
+                                C.RunRequest(mode=C.Mode.SCOPED, argv=("tests",)))
+    assert result.status is C.Status.INCOMPLETE
+    assert result.exit_code == 70
+    assert any(reason.code == "protocol-mismatch" for reason in result.reasons)
+    assert result.source_valid is result.full_gate_eligible is result.baseline_published is False
+
+
+def test_real_late_execution_plugin_is_refused_before_collection(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "from pathlib import Path\n"
+        "class Executor:\n"
+        "    def pytest_runtestloop(self):\n        Path('executor-ran').touch()\n        return True\n"
+        "def pytest_configure(config):\n    config.pluginmanager.register(Executor(), 'late-executor')\n"
+    ))
+    (root / "tests/test_native.py").write_text("from pathlib import Path\nPath('collected').touch()\ndef test_one(): pass\n")
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert _data(result)["status"] == "incomplete"
+    assert not (root / "collected").exists()
+    assert not (root / "executor-ran").exists()
+    _released(domain)
+
+
+def test_real_repeat_plugin_cannot_bypass_gate_without_execution_hooks(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "from pathlib import Path\n"
+        "class Repeat:\n"
+        "    def pytest_generate_tests(self, metafunc):\n        Path('repeat-ran').touch()\n"
+        "def pytest_configure(config):\n    config.pluginmanager.register(Repeat(), 'repeat')\n"
+    ))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert _data(result)["status"] == "incomplete"
+    assert not (root / "repeat-ran").exists()
+    assert not (root / "tests-ran").exists()
+    _released(domain)
+
+
+def test_real_execution_hook_alias_cannot_bypass_plugin_qualification(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\nfrom pathlib import Path\n"
+        "@pytest.hookimpl(specname='pytest_runtestloop')\n"
+        "def pytest_aliased_executor():\n    Path('alias-ran').touch()\n    return True\n"
+    ))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert _data(result)["status"] == "incomplete"
+    assert not (root / "alias-ran").exists()
+    assert not (root / "tests-ran").exists()
+    _released(domain)
+
+
+def test_real_custom_reporter_and_cleanup_hooks_are_preserved(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "from pathlib import Path\n"
+        "def pytest_terminal_summary(terminalreporter):\n    terminalreporter.write_line('custom-report-preserved')\n"
+        "def pytest_unconfigure(config):\n    Path('cleanup-ran').touch()\n"
+    ))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert result.code == 0, result.stderr.decode()
+    assert b"custom-report-preserved" in result.stdout
+    assert (root / "cleanup-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _released(domain)
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=["zero", "nonzero"])
+def test_real_report_write_collision_is_incomplete_without_overwrite(case, failure):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import os\nfrom pathlib import Path\n"
+        "path = Path(os.environ['PTEST_PYTEST_REPORT_PATH'])\n"
+        "path.write_text('existing report sentinel')\npath.chmod(0o600)\n"
+    ))
+    result = case.invoke(domain, root, "--", "tests", timeout=10,
+                         env={"FIXTURE_FAILURE": str(int(failure))})
+    assert result.code == (1 if failure else 70)
+    assert _data(result)["status"] == "incomplete"
+    assert _data(result)["runner_exit_code"] == int(failure)
+    paths = list((domain.root / "checkouts").glob("*/reports/*"))
+    assert len(paths) == 1
+    assert paths[0].read_text() == "existing report sentinel"
+    _released(domain)
+
+
+def test_real_source_change_retains_reason_without_source_valid_claim(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "from pathlib import Path\n"
+        "def pytest_sessionfinish(session, exitstatus):\n    Path('tracked-input.txt').write_text('changed')\n"
+    ))
+    (root / "tracked-input.txt").write_text("original")
+    (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
+    for args in (("init",), ("add", "."), ("commit", "-m", "fixture")):
+        subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", *args],
+                       cwd=root, env=env, capture_output=True, check=True, timeout=5)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert result.code == 0
+    assert any(reason["code"] == "changed-during-run" for reason in data["reasons"])
+    assert (root / "tracked-input.txt").read_text() == "changed"
+    _no_claims(data)
+    _released(domain)
+
+
+def test_real_xdist_plugin_is_refused_when_preprovisioned(case):
+    interpreter = os.environ.get("PTEST_TEST_XDIST_PYTHON")
+    if interpreter is None:
+        pytest.skip("unqualified: no preprovisioned xdist interpreter supplied")
+    probe = subprocess.run([interpreter, "-c", "import pytest, xdist; print(pytest.__version__)"],
+                           check=True, capture_output=True, text=True, timeout=5)
+    assert probe.stdout.strip() in VERSIONS
+    domain = case.domain()
+    root = _project(case, domain)
+    path = root / ".ptest.toml"
+    path.write_text(path.read_text().replace(json.dumps([_interpreter()]), json.dumps([interpreter])))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert _data(result)["status"] == "incomplete"
+    assert _data(result)["exit_origin"] == "ptest"
+    assert b"xdist is not owned" in result.stderr
+    assert not (root / "tests-ran").exists()
+    _released(domain)
+
+
+def test_real_unsupported_runtime_is_refused_when_preprovisioned(case):
+    interpreter = os.environ.get("PTEST_TEST_UNSUPPORTED_PYTEST_PYTHON")
+    if interpreter is None:
+        pytest.skip("unqualified: no preprovisioned unsupported pytest interpreter supplied")
+    probe = subprocess.run([interpreter, "-c", "import pytest; print(pytest.__version__)"],
+                           check=True, capture_output=True, text=True, timeout=5)
+    assert probe.stdout.strip() not in VERSIONS
+    domain = case.domain()
+    root = _project(case, domain)
+    path = root / ".ptest.toml"
+    path.write_text(path.read_text().replace(json.dumps([_interpreter()]), json.dumps([interpreter])))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert b"unsupported-capability" in result.stderr
+    assert not (root / "tests-ran").exists()
     _released(domain)
