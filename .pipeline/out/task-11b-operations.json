@@ -7,7 +7,8 @@
     "493c023",
     "9e2b48f",
     "16cf065",
-    "0b36be4"
+    "0b36be4",
+    "331b462"
   ],
   "red_green": [
     {
@@ -61,9 +62,14 @@
       "evidence": "3 passed, 64 deselected in 0.06s"
     },
     {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_simple_adapters.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py --tb=short --durations=15 (pre-fix RED)",
+      "status": "failed",
+      "evidence": "3 failed, 582 passed in 6.22s: literal-tail/no-config CLI cases received initialization-required before capability classification; no operation/scheduler/adapter failures"
+    },
+    {
       "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_simple_adapters.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py --tb=short --durations=15",
       "status": "passed",
-      "evidence": "585 passed in 5.83s; slowest test 0.38s"
+      "evidence": "585 passed in 6.17s after final invalid-config precedence refinement; slowest test 0.41s"
     }
   ],
   "implemented": [
