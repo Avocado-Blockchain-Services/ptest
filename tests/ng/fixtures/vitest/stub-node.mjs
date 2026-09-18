@@ -6,17 +6,28 @@ import { resolve } from 'node:path'
 const scenario = JSON.parse(process.env.PTEST_STUB_CASE ?? '{}')
 const trace = (event, data = {}) => appendFileSync(process.env.PTEST_STUB_TRACE,
   `${JSON.stringify({ event, ...data })}\n`)
+let parsedFilters
 
 export function parseCLI(argv) {
   trace('parse', { argv: [...argv] })
   if (argv[0] !== 'vitest') throw new Error('Expected "vitest" as the first argument')
+  // Model only the options used by this boundary suite. A value option consumes
+  // its next token, including a scoped file when its value was omitted.
+  const positional = []
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === '--reporter') { i++; continue }
+    if (argv[i] === '--') { positional.push(...argv.slice(i + 1)); break }
+    if (!argv[i].startsWith('-')) positional.push(argv[i])
+  }
   argv[0] = '/index.js'
   argv.unshift('node')
-  return { options: scenario.options ?? {}, filter: scenario.filters ?? [] }
+  parsedFilters = Object.hasOwn(scenario, 'filters') ? scenario.filters : positional
+  return { options: scenario.options ?? {}, filter: parsedFilters }
 }
 
 export async function createVitest(mode, options, overrides) {
   trace('create', { mode, options })
+  if (scenario.mutateFiltersAtCreate) parsedFilters.length = 0
   // Vitest 3.2.6 dist/chunks/coverage.DfSpMS-b.js:3517-3539,3810-3814
   // resolves api:false to this middleware-only object and adds a token.
   const resolvedDefaults = {

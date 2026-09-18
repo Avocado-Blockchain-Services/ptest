@@ -1,6 +1,7 @@
 """Preparation for the intentionally unavailable Vitest basic-serial bridge."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ptest import contracts as C
@@ -32,6 +33,23 @@ def _require_node_launcher(launcher: tuple[str, ...]) -> None:
         raise _problem("native-config-invalid", "Vitest bridge requires a direct Node launcher")
 
 
+def _scoped_files_binding(files: tuple[str, ...]) -> str:
+    """Bind scope separately from native options, within the control-frame bound."""
+    if not files or len(files) > 256 or any(
+        not isinstance(file, str) or not file or file.startswith("-") or "\x00" in file
+        for file in files
+    ):
+        raise _problem("native-config-invalid", "Vitest scoped files must be nonempty literal paths")
+    binding = json.dumps(files, ensure_ascii=False, separators=(",", ":"))
+    try:
+        size = len(binding.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _problem("native-config-invalid", "Vitest scoped files require valid Unicode") from None
+    if size > C.CONTROL_FRAME_MAX_BYTES:
+        raise _problem("native-config-invalid", "Vitest scoped files exceed the binding size bound")
+    return binding
+
+
 def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             attempt: C.AttemptIdentity) -> C.PreparedRun:
     """Prepare a literal, one-slot scoped request; execution remains unavailable.
@@ -45,8 +63,7 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         raise TypeError("prepare requires Config, Plan, Grant and AttemptIdentity")
     if plan.mode is not C.Mode.SCOPED or plan.execution != "scoped":
         raise _problem("unsupported-capability", "Vitest foundation only prepares explicit scoped execution")
-    if not plan.files:
-        raise _problem("native-config-invalid", "Vitest scoped preparation requires requested files")
+    scoped_files = _scoped_files_binding(plan.files)
     if grant.run_id != attempt.run_id or grant.slots != 1 or attempt.worker_count != 1:
         raise _problem("admission-invalid", "Vitest basic-serial attempt requires one admitted slot")
     _require_node_launcher(config.runner.launcher)
@@ -59,6 +76,7 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             ("PTEST_RUN_ID", grant.run_id), ("PTEST_GRANT_NONCE", grant.nonce),
             ("PTEST_VITEST_ATTEMPT", attempt.attempt_id),
             ("PTEST_VITEST_EXECUTION", "scoped"), ("PTEST_VITEST_PROFILE", "basic_serial"),
+            ("PTEST_VITEST_SCOPED_FILES", scoped_files),
             ("PTEST_VITEST_WORKERS", "1"), ("VITEST_MAX_FORKS", "1"),
             ("VITEST_MIN_FORKS", "1"), ("VITEST_MAX_THREADS", "1"), ("VITEST_MIN_THREADS", "1"),
         ),

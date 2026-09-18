@@ -1,0 +1,63 @@
+{
+  "task": "11E-vitest-basic-serial-scope-repair",
+  "status": "repaired-prepared-but-unavailable-awaiting-opus-review",
+  "base_commit": "d4619f7",
+  "scope": [
+    "src/ptest/adapters/vitest.py",
+    "src/ptest/runtime/vitest_bridge.mjs",
+    "tests/ng/test_vitest_adapter.py",
+    "tests/ng/fixtures/vitest/stub-node.mjs",
+    "tests/ng/fixtures/vitest/NATIVE_MATRIX.md",
+    ".pipeline/out/task-11e-astra-scope-repair.json"
+  ],
+  "findings": {
+    "R1": "Repaired with an independently serialized PTEST_VITEST_SCOPED_FILES binding, immutable bridge scope, exact argv-suffix and parser-filter equality, and refusal before createVitest for parser scope loss. start receives the frozen binding, never the mutable parser result.",
+    "R3": "Raw config/root/dir/changed/related/standalone/shard controls, short config/root aliases, dotted API controls, parsed options, and root/project resolved controls are checked. Every API object refuses, including middleware-only objects.",
+    "production_wiring": "Deferred and unchanged: selection.choose_plan and operations._plan construct empty Plan.files for scoped execution; operations._effective_config appends request argv to runner.args. A later lifecycle task must bind the scoped suffix separately before this foundation can be wired into execution."
+  },
+  "contracts": {
+    "bound_scope": "1 through 256 strings; JSON UTF-8 bytes bounded by the shared 65536-byte control-frame maximum; existing PreparedRun argv bounds still apply. Reject empty strings, leading hyphens, NUL, and invalid Unicode; preserve safe literals including Unicode and shell metacharacters.",
+    "parser": "A nonempty filter must equal the bound suffix in length, order, and string values before createVitest. Additional configured positional filters and value options swallowing files refuse.",
+    "refusal": "For a valid report allocation and identity: exact NativeTerminalReport fields, terminal_complete=false, native_exit_code=null, bridge_exit_code=70, problem=bridge-refused. Scope validation failures never start or run tests; binding failures precede project loading and parser mismatch precedes createVitest.",
+    "capability": "Still UNAVAILABLE; no remote, full, selected, setup, or native qualification behavior was added."
+  },
+  "red": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/tests/ng/test_vitest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/tests/ng/test_reports.py -q --tb=short --durations=20",
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra",
+    "exit_code": 1,
+    "output": "73 failed, 115 passed in 6.37s",
+    "evidence": "Only tests and the API double had changed. Empty, swallowed, extra, reordered, and mismatched parser filters returned success against old production; mutation during create produced start([]). The new binding was absent, unsafe file values were admitted, and scope/API controls escaped the requested checks.",
+    "already_guarded_cases": "The empty-string Plan constructor, non-array parser filters, and some non-middleware resolved API forms already refused; these passed as retained regression evidence and are not claimed as newly observed RED."
+  },
+  "green": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/tests/ng/test_vitest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/tests/ng/test_reports.py -q --tb=short --durations=20",
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra",
+    "exit_code": 0,
+    "output": "188 passed in 5.00s",
+    "slowest_test_seconds": 0.07,
+    "controller": "ptest-bootstrap, local backend, one worker, locked/no-sync existing environment; no dependency installation"
+  },
+  "secure_by_spec": {
+    "identity": "Existing run/nonce/attempt/report ownership contracts retained; no new credentials or identity flows.",
+    "authorization": "The admitted scoped suffix is the execution authority. Parser results cannot broaden or replace it.",
+    "tenancy": "No tenant model is present. Existing per-attempt private report binding remains unchanged; no shared fixture dependency trees were installed or edited.",
+    "input": "Negative tests cover malformed/missing/wrong-type/oversized JSON, unsafe strings, suffix mismatch, filter mismatch, and native control inputs.",
+    "state": "The bound list is frozen and independent from parseCLI results, including mutation during createVitest. Refusals cannot become terminal success.",
+    "exposure": "Exact refusal report fields asserted; raw arguments, paths, and native exception details do not enter the terminal schema.",
+    "availability": "Binding count and byte bounds are enforced before project import; an empty parser result cannot expand a scoped request to every test.",
+    "dependencies": "Only the local API double was exercised. Native Vitest/config/hooks remain trusted local code, not a sandbox or qualified dependency tuple."
+  },
+  "checks": {
+    "syntax": "node --check passed for the bridge and stub-node.mjs.",
+    "diff": "git diff --check passed.",
+    "graph": "graphify update . exited 0: 4496 nodes, 9863 edges, 296 communities; AST-only, no model extraction. Seven source files produced zero nodes, including schema/protocol/matrix JSON; the tool reports them absent from the graph. Labels/wiki were not used as fresh evidence.",
+    "gate_inventory": "No applicable checked-in secret/static/dependency scanner configuration found in the scoped repository inventory. No scanner or dependency was installed. The regression matrix supplies the applicable input/property evidence."
+  },
+  "limitations": [
+    "No real Vitest tuple was installed, run, or qualified. The handwritten double parses only options needed by this boundary suite.",
+    "Successful double scenarios explicitly use api:false; recorded Vitest 3.2.x defaults include a middleware API object and are refused. Native resolved config/root fields also remain subject to the narrow guard.",
+    "Executor report allocation/consumption, guard lifecycle, cancellation/reload, native hook side effects, and production integration remain deferred.",
+    "No full suite, remote/API/TUI validation, fixture dependency installation, push, deployment, or integration was performed, as instructed.",
+    "Independent Claude Opus high re-audit remains pending."
+  ]
+}

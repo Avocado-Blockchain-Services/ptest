@@ -6,7 +6,8 @@ import { pathToFileURL } from 'node:url'
 
 const protocol = JSON.parse(readFileSync(new URL('./protocol-v1.json', import.meta.url), 'utf8'))
 const WORKER_ENV = ['VITEST_MIN_THREADS', 'VITEST_MAX_THREADS', 'VITEST_MIN_FORKS', 'VITEST_MAX_FORKS']
-const BLOCKED = new Set(['pool', 'workspace', 'project', 'watch', 'browser', 'api', 'typecheck', 'benchmark', 'runner', 'sequencer', 'maxworkers', 'minworkers', 'maxconcurrency', 'fileparallelism'])
+const SCOPE_CONTROLS = ['config', 'configFile', 'root', 'dir', 'changed', 'related', 'standalone', 'shard']
+const BLOCKED = new Set(['pool', 'workspace', 'project', 'watch', 'browser', 'api', 'typecheck', 'benchmark', 'runner', 'sequencer', 'maxworkers', 'minworkers', 'maxconcurrency', 'fileparallelism', ...SCOPE_CONTROLS.map(name => name.toLowerCase())])
 
 function refused(message) { throw new Error(`bridge-refused: ${message}`) }
 
@@ -54,9 +55,26 @@ function argumentsAfterDelimiter() {
   return process.argv.slice(delimiter + 1)
 }
 
+function sameFiles(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length
+    && expected.every((file, index) => actual[index] === file)
+}
+
+function scopedFiles(argv) {
+  const raw = process.env.PTEST_VITEST_SCOPED_FILES
+  if (!raw || Buffer.byteLength(raw, 'utf8') > protocol.control_frame.max_bytes) refused('invalid scoped files binding')
+  const files = JSON.parse(raw)
+  if (!Array.isArray(files) || files.length === 0 || files.length > 256
+      || files.some(file => typeof file !== 'string' || !file || file.startsWith('-')
+        || file.includes('\0') || /[\uD800-\uDFFF]/u.test(file))) refused('invalid scoped files binding')
+  if (!sameFiles(argv.slice(-files.length), files)) refused('scoped files differ from argv suffix')
+  return Object.freeze(files)
+}
+
 function controlName(token) {
+  if (/^-[cr]/.test(token)) return token[1] === 'c' ? 'config' : 'root'
   if (!token.startsWith('--')) return null
-  return token.slice(2).split('=', 1)[0].replace(/^no-/, '').replaceAll('-', '').toLowerCase()
+  return token.slice(2).split(/[=.]/, 1)[0].replace(/^no-/, '').replaceAll('-', '').toLowerCase()
 }
 
 function rejectControls(argv) {
@@ -66,13 +84,19 @@ function rejectControls(argv) {
   }
 }
 
+function rejectScopeControls(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || SCOPE_CONTROLS.some(name => value[name] !== undefined && value[name] !== false)
+      || (value.api !== undefined && value.api !== false)) refused('unowned Vitest scope or API control')
+}
+
 function validateResolved(value) {
+  rejectScopeControls(value)
   if (value.workspace || (Array.isArray(value.projects) && value.projects.length)
       || value.watch || value.benchmark || value.runner || value.sequencer
       || (Array.isArray(value.poolMatchGlobs) && value.poolMatchGlobs.length)
       || (value.browser && value.browser.enabled !== false)
-      || (value.typecheck && value.typecheck.enabled !== false)
-      || (value.api && (value.api.middlewareMode !== true || value.api.port !== undefined))) refused('unowned resolved Vitest control')
+      || (value.typecheck && value.typecheck.enabled !== false)) refused('unowned resolved Vitest control')
   if (value.pool !== 'forks' || value.maxWorkers !== 1 || value.minWorkers !== 1
       || value.maxConcurrency !== 1 || value.fileParallelism !== false
       || value.poolOptions?.forks?.minForks !== 1 || value.poolOptions?.forks?.maxForks !== 1) refused('resolved serial controls differ')
@@ -96,11 +120,13 @@ async function main() {
     fd = openReport()
     if (process.env.NODE_OPTIONS || process.env.NODE_PATH) refused('unowned Node environment')
     const argv = argumentsAfterDelimiter()
+    const files = scopedFiles(argv)
     rejectControls(argv)
     const native = await loadVitest()
     nativeVersion = native.version
     const parsed = native.parseCLI(['vitest', 'run', ...argv])
-    if (!parsed || !Array.isArray(parsed.filter) || !parsed.options) refused('unsupported Vitest CLI result')
+    if (!parsed || !sameFiles(parsed.filter, files)) refused('parsed Vitest scope differs from prepared files')
+    rejectScopeControls(parsed.options)
     const owned = { ...parsed.options, watch: false, pool: 'forks', maxWorkers: 1, minWorkers: 1,
       maxConcurrency: 1, fileParallelism: false, poolOptions: { forks: { minForks: 1, maxForks: 1 } } }
     const reporter = { onFinished(files, errors) {
@@ -117,7 +143,7 @@ async function main() {
     } }
     const ctx = await native.createVitest('test', owned, { plugins: [plugin] })
     validateResolved(ctx.config)
-    await ctx.start(parsed.filter)
+    await ctx.start(files)
     await ctx.close()
     if (!complete) refused('terminal callback was not observed')
     nativeExit = nativeExit ?? Number(process.exitCode ?? 0)
