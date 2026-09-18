@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import files, platform, render, reports, scheduler, source
+from . import config as config_api, files, platform, render, reports, scheduler, source
 from .runners import adapter_for
 
 
@@ -639,6 +639,19 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command,
                     signals.number, time.monotonic() - enqueued_at))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
+        if native_pytest:
+            # The queue can outlive edits to the command, resource locks, or
+            # project identity. Never launch the previously resolved config
+            # under a grant that was obtained for different inputs.
+            try:
+                resolved = config_api.resolve_config(checkout.root)
+                if (resolved.problem is not None
+                        or resolved.config != replace(config, checkout=None)):
+                    raise _problem("changed-during-run",
+                                   "pytest configuration changed while awaiting admission")
+            except BaseException:
+                scheduler.cancel_pending(domain, ticket, owner)
+                raise
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
         if native_pytest:
@@ -777,7 +790,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             attempts=tuple(replace(item, source_valid=source_valid)
                            for item in result.attempts),
         )
-        invalidation = None if native_pytest else _source_invalidation(input_before, input_after)
+        invalidation = _source_invalidation(input_before, input_after)
         if invalidation is not None:
             if plan.execution == "full":
                 result = _incomplete(result, invalidation)
@@ -797,23 +810,27 @@ def execute(domain: C.DomainPaths, config: C.Config,
             try:
                 native_report = reports.consume_report(report_binding)
                 consumed_report = True
-                if (not native_report.terminal_complete
-                        or native_report.native_exit_code != raw
-                        or native_report.bridge_exit_code != raw):
+                if (native_report.bridge_exit_code != raw
+                        or (native_report.terminal_complete and native_report.native_exit_code != raw)):
                     report_reason = _reason(
                         "report-invalid",
                         "native terminal report did not authenticate the native exit",
                     )
+                elif not native_report.terminal_complete:
+                    report_reason = _reason("unsupported-capability",
+                                            "pytest bridge refused execution before collection")
+                    # An authenticated bridge refusal is not a native test
+                    # failure. Retain the observed child code for diagnosis.
+                    result = replace(result, exit_origin="ptest")
             except C.Problem as problem:
                 code = (problem.code if problem.code in {
                     "capacity-exceeded", "report-invalid", "unsafe-path",
                 } else "state-unavailable")
                 report_reason = _reason(code, "native terminal report was unavailable")
             if report_reason is not None:
-                if raw == 0:
-                    result = _incomplete(result, report_reason)
-                else:
-                    result = replace(result, reasons=result.reasons + (report_reason,))
+                # Without matching terminal evidence the child code is still
+                # preserved, but cannot certify a completed native test run.
+                result = _incomplete(result, report_reason)
 
         def finalize(exported: C.RunResult) -> None:
             scheduler.finish(domain, grant, proof, C.Finalization(

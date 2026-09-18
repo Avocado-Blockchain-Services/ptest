@@ -142,9 +142,11 @@ class OwnedPlugin:
 
     def __init__(self, workers: int) -> None:
         self.workers = workers
+        self.refused = False
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
+        self.refused = True
         _refusal_marker("native-config-invalid", message)
         raise UsageError(f"native-config-invalid: {message}")
 
@@ -157,9 +159,29 @@ class OwnedPlugin:
             except (AttributeError, TypeError):
                 loaded = ()
             for name, plugin in loaded:
+                if plugin is None:  # pluggy records blocked names with a None value.
+                    continue
                 module = getattr(plugin, "__name__", "")
                 if name in {"xdist", "pytest-xdist"} or str(module).startswith("xdist"):
                     self._refuse("pytest xdist is not owned by the serial grant")
+                executors = {"forked", "parallel", "rerunfailures", "repeat", "timeout", "loop"}
+                normalized = str(name).replace("-", "_").removeprefix("pytest_")
+                package = str(module).split(".", 1)[0].removeprefix("pytest_")
+                if normalized in executors or package in executors:
+                    self._refuse("pytest execution-control plugin is not owned by the serial grant")
+            # Inspect registered hook owners, including specname aliases.
+            # Reporters and ordinary fixtures remain additive; an unqualified
+            # executor cannot bypass the serial loop even without a -n flag.
+            for hook in ("pytest_cmdline_main", "pytest_collection",
+                         "pytest_runtestloop", "pytest_runtest_protocol",
+                         "pytest_runtest_call", "pytest_pyfunc_call"):
+                for implementation in getattr(manager.hook, hook).get_hookimpls():
+                    if implementation.plugin is self:
+                        continue
+                    module = getattr(implementation.function, "__module__", "")
+                    if str(module).startswith("_pytest."):
+                        continue
+                    self._refuse("unqualified pytest execution hook is not owned by the serial grant")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
         try:
@@ -204,6 +226,11 @@ class OwnedPlugin:
     def pytest_configure(self, config: Any) -> None:
         self._validate(config, generated=True)
 
+    def pytest_collection(self, session: Any) -> Any:
+        """Check again after configure hooks, before collecting test modules."""
+        self._validate(session.config, generated=True)
+        return (yield)
+
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
         self._validate(config, generated=True)
@@ -231,15 +258,12 @@ class OwnedPlugin:
 
 def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     """Run pytest natively after validating the immutable bridge descriptor."""
-    _protocol()
-    workers = _workers()
-    _python_version()
     binding = _report_binding()
     runtime = "unknown"
     native_exit: int | None = None
     bridge_exit = 70
     complete = False
-    problem: str | None = "bridge-refused" if binding is not None else None
+    problem: str | None = None
     if argv is None:
         argv = tuple(sys.argv[1:])
     if not isinstance(argv, (list, tuple)) or not all(isinstance(item, str) for item in argv):
@@ -247,6 +271,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     # Executing this file must have the same cwd imports as `python -m pytest`.
     sys.path[:1] = [os.getcwd()]
     try:
+        _protocol()
+        workers = _workers()
+        _python_version()
         try:
             import pytest
         except ImportError:
@@ -257,26 +284,28 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         # Mark hooks only after the selected interpreter and pytest have been checked.
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_cmdline_main)
         pytest.hookimpl(tryfirst=True)(OwnedPlugin.pytest_configure)
+        pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_collection)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
-        native_exit = int(pytest.main(list(argv), plugins=[OwnedPlugin(workers)]))
+        plugin = OwnedPlugin(workers)
+        native_exit = int(pytest.main(list(argv), plugins=[plugin]))
         bridge_exit = native_exit
-        if native_exit == 4:
-            # Pytest's usage/configuration result is a bridge refusal, not a
-            # native test failure.  The child exit remains visible to guard.
+        if plugin.refused:
+            problem = "bridge-refused"
             return native_exit
         complete = True
         problem = "native-failure" if native_exit else None
         return native_exit
     except BridgeRefusal:
         bridge_exit = 4
+        problem = "bridge-refused"
         raise
     finally:
-        if binding is not None:
+        if binding is not None and (complete or problem == "bridge-refused"):
             try:
                 _write_report(binding[0], binding[1], runtime=runtime,
                               native_exit=native_exit if complete else None,
                               bridge_exit=bridge_exit, complete=complete,
-                              problem=problem if complete else "bridge-refused")
+                              problem=problem)
             except (BridgeRefusal, OSError):
                 # The executor treats an absent or malformed report as incomplete.
                 pass
