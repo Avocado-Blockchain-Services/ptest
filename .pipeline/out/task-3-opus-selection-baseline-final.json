@@ -1,0 +1,19 @@
+{
+  "task": "3-selection-baseline",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-3-selection/f71e0812-95ab-4a85-bc3f-017cc0a0073f.jsonl",
+  "reviewed_range": "Task 3 selection-baseline repair commits e60339c..7d8c091",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
+    "result": "108 passed in 3.52s"
+  },
+  "approved_repair": "e60339c",
+  "notes": [
+    "baseline_head is encoded and decoded as strict provenance in both private snapshots.",
+    "A clean, complete full run can publish a new baseline across committed deltas only when every existing eligibility gate passes.",
+    "The public serializer allowlists fields and does not expose snapshot provenance.",
+    "Task 11 remains responsible for runtime identity, post-quiescence capture and inventory validation."
+  ]
+}
