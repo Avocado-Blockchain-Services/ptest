@@ -81,7 +81,8 @@ def test_scoped_plan_preserves_literal_files_without_full_args():
 
 @pytest.mark.parametrize("unsafe", [
     ("-n", "1"), ("--numprocesses=2",), ("--tx", "popen//python"),
-    ("--px",), ("--rsyncdir", "src"),
+    ("--px",), ("--rsyncdir", "src"), ("-f",), ("--looponfail",),
+    ("-d",), ("--distload",),
 ])
 def test_runner_parallel_or_remote_controls_are_rejected_before_bridge(unsafe):
     with pytest.raises(C.Problem, match="native-config-invalid"):
@@ -192,6 +193,9 @@ def test_native_controls_cannot_bypass_preparation_through_other_sources(unsafe,
     ("-k", "one"), ("-m", "slow"), ("-qkone",), ("--deselect=tests/a.py::test_a",),
     ("--lf",), ("--last-failed",), ("--ff",), ("--sw",), ("tests/a.py::test_a",),
     ("--ignore=tests/a.py",), ("--collect-only",), ("-x",),
+    ("--setup-only",), ("--setup-plan",), ("--fixtures",),
+    ("--fixtures-per-test",), ("--markers",), ("--cache-show",),
+    ("-h",), ("--help",), ("-V",), ("--version",),
 ])
 def test_full_preparation_refuses_narrowing(args):
     with pytest.raises(C.Problem, match="native-config-invalid"):
@@ -211,7 +215,10 @@ def _native_config(**options):
     defaults = dict(numprocesses=None, maxprocesses=None, tx=[], px=[], rsyncdir=[],
                     keyword="", markexpr="", deselect=[], lf=False, failedfirst=False,
                     stepwise=False, testmon=False, maxfail=0, collectonly=False,
-                    ignore=[], ignore_glob=[], pyargs=False, looponfail=False)
+                    ignore=[], ignore_glob=[], pyargs=False, looponfail=False,
+                    setuponly=False, setupplan=False, showfixtures=False,
+                    show_fixtures_per_test=False, markers=False, cacheshow=False,
+                    help=False, version=False)
     defaults.update(options)
     return SimpleNamespace(option=SimpleNamespace(**defaults), args=["tests"],
                            getini=lambda name: [], invocation_params=SimpleNamespace(args=()))
@@ -258,7 +265,10 @@ def test_owned_wrapper_allows_xdist_generated_transports_and_preserves_native_re
 @pytest.mark.parametrize("options", [{"keyword": "one"}, {"markexpr": "slow"},
     {"deselect": ["tests/a.py::test_a"]}, {"lf": True}, {"failedfirst": True},
     {"stepwise": True}, {"testmon": True}, {"ignore": ["tests/a.py"]},
-    {"maxfail": 1}, {"collectonly": True}])
+    {"maxfail": 1}, {"collectonly": True}, {"setuponly": True},
+    {"setupplan": True}, {"showfixtures": True},
+    {"show_fixtures_per_test": True}, {"markers": True}, {"cacheshow": True},
+    {"help": True}, {"version": True}])
 def test_full_bridge_rejects_effective_native_narrowing(bridge_env, options):
     with pytest.raises(pytest.UsageError, match="native-config-invalid"):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config(**options)))
@@ -339,7 +349,7 @@ def test_missing_pytest_is_a_controlled_bridge_refusal(bridge_env, monkeypatch):
         pytest_bridge.run([])
 
 
-@pytest.mark.parametrize("unsafe", ["-ln4", "-hn4", "-Vn4"])
+@pytest.mark.parametrize("unsafe", ["-ln4", "-hn4", "-Vn4", "-fn4", "-dn4"])
 def test_other_flag_only_clusters_cannot_hide_parallel_control(unsafe):
     with pytest.raises(C.Problem, match="native-config-invalid"):
         prepare(_config(args=(unsafe,)), _plan(), _grant(), _attempt())
@@ -365,12 +375,52 @@ def test_ini_rsync_is_rejected_before_gateway_setup():
         next(pytest_bridge.OwnedPlugin(2).pytest_cmdline_main(config))
 
 
-def test_final_gateway_specs_cannot_change_after_configuration():
+class _RealShapedXSpec:
+    """Minimal execnet.XSpec shape after xdist's NodeManager rewrite."""
+
+    chdir = dont_write_bytecode = installvia = nice = python = None
+    socket = ssh = ssh_config = vagrant_ssh = via = None
+
+    def __init__(self, worker_id, **changes):
+        self._spec = "execmodel=main_thread_only//popen"
+        self.env = {}
+        self.execmodel = "main_thread_only"
+        self.popen = True
+        self.id = worker_id
+        self.__dict__.update(changes)
+
+    def __str__(self):
+        return self._spec
+
+
+def test_final_gateway_accepts_real_shaped_local_xdist_specs_for_exact_grant():
     config = _native_config(numprocesses=2, tx=["popen", "popen"])
     plugin = pytest_bridge.OwnedPlugin(2)
-    plugin.pytest_xdist_setupnodes(config, ["popen", "popen"])
+    plugin.pytest_xdist_setupnodes(config, [_RealShapedXSpec("gw0"), _RealShapedXSpec("gw1")])
+
     with pytest.raises(pytest.UsageError, match="gateway specifications"):
-        plugin.pytest_xdist_setupnodes(config, ["popen", "popen//python=other"])
+        plugin.pytest_xdist_setupnodes(config, [_RealShapedXSpec("gw0")])
+
+
+@pytest.mark.parametrize("changes", [
+    {"_spec": "execmodel=main_thread_only//popen//python=/other/python",
+     "python": "/other/python"},
+    {"_spec": "execmodel=main_thread_only//popen//chdir=/tmp", "chdir": "/tmp"},
+    {"_spec": "execmodel=main_thread_only//popen//ssh=host", "ssh": "host"},
+    {"_spec": "execmodel=main_thread_only//popen//socket=host:1234",
+     "socket": "host:1234"},
+    {"_spec": "execmodel=main_thread_only//popen//via=proxy", "via": "proxy"},
+    {"_spec": "execmodel=main_thread_only//popen//env:TOKEN=value",
+     "env": {"TOKEN": "value"}},
+    {"_spec": "execmodel=main_thread_only//popen//foreign_transport=value",
+     "foreign_transport": "value"},
+])
+def test_final_gateway_rejects_dangerous_or_foreign_xspec_attributes(changes):
+    config = _native_config(numprocesses=2, tx=["popen", "popen"])
+    specs = [_RealShapedXSpec("gw0"), _RealShapedXSpec("gw1", **changes)]
+
+    with pytest.raises(pytest.UsageError, match="gateway specifications"):
+        pytest_bridge.OwnedPlugin(2).pytest_xdist_setupnodes(config, specs)
 
 
 def test_native_refusal_emits_safe_machine_distinguishable_marker(capsys):

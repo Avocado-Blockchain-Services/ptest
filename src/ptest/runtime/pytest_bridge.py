@@ -99,7 +99,10 @@ class OwnedPlugin:
         if os.environ.get("PTEST_EXECUTION") == "full":
             narrowing = ("keyword", "markexpr", "deselect", "lf", "failedfirst",
                          "stepwise", "stepwise_skip", "testmon", "ignore",
-                         "ignore_glob", "maxfail", "collectonly", "pyargs")
+                         "ignore_glob", "maxfail", "collectonly", "pyargs",
+                         "setuponly", "setupplan", "showfixtures",
+                         "show_fixtures_per_test", "markers", "cacheshow",
+                         "help", "version")
             if any(getattr(option, name, None) for name in narrowing):
                 self._refuse("full pytest plans cannot narrow the inventory")
             try:
@@ -120,7 +123,25 @@ class OwnedPlugin:
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
         self._validate(config, generated=True)
-        if [str(spec) for spec in specs] != ["popen"] * self.workers:
+        expected_keys = {"_spec", "env", "execmodel", "popen", "id"}
+        worker_ids = set()
+        for spec in specs:
+            try:
+                attributes = vars(spec)
+            except TypeError:
+                attributes = {}
+            worker_id = attributes.get("id")
+            if (set(attributes) != expected_keys
+                    or attributes.get("_spec") != "execmodel=main_thread_only//popen"
+                    or attributes.get("env") != {}
+                    or attributes.get("execmodel") != "main_thread_only"
+                    or attributes.get("popen") is not True
+                    or not isinstance(worker_id, str)
+                    or not worker_id.startswith("gw")
+                    or not worker_id[2:].isdigit()):
+                self._refuse("xdist gateway specifications differ from admission grant")
+            worker_ids.add(worker_id)
+        if len(specs) != self.workers or len(worker_ids) != self.workers:
             self._refuse("xdist gateway specifications differ from admission grant")
 
 

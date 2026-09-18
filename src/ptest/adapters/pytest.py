@@ -11,12 +11,15 @@ from ptest import contracts as C
 _REMOTE_OPTIONS = {"--tx", "--px", "--rsyncdir"}
 _PARALLEL_OPTIONS = {
     "-n", "--numprocesses", "--maxprocesses", "--dist",
-    "--max-worker-restart",
+    "--max-worker-restart", "-f", "--looponfail", "-d", "--distload",
 }
 _NARROWING_OPTIONS = {
     "--deselect", "--lf", "--last-failed", "--ff", "--failed-first",
     "--sw", "--stepwise", "--sw-skip", "--stepwise-skip", "--testmon",
     "--ignore", "--ignore-glob", "--collect-only", "--co", "--maxfail",
+    "--setup-only", "--setup-plan", "--fixtures", "--funcargs",
+    "--fixtures-per-test", "--markers", "--cache-show",
+    "-h", "--help", "-V", "--version",
 }
 
 
@@ -33,7 +36,7 @@ def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> No
                            "pytest remote or parallel control is not ptest-owned")
         # pytest 9 expands @files; do not read a second source of hidden controls.
         # Flag-only short options can precede a value-taking -n/-k/-m in a cluster.
-        short = re.match(r"^-[qvxslhV]*([nkm])", token)
+        short = re.match(r"^-[qvxslhVfd]*([nkm])", token)
         if token.startswith("@") or (short and short[1] == "n"):
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
