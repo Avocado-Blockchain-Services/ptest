@@ -272,6 +272,42 @@ def test_grace_expiry_kills_its_own_group_without_draining(case, tmp_path):
             process.wait(timeout=_RECOVERY_WATCHDOG_S)
 
 
+def test_active_parent_eof_finishes_current_child_but_never_starts_second(case, tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    base = _manifest(case, first)
+    ready_path = tmp_path / "ready.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(ready_path))
+    listener.listen(1)
+    listener.settimeout(_RECOVERY_WATCHDOG_S)
+    first_run = C.PreparedRun(argv=(sys.executable, str(_FIXTURES / "wait_for_eof.py"),
+                                   str(first), str(ready_path)), cwd=base.domain.root)
+    second_run = C.PreparedRun(argv=(sys.executable, "-c",
+                                    f"from pathlib import Path; Path({str(second)!r}).write_text('ran')"),
+                               cwd=base.domain.root)
+    manifest = C.LaunchManifest(protocol=1, domain=base.domain, grant=base.grant, setup=None,
+                                attempts=(first_run, second_run), attempt_ids=("a001", "a002"),
+                                setup_timeout_s=1, attempt_timeout_s=30, compound_timeout_s=30)
+    process, control = _isolated_guard(manifest)
+    try:
+        assert _read_frame(control, manifest).kind == "registered"
+        assert _read_frame(control, manifest).kind == "phase"
+        ready, _ = listener.accept()
+        # Closing the controller observes parent death; closing the fixture peer
+        # completes only the already-running child without a timing race.
+        control.close()
+        ready.close()
+        assert process.wait(timeout=_RECOVERY_WATCHDOG_S) != 0
+        assert first.read_text() == "finished"
+        assert second.exists() is False
+    finally:
+        listener.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_RECOVERY_WATCHDOG_S)
+
+
 @pytest.mark.parametrize("cancel_signal", [2, 15])
 def test_active_cancel_signals_only_owned_guard_group_and_never_drains(
         case, tmp_path, cancel_signal):
