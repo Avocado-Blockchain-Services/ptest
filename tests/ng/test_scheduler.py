@@ -1269,8 +1269,24 @@ def test_mark_draining_rejects_each_forged_guard_without_mutating_the_ledger(
     assert domain.ledger.read_bytes() == before
 
 
-@pytest.mark.parametrize("state", ["DRAINING", "FINALIZING", "RELEASED", "CANCELLED", "UNCERTAIN"])
-def test_mark_draining_is_irreversible_and_rejects_terminal_or_uncertain_state(
+@pytest.mark.parametrize("state", ["RUNNING", "CANCELLING"])
+def test_mark_draining_rejects_a_second_handoff_without_mutating_the_ledger(
+        case, world, monkeypatch, state):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    with sqlite3.connect(domain.ledger) as conn:
+        conn.execute("UPDATE jobs SET state=? WHERE run_id=?", (state, grant.run_id))
+    guard = _draining_guard(monkeypatch, world)
+    assert scheduler.mark_draining(domain, grant, guard) is True
+    assert _sql(domain, "SELECT state FROM jobs WHERE run_id=?", (grant.run_id,)) == [("DRAINING",)]
+    before = domain.ledger.read_bytes()
+
+    assert scheduler.mark_draining(domain, grant, guard) is False
+    assert domain.ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("state", ["FINALIZING", "RELEASED", "CANCELLED", "UNCERTAIN"])
+def test_mark_draining_rejects_terminal_or_uncertain_state(
         case, world, monkeypatch, state):
     domain = case.domain()
     _, grant = _running(case, domain, world)
@@ -1293,7 +1309,55 @@ def test_mark_draining_allows_the_authenticated_registered_guard_to_drain_from_c
     assert _sql(domain, "SELECT state FROM jobs WHERE run_id=?", (grant.run_id,)) == [("DRAINING",)]
 
 
-def test_mark_draining_rejects_another_process_pid_reuse_and_boot_mismatch_without_repair(
+@pytest.mark.parametrize("caller", ["another_process", "reused_pid"])
+def test_mark_draining_rejects_a_live_caller_that_is_not_the_registered_guard(
+        case, world, monkeypatch, caller):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    if caller == "another_process":
+        guard = C.ProcessIdentity(pid=900003, birth=3.0, uid=os.getuid(), pgid=900003)
+    else:
+        guard = replace(world.guard, birth=world.guard.birth + 5)
+    world.identities[guard.pid] = guard
+    monkeypatch.setattr(os, "getpid", lambda: guard.pid)
+
+    # Every live-caller check passes; only the stored guard can reject the CAS.
+    assert guard.pid == os.getpid() == guard.pgid
+    assert guard.uid == os.getuid()
+    assert platform.process_identity(guard.pid) == guard
+    assert guard != world.guard
+    assert _sql(
+        domain, "SELECT guard_pid,guard_birth,guard_uid,guard_pgid FROM jobs WHERE run_id=?",
+        (grant.run_id,),
+    ) == [(world.guard.pid, world.guard.birth, world.guard.uid, world.guard.pgid)]
+    before = domain.ledger.read_bytes()
+
+    assert scheduler.mark_draining(domain, grant, guard) is False
+    assert domain.ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("guard_field", ["pid", "birth", "uid", "pgid"])
+def test_mark_draining_rejects_each_stored_guard_mismatch_without_mutating_the_ledger(
+        case, world, monkeypatch, guard_field):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    guard = _draining_guard(monkeypatch, world)
+    # Isolate each stored column so dropping any one predicate is observable.
+    with sqlite3.connect(domain.ledger) as conn:
+        conn.execute(
+            f"UPDATE jobs SET guard_{guard_field}=? WHERE run_id=?",
+            (getattr(guard, guard_field) + 1, grant.run_id),
+        )
+    assert guard.pid == os.getpid() == guard.pgid
+    assert guard.uid == os.getuid()
+    assert platform.process_identity(guard.pid) == guard
+    before = domain.ledger.read_bytes()
+
+    assert scheduler.mark_draining(domain, grant, guard) is False
+    assert domain.ledger.read_bytes() == before
+
+
+def test_mark_draining_rejects_mismatched_live_caller_identity_and_boot_without_repair(
         case, world, monkeypatch):
     domain = case.domain()
     _, grant = _running(case, domain, world)
