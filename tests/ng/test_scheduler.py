@@ -7,6 +7,7 @@ import errno
 import json
 import multiprocessing
 import sqlite3
+import warnings
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -257,6 +258,62 @@ def test_observed_escape_survives_reparenting_and_blocks_forged_release(case, wo
     assert poll(domain, ticket).state is C.LeaseState.RELEASED
 
 
+def test_more_than_observation_cap_short_lived_descendants_release_all_claims(case, world):
+    domain = case.domain(slots=4, jobs=2)
+    request = _request(case, domain, "cycling", slots=4, locks=("database",))
+    ticket = enqueue(domain, request)
+    grant = poll(domain, ticket).grant
+    assert grant is not None
+    assert register_guard(domain, grant, world.guard)
+
+    for wave in range(5):
+        children = [
+            C.ProcessIdentity(
+                pid=910000 + wave * 64 + offset,
+                birth=float(wave * 64 + offset + 2),
+                uid=os.getuid(),
+                pgid=world.guard.pgid,
+            )
+            for offset in range(64)
+        ]
+        world.children[world.guard.pid] = [child.pid for child in children]
+        world.identities.update((child.pid, child) for child in children)
+        assert poll(domain, ticket).state is C.LeaseState.RUNNING
+        world.children.clear()
+        for child in children:
+            world.identities.pop(child.pid)
+            world.absent.add(child.pid)
+
+    follower_request = replace(
+        _request(case, domain, "after-cycling", slots=4, locks=("database",)),
+        checkout=request.checkout,
+    )
+    follower = enqueue(domain, follower_request)
+    assert poll(domain, follower).state is C.LeaseState.QUEUED
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+    assert poll(domain, follower).grant.slots == 4
+
+
+def test_reused_descendant_pid_deletes_dead_observation_without_escape(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert _sql(domain, "SELECT pid,birth FROM observations") == [(child.pid, child.birth)]
+
+    world.children.clear()
+    world.identities[child.pid] = replace(child, birth=3.0, pgid=child.pid)
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert _sql(domain, "SELECT pid,birth FROM observations") == []
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
 def test_default_queue_survives_two_240_second_predecessors(case, world):
     domain = case.domain()
     first, grant = _running(case, domain, world, "first")
@@ -309,6 +366,47 @@ def test_lowering_limits_and_introducing_memory_budget_keep_existing_charge(case
     assert poll(domain, first).grant.slots == 3
 
 
+@pytest.mark.parametrize(
+    "initial,requested,active_kwargs,follower_kwargs,applied",
+    [
+        ((4, 2, None), (3, 3, None), {"slots": 1}, {"slots": 3}, (3, 2, None)),
+        ((2, 2, None), (4, 1, None), {"slots": 1}, {"slots": 1}, (2, 1, None)),
+        ((2, 2, 128), (4, 4, 64), {"memory_mb": 40}, {"memory_mb": 40}, (2, 2, 64)),
+    ],
+)
+def test_busy_reload_applies_each_tightening_and_defers_only_loosening(
+        case, world, monkeypatch, tmp_path, initial, requested,
+        active_kwargs, follower_kwargs, applied):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain, slots=initial[0], jobs=initial[1], memory=initial[2])
+    _, active_grant = _running(case, domain, world, "active", **active_kwargs)
+    _configure(domain, slots=requested[0], jobs=requested[1], memory=requested[2])
+    follower = enqueue(domain, _request(case, domain, "follower", **follower_kwargs))
+
+    assert poll(domain, follower).state is C.LeaseState.QUEUED
+    assert _sql(
+        domain,
+        "SELECT config_slots,config_jobs,config_memory,config_generation FROM domain",
+    ) == [(*applied, 1)]
+
+    _gone(world, world.guard)
+    finish(domain, active_grant, _proof(active_grant, world.guard.pgid, world.now), _final())
+    follower_grant = poll(domain, follower).grant
+    assert follower_grant is not None
+    world.identities[world.guard.pid] = world.guard
+    world.absent.remove(world.guard.pid)
+    world.groups[world.guard.pgid] = True
+    assert register_guard(domain, follower_grant, world.guard)
+    _gone(world, world.guard)
+    finish(domain, follower_grant, _proof(follower_grant, world.guard.pgid, world.now), _final())
+
+    enqueue(domain, _request(case, domain, "idle-refresh"))
+    assert _sql(
+        domain,
+        "SELECT config_slots,config_jobs,config_memory,config_generation FROM domain",
+    ) == [(*requested, 2)]
+
+
 @pytest.mark.parametrize("memory", [None, 64])
 def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case, world, monkeypatch, tmp_path, memory):
     domain = _normal_domain(monkeypatch, tmp_path)
@@ -320,7 +418,10 @@ def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case
     assert poll(domain, ticket).grant is not None
     _configure(domain, slots=4, jobs=3, memory=128)
     before = domain.ledger.read_bytes()
-    assert scheduler.effective_limits(domain) == C.EffectiveLimits(max_slots=2, max_jobs=2, memory_mb=memory)
+    expected_memory = 128 if memory is None else memory
+    assert scheduler.effective_limits(domain) == C.EffectiveLimits(
+        max_slots=2, max_jobs=2, memory_mb=expected_memory,
+    )
     assert domain.ledger.read_bytes() == before
 
 
@@ -642,6 +743,33 @@ def test_persisted_defaults_include_cgroup_ancestor_bounds(case, world, monkeypa
     ticket = enqueue(domain, _request(case, domain, "cpu", slots=8))
     assert poll(domain, ticket).grant.slots == expected
     assert f"max_slots = {expected}\n" in domain.machine_config.read_text()
+
+
+def test_missing_nonroot_cgroup_controls_do_not_reduce_normal_defaults(
+        case, world, monkeypatch, tmp_path):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    monkeypatch.setattr(scheduler.os, "sched_getaffinity", lambda _: set(range(16)))
+    monkeypatch.setattr(scheduler.os, "cpu_count", lambda: 16)
+    kernel = {
+        "/proc/self/cgroup": "0::/system.slice/session.scope/leaf\n",
+        "/proc/self/mountinfo": "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+        "/sys/fs/cgroup/cpu.max": "max 100000",
+        "/sys/fs/cgroup/cpuset.cpus.effective": "0-15",
+    }
+
+    def read_control(path):
+        try:
+            return kernel[str(path)]
+        except KeyError:
+            raise FileNotFoundError(path) from None
+
+    monkeypatch.setattr(scheduler, "_read_cpu_file", read_control, raising=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ticket = enqueue(domain, _request(case, domain, "cpu", slots=8))
+    assert poll(domain, ticket).grant.slots == 4
+    assert domain.machine_config.read_text() == "max_slots = 4\nmax_jobs = 2\n"
+    assert not [item for item in caught if issubclass(item.category, RuntimeWarning)]
 
 
 def test_unreadable_cpu_quota_falls_back_to_one_with_diagnostic(monkeypatch):

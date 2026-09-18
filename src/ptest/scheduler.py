@@ -285,7 +285,11 @@ def _cgroup_cpu_bounds() -> list[int]:
     bounds = []
     while True:
         try:
-            quota, period = _read_cpu_file(current / "cpu.max").split()
+            cpu_max = _read_cpu_file(current / "cpu.max")
+        except FileNotFoundError:
+            pass
+        else:
+            quota, period = cpu_max.split()
             period = int(period)
             if period <= 0:
                 raise ValueError("invalid CPU period")
@@ -294,12 +298,13 @@ def _cgroup_cpu_bounds() -> list[int]:
                 if quota <= 0:
                     raise ValueError("invalid CPU quota")
                 bounds.append(max(1, quota // period))
+        try:
+            cpuset = _read_cpu_file(current / "cpuset.cpus.effective")
         except FileNotFoundError:
-            if current != root:
-                raise
-        cpuset = _read_cpu_file(current / "cpuset.cpus.effective")
-        if cpuset:
-            bounds.append(_cpuset_size(cpuset))
+            pass
+        else:
+            if cpuset:
+                bounds.append(_cpuset_size(cpuset))
         if current == root:
             break
         current = current.parent
@@ -704,10 +709,14 @@ def _validated_limits(info: dict) -> EffectiveLimits:
 
 
 def _selected_limits(conn: sqlite3.Connection, requested: tuple, old: tuple) -> tuple:
-    loosening = (requested[0] > old[0] or requested[1] > old[1]
-                 or (old[2] is not None and (requested[2] is None or requested[2] > old[2])))
-    if loosening and (_active_count(conn) or _pending_count(conn)):
-        return old
+    if _active_count(conn) or _pending_count(conn):
+        if old[2] is None:
+            memory = requested[2]
+        elif requested[2] is None:
+            memory = old[2]
+        else:
+            memory = min(requested[2], old[2])
+        return min(requested[0], old[0]), min(requested[1], old[1]), memory
     return requested
 
 
@@ -821,7 +830,16 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
     Inaccessible/capped scans persist an uncertainty sentinel. This is a
     cooperative lifecycle check, not proof against unobserved daemonization.
     """
-    observations = {item["pid"]: dict(item) for item in recorded}
+    observations = {}
+    for item in recorded:
+        item = dict(item)
+        if item["uncertain"]:
+            observations[item["pid"]] = item
+            continue
+        identity, absent = _observe_process(item["pid"])
+        if absent or (identity is not None and identity.birth != item["birth"]):
+            continue
+        observations[item["pid"]] = item
 
     def uncertain():
         observations[0] = dict(run_id=row["run_id"], pid=0, birth=None,
@@ -854,7 +872,7 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
                         uncertain()
                         continue
                     old = observations.get(child.pid)
-                    if old is not None and (old["birth"], old["uid"]) != (identity.birth, identity.uid):
+                    if old is not None and old["birth"] == identity.birth and old["uid"] != identity.uid:
                         uncertain()
                     observations[child.pid] = dict(run_id=row["run_id"], pid=identity.pid,
                                                   birth=identity.birth, uid=identity.uid,
@@ -876,9 +894,9 @@ def _escaped_or_unknown(row: dict, observations: list[dict], *, require_absent: 
         if item["uncertain"]:
             return True
         identity, absent = _observe_process(item["pid"])
-        if absent:
+        if absent or (identity is not None and identity.birth != item["birth"]):
             continue
-        if (require_absent or identity is None or identity.birth != item["birth"] or identity.uid != item["uid"]
+        if (require_absent or identity is None or identity.uid != item["uid"]
                 or identity.pgid != row["guard_pgid"]):
             return True
     return False
@@ -888,6 +906,11 @@ def _observations(conn: sqlite3.Connection, row: dict, *, persist: bool) -> list
     recorded = [dict(item) for item in conn.execute("SELECT * FROM observations WHERE run_id=?", (row["run_id"],))]
     observed = _descendant_observations(row, recorded)
     if persist:
+        observed_pids = {item["pid"] for item in observed}
+        conn.executemany(
+            "DELETE FROM observations WHERE run_id=? AND pid=?",
+            ((row["run_id"], item["pid"]) for item in recorded if item["pid"] not in observed_pids),
+        )
         for item in observed:
             conn.execute("INSERT OR REPLACE INTO observations VALUES (?,?,?,?,?,?)",
                          tuple(item[key] for key in ("run_id", "pid", "birth", "uid", "pgid", "uncertain")))
