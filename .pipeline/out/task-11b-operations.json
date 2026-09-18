@@ -1,11 +1,12 @@
 {
   "task": "11B1",
   "scope": "guarded generic command execution lifecycle",
-  "status": "implemented_not_verified",
+  "status": "implemented-awaiting-opus-high-reaudit",
   "commits": [
     "d028f73",
     "493c023",
-    "9e2b48f"
+    "9e2b48f",
+    "16cf065"
   ],
   "red_green": [
     {
@@ -37,6 +38,21 @@
       "command": "graphify update .",
       "status": "passed",
       "evidence": "AST graph rebuilt in the assigned checkout"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "7 passed in 2.35s; slowest test 0.39s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py -k 'runner_registry_is_closed_and_generic_is_exclusive' --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "1 passed, 66 deselected in 0.13s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py -k 'guard_registration or mark_draining or finalization or proof_before_grant' --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "60 passed, 104 deselected in 1.33s; slowest test 0.03s"
     }
   ],
   "implemented": [
@@ -52,10 +68,13 @@
   "verified": [
     "Python syntax compilation",
     "Git diff whitespace check",
-    "Graph update"
+    "Graph update",
+    "Controller operations proof: 7 passed",
+    "Controller CLI registry boundary: 1 passed",
+    "Controller scheduler registration/draining/finalization boundaries: 60 passed",
+    "Result artifact envelope asserted as kind=run, error=null, payload=data"
   ],
   "not_verified": [
-    "Real subprocess operation tests could not run because pytest and psutil are absent from the existing worktree environment and installation is prohibited.",
     "No ptest --full was run; the root task owns final integrated verification."
   ],
   "deferred": [
