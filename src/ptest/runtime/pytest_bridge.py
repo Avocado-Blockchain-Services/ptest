@@ -231,6 +231,11 @@ class OwnedPlugin:
         self._validate(session.config, generated=True)
         return (yield)
 
+    def pytest_collection_finish(self, session: Any) -> Any:
+        """Check collection-loaded conftests before entering test execution."""
+        self._validate(session.config, generated=True)
+        return (yield)
+
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
         self._validate(config, generated=True)
@@ -285,6 +290,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_cmdline_main)
         pytest.hookimpl(tryfirst=True)(OwnedPlugin.pytest_configure)
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_collection)
+        pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_collection_finish)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
         plugin = OwnedPlugin(workers)
         native_exit = int(pytest.main(list(argv), plugins=[plugin]))

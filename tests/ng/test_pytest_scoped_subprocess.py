@@ -145,6 +145,39 @@ def test_real_unowned_execution_hook_is_refused_before_collection(case, hook):
     _released(domain)
 
 
+@pytest.mark.parametrize("hook", ["pytest_runtestloop", "pytest_runtest_protocol", "pytest_pyfunc_call"])
+def test_real_nested_execution_hook_is_refused_before_tests(case, hook):
+    domain = case.domain()
+    root = _project(case, domain)
+    nested = root / "tests/unit"
+    nested.mkdir()
+    (nested / "conftest.py").write_text(
+        "from pathlib import Path\nPath('nested-conftest-loaded').touch()\n"
+        f"def {hook}():\n    Path('nested-executor-ran').touch()\n    return True\n"
+    )
+    (nested / "test_nested.py").write_text(
+        "from pathlib import Path\nPath('nested-collected').touch()\n"
+        "def test_nested():\n    Path('nested-test-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "nested-conftest-loaded").exists()
+    assert (root / "nested-collected").exists()
+    assert not (root / "nested-executor-ran").exists()
+    assert not (root / "nested-test-ran").exists()
+    assert not (root / "tests-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
 def test_real_native_usage_error_is_not_a_bridge_refusal(case):
     domain = case.domain()
     root = _project(case, domain)
