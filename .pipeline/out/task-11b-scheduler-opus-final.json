@@ -1,0 +1,18 @@
+{
+  "task": "11B-scheduler-producer-seam",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-scheduler/c774e4d9-aa63-4ecd-a625-65f3704fa740.jsonl",
+  "reviewed_range": "b627e05..97a472e",
+  "approved_repairs": ["6b42077"],
+  "verification": {
+    "root_controller_command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/tests/ng/test_scheduler.py --tb=short --durations=15",
+    "result": "164 passed in 2.65s"
+  },
+  "notes": [
+    "Operations must only call finish with a proof issued by begin_finalization after matching DRAINING; finish itself remains a broader frozen primitive.",
+    "Owner-live guard death remains charged until operations records an incomplete/failure result or owner-absent recovery proves quiescence.",
+    "Queued cancellation returns bool and uses caller identity; operations maps cancellation outcome and ensures a racing spawned guard cannot work."
+  ]
+}
