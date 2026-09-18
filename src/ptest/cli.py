@@ -624,7 +624,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             # capability authority to execute it; classify that request as
             # unavailable without inspecting or echoing its literal tokens.
             # Bare/automatic execution keeps the initialization guidance.
-            if parsed.runner_argv:
+            if (parsed.runner_argv and resolution.problem is not None
+                    and resolution.problem.code == "initialization-required"):
                 raise _problem(
                     "unsupported-capability",
                     "literal execution requires a configured runner profile",
