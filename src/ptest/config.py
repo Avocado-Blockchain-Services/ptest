@@ -25,6 +25,13 @@ _MAX_GROUPS = 256
 _MAX_PATH_ENTRIES = 4096
 _MAX_LIST_ENTRIES = 4096
 _MAX_STRING_LENGTH = 4096
+_MAX_ARGV_TOKEN_LENGTH = 16384
+_MAX_ARGV_ENTRIES = 256
+_MAX_ARGV_BYTES = 131072
+_ARGV_FIELDS = frozenset({
+    ("runner", "launcher"), ("runner", "args"), ("runner", "full_args"),
+    ("setup", "argv"),
+})
 _CONTROL_CHARS = frozenset(
     chr(code) for code in range(0x20)
 ) | frozenset({chr(0x7F)})
@@ -168,16 +175,17 @@ def _check_string(value: object, *, allow_empty: bool = False,
     return value
 
 
-def _check_tree_strings(value: object) -> None:
+def _check_tree_strings(value: object, location: tuple[str, ...] = ()) -> None:
     if isinstance(value, str):
-        _check_string(value, allow_empty=True)
+        limit = _MAX_ARGV_TOKEN_LENGTH if location in _ARGV_FIELDS else _MAX_STRING_LENGTH
+        _check_string(value, allow_empty=True, max_len=limit)
     elif isinstance(value, dict):
         for key, item in value.items():
             _check_string(key)
-            _check_tree_strings(item)
+            _check_tree_strings(item, (*location, key))
     elif isinstance(value, list):
         for item in value:
-            _check_tree_strings(item)
+            _check_tree_strings(item, location)
 
 
 def _table(value: object) -> dict:
@@ -208,7 +216,7 @@ def _string_sequence(value: object, *, allow_empty: bool = True,
                  for item in items)
 
 
-def _path(value: object, root: Path) -> str:
+def _path(value: object, root: Path, *, allow_final_symlink: bool = False) -> str:
     text = _check_string(value, max_len=_MAX_STRING_LENGTH)
     if (text.startswith("/") or "\\" in text or text.startswith("~")
             or re.match(r"^[A-Za-z]:", text)
@@ -220,7 +228,7 @@ def _path(value: object, root: Path) -> str:
     if not parts or any(not part or part in {".", ".."} for part in parts):
         _fail()
     cursor = root
-    for part in parts:
+    for index, part in enumerate(parts):
         cursor = cursor / part
         try:
             stamp = os.lstat(cursor)
@@ -228,30 +236,34 @@ def _path(value: object, root: Path) -> str:
             break
         except OSError:
             raise _problem("state-unavailable", "project path is unavailable")
-        if stat.S_ISLNK(stamp.st_mode):
+        if stat.S_ISLNK(stamp.st_mode) and not (
+            allow_final_symlink and index == len(parts) - 1
+        ):
             raise _problem("unsafe-path", "project path crosses a symlink")
     return text
 
 
-def _path_sequence(value: object, root: Path, *, allow_empty: bool = True) -> tuple[str, ...]:
+def _path_sequence(value: object, root: Path, *, allow_empty: bool = True,
+                   allow_final_symlink: bool = False) -> tuple[str, ...]:
     items = _sequence(value, allow_empty=allow_empty)
     if len(items) > _MAX_PATH_ENTRIES:
         _fail()
-    return tuple(_path(item, root) for item in items)
+    return tuple(_path(item, root, allow_final_symlink=allow_final_symlink)
+                 for item in items)
 
 
 def _argv(value: object, *, allow_empty: bool) -> tuple[str, ...]:
-    items = _string_sequence(value, allow_empty=allow_empty, max_entries=256)
-    total = 0
-    for item in items:
-        if "\x00" in item:
-            _fail()
-        total += len(item.encode("utf-8"))
-        if len(item) > 16384:
-            _fail()
-    if total > 131072:
-        _fail()
+    items = _string_sequence(value, allow_empty=allow_empty,
+                             max_entries=_MAX_ARGV_ENTRIES,
+                             max_len=_MAX_ARGV_TOKEN_LENGTH)
+    _command_bound(items)
     return items
+
+
+def _command_bound(items: tuple[str, ...]) -> None:
+    if (len(items) > _MAX_ARGV_ENTRIES
+            or sum(len(item.encode("utf-8")) for item in items) > _MAX_ARGV_BYTES):
+        _fail()
 
 
 def _runner(data: object, root: Path) -> C.RunnerConfig:
@@ -268,6 +280,7 @@ def _runner(data: object, root: Path) -> C.RunnerConfig:
     launcher = _argv(table["launcher"], allow_empty=False)
     args = _argv(table.get("args", []), allow_empty=True)
     full_args = _argv(table.get("full_args", []), allow_empty=True)
+    _command_bound(launcher + args + full_args)
     roots_value = table.get("test_roots", [])
     roots = _path_sequence(
         roots_value, root,
@@ -298,7 +311,11 @@ def _setup(data: object, root: Path) -> C.SetupConfig | None:
     _keys(table, {"argv", "required_paths", "network", "lifecycle_scripts"},
           required={"argv", "required_paths", "network", "lifecycle_scripts"})
     argv = _argv(table["argv"], allow_empty=False)
-    paths = _path_sequence(table["required_paths"], root, allow_empty=False)
+    # Setup declares presence probes, not files to read. A normal venv's final
+    # python entry is a symlink; lstat it without following its target. Ancestors
+    # remain non-symlink paths, and actual reads still use read_regular.
+    paths = _path_sequence(table["required_paths"], root, allow_empty=False,
+                           allow_final_symlink=True)
     network = table["network"]
     lifecycle_scripts = table["lifecycle_scripts"]
     if not isinstance(network, bool) or not isinstance(lifecycle_scripts, bool):
@@ -351,6 +368,7 @@ def _group(value: object, root: Path) -> C.Group:
 def _selection(data: object, root: Path) -> C.SelectionPolicy:
     if data is None:
         data = {}
+    _check_tree_strings(data, ("selection",))
     table = _table(data)
     _keys(table, {"enabled", "closed_inputs", "input_roots", "ignored_inputs",
                   "environment", "full_triggers", "always", "no_tests",
@@ -375,6 +393,8 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
         _fail()
     groups_value = _sequence(table.get("groups", []), max_entries=_MAX_GROUPS)
     groups = tuple(_group(item, root) for item in groups_value)
+    if len({group.name for group in groups}) != len(groups):
+        _fail()
     if sum(len(group.sources) + len(group.tests) for group in groups) \
             + sum(len(items) for items in paths.values()) > _MAX_PATH_ENTRIES:
         _fail()
@@ -407,13 +427,17 @@ def _parse_config(raw: bytes, root: Path, path: Path) -> tuple[C.Config, tuple[C
     except (tomllib.TOMLDecodeError, ValueError):
         raise _problem("invalid-config", "project configuration is invalid")
     try:
-        _check_tree_strings(data)
         table = _table(data)
         _keys(table, {"version", "project_id", "runner", "setup", "resources",
                       "selection"}, required={"version", "project_id", "runner"})
+        # Selection validation has its own fail-closed fallback below. Invalid
+        # policy strings must not invalidate independently safe execution.
+        for name, value in table.items():
+            if name != "selection":
+                _check_tree_strings(value, (name,))
         version = table["version"]
         project_id = table["project_id"]
-        if isinstance(version, bool) or version != 1:
+        if type(version) is not int or version != 1:
             _fail()
         if not isinstance(project_id, str) or not _HEX32.fullmatch(project_id):
             _fail()
@@ -510,11 +534,6 @@ def _native_file(root: Path, name: str) -> bytes | None:
     if len(raw) > _NATIVE_MAX_BYTES:
         raise _problem("invalid-config", "native project file exceeds its bound")
     return raw
-
-
-def _native_root(cwd: Path) -> Path:
-    boundary = _git_boundary(cwd)
-    return boundary if boundary is not None else cwd
 
 
 def _native_candidates(root: Path) -> tuple[C.RunnerKind, ...]:
@@ -716,7 +735,9 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     if resolution.path is not None:
         return _existing_result(resolution.root, resolution.path, resolution)
 
-    root = _native_root(physical_cwd)
+    # The Git boundary limits resolution above; it need not be the project.
+    # Uninitialized sibling projects each use their invocation directory.
+    root = physical_cwd
     target = root / _CONFIG_NAME
     try:
         _, target_exists = _candidate_config(root)

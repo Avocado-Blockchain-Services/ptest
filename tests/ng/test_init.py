@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -63,7 +67,7 @@ def test_init_creates_one_fresh_config_exclusively(tmp_path):
     assert len(resolution.config.project_id) == 32
 
 
-def test_pytest_native_preview_is_static_and_does_not_copy_addopts(tmp_path):
+def test_pytest_native_preview_is_static_and_does_not_copy_addopts(tmp_path, monkeypatch):
     (tmp_path / "tests").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         "[tool.pytest.ini_options]\n"
@@ -71,9 +75,16 @@ def test_pytest_native_preview_is_static_and_does_not_copy_addopts(tmp_path):
         encoding="utf-8",
     )
     sentinel = tmp_path / "execution-sentinel"
-    (tmp_path / "conftest.py").write_text(
-        "raise RuntimeError('should not execute')\n", encoding="utf-8"
-    )
+    payload = f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n"
+    for name in ("conftest.py", "setup.py"):
+        (tmp_path / name).write_text(payload, encoding="utf-8")
+
+    def no_execution(*args, **kwargs):
+        pytest.fail("static preview attempted process execution")
+
+    monkeypatch.setattr(subprocess, "Popen", no_execution)
+    monkeypatch.setattr(os, "system", no_execution)
+    native_before = {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
 
     result = init_project(tmp_path, _options(dry_run=True))
 
@@ -82,6 +93,7 @@ def test_pytest_native_preview_is_static_and_does_not_copy_addopts(tmp_path):
     assert result.config.commands[0].argument_count == 1
     assert result.config.commands[1].argument_count == 1
     assert not sentinel.exists()
+    assert {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == native_before
 
 
 def test_mixed_native_evidence_requires_explicit_runner(tmp_path):
@@ -135,3 +147,188 @@ def test_native_profiles_are_selected_without_execution(tmp_path):
     (cargo / "go.mod").write_text("module example.test\n", encoding="utf-8")
     with pytest.raises(Problem):
         init_project(cargo, _options(dry_run=True))
+
+
+@pytest.mark.parametrize("existing_venv", [False, True])
+def test_uv_generated_config_remains_valid_with_real_python_symlink(tmp_path, existing_venv):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    binary = tmp_path / ".venv/bin/python"
+
+    def create_venv_link():
+        binary.parent.mkdir(parents=True)
+        binary.symlink_to(sys.executable)
+
+    if existing_venv:
+        create_venv_link()
+    created = init_project(tmp_path, _options())
+    original = created.target.read_bytes()
+    before = resolve_config(tmp_path)
+    assert before.problem is None
+    if not existing_venv:
+        create_venv_link()
+
+    after = resolve_config(tmp_path)
+
+    assert binary.is_symlink()
+    assert after.problem is None
+    assert after.warnings == ()
+    assert after.config == before.config
+    assert after.config.setup.required_paths == (".venv/bin/python",)
+    assert after.config.setup.argv == ("uv", "sync", "--locked")
+    assert created.target.read_bytes() == original
+
+
+@pytest.mark.parametrize("marker", ["directory", "worktree-file"])
+def test_monorepo_subprojects_initialize_their_own_nearest_roots(tmp_path, marker):
+    (tmp_path / ".ptest.toml").write_text("invalid parent must not apply\n")
+    repo = tmp_path / "monorepo"
+    api, web = repo / "api", repo / "web"
+    api.mkdir(parents=True)
+    web.mkdir()
+    if marker == "directory":
+        git = repo / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        (git / "config").write_text("[core]\nrepositoryformatversion = 0\n")
+    else:
+        (repo / ".git").write_text("gitdir: /unreadable/shared/metadata\n")
+    (api / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    (web / "package.json").write_text(json.dumps({"devDependencies": {"vitest": "3.2.7"}}))
+
+    results = []
+    for project, kind in ((api, RunnerKind.PYTEST), (web, RunnerKind.VITEST)):
+        preview = init_project(project, _options(dry_run=True))
+        assert preview.target == project / ".ptest.toml"
+        assert preview.config.runner_kind is kind
+        assert not preview.target.exists()
+        created = init_project(project, _options())
+        assert created.action is InitAction.CREATED
+        assert created.target == preview.target
+        child = project / "tests/unit"
+        child.mkdir(parents=True)
+        resolved = resolve_config(child)
+        assert resolved.problem is None
+        assert resolved.root == project
+        assert resolved.config.runner.kind is kind
+        results.append(resolved.config.project_id)
+    assert results[0] != results[1]
+    assert not (repo / ".ptest.toml").exists()
+    assert resolve_config(repo).problem.code == "initialization-required"
+
+
+def test_vitest_native_preview_preserves_coverage_and_executes_nothing(tmp_path, monkeypatch):
+    sentinel = tmp_path / "execution-sentinel"
+    (tmp_path / "package.json").write_text(json.dumps({
+        "devDependencies": {"vitest": "3.2.7"},
+        "scripts": {"test": "vitest --coverage", "postinstall": "touch execution-sentinel"},
+    }))
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
+    (tmp_path / "vitest.config.cjs").write_text(
+        f"require('node:fs').writeFileSync({json.dumps(str(sentinel))}, 'executed');\n"
+        "module.exports = {test: {coverage: {enabled: true, thresholds: {lines: 99}}}};\n"
+    )
+    native_before = {path: path.read_bytes() for path in tmp_path.iterdir()}
+
+    def no_execution(*args, **kwargs):
+        pytest.fail("native preview attempted process execution")
+
+    monkeypatch.setattr(subprocess, "Popen", no_execution)
+    monkeypatch.setattr(os, "system", no_execution)
+    result = init_project(tmp_path, _options(dry_run=True))
+
+    assert result.action is InitAction.PREVIEW
+    assert result.config.runner_kind is RunnerKind.VITEST
+    assert result.config.setup_configured is True
+    assert result.config.setup_network is True
+    assert result.config.setup_lifecycle_scripts is True
+    assert not sentinel.exists()
+    assert {path: path.read_bytes() for path in tmp_path.iterdir()} == native_before
+    created = init_project(tmp_path, _options())
+    config = resolve_config(tmp_path).config
+    assert created.action is InitAction.CREATED
+    assert config.runner.launcher == ("node",)
+    assert config.runner.args == config.runner.full_args == ()
+    assert config.setup.argv == ("npm", "ci")
+    assert config.setup.required_paths == ("node_modules",)
+    assert not sentinel.exists()
+    assert all(path.read_bytes() == original for path, original in native_before.items())
+    assert not (tmp_path / "node_modules").exists()
+
+
+@pytest.mark.parametrize("name", ["pyproject.toml", "package.json", "uv.lock", "tests"])
+def test_init_refuses_symlinked_native_inputs_without_reading_target(tmp_path, monkeypatch, name):
+    import ptest.config as config_module
+
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("must not read this target")
+    (root / name).symlink_to(outside)
+    reads = []
+    read_regular = config_module.read_regular
+
+    def checked_read(read_root, relative, limit):
+        reads.append(relative)
+        assert relative != name
+        return read_regular(read_root, relative, limit)
+
+    monkeypatch.setattr(config_module, "read_regular", checked_read)
+    runner = RunnerKind.PYTEST if name in {"uv.lock", "tests"} else None
+    with pytest.raises(Problem) as caught:
+        init_project(root, _options(runner=runner, dry_run=True))
+    assert caught.value.code == "unsafe-path"
+    assert name not in reads
+    assert not (root / ".ptest.toml").exists()
+    assert outside.read_text() == "must not read this target"
+
+
+@pytest.mark.parametrize("name", ["pyproject.toml", "package.json"])
+@pytest.mark.parametrize("content", [b"\xff", b"x" * (256 * 1024 + 1)],
+                         ids=["invalid-utf8", "oversized"])
+def test_hostile_native_manifests_cannot_initialize_or_write(tmp_path, name, content):
+    (tmp_path / name).write_bytes(content)
+    with pytest.raises(Problem) as caught:
+        init_project(tmp_path, _options())
+    assert caught.value.code == "invalid-config"
+    assert list(tmp_path.iterdir()) == [tmp_path / name]
+    assert (tmp_path / name).read_bytes() == content
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_init_preserves_existing_config_symlink_and_its_target(tmp_path, dry_run):
+    target = tmp_path / "existing.toml"
+    target.write_bytes(b"user-owned sentinel\n")
+    link = tmp_path / ".ptest.toml"
+    link.symlink_to(target)
+    result = init_project(tmp_path, _options(dry_run=dry_run))
+    assert result.action is InitAction.EXISTING
+    assert result.config is None
+    assert [warning.code for warning in result.warnings] == ["unsafe-path"]
+    assert link.is_symlink()
+    assert target.read_bytes() == b"user-owned sentinel\n"
+
+
+def test_concurrent_init_exclusively_creates_one_config(tmp_path, monkeypatch):
+    import ptest.config as config_module
+
+    ready = Barrier(2, timeout=3)
+    create_exclusive = config_module.create_exclusive
+
+    def simultaneous_create(*args, **kwargs):
+        ready.wait()
+        return create_exclusive(*args, **kwargs)
+
+    monkeypatch.setattr(config_module, "create_exclusive", simultaneous_create)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(init_project, tmp_path, _options(runner=RunnerKind.PYTEST))
+                   for _ in range(2)]
+        results = [future.result(timeout=5) for future in futures]
+    assert {result.action for result in results} == {InitAction.CREATED, InitAction.EXISTING}
+    original = (tmp_path / ".ptest.toml").read_bytes()
+    resolved = resolve_config(tmp_path)
+    assert resolved.problem is None
+    created = next(result for result in results if result.action is InitAction.CREATED)
+    assert created.config.project_id == resolved.config.project_id
+    assert init_project(tmp_path, _options()).action is InitAction.EXISTING
+    assert (tmp_path / ".ptest.toml").read_bytes() == original

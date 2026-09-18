@@ -1,13 +1,60 @@
 """Fresh local configuration resolution and validation contracts."""
 from __future__ import annotations
 
+import builtins
+import io
+import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from ptest.config import resolve_config
-from ptest.contracts import RunnerKind
+from ptest.config import init_project, resolve_config
+from ptest.contracts import InitOptions, RunnerKind, SelectionPolicy
+
+
+# Verbatim section 5 example from the frozen design, including its comments.
+DESIGN_CONFIG = '''version = 1
+project_id = "cd58ec6cf99748ce9f15dfce137f044d" # generated 128-bit hex at init
+
+[runner]
+kind = "pytest"
+launcher = ["uv", "run", "--locked", "--no-sync", "python"]
+args = []
+full_args = ["--cov=sample", "--cov-fail-under=85"]
+test_roots = ["tests"]
+workers = 1
+lifecycle = "cooperative-process-group"
+
+[setup]
+argv = ["uv", "sync", "--locked"]
+required_paths = [".venv/bin/python"]
+network = true
+lifecycle_scripts = true # dependency build/lifecycle code may execute during setup
+
+[resources]
+locks = []
+memory_mb_per_worker = 0 # 0 means unknown, not free memory
+probe_isolation = "undeclared" # or "run-worker-namespaced"
+
+[selection]
+enabled = false
+closed_inputs = false
+input_roots = ["src", "tests"]
+ignored_inputs = []
+environment = []
+full_triggers = ["pyproject.toml", "uv.lock", "conftest.py"]
+always = []
+no_tests = []
+non_input_outputs = []
+full_ratio = 0.70
+
+[[selection.groups]]
+name = "sample"
+sources = ["src/sample"]
+tests = ["tests/sample"]
+'''
 
 
 def _write_config(root: Path, *, project_id: str = "ab" * 16,
@@ -65,23 +112,98 @@ def test_parent_config_applies_without_git(tmp_path):
     assert resolution.config.project_id == "33" * 16
 
 
-def test_resolution_ignores_legacy_environment_and_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("operation", ["resolve", "preview", "init"])
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("legacy_state", ["absent", "malformed", "hostile", "unreadable"])
+def test_legacy_targets_are_never_opened_or_parsed(
+    tmp_path, monkeypatch, operation, configured, legacy_state,
+):
     root = tmp_path / "project"
     root.mkdir()
-    _write_config(root, project_id="44" * 16)
-    sentinel = tmp_path / "legacy-sentinel"
-    sentinel.write_text("must not be read", encoding="utf-8")
-    for name in ("PTEST_CONFIG", "PTEST_STATE_DIR", "PTEST_HOME",
-                 "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"):
-        monkeypatch.setenv(name, str(sentinel))
+    (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    if configured:
+        _write_config(root, project_id="44" * 16)
+    legacy = tmp_path / "legacy"
+    redirects = {
+        "HOME": legacy / "home",
+        "XDG_CONFIG_HOME": legacy / "config",
+        "XDG_STATE_HOME": legacy / "state",
+        "PTEST_CONFIG": legacy / "explicit.toml",
+        "PTEST_STATE_DIR": legacy / "ptest-state",
+        "PTEST_HOME": legacy / "ptest-home",
+        "PTEST_BACKEND": legacy / "remote",
+    }
+    files = [redirects["HOME"] / ".config/ptest/config.toml",
+             redirects["XDG_CONFIG_HOME"] / "ptest/config.toml",
+             redirects["PTEST_CONFIG"],
+             redirects["PTEST_HOME"] / "config.toml",
+             redirects["PTEST_STATE_DIR"] / "history.json"]
+    if legacy_state != "absent":
+        for path in files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "invalid = [\n" if legacy_state == "malformed" else
+                '[projects.takeover]\nroot = "/"\nbackend = "remote"\n'
+                'full = "$(touch legacy-executed)"\n'
+            )
+            if legacy_state == "unreadable":
+                path.chmod(0)
+    for name, value in redirects.items():
+        monkeypatch.setenv(name, str(value))
 
-    resolution = resolve_config(root)
+    # Guard both Python file APIs and descriptor-relative OS opens. A swallowed
+    # exception still fails the final assertion, so reading then ignoring a
+    # legacy file cannot satisfy this contract.
+    opened_dirs = {}
+    attempts = []
 
-    assert resolution.problem is None
-    assert resolution.config is not None
-    assert resolution.config.project_id == "44" * 16
-    assert resolution.warnings == ()
-    assert sentinel.read_text(encoding="utf-8") == "must not be read"
+    def guard(open_file):
+        def checked(path, *args, **kwargs):
+            candidate = None
+            if not isinstance(path, int):
+                candidate = Path(os.fsdecode(path))
+                if not candidate.is_absolute():
+                    candidate = opened_dirs.get(kwargs.get("dir_fd"), Path.cwd()) / candidate
+                candidate = Path(os.path.abspath(candidate))
+                if candidate.is_relative_to(legacy):
+                    attempts.append(candidate)
+                    raise AssertionError("legacy target was opened")
+            result = open_file(path, *args, **kwargs)
+            if isinstance(result, int) and candidate is not None:
+                opened_dirs[result] = candidate
+            return result
+        return checked
+
+    for owner, name in ((builtins, "open"), (io, "open"), (os, "open")):
+        monkeypatch.setattr(owner, name, guard(getattr(owner, name)))
+    # Prove the guards detect the attempted reads, even for an absent target.
+    for open_file in (builtins.open, io.open):
+        with pytest.raises(AssertionError, match="legacy target"):
+            open_file(files[0], "rb")
+    with pytest.raises(AssertionError, match="legacy target"):
+        os.open(files[0], os.O_RDONLY)
+    attempts.clear()
+
+    if operation == "resolve":
+        result = resolve_config(root)
+        assert result.root == root
+        if configured:
+            assert result.problem is None
+            assert result.config.project_id == "44" * 16
+        else:
+            assert result.config is None
+            assert result.problem.code == "initialization-required"
+    else:
+        result = init_project(root, InitOptions(
+            runner=None, dry_run=operation == "preview", reveal_command=False,
+        ))
+        assert result.target == root / ".ptest.toml"
+        assert result.config.runner_kind is RunnerKind.PYTEST
+        assert result.action.value == (
+            "existing" if configured else "preview" if operation == "preview" else "created"
+        )
+    assert result.warnings == ()
+    assert attempts == []
 
 
 @pytest.mark.parametrize("project_id", ["a" * 31, "a" * 33, "A" * 32,
@@ -144,16 +266,26 @@ def test_invalid_utf8_and_oversized_config_fail_closed(tmp_path):
     assert resolution.problem.code == "invalid-config"
 
 
-def test_config_symlink_is_unsafe_and_not_followed(tmp_path):
+def test_config_symlink_is_unsafe_and_not_followed(tmp_path, monkeypatch):
+    import ptest.config as config_module
+
     outside = tmp_path / "outside.toml"
     outside.write_text("version = 1\n", encoding="utf-8")
     (tmp_path / ".ptest.toml").symlink_to(outside)
+    reads = []
+
+    def forbidden_read(*args):
+        reads.append(args)
+        pytest.fail("symlinked config must not be opened")
+
+    monkeypatch.setattr(config_module, "read_regular", forbidden_read)
 
     resolution = resolve_config(tmp_path)
 
     assert resolution.config is None
     assert resolution.problem is not None
     assert resolution.problem.code == "unsafe-path"
+    assert reads == []
 
 
 def test_literal_argv_accepts_metacharacters_but_rejects_controls(tmp_path):
@@ -179,3 +311,259 @@ def test_literal_argv_accepts_metacharacters_but_rejects_controls(tmp_path):
     assert resolution.problem is not None
     assert resolution.problem.code == "invalid-config"
     assert "python" not in resolution.problem.message
+
+
+def test_verbatim_design_config_accepts_final_setup_symlink_without_reading_it(tmp_path, monkeypatch):
+    path = tmp_path / ".ptest.toml"
+    path.write_text(DESIGN_CONFIG)
+    before = resolve_config(tmp_path)
+    assert before.problem is None
+    binary = tmp_path / ".venv/bin/python"
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to(sys.executable)
+
+    import ptest.config as config_module
+    read_regular = config_module.read_regular
+    reads = []
+
+    def checked_read(root, relative, limit):
+        reads.append(relative)
+        assert relative == ".ptest.toml"
+        return read_regular(root, relative, limit)
+
+    monkeypatch.setattr(config_module, "read_regular", checked_read)
+    result = resolve_config(tmp_path)
+
+    assert result.problem is None
+    assert result.warnings == ()
+    assert result.config == before.config
+    assert reads == [".ptest.toml"]
+    assert result.config.project_id == "cd58ec6cf99748ce9f15dfce137f044d"
+    assert result.config.runner.launcher == ("uv", "run", "--locked", "--no-sync", "python")
+    assert result.config.runner.full_args == ("--cov=sample", "--cov-fail-under=85")
+    assert result.config.setup.required_paths == (".venv/bin/python",)
+    assert result.config.selection.groups[0].sources == ("src/sample",)
+    assert path.read_text() == DESIGN_CONFIG
+
+
+def test_moved_tree_retains_portable_config_and_nearest_root(tmp_path):
+    root = tmp_path / "original"
+    child = root / "src/sample"
+    child.mkdir(parents=True)
+    (root / ".ptest.toml").write_text(DESIGN_CONFIG)
+    before = resolve_config(child)
+    moved = tmp_path / "moved"
+    root.rename(moved)
+
+    result = resolve_config(moved / "src/sample")
+
+    assert result.problem is None
+    assert result.root == moved
+    assert result.path == moved / ".ptest.toml"
+    assert result.config.config_path == result.path
+    assert result.config.project_id == before.config.project_id
+    assert result.config.runner == before.config.runner
+    assert result.config.setup == before.config.setup
+    assert result.config.selection == before.config.selection
+
+
+@pytest.mark.parametrize("version", ["1.0", "true", '"1"', "0", "2"])
+def test_version_requires_exact_integer_one(tmp_path, version):
+    (tmp_path / ".ptest.toml").write_text(
+        DESIGN_CONFIG.replace("version = 1\n", f"version = {version}\n", 1)
+    )
+    result = resolve_config(tmp_path)
+    assert result.config is None
+    assert result.problem.code == "invalid-config"
+
+
+def _write_argv_config(root, field, tokens):
+    body = DESIGN_CONFIG
+    lines = {
+        "launcher": 'launcher = ["uv", "run", "--locked", "--no-sync", "python"]',
+        "args": "args = []",
+        "full_args": 'full_args = ["--cov=sample", "--cov-fail-under=85"]',
+        "argv": 'argv = ["uv", "sync", "--locked"]',
+    }
+    # A one-byte launcher and empty runner tails make aggregate limits exact.
+    for name, original in lines.items():
+        values = tokens if name == field else ["x"] if name in {"launcher", "argv"} else []
+        body = body.replace(original, f"{name} = {json.dumps(values, ensure_ascii=False)}")
+    (root / ".ptest.toml").write_text(body)
+
+
+@pytest.mark.parametrize("field", ["launcher", "args", "full_args", "argv"])
+@pytest.mark.parametrize("length", [4097, 16384, 16385])
+def test_argv_token_length_boundary_preserves_literal_tokens(tmp_path, field, length):
+    token = "x" * length
+    _write_argv_config(tmp_path, field, [token])
+    result = resolve_config(tmp_path)
+    if length <= 16384:
+        assert result.problem is None
+        section = result.config.setup if field == "argv" else result.config.runner
+        assert getattr(section, field) == (token,)
+    else:
+        assert result.config is None
+        assert result.problem.code == "invalid-config"
+        assert token not in result.problem.message
+
+
+@pytest.mark.parametrize("field", ["launcher", "argv"])
+@pytest.mark.parametrize("count", [256, 257])
+def test_argv_token_count_boundary(tmp_path, field, count):
+    _write_argv_config(tmp_path, field, ["x"] * count)
+    result = resolve_config(tmp_path)
+    if count == 256:
+        assert result.problem is None
+    else:
+        assert result.config is None
+        assert result.problem.code == "invalid-config"
+
+
+@pytest.mark.parametrize("field", ["launcher", "argv"])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_argv_total_utf8_byte_boundary(tmp_path, field, overflow):
+    # Every token is below the old 4 KiB cap; only the total bytes differ.
+    tokens = ["é" * 4096] * 16 + (["x"] if overflow else [])
+    assert sum(len(token.encode("utf-8")) for token in tokens) == 131072 + overflow
+    _write_argv_config(tmp_path, field, tokens)
+    result = resolve_config(tmp_path)
+    if overflow:
+        assert result.config is None
+        assert result.problem.code == "invalid-config"
+    else:
+        assert result.problem is None
+
+
+@pytest.mark.parametrize("bound", ["tokens", "bytes"])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_runner_command_bounds_include_launcher_args_and_full_args(tmp_path, bound, overflow):
+    if bound == "tokens":
+        args = ["x"] * 254
+        full_args = ["x"] * (1 + overflow)
+    else:
+        args = ["x" * 4096] * 31
+        full_args = ["x" * (4095 + overflow)]
+    _write_argv_config(tmp_path, "args", args)
+    path = tmp_path / ".ptest.toml"
+    path.write_text(path.read_text().replace("full_args = []", f"full_args = {json.dumps(full_args)}"))
+    result = resolve_config(tmp_path)
+    if overflow:
+        assert result.config is None
+        assert result.problem.code == "invalid-config"
+    else:
+        assert result.problem is None
+
+
+@pytest.mark.parametrize("field", ["launcher", "args", "full_args", "argv"])
+@pytest.mark.parametrize("value", ['"shell command"', '[1]', '[["nested"]]', '["bad\\u0000token"]'])
+def test_hostile_argv_types_and_controls_fail_closed(tmp_path, field, value):
+    _write_argv_config(tmp_path, field, ["sentinel"])
+    path = tmp_path / ".ptest.toml"
+    path.write_text(path.read_text().replace(f'{field} = ["sentinel"]', f"{field} = {value}"))
+    result = resolve_config(tmp_path)
+    assert result.config is None
+    assert result.problem.code == "invalid-config"
+
+
+@pytest.mark.parametrize("length", [4096, 4097])
+def test_ordinary_string_limit_is_not_relaxed_for_non_argv_fields(tmp_path, length):
+    # The absent first component avoids OS filename limits; this is the config
+    # string bound, independently of filesystem component length restrictions.
+    root = "absent/" + "x" * (length - len("absent/"))
+    (tmp_path / ".ptest.toml").write_text(
+        DESIGN_CONFIG.replace('test_roots = ["tests"]', f"test_roots = {json.dumps([root])}")
+    )
+    result = resolve_config(tmp_path)
+    if length == 4096:
+        assert result.problem is None
+        assert result.config.runner.test_roots == (root,)
+    else:
+        assert result.config is None
+        assert result.problem.code == "invalid-config"
+
+
+@pytest.mark.parametrize("field", ["test_roots", "required_paths"])
+@pytest.mark.parametrize("path", ["../escape", "/outside", "a//b", "a/./b", "a/../b",
+                                  "C:/outside", "a\\b", "~/.config", ""])
+def test_execution_paths_reject_unsafe_syntax(tmp_path, field, path):
+    original = 'test_roots = ["tests"]' if field == "test_roots" else 'required_paths = [".venv/bin/python"]'
+    (tmp_path / ".ptest.toml").write_text(DESIGN_CONFIG.replace(original, f"{field} = {json.dumps([path])}"))
+    result = resolve_config(tmp_path)
+    assert result.config is None
+    assert result.problem.code == "invalid-config"
+
+
+@pytest.mark.parametrize("component", [".venv", ".venv/bin", "tests"])
+def test_setup_ancestor_and_runner_symlinks_remain_unsafe(tmp_path, component):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / component
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    (tmp_path / ".ptest.toml").write_text(DESIGN_CONFIG)
+    result = resolve_config(tmp_path)
+    assert result.config is None
+    assert result.problem.code == "unsafe-path"
+
+
+@pytest.mark.parametrize("policy", [
+    'enabled = "yes"',
+    'input_roots = "src"',
+    'input_roots = [1]',
+    'input_roots = [["src"]]',
+    'input_roots = ["../outside"]',
+    'input_roots = ["bad\\u0001path"]',
+    'input_roots = ["' + "x" * 4097 + '"]',
+    'environment = ["BAD=VALUE"]',
+    'full_ratio = nan',
+    'full_ratio = inf',
+    'full_ratio = true',
+    'unknown = true',
+    'groups = ["not a table"]',
+    'groups = [{name = "x", sources = [], tests = ["tests"]}]',
+    'groups = [{name = "../x", sources = ["src"], tests = ["tests"]}]',
+    'groups = [{name = "x", sources = ["src"], tests = ["tests"], unknown = true}]',
+    'groups = [{name = "same", sources = ["src/a"], tests = ["tests/a"]}, '
+    '{name = "same", sources = ["src/b"], tests = ["tests/b"]}]',
+], ids=["boolean", "scalar-list", "list-type", "nested-list", "traversal", "control",
+        "oversized-string", "environment", "nan", "infinity", "boolean-ratio", "unknown",
+        "group-type", "empty-group", "unsafe-name", "group-unknown", "duplicate-groups"])
+def test_hostile_selection_falls_back_without_retaining_partial_policy(tmp_path, policy):
+    execution = DESIGN_CONFIG.split("[selection]")[0]
+    (tmp_path / ".ptest.toml").write_text(execution + "[selection]\n" + policy + "\n")
+    result = resolve_config(tmp_path)
+    assert result.problem is None
+    assert result.config.runner.kind is RunnerKind.PYTEST
+    assert result.config.runner.full_args == ("--cov=sample", "--cov-fail-under=85")
+    assert result.config.selection == SelectionPolicy(enabled=False, closed_inputs=False)
+    assert [warning.code for warning in result.warnings] == ["policy-invalid"]
+
+
+@pytest.mark.parametrize("bound", ["groups", "paths", "combined-paths"])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_selection_group_and_path_count_bounds(tmp_path, bound, overflow):
+    if bound == "groups":
+        groups = [f'{{name = "g{i}", sources = ["src"], tests = ["tests"]}}'
+                  for i in range(256 + overflow)]
+        policy = "groups = [" + ",".join(groups) + "]"
+    elif bound == "paths":
+        policy = f'input_roots = {json.dumps(["src"] * (4096 + overflow))}'
+    else:
+        policy = (f'input_roots = {json.dumps(["src"] * (4094 + overflow))}\n'
+                  'groups = [{name = "g", sources = ["src"], tests = ["tests"]}]')
+    _write_config(tmp_path, extra=policy)
+    result = resolve_config(tmp_path)
+    assert result.problem is None
+    assert [warning.code for warning in result.warnings] == (["policy-invalid"] if overflow else [])
+
+
+def test_selection_symlink_disables_selection(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "src").symlink_to(outside, target_is_directory=True)
+    (tmp_path / ".ptest.toml").write_text(DESIGN_CONFIG)
+    result = resolve_config(tmp_path)
+    assert result.problem is None
+    assert result.config.selection == SelectionPolicy(enabled=False, closed_inputs=False)
+    assert [warning.code for warning in result.warnings] == ["policy-invalid"]
