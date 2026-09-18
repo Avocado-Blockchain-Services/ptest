@@ -436,9 +436,14 @@ def _publication_is_active(
         or value["version"] != 1
         or type(value["pid"]) is not int or value["pid"] <= 0
         or type(value["birth"]) not in {int, float} or value["birth"] < 0
-        or type(value["sequence"]) is not int or value["sequence"] != sequence
+        or type(value["sequence"]) is not int or value["sequence"] < 0
     ):
         raise _HistoryStateError("coordinator-corrupt")
+    if value["sequence"] != sequence:
+        # A later publisher may commit while an older generic uncertainty
+        # marker remains. Its live marker does not make that older uncertainty
+        # safe to ignore.
+        return False
     try:
         birth = psutil.Process(value["pid"]).create_time()
     except (psutil.Error, OSError):
@@ -446,7 +451,10 @@ def _publication_is_active(
     return abs(birth - float(value["birth"])) < 0.001
 
 
-def _reserve_publication(directory: Path, sequence: int, capacity: int | None) -> None:
+def _reserve_publication(
+    directory: Path, sequence: int, capacity: int | None,
+    publication: int | None,
+) -> None:
     active = {
         "version": 1,
         "pid": os.getpid(),
@@ -457,14 +465,19 @@ def _reserve_publication(directory: Path, sequence: int, capacity: int | None) -
         directory, _ACTIVE_PUBLICATION_NAME, _json_bytes(active).encode("utf-8"),
     )
     try:
-        publish_atomic(directory, _PUBLICATION_MARKER_NAME, _json_bytes({
-            "version": 1, "code": "selection-disabled", "sequence": sequence,
-        }).encode("utf-8"))
-        _store_capacity_reserve(directory, max(sequence, capacity or 0))
+        if publication is None:
+            publish_atomic(directory, _PUBLICATION_MARKER_NAME, _json_bytes({
+                "version": 1, "code": "selection-disabled", "sequence": sequence,
+            }).encode("utf-8"))
+        _store_capacity_reserve(
+            directory, max(sequence, capacity or 0, publication or 0),
+        )
     except BaseException:
-        for name in (
-            _CAPACITY_RESERVE_NAME, _PUBLICATION_MARKER_NAME, _ACTIVE_PUBLICATION_NAME,
-        ):
+        names = [_CAPACITY_RESERVE_NAME]
+        if publication is None:
+            names.append(_PUBLICATION_MARKER_NAME)
+        names.append(_ACTIVE_PUBLICATION_NAME)
+        for name in names:
             try:
                 _remove_marker(directory, name)
             except (C.Problem, OSError):
@@ -472,11 +485,15 @@ def _reserve_publication(directory: Path, sequence: int, capacity: int | None) -
         raise
 
 
-def _discard_publication_reservation(directory: Path) -> None:
+def _discard_publication_reservation(
+    directory: Path, *, retain_publication: bool = False,
+) -> None:
     first_error = None
-    for name in (
-        _CAPACITY_RESERVE_NAME, _PUBLICATION_MARKER_NAME, _ACTIVE_PUBLICATION_NAME,
-    ):
+    names = [_CAPACITY_RESERVE_NAME]
+    if not retain_publication:
+        names.append(_PUBLICATION_MARKER_NAME)
+    names.append(_ACTIVE_PUBLICATION_NAME)
+    for name in names:
         try:
             _remove_marker(directory, name)
         except (C.Problem, OSError) as exc:
@@ -493,12 +510,12 @@ def _retain_publication_uncertainty(directory: Path) -> None:
 
 
 def _claim_reserved_capacity(directory: Path) -> None:
-    # Once the active marker is gone readers conservatively see generic
-    # uncertainty until the publication marker is removed. The already-created
-    # reserve then becomes the durable capacity claim without allocating space.
+    # Promote the already-created reserve before removing either publication
+    # marker. Readers infer capacity only from this durable record, never from
+    # preallocation by a healthy or abandoned publisher.
+    os.replace(directory / _CAPACITY_RESERVE_NAME, directory / _CAPACITY_MARKER_NAME)
     _remove_marker(directory, _ACTIVE_PUBLICATION_NAME)
     _remove_marker(directory, _PUBLICATION_MARKER_NAME)
-    os.replace(directory / _CAPACITY_RESERVE_NAME, directory / _CAPACITY_MARKER_NAME)
 
 
 def _selection_marker(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> str | None:
@@ -511,13 +528,18 @@ def _selection_marker(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> st
     for _attempt in range(2):
         capacity = _capacity_sequence(domain, checkout)
         publication = _publication_sequence(domain, checkout)
-        reserve = _capacity_reserve_sequence(domain, checkout)
         if publication is None:
-            return "capacity-exceeded" if capacity is not None or reserve is not None else None
+            # A capacity claim is promoted before publication cleanup. Re-read
+            # it so a reader spanning that rename cannot miss the durable state.
+            if capacity is None:
+                capacity = _capacity_sequence(domain, checkout)
+            return "capacity-exceeded" if capacity is not None else None
         if capacity is not None:
             return "capacity-exceeded"
         if _publication_is_active(domain, checkout, publication):
             return None
+        if _capacity_sequence(domain, checkout) is not None:
+            return "capacity-exceeded"
         if _publication_sequence(domain, checkout) is None:
             continue
         return "selection-disabled"
@@ -1710,24 +1732,19 @@ def _publish_locked(
         marker_code = _disabled_marker(domain, checkout)
         if marker_code is not None:
             raise _HistoryStateError(marker_code)
-        if _publication_sequence(domain, checkout) is not None:
-            raise _HistoryStateError("selection-disabled")
+        publication = _publication_sequence(domain, checkout)
         reserve = _capacity_reserve_sequence(domain, checkout)
         capacity = _capacity_sequence(domain, checkout)
+        # A reserve is only preallocated space. If its publisher disappeared,
+        # the generic publication marker retains uncertainty; the reserve must
+        # not be promoted without an observed capacity failure.
         if reserve is not None:
-            if capacity is None or reserve > capacity:
-                os.replace(
-                    directory / _CAPACITY_RESERVE_NAME,
-                    directory / _CAPACITY_MARKER_NAME,
-                )
-                capacity = reserve
-            else:
-                _remove_marker(directory, _CAPACITY_RESERVE_NAME)
+            _remove_marker(directory, _CAPACITY_RESERVE_NAME)
         # An active marker without generic uncertainty is from a writer that
         # never reached the database. The exclusive writer lock proves it no
         # longer owns publication, so it is safe to discard here.
         _remove_marker(directory, _ACTIVE_PUBLICATION_NAME)
-        _reserve_publication(directory, result.sequence, capacity)
+        _reserve_publication(directory, result.sequence, capacity, publication)
         connection = None
         try:
             connection = _open_store(domain, checkout, create=True)
@@ -1751,7 +1768,9 @@ def _publish_locked(
                 if capacity_observed:
                     _claim_reserved_capacity(directory)
                 elif safe_transient:
-                    _discard_publication_reservation(directory)
+                    _discard_publication_reservation(
+                        directory, retain_publication=publication is not None,
+                    )
                 else:
                     _retain_publication_uncertainty(directory)
             except (C.Problem, OSError):
@@ -1769,20 +1788,36 @@ def _publish_locked(
         # Commit is final. No maintenance error below can retry publication or
         # change its receipt. Retain the marker unless a newer full gate can
         # account for ALL lost outcomes, including an overlapping late failure.
-        disabled_code = None
-        if capacity is not None and not (
-            result.sequence > capacity
-            and _clean_full(result, inventory, require_tests=True)
+        authoritative_full = bool(
+            _clean_full(result, inventory, require_tests=True)
+            and inventory is not None
             and all(item.outcome is _SUCCESS_OUTCOME for item in inventory.tests)
-        ):
+        )
+        recover_capacity = bool(
+            capacity is not None
+            and result.sequence > capacity
+            and authoritative_full
+        )
+        recover_publication = bool(
+            publication is not None
+            and result.sequence > publication
+            and authoritative_full
+        )
+        disabled_code = None
+        if capacity is not None and not recover_capacity:
             disabled_code = "capacity-exceeded"
-        elif capacity is not None:
+        elif recover_capacity:
             try:
                 _clear_capacity(directory)
             except (C.Problem, OSError):
                 disabled_code = "capacity-exceeded"
+        if publication is not None and not recover_publication:
+            disabled_code = disabled_code or "selection-disabled"
         try:
-            _discard_publication_reservation(directory)
+            _discard_publication_reservation(
+                directory,
+                retain_publication=publication is not None and not recover_publication,
+            )
         except (C.Problem, OSError):
             disabled_code = disabled_code or "selection-disabled"
         if pruned:

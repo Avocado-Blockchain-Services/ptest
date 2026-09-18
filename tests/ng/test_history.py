@@ -1313,6 +1313,285 @@ def test_interrupted_publish_is_uncertain_without_false_capacity(case, monkeypat
     assert not (_store_path(domain, checkout).parent / "history-capacity.json").exists()
 
 
+def test_interrupted_publication_allows_ineligible_commits_and_retains_failure(
+    case, monkeypatch,
+):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    passed = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), passed,
+    ).baseline_published
+    original_insert = H._insert_summary
+
+    def interrupted(*_args):
+        raise TypeError("interrupted publication")
+
+    monkeypatch.setattr(H, "_insert_summary", interrupted)
+    with pytest.raises(TypeError, match="interrupted publication"):
+        H.publish_outcome(
+            domain, checkout, _result(case, 10, checkout=checkout), passed,
+        )
+    monkeypatch.setattr(H, "_insert_summary", original_insert)
+    directory = _store_path(domain, checkout).parent
+    marker = directory / "history-publication.json"
+    assert json.loads(marker.read_bytes())["sequence"] == 10
+
+    dirty = _snapshot(case, clean=False)
+    candidates = (
+        (_result(case, 11, before=snapshot, checkout=checkout, mode=C.Mode.SCOPED), passed),
+        (_result(case, 12, before=dirty, checkout=checkout), passed),
+        (_result(case, 13, before=snapshot, checkout=checkout),
+         case.inventory(("tests/test_a.py",), outcome="skipped")),
+        (_result(case, 14, before=snapshot, checkout=checkout),
+         case.inventory(("tests/test_a.py",), outcome="xfail")),
+        (_result(case, 15, status="failed", before=snapshot, checkout=checkout),
+         case.inventory(("tests/test_new_failure.py",), outcome="failed")),
+        (_result(case, 9, before=snapshot, checkout=checkout), passed),
+    )
+    committed_ids = []
+    for candidate, inventory in candidates:
+        published = H.publish_outcome(domain, checkout, candidate, inventory)
+        assert published.committed and published.selection_disabled
+        assert published.reasons[0].code == "selection-disabled"
+        assert json.loads(marker.read_bytes())["sequence"] == 10
+        committed_ids.append(candidate.run_id)
+
+    view = H.read_history(domain, checkout)
+    assert view.selection_disabled
+    assert view.limitations[0].code == "selection-disabled"
+    assert any(
+        item.file == "tests/test_new_failure.py" and item.sequence == 15
+        for item in view.obligations
+    )
+    connection = sqlite3.connect(_store_path(domain, checkout))
+    stored_ids = {row[0] for row in connection.execute("SELECT run_id FROM runs")}
+    connection.close()
+    assert set(committed_ids).issubset(stored_ids)
+    assert not (directory / "history-capacity.json").exists()
+
+
+def test_strictly_newer_clean_full_clears_publication_only_after_commit(
+    case, monkeypatch,
+):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    passed = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), passed,
+    ).baseline_published
+    original_insert = H._insert_summary
+
+    def interrupted(*_args):
+        raise TypeError("interrupted publication")
+
+    monkeypatch.setattr(H, "_insert_summary", interrupted)
+    with pytest.raises(TypeError, match="interrupted publication"):
+        H.publish_outcome(
+            domain, checkout, _result(case, 10, checkout=checkout), passed,
+        )
+    monkeypatch.setattr(H, "_insert_summary", original_insert)
+    failed = H.publish_outcome(
+        domain, checkout,
+        _result(case, 11, status="failed", before=snapshot, checkout=checkout),
+        case.inventory(("tests/test_a.py",), outcome="failed"),
+    )
+    assert failed.committed and failed.selection_disabled
+
+    committed = threading.Event()
+    release = threading.Event()
+    original_remove = H._remove_marker
+    result = {}
+    errors = []
+    recovery_result = _result(case, 12, before=snapshot, checkout=checkout)
+
+    def remove_after_commit(directory, name):
+        if (threading.current_thread().name == "publication-recovery"
+                and name == H._PUBLICATION_MARKER_NAME):
+            committed.set()
+            assert release.wait(timeout=3)
+        return original_remove(directory, name)
+
+    def recover():
+        try:
+            result["value"] = H.publish_outcome(
+                domain, checkout, recovery_result, passed,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            errors.append(exc)
+
+    monkeypatch.setattr(H, "_remove_marker", remove_after_commit)
+    writer = threading.Thread(name="publication-recovery", target=recover)
+    writer.start()
+    assert committed.wait(timeout=3)
+    try:
+        connection = sqlite3.connect(_store_path(domain, checkout))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE sequence = 12"
+        ).fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM obligations").fetchone() == (0,)
+        connection.close()
+        view = H.read_history(domain, checkout)
+        assert view.baseline is not None and view.baseline.run_id == recovery_result.run_id
+        assert view.obligations == ()
+        assert view.selection_disabled
+        assert view.limitations[0].code == "selection-disabled"
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive() and not errors
+    assert result["value"].committed and result["value"].baseline_published
+    assert not result["value"].selection_disabled
+    assert not H.read_history(domain, checkout).selection_disabled
+    assert not (_store_path(domain, checkout).parent / "history-publication.json").exists()
+
+
+def test_reader_classification_at_every_healthy_publication_boundary(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), inventory,
+    ).baseline_published
+    original_publish = H.publish_atomic
+    original_remove = H._remove_marker
+    tracked = False
+    observations = []
+    names = {
+        H._ACTIVE_PUBLICATION_NAME,
+        H._PUBLICATION_MARKER_NAME,
+        H._CAPACITY_RESERVE_NAME,
+    }
+
+    def observed_publish(directory, name, payload):
+        nonlocal tracked
+        value = original_publish(directory, name, payload)
+        if name == H._ACTIVE_PUBLICATION_NAME:
+            tracked = True
+        if tracked and name in names:
+            observations.append(("create", name, H._selection_marker(domain, checkout)))
+        return value
+
+    def observed_remove(directory, name):
+        value = original_remove(directory, name)
+        if tracked and name in names:
+            observations.append(("remove", name, H._selection_marker(domain, checkout)))
+        return value
+
+    monkeypatch.setattr(H, "publish_atomic", observed_publish)
+    monkeypatch.setattr(H, "_remove_marker", observed_remove)
+    published = H.publish_outcome(
+        domain, checkout, _result(case, 2, checkout=checkout), inventory,
+    )
+    assert published.committed and not published.selection_disabled
+    assert observations == [
+        ("create", H._ACTIVE_PUBLICATION_NAME, None),
+        ("create", H._PUBLICATION_MARKER_NAME, None),
+        ("create", H._CAPACITY_RESERVE_NAME, None),
+        ("remove", H._CAPACITY_RESERVE_NAME, None),
+        ("remove", H._PUBLICATION_MARKER_NAME, None),
+        ("remove", H._ACTIVE_PUBLICATION_NAME, None),
+    ]
+
+
+def test_capacity_is_promoted_before_claim_cleanup_and_reserve_is_never_capacity(
+    case, monkeypatch,
+):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), inventory,
+    ).baseline_published
+    original_insert = H._insert_summary
+    original_remove = H._remove_marker
+    original_replace = H.os.replace
+    claiming = False
+    observations = []
+
+    def full(*_args):
+        nonlocal claiming
+        claiming = True
+        raise _full_error()
+
+    def observed_remove(directory, name):
+        value = original_remove(directory, name)
+        if claiming and name in {H._ACTIVE_PUBLICATION_NAME, H._PUBLICATION_MARKER_NAME}:
+            observations.append(("remove", name, H._selection_marker(domain, checkout)))
+        return value
+
+    def observed_replace(source, destination):
+        value = original_replace(source, destination)
+        if (claiming and Path(source).name == H._CAPACITY_RESERVE_NAME
+                and Path(destination).name == H._CAPACITY_MARKER_NAME):
+            observations.append(("promote", H._CAPACITY_MARKER_NAME,
+                                 H._selection_marker(domain, checkout)))
+        return value
+
+    monkeypatch.setattr(H, "_insert_summary", full)
+    monkeypatch.setattr(H, "_remove_marker", observed_remove)
+    monkeypatch.setattr(H.os, "replace", observed_replace)
+    published = H.publish_outcome(
+        domain, checkout,
+        _result(case, 2, status="failed", checkout=checkout),
+        case.inventory(("tests/test_a.py",), outcome="failed"),
+    )
+    assert not published.committed and published.reasons[0].code == "capacity-exceeded"
+    assert observations == [
+        ("promote", H._CAPACITY_MARKER_NAME, "capacity-exceeded"),
+        ("remove", H._ACTIVE_PUBLICATION_NAME, "capacity-exceeded"),
+        ("remove", H._PUBLICATION_MARKER_NAME, "capacity-exceeded"),
+    ]
+    monkeypatch.setattr(H, "_insert_summary", original_insert)
+
+
+def test_stale_publisher_is_selection_disabled_and_does_not_turn_reserve_into_capacity(
+    case, monkeypatch,
+):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), inventory,
+    ).baseline_published
+    directory = _store_path(domain, checkout).parent
+    H._store_capacity_reserve(directory, 10)
+    F.publish_atomic(directory, H._PUBLICATION_MARKER_NAME, json.dumps({
+        "version": 1, "code": "selection-disabled", "sequence": 10,
+    }).encode())
+    F.publish_atomic(directory, H._ACTIVE_PUBLICATION_NAME, json.dumps({
+        "version": 1, "pid": os.getpid(),
+        "birth": H.psutil.Process(os.getpid()).create_time() + 100,
+        "sequence": 10,
+    }).encode())
+
+    view = H.read_history(domain, checkout)
+    assert view.selection_disabled
+    assert view.limitations[0].code == "selection-disabled"
+    assert not (directory / "history-capacity.json").exists()
+    failed = H.publish_outcome(
+        domain, checkout,
+        _result(case, 11, status="failed", before=snapshot, checkout=checkout),
+        case.inventory(("tests/test_stale.py",), outcome="failed"),
+    )
+    assert failed.committed and failed.selection_disabled
+    assert failed.reasons[0].code == "selection-disabled"
+    view = H.read_history(domain, checkout)
+    assert any(item.file == "tests/test_stale.py" for item in view.obligations)
+    assert view.limitations[0].code == "selection-disabled"
+    assert not (directory / "history-capacity.json").exists()
+
+
 def test_ineligible_commits_preserve_original_capacity_sequence(case, monkeypatch):
     domain = case.domain()
     checkout = case.checkout(domain)
