@@ -1,71 +1,115 @@
-"""Package-resource presence tests (Task 9)."""
+"""Packaged guidance and executable ownership recipe evidence (Task 9)."""
 from __future__ import annotations
 
 from importlib.resources import files
+import errno
+import shutil
 import socket
 import sqlite3
 
+import pytest
+
+from fixtures.doctor.ownership import CacheClient, WorkerDatabases
+
 
 def test_agent_guide_contains_local_nonexecuting_repair_workflow():
-    """A blank guide would fail to preserve the concrete repair boundary."""
     guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
-
     assert "Do not launch an agent" in guide
     assert "one database per worker per run" in guide
     assert "never use global flush" in guide
 
 
-def test_resource_recipe_models_isolated_database_cleanup_and_worker_setup(tmp_path):
-    """A shared database or per-test setup would leak state or over-initialize."""
-    shared = tmp_path / "shared.sqlite"
-    with sqlite3.connect(shared) as conn:
-        conn.execute("create table records (value text)")
-        conn.execute("insert into records values ('worker-a')")
-    with sqlite3.connect(shared) as conn:
-        assert conn.execute("select value from records").fetchall() == [("worker-a",)]
-
-    setup_count = {}
-
-    def worker_db(run: str, worker: str):
-        key = (run, worker)
-        setup_count.setdefault(key, 0)
-        if setup_count[key] == 0:
-            setup_count[key] += 1
-        path = tmp_path / run / worker / "test.sqlite"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path) as conn:
-            conn.execute("create table if not exists records (value text)")
-        return path
-
-    first = worker_db("run-a", "w0")
-    neighbor = worker_db("run-a", "w1")
-    worker_db("run-a", "w0")
-    with sqlite3.connect(first) as conn:
-        conn.execute("insert into records values ('owned')")
-        conn.execute("delete from records")
-    with sqlite3.connect(neighbor) as conn:
-        conn.execute("insert into records values ('neighbor')")
-        assert conn.execute("select value from records").fetchall() == [("neighbor",)]
-    assert setup_count == {("run-a", "w0"): 1, ("run-a", "w1"): 1}
+@pytest.mark.parametrize("name, required", [
+    ("databases", ("once per run or worker, not per test", "run/worker-owned", "neighbor database sentinel")),
+    ("cache", ("run and worker identity", "Never call a global flush", "neighbor key")),
+    ("files-ports", ("run/worker-owned", "OS-assigned ephemeral ports", "neighbor sentinel")),
+    ("processes", ("foreground process group", "Do not\ndetach", "only owned descendants")),
+    ("time-network", ("fake clocks", "local fakes", "scoped ptest")),
+    ("factories", ("fresh test records", "per-test cleanup", "not permission to weaken a test")),
+])
+def test_every_recipe_is_loadable_package_data_with_its_ownership_guidance(name, required):
+    # Package-content check only; execution behavior is tested below.
+    content = files("ptest").joinpath("resources", "recipes", name + ".md").read_text(encoding="utf-8")
+    assert all(phrase in content for phrase in required)
 
 
-def test_resource_recipe_models_namespaced_cache_and_ephemeral_local_sockets():
-    """Global cache cleanup and fixed ports would destroy a neighbor or collide."""
-    cache = {"run-a:w0:key": "owned", "run-a:w1:key": "neighbor"}
-    globally_flushed = dict(cache)
-    globally_flushed.clear()
-    assert "run-a:w1:key" not in globally_flushed
-    for key in tuple(cache):
-        if key.startswith("run-a:w0:"):
-            del cache[key]
-    assert cache == {"run-a:w1:key": "neighbor"}
+@pytest.mark.parametrize("global_cleanup", [True, False], ids=["bad-global", "owned-only"])
+def test_database_cleanup_preserves_only_owned_namespaces(tmp_path, global_cleanup):
+    databases = WorkerDatabases(tmp_path)
+    identities = (("run-a", "w0"), ("run-a", "w1"), ("run-b", "w0"))
+    paths = [databases.database(*identity) for identity in identities]
+    for path in paths:
+        with sqlite3.connect(path) as connection:
+            connection.execute("insert into records values ('sentinel')")
+    for path in paths:
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("select value from records").fetchall() == [("sentinel",)]
 
-    first = socket.socket()
-    second = socket.socket()
-    try:
-        first.bind(("127.0.0.1", 0))
-        second.bind(("127.0.0.1", 0))
-        assert first.getsockname()[1] != second.getsockname()[1]
-    finally:
-        first.close()
-        second.close()
+    databases.cleanup("run-a", "w0", global_cleanup=global_cleanup)
+
+    for index, path in enumerate(paths):
+        with sqlite3.connect(path) as connection:
+            expected = [] if global_cleanup or index == 0 else [("sentinel",)]
+            assert connection.execute("select value from records").fetchall() == expected
+
+
+def test_expensive_database_setup_runs_once_per_worker_and_run_and_each_test_is_clean(tmp_path):
+    databases = WorkerDatabases(tmp_path)
+    for identity in (("run-a", "w0"), ("run-a", "w1"), ("run-b", "w0")):
+        for repetition in range(3):
+            with databases.test_connection(*identity) as connection:
+                assert connection.execute("select value from records").fetchall() == []
+                connection.execute("insert into records values (?)", (str(repetition),))
+                connection.commit()
+                assert connection.execute("select value from records").fetchall() == [(str(repetition),)]
+    assert databases.setup_calls == {("run-a", "w0"): 1, ("run-a", "w1"): 1, ("run-b", "w0"): 1}
+    assert len(set(databases.paths.values())) == 3
+
+
+@pytest.mark.parametrize("global_cleanup", [True, False], ids=["bad-global", "owned-only"])
+def test_shared_cache_clients_observe_neighbor_loss_only_for_global_cleanup(global_cleanup):
+    service = {}
+    owner = CacheClient(service, "run-a", "w0")
+    neighbors = [CacheClient(service, "run-a", "w1"), CacheClient(service, "run-b", "w0")]
+    owner.put("key", "owned")
+    for neighbor in neighbors:
+        neighbor.put("key", "sentinel")
+        assert neighbor.get("key") == "sentinel"
+    owner.cleanup(global_cleanup=global_cleanup)
+    assert owner.get("key") is None
+    assert [neighbor.get("key") for neighbor in neighbors] == ([None, None] if global_cleanup else ["sentinel", "sentinel"])
+
+
+@pytest.mark.parametrize("global_cleanup", [True, False], ids=["bad-global", "owned-only"])
+def test_file_cleanup_has_a_neighbor_sentinel_before_teardown(tmp_path, global_cleanup):
+    root = tmp_path / "runs"
+    owner, neighbor = root / "run-a" / "w0", root / "run-b" / "w0"
+    for path in (owner, neighbor):
+        path.mkdir(parents=True)
+        (path / "sentinel").write_text("retained")
+        assert (path / "sentinel").read_text() == "retained"
+    shutil.rmtree(root if global_cleanup else owner)
+    assert not owner.exists()
+    assert (neighbor / "sentinel").exists() is (not global_cleanup)
+    if not global_cleanup:
+        assert (neighbor / "sentinel").read_text() == "retained"
+
+
+def test_shared_socket_port_collides_but_ephemeral_neighbor_survives_owned_close():
+    with socket.socket() as neighbor, socket.socket() as owner, socket.socket() as conflicting:
+        neighbor.bind(("127.0.0.1", 0))
+        neighbor.listen()
+        with pytest.raises(OSError) as collision:
+            conflicting.bind(neighbor.getsockname())
+        assert collision.value.errno == errno.EADDRINUSE
+        owner.bind(("127.0.0.1", 0))
+        owner.listen()
+        assert owner.getsockname() != neighbor.getsockname()
+        owner.close()
+        neighbor.settimeout(1)
+        with socket.create_connection(neighbor.getsockname(), timeout=1) as client:
+            client.sendall(b"neighbor-sentinel")
+            accepted, _ = neighbor.accept()
+            with accepted:
+                accepted.settimeout(1)
+                assert accepted.recv(17) == b"neighbor-sentinel"
