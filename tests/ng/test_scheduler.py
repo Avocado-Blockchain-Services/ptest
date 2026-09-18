@@ -30,15 +30,26 @@ def world(monkeypatch):
     state = SimpleNamespace(now=100.0, owner=owner, guard=guard,
                             identities={owner.pid: owner, guard.pid: guard},
                             absent=set(), groups={guard.pgid: True},
-                            children={}, parents={}, inaccessible=set())
+                            children={}, parents={}, inaccessible=set(),
+                            vanish_on_children=set())
 
     def process(pid):
         if pid in state.inaccessible:
             raise psutil.AccessDenied(pid)
         if pid in state.absent:
             raise psutil.NoSuchProcess(pid)
+
+        def children():
+            if pid in state.vanish_on_children:
+                state.vanish_on_children.remove(pid)
+                state.identities.pop(pid, None)
+                state.absent.add(pid)
+                raise psutil.NoSuchProcess(pid)
+            return [SimpleNamespace(pid=child_pid)
+                    for child_pid in state.children.get(pid, ())]
+
         return SimpleNamespace(pid=pid, ppid=lambda: state.parents.get(pid, 0),
-                               children=lambda: [process(p) for p in state.children.get(pid, ())])
+                               children=children)
 
     def kill(pid, signal):
         assert signal == 0
@@ -309,6 +320,24 @@ def test_reused_descendant_pid_deletes_dead_observation_without_escape(case, wor
     world.identities[child.pid] = replace(child, birth=3.0, pgid=child.pid)
     assert poll(domain, ticket).state is C.LeaseState.RUNNING
     assert _sql(domain, "SELECT pid,birth FROM observations") == []
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_listed_then_reaped_descendant_does_not_leak_lease(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    world.vanish_on_children.add(child.pid)
+
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert _sql(domain, "SELECT pid FROM observations") == []
+    assert _sql(domain, "SELECT pid FROM observations WHERE pid=0") == []
+
     _gone(world, world.guard)
     finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
     assert poll(domain, ticket).state is C.LeaseState.RELEASED

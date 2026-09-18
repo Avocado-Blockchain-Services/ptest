@@ -850,39 +850,48 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
         uncertain()
     if _same_identity(guard, row, "guard"):
         pending, visited = [guard.pid], set()
-        try:
-            while pending:
-                pid = pending.pop()
-                if pid in visited:
-                    uncertain()
-                    break
-                visited.add(pid)
-                if len(visited) > _MAX_OBSERVATIONS:
-                    uncertain()
-                    break
-                for child in psutil.Process(pid).children():
-                    if len(observations) >= _MAX_OBSERVATIONS:
-                        uncertain()
-                        pending.clear()
-                        break
-                    identity, gone = _observe_process(child.pid)
-                    if gone:
-                        continue
-                    if identity is None:
-                        uncertain()
-                        continue
-                    old = observations.get(child.pid)
-                    if old is not None and old["birth"] == identity.birth and old["uid"] != identity.uid:
-                        uncertain()
-                    observations[child.pid] = dict(run_id=row["run_id"], pid=identity.pid,
-                                                  birth=identity.birth, uid=identity.uid,
-                                                  pgid=identity.pgid, uncertain=0)
-                    pending.append(child.pid)
-        except (psutil.Error, OSError):
-            # A root which exited during inspection is safe only if independently
-            # absent; an inaccessible live tree remains unknown permanently.
-            if not _observe_process(guard.pid)[1]:
+        while pending:
+            pid = pending.pop()
+            if pid in visited:
                 uncertain()
+                break
+            visited.add(pid)
+            if len(visited) > _MAX_OBSERVATIONS:
+                uncertain()
+                break
+            try:
+                children = psutil.Process(pid).children()
+            except psutil.NoSuchProcess:
+                identity, gone = _observe_process(pid)
+                expected = row if pid == guard.pid else observations.get(pid)
+                if gone or (identity is not None and expected is not None
+                            and identity.birth != expected["birth"]):
+                    observations.pop(pid, None)
+                    continue
+                uncertain()
+                break
+            except (psutil.Error, OSError):
+                # Inaccessible live trees remain unknown permanently.
+                uncertain()
+                break
+            for child in children:
+                if len(observations) >= _MAX_OBSERVATIONS:
+                    uncertain()
+                    pending.clear()
+                    break
+                identity, gone = _observe_process(child.pid)
+                if gone:
+                    continue
+                if identity is None:
+                    uncertain()
+                    continue
+                old = observations.get(child.pid)
+                if old is not None and old["birth"] == identity.birth and old["uid"] != identity.uid:
+                    uncertain()
+                observations[child.pid] = dict(run_id=row["run_id"], pid=identity.pid,
+                                              birth=identity.birth, uid=identity.uid,
+                                              pgid=identity.pgid, uncertain=0)
+                pending.append(child.pid)
         current, gone = _observe_process(guard.pid)
         if not gone and not _same_identity(current, row, "guard"):
             uncertain()
