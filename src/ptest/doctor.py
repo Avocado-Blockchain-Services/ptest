@@ -40,12 +40,25 @@ _PATH_BYTES = 4096  # Bounds caller/config path evidence before it can enter a r
 MIN_DOCTOR_OUTPUT_BYTES = 4096
 _PHYSICAL_NEWLINE = re.compile(r"\r\n|\r|\n")
 _TIMING_MISSING = "Timing unavailable: inspect has no checkout identity or per-test history timing input."
+_CACHE_CLEAR_CALL = re.compile(
+    r"(?P<receiver>[A-Za-z_$][A-Za-z0-9_$]{0,255})\s*\.\s*"
+    r"(?:clear|clearAll|clear_all|invalidateAll|invalidate_all)\s*\("
+)
+
+
+def _cache_clear_call(line: str) -> bool:
+    """Recognize bounded cache-named receiver clears without type inference."""
+    for match in _CACHE_CLEAR_CALL.finditer(line):
+        receiver = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", match.group("receiver"))
+        if {token.casefold() for token in re.split(r"[_\s]+", receiver)} & {"cache", "caches"}:
+            return True
+    return False
 
 # code, pattern, severity, consequence, remediation, verification
 _RULES = (
     ("db.per-test-initialization", re.compile(r"\b(?:sqlite3\.)?connect\s*\(|\bcreate_all\s*\("), "medium", "Repeated database creation can dominate tests and hide shared ownership.", "Create expensive database/schema state once per run or worker; reset records per test.", "Run the scoped suite twice with distinct run/worker database identities."),
     ("db.cleanup-ownership", re.compile(r"\b(?:drop_database|drop_all|truncate_all)\s*\("), "medium", "Broad cleanup can destroy a neighbor's database.", "Record the exact database owner before cleanup and only remove that owned namespace.", "Keep a neighbor sentinel database and assert it survives teardown."),
-    ("cache.global-flush", re.compile(r"\bflush(?:all|db)\s*\("), "high", "A global cache flush can erase another worker or run.", "Namespace cache keys by run and worker; delete only that namespace.", "Keep a neighbor cache key and assert it survives cleanup."),
+    ("cache.global-flush", re.compile(r"\bflush(?:all|db)\s*\(", re.I), "high", "A cache-wide flush or clear may erase another worker/run's entries.", "Verify receiver lifetime and ownership; use checkout/run/worker key namespaces and delete only owned keys, or demonstrate an exclusively owned disposable cache.", "Preserve a neighboring run/worker sentinel during cleanup."),
     ("resource.fixed-name", re.compile(r"(?:open|Path)\s*\(\s*[\"'][^\"']+[\"']"), "low", "A fixed mutable path can collide across parallel workers.", "Derive files from a run/worker-owned temporary namespace.", "Run two workers concurrently and assert their paths differ."),
     ("network.fixed-port", re.compile(r"\b(?:port\s*=\s*\d{2,5}\b|bind\s*\([^,\n)]{0,200},\s*\d{2,5}\b)"), "medium", "A fixed port can collide with another test or process.", "Ask the OS for an ephemeral port or allocate a run/worker-owned port.", "Run parallel workers and assert no bind collision occurs."),
     ("time.blocking-sleep", re.compile(r"\b(?:time\.)?sleep\s*\("), "low", "Wall-clock sleeps make timing and cancellation nondeterministic.", "Use a fake clock or deterministic synchronization boundary.", "Exercise the scoped test without waiting on wall-clock time."),
@@ -437,7 +450,7 @@ class _Scan:
                 continue
             for code, pattern, severity, consequence, remediation, verification in _RULES:
                 self.check_deadline()
-                if pattern.search(line):
+                if pattern.search(line) or (code == "cache.global-flush" and _cache_clear_call(line)):
                     finding = C.Finding(code=code, severity=severity, confidence="medium", path=_report_path(rel), line=line_number, evidence_type="static-pattern", consequence=consequence, remediation=remediation, verification=verification)
                     size = _finding_bytes(finding)
                     if len(self.findings) >= limits.findings:

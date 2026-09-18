@@ -54,6 +54,107 @@ def test_doctor_finds_global_cache_flush_and_never_certifies_parallel_safety(cas
     }
 
 
+@pytest.mark.parametrize("source", [
+    "redis.flushAll()",
+    "valkey.flushDb()",
+    "client.flushDB()",
+    "client.FLUSHALL()",
+    "cache.clear()",
+    "shared_cache.clear_all()",
+    "memoryCache.clearAll()",
+    "cacheClient.invalidateAll()",
+    "obj.cache.clear()",
+    "applicationCache.clear()",
+], ids=[
+    "flush-all-camel", "flush-db-camel", "flush-db-uppercase", "flush-all-uppercase",
+    "cache-clear", "shared-cache-clear-snake", "memory-cache-clear-camel",
+    "cache-client-invalidate", "member-cache-clear", "application-cache-clear",
+])
+def test_cache_hardening_finds_bounded_global_flush_hypotheses(case, source):
+    """Replacing either cache branch with a no-op loses the explicit risk finding."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache.test.js").write_text(source + "\n", encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.severity, item.confidence, item.evidence_type,
+             item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", "high", "medium", "static-pattern", "tests/cache.test.js", 1),
+    ]
+    assert next(item for item in report.readiness if item.area == "parallel").state == "unknown"
+    assert next(item for item in report.readiness if item.area == "timing").state == "unknown"
+
+
+@pytest.mark.parametrize("source", [
+    "client.flushAllMetrics()",
+    "flushall_pending()",
+    "flush_database()",
+    "items.clear()",
+    "new Set().clear()",
+    "form.clear()",
+    "console.clear()",
+    "cache.delete(key)",
+    "cache.deleteMany(ownedKeys)",
+    "cache.clearKey(key)",
+    "cache.clearOwnedNamespace(prefix)",
+    "cacheable.clear()",
+    "cachedValue.clear()",
+    "cachet.clear()",
+], ids=[
+    "flush-metrics", "flush-pending", "flush-database", "items", "set", "form",
+    "console", "delete", "delete-many", "clear-key", "clear-owned", "cacheable",
+    "cached-value", "cachet",
+])
+def test_cache_hardening_rejects_near_match_receivers_and_methods(case, source):
+    """Broad receiver/method matching would turn ordinary cleanup into a cache alert."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache.test.js").write_text(source + "\n", encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert "cache.global-flush" not in {item.code for item in report.findings}
+
+
+def test_cache_hardening_emits_one_shared_finding_when_flush_and_clear_share_a_line(case):
+    """Separate catalog rows would duplicate a single line's cache hazard evidence."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache.test.js").write_text("redis.flushAll(); cache.clear()\n", encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", "tests/cache.test.js", 1),
+    ]
+    finding = report.findings[0]
+    assert "flush or clear" in finding.consequence.lower()
+    assert "receiver lifetime and ownership" in finding.remediation.lower()
+    assert "neighboring run/worker sentinel" in finding.verification.lower()
+
+
+def test_cache_hardening_bounds_long_near_match_receiver(case):
+    """Unbounded receiver parsing would make adversarial near-matches expensive."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    receiver = "cacheable" + "Value" * 300
+    (tests / "cache.test.js").write_text(f"{receiver}.clear()\n", encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert len(receiver) < 4096
+    assert "cache.global-flush" not in {item.code for item in report.findings}
+
+
 def test_doctor_rejects_symlink_without_reading_target(case, tmp_path):
     """Following an in-tree symlink would expose unrelated file contents."""
     domain = case.domain()
@@ -353,6 +454,7 @@ def test_absent_or_unreached_declared_test_roots_are_explicit(case, entries, exp
 
 def test_static_markers_do_not_claim_observed_timing_or_read_state(case, monkeypatch):
     import ptest.doctor as doctor
+    from ptest import config, history
     domain = case.domain()
     root = case.project(domain)
     (root / "marked.py").write_text("@pytest.mark.slow\ndef test_marked(): pass\n")
@@ -370,6 +472,8 @@ def test_static_markers_do_not_claim_observed_timing_or_read_state(case, monkeyp
 
     before = set(domain.root.rglob("*"))
     monkeypatch.setattr(doctor.os, "open", reject_state)
+    monkeypatch.setattr(history, "read_history", lambda *_args, **_kwargs: pytest.fail("history read"))
+    monkeypatch.setattr(config, "resolve_config", lambda *_args, **_kwargs: pytest.fail("config resolve"))
     report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
     assert not any(item.code == "timing.slow-test" for item in report.findings)
     assert {item.area: item.state for item in report.readiness} == {

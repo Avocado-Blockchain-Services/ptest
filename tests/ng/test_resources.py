@@ -17,6 +17,11 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
     assert "Do not launch an agent" in guide
     assert "one database per worker per run" in guide
     assert "never use global flush" in guide
+    assert guide.index("scoped `ptest` command") < guide.index("one `ptest --full` final gate")
+    assert "static doctor currently has no validated per-test history timing\ninput" in guide
+    assert "under 0.5 seconds is healthy" in guide
+    assert "Exactly 2 seconds starts optimization" in guide
+    assert "exactly 3\nseconds remains in that band" in guide
 
 
 @pytest.mark.parametrize("name, required", [
