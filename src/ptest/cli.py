@@ -25,8 +25,7 @@ _INSPECTION = frozenset({
     "doctor", "guide",
 })
 _EXECUTION_VALUE = frozenset({
-    "--fixture-domain", "--base", "--workers", "--queue-timeout",
-    "--result-json",
+    "--base", "--workers", "--queue-timeout", "--result-json",
 })
 _EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow"})
 
@@ -64,6 +63,14 @@ class ParsedArgs:
     max_total_bytes: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CliPrefix:
+    fixture_domain: Path | None
+    remainder_index: int
+    command: str | None
+    problem: C.Problem | None
+
+
 def _value(args: Sequence[str], index: int, option: str) -> tuple[str, int]:
     if index + 1 >= len(args):
         raise _problem("invalid-config", "option requires a value")
@@ -93,13 +100,36 @@ def _number(value: str, *, lo: float, hi: float) -> float:
     return parsed
 
 
+def _walk_cli_prefix(args: Sequence[str]) -> _CliPrefix:
+    """Locate one leading fixture domain and the closed inspection command."""
+    fixture = None
+    problem = None
+    index = 0
+    while index < len(args) and args[index] == "--fixture-domain":
+        try:
+            value, next_index = _value(args, index, "--fixture-domain")
+        except C.Problem as error:
+            return _CliPrefix(fixture, index, None, problem or error)
+        if fixture is not None and problem is None:
+            problem = _problem("invalid-config", "option cannot be repeated")
+        path = Path(value)
+        if not path.is_absolute() and problem is None:
+            problem = _problem("unsafe-path", "fixture domain must be an absolute path")
+        if fixture is None:
+            fixture = path
+        index = next_index
+    command = (args[index] if index < len(args)
+               and isinstance(args[index], str)
+               and args[index] in _INSPECTION else None)
+    return _CliPrefix(fixture, index, command, problem)
+
+
 def _parse_execution(args: Sequence[str], *, command: str | None = None) -> ParsedArgs:
     mode = C.Mode.AUTOMATIC
     changed = command == "changed"
     full = False
     workers = None
     base = None
-    fixture = None
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
     no_setup = False
     shadow = False
@@ -130,14 +160,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
             index += 1
             continue
         value, index = _value(args, index, token)
-        if token == "--fixture-domain":
-            if fixture is not None:
-                raise _problem("invalid-config", "option cannot be repeated")
-            path = Path(value)
-            if not path.is_absolute():
-                raise _problem("unsafe-path", "fixture domain must be an absolute path")
-            fixture = path
-        elif token == "--base":
+        if token == "--base":
             if base is not None:
                 raise _problem("invalid-config", "option cannot be repeated")
             base = value
@@ -164,7 +187,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     if shadow and mode is not C.Mode.AUTOMATIC:
         raise _problem("invalid-config", "shadow execution requires automatic mode")
     return ParsedArgs(
-        command=command, mode=mode, runner_argv=tail, fixture_domain=fixture,
+        command=command, mode=mode, runner_argv=tail,
         base=base, workers=workers, queue_timeout_s=queue_timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
         changed=changed, full=full,
@@ -277,32 +300,29 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     raise _problem("invalid-config", "unknown command")
 
 
-def parse_argv(argv: Sequence[str] | None = None) -> ParsedArgs:
-    """Parse ptest's closed prefix grammar without inspecting runner tails."""
-    if argv is None:
-        argv = tuple(sys.argv[1:])
-    args = tuple(argv)
+def _parse_args(args: tuple[str, ...], prefix: _CliPrefix) -> ParsedArgs:
     if any(not isinstance(token, str) for token in args):
         raise _problem("invalid-config", "arguments must be strings")
-    if args[:1] == ("--fixture-domain",):
-        value, index = _value(args, 0, "--fixture-domain")
-        path = Path(value)
-        if not path.is_absolute():
-            raise _problem("unsafe-path", "fixture domain must be an absolute path")
-        parsed = parse_argv(args[index:])
-        return replace(parsed, fixture_domain=path)
-    if args and args[0] in _INSPECTION:
-        command = args[0]
-        return _parse_inspection(command, args[1:])
-    if args and args[0] == "changed":
-        return _parse_execution(args[1:], command="changed")
-    if args and args[0] in {"--help", "-h"}:
-        return ParsedArgs(command="help")
-    if args and args[0] == "--version":
-        return ParsedArgs(command="version")
-    # --fixture-domain is a leading global option and is consumed by the same
-    # prefix parser as execution options.
-    return _parse_execution(args)
+    if prefix.problem is not None:
+        raise prefix.problem
+    remaining = args[prefix.remainder_index:]
+    if prefix.command is not None:
+        parsed = _parse_inspection(prefix.command, remaining[1:])
+    elif remaining and remaining[0] == "changed":
+        parsed = _parse_execution(remaining[1:], command="changed")
+    elif remaining and remaining[0] in {"--help", "-h"}:
+        parsed = ParsedArgs(command="help")
+    elif remaining and remaining[0] == "--version":
+        parsed = ParsedArgs(command="version")
+    else:
+        parsed = _parse_execution(remaining)
+    return replace(parsed, fixture_domain=prefix.fixture_domain)
+
+
+def parse_argv(argv: Sequence[str] | None = None) -> ParsedArgs:
+    """Parse ptest's closed prefix grammar without inspecting runner tails."""
+    args = tuple(sys.argv[1:] if argv is None else argv)
+    return _parse_args(args, _walk_cli_prefix(args))
 
 
 def _domain_public(domain: C.DomainPaths | None) -> dict | None:
@@ -591,33 +611,27 @@ def _lease(item: C.LeaseView) -> dict:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = tuple(sys.argv[1:] if argv is None else argv)
-    json_requested = _inspection_json_requested(raw_args)
+    prefix = _walk_cli_prefix(raw_args)
+    json_requested = _inspection_json_requested(raw_args, prefix)
     try:
-        parsed = parse_argv(raw_args)
+        parsed = _parse_args(raw_args, prefix)
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
         # No subprocesses are launched in Slice 11A.  Keep this a typed
         # capability error so callers cannot mistake preparation for authority.
         raise _problem("unsupported-capability", "execution orchestration is not qualified in this slice")
     except C.Problem as problem:
-        kind = _command_from_args(raw_args) or "run"
+        kind = prefix.command or "run"
         return _emit_error(problem, kind=kind, json_output=json_requested)
 
 
-def _inspection_json_requested(args: Sequence[str]) -> bool:
+def _inspection_json_requested(args: Sequence[str], prefix: _CliPrefix) -> bool:
     """Choose machine errors independent of closed inspection option order.
 
     Guide is text-only. Execution tails never give --json ptest semantics.
     """
-    command = _command_from_args(args)
-    return command is not None and command != "guide" and "--json" in args
-
-
-def _command_from_args(args: Sequence[str]) -> str | None:
-    values = tuple(args)
-    if values[:1] == ("--fixture-domain",):
-        values = values[2:]
-    return values[0] if values[:1] and values[0] in _INSPECTION else None
+    return (prefix.command is not None and prefix.command != "guide"
+            and "--json" in args[prefix.remainder_index + 1:])
 
 
 __all__ = ["ParsedArgs", "parse_argv", "main"]

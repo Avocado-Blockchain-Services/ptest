@@ -65,6 +65,47 @@ def test_json_error_is_one_descriptor_document(command, invalid, code,
     assert captured.err == ""
 
 
+def test_repeated_fixture_domain_is_rejected_before_text_inspection(
+        inspection_project, capsys):
+    domain, _ = inspection_project
+    second_domain = domain.root.parent / "private-second-fixture-token"
+    before = _tree_bytes(domain.root.parent)
+    argv = ("--fixture-domain", str(domain.root),
+            "--fixture-domain", str(second_domain), "where")
+
+    assert main(argv) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "invalid-config: option cannot be repeated\n"
+    assert str(domain.root) not in captured.err
+    assert str(second_domain) not in captured.err
+    assert _tree_bytes(domain.root.parent) == before
+
+
+def test_repeated_fixture_domain_keeps_json_error_contract_before_bogus_option(
+        inspection_project, capsys):
+    domain, _ = inspection_project
+    second_domain = domain.root.parent / "private-second-fixture-token"
+    before = _tree_bytes(domain.root.parent)
+    argv = ("--fixture-domain", str(domain.root),
+            "--fixture-domain", str(second_domain),
+            "where", "--bogus", "--json")
+
+    assert main(argv) == 2
+
+    captured = capsys.readouterr()
+    document = C.decode_public_document(captured.out)
+    assert document.kind == "where"
+    assert document.error.code == "invalid-config"
+    assert document.error.message == "option cannot be repeated"
+    assert document.data is None
+    assert captured.err == ""
+    for token in (str(domain.root), str(second_domain), "--bogus"):
+        assert token not in captured.out
+    assert _tree_bytes(domain.root.parent) == before
+
+
 SECRET_ARGV = ("/private/launcher-secret", "ODD=token-secret",
                "https://user:password-secret@example.invalid/",
                "--unrecognized-secret", "$(touch injected)", "quoted 'token'; *")
