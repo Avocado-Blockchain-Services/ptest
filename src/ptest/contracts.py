@@ -739,6 +739,8 @@ class InputSnapshot:
     changes: tuple = ()
     limitations: tuple = ()
     files: tuple = ()
+    # Internal provenance for the committed delta; absent evidence fails closed.
+    baseline_head: str | None = None
 
     def __post_init__(self) -> None:
         if self.digest is not None:
@@ -747,6 +749,8 @@ class InputSnapshot:
             _check_str("snapshot.compatibility", self.compatibility, allow_empty=True)
         if self.head is not None:
             _check_str("snapshot.head", self.head)
+        if self.baseline_head is not None:
+            _check_str("snapshot.baseline_head", self.baseline_head)
         object.__setattr__(self, "clean", _check_bool("snapshot.clean", self.clean))
         for field, cls in (("changes", Change), ("limitations", Reason),
                            ("files", FileFingerprint)):

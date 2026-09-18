@@ -1,4 +1,19 @@
 import subprocess
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from ptest import contracts as C
+
+
+def snapshot(*args, **kwargs):
+    """Unit boundary: emulate independently verified T11 native identity."""
+    from ptest.source import snapshot as actual_snapshot
+    return actual_snapshot(*args, runtime_identity=kwargs.pop("runtime_identity", "a" * 64), **kwargs)
 
 
 def test_static_snapshot_without_key_creates_no_state_and_cannot_narrow(case):
@@ -25,7 +40,7 @@ def test_execution_key_creation_is_scoped_to_supplied_domain(case):
 
 
 def test_snapshot_reads_git_nul_status_and_committed_base_union(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case)
     config = _config(case, domain)
@@ -45,7 +60,7 @@ def test_snapshot_reads_git_nul_status_and_committed_base_union(case):
 
 
 def test_snapshot_rejects_nonancestor_baseline_and_bad_base(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); config = _config(case, domain); ensure_fingerprint_key(domain)
     baseline = case.history(with_baseline=True).baseline
@@ -57,7 +72,7 @@ def test_snapshot_rejects_nonancestor_baseline_and_bad_base(case):
 
 
 def test_declared_environment_is_hmaced_without_exposing_value(case, monkeypatch):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
     from ptest import contracts as C
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
@@ -73,7 +88,7 @@ def test_declared_environment_is_hmaced_without_exposing_value(case, monkeypatch
 
 
 def test_deleted_and_renamed_paths_are_reported_without_losing_snapshot(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     (root / "src" / "a.py").rename(root / "src" / "renamed.py")
@@ -86,7 +101,7 @@ def test_deleted_and_renamed_paths_are_reported_without_losing_snapshot(case):
 
 
 def test_ignored_generated_input_is_fingerprinted_when_declared(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
     from ptest import contracts as C
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
@@ -101,7 +116,7 @@ def test_ignored_generated_input_is_fingerprinted_when_declared(case):
 
 
 def test_fingerprint_scan_envelopes_fail_closed(case, monkeypatch):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
     from ptest import source
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
@@ -117,7 +132,7 @@ def test_fingerprint_scan_envelopes_fail_closed(case, monkeypatch):
 
 
 def test_mode_change_and_gitlink_fail_closed(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     (root / "src" / "a.py").chmod(0o755)
@@ -127,7 +142,7 @@ def test_mode_change_and_gitlink_fail_closed(case):
 
 
 def test_unmerged_conflict_and_shallow_baseline_fail_closed(case):
-    from ptest.source import ensure_fingerprint_key, snapshot
+    from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     initial = _git(root, "rev-parse", "HEAD")
@@ -172,3 +187,394 @@ def _config(case, domain):
     checkout = case.checkout(domain)
     object.__setattr__(checkout, "root", domain.root / "repo")
     return case.config(checkout=checkout)
+
+
+def _baseline(case, config, snap):
+    return replace(case.history(with_baseline=True).baseline, head=snap.head,
+                   input_digest=snap.digest, compatibility=snap.compatibility,
+                   policy_digest=hashlib.sha256(repr(config.selection).encode()).hexdigest())
+
+
+def test_ignored_caches_do_not_dirty_or_change_a_clean_snapshot(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    (root / ".gitignore").write_text("__pycache__/\n.venv/\n")
+    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore caches")
+    config = _config(case, domain)
+    before = snapshot(domain, config, None, None)
+    (root / "src/__pycache__").mkdir()
+    (root / "src/__pycache__/a.pyc").write_bytes(b"cache")
+    (root / ".venv").mkdir()
+    (root / ".venv/cache").write_bytes(b"cache")
+    after = snapshot(domain, config, None, None)
+    assert after.clean and after.changes == ()
+    assert before.digest == after.digest
+    assert {item.path for item in after.files} == {".gitignore", "src/a.py", "tests/test_a.py"}
+
+
+def test_committed_delta_does_not_mark_worktree_dirty_and_newer_base_cannot_hide_it(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    baseline = _baseline(case, config, snapshot(domain, config, None, None))
+    (root / "src/a.py").write_text("second\n")
+    _git(root, "commit", "-am", "second")
+    result = snapshot(domain, config, baseline, "HEAD")
+    assert result.clean
+    assert any(change.new == "src/a.py" for change in result.changes)
+
+
+@pytest.mark.parametrize("changed_path", ["docs/readme.md", "src/a.py"])
+def test_environment_change_with_path_change_cannot_narrow(case, monkeypatch, changed_path):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(
+        enabled=True, closed_inputs=True, environment=("TASK8_TOKEN",), no_tests=("docs",),
+        groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
+    (root / "tests/other.py").write_text("pass\n")
+    _git(root, "add", "tests/other.py"); _git(root, "commit", "-m", "other test")
+    monkeypatch.setenv("TASK8_TOKEN", "before")
+    before = snapshot(domain, config, None, None)
+    baseline = replace(_baseline(case, config, before), inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
+    (root / changed_path).parent.mkdir(exist_ok=True)
+    (root / changed_path).write_text("edit\n")
+    path_only = snapshot(domain, config, baseline, None)
+    expected = "none" if changed_path.startswith("docs/") else "selected"
+    assert choose_plan(config, path_only, C.HistoryView(baseline=baseline), case.request()).execution == expected
+    monkeypatch.setenv("TASK8_TOKEN", "after")
+    after = snapshot(domain, config, baseline, None)
+    plan = choose_plan(config, after, C.HistoryView(baseline=baseline), case.request())
+    assert before.compatibility and after.compatibility != before.compatibility
+    assert plan.execution == "full" and plan.reasons[0].code == "incompatible-baseline"
+
+
+def test_environment_absent_and_empty_are_distinct(case, monkeypatch):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True, environment=("TASK8_TOKEN",)))
+    monkeypatch.delenv("TASK8_TOKEN", raising=False)
+    absent = snapshot(domain, config, None, None)
+    monkeypatch.setenv("TASK8_TOKEN", "")
+    assert snapshot(domain, config, None, None).digest != absent.digest
+
+
+def test_same_environment_is_separated_by_domain_key(case, monkeypatch):
+    from ptest.source import ensure_fingerprint_key
+
+    first, root = _repository(case); second = case.domain()
+    ensure_fingerprint_key(first); ensure_fingerprint_key(second)
+    config = replace(_config(case, first), selection=C.SelectionPolicy(enabled=True, closed_inputs=True, environment=("TASK8_TOKEN",)))
+    monkeypatch.setenv("TASK8_TOKEN", "same-secret")
+    one = snapshot(first, config, None, None)
+    two = snapshot(second, config, None, None)
+    assert one.digest and two.digest and one.digest != two.digest
+    assert "same-secret" not in repr((one, two))
+
+
+def test_mode_only_change_invalidates_input_digest(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    before = snapshot(domain, config, None, None)
+    (root / "src/a.py").chmod(0o755)
+    after = snapshot(domain, config, None, None)
+    assert before.digest is not None and before.digest != after.digest
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_mode_change_prevents_narrowing_even_with_mapped_change(case, staged):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
+        groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
+    baseline = replace(_baseline(case, config, snapshot(domain, config, None, None)),
+                       inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
+    (root / "src/a.py").chmod(0o755)
+    if staged:
+        _git(root, "add", "src/a.py")
+    result = snapshot(domain, config, baseline, None)
+    assert choose_plan(config, result, C.HistoryView(baseline=baseline), case.request()).execution == "full"
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_index_flags_cannot_hide_runtime_edit_behind_docs_change(case, flag):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True, no_tests=("docs",)))
+    baseline = _baseline(case, config, snapshot(domain, config, None, None))
+    _git(root, "update-index", flag, "src/a.py")
+    (root / "src/a.py").write_text("hidden runtime change")
+    (root / "docs").mkdir(); (root / "docs/readme.md").write_text("docs")
+    result = snapshot(domain, config, baseline, None)
+    assert choose_plan(config, result, C.HistoryView(baseline=baseline), case.request()).execution == "full"
+
+
+def test_dd_unmerged_index_cannot_produce_usable_identity(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    oid = _git(root, "rev-parse", "HEAD:src/a.py")
+    _git(root, "update-index", "--force-remove", "src/a.py")
+    subprocess.run(("git", "-C", str(root), "update-index", "--index-info"),
+                   input=f"100644 {oid} 1\tsrc/a.py\n".encode(), check=True)
+    (root / "src/a.py").unlink()
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None
+    assert any("conflict" in reason.message.lower() for reason in result.limitations)
+
+
+@pytest.mark.parametrize("marker", ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply"])
+def test_in_progress_operation_with_clean_status_fails_closed(case, marker):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    target = root / ".git" / marker
+    if marker.startswith("rebase-"):
+        target.mkdir()
+    else:
+        target.write_text(_git(root, "rev-parse", "HEAD") + "\n")
+    assert snapshot(domain, _config(case, domain), None, None).digest is None
+
+
+def test_git_environment_cannot_redirect_snapshot(case, monkeypatch):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    other_domain, other = _repository(case)
+    (other / "alien.py").write_text("wrong checkout")
+    _git(other, "add", "."); _git(other, "commit", "-m", "alien")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git/index"))
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert {item.path for item in result.files} == {"src/a.py", "tests/test_a.py"}
+
+
+def test_snapshot_never_executes_repository_fsmonitor(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    hook = domain.root / "fsmonitor"
+    marker = domain.root / "hook-executed"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf '\\0'\n")
+    hook.chmod(0o700)
+    _git(root, "config", "core.fsmonitor", str(hook))
+    snapshot(domain, _config(case, domain), None, None)
+    assert not marker.exists()
+
+
+def test_runtime_identity_is_not_assumed_by_static_snapshot(case):
+    from ptest.source import ensure_fingerprint_key, snapshot
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is not None
+    assert result.compatibility is None
+    assert result.limitations
+
+
+def test_real_divergent_commit_is_not_accepted_as_baseline_or_base(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    main = _git(root, "branch", "--show-current")
+    _git(root, "checkout", "-b", "divergent")
+    (root / "src/a.py").write_text("divergent\n"); _git(root, "commit", "-am", "diverge")
+    other = snapshot(domain, config, None, None)
+    baseline = _baseline(case, config, other)
+    _git(root, "checkout", main)
+    (root / "src/a.py").write_text("main\n"); _git(root, "commit", "-am", "main")
+    assert snapshot(domain, config, baseline, None).digest is None
+    assert snapshot(domain, config, None, other.head).digest is None
+
+
+def test_declared_non_input_output_does_not_change_identity(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
+        input_roots=("src", "tests"), non_input_outputs=("reports",)))
+    before = snapshot(domain, config, None, None)
+    (root / "reports").mkdir(); (root / "reports/result.xml").write_text("output")
+    after = snapshot(domain, config, None, None)
+    assert before.digest == after.digest and after.clean and after.changes == ()
+
+
+def test_all_git_calls_share_one_snapshot_deadline(case, monkeypatch):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    tick = [0.0]
+    original = source._git
+    def elapsed_git(*args, **kwargs):
+        result = original(*args, **kwargs)
+        tick[0] += 0.6
+        return result
+    monkeypatch.setattr(source, "_git", elapsed_git)
+    monkeypatch.setattr(source.time, "monotonic", lambda: tick[0])
+    monkeypatch.setattr(source, "_TIMEOUT_S", 1.0)
+    result = source.snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None
+    assert any("limit" in reason.message or "deadline" in reason.message for reason in result.limitations)
+
+
+def test_git_capture_bytes_are_bounded(case, monkeypatch):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    for i in range(20):
+        (root / f"untracked-{i:02d}.py").write_text("x")
+    monkeypatch.setattr(source, "_MAX_GIT_BYTES", 256, raising=False)
+    result = source.snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None
+    assert any("limit" in reason.message for reason in result.limitations)
+
+
+def test_per_file_byte_limit_is_independent_of_total_limit(case, monkeypatch):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    monkeypatch.setattr(source, "_MAX_FILE_BYTES", 3)
+    assert source.snapshot(domain, _config(case, domain), None, None).digest is None
+
+
+def test_file_removed_during_read_returns_limitation_without_stat_race(case, monkeypatch):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    target = root / "src/a.py"
+    inode = target.stat().st_ino
+    read = os.read
+    def disappearing_read(fd, size):
+        data = read(fd, size)
+        if os.fstat(fd).st_ino == inode and target.exists():
+            target.unlink()
+        return data
+    monkeypatch.setattr(source.os, "read", disappearing_read)
+    result = source.snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None and result.limitations
+
+
+@pytest.mark.parametrize("scenario", json.loads((Path(__file__).parent / "fixtures/selection/revalidation.json").read_text()))
+def test_queue_and_running_revalidation_identity_fixture(case, monkeypatch, scenario):
+    """Produces T11 inputs; this is not a claim that execution is integrated."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
+        input_roots=("src", "tests"), environment=("TASK8_TOKEN",), non_input_outputs=("reports",)))
+    monkeypatch.setenv("TASK8_TOKEN", "before")
+    before = snapshot(domain, config, None, None)
+    target = root / scenario["path"]
+    target.parent.mkdir(exist_ok=True)
+    if scenario["mutation"] == "mode":
+        target.chmod(0o755)
+    else:
+        target.write_text("changed\n")
+    if scenario["mutation"] == "environment":
+        monkeypatch.setenv("TASK8_TOKEN", "after")
+    after = snapshot(domain, config, None, None)
+    assert before.digest and before.compatibility
+    assert (after.digest != before.digest) is scenario["identity_changes"]
+
+
+@pytest.mark.parametrize("influence", ["runtime", "platform", "interpreter", "protocol"])
+def test_compatibility_binds_runtime_and_static_identity(case, monkeypatch, influence):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    before = snapshot(domain, config, None, None)
+    runtime = "a" * 64
+    if influence == "runtime":
+        runtime = "b" * 64
+    elif influence == "platform":
+        monkeypatch.setattr(source.platform, "machine", lambda: "another-architecture")
+    elif influence == "interpreter":
+        monkeypatch.setattr(source.sys, "version", "different interpreter")
+    else:
+        monkeypatch.setattr(source, "_IDENTITY_PROTOCOL", "different protocol")
+    after = snapshot(domain, config, None, None, runtime_identity=runtime)
+    assert before.compatibility and after.compatibility and before.compatibility != after.compatibility
+
+
+def test_declared_ignored_input_change_with_docs_forces_full(case):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".gitignore").write_text("generated/\n")
+    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "generated inputs")
+    (root / "generated").mkdir(); (root / "generated/input.py").write_text("original\n")
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
+        ignored_inputs=("generated",), no_tests=("docs",)))
+    before = snapshot(domain, config, None, None)
+    baseline = _baseline(case, config, before)
+    assert choose_plan(config, snapshot(domain, config, baseline, None), C.HistoryView(baseline=baseline), case.request()).execution == "none"
+    (root / "generated/input.py").write_text("changed\n")
+    (root / "docs").mkdir(); (root / "docs/readme.md").write_text("docs\n")
+    after = snapshot(domain, config, baseline, None)
+    plan = choose_plan(config, after, C.HistoryView(baseline=baseline), case.request())
+    assert plan.execution == "full" and plan.reasons[0].code == "incompatible-baseline"
+
+
+def test_static_scan_uses_only_supplied_domain_and_does_not_refresh_index(case, monkeypatch):
+    from ptest import source
+
+    domain, root = _repository(case); source.ensure_fingerprint_key(domain)
+    index = root / ".git/index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    (root / "src/a.py").touch()
+    read, validate = source.read_regular, source.validate_private_file
+    def supplied_read(read_root, relative, limit):
+        assert read_root == domain.root
+        return read(read_root, relative, limit)
+    def supplied_validate(path):
+        assert path == domain.root / "input-hmac.key"
+        return validate(path)
+    monkeypatch.setattr(source, "read_regular", supplied_read)
+    monkeypatch.setattr(source, "validate_private_file", supplied_validate)
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is not None
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_actual_sixteen_mib_file_limit_without_allocating_payload(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    with (root / "src/large.py").open("wb") as stream:
+        stream.truncate(16 * 1024 * 1024 + 1)
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None and result.limitations[0].code == "scan-limit"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "invalid-utf8"])
+def test_unsafe_input_types_and_encodings_fail_closed(case, kind):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    if kind == "symlink":
+        (root / "src/unsafe").symlink_to(root / "src/a.py")
+    elif kind == "fifo":
+        # Git has no untracked FIFO inventory; exercise a known input replaced
+        # by a FIFO, which must never block the bounded reader.
+        (root / "src/a.py").unlink()
+        os.mkfifo(root / "src/a.py")
+    else:
+        fd = os.open(os.fsencode(root) + b"/src/unsafe-\xff", os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None and result.limitations
