@@ -21,6 +21,15 @@
       "Four-file sensitivity/recovery uses full_ratio 0.75; separate equality case at 0.50 widens to full"
     ]
   },
+  "focused_review_clarifications": {
+    "reviewer": "Opus",
+    "approved_commit": "e6d71a2d31177bcb6e8097fbcf2af95e56a90567",
+    "remaining_note_severity": "LOW",
+    "addressed": [
+      "Freeze per-mode a001 identity references; probe first content capture cannot prove admission-time content stability",
+      "Enumerate exactly five REASON_CODES additions with exact public/private use and unchanged decision-stop subset"
+    ]
+  },
   "owned_files": [
     "docs/designs/2026-09-18-ptest-ng-task12-amendment.md",
     "docs/plans/2026-09-17-ptest-ng.md",
@@ -63,11 +72,44 @@
     },
     "first_gate_invalidation": {
       "same_grant_replan": false,
-      "ordinary_and_probe": "Incomplete 70, ptest origin, changed-during-run for observed change or unknown-input for lost required identity",
+      "identity_references": {
+        "automatic_selected_and_shadow": "Admitted plan input_digest or fixed selected/full comparison digest, plus bound config/scope/relevant environment resolution",
+        "automatic_full_explicit_full_and_scoped": "Retained post-admission pre-guard input/config/environment capture; scope matches admitted resolution; no earlier content-delta claim",
+        "probe": "Config/scope/relevant environment drift from admission resolution or unknown required identity; a001 is first content capture for later gates/final verification, not admission-time content-delta detection"
+      },
+      "ordinary_and_probe": "Incomplete 70, ptest origin, changed-during-run for observed change against the mode-specific reference or unknown-input for unknown required identity",
       "shadow": "Not-run 2, ptest origin, unsupported-capability plus changed-during-run or unknown-input",
       "execution_attempts_started": 0,
       "replan": "New caller invocation and fresh admission; automatic readmission is outside Task 12"
     },
+    "reason_code_additions": [
+      {
+        "code": "execution-timeout",
+        "public": "Run reason for execution or compound expiry; affected attempt status/exit remains in AttemptResult; incomplete ptest-origin 70 absent earlier nonzero; not queue or decision expiry",
+        "private": "Existing guard deadline problem and allowed attempt-decision stop reason for exhausted execution budget"
+      },
+      {
+        "code": "attempt-decision-timeout",
+        "public": "Run reason for pending-gate watchdog expiry; incomplete ptest-origin 70 absent earlier nonzero",
+        "private": "Guard/controller diagnostic only; not an allowed decision-stop reason, new event or synthetic facts for an unstarted attempt"
+      },
+      {
+        "code": "selection-shadow-quarantine",
+        "public": "History/selection limitation and automatic-full planning reason while the dedicated row exists; context for eligible diagnostic shadow",
+        "private": "Exact SelectionQuarantine.code and history-owned row discriminator; not a guard stop reason or generic health marker"
+      },
+      {
+        "code": "probe-no-conflict-observed",
+        "public": "Run reason only for a complete passing probe sample; no safety or full-gate certification",
+        "private": "Controller classification of authenticated complete evidence only; not a guard/bridge verdict or decision-stop reason"
+      },
+      {
+        "code": "probe-conflict-observed",
+        "public": "Run reason for conclusive serial-pass/reproducible-parallel-failure differential; preserve first failing runner outcome",
+        "private": "Controller classification of authenticated differential evidence only; not a guard/bridge verdict or decision-stop reason"
+      }
+    ],
+    "reason_catalog_boundaries": "Exactly five public additions; existing reasons and seven-code decision-stop subset unchanged; internal comparison verdicts and private control-unavailable are not added; preserve safe public projection; no second catalog or public field/schema-version change",
     "shadow": {
       "requires": "Qualified advanced first-class profile and genuine nonempty strict selected plan with compatible complete baseline",
       "ordinary_selected_failure": "Full still executes; first nonzero remains",
