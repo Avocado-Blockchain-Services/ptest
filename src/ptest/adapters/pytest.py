@@ -33,7 +33,8 @@ def _problem(code: str, message: str) -> C.Problem:
 
 def _short_redirect_cluster(token: str) -> bool:
     """Recognise value-taking ``-c``/``-o`` inside a short-option cluster."""
-    if not token.startswith("-") or token.startswith("--"):
+    if (not token.startswith("-") or token.startswith("--")
+            or token.startswith("-W")):
         return False
     short_options = token[1:]
     return len(short_options) > 1 and ("c" in short_options or "o" in short_options)

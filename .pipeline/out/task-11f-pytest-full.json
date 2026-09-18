@@ -36,19 +36,19 @@
     {
       "stage": "audit-repair focused bootstrap scope",
       "exit_code": 0,
-      "output": "286 passed in 18.60s; combined short redirects in args/full_args, warning-filter values, effective option path binding, source domain, generic plan, and real full hook cases",
+      "output": "288 passed in 18.87s; combined short redirects in args/full_args, attached/separated warning-filter values, effective option path binding, source domain, generic plan, and real full hook cases",
       "red_green": "GREEN after the R1 HIGH repair edits; no raw runner or dependency installation substituted"
     },
     {
       "stage": "approved combined scoped bootstrap regression",
       "exit_code": 0,
-      "output": "717 passed, 8 skipped in 87.49s (0:01:27); slowest 20 durations reported, maximum 1.63s",
+      "output": "719 passed, 8 skipped in 91.85s (0:01:31); slowest 20 durations reported, maximum 2.93s",
       "red_green": "GREEN on the provisioned controller after R1 HIGH audit repairs; skipped versions/xdist/unsupported tuples remain explicitly unqualified"
     }
   ],
   "verified_by_inspection": [
     "git diff --check",
-    "graphify update . (AST graph refreshed: 4617 nodes, 10083 edges, 305 communities)",
+    "graphify update . (AST graph refreshed: 4617 nodes, 10083 edges, 306 communities)",
     "Scoped code/test ownership remains limited to the Task 11F file list; no controller or dependency files were edited."
   ],
   "not_verified": [

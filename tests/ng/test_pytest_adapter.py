@@ -423,8 +423,10 @@ def test_full_preparation_rejects_combined_native_redirects(args, location):
         prepare(config, _plan(), _grant(), _attempt())
 
 
-def test_full_preparation_does_not_treat_warning_filter_as_node_selection():
-    prepare(_config(args=("-W", "error::DeprecationWarning")),
+@pytest.mark.parametrize("warning", [("-W", "error::DeprecationWarning"),
+                                      ("-Wignore::DeprecationWarning",)])
+def test_full_preparation_does_not_treat_warning_filter_as_node_selection(warning):
+    prepare(_config(args=warning),
             _plan(), _grant(), _attempt())
 
 
@@ -473,8 +475,10 @@ def test_full_bridge_rejects_addopts_controls_from_ini(bridge_env, value):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
 
 
-def test_full_bridge_does_not_treat_warning_filter_as_node_selection(bridge_env, monkeypatch):
-    monkeypatch.setenv("PYTEST_ADDOPTS", "-W error::DeprecationWarning")
+@pytest.mark.parametrize("value", ["-W error::DeprecationWarning",
+                                    "-Wignore::DeprecationWarning"])
+def test_full_bridge_does_not_treat_warning_filter_as_node_selection(bridge_env, monkeypatch, value):
+    monkeypatch.setenv("PYTEST_ADDOPTS", value)
     hook = pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config())
     next(hook)
 
