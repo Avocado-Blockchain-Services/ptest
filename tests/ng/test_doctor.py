@@ -155,6 +155,73 @@ def test_cache_hardening_bounds_long_near_match_receiver(case):
     assert "cache.global-flush" not in {item.code for item in report.findings}
 
 
+def test_cache_hardening_rejects_identifier_suffix_beyond_receiver_bound(case):
+    """A bounded regex must not restart inside an overlong identifier suffix."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    receiver = "x" * 252 + "Cache"
+    (tests / "cache.test.js").write_text(f"{receiver}.clear()\n", encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert len(receiver) == 257
+    assert "cache.global-flush" not in {item.code for item in report.findings}
+
+
+def test_cache_hardening_finds_valid_python_cache_clear_inside_function(case):
+    """Dropping valid syntax lines would miss an executable cache-wide clear."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache_test.py").write_text(
+        "def test_cache():\n    shared_cache.clear_all()\n",
+        encoding="utf-8",
+    )
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", "tests/cache_test.py", 2),
+    ]
+
+
+def test_cache_hardening_ignores_python_comment_only_clear(case):
+    """Scanning physical Python lines without syntax filtering would flag comments."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache_test.py").write_text(
+        "def test_cache():\n    # cache.clear()\n    pass\n",
+        encoding="utf-8",
+    )
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert "cache.global-flush" not in {item.code for item in report.findings}
+
+
+def test_cache_hardening_documents_python_string_literal_lexical_limit(case):
+    """Syntax filtering excludes comments but remains lexical within string nodes."""
+    domain = case.domain()
+    root = case.project(domain)
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "cache_test.py").write_text(
+        "def test_cache():\n    marker = 'cache.clear()'\n",
+        encoding="utf-8",
+    )
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", "tests/cache_test.py", 2),
+    ]
+
+
 def test_doctor_rejects_symlink_without_reading_target(case, tmp_path):
     """Following an in-tree symlink would expose unrelated file contents."""
     domain = case.domain()

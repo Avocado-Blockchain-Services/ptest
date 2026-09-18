@@ -41,7 +41,7 @@ MIN_DOCTOR_OUTPUT_BYTES = 4096
 _PHYSICAL_NEWLINE = re.compile(r"\r\n|\r|\n")
 _TIMING_MISSING = "Timing unavailable: inspect has no checkout identity or per-test history timing input."
 _CACHE_CLEAR_CALL = re.compile(
-    r"(?P<receiver>[A-Za-z_$][A-Za-z0-9_$]{0,255})\s*\.\s*"
+    r"(?<![A-Za-z0-9_$])(?P<receiver>[A-Za-z_$][A-Za-z0-9_$]{0,255})\s*\.\s*"
     r"(?:clear|clearAll|clear_all|invalidateAll|invalidate_all)\s*\("
 )
 

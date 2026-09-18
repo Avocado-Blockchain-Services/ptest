@@ -107,6 +107,8 @@ def test_prompt_keeps_constraints_before_bounded_delimited_untrusted_evidence():
     assert len(prompt.encode()) <= C.MAX_PROMPT_BYTES
     before, evidence = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)
     assert "Repair constraints:" in before
+    assert "verify suspected behavior and callers first" in before
+    assert "preserve assertions, test inventory, coverage, and test semantics" in before
     assert "Never use blanket flush or drop" in before
     assert "sleep synchronization" in before
     assert "failure suppression" in before
@@ -126,6 +128,38 @@ def test_prompt_keeps_constraints_before_bounded_delimited_untrusted_evidence():
                and record != "[doctor prompt truncated at the configured bound]")
     context_line = next(line for line in before.splitlines() if line.startswith("Scan context: "))
     assert json.loads(context_line.removeprefix("Scan context: "))["usage"]["truncated"] is False
+
+
+def test_repair_prompt_explains_trusted_scan_semantics_in_order_before_evidence():
+    report = _hostile_report()
+
+    prompt = repair_prompt(report)
+
+    caveat = (
+        "Static findings are hypotheses. No findings does not certify parallel safety. "
+        "Scan limits and missing evidence constrain this advice."
+    )
+    explanation = (
+        "Scan context semantics: scope=[] means the resolved repository root; nonempty "
+        "scope lists exact inspected relative targets; null limits or usage means that "
+        "metadata is unavailable. Readiness entries are copied in order; missing areas "
+        "are unassessed and repeated areas are unreconciled. Scan usage.truncated "
+        "describes scan truncation and is distinct from prompt evidence truncation below."
+    )
+    ordered_markers = (
+        "Repair constraints:",
+        "# ptest local repair guide",
+        caveat,
+        "Scan context: ",
+        explanation,
+        "BEGIN UNTRUSTED DOCTOR EVIDENCE",
+    )
+    positions = [prompt.index(marker) for marker in ordered_markers]
+    before = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)[0]
+
+    assert positions == sorted(positions)
+    assert caveat in before
+    assert explanation in before
 
 
 def test_repair_prompt_copies_scan_context_and_readiness_exactly_before_evidence():
