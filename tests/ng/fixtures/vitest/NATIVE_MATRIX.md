@@ -35,6 +35,15 @@ Production wiring remains deferred: `selection.choose_plan` and
 This foundation must not be wired into execution until a later lifecycle task
 supplies the independently bound scoped suffix and executor-owned report flow.
 
+Activation gates from the final foundation audit: Vitest matches filters by
+case-insensitive substring, so planner/lifecycle work must reject suite-root or
+otherwise broad filters such as `.` and `test` before the adapter is enabled.
+Real Vitest resolves both a root and a middleware API object; the current
+fail-closed policy rejects either, so a qualified real tuple requires a
+documented effective-config policy and real-subprocess evidence. Grouped short
+flags must also receive real-parser coverage before this capability changes from
+unavailable.
+
 The eventual executor-owned terminal record has exactly the shared
 `NativeTerminalReport` fields: `protocol`, `run_id`, `nonce`, `attempt_id`,
 `runner`, `observed_runtime_version`, `execution_mode`, `effective_profile`,

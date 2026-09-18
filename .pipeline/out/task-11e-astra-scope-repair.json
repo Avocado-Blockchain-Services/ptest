@@ -1,6 +1,6 @@
 {
   "task": "11E-vitest-basic-serial-scope-repair",
-  "status": "repaired-prepared-but-unavailable-awaiting-opus-review",
+  "status": "approved-with-notes-prepared-but-unavailable",
   "base_commit": "d4619f7",
   "scope": [
     "src/ptest/adapters/vitest.py",
@@ -58,6 +58,6 @@
     "Successful double scenarios explicitly use api:false; recorded Vitest 3.2.x defaults include a middleware API object and are refused. Native resolved config/root fields also remain subject to the narrow guard.",
     "Executor report allocation/consumption, guard lifecycle, cancellation/reload, native hook side effects, and production integration remain deferred.",
     "No full suite, remote/API/TUI validation, fixture dependency installation, push, deployment, or integration was performed, as instructed.",
-    "Independent Claude Opus high re-audit remains pending."
+    "Claude Opus high approved the scope repair with activation notes: reject broad substring filters in the future planner, define the real root/middleware-API policy with a real tuple, and exercise grouped short flags with a real parser before enabling execution."
   ]
 }
