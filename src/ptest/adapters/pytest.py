@@ -31,6 +31,22 @@ def _problem(code: str, message: str) -> C.Problem:
     return C.Problem(code=code, message=message, phase="execution")
 
 
+def _short_redirect_cluster(token: str) -> bool:
+    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster."""
+    if not token.startswith("-") or token.startswith("--"):
+        return False
+    short_options = token[1:]
+    return len(short_options) > 1 and ("c" in short_options or "o" in short_options)
+
+
+def _node_id_token(argv: tuple[str, ...], index: int) -> bool:
+    """Only positional ``::`` tokens are native node selectors."""
+    token = argv[index]
+    if "::" not in token or token.startswith("-"):
+        return False
+    return index == 0 or argv[index - 1] not in {"-W", "--pythonwarnings"}
+
+
 def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
     """Reject controls that would bypass the admission grant before import."""
     for index, token in enumerate(argv):
@@ -44,13 +60,13 @@ def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> No
         if token.startswith("@") or (short and short[1] == "n"):
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
-        redirect_cluster = token.startswith(("-c", "-o")) and token not in {"-c", "-o"}
+        redirect_cluster = _short_redirect_cluster(token)
         maxfail_zero = (full and option == "--maxfail" and (
             token.partition("=")[2] == "0"
             or ("=" not in token and index + 1 < len(argv) and argv[index + 1] == "0")
         ))
         if full and (option in _NARROWING_OPTIONS or option in _FULL_REDIRECT_OPTIONS
-                     or redirect_cluster or "::" in token
+                     or redirect_cluster or _node_id_token(argv, index)
                      or (short and short[1] in {"k", "m"})
                      or re.fullmatch(r"-[qvs]*x[qvs]*", token)) and not maxfail_zero:
             raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")

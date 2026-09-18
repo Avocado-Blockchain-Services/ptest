@@ -68,8 +68,8 @@ missing/non-Git/over-budget evidence makes a zero run incomplete/70 while
 preserving an observed native nonzero.
 
 The implementation evidence in `.pipeline/out/task-11f-pytest-full.json` records
-the exact controller command and the final repair regression: 701 passed and 8
-explicitly unqualified tuples skipped in 104.83s on Linux CPython 3.13.11 /
+the exact controller command and the final repair regression: 717 passed and 8
+explicitly unqualified tuples skipped in 87.49s on Linux CPython 3.13.11 /
 pytest 9.1.1 / pluggy 1.6.0. Pytest 8.4.2, 9.0.3 and 9.1.0, xdist, coverage,
 macOS and independent-repository adoption remain explicitly unqualified.
 

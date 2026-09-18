@@ -93,6 +93,27 @@ _FULL_NARROWING_OPTIONS = {
 }
 
 
+def _short_redirect_cluster(token: str) -> bool:
+    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster."""
+    if not token.startswith("-") or token.startswith("--"):
+        return False
+    short_options = token[1:]
+    return len(short_options) > 1 and ("c" in short_options or "o" in short_options)
+
+
+def _node_id_token(tokens: tuple[str, ...], index: int) -> bool:
+    """Treat ``::`` as a node id only when it is a positional token.
+
+    Warning filters use the same separator (for example ``-W
+    error::DeprecationWarning``), but are option values rather than inventory
+    selectors and must not be rejected as full-mode narrowing.
+    """
+    token = tokens[index]
+    if "::" not in token or token.startswith("-"):
+        return False
+    return index == 0 or tokens[index - 1] not in {"-W", "--pythonwarnings"}
+
+
 def _split_addopts(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -119,7 +140,7 @@ def _full_addopts(config: Any) -> tuple[str, ...]:
 def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
     for index, token in enumerate(tokens):
         option = token.split("=", 1)[0]
-        redirect_cluster = token.startswith(("-c", "-o")) and token not in {"-c", "-o"}
+        redirect_cluster = _short_redirect_cluster(token)
         short_narrow = len(token) > 2 and token.startswith(("-k", "-m"))
         maxfail_zero = (option == "--maxfail" and (
             token.partition("=")[2] == "0"
@@ -127,7 +148,7 @@ def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
         ))
         if (token.startswith("@") or option in _FULL_REDIRECT_OPTIONS
                 or option in _FULL_NARROWING_OPTIONS or redirect_cluster or short_narrow
-                or "::" in token) and not maxfail_zero:
+                or _node_id_token(tokens, index)) and not maxfail_zero:
             _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
 
 
@@ -152,9 +173,12 @@ def _validate_native_paths(config: Any, checkout_root: str | None,
             _fail("pytest native configuration paths are invalid")
         return os.path.realpath(text)
 
+    option = getattr(config, "option", None)
     effective_roots = []
-    for name in ("rootdir", "rootpath"):
-        value = getattr(config, name, None)
+    # ``option.rootdir`` is the effective command-line value.  The public
+    # ``config.rootdir`` attribute can be stale or replaced by a plugin, so it
+    # is deliberately not trusted for redirect detection.
+    for value in (getattr(option, "rootdir", None), getattr(config, "rootpath", None)):
         if value is None:
             continue
         native_root = real(value)
@@ -169,7 +193,7 @@ def _validate_native_paths(config: Any, checkout_root: str | None,
         _fail("pytest native configuration root metadata disagrees")
 
     inipath = getattr(config, "inipath", None)
-    inifilename = getattr(config, "inifilename", None)
+    inifilename = getattr(option, "inifilename", None)
     if inipath is None:
         if inifilename not in (None, ""):
             _fail("pytest native configuration paths have no matching ini path")
@@ -378,7 +402,7 @@ class OwnedPlugin:
             for token in invocation:
                 option_name = str(token).split("=", 1)[0]
                 token_text = str(token)
-                redirect_cluster = token_text.startswith(("-c", "-o")) and token_text not in {"-c", "-o"}
+                redirect_cluster = _short_redirect_cluster(token_text)
                 if option_name in redirects or redirect_cluster:
                     self._refuse("full pytest plans cannot redirect native configuration")
             if any(getattr(option, name, None) for name in
@@ -477,6 +501,11 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             _fail("full pytest roots are invalid")
         if execution == "full":
             _validate_full_roots(roots)
+            # Refuse executor-provided controls before pytest parses native
+            # addopts.  In particular, a combined ``-qc`` may otherwise make
+            # pytest open an attacker-selected file before our hooks run.
+            _reject_full_addopts(_split_addopts(os.environ.get("PYTEST_ADDOPTS")))
+            _reject_full_addopts(tuple(argv))
         try:
             import pytest
         except ImportError:

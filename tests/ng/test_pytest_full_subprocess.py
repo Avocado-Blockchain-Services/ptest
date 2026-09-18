@@ -9,6 +9,18 @@ import subprocess
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_native_pytest_environment(monkeypatch):
+    """Keep committed-Git child runs independent of an outer pytest run."""
+    for name in (
+        "PYTEST_ADDOPTS", "PYTHONDONTWRITEBYTECODE", "PTEST_EXECUTION",
+        "PTEST_PYTEST_REPORT_PATH", "PTEST_PYTEST_ATTEMPT",
+        "PTEST_PYTEST_EXECUTION", "PTEST_PYTEST_CHECKOUT_ROOT",
+        "PTEST_PYTEST_CONFIG_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _commit_fixture(root):
     """Make lifecycle evidence real: these tests must run from committed Git."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -47,7 +59,7 @@ def test_non_git_pytest_full_preserves_native_zero_but_is_incomplete(case):
     assert data["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("source", ["env", "ini"])
+@pytest.mark.parametrize("source", ["env", "ini", "env-combined", "ini-combined"])
 def test_git_full_addopts_controls_are_ptest_refusals(case, source):
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
@@ -58,11 +70,13 @@ def test_git_full_addopts_controls_are_ptest_refusals(case, source):
         "def test_body():\n    Path('body.marker').write_text('ran')\n")
     (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
     env = None
-    if source == "env":
-        env = {"PYTEST_ADDOPTS": "-k hidden"}
+    if source in {"env", "env-combined"}:
+        env = {"PYTEST_ADDOPTS": "-k hidden" if source == "env" else "-qc alt.ini"}
     else:
+        addopts = ("--deselect=tests/test_native.py::test_body"
+                   if source == "ini" else "-qc alt.ini")
         (root / "pytest.ini").write_text(
-            "[pytest]\ncache_dir = .pytest_cache\naddopts = --deselect=tests/test_native.py::test_body\n")
+            "[pytest]\ncache_dir = .pytest_cache\naddopts = " + addopts + "\n")
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
@@ -119,9 +133,7 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
         "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"nested/tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
-    for args in (("init",), ("config", "user.email", "fixture@example.test"),
-                 ("config", "user.name", "Fixture"), ("add", "."), ("commit", "-m", "initial")):
-        subprocess.run(("git", "-C", str(root), *args), check=True, stdout=subprocess.PIPE)
+    _commit_fixture(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 70
     assert (nested / ".pytest_cache").is_dir()

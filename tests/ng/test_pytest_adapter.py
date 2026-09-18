@@ -339,6 +339,7 @@ def _install_fake_pytest(monkeypatch, main, version="9.1.1"):
 
 def test_run_restores_project_imports_and_preserves_literal_argv_and_exit(bridge_env, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PTEST_EXECUTION", "scoped")
     monkeypatch.setattr(sys, "path", [str(Path(pytest_bridge.__file__).parent), *sys.path[1:]])
     def native_main(argv, plugins):
         assert sys.path[0] == str(tmp_path)
@@ -411,6 +412,22 @@ def test_other_flag_only_clusters_cannot_hide_parallel_control(unsafe):
         prepare(_config(args=(unsafe,)), _plan(), _grant(), _attempt())
 
 
+@pytest.mark.parametrize("location", ["args", "full_args"])
+@pytest.mark.parametrize("args", [("-qc", "alternate.ini"), ("-vc", "alternate.ini"),
+                                   ("-sc", "alternate.ini")])
+def test_full_preparation_rejects_combined_native_redirects(args, location):
+    config = _config(args=args)
+    if location == "full_args":
+        config = replace(config, runner=replace(config.runner, args=(), full_args=args))
+    with pytest.raises(C.Problem, match="native-config-invalid"):
+        prepare(config, _plan(), _grant(), _attempt())
+
+
+def test_full_preparation_does_not_treat_warning_filter_as_node_selection():
+    prepare(_config(args=("-W", "error::DeprecationWarning")),
+            _plan(), _grant(), _attempt())
+
+
 def test_preparation_exports_full_scope_for_effective_native_validation():
     env = dict(prepare(_config(), _plan(), _grant(), _attempt()).env_updates)
     assert env["PTEST_EXECUTION"] == "full"
@@ -435,7 +452,8 @@ def test_full_bridge_keeps_captured_roots_after_environment_mutation(bridge_env,
 
 @pytest.mark.parametrize("value", ["-k hidden", "-x", "--deselect=tests/test_a.py::test_x",
                                     "-c alternate.ini", "--config-file=alternate.ini",
-                                    "--rootdir=/tmp/other"])
+                                    "--rootdir=/tmp/other", "-qc alternate.ini",
+                                    "-vc alternate.ini", "-sc alternate.ini"])
 def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monkeypatch, value):
     monkeypatch.setenv("PYTEST_ADDOPTS", value)
 
@@ -444,7 +462,9 @@ def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monke
 
 
 @pytest.mark.parametrize("value", [["-k", "hidden"], ["-x"], ["--deselect=tests/a.py::test_x"],
-                                    ["-c", "alternate.ini"], ["--rootdir=/tmp/other"]])
+                                    ["-c", "alternate.ini"], ["--rootdir=/tmp/other"],
+                                    ["-qc", "alternate.ini"], ["-vc", "alternate.ini"],
+                                    ["-sc", "alternate.ini"]])
 def test_full_bridge_rejects_addopts_controls_from_ini(bridge_env, value):
     config = _native_config()
     config.getini = lambda name: value if name == "addopts" else []
@@ -453,15 +473,21 @@ def test_full_bridge_rejects_addopts_controls_from_ini(bridge_env, value):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
 
 
+def test_full_bridge_does_not_treat_warning_filter_as_node_selection(bridge_env, monkeypatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-W error::DeprecationWarning")
+    hook = pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config())
+    next(hook)
+
+
 def test_full_bridge_requires_trusted_effective_root_paths(bridge_env, monkeypatch, tmp_path):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(checkout))
     config = _native_config()
-    config.rootdir = tmp_path / "outside"
-    config.rootpath = config.rootdir
+    config.option.rootdir = tmp_path / "outside"
+    config.rootpath = checkout
     config.inipath = checkout / "pytest.ini"
-    config.inifilename = "pytest.ini"
+    config.option.inifilename = "pytest.ini"
 
     with pytest.raises(pytest.UsageError, match="native configuration paths"):
         pytest_bridge.OwnedPlugin(1).pytest_configure(config)
@@ -472,10 +498,10 @@ def test_full_bridge_accepts_trusted_effective_root_paths(bridge_env, monkeypatc
     checkout.mkdir()
     monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(checkout))
     config = _native_config()
-    config.rootdir = checkout
     config.rootpath = checkout
     config.inipath = checkout / "pytest.ini"
-    config.inifilename = "pytest.ini"
+    config.option.rootdir = checkout
+    config.option.inifilename = "pytest.ini"
     (checkout / "pytest.ini").write_text("[pytest]\n")
 
     pytest_bridge.OwnedPlugin(1).pytest_configure(config)
