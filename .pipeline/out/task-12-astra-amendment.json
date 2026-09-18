@@ -30,6 +30,48 @@
       "Enumerate exactly five REASON_CODES additions with exact public/private use and unchanged decision-stop subset"
     ]
   },
+  "t12a_repair_ownership": {
+    "blocked_candidate": "7a7c7a0",
+    "scope": "Ownership-only correction to the narrower execution brief; all frozen runtime behavior, G1-G3/H1-H2 and ordered deliverables remain unchanged",
+    "source_and_generated_files": [
+      "src/ptest/contracts.py",
+      "src/ptest/runtime/protocol-v1.json",
+      "src/ptest/guard.py",
+      "src/ptest/operations.py",
+      "src/ptest/history.py",
+      "src/ptest/selection.py"
+    ],
+    "test_modules": [
+      "tests/ng/test_contracts.py",
+      "tests/ng/test_guard.py",
+      "tests/ng/test_operations.py",
+      "tests/ng/test_history.py",
+      "tests/ng/test_selection.py"
+    ],
+    "fixture_files": [
+      {
+        "path": "tests/ng/fixtures/processes/guard_client.py",
+        "why": "Independent admission/controller cancellation must emit guard protocol 2; leave scheduler/domain protocol unchanged"
+      },
+      {
+        "path": "tests/ng/fixtures/processes/guard_driver.py",
+        "why": "Real-guard barriers, fake clock and bounded fault injection for decision, cancellation, deadline and quiescence evidence"
+      },
+      {
+        "path": "tests/ng/fixtures/processes/guard_workload.py",
+        "why": "Local child/descendant markers and IPC barriers for G1-G3, survivor uncertainty, cleanup and neighbor preservation"
+      },
+      {
+        "path": "tests/ng/fixtures/command/guard_faults.py",
+        "why": "Protocol-2 operations fault injection must reach the intended wrong-run/nonce/order/handoff or first-gate boundary, not incidental protocol-1 rejection"
+      }
+    ],
+    "restored_selection_responsibility": "Pure choose_shadow_plans and quarantine-aware ordinary fallback plus test_selection.py stay in T12a; no deferral or record-only completion",
+    "shared_support_excluded": ["tests/ng/conftest.py", "tests/ng/support.py"],
+    "other_boundaries": "File-specific fixtures only; operations limited to shared transport/ordinary-run first gates; no other fixtures, adapters, CLI, source/config/scheduler or dependency/packaging transfer; existing report paths unchanged",
+    "required_evidence": "Real-subprocess G1-G3, H1-H2 marker/evidence preservation and operations first-gate regressions; scoped evidence across all five owned test modules without weakening assertions",
+    "next_action": "Controller corrects the implementation brief to transfer these exact files before repair resumes"
+  },
   "owned_files": [
     "docs/designs/2026-09-18-ptest-ng-task12-amendment.md",
     "docs/plans/2026-09-17-ptest-ng.md",
