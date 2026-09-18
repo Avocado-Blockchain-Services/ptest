@@ -12,6 +12,10 @@ def main():
         return 0
     if mode == "exit":
         return 23
+    if mode == "streams":
+        sys.stdout.buffer.write(b"literal stdout\n")
+        sys.stderr.buffer.write(b"literal stderr\n")
+        return 0
     if mode == "signal":
         os.kill(os.getpid(), signal.SIGTERM)
         return 99

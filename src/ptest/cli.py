@@ -15,7 +15,7 @@ from typing import Sequence
 
 from . import config as config_api
 from . import contracts as C
-from . import doctor, files, history, platform, scheduler
+from . import doctor, files, history, operations, platform, scheduler
 from . import render
 from .runners import adapter_for
 
@@ -617,9 +617,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         parsed = _parse_args(raw_args, prefix)
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
-        # No subprocesses are launched in Slice 11A.  Keep this a typed
-        # capability error so callers cannot mistake preparation for authority.
-        raise _problem("unsupported-capability", "execution orchestration is not qualified in this slice")
+        resolution = config_api.resolve_config(Path.cwd())
+        if resolution.config is None:
+            raise resolution.problem or _problem(
+                "initialization-required", "project configuration is required",
+            )
+        domain = platform.domain_paths(parsed.fixture_domain)
+        request = C.RunRequest(
+            mode=parsed.mode,
+            argv=parsed.runner_argv,
+            base=parsed.base,
+            workers=parsed.workers,
+            queue_timeout_s=parsed.queue_timeout_s,
+            no_setup=parsed.no_setup,
+            shadow=parsed.shadow,
+            result_path=parsed.result_path,
+            fixture_domain=parsed.fixture_domain,
+            probe=parsed.probe,
+        )
+        result = operations.execute(domain, resolution.config, request)
+        if parsed.result_path is not None:
+            root = (resolution.config.checkout.root
+                    if resolution.config.checkout is not None
+                    else resolution.config.config_path.parent)
+            files.create_exclusive(
+                root, parsed.result_path,
+                render.render_json(C.PublicDocument(
+                    kind="run", ptest_version=C.PTEST_VERSION,
+                    domain=_domain_public(domain),
+                    data=C.serialize_run_result(result), error=None,
+                )),
+                private=False,
+            )
+        return result.exit_code
     except C.Problem as problem:
         kind = prefix.command or "run"
         return _emit_error(problem, kind=kind, json_output=json_requested)
