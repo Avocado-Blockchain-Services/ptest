@@ -93,7 +93,10 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
 
     _require_python_launcher(config.runner.launcher)
     native = config.runner.args
-    _reject_unowned_controls(native + config.runner.full_args + plan.files,
+    literal_controls = native + config.runner.full_args + plan.files
+    if plan.execution == "full":
+        literal_controls += config.runner.test_roots
+    _reject_unowned_controls(literal_controls,
                             full=plan.execution == "full")
     if plan.execution == "full":
         native += config.runner.full_args

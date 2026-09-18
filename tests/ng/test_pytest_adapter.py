@@ -202,6 +202,29 @@ def test_full_preparation_refuses_narrowing(args):
         prepare(_config(args=args), _plan(), _grant(), _attempt())
 
 
+@pytest.mark.parametrize("test_root", ["-V", "--version", "--co", "@args.txt"])
+def test_full_preparation_refuses_control_test_roots(test_root):
+    runner = replace(_config().runner, test_roots=(test_root,))
+
+    with pytest.raises(C.Problem, match="native-config-invalid") as refused:
+        prepare(_config(runner=runner), _plan(), _grant(), _attempt())
+
+    assert refused.value.phase == "execution"
+
+
+@pytest.mark.parametrize("test_roots", [
+    ("tests",),
+    ("tests/unit", "integration"),
+])
+def test_full_preparation_preserves_ordinary_test_roots(test_roots):
+    runner = replace(_config().runner, test_roots=test_roots)
+
+    prepared = prepare(_config(runner=runner), _plan(), _grant(), _attempt())
+
+    assert prepared.argv[-len(test_roots):] == test_roots
+    assert json.loads(dict(prepared.env_updates)["PTEST_TEST_ROOTS"]) == list(test_roots)
+
+
 @pytest.fixture
 def bridge_env(monkeypatch):
     descriptor = Path(pytest_bridge.__file__).with_name("protocol-v1.json")
