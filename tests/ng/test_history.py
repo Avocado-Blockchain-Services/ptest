@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -362,6 +363,165 @@ def test_clean_complete_full_pass_publishes_baseline_and_history_payload(case):
     payload = H.read_history_payload(domain, checkout)
     assert payload["summaries"] == [C.serialize_run_result(result)]
     assert payload["obligations"] == []
+
+
+def test_committed_delta_full_pass_publishes_new_head_baseline(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    old = _snapshot(case)
+    first = H.publish_outcome(
+        domain, checkout, _result(case, 1, before=old, checkout=checkout), inventory,
+    )
+    assert first.baseline_published is True
+    failed = _result(
+        case, 2, status="failed", before=old, checkout=checkout,
+        runner_exit_code=1, exit_code=1,
+    )
+    assert H.publish_outcome(domain, checkout, failed, inventory).committed is True
+    assert any(item.file is None for item in H.read_history(domain, checkout).obligations)
+    current = replace(
+        old, head="b" * 40, digest="88" * 32, baseline_head=old.head,
+        changes=(C.Change(old="src/app.py", new="src/app.py", kind="modified"),),
+    )
+    result = _result(case, 3, before=current, checkout=checkout)
+
+    published = H.publish_outcome(domain, checkout, result, inventory)
+
+    assert published.committed is True
+    assert published.baseline_published is True
+    view = H.read_history(domain, checkout)
+    assert view.selection_disabled is False
+    assert view.baseline.run_id == result.run_id
+    assert view.baseline.head == "b" * 40
+    assert view.baseline.input_digest == "88" * 32
+    assert view.baseline.inventory == inventory
+    assert view.obligations == ()
+
+
+@pytest.mark.parametrize("invalid", [
+    "dirty-before", "dirty-after", "limited-before", "limited-after",
+    "changed-digest", "changed-head", "changed-compatibility", "untrusted-source",
+    "incomplete-inventory", "unknown-outcome",
+])
+def test_unverified_committed_delta_cannot_replace_baseline(case, invalid):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    old = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    original = _result(case, 1, before=old, checkout=checkout)
+    assert H.publish_outcome(domain, checkout, original, inventory).baseline_published is True
+    current = replace(
+        old, head="b" * 40, digest="88" * 32, baseline_head=old.head,
+        changes=(C.Change(old="src/app.py", new="src/app.py", kind="modified"),),
+    )
+    before = after = current
+    if invalid == "dirty-before":
+        before = replace(current, clean=False)
+    elif invalid == "dirty-after":
+        after = replace(current, clean=False)
+    elif invalid == "limited-before":
+        before = replace(current, limitations=(C.Reason(code="unknown-input", message="unknown"),))
+    elif invalid == "limited-after":
+        after = replace(current, limitations=(C.Reason(code="unknown-input", message="unknown"),))
+    elif invalid == "changed-digest":
+        after = replace(current, digest="99" * 32)
+    elif invalid == "changed-head":
+        after = replace(current, head="c" * 40)
+    elif invalid == "changed-compatibility":
+        after = replace(current, compatibility="other-compatibility")
+    elif invalid == "incomplete-inventory":
+        inventory = replace(inventory, complete=False)
+    elif invalid == "unknown-outcome":
+        inventory = case.inventory(("tests/test_a.py",), outcome="unknown")
+    candidate = _result(
+        case, 2, before=before, after=after, checkout=checkout,
+        source_valid=invalid != "untrusted-source",
+    )
+
+    published = H.publish_outcome(domain, checkout, candidate, inventory)
+
+    assert published.committed is True
+    assert published.baseline_published is False
+    view = H.read_history(domain, checkout)
+    assert view.selection_disabled is False
+    assert view.baseline.run_id == original.run_id
+    assert view.baseline.head == old.head
+
+
+@pytest.mark.parametrize("baseline_head", [None, "c" * 40])
+def test_private_snapshot_codec_preserves_baseline_head(case, baseline_head):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = replace(_snapshot(case), baseline_head=baseline_head)
+    result = _result(case, 1, before=snapshot, checkout=checkout)
+    published = H.publish_outcome(
+        domain, checkout, result, case.inventory(("tests/test_a.py",), outcome="passed"),
+    )
+    assert published.baseline_published is True
+    connection = sqlite3.connect(_store_path(domain, checkout))
+    try:
+        stored = connection.execute(
+            "SELECT input_before, input_after FROM runs WHERE run_id = ?", (result.run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    for text in stored:
+        private = json.loads(text)
+        assert "baseline_head" in private
+        assert private["baseline_head"] == baseline_head
+        assert H._snapshot_from_dict(private) == snapshot
+    assert H.read_history(domain, checkout).selection_disabled is False
+    summary = H.read_history_summaries(domain, checkout)[0]
+    assert summary == C.serialize_run_result(result)
+    assert "baseline_head" not in json.dumps(summary)
+    if baseline_head is not None:
+        assert baseline_head not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("column", ["input_before", "input_after"])
+@pytest.mark.parametrize("corruption", ["missing", "unknown-field", "integer", "boolean", "empty"])
+def test_invalid_private_baseline_head_disables_selection(case, column, corruption):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = replace(_snapshot(case), baseline_head="c" * 40)
+    result = _result(case, 1, before=snapshot, checkout=checkout)
+    assert H.publish_outcome(
+        domain, checkout, result, case.inventory(("tests/test_a.py",), outcome="passed"),
+    ).baseline_published is True
+    path = _store_path(domain, checkout)
+    connection = sqlite3.connect(path)
+    try:
+        # Only the two literal parameterized column names reach SQL here.
+        private = json.loads(connection.execute(
+            f"SELECT {column} FROM runs WHERE run_id = ?", (result.run_id,),
+        ).fetchone()[0])
+        if corruption == "missing":
+            private.pop("baseline_head", None)
+        elif corruption == "unknown-field":
+            private["unexpected_provenance"] = "c" * 40
+        else:
+            private["baseline_head"] = {"integer": 7, "boolean": True, "empty": ""}[corruption]
+        damaged = json.dumps(private)
+        connection.execute(
+            f"UPDATE runs SET {column} = ? WHERE run_id = ?", (damaged, result.run_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    view = H.read_history(domain, checkout)
+
+    assert view.selection_disabled is True
+    assert view.baseline is None
+    assert any(reason.code == "coordinator-corrupt" for reason in view.limitations)
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute(
+            f"SELECT {column} FROM runs WHERE run_id = ?", (result.run_id,),
+        ).fetchone()[0] == damaged
+    finally:
+        connection.close()
 
 
 def test_deleted_id_reconciles_only_after_a_complete_clean_full_inventory(case):

@@ -744,6 +744,7 @@ def _snapshot_dict(snapshot: C.InputSnapshot | None) -> dict | None:
         "digest": snapshot.digest,
         "compatibility": snapshot.compatibility,
         "head": snapshot.head,
+        "baseline_head": snapshot.baseline_head,
         "clean": snapshot.clean,
         "changes": [_change_dict(item) for item in snapshot.changes],
         "limitations": [_reason_dict(item) for item in snapshot.limitations],
@@ -804,7 +805,7 @@ def _snapshot_from_dict(value: object) -> C.InputSnapshot | None:
         raise _HistoryStateError("coordinator-corrupt")
     if set(value) != {
         "digest", "compatibility", "head", "clean", "changes",
-        "limitations", "files",
+        "limitations", "files", "baseline_head",
     }:
         raise _HistoryStateError("coordinator-corrupt")
     try:
@@ -814,7 +815,7 @@ def _snapshot_from_dict(value: object) -> C.InputSnapshot | None:
         return C.InputSnapshot(
             digest=value["digest"], compatibility=value["compatibility"],
             head=value["head"], clean=value["clean"], changes=changes,
-            limitations=limitations, files=files,
+            limitations=limitations, files=files, baseline_head=value["baseline_head"],
         )
     except (KeyError, TypeError, ValueError):
         raise _HistoryStateError("coordinator-corrupt") from None
@@ -1131,8 +1132,7 @@ def _clean_full(
         and result.input_after is not None
         and result.input_before.clean
         and result.input_after.clean
-        and not result.input_before.changes
-        and not result.input_after.changes
+        # A clean checkout can contain committed changes since the prior baseline.
         and not result.input_before.limitations
         and not result.input_after.limitations
         and result.input_before.digest is not None
