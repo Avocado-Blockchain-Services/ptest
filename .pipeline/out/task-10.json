@@ -1,10 +1,10 @@
 {
   "task": 10,
-  "status": "implemented-preparation-only",
+  "status": "repaired-preparation-only-awaiting-independent-review",
   "acceptance": {
-    "go_controls": "MET: simple.py injects -count=1, -p, -parallel, -cpu and GOMAXPROCS; owned CLI/config/environment controls reject.",
-    "cargo_controls": "MET: explicit standard Cargo target required, -j and libtest --test-threads inject; jobs and custom harnesses reject.",
-    "literal_command": "MET: argv tokens are concatenated as tuples only, no shell or output parsing; capability is exclusive_command.",
+    "go_controls": "PREPARATION VERIFIED: -count=1, -p=1, -parallel=grant, -cpu=grant and GOMAXPROCS=grant. One/two-dash and test.-prefixed owned controls reject; only explicit supported full-test options are admitted. Native qualification remains unavailable.",
+    "cargo_controls": "PREPARATION VERIFIED: explicit standard targets, -j=grant, exactly one separator and --test-threads=grant before allowlisted libtest display flags. Config, environment, workspace/member, custom-harness and uncertain discovery surfaces fail closed. Native qualification remains unavailable.",
+    "literal_command": "PREPARATION VERIFIED: literal tuple argv and exclusive_command capability. requires_exclusive(config) documents the required pre-admission hook; enforcement and native outcome preservation remain Task11 obligations.",
     "native_execution": "DEFERRED TO TASK11: no Go/Cargo/command subprocess was executed in this task."
   },
   "tests": [
@@ -22,13 +22,80 @@
       "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli'",
       "exit_code": 0,
       "evidence": "22 passed in 0.05s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli' --tb=short --durations=10",
+      "exit_code": 1,
+      "stage": "repair RED against original simple.py",
+      "evidence": "256 failed, 67 passed in 3.50s. 255 behavioral failures reproduced the audit bypasses/missing admission hook. One invalid empty-root parameter failed in the frozen RunnerConfig constructor instead of the adapter; that redundant parameter was removed and is not claimed as RED evidence."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli' --tb=short --durations=10",
+      "exit_code": 1,
+      "stage": "initial repair verification",
+      "evidence": "322 passed, 1 failed in 0.92s; remaining failure was the invalid empty-root test parameter described above."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'nonstandard_test_enabled or uncertain_config_directories or default_home or ambiguous_home' --tb=short",
+      "exit_code": 1,
+      "stage": "follow-up RED",
+      "evidence": "2 failed, 10 passed, 322 deselected in 0.12s. Example and benchmark targets explicitly opted into testing with custom harnesses were accepted before the follow-up control."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli' --tb=short --durations=10",
+      "exit_code": 0,
+      "stage": "final repair GREEN",
+      "evidence": "337 passed in 0.69s. Slowest test call 0.03s (bounded oversized-manifest refusal); fixture matrix Cargo preparation 0.01s. Real fixture matrices are consumed under no-execution/no-resolution sentinels."
     }
+  ],
+  "repair": {
+    "source_commit": "4ce521b",
+    "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-10/8809b428-1047-4903-ac34-598bc5f152c3.jsonl",
+    "prior_verdict": "rejected",
+    "scope": "simple.py, Task10 tests, fixture projects and matrix/readme files only; no CLI/registry/contracts/design or native execution changes",
+    "findings": {
+      "T10-B1": "Explicit Go option parsing replaces guessed arity. All one/two-dash and test.-prefixed owned flags reject in args/full_args, including separated and equals forms. Unknown/follow-on controls, -args and -- refuse.",
+      "T10-B2": "Cargo and libtest token streams split once. The generated thread cap is first after that one separator; only exact --nocapture/--show-output passthrough is accepted. Repeated separators, filters and libtest controls refuse.",
+      "T10-B3": "Go always uses -p=1 alongside per-binary grant limits. The frozen design overrides the conflicting Task10 brief; the regression uses grant 2 and checks argv plus generated summary.",
+      "T10-B4": "Unknown/attached Cargo controls, config/manifest/target/package/workspace overrides and wrapper launcher prefixes refuse. All discovered config files under cwd/ancestors/CARGO_HOME (current and legacy names) refuse without reading them. Cargo/Rust env controls except the inspected absolute CARGO_HOME refuse. Standalone bounded regular root manifest required; workspaces, ancestor manifests, all custom harness declarations and test-enabled examples/benches refuse. Symlink, special-file, permission, malformed, missing and oversized ambiguity fails closed.",
+      "T10-B5": "Both native adapters refuse scoped/selected plans and full plans containing files until a qualified file-to-package/target mapping exists. Go test_roots accept explicit local package directories/patterns only.",
+      "T10-B6": "A small Go option allowlist excludes compile-only/list/help/dry-run modes, filters, short, benchmark, fuzz and custom executors, including alternate spellings. Unknown options refuse instead of guessing.",
+      "T10-B7": "Regression matrix covers B1-B6; requires_exclusive(config) and explicit warning define the pre-admission caller requirement without extending frozen contracts. Concrete Go two-package trace project, Cargo standard/custom/workspace projects, and literal command fixture have machine-readable NOT_RUN_NATIVE_TASK11 matrices. Tests consume those matrices and assert prepare outcomes while executable resolution/subprocess creation are forbidden."
+    },
+    "conservative_limitations": [
+      "All Go/Cargo execution tiers remain unavailable, even on successful preparation.",
+      "Cargo configuration files are refused wholesale, including harmless or empty files; merged config support is not inferred.",
+      "Cargo workspaces/ancestor manifests/package selection and all native scoped/selected file plans remain unsupported.",
+      "A single launcher token is required for native profiles; executable/version trust is not inferred from that token.",
+      "The frozen Grant cannot prove exclusivity; requires_exclusive is a caller contract, not scheduler enforcement.",
+      "Fixture Go/Rust sources and native expected outcomes have not been compiled or executed."
+    ]
+  },
+  "secure_by_spec": {
+    "identity": "Existing grant/run/attempt identity and worker equality checks retained; Task11 must use the effective granted worker count.",
+    "authorization": "Runner/config inputs cannot override ptest-owned concurrency/cache controls. Native preparation is not authority to launch.",
+    "tenancy": "No native child or scheduler state created; fixtures are copied into per-test private temporary roots. Task11 must enforce fixture-domain ownership for all outputs.",
+    "input": "Explicit option arity/allowlists, Cargo discovery refusal, bounded shared manifest reads, and fail-closed path/type errors.",
+    "state": "Preparation/launch snapshot and file-mutation races remain an explicit Task11 revalidation requirement; no launch occurs here.",
+    "exposure": "Refusal messages never echo untrusted token/config values; discovered Cargo config contents are not read merely to reject them.",
+    "availability": "No native fan-out; FIFO and oversized manifest tests fail closed without blocking; Go package concurrency corrected to one.",
+    "dependencies": "Existing stdlib plus shared read_regular only; no new package or external service. Config includes and execution wrappers are refused.",
+    "gates": "Scoped ptest regression suite and git diff --check passed. No secrets/static/dependency scanner or fuzz gate exists in this branch's applicable configuration; security gate implementation is Task13. No gate/dependency installation was added in this repair."
+  },
+  "checks": [
+    {"command": "git diff --check", "exit_code": 0},
+    {"command": "git diff --cached --check", "exit_code": 0},
+    {"command": "graphify update .", "exit_code": 0, "evidence": "AST-only update: 3607 nodes, 7315 edges, 242 communities. Warning: six JSON schema/protocol/matrix files produced zero AST nodes; no semantic extraction or external provider invoked. Community/wiki metadata not used as refreshed evidence."}
   ],
   "deferred_to_task11": [
     "candidate ptest execution of Go/Cargo/command fixture matrix",
     "missing executable exit 127, custom nonzero exit, and signal preservation",
     "native profile promotion from unavailable to bounded_native after fixture evidence",
-    "registry dispatch, admission wiring, CLI, and result publication"
+    "registry dispatch, admission wiring, CLI, and result publication",
+    "call requires_exclusive(config) before AdmissionRequest, prove exclusive wait/reservation with scheduler event traces, and do not infer exclusivity from Grant",
+    "resolve and qualify the actual executable/version, persisted Go environment/config, child environment snapshot, and unchanged control/source files through launch",
+    "keep Go/Cargo unavailable until candidate-ptest fixture execution is accepted; add qualified native file mapping before accepting scoped/selected plans",
+    "verify native CLI exit versus inner test-binary exit/signal, guard cancellation/draining, and positive fixture execution traces without inventing public test counts"
   ],
   "not_run": [
     "ptest --full is intentionally omitted: the Task10 brief authorizes only the bootstrap task scope.",
