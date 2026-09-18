@@ -34,6 +34,13 @@ def _command_project(case, domain, *, args=(), full_args=()):
     return root
 
 
+def _run_data(completed):
+    assert completed.result is not None
+    assert completed.result["kind"] == "run"
+    assert completed.result["error"] is None
+    return completed.result["data"]
+
+
 def test_command_success_preserves_literal_argv_and_streams(case):
     domain = case.domain()
     tokens = ("space value", "quoted 'value'", "--looks-like-a-flag", "$(not shell)", "界")
@@ -44,13 +51,13 @@ def test_command_success_preserves_literal_argv_and_streams(case):
     assert completed.code == 0
     assert json.loads(completed.stdout) == list(tokens)
     assert completed.stderr == b""
-    assert completed.result is not None
-    assert completed.result["status"] == "passed"
-    assert completed.result["runner_exit_code"] == 0
-    assert completed.result["counts"] is None
-    assert completed.result["full_gate_eligible"] is False
-    assert completed.result["baseline_published"] is False
-    assert all(token not in json.dumps(completed.result) for token in tokens)
+    result = _run_data(completed)
+    assert result["status"] == "passed"
+    assert result["runner_exit_code"] == 0
+    assert result["counts"] is None
+    assert result["full_gate_eligible"] is False
+    assert result["baseline_published"] is False
+    assert all(token not in json.dumps(result) for token in tokens)
 
 
 def test_command_preserves_stdout_and_stderr_bytes(case):
@@ -72,15 +79,20 @@ def test_command_failure_preserves_native_exit_precedence(case, raw, expected):
     completed = case.invoke(domain, root, timeout=20)
 
     assert completed.code == expected
-    assert completed.result is not None
-    assert completed.result["status"] == "failed"
-    assert completed.result["runner_exit_code"] == (-15 if raw == "signal" else 23)
-    assert completed.result["exit_code"] == expected
+    result = _run_data(completed)
+    assert result["status"] == "failed"
+    assert result["runner_exit_code"] == (-15 if raw == "signal" else 23)
+    assert result["exit_code"] == expected
 
 
 def test_native_profiles_are_rejected_before_admission(case):
     domain = case.domain()
     root = case.project(domain, kind="pytest")
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text(encoding="utf-8")
+        + 'test_roots = ["tests"]\n',
+        encoding="utf-8",
+    )
 
     completed = case.invoke(domain, root, timeout=20)
 
@@ -97,8 +109,8 @@ def test_command_scope_appends_literal_tail_and_excludes_full_args(case):
 
     assert completed.code == 0
     assert json.loads(completed.stdout) == ["--full", "界"]
-    assert completed.result is not None
-    assert completed.result["plan"]["execution"] == "scoped"
+    result = _run_data(completed)
+    assert result["plan"]["execution"] == "scoped"
 
 
 def test_command_completion_releases_exclusive_lease(case):
