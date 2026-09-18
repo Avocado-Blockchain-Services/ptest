@@ -1,9 +1,9 @@
 {
   "task": 5,
-  "status": "repair-ready-for-controller-review",
+  "status": "sol-repair2-ready-for-controller-review",
   "commit": "NOT COMMITTED (requested)",
   "scope": "Unit-tested unpromoted preparation foundation. No native runner subprocess was executed. UNAVAILABLE means consumers must not launch this as a supported profile or publish a full gate.",
-  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-5/0990e412-daf6-4547-a977-eb707de3e610.jsonl final StructuredOutput",
+  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-5/92d24f7c-7591-4bb2-a299-a3b29791bbae.jsonl final StructuredOutput",
   "repaired": [
     {
       "id": "T5-1",
@@ -18,18 +18,26 @@
       "change": "Every PreparedRun is UNAVAILABLE with selection=false and explicit native_cli qualification/terminal/coverage/inventory-pending limitation. Selected plans refuse unsupported-capability. Full plans reject explicit narrowing and bridge validates effective selectors plus exact configured roots before tests."
     },
     {
+      "id": "T5R-1",
+      "change": "The setupnodes boundary now accepts only the real xdist-generated XSpec shape: exact execmodel=main_thread_only//popen, empty env, generated gw id, no extra parsed attributes, unique spec per granted worker. Python/chdir/ssh/socket/via/env and foreign fields are refused."
+    },
+    {
+      "id": "T5R-2",
+      "change": "Full plans now reject setup-only, setup-plan, fixture/marker/cache display, help and version modes both in prepared literal argv and in the effective native option state before yielding to pytest. Existing collection and selector refusal remains."
+    },
+    {
       "id": "notes",
-      "change": "Strict direct Python or exact locked uv launcher forms; CPython implementation/version and enumerated pytest candidates; project cwd replaces bridge-directory import root; combined parallel short flags/argfiles/scoped tails checked; UsageError for owned native refusals, safe structured stderr marker, bridge-specific pre-import exception, unused grant nonce no longer exported; run()/plugin/script entrypoint exercised with native execution replaced."
+      "change": "Strict direct Python or exact locked uv launcher forms; CPython implementation/version and enumerated pytest candidates; project cwd replaces bridge-directory import root; combined parallel short flags (including -f/-d clusters), argfiles and scoped tails checked; UsageError for owned native refusals, safe structured stderr marker, bridge-specific pre-import exception, unused grant nonce no longer exported; run()/plugin/script entrypoint exercised with native execution replaced."
     }
   ],
   "abuse_contracts": {
     "identity": "A grant with a different run_id or worker count from the attempt must not prepare.",
     "authorization": "An arbitrary command prefix cannot acquire interpreter-launcher semantics; transport/parallel control cannot exceed the admitted capacity.",
     "tenancy": "N/A to production: no tenant model. Native fixture projects and dependencies are isolated beneath a private fixture domain, with no shared .venv.",
-    "input": "Reject combined -n clusters, explicit remote/proxy controls, @argfiles in prepared inputs, malformed argv/descriptors, unsupported runtimes and full selectors.",
-    "state": "Validate transports before xdist rewrites tx, at configure and immediately before gateway setup. Reduced grants must remain executable preparation inputs.",
+    "input": "Reject combined -n clusters (including -f/-d prefixes), explicit remote/proxy controls, @argfiles in prepared inputs, malformed argv/descriptors, unsupported runtimes, full selectors and successful no-test-body modes.",
+    "state": "Validate transports before xdist rewrites tx, at configure and immediately before gateway setup. At setupnodes accept only the exact generated local XSpec shape and exact unique grant count. Reduced grants must remain executable preparation inputs.",
     "exposure": "Refusal marker contains only fixed owned code/message fields. Removed unused grant nonce export; no claim that inherited env is an authority.",
-    "availability": "Generated worker counts come only from bounded grants. Recheck effective maxprocesses and final popen spec count; no native resource-bound qualification claimed yet.",
+    "availability": "Generated worker counts come only from bounded grants. Recheck effective maxprocesses, exact local XSpec attributes and unique final spec count; full gates cannot return success through no-execution modes. No native resource-bound qualification is claimed yet.",
     "dependencies": "Only stdlib before validated pytest import. Four version-pinned no-xdist fixture locks resolved from metadata; none installed or executed."
   },
   "red_evidence": [
@@ -44,6 +52,12 @@
       "exit_code": 1,
       "output": "3 failed, 101 deselected in 0.07s",
       "evidence": "DID NOT RAISE for -ln4/-hn4/-Vn4 before extending the flag-only cluster check."
+    },
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'full_preparation_refuses_narrowing or full_bridge_rejects_effective_native_narrowing or final_gateway or other_flag_only or runner_parallel_or_remote' --tb=short --durations=10",
+      "exit_code": 1,
+      "output": "25 failed, 37 passed in 0.53s",
+      "evidence": "Observed before Sol repair 2 production edits. The real-shaped execmodel=main_thread_only//popen gateway objects were rejected; prepared and effective no-execution controls did not raise; -fn4/-dn4 and direct -f/-d controls were not rejected. Existing covered variants supplied the 37 passing controls."
     }
   ],
   "verified": [
@@ -82,6 +96,24 @@
       "exit_code": 0,
       "output": "Code graph updated: 3420 nodes, 6490 edges, 233 communities.",
       "warning": "implementation.json, review.json and protocol-v1.json produced zero AST nodes. No semantic extraction or external model call. Wiki/community metadata not used as refreshed evidence."
+    },
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'full_preparation_refuses_narrowing or full_bridge_rejects_effective_native_narrowing or final_gateway or other_flag_only or runner_parallel_or_remote' --tb=short --durations=10",
+      "exit_code": 0,
+      "output": "62 passed in 0.40s",
+      "stage": "Sol repair 2 focused GREEN"
+    },
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'not native_cli' --tb=short --durations=10",
+      "exit_code": 0,
+      "output": "141 passed in 0.45s",
+      "stage": "Sol repair 2 task-file unit scope; no native_cli process executed"
+    },
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "output": "Code graph updated: 3429 nodes, 6500 edges, 237 communities.",
+      "warning": "implementation.json, review.json and protocol-v1.json produced zero AST nodes. AST-only update; no semantic extraction or external model call."
     }
   ],
   "dependency_metadata_resolution": {
@@ -114,13 +146,13 @@
     "No macOS, actual gateway lifecycle, concurrent native nonexclusive behavior, real-provider or external-service verification."
   ],
   "gates": {
-    "regression": "Executed bounded deterministic negative/positive tests via scripts/ptest-bootstrap only.",
+    "regression": "Executed bounded deterministic negative/positive tests through ptest only; native_cli remained excluded and no native runner subprocess was launched.",
     "secrets": "No repository secrets-scanner gate present; pinned Gitleaks gate remains later integration scope.",
     "static_analysis": "No repository Bandit gate present; later security-gate ownership unchanged.",
     "dependency_advisory": "No advisory scan in this repair; uv lock resolution is not a vulnerability scan.",
     "fuzz": "No property/fuzz dependency or gate present; parametrized hostile inputs tested without adding dependencies."
   },
-  "cleanup": "Removed dead short-option condition, configured-worker equality assumption, premature tiers and unused grant nonce export. Kept shared contracts/registry/CLI/scheduler untouched. Existing unrelated untracked repair/review briefs preserved.",
+  "cleanup": "Removed the obsolete string-only gateway assertion in favor of the real generated XSpec boundary, closed -f/-d short and long control gaps, and kept shared contracts/registry/CLI/scheduler untouched. Existing unrelated untracked repair/review briefs were preserved.",
   "owned_files": [
     "src/ptest/adapters/pytest.py",
     "src/ptest/runtime/pytest_bridge.py",
