@@ -1,8 +1,7 @@
-"""Private local guard for one scheduler-admitted process group.
+"""Own one admitted process group, reap it, and hand off provisional facts.
 
-The guard has exactly one authority: launch and reap a registered process
-group, then make the scheduler's authenticated DRAINING handoff.  It neither
-releases a lease nor publishes a final result.
+Only the live session leader signals its group. DRAINING is not quiescence:
+the caller must reap this guard and independently prove group/escape absence.
 """
 from __future__ import annotations
 
@@ -13,29 +12,26 @@ import signal
 import struct
 import subprocess
 import time
+from dataclasses import dataclass
+
+import psutil
 
 from . import platform, scheduler
 from .contracts import (
-    CANCEL_GRACE_S,
-    CONTROL_FRAME_MAX_BYTES,
-    MANIFEST_MAX_BYTES,
-    ControlFrame,
-    LaunchManifest,
-    Problem,
-    decode_control_frame,
-    decode_launch_manifest,
-    encode_control_frame,
+    CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
+    MAX_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
+    decode_control_frame, decode_launch_manifest, encode_control_frame,
 )
 
-_PHASE = "guard"
 _FRAME_DEADLINE_S = 2.0
+_POLL_S = 0.05
+_MAX_GROUP_SCAN = 8192
 _EXIT_PROTOCOL = 70
 _EXIT_REGISTRATION = 75
-_EXIT_CANCELLED = 128 + signal.SIGTERM
 
 
 def _problem(code: str, message: str) -> Problem:
-    return Problem(code=code, message=message, phase=_PHASE, retryable=False)
+    return Problem(code=code, message=message, phase="guard", retryable=False)
 
 
 def _problem_payload(problem: Problem) -> dict:
@@ -43,47 +39,82 @@ def _problem_payload(problem: Problem) -> dict:
             "phase": problem.phase, "retryable": problem.retryable}
 
 
-def _read_exact(fd: int, amount: int, deadline: float) -> bytes:
+@dataclass
+class _State:
+    cancel_signal: int | None = None
+    problem: Problem | None = None
+    spawn_closed: bool = False
+    child: subprocess.Popen | None = None
+    grace_deadline: float | None = None
+    spawned: bool = False
+
+    def cancel(self, signum: int) -> None:
+        # First cancellation wins, including signals reflected by our killpg.
+        if self.cancel_signal is None:
+            self.cancel_signal = signum
+        self.spawn_closed = True
+
+    def fail(self, problem: Problem) -> None:
+        if self.problem is None:
+            self.problem = problem
+        self.cancel(signal.SIGTERM)
+
+
+class _StartupCancelled(Exception):
+    pass
+
+
+def _read_exact(fd: int, amount: int, deadline: float, state: _State) -> bytes:
     chunks = bytearray()
     while len(chunks) < amount:
+        if state.cancel_signal is not None:
+            raise _StartupCancelled
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise _problem("protocol-mismatch", "private frame receive timed out")
-        ready, _, _ = select.select([fd], [], [], remaining)
+        ready, _, _ = select.select([fd], [], [], min(remaining, _POLL_S))
         if not ready:
-            raise _problem("protocol-mismatch", "private frame receive timed out")
-        try:
-            piece = os.read(fd, amount - len(chunks))
-        except OSError as exc:
-            raise _problem("protocol-mismatch", "private frame receive failed") from exc
+            continue
+        piece = os.read(fd, amount - len(chunks))
         if not piece:
             raise _problem("protocol-mismatch", "private frame was truncated")
         chunks.extend(piece)
     return bytes(chunks)
 
 
-def _read_manifest(fd: int) -> LaunchManifest:
+def _read_manifest(fd: int, state: _State) -> LaunchManifest:
     deadline = time.monotonic() + _FRAME_DEADLINE_S
-    prefix = _read_exact(fd, 4, deadline)
+    prefix = _read_exact(fd, 4, deadline, state)
     (length,) = struct.unpack(">I", prefix)
     if length > MANIFEST_MAX_BYTES:
         raise _problem("protocol-mismatch", "launch manifest declares oversize length")
-    try:
-        return decode_launch_manifest(prefix + _read_exact(fd, length, deadline))
-    except Problem:
-        raise
-    except (TypeError, ValueError) as exc:
-        raise _problem("protocol-mismatch", "launch manifest is invalid") from exc
+    manifest = decode_launch_manifest(prefix + _read_exact(fd, length, deadline, state))
+    # The manifest pipe contains exactly one frame, unlike the control stream.
+    # Require its terminating EOF within the same frame deadline.
+    while True:
+        if state.cancel_signal is not None:
+            raise _StartupCancelled
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _problem("protocol-mismatch", "manifest pipe did not close")
+        if select.select([fd], [], [], min(remaining, _POLL_S))[0]:
+            if os.read(fd, 1):
+                raise _problem("protocol-mismatch", "manifest pipe has trailing data")
+            return manifest
 
 
 def _send(fd: int, frame: ControlFrame) -> None:
     raw = encode_control_frame(frame)
     offset = 0
+    deadline = time.monotonic() + _FRAME_DEADLINE_S
     while offset < len(raw):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([], [fd], [], max(0, remaining))[1]:
+            raise _problem("control-unavailable", "private control send timed out")
         try:
             sent = os.write(fd, raw[offset:])
-        except OSError as exc:
-            raise _problem("control-unavailable", "private control send failed") from exc
+        except BlockingIOError:
+            continue
         if sent <= 0:
             raise _problem("control-unavailable", "private control send made no progress")
         offset += sent
@@ -94,173 +125,298 @@ def _emit(fd: int, manifest: LaunchManifest, kind: str, payload: dict) -> None:
                            nonce=manifest.grant.nonce, kind=kind, payload=payload))
 
 
-def _command_environment(updates: tuple[tuple[str, str], ...]) -> dict[str, str]:
-    env = os.environ.copy()
-    env.update(dict(updates))
-    return env
+class _Control:
+    """Incremental bounded frames; EOF removes the fd from all future polls."""
+
+    def __init__(self, fd: int, manifest: LaunchManifest, state: _State):
+        self.fd, self.manifest, self.state = fd, manifest, state
+        self.read_open = self.write_open = True
+        self.pending = bytearray()
+        self.deadline: float | None = None
+
+    def disconnected(self) -> None:
+        self.read_open = self.write_open = False
+        self.state.spawn_closed = True
+        self.pending.clear()
+        self.deadline = None
+
+    def emit(self, kind: str, payload: dict) -> None:
+        if not self.write_open:
+            return
+        try:
+            _emit(self.fd, self.manifest, kind, payload)
+        except OSError as exc:
+            self.disconnected()
+            if exc.errno not in (errno.EPIPE, errno.ECONNRESET):
+                self.state.fail(_problem("control-unavailable", "private control send failed"))
+        except Problem as exc:
+            self.disconnected()
+            self.state.fail(exc)
+
+    def _parse(self) -> None:
+        if len(self.pending) < 4:
+            return
+        (length,) = struct.unpack(">I", self.pending[:4])
+        if length > CONTROL_FRAME_MAX_BYTES:
+            raise _problem("protocol-mismatch", "private control declares oversize length")
+        if len(self.pending) < 4 + length:
+            return
+        frame = decode_control_frame(bytes(self.pending), expected_nonce=self.manifest.grant.nonce)
+        if frame.run_id != self.manifest.grant.run_id or frame.kind not in {"cancel", "parent-closing"}:
+            raise _problem("protocol-mismatch", "private control is not for this guard")
+        self.pending.clear()
+        self.deadline = None
+        if frame.kind == "cancel":
+            self.state.cancel(frame.payload["signal"])
+        else:
+            self.read_open = False
+            self.state.spawn_closed = True
+
+    def poll(self, timeout: float = 0) -> None:
+        if not self.read_open:
+            if timeout:
+                select.select([], [], [], timeout)
+            return
+        try:
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _problem("protocol-mismatch", "private control receive timed out")
+                timeout = min(timeout, remaining)
+            if not select.select([self.fd], [], [], timeout)[0]:
+                return
+            # Read exactly one frame at a time. A bounded batch consumes queued
+            # controls before launch without letting a flood starve deadlines.
+            for _ in range(16):
+                size = (4 - len(self.pending)) if len(self.pending) < 4 else (
+                    4 + struct.unpack(">I", self.pending[:4])[0] - len(self.pending))
+                piece = os.read(self.fd, size)
+                if not piece:
+                    if self.pending:
+                        raise _problem("protocol-mismatch", "private control was truncated")
+                    self.disconnected()
+                    return
+                if not self.pending:
+                    self.deadline = time.monotonic() + _FRAME_DEADLINE_S
+                self.pending.extend(piece)
+                self._parse()
+                if not self.read_open:
+                    return
+        except BlockingIOError:
+            return
+        except OSError as exc:
+            # Closing a stream with unread guard notifications may produce a
+            # reset instead of EOF. Both mean the controller disappeared.
+            if exc.errno == errno.ECONNRESET and not self.pending:
+                self.disconnected()
+                return
+            self.pending.clear()
+            self.read_open = False
+            self.state.fail(_problem("protocol-mismatch", "private control read failed"))
+        except (Problem, ValueError, TypeError):
+            self.pending.clear()
+            self.read_open = False
+            self.state.fail(_problem("protocol-mismatch", "invalid private control frame"))
 
 
-def _cancel_own_group(identity) -> None:
-    """Signal only the group the guard anchored with setsid()."""
-    if identity.pid != os.getpid() or identity.pgid != identity.pid:
+def _signal_group(identity, signum: int) -> None:
+    if (identity.pid != os.getpid() or identity.pgid != identity.pid
+            or os.getpgrp() != identity.pid or os.getsid(0) != identity.pid):
         raise _problem("ownership-uncertain", "guard no longer anchors its own group")
+    os.killpg(identity.pgid, signum)
+
+
+def _group_needs_cleanup(identity) -> bool:
+    """Bounded observation for cancellation effort, NEVER an absence proof.
+
+    Only a caller's post-reap ESRCH probe can prove group absence. A racing fork
+    or inaccessible snapshot retains that obligation even after this says no.
+    """
+    deadline = time.monotonic() + _POLL_S
     try:
-        os.killpg(identity.pgid, signal.SIGTERM)
-    except OSError as exc:
-        if exc.errno != errno.ESRCH:
-            raise _problem("ownership-uncertain", "guard group cannot be signalled") from exc
-
-
-def _force_kill_own_group(identity) -> None:
-    """Last-resort abnormal termination; this deliberately kills the guard too."""
-    if identity.pid != os.getpid() or identity.pgid != identity.pid:
-        raise _problem("ownership-uncertain", "guard no longer anchors its own group")
-    try:
-        os.killpg(identity.pgid, signal.SIGKILL)
-    except OSError as exc:
-        if exc.errno != errno.ESRCH:
-            raise _problem("ownership-uncertain", "guard group cannot be killed") from exc
-
-
-def _consume_controls(fd: int, manifest: LaunchManifest, cancelled: list[bool],
-                      parent_closed: list[bool]) -> bool:
-    """Read one controller frame.  EOF permanently closes future spawning."""
-    try:
-        prefix = os.read(fd, 4)
-    except BlockingIOError:
+        for count, proc in enumerate(psutil.process_iter()):
+            if count >= _MAX_GROUP_SCAN or time.monotonic() >= deadline:
+                return True
+            if proc.pid == identity.pid:
+                continue
+            try:
+                if os.getpgid(proc.pid) == identity.pgid and proc.status() != psutil.STATUS_ZOMBIE:
+                    return True
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            except (OSError, psutil.Error):
+                return True
+    except (OSError, psutil.Error):
         return True
-    except OSError as exc:
-        raise _problem("protocol-mismatch", "private control read failed") from exc
-    if not prefix:
-        parent_closed[0] = True
-        return False
-    if len(prefix) < 4:
-        # Pipes and stream sockets may split a valid four-byte prefix.
-        prefix += _read_exact(fd, 4 - len(prefix), time.monotonic() + _FRAME_DEADLINE_S)
-    (length,) = struct.unpack(">I", prefix)
-    if length > CONTROL_FRAME_MAX_BYTES:
-        raise _problem("protocol-mismatch", "private control declares oversize length")
-    frame = decode_control_frame(
-        prefix + _read_exact(fd, length, time.monotonic() + _FRAME_DEADLINE_S),
-        expected_nonce=manifest.grant.nonce)
-    if frame.run_id != manifest.grant.run_id or frame.kind not in {"cancel", "parent-closing"}:
-        raise _problem("protocol-mismatch", "private control is not for this guard")
-    if frame.kind == "cancel":
-        cancelled[0] = True
-    else:
-        parent_closed[0] = True
-    return True
+    return False
 
 
-def _observe_control(fd: int, manifest: LaunchManifest, cancelled: list[bool],
-                     parent_closed: list[bool], timeout: float) -> None:
-    ready, _, _ = select.select([fd], [], [], timeout)
-    if ready:
-        _consume_controls(fd, manifest, cancelled, parent_closed)
+def _cancel_and_reap(state: _State, control: _Control, identity) -> None:
+    if state.grace_deadline is None:
+        state.grace_deadline = time.monotonic() + CANCEL_GRACE_S
+        _signal_group(identity, state.cancel_signal or signal.SIGTERM)
+    while True:
+        child_done = state.child is None or state.child.poll() is not None
+        if child_done and not _group_needs_cleanup(identity):
+            return
+        remaining = state.grace_deadline - time.monotonic()
+        if remaining <= 0:
+            _signal_group(identity, signal.SIGKILL)
+            # Successful killpg includes us: there can be no later handoff.
+            os._exit(_EXIT_PROTOCOL)
+        control.poll(min(_POLL_S, remaining))
 
 
-def _run_one(control_fd: int, manifest: LaunchManifest, prepared, attempt_id: str,
-             phase: str, timeout_s: float | None, identity, cancelled: list[bool],
-             parent_closed: list[bool]) -> int | None:
-    _observe_control(control_fd, manifest, cancelled, parent_closed, 0)
-    if cancelled[0] or parent_closed[0]:
-        return None
-    _emit(control_fd, manifest, "phase", {"phase": phase, "attempt_id": attempt_id})
-    try:
-        child = subprocess.Popen(
-            prepared.argv, cwd=prepared.cwd, env=_command_environment(prepared.env_updates),
-            close_fds=True,
-        )
-    except (OSError, ValueError):
-        _emit(control_fd, manifest, "runner-facts", {
-            "attempt_id": attempt_id, "phase": phase, "raw_exit_code": None,
-            "report_name": None, "problem": _problem_payload(
-                _problem("missing-executable", "runner could not be launched")),
-        })
-        return None
-    deadline = None if timeout_s is None else time.monotonic() + timeout_s
-    cancel_deadline: float | None = None
-    while child.poll() is None:
-        _observe_control(control_fd, manifest, cancelled, parent_closed, 0.05)
-        if cancelled[0] and cancel_deadline is None:
-            _cancel_own_group(identity)
-            cancel_deadline = time.monotonic() + CANCEL_GRACE_S
-        if cancel_deadline is not None and time.monotonic() >= cancel_deadline:
-            _force_kill_own_group(identity)
-            raise AssertionError("SIGKILL of the guard group unexpectedly returned")
-        if deadline is not None and time.monotonic() >= deadline:
-            # A timed-out attempt is cancellation: it may not fall through and
-            # start a later compound attempt after the child finally exits.
-            cancelled[0] = True
-            _cancel_own_group(identity)
-            cancel_deadline = time.monotonic() + CANCEL_GRACE_S
-            deadline = None
-    result = child.returncode
-    _emit(control_fd, manifest, "runner-facts", {
+def _ready(control: _Control, state: _State, deadline: float) -> bool:
+    control.poll()
+    while control.pending and not state.spawn_closed:
+        control.poll(_POLL_S)
+    if time.monotonic() >= deadline and not state.spawn_closed:
+        state.fail(_problem("execution-timeout", "compound execution deadline expired"))
+    return not state.spawn_closed
+
+
+def _runner_facts(control: _Control, prepared, attempt_id: str, phase: str,
+                  result: int | None, problem: Problem | None) -> None:
+    control.emit("runner-facts", {
         "attempt_id": attempt_id, "phase": phase, "raw_exit_code": result,
         "report_name": None if prepared.report_path is None else prepared.report_path.name,
-        "problem": None,
+        "problem": None if problem is None else _problem_payload(problem),
     })
+
+
+def _run_one(control: _Control, prepared, attempt_id: str,
+             phase: str, timeout_s: float | None, compound_deadline: float,
+             identity, state: _State) -> int | None:
+    ready = _ready(control, state, compound_deadline)
+    if ready:
+        control.emit("phase", {"phase": phase, "attempt_id": attempt_id})
+        # This narrows, but cannot atomically eliminate, the check/fork race.
+        ready = _ready(control, state, compound_deadline)
+    if not ready:
+        if state.problem and state.problem.code == "execution-timeout":
+            _runner_facts(control, prepared, attempt_id, phase, None, state.problem)
+        return None
+    deadline = compound_deadline
+    timeout_scope = "compound"
+    if timeout_s is not None and time.monotonic() + timeout_s < deadline:
+        deadline = time.monotonic() + timeout_s
+        timeout_scope = "attempt" if phase == "execution" else "setup"
+    problem = None
+    result = None
+    try:
+        state.child = subprocess.Popen(
+            prepared.argv, cwd=prepared.cwd,
+            env=dict(os.environ, **dict(prepared.env_updates)), close_fds=True)
+        state.spawned = True
+    except (OSError, ValueError):
+        problem = _problem("missing-executable", "runner could not be launched")
+        state.spawn_closed = True
+    else:
+        while state.child.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and state.cancel_signal is None:
+                state.fail(_problem("execution-timeout", timeout_scope + " execution deadline expired"))
+            if state.cancel_signal is not None:
+                _cancel_and_reap(state, control, identity)
+                break
+            control.poll(min(_POLL_S, max(0, remaining)))
+        # Cancellation still owns the group after a promptly exiting direct
+        # child; a surviving group member must not escape the grace deadline.
+        control.poll()
+        if state.cancel_signal is not None:
+            _cancel_and_reap(state, control, identity)
+        result = state.child.wait()
+        state.child = None
+        problem = state.problem
+    _runner_facts(control, prepared, attempt_id, phase, result, problem)
     return result
 
 
 def run_guard(control_fd: int, manifest_fd: int) -> int:
-    """Run a bounded private manifest and emit only provisional facts."""
+    """Execute only after registration; every ordinary exit contains cleanup."""
     if (isinstance(control_fd, bool) or isinstance(manifest_fd, bool)
-            or not isinstance(control_fd, int) or not isinstance(manifest_fd, int)):
+            or not isinstance(control_fd, int) or not isinstance(manifest_fd, int)
+            or control_fd < 0 or manifest_fd < 0 or control_fd == manifest_fd):
         return _EXIT_PROTOCOL
-    cancelled = [False]
-    parent_closed = [False]
-    old_handlers = {}
+    state = _State()
+    control = identity = None
+    handlers = {}
     try:
-        manifest = _read_manifest(manifest_fd)
-        # A guard must be a session leader before it acquires scheduler authority.
-        os.setsid()
+        def request_cancel(signum, _frame):
+            state.cancel(signum)
+
+        # Install before the first potentially blocking manifest/ledger read.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handlers[signum] = signal.signal(signum, request_cancel)
+        os.set_blocking(control_fd, False)
+        manifest = _read_manifest(manifest_fd, state)
+        os.close(manifest_fd)
+        manifest_fd = -1
+        control = _Control(control_fd, manifest, state)
+        control.poll()
+        while control.pending and not state.spawn_closed:
+            control.poll(_POLL_S)
+        if state.problem:
+            return _EXIT_PROTOCOL
+        if state.cancel_signal is not None:
+            return 128 + state.cancel_signal
+        if state.spawn_closed:
+            return _EXIT_PROTOCOL
+        if not os.getpgrp() == os.getpid() == os.getsid(0):
+            os.setsid()
         identity = platform.process_identity(os.getpid())
         if identity is None or identity.uid != os.getuid() or identity.pgid != identity.pid:
             return _EXIT_REGISTRATION
         if not scheduler.register_guard(manifest.domain, manifest.grant, identity):
             return _EXIT_REGISTRATION
-        _emit(control_fd, manifest, "registered", {"guard": {
-            "pid": identity.pid, "birth": identity.birth, "uid": identity.uid,
-            "pgid": identity.pgid,
+        control.emit("registered", {"guard": {
+            "pid": identity.pid, "birth": identity.birth, "uid": identity.uid, "pgid": identity.pgid,
         }})
-
-        def request_cancel(_signum, _frame) -> None:
-            cancelled[0] = True
-
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            old_handlers[signum] = signal.signal(signum, request_cancel)
+        # None is the bounded default, not permission for an unlimited run.
+        compound_deadline = time.monotonic() + min(
+            manifest.compound_timeout_s or MAX_COMPOUND_TIMEOUT_S, MAX_COMPOUND_TIMEOUT_S)
         if manifest.setup is not None:
-            setup_result = _run_one(control_fd, manifest, manifest.setup, "a001", "setup",
-                                    manifest.setup_timeout_s, identity, cancelled, parent_closed)
-            if setup_result != 0:
-                # Setup is part of the compound attempt; a failed or unstarted
-                # setup cannot safely fall through into an execution attempt.
-                parent_closed[0] = True
+            result = _run_one(control, manifest.setup, manifest.attempt_ids[0],
+                              "setup", manifest.setup_timeout_s, compound_deadline, identity, state)
+            if result != 0:
+                state.spawn_closed = True
         for prepared, attempt_id in zip(manifest.attempts, manifest.attempt_ids, strict=True):
-            if parent_closed[0] or cancelled[0]:
+            if state.spawn_closed:
                 break
-            _run_one(control_fd, manifest, prepared, attempt_id, "execution",
-                     manifest.attempt_timeout_s, identity, cancelled, parent_closed)
-        if cancelled[0]:
-            return _EXIT_CANCELLED
-        # All direct children are reaped above and spawning is permanently closed.
-        parent_closed[0] = True
-        if scheduler.mark_draining(manifest.domain, manifest.grant, identity):
-            _emit(control_fd, manifest, "draining", {"provisional_artifact_id": None})
-            return 0
-        return _EXIT_REGISTRATION
-    except (Problem, OSError, ValueError):
+            _run_one(control, prepared, attempt_id, "execution",
+                     manifest.attempt_timeout_s, compound_deadline, identity, state)
+        control.poll()
+        state.spawn_closed = True
+        if state.cancel_signal is not None and state.spawned:
+            _cancel_and_reap(state, control, identity)
+        if not scheduler.mark_draining(manifest.domain, manifest.grant, identity):
+            return _EXIT_REGISTRATION
+        control.emit("draining", {"provisional_artifact_id": None})
+        if state.problem and state.problem.code != "execution-timeout":
+            return _EXIT_PROTOCOL
+        return 0 if state.cancel_signal is None else 128 + state.cancel_signal
+    except _StartupCancelled:
+        return 128 + state.cancel_signal
+    except Exception:
+        # Guard is an implementation-owned process boundary. Even an unexpected
+        # dependency error must not abandon its child or leak raw exception data.
+        if identity is not None and control is not None and state.spawned:
+            state.cancel(signal.SIGTERM)
+            try:
+                _cancel_and_reap(state, control, identity)
+            except Exception:
+                _signal_group(identity, signal.SIGKILL)
         return _EXIT_PROTOCOL
     finally:
-        for signum, handler in old_handlers.items():
+        for signum, handler in handlers.items():
             signal.signal(signum, handler)
         for fd in (control_fd, manifest_fd):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 __all__ = ["run_guard"]
