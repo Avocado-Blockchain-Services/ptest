@@ -1,0 +1,54 @@
+{
+  "task": "11F",
+  "slice": "explicit-pytest-full-basic-serial",
+  "status": "implemented-controller-scoped-regression-green",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-pytest-full/ptest",
+  "branch": "cx-ng-pytest-full",
+  "base": "94477a7",
+  "implemented": [
+    "Explicit Pytest full admission, mode/execution pairing, one-slot grant, exact full argv and root/full-argument queue revalidation.",
+    "Frozen bridge mode/roots/report identity with repeated effective-root, native-control, executor-hook and terminal-report checks.",
+    "Exact opt-in Pytest full generated-output policy with no-follow validation, tracked/declared-input precedence and the ptest-pytest-full-content-v1 digest domain.",
+    "Conditional static where capability text for Pytest scoped/full, dot-root scoped-only behavior, setup refusal and prepared-only Vitest.",
+    "Native result/source/report lifecycle preserves output, failure/signal precedence, cooperative inventory limitations, incomplete evidence and owned lease finalization."
+  ],
+  "security_contracts": {
+    "identity": "Automatic, selected, setup, shadow, probe and Vitest execution remain unavailable; full mode cannot downgrade or redefine roots through environment mutation.",
+    "authorization": "A queued full-args/root/config mutation is rejected before guard launch and leaves no active grant.",
+    "input": "Native narrowing/config redirection, argfiles, positional node IDs, duplicate/unsafe roots and unowned full hooks fail closed.",
+    "state": "Signals, missing/mismatched/replayed reports, source changes, export collisions and finalization uncertainty preserve nonzero/incomplete outcomes and do not certify a gate.",
+    "exposure": "Where and run payloads retain redaction and the existing public/private schemas; no argv, environment values or source excerpts are added.",
+    "availability": "The bounded scanner, one-slot scheduler and process-group guard remain the only execution path; no dependency install, network or fallback runner was added.",
+    "dependencies": "No package, lockfile, bootstrap, installed CLI, remote backend or public schema changed.",
+    "residual": "Allowed collection-finish mutation and native setup/fixture skips can change the effective item list; inventory/count/full-gate claims therefore remain false/null."
+  },
+  "controller": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-pytest-full/ptest/src /home/ingmar/worktrees/ptest/cx-ng-pytest-full/ptest/scripts/ptest-bootstrap tests/ng/test_task_11f_pytest.py tests/ng/test_pytest_full_subprocess.py tests/ng/test_pytest_scoped_subprocess.py tests/ng/test_pytest_adapter.py tests/ng/test_task_11d_pytest.py tests/ng/test_operations.py tests/ng/test_reports.py tests/ng/test_cli.py tests/ng/test_vitest_adapter.py tests/ng/test_source.py tests/ng/test_selection.py -q --tb=short --durations=20",
+    "dispatcher": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "dispatcher_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "workers": 1,
+    "runtime": "Linux CPython 3.13.11 / provisioned pytest 9.1.1 / pluggy 1.6.0; other candidate tuples remain unqualified",
+    "network_or_install": false
+  },
+  "test_runs": [
+    {
+      "stage": "approved combined scoped bootstrap regression",
+      "exit_code": 0,
+      "output": "673 passed, 8 skipped in 82.20s (0:01:22); slowest 20 durations reported, maximum 1.59s",
+      "red_green": "GREEN on the provisioned controller; skipped versions/xdist/unsupported tuples remain explicitly unqualified"
+    }
+  ],
+  "verified_by_inspection": [
+    "git diff --check",
+    "graphify update . (AST graph refreshed: 4581 nodes, 9995 edges, 306 communities)",
+    "Scoped code/test ownership remains limited to the Task 11F file list; no controller or dependency files were edited."
+  ],
+  "not_verified": [
+    "Pytest 8.4.2, 9.0.3, 9.1.0, xdist, coverage, macOS and whole-suite qualification"
+  ],
+  "claims": {
+    "shipped": "Bounded implementation and full/scoped lifecycle regression fixtures are present and pass on the provisioned 9.1.1 controller tuple.",
+    "not_claimed": "No source-validity, inventory, baseline/history or full-gate qualification is claimed; other candidate tuples and whole-suite qualification remain unverified."
+  },
+  "commit": "recorded in final handoff"
+}

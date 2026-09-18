@@ -338,14 +338,45 @@ def _mac(key: bytes, value: object) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
+def _pytest_full_generated(path: str, roots: tuple[str, ...], included: set[str]) -> str | None:
+    """Return the source relation for one exact Pytest full-run byproduct."""
+    if path in {
+        ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
+        ".pytest_cache/v/cache/nodeids", ".pytest_cache/v/cache/lastfailed",
+        ".pytest_cache/v/cache/stepwise",
+    }:
+        return ""
+    match = re.fullmatch(
+        r"(?P<parent>(?:[^/]+/)*)__pycache__/(?P<module>[^/]+)\.cpython-(?P<version>[0-9]+)(?:\.opt-[0-9]+|-pytest-(?:8\.4\.2|9\.0\.3|9\.1\.0|9\.1\.1))?\.pyc",
+        path,
+    )
+    if match is None:
+        return None
+    source = match.group("parent") + match.group("module") + ".py"
+    if not any(path.startswith(root + "/") for root in roots):
+        return None
+    if source not in included:
+        return None
+    return source
+
+
 def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | None,
-             base: str | None, *, runtime_identity: str | None = None) -> C.InputSnapshot:
+             base: str | None, *, runtime_identity: str | None = None,
+             pytest_full_outputs: bool = False) -> C.InputSnapshot:
     """Read supplied state only; unknown runtime evidence prevents compatibility.
 
     ``runtime_identity`` is a 64-hex digest of *verified* native facts, not a
     caller's guessed runner version. T11 must refresh those facts after setup
     and queue waits. No native probing/import is performed by this function.
     """
+    if pytest_full_outputs and (
+            config.runner.kind is not C.RunnerKind.PYTEST
+            or baseline is not None or base is not None or runtime_identity is not None):
+        raise C.Problem(
+            code="invalid-config",
+            message="pytest full output policy requires a Pytest full content snapshot",
+            phase="source", retryable=False,
+        )
     scan = _Scan(time.monotonic() + _TIMEOUT_S)
     head, changes = None, ()
     baseline_head = baseline.head if baseline is not None else None
@@ -398,9 +429,27 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         declared_ignored = {path for path in ignored_all
                             if _matches(path, config.selection.ignored_inputs)}
         undeclared_ignored = {path for path in ignored_all
-                              if path not in declared_ignored
+                            if path not in declared_ignored
                               and not _matches(path, config.selection.non_input_outputs)}
         present, deleted = _present_tracked(root, set(tracked), scan)
+        candidate_paths = present | untracked | declared_ignored | undeclared_ignored
+        generated = set()
+        if pytest_full_outputs:
+            for path in untracked | undeclared_ignored:
+                relation = _pytest_full_generated(path, config.runner.test_roots, candidate_paths)
+                if relation is None:
+                    continue
+                # Filtering is allowed only after the same no-follow regular
+                # file checks used for ordinary inputs.  This also makes a
+                # symlink/FIFO/raced replacement fail closed instead of
+                # disappearing merely because it resembles tool output.
+                with _opened(root, path):
+                    if relation:
+                        with _opened(root, relation):
+                            pass
+                generated.add(path)
+        untracked -= generated
+        undeclared_ignored -= generated
         paths = present | untracked | declared_ignored | undeclared_ignored
         files, object_ids = _fingerprints(key, root, paths, scan, object_format)
         raw_changed = {path for path in present if object_ids[path] != tracked[path][1]}
@@ -434,10 +483,15 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         external = _mac(key, [environment, [(f.path, f.digest, f.mode, f.size)
                                             for f in files if f.path in declared_ignored]])
         identity = [(f.path, f.digest, f.mode, f.size) for f in files]
-        digest = _mac(key, [_IDENTITY_PROTOCOL, identity, external])
+        digest = _mac(key, [_IDENTITY_PROTOCOL,
+                            "ptest-pytest-full-content-v1" if pytest_full_outputs else "default-v1",
+                            identity, external])
         compatibility = None
         limitations = ()
-        if not isinstance(runtime_identity, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_identity):
+        if pytest_full_outputs:
+            compatibility = None
+            limitations = (_reason("unknown-input", "pytest full content identity is execution-only"),)
+        elif not isinstance(runtime_identity, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_identity):
             limitations = (_reason("unknown-input", "verified native runtime identity is unavailable"),)
         else:
             compatibility = _mac(key, [_IDENTITY_PROTOCOL, runtime_identity, external,

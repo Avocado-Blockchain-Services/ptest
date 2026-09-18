@@ -21,6 +21,10 @@ _NARROWING_OPTIONS = {
     "--fixtures-per-test", "--markers", "--cache-show",
     "-h", "--help", "-V", "--version",
 }
+_FULL_REDIRECT_OPTIONS = {
+    "-c", "--config-file", "--rootdir", "--confcutdir", "--noconftest",
+    "--pyargs", "-o", "--override-ini", "--basetemp",
+}
 
 
 def _problem(code: str, message: str) -> C.Problem:
@@ -40,10 +44,23 @@ def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> No
         if token.startswith("@") or (short and short[1] == "n"):
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
-        if full and (option in _NARROWING_OPTIONS or "::" in token
+        redirect_cluster = token.startswith(("-c", "-o")) and token not in {"-c", "-o"}
+        if full and (option in _NARROWING_OPTIONS or option in _FULL_REDIRECT_OPTIONS
+                     or redirect_cluster or "::" in token
                      or (short and short[1] in {"k", "m"})
                      or re.fullmatch(r"-[qvs]*x[qvs]*", token)):
             raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")
+
+
+def _validate_full_roots(roots: tuple[str, ...]) -> None:
+    """Validate the literal roots before a native parser/project is involved."""
+    if not roots or len(set(roots)) != len(roots):
+        raise _problem("native-config-invalid", "full pytest roots must be nonempty and unique")
+    for root in roots:
+        if (not isinstance(root, str) or not root or root == "."
+                or root.startswith(("-", "@", "/")) or "\\" in root
+                or "::" in root or any(part in {"", ".", ".."} for part in root.split("/"))):
+            raise _problem("native-config-invalid", "full pytest roots must be literal project-relative paths")
 
 
 def _project_root(config: C.Config) -> Path:
@@ -72,6 +89,59 @@ def _require_python_launcher(launcher: tuple[str, ...]) -> None:
                        "pytest bridge requires a CPython interpreter launcher")
 
 
+def inspect_capability(config: C.Config) -> C.Capability:
+    """Describe Pytest's static conditional capability without native I/O."""
+    if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
+        raise _problem("native-config-invalid", "pytest adapter requires pytest config")
+    if config.setup is not None:
+        return C.Capability(
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=(C.Reason(code="unsupported-capability",
+                                  message="pytest setup declarations are unsupported in this tier"),),
+        )
+    try:
+        _require_python_launcher(config.runner.launcher)
+    except C.Problem as problem:
+        return C.Capability(
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=(C.Reason(code=problem.code, message=problem.message),),
+        )
+    limitations = [C.Reason(
+        code="unsupported-capability",
+        message=("pytest scoped/full basic-serial is conditional on the provisioned native tuple, "
+                 "exact hook policy, comparable bounded Git content and exact checkout-root native "
+                 "cache placement; non-Git, nested/custom-cache or over-budget evidence makes full "
+                 "incomplete/70; inventory/counts/full gates remain unavailable"),
+    ), C.Reason(
+        code="unsupported-capability",
+        message=("allowed plain/wrapper pytest_collection_finish code may mutate the effective item list, "
+                 "and setup/fixtures may skip; automatic/setup/shadow/probe, selection, history, "
+                 "baseline and whole-gate obligations remain unavailable"),
+    )]
+    if "." in config.runner.test_roots:
+        limitations.insert(0, C.Reason(
+            code="unsupported-capability",
+            message=("pytest full execution is unavailable for a dot test root in this slice; "
+                     "the basic-serial capability describes scoped execution only"),
+        ))
+    try:
+        _validate_full_roots(config.runner.test_roots)
+        _reject_unowned_controls(config.runner.args + config.runner.full_args
+                                 + config.runner.test_roots, full=True)
+    except C.Problem:
+        limitations.insert(0, C.Reason(
+            code="unsupported-capability",
+            message=("pytest full execution is unavailable for the configured native controls; "
+                     "scoped execution remains literal basic-serial"),
+        ))
+    return C.Capability(
+        execution=C.ExecutionTier.BASIC_SERIAL, selection=False,
+        lifecycle="cooperative-process-group", limitations=tuple(limitations),
+    )
+
+
 def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             attempt: C.AttemptIdentity) -> C.PreparedRun:
     """Create literal pytest argv after the scheduler has granted capacity.
@@ -90,6 +160,17 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         raise _problem("native-config-invalid", "pytest bridge cannot execute an empty plan")
     if plan.execution == "selected":
         raise _problem("unsupported-capability", "pytest selection requires qualified native inventory evidence")
+    if plan.execution not in {"scoped", "full"}:
+        raise _problem("unsupported-capability", "pytest execution mode is unavailable")
+    expected_mode = C.Mode.FULL if plan.execution == "full" else C.Mode.SCOPED
+    if plan.mode is not expected_mode:
+        raise _problem("native-config-invalid", "pytest plan mode does not match execution mode")
+    if grant.slots != 1:
+        raise _problem("admission-invalid", "pytest basic-serial execution requires one slot")
+    if plan.execution == "full" and plan.files:
+        raise _problem("native-config-invalid", "pytest full plans cannot carry scoped files")
+    if plan.execution == "full":
+        _validate_full_roots(config.runner.test_roots)
 
     _require_python_launcher(config.runner.launcher)
     native = config.runner.args
@@ -104,19 +185,14 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         native += plan.files
 
     generated: tuple[str, ...] = ()
-    if grant.slots > 1:
-        native += ("-n", str(grant.slots))
-        generated = (f"xdist-workers={grant.slots}",)
     if plan.execution == "full":
         native += config.runner.test_roots
     argv = config.runner.launcher + (str(_bridge_path()),) + native
-    execution = C.ExecutionTier.BASIC_SERIAL if plan.execution == "scoped" else C.ExecutionTier.UNAVAILABLE
-    limitations = () if execution is C.ExecutionTier.BASIC_SERIAL else (C.Reason(
+    execution = C.ExecutionTier.BASIC_SERIAL
+    limitations = (() if plan.execution == "scoped" else (C.Reason(
         code="unsupported-capability",
-        message=("unqualified pytest foundation: native_cli checks, terminal/coverage "
-                 "and inventory evidence pending; cannot launch as a supported profile "
-                 "or publish full gates"),
-    ),)
+        message="pytest full observes native outcomes only; inventory, source validity and full gates remain unavailable",
+    ),))
     return C.PreparedRun(
         argv=argv,
         cwd=_project_root(config),

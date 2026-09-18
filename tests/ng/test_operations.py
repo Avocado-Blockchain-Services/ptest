@@ -299,6 +299,86 @@ def test_command_unknown_snapshot_is_not_source_valid_or_gate_eligible(case):
     assert any(reason.code == "unknown-input" for reason in result.limitations)
 
 
+def _pytest_project(case, domain, *, workers=1):
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
+        'project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "test_native.py").write_text("def test_body():\n    assert True\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        'args = ["-q"]\n'
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        f"workers = {workers}\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def _git_pytest_project(case, domain):
+    root = _pytest_project(case, domain)
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
+    for argv in (("init",), ("add", "."), ("commit", "-m", "fixture")):
+        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
+                        "-c", "commit.gpgsign=false", "-C", str(root), *argv),
+                       env=env, check=True, capture_output=True)
+    return root
+
+
+def test_pytest_full_missing_source_evidence_is_incomplete_while_command_full_passes(case):
+    """The missing-either-digest rule is Pytest-full-only; command full keeps its semantics."""
+    domain = case.domain()
+    command_root = _command_project(case, domain, args=("exit", "0"))
+    command_result = _execute(command_root, domain)
+    assert (command_result.status, command_result.exit_code,
+            command_result.runner_exit_code) == (C.Status.PASSED, 0, 0)
+
+    pytest_root = _pytest_project(case, domain)
+    pytest_result = _execute(pytest_root, domain)
+
+    assert pytest_result.input_before.digest is None
+    assert (pytest_result.status, pytest_result.exit_code,
+            pytest_result.runner_exit_code) == (C.Status.INCOMPLETE, 70, 0)
+    assert pytest_result.exit_origin == "ptest"
+    assert pytest_result.source_valid is False
+    assert pytest_result.full_gate_eligible is False
+    assert any(reason.code == "unknown-input" for reason in pytest_result.reasons)
+    assert pytest_result.attempts[0].inventory_complete is False
+
+
+def test_pytest_full_equal_execution_only_digests_pass_despite_missing_compatibility(case):
+    """Equal full-policy digests carry the native outcome; compatibility alone never blocks."""
+    domain = case.domain()
+    root = _git_pytest_project(case, domain)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.PASSED, 0, 0)
+    assert result.exit_origin == "runner"
+    assert result.input_before.digest is not None
+    assert result.input_before.digest == result.input_after.digest
+    assert result.input_before.compatibility is None
+    assert result.source_valid is False
+    assert result.full_gate_eligible is False
+    assert result.baseline_published is False
+    assert result.counts is None
+    assert any("execution-only" in reason.message for reason in result.limitations)
+    assert any("inventory is not complete" in reason.message for reason in result.limitations)
+    assert result.attempts[0].inventory_complete is False
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
+
+
 def test_source_capture_follows_queue_changes_and_precedes_guard_finalization(case, monkeypatch):
     domain = case.domain()
     blocker = _follower(case, domain)

@@ -218,6 +218,60 @@ def test_where_reveal_is_labelled_stderr_only_and_never_persisted(
     assert _tree_bytes(domain.root) == before
 
 
+@pytest.mark.parametrize(
+    "kind,roots,setup,expected,limitation",
+    [
+        ("pytest", ("tests",), False, "basic_serial", "inventory"),
+        ("pytest", (".",), False, "basic_serial", "dot test root"),
+        ("pytest", ("tests",), True, "unavailable", "setup declarations"),
+        ("vitest", ("tests",), False, "unavailable", "prepared only"),
+    ],
+)
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_where_describes_conditional_pytest_and_prepared_vitest_without_execution(
+        case, monkeypatch, capsys, kind, roots, setup, expected, limitation, json_mode):
+    domain = case.domain()
+    root = case.project(domain, kind=kind)
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    lines = [
+        "version = 1",
+        f'project_id = "{project_id}"',
+        "[runner]",
+        f'kind = "{kind}"',
+        f'launcher = {json.dumps(["python"] if kind == "pytest" else ["node"])}',
+        "args = []",
+        "full_args = []",
+        f"test_roots = {json.dumps(list(roots))}",
+        "workers = 8",
+        'lifecycle = "cooperative-process-group"',
+    ]
+    if setup:
+        lines.extend([
+            "[setup]",
+            'argv = ["uv", "sync"]',
+            'required_paths = [".venv"]',
+            "network = true",
+            "lifecycle_scripts = true",
+        ])
+    (root / ".ptest.toml").write_text("\n".join(lines) + "\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: pytest.fail("where executed a runner"))
+    monkeypatch.setattr("socket.create_connection", lambda *a, **k: pytest.fail("where made a network request"))
+    args = ("where", "--json") if json_mode else ("where",)
+    assert main(("--fixture-domain", str(domain.root), *args)) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if json_mode:
+        payload = C.decode_public_document(captured.out).data
+        capability = payload["capability"]
+        text = " ".join(item["message"] for item in capability["limitations"])
+        assert capability["execution"] == expected
+    else:
+        assert f"capability: {expected}" in captured.out
+        text = captured.out
+    assert limitation in text
+
+
 @pytest.mark.parametrize("target", ["tests/test_cache.py", "tests/test_cache.py::test_a", "ab" * 16])
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_history_filter_fails_closed_instead_of_reporting_wrong_empty_result(

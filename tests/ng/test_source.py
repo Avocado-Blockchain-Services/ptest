@@ -13,7 +13,11 @@ from ptest import contracts as C
 def snapshot(*args, **kwargs):
     """Unit boundary: emulate independently verified T11 native identity."""
     from ptest.source import snapshot as actual_snapshot
-    return actual_snapshot(*args, runtime_identity=kwargs.pop("runtime_identity", "a" * 64), **kwargs)
+    if kwargs.get("pytest_full_outputs"):
+        kwargs.pop("runtime_identity", None)
+    else:
+        kwargs.setdefault("runtime_identity", "a" * 64)
+    return actual_snapshot(*args, **kwargs)
 
 
 def test_static_snapshot_without_key_creates_no_state_and_cannot_narrow(case):
@@ -214,6 +218,78 @@ def test_undeclared_ignored_content_is_not_an_automatic_exemption(case):
     assert ignored == {".venv/cache", "src/__pycache__/a.pyc"}
     assert before.digest != after.digest
     assert ignored.issubset({item.path for item in after.files})
+
+
+def test_pytest_full_snapshot_excludes_only_root_cache_and_bytecode(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    before = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    (root / ".gitignore").write_text(".pytest_cache/\ntests/__pycache__/\n")
+    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore native outputs")
+    (root / ".pytest_cache").mkdir(); (root / ".pytest_cache" / "CACHEDIR.TAG").write_text("cache")
+    (root / "tests" / "__pycache__").mkdir(); (root / "tests" / "__pycache__" / "test_a.cpython-313-pytest-9.1.1.pyc").write_bytes(b"pyc")
+    after = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert after.digest is not None
+    assert ".pytest_cache/CACHEDIR.TAG" not in {item.path for item in after.files}
+    assert "tests/__pycache__/test_a.cpython-313-pytest-9.1.1.pyc" not in {item.path for item in after.files}
+
+
+def test_pytest_full_digest_domain_is_execution_only_and_separate(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, _ = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    normal = snapshot(domain, config, None, None)
+    full = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert normal.digest is not None and full.digest is not None
+    assert normal.digest != full.digest
+    assert normal.compatibility is not None
+    assert full.compatibility is None
+    assert any("execution-only" in item.message for item in full.limitations)
+
+
+@pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
+                                  "tests/__pycache__/sourceless.cpython-313.pyc"])
+def test_pytest_full_snapshot_retains_nonstandard_cache_outputs(case, path):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / ".gitignore").write_text(".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\n")
+    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore caches")
+    target = root / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"output")
+    result = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert path in {item.path for item in result.files}
+
+
+def test_pytest_full_generated_allowlist_never_overrides_tracked_or_declared_inputs(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    (root / ".pytest_cache").mkdir()
+    (root / ".pytest_cache" / "CACHEDIR.TAG").write_text("tracked cache")
+    (root / "tests" / "__pycache__").mkdir()
+    tracked_pyc = root / "tests" / "__pycache__" / "test_a.cpython-313.pyc"
+    tracked_pyc.write_bytes(b"tracked bytecode")
+    (root / ".gitignore").write_text("generated/\n")
+    (root / "generated").mkdir()
+    declared_pyc = root / "generated" / "test.cpython-313.pyc"
+    declared_pyc.write_bytes(b"declared bytecode")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "track cache lookalikes")
+    policy = replace(_config(case, domain).selection, ignored_inputs=("generated",))
+    config = case.config(checkout=_config(case, domain).checkout, selection=policy)
+    result = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    paths = {item.path for item in result.files}
+    assert ".pytest_cache/CACHEDIR.TAG" in paths
+    assert "tests/__pycache__/test_a.cpython-313.pyc" in paths
+    assert "generated/test.cpython-313.pyc" in paths
 
 
 @pytest.mark.parametrize("with_docs_change", [False, True])

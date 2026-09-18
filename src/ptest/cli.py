@@ -17,6 +17,7 @@ from . import config as config_api
 from . import contracts as C
 from . import doctor, files, history, operations, platform, scheduler
 from . import render
+from .adapters import pytest as pytest_adapter
 from .runners import adapter_for
 
 
@@ -175,6 +176,8 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
                 raise _problem("invalid-config", "option cannot be repeated")
             result_path = value
     if full:
+        if base is not None:
+            raise _problem("invalid-config", "--base is unavailable with --full")
         mode = C.Mode.FULL
         if tail:
             raise _problem("invalid-config", "full execution cannot accept runner narrowing")
@@ -346,7 +349,8 @@ def _summary(config: C.Config) -> C.ConfigSummary:
     )
     full = C.summarize_command(
         config.runner.kind, C.Mode.FULL,
-        config.runner.launcher + config.runner.args + config.runner.full_args,
+        config.runner.launcher + config.runner.args + config.runner.full_args
+        + (config.runner.test_roots if config.runner.kind is C.RunnerKind.PYTEST else ()),
         workers=config.runner.workers, provenance=("config",),
     )
     return C.summarize_config(config, scoped=scoped, full=full)
@@ -364,15 +368,32 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
             "warnings": [],
         }
     adapter_for(config.runner.kind)  # closed registry validation only
+    if config.runner.kind is C.RunnerKind.PYTEST:
+        inspected = pytest_adapter.inspect_capability(config)
+    elif config.runner.kind is C.RunnerKind.VITEST:
+        inspected = C.Capability(
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=(C.Reason(
+                code="unsupported-capability",
+                message=("Vitest basic-serial is prepared only; executor integration and "
+                         "real native tuple qualification remain unavailable"),
+            ),),
+        )
+    else:
+        inspected = C.Capability(
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=(C.Reason(
+                code="unsupported-capability",
+                message="unavailable",
+            ),),
+        )
     capability = {
-        "execution": C.ExecutionTier.UNAVAILABLE.value,
-        "selection": False,
-        "lifecycle": "cooperative-process-group",
-        "limitations": [{
-            "code": "unsupported-capability",
-            "message": "execution orchestration is not qualified in this slice",
-            "paths": [],
-        }],
+        "execution": inspected.execution.value,
+        "selection": inspected.selection,
+        "lifecycle": inspected.lifecycle,
+        "limitations": [_reason(item) for item in inspected.limitations],
     }
     try:
         limits = scheduler.effective_limits(domain) if domain is not None else C.EffectiveLimits()
@@ -507,6 +528,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             else:
                 print(f"root: {render.terminal_text(payload['root'])}")
                 print(f"initialized: {payload['initialized']}")
+                if payload["capability"] is not None:
+                    print(f"capability: {payload['capability']['execution']}")
+                    for limitation in payload["capability"]["limitations"]:
+                        print(f"limitation: {render.terminal_text(limitation['message'])}")
             if parsed.reveal_command:
                 if resolution.config is None:
                     print("unredacted-command-disclosure: no command is configured",

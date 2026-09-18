@@ -32,10 +32,10 @@ def _attempt(workers: int = 1) -> C.AttemptIdentity:
     )
 
 
-def test_pytest_full_is_refused_before_admission(case, monkeypatch):
+def test_pytest_automatic_is_refused_before_admission(case, monkeypatch):
     domain = case.domain()
     config = case.config(runner_kind="pytest")
-    request = C.RunRequest(mode=C.Mode.FULL)
+    request = C.RunRequest(mode=C.Mode.AUTOMATIC)
 
     def enqueue(*args, **kwargs):
         raise AssertionError("native pytest must be rejected before admission")
@@ -46,7 +46,7 @@ def test_pytest_full_is_refused_before_admission(case, monkeypatch):
         operations.execute(domain, config, request)
 
 
-@pytest.mark.parametrize("mode", [C.Mode.AUTOMATIC, C.Mode.FULL])
+@pytest.mark.parametrize("mode", [C.Mode.AUTOMATIC])
 def test_pytest_non_scoped_modes_are_refused_before_admission(case, monkeypatch, mode):
     domain = case.domain()
     config = case.config(runner_kind="pytest")

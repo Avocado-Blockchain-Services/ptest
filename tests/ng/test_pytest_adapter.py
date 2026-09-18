@@ -40,7 +40,8 @@ def _config(*, workers: int = 1, args: tuple[str, ...] = (),
 
 
 def _plan(*, execution: str = "full", files: tuple[str, ...] = ()) -> C.Plan:
-    return C.Plan(mode=C.Mode.FULL, execution=execution, files=files)
+    mode = C.Mode.SCOPED if execution == "scoped" else C.Mode.FULL
+    return C.Plan(mode=mode, execution=execution, files=files)
 
 
 def _grant(slots: int = 1) -> C.Grant:
@@ -102,11 +103,9 @@ def test_non_interpreter_launcher_is_rejected_before_bridge_execution():
         prepare(_config(runner=runner), _plan(), _grant(1), _attempt(1))
 
 
-def test_parallel_grant_adds_exact_xdist_worker_count():
-    prepared = prepare(_config(workers=2), _plan(), _grant(2), _attempt(2))
-
-    assert prepared.argv[-4:] == ("-q", "-n", "2", "tests")
-    assert prepared.summary.generated_options == ("xdist-workers=2",)
+def test_parallel_grant_is_refused_for_basic_serial_profile():
+    with pytest.raises(C.Problem, match="admission-invalid"):
+        prepare(_config(workers=2), _plan(), _grant(2), _attempt(2))
 
 
 def test_prepared_bridge_receives_the_generated_protocol_descriptor():
@@ -133,13 +132,11 @@ def test_bridge_rejects_missing_or_out_of_range_grant_workers(monkeypatch, worke
         pytest_bridge._workers()
 
 
-@pytest.mark.parametrize("slots", [1, 2])
-def test_lower_grant_is_the_worker_authority(slots):
+def test_lower_grant_is_the_worker_authority():
+    slots = 1
     prepared = prepare(_config(workers=4), _plan(), _grant(slots), _attempt(slots))
     assert prepared.summary.workers == slots
-    assert ("-n" in prepared.argv) is (slots > 1)
-    if slots > 1:
-        assert prepared.argv[prepared.argv.index("-n") + 1] == "2"
+    assert "-n" not in prepared.argv
 
 
 def test_grant_run_identity_must_match_attempt():
@@ -147,12 +144,12 @@ def test_grant_run_identity_must_match_attempt():
         prepare(_config(), _plan(), _grant(), replace(_attempt(), run_id="12" * 16))
 
 
-@pytest.mark.parametrize("slots", [1, 2])
-def test_unqualified_preparation_cannot_advertise_native_capability(slots):
+def test_full_preparation_advertises_basic_serial_with_claim_limits():
+    slots = 1
     prepared = prepare(_config(workers=slots), _plan(), _grant(slots), _attempt(slots))
-    assert prepared.capability.execution is C.ExecutionTier.UNAVAILABLE
+    assert prepared.capability.execution is C.ExecutionTier.BASIC_SERIAL
     assert prepared.capability.selection is False
-    assert any("native_cli" in reason.message for reason in prepared.capability.limitations)
+    assert any("inventory" in reason.message for reason in prepared.capability.limitations)
     assert "PTEST_GRANT_NONCE" not in dict(prepared.env_updates)
 
 
@@ -389,6 +386,74 @@ def test_full_bridge_rejects_positional_narrowing_from_native_config(bridge_env)
     config.args = ["tests/test_a.py::test_one", "tests"]
     with pytest.raises(pytest.UsageError, match="inventory differs"):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
+
+
+def test_full_bridge_keeps_captured_roots_after_environment_mutation(bridge_env, monkeypatch):
+    plugin = pytest_bridge.OwnedPlugin(1, "full", ("tests",))
+    monkeypatch.setenv("PTEST_EXECUTION", "scoped")
+    monkeypatch.setenv("PTEST_TEST_ROOTS", '["other"]')
+    config = _native_config(); config.args = ["other"]
+    with pytest.raises(pytest.UsageError, match="inventory differs"):
+        plugin.pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
+                                   "pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_sessionfinish"])
+def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
+    function = SimpleNamespace(__module__="project.conftest")
+    function.pytest_hookimpl = {"wrapper": True}
+    implementation = SimpleNamespace(plugin=object(), function=function)
+    manager = SimpleNamespace(
+        list_name_plugin=lambda: (),
+        hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
+                                for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+                                             "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_runtest_makereport",
+                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+    )
+    config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_runtest_makereport",
+                                   "pytest_sessionfinish"])
+def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
+    implementation = SimpleNamespace(
+        plugin=object(),
+        function=SimpleNamespace(__module__="project.alias_plugin"),
+        specname=hook, opts={"tryfirst": True},
+    )
+    late_manager = SimpleNamespace(
+        list_name_plugin=lambda: (("alias-name", object()),),
+        hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
+                                for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+                                             "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_runtest_makereport",
+                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+    )
+    config = _native_config(); config.pluginmanager = late_manager
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
+                                   "pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_sessionfinish"])
+def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
+    implementation = SimpleNamespace(plugin=object(), function=SimpleNamespace(__module__="project.conftest"))
+    manager = SimpleNamespace(
+        list_name_plugin=lambda: (),
+        hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
+                                for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+                                             "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_runtest_makereport",
+                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+    )
+    config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 
 def test_ini_rsync_is_rejected_before_gateway_setup():

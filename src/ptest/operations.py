@@ -78,16 +78,22 @@ def _summary(config: C.Config, plan: C.Plan, request: C.RunRequest,
     args = tuple(config.runner.launcher) + tuple(config.runner.args)
     if plan.execution == "full":
         args += tuple(config.runner.full_args)
+        if config.runner.kind is C.RunnerKind.PYTEST:
+            args += tuple(config.runner.test_roots)
     elif plan.execution == "scoped":
         args += tuple(request.argv)
     return C.summarize_command(config.runner.kind, plan.mode, args,
                                workers=workers,
-                               provenance=("literal-exclusive-command",))
+                               provenance=(("pytest-native-bridge",)
+                                           if config.runner.kind is C.RunnerKind.PYTEST
+                                           else ("literal-exclusive-command",)))
 
 
 def _plan(request: C.RunRequest) -> C.Plan:
     if request.mode is C.Mode.SCOPED:
         return C.Plan(mode=C.Mode.SCOPED, execution="scoped", static_preview=False)
+    if request.mode is C.Mode.FULL:
+        return C.Plan(mode=C.Mode.FULL, execution="full", static_preview=False)
     # Automatic command mode is a real full command, never a guessed selected
     # subset.  The source/selection lifecycle is intentionally deferred.
     return C.Plan(mode=request.mode, execution="full",
@@ -141,6 +147,9 @@ def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
         timings=timings, attempts=attempts, reasons=tuple(reasons),
         limitations=(_reason("unsupported-capability",
                              "command execution has no inventory or verified runtime identity"),
+                     *((_reason("unsupported-capability",
+                                "pytest full permits cooperative collection-finish mutation and setup skips; inventory is not complete"),)
+                       if request.mode is C.Mode.FULL and command.kind is C.RunnerKind.PYTEST else ()),
                      *tuple(limitations)),
         input_before=input_before, input_after=input_after,
     )
@@ -167,17 +176,23 @@ def _capture_source(domain: C.DomainPaths, config: C.Config,
             )
         return snapshot_item
 
+    snapshot_kwargs = {}
+    if config.runner.kind is C.RunnerKind.PYTEST and request.mode is C.Mode.FULL:
+        snapshot_kwargs["pytest_full_outputs"] = True
+
     if ensure_key:
         try:
             source.ensure_fingerprint_key(domain)
         except (C.Problem, OSError) as exc:
             problem = exc if isinstance(exc, C.Problem) else None
             try:
-                return normalize(source.snapshot(domain, config, None, request.base))
+                return normalize(source.snapshot(domain, config, None, request.base,
+                                                 **snapshot_kwargs))
             except (C.Problem, OSError):
                 return _unknown_snapshot(problem)
     try:
-        return normalize(source.snapshot(domain, config, None, request.base))
+        return normalize(source.snapshot(domain, config, None, request.base,
+                                         **snapshot_kwargs))
     except (C.Problem, OSError):
         return _unknown_snapshot()
 
@@ -561,8 +576,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise TypeError("execute requires RunRequest")
     native_pytest = config.runner.kind is C.RunnerKind.PYTEST
     if native_pytest:
-        if request.mode is not C.Mode.SCOPED:
-            raise _problem("unsupported-capability", "pytest execution is scoped-only in this tier")
+        if request.mode not in {C.Mode.SCOPED, C.Mode.FULL}:
+            raise _problem("unsupported-capability", "pytest execution requires explicit scope or --full")
+        if request.mode is C.Mode.FULL and request.base is not None:
+            raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
+        if request.mode is C.Mode.FULL and "." in config.runner.test_roots:
+            raise _problem("unsupported-capability", "pytest full execution does not support a dot test root")
         if config.setup is not None or request.shadow or request.probe is not None:
             raise _problem("unsupported-capability", "pytest setup, shadow and probe are unavailable")
     elif config.runner.kind is not C.RunnerKind.COMMAND:
@@ -791,7 +810,11 @@ def execute(domain: C.DomainPaths, config: C.Config,
                            for item in result.attempts),
         )
         invalidation = _source_invalidation(input_before, input_after)
-        if invalidation is not None:
+        if (native_pytest and plan.execution == "full"
+                and (input_before.digest is None or input_after.digest is None)):
+            result = _incomplete(result, _reason(
+                "unknown-input", "pytest full content evidence is unavailable"))
+        elif invalidation is not None:
             if plan.execution == "full":
                 result = _incomplete(result, invalidation)
             else:

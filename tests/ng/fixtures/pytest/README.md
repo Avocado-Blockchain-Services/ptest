@@ -46,11 +46,31 @@ xdist tuple and an unsupported pytest runtime remain explicit unqualified skips
 unless matching interpreters are supplied through the documented environment
 overrides; no fixture installation promotes them.
 
-Pending full-tier acceptance (preserved from Task 5): basic serial automatic/full
-pass and native failure across 8.4.2, 9.0.3, 9.1.0 and 9.1.1; candidate-owned
-locked dependency setup; full narrowing through ini/env/argfiles; full native
-stdout, exit and baseline restrictions. These require a later authorized tier;
-they are not silently promoted or represented as passing native execution here.
+Task 11F implements explicit Pytest `--full` basic-serial admission on top of
+the scoped lifecycle. Full mode retains configured `runner.args`, appends
+`runner.full_args` and the exact configured roots, grants one slot regardless
+of the requested worker count, freezes mode/roots before project import, and
+authenticates the existing private terminal report. It rejects native
+narrowing, redirect/configuration controls, executor hooks, dot roots, setup,
+automatic/selected/shadow/probe requests and `--base`. Allowed terminal/log/
+cleanup hooks remain additive; collection-finish item mutation and setup-time
+skips are explicitly cooperative limitations, so inventory, counts, source
+validity and full-gate claims remain unavailable.
+
+The full-only source domain excludes only the exact checkout-root Pytest cache
+files and regular assertion-rewrite/CPython bytecode with an included source
+module. Tracked, declared-input, malformed, sourceless, nested/custom-cache,
+symlink and raced outputs remain inputs. Equal execution-only digests can carry
+an authenticated native outcome despite missing compatibility identity;
+missing/non-Git/over-budget evidence makes a zero run incomplete/70 while
+preserving an observed native nonzero.
+
+The implementation evidence in `.pipeline/out/task-11f-pytest-full.json` records
+the exact controller command and the current qualification prerequisite. The
+assigned worktree does not currently contain the provisioned pytest tuple, so
+no candidate runtime/version is claimed qualified until the mandated controller
+bootstrap can execute. Pytest 8.4.2, 9.0.3, 9.1.0 and 9.1.1, xdist, coverage,
+macOS and independent-repository adoption remain explicitly unqualified.
 
 Still to author/execute at the native qualification stage: bounded xdist worker
 instrumentation/inventory, full pytest 9 TOML precedence, coverage thresholds,

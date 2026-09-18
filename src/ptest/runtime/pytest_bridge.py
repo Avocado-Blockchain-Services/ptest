@@ -67,6 +67,17 @@ def _python_version() -> None:
         _fail("unsupported CPython version or implementation", "unsupported-capability")
 
 
+def _validate_full_roots(roots: tuple[str, ...]) -> None:
+    if not roots or len(set(roots)) != len(roots):
+        _fail("full pytest roots must be nonempty and unique")
+    for root in roots:
+        if (not isinstance(root, str) or not root or root == "."
+                or root.startswith(("-", "@", "/")) or "\\" in root
+                or "::" in root
+                or any(part in {"", ".", ".."} for part in root.split("/"))):
+            _fail("full pytest roots must be literal project-relative paths")
+
+
 def _report_binding() -> tuple[Path, dict[str, str]] | None:
     """Read the executor-owned report binding, when this is an admitted run."""
     path_value = os.environ.get("PTEST_PYTEST_REPORT_PATH")
@@ -88,10 +99,13 @@ def _report_binding() -> tuple[Path, dict[str, str]] | None:
     if (not re.fullmatch(r"[0-9a-f]{32}", run_id)
             or not re.fullmatch(r"[0-9a-f]{64}", nonce)
             or not re.fullmatch(r"a(00[1-9]|010)", attempt)
-            or execution != "scoped"):
+            or execution not in {"scoped", "full"}):
         _fail("invalid pytest report identity")
     if not path.parent.is_dir():
         _fail("pytest report directory is unavailable")
+    declared_execution = os.environ.get("PTEST_EXECUTION", execution)
+    if declared_execution != execution:
+        _fail("pytest report identity does not match the execution binding")
     try:
         parent = path.parent
         stamp = parent.stat()
@@ -140,8 +154,17 @@ def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
 class OwnedPlugin:
     """Additive profile gate; it neither replaces reporters nor parses addopts."""
 
-    def __init__(self, workers: int) -> None:
+    def __init__(self, workers: int, execution: str | None = None,
+                 roots: tuple[str, ...] | None = None) -> None:
         self.workers = workers
+        self.execution = execution if execution is not None else os.environ.get("PTEST_EXECUTION")
+        if roots is None:
+            try:
+                decoded = json.loads(os.environ.get("PTEST_TEST_ROOTS", "null"))
+                roots = tuple(decoded) if isinstance(decoded, list) else ()
+            except ValueError:
+                roots = ()
+        self.roots = roots
         self.refused = False
         self._config: Any | None = None
 
@@ -165,7 +188,21 @@ class OwnedPlugin:
                     continue
                 module = getattr(plugin, "__name__", "")
                 if name in {"xdist", "pytest-xdist"} or str(module).startswith("xdist"):
-                    self._refuse("pytest xdist is not owned by the serial grant")
+                    # xdist is commonly installed in a shared interpreter.  Its
+                    # plugin being auto-loaded is harmless for a one-slot run
+                    # when no transport/worker option activated it; the later
+                    # effective-option checks still refuse every active path.
+                    configured_workers = getattr(option, "numprocesses", None)
+                    active_xdist = (
+                        self.workers > 1
+                        or configured_workers not in (None, 0, "0")
+                        or bool(getattr(option, "tx", None))
+                        or bool(getattr(option, "px", None))
+                        or bool(getattr(option, "rsyncdir", None))
+                    )
+                    if active_xdist:
+                        self._refuse("pytest xdist is not owned by the serial grant")
+                    continue
                 executors = {"forked", "parallel", "rerunfailures", "repeat", "timeout", "loop"}
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")
                 package = str(module).split(".", 1)[0].removeprefix("pytest_")
@@ -174,9 +211,14 @@ class OwnedPlugin:
             # Inspect registered hook owners, including specname aliases.
             # Reporters and ordinary fixtures remain additive; an unqualified
             # executor cannot bypass the serial loop even without a -n flag.
-            for hook in ("pytest_cmdline_main", "pytest_collection",
-                         "pytest_runtestloop", "pytest_runtest_protocol",
-                         "pytest_runtest_call", "pytest_pyfunc_call"):
+            hooks = ("pytest_cmdline_main", "pytest_collection",
+                     "pytest_runtestloop", "pytest_runtest_protocol",
+                     "pytest_runtest_call", "pytest_pyfunc_call")
+            if self.execution == "full":
+                hooks += ("pytest_collection_modifyitems", "pytest_ignore_collect",
+                          "pytest_runtest_makereport", "pytest_report_teststatus",
+                          "pytest_sessionfinish")
+            for hook in hooks:
                 for implementation in getattr(manager.hook, hook).get_hookimpls():
                     if implementation.plugin is self:
                         continue
@@ -204,7 +246,7 @@ class OwnedPlugin:
         maximum = getattr(option, "maxprocesses", None)
         if maximum is not None and str(maximum) != str(self.workers):
             self._refuse("xdist maximum worker count differs from admission grant")
-        if os.environ.get("PTEST_EXECUTION") == "full":
+        if self.execution == "full":
             narrowing = ("keyword", "markexpr", "deselect", "lf", "failedfirst",
                          "stepwise", "stepwise_skip", "testmon", "ignore",
                          "ignore_glob", "maxfail", "collectonly", "pyargs",
@@ -213,11 +255,24 @@ class OwnedPlugin:
                          "help", "version")
             if any(getattr(option, name, None) for name in narrowing):
                 self._refuse("full pytest plans cannot narrow the inventory")
-            try:
-                roots = json.loads(os.environ.get("PTEST_TEST_ROOTS", "null"))
-            except ValueError:
-                roots = None
-            if not isinstance(roots, list) or not roots or config.args != roots:
+            invocation = getattr(getattr(config, "invocation_params", None), "args", ())
+            if not isinstance(invocation, (tuple, list)):
+                invocation = ()
+            redirects = {"-c", "--config-file", "--rootdir", "--confcutdir",
+                         "--noconftest", "--pyargs", "-o", "--override-ini",
+                         "--basetemp"}
+            for token in invocation:
+                option_name = str(token).split("=", 1)[0]
+                token_text = str(token)
+                redirect_cluster = token_text.startswith(("-c", "-o")) and token_text not in {"-c", "-o"}
+                if option_name in redirects or redirect_cluster:
+                    self._refuse("full pytest plans cannot redirect native configuration")
+            if any(getattr(option, name, None) for name in
+                   ("noconftest", "pyargs", "confcutdir", "override_ini", "basetemp")):
+                self._refuse("full pytest plans cannot redirect native configuration")
+            roots = self.roots
+            _validate_full_roots(roots)
+            if config.args != list(roots):
                 self._refuse("full pytest inventory differs from configured roots")
 
     def pytest_cmdline_main(self, config: Any) -> Any:
@@ -297,6 +352,17 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         _protocol()
         workers = _workers()
         _python_version()
+        execution = os.environ.get("PTEST_EXECUTION")
+        if execution is not None and execution not in {"scoped", "full"}:
+            _fail("pytest execution binding is invalid")
+        try:
+            roots = tuple(json.loads(os.environ.get("PTEST_TEST_ROOTS", "null")))
+        except (TypeError, ValueError):
+            roots = ()
+        if execution == "full" and (not roots or not all(isinstance(root, str) for root in roots)):
+            _fail("full pytest roots are invalid")
+        if execution == "full":
+            _validate_full_roots(roots)
         try:
             import pytest
         except ImportError:
@@ -313,7 +379,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_runtest_protocol)
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_runtest_call)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
-        plugin = OwnedPlugin(workers)
+        plugin = OwnedPlugin(workers, execution, roots)
         native_exit = int(pytest.main(list(argv), plugins=[plugin]))
         bridge_exit = native_exit
         # Hooks may register only after the final item boundary (for example
