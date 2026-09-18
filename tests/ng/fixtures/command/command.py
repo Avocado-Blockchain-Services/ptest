@@ -11,7 +11,21 @@ def main():
         print(json.dumps(tokens))
         return 0
     if mode == "exit":
-        return 23
+        return int(tokens[0]) if tokens else 23
+    if mode == "cwd":
+        print(os.getcwd())
+        return 0
+    if mode == "marker":
+        from pathlib import Path
+        Path(tokens[0]).write_text("launched")
+        return 0
+    if mode == "cancel":
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(int(tokens[1])))
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(tokens[1])))
+        with open(tokens[0], "wb", buffering=0) as ready:
+            ready.write(b"ready")
+        signal.pause()
+        return 99
     if mode == "streams":
         sys.stdout.buffer.write(b"literal stdout\n")
         sys.stderr.buffer.write(b"literal stderr\n")

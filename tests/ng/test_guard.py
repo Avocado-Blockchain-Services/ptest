@@ -314,6 +314,9 @@ def test_guard_accepts_launcher_created_session_and_real_draining(harness):
     assert h.frames[0].payload["guard"]["pgid"] == h.process.pid
     assert h.frames[-1].kind == "draining"
     assert platform.probe_group(h.process.pid).exists is False
+    assert scheduler.poll(h.domain, h.ticket).state is C.LeaseState.DRAINING
+    proof = scheduler.begin_finalization(h.domain, h.grant)
+    assert proof.group_absent and proof.pgid == h.process.pid
     assert scheduler.poll(h.domain, h.ticket).state is C.LeaseState.FINALIZING
 
 
@@ -631,6 +634,11 @@ def test_six_independent_clients_obey_grants_and_recover_only_after_owner_death(
     peer.sendall(b"g")
     assert first.finish()[0] == 0
     follower = clients[budget]
+    assert follower.owner_poll()["state"] == "QUEUED"
+    assert first.row()["state"] == "DRAINING"
+    assert platform.probe_group(first.process.pid).exists is False
+    proof = scheduler.begin_finalization(first.domain, first.grant)
+    assert proof.group_absent and proof.pgid == first.process.pid
     assert follower.owner_poll()["state"] == "QUEUED"
     assert first.row()["state"] == "FINALIZING"
     start = time.monotonic()

@@ -15,6 +15,7 @@ import errno
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 from .contracts import Problem
@@ -309,12 +310,20 @@ def ensure_private_dir(parent: Path, name: str) -> Path:
 
 
 def create_exclusive(root: Path, relative: str, data: bytes, *,
-                     private: bool = True) -> Path:
-    """Create one new file with O_EXCL|O_NOFOLLOW; parents must already exist."""
+                     private: bool = True,
+                     after_write: Callable[[], None] | None = None) -> Path:
+    """Create one new file, optionally finalize while rollback is still owned.
+
+    The callback runs after content and directory fsync. Failure invalidates
+    our open inode and removes its directory entry only if it still matches.
+    Existing files and raced replacements are never callback/rollback targets.
+    """
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise TypeError("data must be bytes")
     if not isinstance(private, bool):
         raise TypeError("private must be bool")
+    if after_write is not None and not callable(after_write):
+        raise TypeError("after_write must be callable or None")
     payload = bytes(data)
     parts = _split_relative(relative)
     root_fd = _open_dir(Path(root))
@@ -354,9 +363,23 @@ def create_exclusive(root: Path, relative: str, data: bytes, *,
                     or stat.S_IMODE(stamp.st_mode) != mode):
                 _fail("unsafe-path", f"file {relative!r} failed creation checks")
             os.fsync(fd)
+            if after_write is not None:
+                os.fsync(parent_fd)
+                after_write()
         except Exception:
+            # Invalidate the still-open owned inode even if directory removal
+            # fails. Never leave a parseable optimistic result on rollback.
             try:
-                os.unlink(parts[-1], dir_fd=parent_fd)
+                os.ftruncate(fd, 0)
+                os.fsync(fd)
+            except OSError:
+                pass
+            try:
+                owned = os.fstat(fd)
+                current = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                    os.unlink(parts[-1], dir_fd=parent_fd)
+                    os.fsync(parent_fd)
             except OSError:
                 pass
             raise

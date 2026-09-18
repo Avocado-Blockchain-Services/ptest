@@ -647,19 +647,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe=parsed.probe,
         )
         result = operations.execute(domain, resolution.config, request)
-        if parsed.result_path is not None:
-            root = (resolution.config.checkout.root
-                    if resolution.config.checkout is not None
-                    else resolution.config.config_path.parent)
-            files.create_exclusive(
-                root, parsed.result_path,
-                render.render_json(C.PublicDocument(
-                    kind="run", ptest_version=C.PTEST_VERSION,
-                    domain=_domain_public(domain),
-                    data=C.serialize_run_result(result), error=None,
-                )),
-                private=False,
-            )
+        for reason in result.reasons:
+            print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
         return result.exit_code
     except C.Problem as problem:
         kind = prefix.command or "run"

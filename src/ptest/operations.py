@@ -9,6 +9,7 @@ ownership and process-group quiescence respectively.
 from __future__ import annotations
 
 from dataclasses import replace
+from collections.abc import Callable
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -22,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import platform, scheduler
+from . import files, platform, render, scheduler
 from .runners import adapter_for
 
 
@@ -210,7 +211,8 @@ class _Frames:
             self.facts = dict(frame.payload)
             return
         if frame.kind == "draining":
-            if self.facts is None or self.draining:
+            if (self.facts is None or self.draining or
+                    frame.payload["provisional_artifact_id"] is not None):
                 self._fail("draining frame was duplicated or out of order")
                 return
             self.draining = True
@@ -271,7 +273,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         protocol=1, domain=domain, grant=grant, setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=C.DEFAULT_SETUP_TIMEOUT_S,
-        attempt_timeout_s=C.DEFAULT_ATTEMPT_TIMEOUT_S,
+        attempt_timeout_s=None,
         compound_timeout_s=C.MAX_COMPOUND_TIMEOUT_S,
     )
     guard_peer, controller = socket.socketpair()
@@ -337,13 +339,11 @@ def _run_guard(domain: C.DomainPaths, grant: C.Grant,
                 frames.drain()
             if frames.invalid is not None and not cancel_sent:
                 cancel_sent = _send_cancel(control, grant, signal.SIGTERM)
-            if time.monotonic() - started > C.MAX_COMPOUND_TIMEOUT_S and not cancel_sent:
-                cancel_sent = _send_cancel(control, grant, signal.SIGTERM)
         process.wait()
         # The guard closes its end in finally.  Drain already queued frames and
         # require EOF/truncation evidence before finalization.
         deadline = time.monotonic() + _FRAME_TIMEOUT_S
-        while not frames.eof and time.monotonic() < deadline:
+        while not frames.eof and frames.invalid is None and time.monotonic() < deadline:
             ready, _, _ = select.select([control], [], [], min(_POLL_S, deadline - time.monotonic()))
             if ready:
                 frames.drain()
@@ -362,6 +362,79 @@ def _cancel_result(run_id: str, checkout: C.CheckoutIdentity,
                    started=_iso_now(), runner_code=None,
                    exit_code=128 + signal_number, origin="signal",
                    signal_number=signal_number, queue_s=queue_s)
+
+
+def _outcome(raw: int | None, cancellation: int | None,
+             guard_problem: C.Problem | None, incomplete: bool
+             ) -> tuple[C.Status, int, str, int | None]:
+    """One precedence rule for all post-launch results, including partial ones."""
+    if raw is not None and raw > 0:
+        return (C.Status.INCOMPLETE if incomplete else C.Status.FAILED,
+                raw, "runner", None)
+    if raw is not None and raw < 0 and guard_problem is None:
+        return (C.Status.INCOMPLETE if incomplete else C.Status.FAILED,
+                128 - raw, "signal", -raw)
+    if guard_problem is not None and guard_problem.code == "missing-executable" and raw is None:
+        return (C.Status.INCOMPLETE if incomplete else C.Status.FAILED,
+                127, "runner", None)
+    if cancellation is not None:
+        return (C.Status.INCOMPLETE if incomplete else C.Status.CANCELLED,
+                128 + cancellation, "signal", cancellation)
+    if incomplete or raw is None:
+        return C.Status.INCOMPLETE, 70, "ptest", None
+    return C.Status.PASSED, 0, "runner", None
+
+
+def _incomplete(result: C.RunResult, reason: C.Reason) -> C.RunResult:
+    # The result already contains the centralized native/signal precedence.
+    # A later publication/release failure may only replace a zero exit.
+    code = result.exit_code or 70
+    return replace(
+        result, status=C.Status.INCOMPLETE, phase="finalization",
+        exit_code=code, exit_origin=result.exit_origin if result.exit_code else "ptest",
+        reasons=result.reasons + (reason,),
+        attempts=tuple(replace(attempt, status=C.Status.INCOMPLETE,
+                               final_exit_code=code) for attempt in result.attempts),
+    )
+
+
+def _export(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+            request: C.RunRequest, result: C.RunResult,
+            finalize: Callable[[C.RunResult], None] | None = None) -> C.RunResult:
+    finalizing = False
+
+    def finish() -> None:
+        nonlocal finalizing
+        finalizing = True
+        finalize(result)
+
+    try:
+        if request.result_path is not None:
+            files.create_exclusive(
+                checkout.root, request.result_path,
+                render.render_json(C.PublicDocument(
+                    kind="run", ptest_version=C.PTEST_VERSION,
+                    domain=None if domain.domain_id is None else {
+                        "id": domain.domain_id, "fixture": domain.fixture},
+                    data=C.serialize_run_result(result), error=None,
+                )), private=False, after_write=finish if finalize is not None else None,
+            )
+        elif finalize is not None:
+            finish()
+    except (C.Problem, OSError):
+        if finalizing:
+            result = _incomplete(result, _reason("ownership-uncertain", "lease finalization could not be confirmed"))
+            # The exclusive writer rolled back only its own export. Publish
+            # the incomplete facts without retrying finish; a raced target
+            # remains protected by exclusive creation on this second attempt.
+            return _export(domain, checkout, request, result)
+        result = _incomplete(result, _reason("state-unavailable", "requested result export failed"))
+        if finalize is not None:
+            try:
+                finalize(result)
+            except (C.Problem, OSError):
+                result = _incomplete(result, _reason("ownership-uncertain", "lease finalization could not be confirmed"))
+    return result
 
 
 def execute(domain: C.DomainPaths, config: C.Config,
@@ -415,8 +488,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
             if signals.number is not None and state.state in {
                     C.LeaseState.QUEUED, C.LeaseState.GRANTED}:
                 if scheduler.cancel_pending(domain, ticket, owner):
-                    return _cancel_result(run_id, checkout, request, plan, command,
-                                          signals.number, time.monotonic() - enqueued_at)
+                    return _export(domain, checkout, request, _cancel_result(
+                        run_id, checkout, request, plan, command,
+                        signals.number, time.monotonic() - enqueued_at))
+                raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
             if state.state is C.LeaseState.GRANTED:
                 grant = state.grant
                 break
@@ -433,11 +508,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("ownership-uncertain", "scheduler grant was incomplete")
         queue_s = time.monotonic() - enqueued_at
         # A signal delivered in the narrow GRANTED window must cancel before
-        # any guard is spawned.  If the CAS loses to registration, the guard
-        # receives the authenticated cancellation frame immediately.
-        if signals.number is not None and scheduler.cancel_pending(domain, ticket, owner):
-            return _cancel_result(run_id, checkout, request, plan, command,
-                                  signals.number, time.monotonic() - enqueued_at)
+        # any guard is spawned. A failed CAS cannot authorize another launch.
+        if signals.number is not None:
+            if scheduler.cancel_pending(domain, ticket, owner):
+                return _export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, plan, command,
+                    signals.number, time.monotonic() - enqueued_at))
+            raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
         try:
@@ -455,59 +532,50 @@ def execute(domain: C.DomainPaths, config: C.Config,
             ("PTEST_WORKER_ID", "w000"),
             ("PTEST_RESOURCE_PREFIX", attempt.resource_prefix),
         ))
+        if signals.number is not None:
+            if scheduler.cancel_pending(domain, ticket, owner):
+                return _export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, plan, command, signals.number, queue_s))
+            raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         try:
             raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
-        except BaseException:
+        except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
             # live lease for scheduler recovery instead of guessing release.
-            scheduler.cancel_pending(domain, ticket, owner)
-            raise
+            reasons = (_reason("state-unavailable", "guard execution could not be completed"),)
+            try:
+                scheduler.cancel_pending(domain, ticket, owner)
+            except C.Problem:
+                reasons += (_reason("ownership-uncertain", "pending grant remains unconfirmed"),)
+            status, code, origin, number = _outcome(None, signals.number, None, True)
+            return _export(domain, checkout, request, _result(
+                run_id=run_id, checkout=checkout, request=request, plan=plan,
+                command=command, status=status, phase="execution", started=started,
+                runner_code=None, exit_code=code, origin=origin, signal_number=number,
+                granted=grant, reasons=reasons, queue_s=queue_s))
         raw = None if frames.facts is None else frames.facts["raw_exit_code"]
+        guard_problem = (None if frames.facts is None or frames.facts["problem"] is None
+                         else C.Problem(**frames.facts["problem"]))
         protocol_valid = (frames.invalid is None and frames.registered and
                           frames.phase and frames.facts is not None and frames.draining and
                           frames.eof)
-        if not protocol_valid:
-            attempt_result = C.AttemptResult(
-                attempt_id="a001", phase="execution", status=C.Status.INCOMPLETE,
-                raw_exit_code=raw, final_exit_code=70, source_valid=False,
-                inventory_complete=False,
-                timings=C.Timings(execution_s=execution_s),
-            )
-            return _result(run_id=run_id, checkout=checkout, request=request,
-                           plan=plan, command=command, status=C.Status.INCOMPLETE,
-                           phase="execution", started=started, runner_code=raw,
-                           exit_code=(raw if raw not in (None, 0) else 70),
-                           origin="runner" if raw not in (None, 0) else "ptest",
-                           granted=grant,
-                           reasons=(_reason("protocol-mismatch", "guard handoff was incomplete"),),
-                           attempt=attempt_result,
-                           queue_s=queue_s,
-                           execution_s=execution_s)
-        # begin_finalization is intentionally after both the authenticated
-        # in-band handoff and guard reaping; finish is always last.
-        finalization_started = time.monotonic()
-        proof = scheduler.begin_finalization(domain, grant)
-        signal_number = None
-        final_code = raw
-        status = C.Status.PASSED
-        origin = "runner"
-        if signals.number is not None:
-            signal_number = signals.number
-            final_code = 128 + signal_number
-            status = C.Status.CANCELLED
-            origin = "signal"
-        elif raw is None:
-            final_code = 127
-            status = C.Status.FAILED
-        elif raw < 0:
-            signal_number = -raw
-            final_code = 128 + signal_number
-            status = C.Status.FAILED
-            origin = "signal"
-        elif raw != 0:
-            final_code = raw
-            status = C.Status.FAILED
+        reasons = ()
+        incomplete = not protocol_valid
+        if incomplete:
+            reasons += (_reason("protocol-mismatch", "guard handoff was incomplete"),)
+        if guard_problem is not None:
+            if guard_problem.code == "missing-executable":
+                incomplete = incomplete or raw is not None
+                reasons += (_reason("missing-executable", "runner could not be launched"),)
+            else:
+                incomplete = True
+                reasons += (_reason("state-unavailable", "guard execution failed or exceeded its deadline"),)
+        elif raw is None or (raw_guard != 0 and signals.number is None):
+            incomplete = True
+            reasons += (_reason("state-unavailable", "guard execution did not complete normally"),)
+        status, final_code, origin, signal_number = _outcome(
+            raw, signals.number, guard_problem, incomplete)
         attempt_result = C.AttemptResult(
             attempt_id="a001", phase="execution", status=status,
             raw_exit_code=raw, final_exit_code=final_code, source_valid=False,
@@ -518,12 +586,34 @@ def execute(domain: C.DomainPaths, config: C.Config,
                          phase="complete", started=started, runner_code=raw,
                          exit_code=final_code if final_code is not None else 70,
                          origin=origin, signal_number=signal_number, granted=grant,
-                         attempt=attempt_result, queue_s=queue_s,
+                         reasons=reasons, attempt=attempt_result, queue_s=queue_s,
                          execution_s=execution_s)
-        scheduler.finish(domain, grant, proof, C.Finalization(
-            outcome_id=None, status=status, exit_code=result.exit_code,
-            source_valid=False, committed=True,
-        ))
+        if not protocol_valid:
+            if not frames.registered:
+                # A missing notification is not proof of no registration. The
+                # scheduler CAS alone decides whether this grant can be revoked.
+                try:
+                    scheduler.cancel_pending(domain, ticket, owner)
+                except C.Problem:
+                    result = _incomplete(result, _reason("ownership-uncertain", "pending grant remains unconfirmed"))
+            return _export(domain, checkout, request, result)
+        # Only authenticated DRAINING plus guard reap permits this proof. All
+        # requested publication stays under the lease; finish remains last.
+        finalization_started = time.monotonic()
+        try:
+            proof = scheduler.begin_finalization(domain, grant)
+        except (C.Problem, OSError):
+            return _export(domain, checkout, request, _incomplete(
+                result, _reason("ownership-uncertain", "guard quiescence could not be confirmed")))
+        result = replace(result, timings=replace(result.timings, finalization_s=(
+            time.monotonic() - finalization_started)))
+        def finalize(exported: C.RunResult) -> None:
+            scheduler.finish(domain, grant, proof, C.Finalization(
+                outcome_id=None, status=exported.status, exit_code=exported.exit_code,
+                source_valid=False, committed=True,
+            ))
+
+        result = _export(domain, checkout, request, result, finalize=finalize)
         return replace(
             result,
             timings=replace(result.timings, finalization_s=(

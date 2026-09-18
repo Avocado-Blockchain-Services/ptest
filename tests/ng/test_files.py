@@ -302,6 +302,92 @@ def test_create_exclusive_missing_parent_is_typed_absence(tmp_path):
         create_exclusive(root, "nodir/file.txt", b"x")
 
 
+def test_exclusive_callback_runs_after_durable_content(tmp_path, monkeypatch):
+    synced = []
+    fsync = os.fsync
+
+    def observe_sync(fd):
+        synced.append(os.fstat(fd).st_ino)
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", observe_sync)
+    target = tmp_path / "result.json"
+
+    def after_write():
+        assert target.read_bytes() == b"complete content"
+        assert target.stat().st_ino in synced
+        assert tmp_path.stat().st_ino in synced
+
+    assert create_exclusive(tmp_path, target.name, b"complete content", after_write=after_write) == target
+    assert target.read_bytes() == b"complete content"
+
+
+def test_exclusive_callback_failure_removes_owned_file_durably(tmp_path, monkeypatch):
+    fsync = os.fsync
+    removed_parent_synced = []
+    target = tmp_path / "result.json"
+
+    def observe_sync(fd):
+        if os.fstat(fd).st_ino == tmp_path.stat().st_ino and not target.exists():
+            removed_parent_synced.append(True)
+        fsync(fd)
+
+    def fail():
+        raise Problem(code="ownership-uncertain", message="finalization failed", phase="finalization")
+
+    monkeypatch.setattr(os, "fsync", observe_sync)
+    with pytest.raises(Problem, match="ownership-uncertain"):
+        create_exclusive(tmp_path, target.name, b"provisional pass", after_write=fail)
+    assert not target.exists()
+    assert removed_parent_synced
+
+
+@pytest.mark.parametrize("replacement", ["file", "symlink"])
+def test_exclusive_callback_failure_never_unlinks_replacement(tmp_path, replacement):
+    target = tmp_path / "result.json"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"user-owned sentinel")
+
+    def replace_then_fail():
+        target.rename(tmp_path / "original")
+        if replacement == "file":
+            target.write_bytes(b"user-owned replacement")
+        else:
+            target.symlink_to(sentinel)
+        raise RuntimeError("failed finalization")
+
+    with pytest.raises(RuntimeError, match="failed finalization"):
+        create_exclusive(tmp_path, target.name, b"provisional pass", after_write=replace_then_fail)
+    assert target.read_bytes() == (b"user-owned replacement" if replacement == "file" else b"user-owned sentinel")
+    assert sentinel.read_bytes() == b"user-owned sentinel"
+
+
+def test_exclusive_io_failure_never_calls_callback(tmp_path, monkeypatch):
+    calls = []
+
+    def fail_sync(fd):
+        raise OSError("original I/O failure")
+
+    monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(OSError, match="original I/O failure"):
+        create_exclusive(tmp_path, "result.json", b"content", after_write=lambda: calls.append(True))
+    assert not calls
+    assert not (tmp_path / "result.json").exists()
+
+
+def test_exclusive_rollback_unlink_failure_cannot_leave_parseable_pass(tmp_path, monkeypatch):
+    def fail_unlink(*args, **kwargs):
+        raise OSError("cannot unlink")
+
+    def fail():
+        raise RuntimeError("finalization failed")
+
+    monkeypatch.setattr(os, "unlink", fail_unlink)
+    with pytest.raises(RuntimeError, match="finalization failed"):
+        create_exclusive(tmp_path, "result.json", b'{"status":"passed"}', after_write=fail)
+    assert (tmp_path / "result.json").read_bytes() == b""
+
+
 MINI_MAIN = """\
 import json
 import os
