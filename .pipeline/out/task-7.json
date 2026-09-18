@@ -1,18 +1,18 @@
 {
   "status": "PARTIAL",
-  "commit": "db4215e",
-  "test_summary": "scripts/ptest-bootstrap tests/ng/test_guard.py exited 0: 10 passed in 4.22s. The real isolated guard process tests cover queued cancel, repeated active SIGINT/SIGTERM, no later attempt after cancellation, parent-closing before launch, and force self-SIGKILL. scripts/ptest-bootstrap --full refused before test execution: scoped runs only until the final-gate switch.",
+  "commit": "4d5e229",
+  "test_summary": "scripts/ptest-bootstrap tests/ng/test_guard.py exited 0: 11 passed in 4.45s. The real isolated guard process tests cover queued cancel, repeated active SIGINT/SIGTERM, no later attempt after cancellation, parent EOF after an active barrier, parent-closing before launch, and force self-SIGKILL. scripts/ptest-bootstrap --full refused before test execution: scoped runs only until the final-gate switch.",
   "report_path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-7-revive/.pipeline/out/task-7.json",
   "acceptance": {
     "unregistered_guard_never_executes": "MET: tests/ng/test_guard.py:27-45; focused bootstrap evidence has 5 passed.",
     "bounded_protocol_and_identity": "IMPLEMENTED: src/ptest/guard.py:46-76, 125-151; runtime test not run.",
     "registered_new_session_guard": "IMPLEMENTED: src/ptest/guard.py:212-223; runtime test not run.",
-    "cancellation_and_parent_eof": "PARTIAL: tests/ng/test_guard.py:191-315 exercises queued cancel, real isolated guard-group repeated SIGINT/SIGTERM, no later attempt, parent closing before launch, and force kill; actual parent EOF after an active barrier remains missing.",
+    "cancellation_and_parent_eof": "MET: tests/ng/test_guard.py:191-355 exercises queued cancel, real isolated guard-group repeated SIGINT/SIGTERM, no later attempt, parent closing before launch, active parent EOF, and force kill.",
     "quiescent_mark_draining_handoff": "STUBBED: src/ptest/guard.py:240-245 gates draining on the CAS, but end-to-end scheduler evidence is still missing.",
     "forced_sigkill_abnormal_branch": "MET: tests/ng/test_guard.py:278-315 observes the isolated guard exit -SIGKILL and no draining frame."
   },
   "concerns": [
-    "Missing deterministic coverage: every parent-death transition, second-spawn prevention after active EOF, descendant escape/quiescence/ESRCH ordering, and uncertainty retention.",
+    "Missing deterministic coverage: parent death at registration/fork/drain/finalize barriers, descendant escape/quiescence/ESRCH ordering, and scheduler-owned uncertainty retention.",
     "No full suite was run."
   ]
 }
