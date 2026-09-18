@@ -1199,6 +1199,49 @@ def register_guard(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) ->
         _finish_transaction(conn, ok)
 
 
+def mark_draining(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) -> bool:
+    """CAS the authenticated live guard from RUNNING/CANCELLING to DRAINING."""
+    if not isinstance(grant, Grant):
+        raise TypeError("scheduler grant must be Grant")
+    if not isinstance(guard, ProcessIdentity):
+        raise TypeError("scheduler guard must be ProcessIdentity")
+    conn, info = _open_state(domain, create=False)
+    ok = False
+    try:
+        _begin(conn)
+        # This handoff is deliberately not a recovery boundary: a changed boot
+        # or any stale identity simply cannot authorize a new state transition.
+        info = _domain_info(conn)
+        if (info["boot_id"] != _boot_identity() or grant.domain_id != info["domain_id"]
+                or guard.pid != os.getpid() or guard.uid != os.getuid()
+                or guard.pgid != guard.pid):
+            result = False
+        else:
+            live = platform.process_identity(guard.pid)
+            if live is None:
+                _fail("ownership-uncertain", "live guard identity cannot be verified")
+            if live != guard:
+                result = False
+            else:
+                cursor = conn.execute(
+                    """UPDATE jobs SET state='DRAINING',phase='draining'
+                       WHERE run_id=? AND nonce=? AND generation=?
+                         AND slots=? AND memory_estimate IS ? AND reserved_memory IS ?
+                         AND state IN ('RUNNING','CANCELLING')
+                         AND guard_pid=? AND guard_birth=? AND guard_uid=? AND guard_pgid=?""",
+                    (grant.run_id, grant.nonce, grant.generation,
+                     grant.slots, grant.memory_estimate_mb, grant.reserved_memory_mb,
+                     guard.pid, guard.birth, guard.uid, guard.pgid),
+                )
+                result = cursor.rowcount == 1
+        ok = True
+        return result
+    except sqlite3.Error:
+        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    finally:
+        _finish_transaction(conn, ok)
+
+
 def _lease_view(row: sqlite3.Row | dict, now: float) -> LeaseView:
     state = LeaseState(row["state"])
     age = max(0.0, now - float(row["enqueue_time"]))
@@ -1343,4 +1386,4 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
         _finish_transaction(conn, ok or commit_on_error)
 
 
-__all__ = ["enqueue", "poll", "register_guard", "reconcile", "finish", "effective_limits"]
+__all__ = ["enqueue", "poll", "register_guard", "mark_draining", "reconcile", "finish", "effective_limits"]

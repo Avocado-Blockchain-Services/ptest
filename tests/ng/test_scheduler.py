@@ -97,9 +97,9 @@ def _gone(world, identity):
     world.groups[identity.pgid] = False
 
 
-def _sql(domain, query):
+def _sql(domain, query, parameters=()):
     with sqlite3.connect(domain.ledger) as conn:
-        return conn.execute(query).fetchall()
+        return conn.execute(query, parameters).fetchall()
 
 
 def _configure(domain, slots=2, jobs=2, memory=64):
@@ -1187,6 +1187,187 @@ def test_guard_registration_is_a_nonce_bound_compare_and_swap(case):
     assert register_guard(domain, state.grant, identity) is True
     assert register_guard(domain, state.grant, identity) is False
     assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+
+def _draining_guard(monkeypatch, world):
+    """Make the deterministic registered guard the authenticated caller."""
+    monkeypatch.setattr(os, "getpid", lambda: world.guard.pid)
+    return world.guard
+
+
+def test_mark_draining_authenticates_the_live_registered_guard_and_retains_claims(
+        case, world, monkeypatch):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = (child.pid,)
+    reconcile(domain)
+    before_claims = _sql(
+        domain,
+        "SELECT checkout_id,slots,memory_estimate,reserved_memory FROM jobs WHERE run_id=?",
+        (grant.run_id,),
+    )
+    before_resources = _sql(domain, "SELECT resource FROM job_resources WHERE run_id=?", (grant.run_id,))
+    before_observations = _sql(
+        domain, "SELECT pid,birth,uid,pgid,uncertain FROM observations WHERE run_id=?", (grant.run_id,)
+    )
+    guard = _draining_guard(monkeypatch, world)
+
+    assert scheduler.mark_draining(domain, grant, guard) is True
+    assert _sql(domain, "SELECT state FROM jobs WHERE run_id=?", (grant.run_id,)) == [("DRAINING",)]
+    assert _sql(
+        domain,
+        "SELECT checkout_id,slots,memory_estimate,reserved_memory FROM jobs WHERE run_id=?",
+        (grant.run_id,),
+    ) == before_claims
+    assert _sql(domain, "SELECT resource FROM job_resources WHERE run_id=?", (grant.run_id,)) == before_resources
+    assert _sql(
+        domain, "SELECT pid,birth,uid,pgid,uncertain FROM observations WHERE run_id=?", (grant.run_id,)
+    ) == before_observations
+
+
+@pytest.mark.parametrize(
+    "grant_field,value",
+    [
+        ("run_id", "b" * 32),
+        ("nonce", "b" * 64),
+        ("generation", 99),
+        ("domain_id", "b" * 32),
+        ("slots", 2),
+        ("memory_estimate_mb", 10),
+        ("reserved_memory_mb", 10),
+    ],
+)
+def test_mark_draining_rejects_each_forged_grant_without_mutating_the_ledger(
+        case, world, monkeypatch, grant_field, value):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    before = domain.ledger.read_bytes()
+
+    assert scheduler.mark_draining(
+        domain, replace(grant, **{grant_field: value}), _draining_guard(monkeypatch, world)
+    ) is False
+    assert domain.ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "guard_field,value",
+    [("pid", 900002), ("birth", 2.0), ("uid", 0), ("pgid", 900002)],
+)
+def test_mark_draining_rejects_each_forged_guard_without_mutating_the_ledger(
+        case, world, monkeypatch, guard_field, value):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    before = domain.ledger.read_bytes()
+    _draining_guard(monkeypatch, world)
+
+    assert scheduler.mark_draining(
+        domain, grant, replace(world.guard, **{guard_field: value})
+    ) is False
+    assert domain.ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("state", ["DRAINING", "FINALIZING", "RELEASED", "CANCELLED", "UNCERTAIN"])
+def test_mark_draining_is_irreversible_and_rejects_terminal_or_uncertain_state(
+        case, world, monkeypatch, state):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    with sqlite3.connect(domain.ledger) as conn:
+        conn.execute("UPDATE jobs SET state=? WHERE run_id=?", (state, grant.run_id))
+    before = domain.ledger.read_bytes()
+
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world)) is False
+    assert domain.ledger.read_bytes() == before
+
+
+def test_mark_draining_allows_the_authenticated_registered_guard_to_drain_from_cancelling(
+        case, world, monkeypatch):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    with sqlite3.connect(domain.ledger) as conn:
+        conn.execute("UPDATE jobs SET state='CANCELLING' WHERE run_id=?", (grant.run_id,))
+
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world)) is True
+    assert _sql(domain, "SELECT state FROM jobs WHERE run_id=?", (grant.run_id,)) == [("DRAINING",)]
+
+
+def test_mark_draining_rejects_another_process_pid_reuse_and_boot_mismatch_without_repair(
+        case, world, monkeypatch):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    before = domain.ledger.read_bytes()
+    monkeypatch.setattr(os, "getpid", lambda: world.guard.pid + 1)
+    assert scheduler.mark_draining(domain, grant, world.guard) is False
+    assert domain.ledger.read_bytes() == before
+
+    monkeypatch.setattr(os, "getpid", lambda: world.guard.pid)
+    world.identities[world.guard.pid] = replace(world.guard, birth=world.guard.birth + 1)
+    assert scheduler.mark_draining(domain, grant, world.guard) is False
+    assert domain.ledger.read_bytes() == before
+
+    world.identities[world.guard.pid] = world.guard
+    monkeypatch.setattr(platform, "boot_identity", lambda: "different-boot")
+    assert scheduler.mark_draining(domain, grant, world.guard) is False
+    assert domain.ledger.read_bytes() == before
+
+
+def test_mark_draining_fails_closed_for_an_unobservable_guard_and_never_reconciles_or_repairs(
+        case, world, monkeypatch):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    guard = _draining_guard(monkeypatch, world)
+    before = domain.ledger.read_bytes()
+    # platform.process_identity deliberately maps both absent and inaccessible
+    # kernel observations to None; the scheduler must convert that ambiguity
+    # to its typed fail-closed result.
+    monkeypatch.setattr(platform, "process_identity", lambda _pid: None)
+    with pytest.raises(C.Problem) as caught:
+        scheduler.mark_draining(domain, grant, guard)
+    assert caught.value.code == "ownership-uncertain"
+    assert domain.ledger.read_bytes() == before
+
+    monkeypatch.setattr(platform, "process_identity", lambda pid: world.identities.get(pid))
+    monkeypatch.setattr(scheduler, "_reconcile_locked", lambda *_args: pytest.fail("must not reconcile"))
+    monkeypatch.setattr(scheduler, "_recover_boot_locked", lambda *_args: pytest.fail("must not repair boot"))
+    assert scheduler.mark_draining(domain, grant, guard) is True
+
+
+@pytest.mark.parametrize("failure", ["write", "commit"])
+def test_mark_draining_surfaces_transaction_failure_without_success(case, world, monkeypatch, failure):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    guard = _draining_guard(monkeypatch, world)
+    before = domain.ledger.read_bytes()
+    original = scheduler.storage.open_database
+
+    class FailingConnection:
+        def __init__(self, conn):
+            object.__setattr__(self, "conn", conn)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def __setattr__(self, name, value):
+            setattr(self.conn, name, value)
+
+        def execute(self, sql, *args):
+            if failure == "write" and "UPDATE jobs SET state='DRAINING'" in sql:
+                raise sqlite3.OperationalError("fixture disk full")
+            return self.conn.execute(sql, *args)
+
+        def commit(self):
+            if failure == "commit":
+                raise sqlite3.OperationalError("fixture disk full")
+            return self.conn.commit()
+
+    monkeypatch.setattr(scheduler.storage, "open_database",
+                        lambda *args, **kwargs: FailingConnection(original(*args, **kwargs)))
+    with pytest.raises(C.Problem) as caught:
+        scheduler.mark_draining(domain, grant, guard)
+    assert caught.value.code == "coordinator-unavailable"
+    assert domain.ledger.read_bytes() == before
 
 
 def test_finish_releases_only_with_a_complete_quiescence_proof(case):
