@@ -1,0 +1,57 @@
+{
+  "task": "Task 4 lifecycle amendment — authenticated irreversible DRAINING handoff",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "criterion": "scheduler-owned migration-free authenticated CAS",
+      "status": "MET",
+      "evidence": "src/ptest/scheduler.py:1202"
+    },
+    {
+      "criterion": "one immediate transaction authenticates grant, current boot/domain, live calling guard, and registered guard identity",
+      "status": "MET",
+      "evidence": "src/ptest/scheduler.py:1210"
+    },
+    {
+      "criterion": "only RUNNING/CANCELLING to DRAINING; all claims and observations retained",
+      "status": "MET",
+      "evidence": "src/ptest/scheduler.py:1226; tests/ng/test_scheduler.py:1198"
+    },
+    {
+      "criterion": "stale, forged, repeated, terminal, uncertain, and boot-mismatched calls return false unchanged; identity/storage failures are typed",
+      "status": "MET",
+      "evidence": "tests/ng/test_scheduler.py:1243; tests/ng/test_scheduler.py:1272; tests/ng/test_scheduler.py:1296; tests/ng/test_scheduler.py:1316; tests/ng/test_scheduler.py:1337"
+    },
+    {
+      "criterion": "does not reconcile, recover boot, admit, release, or fabricate quiescence",
+      "status": "MET",
+      "evidence": "src/ptest/scheduler.py:1211; tests/ng/test_scheduler.py:1331"
+    }
+  ],
+  "verification": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k mark_draining --durations=10",
+      "workdir": "/home/ingmar/worktrees/ptest/cx-ng-product/task-4-drain",
+      "exit_code": 0,
+      "output": "22 passed, 99 deselected in 0.32s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py --durations=10",
+      "workdir": "/home/ingmar/worktrees/ptest/cx-ng-product/task-4-drain",
+      "exit_code": 0,
+      "output": "121 passed in 1.19s"
+    }
+  ],
+  "environment_note": {
+    "initial_bootstrap": "The first test invocation could not import pytest because bootstrap uses uv --no-sync in a fresh worktree.",
+    "setup": "uv sync --locked installed declared locked development dependencies before rerunning every test through scripts/ptest-bootstrap."
+  },
+  "integration_boundary": {
+    "task_7": "After permanently closing spawning and reaping all direct children, the live registered guard must call mark_draining and emit its draining provisional frame only if it returns true. False/error forbids future spawn and success notification.",
+    "task_11": "Finalization must require matching in-band draining evidence; forced kill, missing/failed handoff, or unavailable outcome evidence remains incomplete and cannot publish a baseline."
+  },
+  "not_claimed": [
+    "No Task 7 guard lifecycle or Task 11 finalization integration was implemented in this task.",
+    "No end-to-end guard-to-finalizer lifecycle test exists yet; it belongs to Task 7/Task 11 integration."
+  ]
+}
