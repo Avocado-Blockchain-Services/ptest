@@ -132,6 +132,69 @@ def test_native_lock_preview_declares_setup_without_running_it(tmp_path):
     assert not (tmp_path / ".ptest.toml").exists()
 
 
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "create"])
+@pytest.mark.parametrize(("name", "runner", "expected_kind", "expected_launcher",
+                          "expected_setup_argv"), [
+    pytest.param("uv.lock", RunnerKind.PYTEST, RunnerKind.PYTEST,
+                 ("uv", "run", "--locked", "--no-sync", "python"),
+                 ("uv", "sync", "--locked"), id="uv-lock"),
+    pytest.param("package-lock.json", RunnerKind.VITEST, RunnerKind.VITEST,
+                 ("node",), ("npm", "ci"), id="package-lock"),
+    pytest.param("conftest.py", None, RunnerKind.PYTEST, ("python",), None,
+                 id="conftest"),
+    pytest.param("pytest.ini", None, RunnerKind.PYTEST, ("python",), None,
+                 id="pytest-config"),
+    pytest.param("vitest.config.ts", None, RunnerKind.VITEST, ("node",), None,
+                 id="vitest-config"),
+])
+def test_large_presence_only_native_evidence_is_never_read(
+    tmp_path, monkeypatch, dry_run, name, runner, expected_kind,
+    expected_launcher, expected_setup_argv,
+):
+    import ptest.config as config_module
+
+    evidence = tmp_path / name
+    evidence.write_bytes(b"x" * (256 * 1024 + 1))
+    reads = []
+    read_regular = config_module.read_regular
+
+    def checked_read(read_root, relative, limit):
+        reads.append(relative)
+        if relative == name:
+            raise AssertionError("presence-only native evidence was read")
+        return read_regular(read_root, relative, limit)
+
+    # Sensitivity proof: this guard really does fail if the evidence is read.
+    with pytest.raises(AssertionError, match="presence-only native evidence was read"):
+        checked_read(tmp_path, name, 1)
+    assert reads == [name]
+    reads.clear()
+    monkeypatch.setattr(config_module, "read_regular", checked_read)
+
+    result = init_project(tmp_path, _options(runner=runner, dry_run=dry_run))
+
+    assert result.action is (InitAction.PREVIEW if dry_run else InitAction.CREATED)
+    assert result.config is not None
+    assert result.config.runner_kind is expected_kind
+    assert result.config.setup_configured is (expected_setup_argv is not None)
+    assert name not in reads
+    assert evidence.stat().st_size == 256 * 1024 + 1
+    if dry_run:
+        assert not result.target.exists()
+    else:
+        resolution = resolve_config(tmp_path)
+        assert resolution.problem is None
+        assert resolution.config is not None
+        assert resolution.config.runner.kind is expected_kind
+        assert resolution.config.runner.launcher == expected_launcher
+        if expected_setup_argv is None:
+            assert resolution.config.setup is None
+        else:
+            assert resolution.config.setup is not None
+            assert resolution.config.setup.argv == expected_setup_argv
+        assert name not in reads
+
+
 def test_native_profiles_are_selected_without_execution(tmp_path):
     (tmp_path / "go.mod").write_text("module example.test\n", encoding="utf-8")
     result = init_project(tmp_path, _options(dry_run=True))
@@ -256,8 +319,19 @@ def test_vitest_native_preview_preserves_coverage_and_executes_nothing(tmp_path,
     assert not (tmp_path / "node_modules").exists()
 
 
-@pytest.mark.parametrize("name", ["pyproject.toml", "package.json", "uv.lock", "tests"])
-def test_init_refuses_symlinked_native_inputs_without_reading_target(tmp_path, monkeypatch, name):
+@pytest.mark.parametrize(("name", "runner"), [
+    pytest.param("pyproject.toml", None, id="pyproject"),
+    pytest.param("package.json", None, id="package-manifest"),
+    pytest.param("uv.lock", RunnerKind.PYTEST, id="uv-lock"),
+    pytest.param("package-lock.json", RunnerKind.VITEST, id="package-lock"),
+    pytest.param("conftest.py", None, id="conftest"),
+    pytest.param("pytest.ini", None, id="pytest-config"),
+    pytest.param("vitest.config.ts", None, id="vitest-config"),
+    pytest.param("tests", RunnerKind.PYTEST, id="test-root"),
+])
+def test_init_refuses_symlinked_native_inputs_without_reading_target(
+    tmp_path, monkeypatch, name, runner,
+):
     import ptest.config as config_module
 
     root = tmp_path / "project"
@@ -274,7 +348,6 @@ def test_init_refuses_symlinked_native_inputs_without_reading_target(tmp_path, m
         return read_regular(read_root, relative, limit)
 
     monkeypatch.setattr(config_module, "read_regular", checked_read)
-    runner = RunnerKind.PYTEST if name in {"uv.lock", "tests"} else None
     with pytest.raises(Problem) as caught:
         init_project(root, _options(runner=runner, dry_run=True))
     assert caught.value.code == "unsafe-path"

@@ -536,10 +536,27 @@ def _native_file(root: Path, name: str) -> bytes | None:
     return raw
 
 
+def _native_present(root: Path, name: str) -> bool:
+    """Check unparsed native evidence with lstat only, never content reads."""
+    safe_root = _absolute_directory(root)
+    target = safe_root / name
+    try:
+        stamp = os.lstat(target)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise _problem("state-unavailable", "native project file is unavailable")
+    if stat.S_ISLNK(stamp.st_mode):
+        raise _problem("unsafe-path", "native project file path is unsafe")
+    if not stat.S_ISREG(stamp.st_mode):
+        raise _problem("unsafe-path", "native project file is not a file")
+    return True
+
+
 def _native_candidates(root: Path) -> tuple[C.RunnerKind, ...]:
     found: list[C.RunnerKind] = []
     for name in ("pytest.ini", "tox.ini", "setup.cfg", "conftest.py"):
-        if _native_file(root, name) is not None:
+        if _native_present(root, name):
             found.append(C.RunnerKind.PYTEST)
             break
     pyproject = _native_file(root, "pyproject.toml")
@@ -583,14 +600,14 @@ def _native_candidates(root: Path) -> tuple[C.RunnerKind, ...]:
             pass
     for name in ("vitest.config.ts", "vitest.config.js", "vitest.config.mts",
                  "vitest.config.mjs", "vitest.config.cts", "vitest.config.cjs"):
-        if _native_file(root, name) is not None:
+        if _native_present(root, name):
             vitest_evidence = True
             break
     if vitest_evidence:
         found.append(C.RunnerKind.VITEST)
-    if _native_file(root, "go.mod") is not None:
+    if _native_present(root, "go.mod"):
         found.append(C.RunnerKind.GO)
-    if _native_file(root, "Cargo.toml") is not None:
+    if _native_present(root, "Cargo.toml"):
         found.append(C.RunnerKind.CARGO)
     return tuple(found)
 
@@ -613,10 +630,11 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         raise _problem("command-required", "an explicit command configuration is required")
     if kind is C.RunnerKind.PYTEST:
         roots = ("tests",) if _directory_exists(root, "tests") else (".",)
+        locked = _native_present(root, "uv.lock")
         launcher = ("uv", "run", "--locked", "--no-sync", "python") \
-            if _native_file(root, "uv.lock") is not None else ("python",)
+            if locked else ("python",)
         setup = None
-        if _native_file(root, "uv.lock") is not None:
+        if locked:
             setup = C.SetupConfig(
                 argv=("uv", "sync", "--locked"),
                 required_paths=(".venv/bin/python",),
@@ -626,7 +644,7 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         roots = ("tests",) if _directory_exists(root, "tests") else (".",)
         launcher = ("node",)
         setup = None
-        if _native_file(root, "package-lock.json") is not None:
+        if _native_present(root, "package-lock.json"):
             setup = C.SetupConfig(
                 argv=("npm", "ci"), required_paths=("node_modules",),
                 network=True, lifecycle_scripts=True,
