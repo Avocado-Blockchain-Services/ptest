@@ -110,6 +110,13 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
     if plan.execution == "full":
         native += config.runner.test_roots
     argv = config.runner.launcher + (str(_bridge_path()),) + native
+    execution = C.ExecutionTier.BASIC_SERIAL if plan.execution == "scoped" else C.ExecutionTier.UNAVAILABLE
+    limitations = () if execution is C.ExecutionTier.BASIC_SERIAL else (C.Reason(
+        code="unsupported-capability",
+        message=("unqualified pytest foundation: native_cli checks, terminal/coverage "
+                 "and inventory evidence pending; cannot launch as a supported profile "
+                 "or publish full gates"),
+    ),)
     return C.PreparedRun(
         argv=argv,
         cwd=_project_root(config),
@@ -121,14 +128,9 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             ("PTEST_TEST_ROOTS", json.dumps(config.runner.test_roots)),
         ),
         capability=C.Capability(
-            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            execution=execution, selection=False,
             lifecycle="cooperative-process-group",
-            limitations=(C.Reason(
-                code="unsupported-capability",
-                message=("unqualified pytest foundation: native_cli checks, terminal/coverage "
-                         "and inventory evidence pending; cannot launch as a supported profile "
-                         "or publish full gates"),
-            ),),
+            limitations=limitations,
         ),
         summary=C.summarize_command(
             C.RunnerKind.PYTEST, plan.mode, argv, workers=grant.slots,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ class BridgeRefusal(RuntimeError):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
+
+
+_REPORT_NAME = re.compile(r"native-a(00[1-9]|010)-[0-9a-f]{32}\.json\Z")
 
 
 def _fail(message: str, code: str = "native-config-invalid") -> None:
@@ -63,6 +67,76 @@ def _python_version() -> None:
         _fail("unsupported CPython version or implementation", "unsupported-capability")
 
 
+def _report_binding() -> tuple[Path, dict[str, str]] | None:
+    """Read the executor-owned report binding, when this is an admitted run."""
+    path_value = os.environ.get("PTEST_PYTEST_REPORT_PATH")
+    identity_names = (
+        "PTEST_RUN_ID", "PTEST_GRANT_NONCE", "PTEST_PYTEST_ATTEMPT",
+        "PTEST_PYTEST_EXECUTION",
+    )
+    if path_value is None and not any(name in os.environ for name in identity_names):
+        return None
+    if not path_value or not os.path.isabs(path_value):
+        _fail("executor must bind a private pytest report path")
+    path = Path(path_value)
+    if _REPORT_NAME.fullmatch(path.name) is None:
+        _fail("executor report basename is invalid")
+    run_id = os.environ.get("PTEST_RUN_ID", "")
+    nonce = os.environ.get("PTEST_GRANT_NONCE", "")
+    attempt = os.environ.get("PTEST_PYTEST_ATTEMPT", "")
+    execution = os.environ.get("PTEST_PYTEST_EXECUTION", "")
+    if (not re.fullmatch(r"[0-9a-f]{32}", run_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", nonce)
+            or not re.fullmatch(r"a(00[1-9]|010)", attempt)
+            or execution != "scoped"):
+        _fail("invalid pytest report identity")
+    if not path.parent.is_dir():
+        _fail("pytest report directory is unavailable")
+    try:
+        parent = path.parent
+        stamp = parent.stat()
+        if stamp.st_uid != os.getuid() or stamp.st_mode & 0o077:
+            _fail("pytest report directory is not private")
+        if os.path.realpath(parent) != str(parent):
+            _fail("pytest report directory is not private")
+    except OSError:
+        _fail("pytest report directory is unavailable")
+    return path, {
+        "run_id": run_id, "nonce": nonce, "attempt_id": attempt,
+        "execution_mode": execution,
+    }
+
+
+def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
+                  native_exit: int | None, bridge_exit: int,
+                  complete: bool, problem: str | None) -> None:
+    payload = {
+        "protocol": 1,
+        **identity,
+        "runner": "pytest",
+        "observed_runtime_version": runtime,
+        "effective_profile": "basic_serial",
+        "terminal_complete": complete,
+        "native_exit_code": native_exit,
+        "bridge_exit_code": bridge_exit,
+        "problem": problem,
+    }
+    raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(raw) > 65536:
+        raise BridgeRefusal("pytest terminal report exceeds its bound", "capacity-exceeded")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("pytest terminal report write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class OwnedPlugin:
     """Additive profile gate; it neither replaces reporters nor parses addopts."""
 
@@ -76,6 +150,16 @@ class OwnedPlugin:
 
     def _validate(self, config: Any, *, generated: bool) -> None:
         option = config.option
+        manager = getattr(config, "pluginmanager", None)
+        if manager is not None:
+            try:
+                loaded = manager.list_name_plugin()
+            except (AttributeError, TypeError):
+                loaded = ()
+            for name, plugin in loaded:
+                module = getattr(plugin, "__name__", "")
+                if name in {"xdist", "pytest-xdist"} or str(module).startswith("xdist"):
+                    self._refuse("pytest xdist is not owned by the serial grant")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
         try:
@@ -150,6 +234,12 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     _protocol()
     workers = _workers()
     _python_version()
+    binding = _report_binding()
+    runtime = "unknown"
+    native_exit: int | None = None
+    bridge_exit = 70
+    complete = False
+    problem: str | None = "bridge-refused" if binding is not None else None
     if argv is None:
         argv = tuple(sys.argv[1:])
     if not isinstance(argv, (list, tuple)) or not all(isinstance(item, str) for item in argv):
@@ -157,16 +247,39 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     # Executing this file must have the same cwd imports as `python -m pytest`.
     sys.path[:1] = [os.getcwd()]
     try:
-        import pytest
-    except ImportError:
-        _fail("pytest is unavailable in the selected interpreter")
-    if pytest.__version__ not in {"8.4.2", "9.0.3", "9.1.0", "9.1.1"}:
-        _fail("pytest version is outside the candidate table", "unsupported-capability")
-    # Mark hooks only after the selected interpreter and pytest have been checked.
-    pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_cmdline_main)
-    pytest.hookimpl(tryfirst=True)(OwnedPlugin.pytest_configure)
-    pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
-    return int(pytest.main(list(argv), plugins=[OwnedPlugin(workers)]))
+        try:
+            import pytest
+        except ImportError:
+            _fail("pytest is unavailable in the selected interpreter")
+        runtime = str(pytest.__version__)
+        if runtime not in {"8.4.2", "9.0.3", "9.1.0", "9.1.1"}:
+            _fail("pytest version is outside the candidate table", "unsupported-capability")
+        # Mark hooks only after the selected interpreter and pytest have been checked.
+        pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_cmdline_main)
+        pytest.hookimpl(tryfirst=True)(OwnedPlugin.pytest_configure)
+        pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
+        native_exit = int(pytest.main(list(argv), plugins=[OwnedPlugin(workers)]))
+        bridge_exit = native_exit
+        if native_exit == 4:
+            # Pytest's usage/configuration result is a bridge refusal, not a
+            # native test failure.  The child exit remains visible to guard.
+            return native_exit
+        complete = True
+        problem = "native-failure" if native_exit else None
+        return native_exit
+    except BridgeRefusal:
+        bridge_exit = 4
+        raise
+    finally:
+        if binding is not None:
+            try:
+                _write_report(binding[0], binding[1], runtime=runtime,
+                              native_exit=native_exit if complete else None,
+                              bridge_exit=bridge_exit, complete=complete,
+                              problem=problem if complete else "bridge-refused")
+            except (BridgeRefusal, OSError):
+                # The executor treats an absent or malformed report as incomplete.
+                pass
 
 
 if __name__ == "__main__":

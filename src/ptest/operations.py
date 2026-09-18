@@ -1,10 +1,9 @@
 """The admitted command execution lifecycle.
 
-This module is deliberately small in the first execution slice.  A generic
-``command`` profile is the only profile that may cross the admission barrier;
-native adapters, setup, selection, reports and probes remain explicit
-unsupported capabilities.  The scheduler and guard are the authorities for
-ownership and process-group quiescence respectively.
+This module admits the bounded execution slice.  Generic ``command`` profiles
+retain their exclusive lifecycle, while Pytest basic-serial scoped runs use one
+nonexclusive slot and an executor-owned terminal report.  The scheduler and
+guard are the authorities for ownership and process-group quiescence.
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import files, platform, render, scheduler, source
+from . import files, platform, render, reports, scheduler, source
 from .runners import adapter_for
 
 
@@ -266,10 +265,12 @@ class _Frames:
     """Receive and authenticate one bounded guard frame at a time."""
 
     def __init__(self, peer: socket.socket, grant: C.Grant,
-                 launched: C.ProcessIdentity | None):
+                 launched: C.ProcessIdentity | None,
+                 expected_report_name: str | None = None):
         self.peer = peer
         self.grant = grant
         self.launched = launched
+        self.expected_report_name = expected_report_name
         self.pending = bytearray()
         self.eof = False
         self.invalid: C.Problem | None = None
@@ -316,7 +317,7 @@ class _Frames:
                 return
             if (frame.payload["attempt_id"] != "a001" or
                     frame.payload["phase"] != "execution" or
-                    frame.payload["report_name"] is not None):
+                    frame.payload["report_name"] != self.expected_report_name):
                 self._fail("runner facts do not match the command attempt")
                 return
             self.facts = dict(frame.payload)
@@ -412,7 +413,10 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         manifest_write = -1
         controller.setblocking(False)
         launched_identity = launched(process.pid)
-        return process, controller, _Frames(controller, grant, launched_identity)
+        return process, controller, _Frames(
+            controller, grant, launched_identity,
+            None if prepared.report_path is None else prepared.report_path.name,
+        )
     except BaseException:
         if process is not None:
             try:
@@ -550,27 +554,35 @@ def _export(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
 
 def execute(domain: C.DomainPaths, config: C.Config,
             request: C.RunRequest) -> C.RunResult:
-    """Run one admitted generic command and return its typed outcome."""
+    """Run one admitted command and return its typed outcome."""
     if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.Config):
         raise TypeError("execute requires DomainPaths and Config")
     if not isinstance(request, C.RunRequest):
         raise TypeError("execute requires RunRequest")
-    if config.runner.kind is not C.RunnerKind.COMMAND:
+    native_pytest = config.runner.kind is C.RunnerKind.PYTEST
+    if native_pytest:
+        if request.mode is not C.Mode.SCOPED:
+            raise _problem("unsupported-capability", "pytest execution is scoped-only in this tier")
+        if config.setup is not None or request.shadow or request.probe is not None:
+            raise _problem("unsupported-capability", "pytest setup, shadow and probe are unavailable")
+    elif config.runner.kind is not C.RunnerKind.COMMAND:
         raise _problem("unsupported-capability", "native profile execution is deferred")
-    if config.setup is not None or request.shadow or request.probe is not None:
+    if not native_pytest and (config.setup is not None or request.shadow or request.probe is not None):
         raise _problem("unsupported-capability", "setup, shadow and probe execution are deferred")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
     adapter = adapter_for(config.runner.kind)
-    if not adapter.requires_exclusive(config):
+    if not native_pytest and not adapter.requires_exclusive(config):
         raise _problem("unsupported-capability", "command execution requires exclusive admission")
 
     checkout = _checkout(config)
     run_id = secrets.token_hex(16)
     plan = _plan(request)
     # The command summary is redacted and never includes token values.
-    requested_slots = min(config.runner.workers,
-                          config.runner.workers if request.workers is None else request.workers)
+    requested_slots = 1 if native_pytest else min(
+        config.runner.workers,
+        config.runner.workers if request.workers is None else request.workers,
+    )
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()
     signals = _Signals()
@@ -581,6 +593,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
     queue_s = None
     ticket = None
     grant = None
+    report_binding = None
     try:
         owner = platform.process_identity(os.getpid())
         if owner is None:
@@ -588,7 +601,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         memory = config.resources.memory_mb_per_worker or None
         admission = C.AdmissionRequest(
             run_id=run_id, checkout=checkout, owner=owner,
-            slots=requested_slots, exclusive=True,
+            slots=requested_slots, exclusive=not native_pytest,
             locks=config.resources.locks, memory_mb=memory,
             deadline=time.monotonic() + request.queue_timeout_s,
             fixture=domain.fixture,
@@ -628,6 +641,20 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
+        if native_pytest:
+            try:
+                report_binding = reports.allocate_report(
+                    domain, checkout,
+                    run_id=grant.run_id,
+                    nonce=grant.nonce,
+                    attempt_id=attempt.attempt_id,
+                    runner=C.RunnerKind.PYTEST,
+                    execution_mode=plan.execution,
+                    effective_profile=C.ExecutionTier.BASIC_SERIAL.value,
+                )
+            except BaseException:
+                scheduler.cancel_pending(domain, ticket, owner)
+                raise
         try:
             prepared = adapter.prepare(effective, plan, grant, attempt)
         except BaseException:
@@ -635,6 +662,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # never-registered GRANTED lease charging the checkout.
             scheduler.cancel_pending(domain, ticket, owner)
             raise
+        if report_binding is not None:
+            prepared = replace(
+                prepared,
+                report_path=report_binding.path,
+                env_updates=prepared.env_updates + (
+                    ("PTEST_GRANT_NONCE", grant.nonce),
+                    ("PTEST_PYTEST_ATTEMPT", attempt.attempt_id),
+                    ("PTEST_PYTEST_EXECUTION", plan.execution),
+                    ("PTEST_PYTEST_REPORT_PATH", str(report_binding.path)),
+                ),
+            )
         prepared = replace(prepared, env_updates=prepared.env_updates + (
             ("PTEST_PROJECT_ID", checkout.project_id),
             ("PTEST_CHECKOUT_ID", checkout.checkout_id),
@@ -728,6 +766,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # the post-run snapshot while the lease is held, before finalization.
         input_after = _capture_source(domain, effective, request, ensure_key=False)
         source_valid = _source_valid(input_before, input_after)
+        if native_pytest:
+            source_valid = False
         result = replace(
             result,
             source_valid=source_valid,
@@ -737,7 +777,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             attempts=tuple(replace(item, source_valid=source_valid)
                            for item in result.attempts),
         )
-        invalidation = _source_invalidation(input_before, input_after)
+        invalidation = None if native_pytest else _source_invalidation(input_before, input_after)
         if invalidation is not None:
             if plan.execution == "full":
                 result = _incomplete(result, invalidation)
@@ -751,11 +791,37 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 result, _reason("ownership-uncertain", "guard quiescence could not be confirmed")))
         result = replace(result, timings=replace(result.timings, finalization_s=(
             time.monotonic() - finalization_started)))
+        consumed_report = False
+        if native_pytest:
+            report_reason = None
+            try:
+                native_report = reports.consume_report(report_binding)
+                consumed_report = True
+                if (not native_report.terminal_complete
+                        or native_report.native_exit_code != raw
+                        or native_report.bridge_exit_code != raw):
+                    report_reason = _reason(
+                        "report-invalid",
+                        "native terminal report did not authenticate the native exit",
+                    )
+            except C.Problem as problem:
+                code = (problem.code if problem.code in {
+                    "capacity-exceeded", "report-invalid", "unsafe-path",
+                } else "state-unavailable")
+                report_reason = _reason(code, "native terminal report was unavailable")
+            if report_reason is not None:
+                if raw == 0:
+                    result = _incomplete(result, report_reason)
+                else:
+                    result = replace(result, reasons=result.reasons + (report_reason,))
+
         def finalize(exported: C.RunResult) -> None:
             scheduler.finish(domain, grant, proof, C.Finalization(
                 outcome_id=None, status=exported.status, exit_code=exported.exit_code,
                 source_valid=exported.source_valid, committed=True,
             ))
+            if consumed_report:
+                reports.cleanup_report(report_binding)
 
         result = _export(domain, checkout, request, result, finalize=finalize)
         return replace(
