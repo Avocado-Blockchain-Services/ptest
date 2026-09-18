@@ -1,0 +1,68 @@
+{
+  "task": "11B-scheduler-producer-seam",
+  "status": "implemented-awaiting-opus-high",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+  "branch": "cx-ng-product-task-11b-scheduler",
+  "owned_scope": [
+    "src/ptest/scheduler.py",
+    "tests/ng/test_scheduler.py"
+  ],
+  "implemented": [
+    "cancel_pending authenticates the current owner against the durable owner identity and exact ticket sequence",
+    "cancel_pending atomically cancels only QUEUED or unregistered GRANTED work",
+    "registration and cancellation contend on BEGIN IMMEDIATE plus a guard-null CAS, so registered live work is retained",
+    "begin_finalization authenticates the durable grant, owner, guard, group, and observed descendants",
+    "begin_finalization fails closed for missing, live, escaped, unknown, stale, or ambiguous authority",
+    "begin_finalization transitions valid work to FINALIZING and returns a bound QuiescenceProof without releasing claims",
+    "finish shares only the uncertainty transition helper and independently rechecks the proof before releasing"
+  ],
+  "source_commit": "7832fb8",
+  "tests": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'mark_draining or finish_releases_only_with_a_complete_quiescence_proof'",
+      "exit_code": 1,
+      "result": "bootstrap reached the scoped command but collection could not start: the fresh worktree .venv has no pytest"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'cancel_pending or begin_finalization or finish_rechecks_scheduler_proof'",
+      "exit_code": 1,
+      "result": "bootstrap reached the scoped command but collection could not start: /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/.venv/bin/python3: No module named pytest"
+    },
+    {
+      "command": "python3 -m py_compile src/ptest/scheduler.py tests/ng/test_scheduler.py",
+      "exit_code": 0,
+      "result": "source and focused tests compile"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "result": "clean"
+    }
+  ],
+  "graphify": {
+    "command": "graphify update .",
+    "exit_code": 0,
+    "result": "4283 nodes, 9129 edges, 294 communities; AST-only update",
+    "warning": "7 JSON/schema/fixture files produced zero AST nodes; no semantic extraction or external provider was used"
+  },
+  "dan_three_passes": {
+    "pass_1_contract": "Re-read design section 7, contracts.py records, scheduler state transitions, and the focused test fixture. Verified exact owner/sequence authentication, guard-null cancellation CAS, durable grant matching, claim retention, and proof binding to run/generation/pgid.",
+    "pass_2_race_security": "Checked cancel-vs-register ordering: cancellation commits only while guard_pid is NULL, while register_guard requires GRANTED and the same transaction lock; either cancellation wins and registration returns false, or registration wins and cancellation returns false. Checked missing/live/unknown/escaped descendant paths fail closed without releasing capacity. Checked finish performs fresh group, guard, descendant, owner, timestamp, and proof-field validation.",
+    "pass_3_integration_maintenance": "Inspected callers and exports, kept CLI/operations/guard/adapters/contracts untouched, consolidated the duplicate finalization uncertainty update, ran py_compile/diff checks, refreshed graphify after source changes, and confirmed only the declared source/test files were in the source commit. Runtime pytest verification remains unavailable because the mandated bootstrap environment has no pytest and installation was explicitly out of scope."
+  },
+  "secure_by_spec": {
+    "identity": "Current cancellation owner must match os.getpid/os.getuid, durable owner PID/birth/UID/PGID, and a fresh platform identity observation; finalization authenticates durable grant and process identities.",
+    "authorization": "Wrong owner, wrong sequence, forged grant, missing guard, stale proof, and unrelated tickets cannot mutate or release another lease.",
+    "state": "BEGIN IMMEDIATE and CAS predicates close registration/cancellation races; finalization uncertainty commits only a retained UNCERTAIN state; no finally-based capacity release was added.",
+    "availability": "No extra coordinator or polling worker was introduced; claims remain charged for all uncertain/live/escaped work.",
+    "dependencies": "No new dependencies, subprocesses, cloud calls, or legacy state access were added."
+  },
+  "not_run": [
+    "The focused pytest suite could not be collected because pytest is absent from this fresh worktree environment.",
+    "No raw test runner, ptest --full, dependency installation, push, deployment, or external audit was run."
+  ],
+  "awaiting": [
+    "Independent Opus High audit of the source/test commit",
+    "Parent-run scoped and final test evidence once a prepared pytest environment is available"
+  ]
+}
