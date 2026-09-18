@@ -184,17 +184,8 @@ def _capture_source(domain: C.DomainPaths, config: C.Config,
 
 
 def _source_limitations(*snapshots: C.InputSnapshot | None) -> tuple[C.Reason, ...]:
-    seen = set()
-    result = []
-    for snapshot_item in snapshots:
-        if snapshot_item is None:
-            continue
-        for limitation in snapshot_item.limitations:
-            marker = (limitation.code, limitation.message, limitation.paths)
-            if marker not in seen:
-                seen.add(marker)
-                result.append(limitation)
-    return tuple(result)
+    return _unique_reasons(tuple(limitation for item in snapshots if item is not None
+                                 for limitation in item.limitations))
 
 
 def _unique_reasons(reasons: tuple[C.Reason, ...]) -> tuple[C.Reason, ...]:
@@ -208,17 +199,45 @@ def _unique_reasons(reasons: tuple[C.Reason, ...]) -> tuple[C.Reason, ...]:
     return tuple(result)
 
 
-def _source_changed(before: C.InputSnapshot | None,
-                    after: C.InputSnapshot | None) -> bool:
-    if before is None or after is None:
-        return False
-    if before.digest is not None and after.digest is not None:
-        if before.digest != after.digest:
-            return True
-        if (before.compatibility is not None and after.compatibility is not None
-                and before.compatibility != after.compatibility):
-            return True
-    return False
+def _changed_path_classes(before: C.InputSnapshot, after: C.InputSnapshot) -> tuple[str, ...]:
+    """Summarize recorded changes only; never rescan or disclose their paths."""
+    old = {item.path: item for item in before.files}
+    new = {item.path: item for item in after.files}
+    changed = {path for path in old.keys() | new.keys() if old.get(path) != new.get(path)}
+    classified, classes = set(), set()
+    for snapshot_item in (before, after):
+        for change in snapshot_item.changes:
+            paths = {change.old, change.new} & changed
+            if not paths:
+                continue
+            if change.kind in {"untracked", "ignored"}:
+                classes.add(change.kind)
+            elif change.kind in {"added", "modified", "deleted", "renamed", "mode", "raw"}:
+                classes.add("tracked")
+            else:
+                classes.add("unclassified")
+            classified.update(paths)
+    # Declared ignored inputs and non-file influences need not have Change
+    # records. Missing class evidence is uncertainty, never a guessed class.
+    if changed - classified or not classes:
+        classes.add("unclassified")
+    return tuple(sorted(classes))
+
+
+def _source_invalidation(before: C.InputSnapshot,
+                         after: C.InputSnapshot) -> C.Reason | None:
+    if before.digest is None:
+        return None
+    if after.digest is None or (before.compatibility is not None and after.compatibility is None):
+        return _reason("unknown-input",
+                       "final source identity is unavailable; verify the final input state")
+    if (before.digest != after.digest or
+            (before.compatibility is not None and before.compatibility != after.compatibility)):
+        classes = ", ".join(_changed_path_classes(before, after))
+        return _reason("changed-during-run",
+                       "relevant source inputs changed during execution; "
+                       f"path classes: {classes}; verify the final input state")
+    return None
 
 
 def _source_valid(before: C.InputSnapshot | None,
@@ -631,7 +650,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         # Capture the initial identity after exclusive admission and queue wait,
         # immediately before launching the admitted command.
-        input_before = _capture_source(domain, effective, request, ensure_key=True)
+        try:
+            input_before = _capture_source(domain, effective, request, ensure_key=True)
+        except BaseException:
+            # Capture has the same pre-launch ownership obligation as prepare.
+            scheduler.cancel_pending(domain, ticket, owner)
+            raise
+        if signals.number is not None:
+            if scheduler.cancel_pending(domain, ticket, owner):
+                return _export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, plan, command, signals.number, queue_s))
+            raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         try:
             raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
         except (C.Problem, OSError):
@@ -708,12 +737,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
             attempts=tuple(replace(item, source_valid=source_valid)
                            for item in result.attempts),
         )
-        if _source_changed(input_before, input_after):
-            result = _incomplete(
-                result,
-                _reason("changed-during-run",
-                        "relevant source inputs changed during execution; verify the final input state"),
-            )
+        invalidation = _source_invalidation(input_before, input_after)
+        if invalidation is not None:
+            if plan.execution == "full":
+                result = _incomplete(result, invalidation)
+            else:
+                result = replace(result, reasons=result.reasons + (invalidation,))
         finalization_started = time.monotonic()
         try:
             proof = scheduler.begin_finalization(domain, grant)

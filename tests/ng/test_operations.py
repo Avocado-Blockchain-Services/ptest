@@ -6,6 +6,7 @@ import os
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -132,18 +133,25 @@ def test_command_completion_releases_exclusive_lease(case):
     assert leases[0].state.value == "RELEASED"
 
 
-def _execute(root, domain, **options):
+def _execute(root, domain, *, mode=C.Mode.FULL, **options):
     config = config_api.resolve_config(root).config
-    return operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL, **options))
+    return operations.execute(domain, config, C.RunRequest(mode=mode, **options))
 
 
-def _source_snapshots(monkeypatch, *digests):
-    snapshots = [C.InputSnapshot(
-        digest=digest, compatibility="command-test-compatibility",
-        head="a" * 40, clean=True,
-    ) for digest in digests]
-    monkeypatch.setattr(operations.source, "ensure_fingerprint_key", lambda _domain: None)
-    monkeypatch.setattr(operations.source, "snapshot", lambda *args, **kwargs: snapshots.pop(0))
+def _git_command_project(case, domain, *, args=()):
+    root = _command_project(case, domain, args=args)
+    (root / "runtime-input.txt").write_text("original input")
+    (root / ".gitignore").write_text("ignored-input.txt\n")
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
+    for argv in (("init",), ("add", "."), ("commit", "-m", "fixture")):
+        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
+                        "-c", "commit.gpgsign=false", "-C", str(root), *argv),
+                       env=env, check=True, capture_output=True)
+    return root
 
 
 def _guard_fault(monkeypatch, mode):
@@ -180,79 +188,236 @@ def test_command_missing_executable_is_failed_127(case):
     assert any(reason.code == "missing-executable" for reason in result.reasons)
 
 
-def test_command_unchanged_source_preserves_runner_result_and_records_snapshots(case, monkeypatch):
+def test_command_unchanged_source_preserves_runner_result_and_records_snapshots(case):
     domain = case.domain()
-    root = _command_project(case, domain, args=("exit", "0"))
-    _source_snapshots(monkeypatch, "a" * 64, "a" * 64)
+    root = _git_command_project(case, domain, args=("exit", "0"))
 
     result = _execute(root, domain)
 
     assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.PASSED, 0, 0)
-    assert result.input_before.digest == result.input_after.digest == "a" * 64
+    assert result.input_before.digest is not None
+    assert result.input_before.digest == result.input_after.digest
+    assert result.input_before.clean and result.input_after.clean
+    assert result.input_before.files == result.input_after.files
+    assert result.input_before.compatibility is result.input_after.compatibility is None
+    assert result.source_valid is False
+    assert any(reason.code == "unknown-input" for reason in result.limitations)
     assert result.baseline_published is False
     assert result.full_gate_eligible is False
 
 
-def test_command_source_change_with_zero_exit_is_incomplete_70(case, monkeypatch):
+@pytest.mark.parametrize("mode, raw, status, final", [
+    (C.Mode.FULL, 0, C.Status.INCOMPLETE, 70),
+    (C.Mode.FULL, 23, C.Status.INCOMPLETE, 23),
+    (C.Mode.AUTOMATIC, 0, C.Status.INCOMPLETE, 70),
+    (C.Mode.SCOPED, 0, C.Status.PASSED, 0),
+    (C.Mode.SCOPED, 23, C.Status.FAILED, 23),
+])
+def test_command_tracked_source_change_preserves_mode_exit_contract(case, mode, raw, status, final):
     domain = case.domain()
-    root = _command_project(case, domain)
-    changed = root / "runtime-input.txt"
-    (root / ".ptest.toml").write_text(
-        (root / ".ptest.toml").read_text(encoding="utf-8").replace(
-            'args = []', f'args = ["modify-exit", "{changed}", "0"]'),
-        encoding="utf-8",
-    )
-    _source_snapshots(monkeypatch, "a" * 64, "b" * 64)
+    root = _git_command_project(case, domain, args=("modify-exit", "runtime-input.txt", str(raw)))
 
-    result = _execute(root, domain)
+    result = _execute(root, domain, mode=mode, result_path="result.json")
 
-    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.INCOMPLETE, 70, 0)
-    assert any(reason.code == "changed-during-run" for reason in result.reasons)
+    assert (result.status, result.exit_code, result.runner_exit_code) == (status, final, raw)
+    assert result.exit_origin == ("ptest" if final == 70 else "runner")
+    assert result.input_before.digest is not None and result.input_after.digest is not None
+    assert result.input_before.digest != result.input_after.digest
+    assert (root / "runtime-input.txt").read_text() == "runner modification"
     assert result.source_valid is False
     assert result.full_gate_eligible is False
     assert result.baseline_published is False
+    assert result.attempts[0].status is status
+    assert result.attempts[0].raw_exit_code == raw
+    assert result.attempts[0].final_exit_code == final
+    assert result.attempts[0].source_valid is False
     changed_reason = next(reason for reason in result.reasons
                           if reason.code == "changed-during-run")
     assert changed_reason.paths == ()
+    assert "tracked" in changed_reason.message
     assert "runtime-input.txt" not in changed_reason.message
+    assert "runner modification" not in changed_reason.message
+    assert len(changed_reason.message) < 256
+    exported = json.loads((root / "result.json").read_text())["data"]
+    assert exported["status"] == status.value
+    assert exported["runner_exit_code"] == raw
+    assert exported["exit_code"] == final
+    assert exported["source_valid"] is exported["full_gate_eligible"] is exported["baseline_published"] is False
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
 
 
-def test_command_source_change_with_runner_failure_preserves_runner_exit(case, monkeypatch):
+@pytest.mark.parametrize("path_class", ["untracked", "ignored"])
+def test_command_changed_path_class_evidence_excludes_paths_and_content(case, path_class):
     domain = case.domain()
-    root = _command_project(case, domain)
-    changed = root / "runtime-input.txt"
-    (root / ".ptest.toml").write_text(
-        (root / ".ptest.toml").read_text(encoding="utf-8").replace(
-            'args = []', f'args = ["modify-exit", "{changed}", "23"]'),
-        encoding="utf-8",
-    )
-    _source_snapshots(monkeypatch, "a" * 64, "b" * 64)
+    path = f"{path_class}-input.txt"
+    root = _git_command_project(case, domain, args=("modify-exit", path, "0"))
+    # An unrelated dirty tracked file must not appear in changed-during-run classes.
+    (root / "runtime-input.txt").write_text("prior edit")
+    (root / path).write_text("before")
 
     result = _execute(root, domain)
 
-    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.INCOMPLETE, 23, 23)
-    assert result.exit_origin == "runner"
-    assert any(reason.code == "changed-during-run" for reason in result.reasons)
+    assert (result.status, result.exit_code) == (C.Status.INCOMPLETE, 70)
+    reason = next(reason for reason in result.reasons if reason.code == "changed-during-run")
+    assert path_class in reason.message
+    assert "classes: tracked" not in reason.message
+    assert reason.paths == ()
+    assert path not in reason.message and "runner modification" not in reason.message
+    assert len(reason.message) < 256
 
 
-def test_command_unknown_snapshot_is_not_source_valid_or_gate_eligible(case, monkeypatch):
+@pytest.mark.parametrize("raw, final", [(0, 70), (23, 23)])
+def test_command_known_to_unknown_source_cannot_pass_full_gate(case, raw, final):
+    domain = case.domain()
+    root = _git_command_project(case, domain, args=("modify-mode-exit", "runtime-input.txt", str(raw)))
+
+    result = _execute(root, domain)
+
+    assert result.input_before.digest is not None
+    assert result.input_after.digest is None
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.INCOMPLETE, final, raw)
+    assert result.exit_origin == ("ptest" if raw == 0 else "runner")
+    assert result.source_valid is result.full_gate_eligible is result.baseline_published is False
+    reason = next(reason for reason in result.reasons if reason.code == "unknown-input")
+    assert reason.paths == () and "runtime-input.txt" not in reason.message
+    assert any(reason.code == "unknown-input" for reason in result.limitations)
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
+
+
+def test_command_unknown_snapshot_is_not_source_valid_or_gate_eligible(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("exit", "0"))
-    unknown = C.InputSnapshot(
-        digest=None, compatibility=None, head=None, clean=False,
-        limitations=(C.Reason(code="unknown-input", message="snapshot unavailable"),),
-    )
-    monkeypatch.setattr(operations.source, "ensure_fingerprint_key", lambda _domain: None)
-    monkeypatch.setattr(operations.source, "snapshot", lambda *args, **kwargs: unknown)
 
     result = _execute(root, domain)
 
     assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.PASSED, 0, 0)
     assert result.source_valid is False
     assert result.full_gate_eligible is False
-    assert result.input_before is unknown
-    assert result.input_after is unknown
+    assert result.baseline_published is False
+    assert result.input_before.digest is None
+    assert result.input_after.digest is None
     assert any(reason.code == "unknown-input" for reason in result.limitations)
+
+
+def test_source_capture_follows_queue_changes_and_precedes_guard_finalization(case, monkeypatch):
+    domain = case.domain()
+    blocker = _follower(case, domain)
+    assert scheduler.poll(domain, blocker).state is C.LeaseState.GRANTED
+    root = _git_command_project(case, domain, args=("exit", "0"))
+    events, snapshots = [], []
+    poll, ensure = scheduler.poll, operations.source.ensure_fingerprint_key
+    capture, run_guard = operations.source.snapshot, operations._run_guard
+    begin, finish = scheduler.begin_finalization, scheduler.finish
+
+    def queued_edit(*args):
+        state = poll(*args)
+        if state.state is C.LeaseState.QUEUED:
+            assert not events
+            assert not (domain.root / "input-hmac.key").exists()
+            (root / "runtime-input.txt").write_text("edited while queued")
+            events.append("queued-edit")
+            assert scheduler.cancel_pending(domain, blocker, platform.process_identity(os.getpid()))
+        return state
+
+    def admitted_key(*args):
+        assert events == ["queued-edit"]
+        leases = scheduler.reconcile(domain)
+        assert sum(lease.state is C.LeaseState.GRANTED for lease in leases) == 1
+        events.append("key")
+        return ensure(*args)
+
+    def observed_capture(*args, **kwargs):
+        assert events == (["queued-edit", "key"] if not snapshots else
+                          ["queued-edit", "key", "before", "guard-reaped"])
+        assert (root / "runtime-input.txt").read_text() == "edited while queued"
+        leases = scheduler.reconcile(domain)
+        expected_state = C.LeaseState.GRANTED if not snapshots else C.LeaseState.DRAINING
+        assert any(lease.state is expected_state for lease in leases)
+        snapshot = capture(*args, **kwargs)
+        snapshots.append(snapshot)
+        events.append("before" if len(snapshots) == 1 else "after")
+        return snapshot
+
+    def observed_guard(*args):
+        assert events[-1] == "before"
+        result = run_guard(*args)
+        frames = result[1]
+        assert frames.registered and frames.phase and frames.facts and frames.draining and frames.eof
+        assert frames.invalid is None
+        events.append("guard-reaped")
+        return result
+
+    def observed_begin(*args):
+        assert events[-1] == "after" and len(snapshots) == 2
+        events.append("finalization")
+        return begin(*args)
+
+    def observed_finish(*args):
+        assert events[-1] == "finalization"
+        exported = json.loads((root / "result.json").read_text())["data"]
+        assert args[-1].source_valid is exported["source_valid"] is False
+        assert exported["status"] == "passed"
+        events.append("exported-finish")
+        return finish(*args)
+
+    monkeypatch.setattr(scheduler, "poll", queued_edit)
+    monkeypatch.setattr(operations.source, "ensure_fingerprint_key", admitted_key)
+    monkeypatch.setattr(operations.source, "snapshot", observed_capture)
+    monkeypatch.setattr(operations, "_run_guard", observed_guard)
+    monkeypatch.setattr(scheduler, "begin_finalization", observed_begin)
+    monkeypatch.setattr(scheduler, "finish", observed_finish)
+
+    result = _execute(root, domain, result_path="result.json")
+
+    assert result.exit_code == 0
+    assert result.input_before is snapshots[0] and result.input_after is snapshots[1]
+    assert result.input_before.digest is not None
+    assert result.input_before.digest == result.input_after.digest
+    assert events == ["queued-edit", "key", "before", "guard-reaped", "after", "finalization", "exported-finish"]
+
+
+def test_cancellation_during_source_capture_revokes_grant_without_guard_launch(case, monkeypatch):
+    domain = case.domain()
+    root = _git_command_project(case, domain, args=("marker", "launch-marker"))
+    capture = operations.source.snapshot
+    launches = []
+    launch = operations._launch_guard
+
+    def capture_and_cancel(*args, **kwargs):
+        result = capture(*args, **kwargs)
+        signal.raise_signal(signal.SIGTERM)
+        return result
+
+    def observed_launch(*args):
+        launches.append(True)
+        return launch(*args)
+
+    monkeypatch.setattr(operations.source, "snapshot", capture_and_cancel)
+    monkeypatch.setattr(operations, "_launch_guard", observed_launch)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.CANCELLED, 143, None)
+    assert not launches
+    assert not (root / "launch-marker").exists()
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.CANCELLED
+
+
+@pytest.mark.parametrize("boundary", ["ensure_fingerprint_key", "snapshot"])
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_unexpected_source_capture_failure_cannot_strand_granted_lease(case, monkeypatch, boundary, failure):
+    domain = case.domain()
+    root = _command_project(case, domain, args=("marker", "launch-marker"))
+
+    def fail(*args, **kwargs):
+        raise failure("injected capture failure")
+
+    monkeypatch.setattr(operations.source, boundary, fail)
+    with pytest.raises(failure, match="injected capture failure"):
+        _execute(root, domain)
+
+    assert not (root / "launch-marker").exists()
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.CANCELLED
 
 
 def test_command_from_subdirectory_uses_project_root(case):
