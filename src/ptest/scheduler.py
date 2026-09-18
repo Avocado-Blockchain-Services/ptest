@@ -863,9 +863,13 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
                 children = psutil.Process(pid).children()
             except psutil.NoSuchProcess:
                 identity, gone = _observe_process(pid)
-                expected = row if pid == guard.pid else observations.get(pid)
-                if gone or (identity is not None and expected is not None
-                            and identity.birth != expected["birth"]):
+                expected = observations.get(pid)
+                guard_reused = (pid == guard.pid and identity is not None
+                                and not _same_identity(identity, row, "guard"))
+                descendant_reused = (pid != guard.pid and identity is not None
+                                     and expected is not None
+                                     and identity.birth != expected["birth"])
+                if gone or guard_reused or descendant_reused:
                     observations.pop(pid, None)
                     continue
                 uncertain()

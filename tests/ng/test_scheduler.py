@@ -31,7 +31,7 @@ def world(monkeypatch):
                             identities={owner.pid: owner, guard.pid: guard},
                             absent=set(), groups={guard.pgid: True},
                             children={}, parents={}, inaccessible=set(),
-                            vanish_on_children=set())
+                            vanish_on_children=set(), reuse_on_children={})
 
     def process(pid):
         if pid in state.inaccessible:
@@ -40,6 +40,10 @@ def world(monkeypatch):
             raise psutil.NoSuchProcess(pid)
 
         def children():
+            if pid in state.reuse_on_children:
+                state.identities[pid] = state.reuse_on_children.pop(pid)
+                state.absent.discard(pid)
+                raise psutil.NoSuchProcess(pid)
             if pid in state.vanish_on_children:
                 state.vanish_on_children.remove(pid)
                 state.identities.pop(pid, None)
@@ -341,6 +345,24 @@ def test_listed_then_reaped_descendant_does_not_leak_lease(case, world):
     _gone(world, world.guard)
     finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
     assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_guard_reused_during_children_walk_is_typed_uncertain_and_retains_charge(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, _ = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    world.reuse_on_children[world.guard.pid] = replace(
+        world.guard, birth=world.guard.birth + 1,
+    )
+
+    result = poll(domain, ticket)
+
+    assert result.state is C.LeaseState.UNCERTAIN
+    assert result.problem is not None
+    assert result.problem.code == "unsupported-detached-descendant"
+    waiting = poll(domain, follower)
+    assert waiting.state is C.LeaseState.QUEUED
+    assert waiting.grant is None
 
 
 def test_default_queue_survives_two_240_second_predecessors(case, world):
