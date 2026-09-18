@@ -1,18 +1,177 @@
 {
-  "status": "PARTIAL",
-  "commit": "4d5e229",
-  "test_summary": "scripts/ptest-bootstrap tests/ng/test_guard.py exited 0: 11 passed in 4.45s. The real isolated guard process tests cover queued cancel, repeated active SIGINT/SIGTERM, no later attempt after cancellation, parent EOF after an active barrier, parent-closing before launch, and force self-SIGKILL. scripts/ptest-bootstrap --full refused before test execution: scoped runs only until the final-gate switch.",
-  "report_path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-7-revive/.pipeline/out/task-7.json",
-  "acceptance": {
-    "unregistered_guard_never_executes": "MET: tests/ng/test_guard.py:27-45; focused bootstrap evidence has 5 passed.",
-    "bounded_protocol_and_identity": "IMPLEMENTED: src/ptest/guard.py:46-76, 125-151; runtime test not run.",
-    "registered_new_session_guard": "IMPLEMENTED: src/ptest/guard.py:212-223; runtime test not run.",
-    "cancellation_and_parent_eof": "MET: tests/ng/test_guard.py:191-355 exercises queued cancel, real isolated guard-group repeated SIGINT/SIGTERM, no later attempt, parent closing before launch, active parent EOF, and force kill.",
-    "quiescent_mark_draining_handoff": "STUBBED: src/ptest/guard.py:240-245 gates draining on the CAS, but end-to-end scheduler evidence is still missing.",
-    "forced_sigkill_abnormal_branch": "MET: tests/ng/test_guard.py:278-315 observes the isolated guard exit -SIGKILL and no draining frame."
+  "status": "READY_FOR_INDEPENDENT_REVIEW",
+  "commit": "6b7f6528d36de433fa879035a0992ba7c4602138",
+  "evidence_revision": "This report is in the documentation-only commit immediately after the verified implementation commit. Source/test blob IDs below identify the code at both commits; no source changed after verification.",
+  "test_summary": "At the committed implementation HEAD: 240 passed in 27.45s, exit 0 (58 guard cases, 54 contracts cases, 128 scheduler cases), Linux/Python 3.13.11/pytest 9.1.1. Scoped bootstrap only, as assigned; no full suite, installation, push, or deployment.",
+  "report_path": ".pipeline/out/task-7.json",
+  "audit_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-7-revive/eeb4deb5-df8a-4691-b7d8-e5a6eececebc.jsonl (StructuredOutput T7-01 through T7-12)",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_guard.py tests/ng/test_contracts.py tests/ng/test_scheduler.py --durations=15",
+    "exit_code": 0,
+    "passed": 240,
+    "guard_cases": 58,
+    "skipped": 0,
+    "seconds": 27.45,
+    "output_tail": ".pipeline/out/task-7-repair1-verification.txt",
+    "diff_check": "git diff --check: exit 0",
+    "graphify": "graphify update .: exit 0; AST only. Three pre-existing JSON schema files produced no AST nodes: implementation.json, review.json, protocol-v1.json. No semantic-provider extraction or current-wiki claims.",
+    "source_blobs": {
+      "src/ptest/guard.py": "cfb804fcef81e179ae61abe0181a5f5010544493",
+      "tests/ng/test_guard.py": "b968f9bfedf003aa42234cee064e4ef33d9a5278",
+      "tests/ng/fixtures/processes/guard_client.py": "f5540ce2c29075abb8812f6bffde5e7382416bd3",
+      "tests/ng/fixtures/processes/guard_driver.py": "f336845612279381f7682ae3f313181e35e36e2a",
+      "tests/ng/fixtures/processes/guard_workload.py": "817684b5bd90f006f5e744402f1f813ee14b4196"
+    }
   },
+  "acceptance": {
+    "T7-01": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:304"
+      ],
+      "claim": "Actual start_new_session=True guard authenticates with the real scheduler and emits registered; existing session leaders do not call setsid again."
+    },
+    "T7-02": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:322",
+        "tests/ng/test_guard.py:535"
+      ],
+      "claim": "Cooperative frame/PID/group SIGINT and SIGTERM reap the direct child before the real DRAINING CAS; exit is 128+requested signal. Forced own-group SIGKILL produces no handoff or draining notification."
+    },
+    "T7-03": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:471",
+        "tests/ng/test_guard.py:674"
+      ],
+      "claim": "Real orphan completion drains with no later attempt; closed-control fd is removed from reads/selects, and driver records at most one EOF read."
+    },
+    "T7-04": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:403",
+        "tests/ng/test_guard.py:471",
+        "tests/ng/test_guard.py:492",
+        "tests/ng/test_guard.py:514"
+      ],
+      "claim": "Invalid active nonce/run/oversize/truncated controls cancel and reap before handoff. EOF/reset suppress undeliverable notifications while preserving authenticated DRAINING. Unexpected scheduler errors are contained."
+    },
+    "T7-05": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:455",
+        "tests/ng/test_guard.py:722",
+        "tests/ng/test_guard.py:378"
+      ],
+      "claim": "One bounded compound deadline spans setup and all attempts; a fake-clock test proves setup plus first attempt exhaust it before a later spawn. Partial controls do not block the active execution deadline."
+    },
+    "T7-06": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:535",
+        "tests/ng/test_guard.py:568"
+      ],
+      "claim": "TERM-ignoring group grandchild is killed at grace expiry even after direct-child exit. Actual observed setsid escape remains untouched and scheduler charge stays UNCERTAIN; separate-session controller sentinel survives. Group scan is cleanup guidance only, never absence proof."
+    },
+    "T7-07": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:304",
+        "tests/ng/test_guard.py:523",
+        "tests/ng/test_guard.py:613",
+        "tests/ng/test_guard.py:705",
+        "tests/ng/test_guard.py:535"
+      ],
+      "claim": "Real fixture-domain enqueue/poll/register/drain/recovery, late revoked-grant refusal, six independent admission clients at budgets 1 and 4, group presence until guard reap, live finalizer retention, and incomplete orphan recovery under explicit 10s/30s targets and 45s watchdog."
+    },
+    "T7-08": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:492",
+        "tests/ng/test_guard.py:471",
+        "tests/ng/test_guard.py:613"
+      ],
+      "claim": "Logical invoking controller is SIGKILLed at manifest/register/registered/fork/run/drain/drained barriers. Control descriptor closure comes from actual controller death. Guard stays a direct harness child so its exit can be waited without depending on init. No work starts after observed EOF. Post-drain live-caller retention and dead-caller incomplete recovery are demonstrated."
+    },
+    "T7-09": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:394",
+        "tests/ng/test_guard.py:423",
+        "tests/ng/test_guard.py:589",
+        "tests/ng/test_guard.py:744",
+        "tests/ng/test_guard.py:362"
+      ],
+      "claim": "Oversized/truncated/malformed manifests and wrong nonce/run/kind/payload/oversized/truncated controls cannot authorize launch. Manifest trailing bytes reject. Child verifies private fds closed, literal argv/env and inherited stdout/stderr. Unread notifications hit bounded send deadline and close spawning."
+    },
+    "T7-10": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:322",
+        "tests/ng/test_guard.py:347",
+        "tests/ng/test_guard.py:432",
+        "tests/ng/test_guard.py:650",
+        "tests/ng/test_guard.py:662"
+      ],
+      "claim": "Requested 2/15 is forwarded and returned as 130/143. Real signals before manifest/during registration, active PID/group delivery, queued controller-group signals, and controller-group-to-private-cancel forwarding are covered. These are fixture controllers, not Task 11 CLI acceptance."
+    },
+    "T7-11": {
+      "status": "REPAIRED",
+      "evidence": [
+        "tests/ng/test_guard.py:440",
+        "tests/ng/test_guard.py:455",
+        "tests/ng/test_guard.py:722"
+      ],
+      "claim": "execution-timeout Problem preserves actual child raw status (including zero from a cooperative handler) or null when unstarted. Missing executable closes later attempts with raw_exit_code null and missing-executable Problem."
+    },
+    "T7-12": {
+      "status": "REPAIRED",
+      "evidence": [
+        ".pipeline/out/task-7.json",
+        ".pipeline/out/task-7-repair1-verification.txt"
+      ],
+      "claim": "Report now identifies the actually tested implementation HEAD, exact blob IDs, reproducible scoped command, correct counts, named tests/line anchors, observed failures, and remaining Task 11 boundaries."
+    }
+  },
+  "observed_red_and_intermediate_results": [
+    "Startup regression: 1 failed (expected 0, actual 70 with launcher-created session); 1 passed after conditional setsid.",
+    "Before lifecycle repair, 5 failures demonstrated pre-manifest SIGINT traceback/SIGTERM termination, later execution after missing launch, EOF exit 70, and uncaught sqlite registration failure. An independent first cancellation batch failed 5 cases waiting for the missing DRAINING barrier (226.25s); harness barrier waiting was corrected to detect guard exit promptly.",
+    "First broad repaired run: 36 passed, 2 failed. Fork-barrier controller close produced ECONNRESET (now treated as disconnect); escaped fixture retained inherited stdio and exposed a test communicate() wait (harness now distinguishes guard exit from pipe EOF).",
+    "41-case lifecycle run: 41 passed in 15.16s.",
+    "New admission/resource checks: 7 passed and 1 skipped because that Python lacked pidfd_open; replaced with the executed Linux zombie/group-before-reap check, so final run has no skips.",
+    "Compound-between-phases RED: expected 3 facts, saw 2. Repaired to emit the unstarted timeout fact; targeted compound/group checks then both passed.",
+    "Manifest trailing-data RED: expected 70, got 0. Repaired to require exactly one manifest frame followed by EOF within its receive deadline; targeted check passed.",
+    "Partial-frame test had one misplaced assertion from the neighboring test; corrected that test-only edit. Its deadline and typed timeout assertions already passed.",
+    "236-case run: 235 passed, one fixture stderr failure from duplicate SIGINT during Python shutdown. Fixture signal handler made idempotent; subsequent scoped run: 240 passed in 27.85s.",
+    "Final committed implementation verification: 240 passed in 27.45s."
+  ],
+  "secure_by_spec": {
+    "identity": "Wrong nonce, wrong run, revoked grant, exact live guard identity and scheduler CAS tested.",
+    "authorization": "No repository code before a successful real registration; no late compound spawn after observed cancel/EOF/protocol or launch failure.",
+    "tenancy": "All mutable workloads, outputs, admission rows and IPC endpoints use explicit private fixture domains; six independent clients verify domain capacity. No normal-domain workload was created.",
+    "input": "Private size/type/kind/payload/framing/trailing-data validation plus literal argv/env and private descriptor closure.",
+    "state": "Controller death at named barriers, repeated/group cancellation, direct-child reap before drain, failed handoff, forced-kill no handoff, uncertainty retention and recovery.",
+    "exposure": "Raw exception details suppressed at guard boundary; credentials travel in the private manifest/control protocol, not new public reports or child environment.",
+    "availability": "Incremental reads; EOF removed from polling; bounded send/receive, compound execution and cancellation; conservative bounded group scan.",
+    "dependencies": "Existing pinned psutil plus platform/scheduler contracts only; no dependency or scheduler/CLI source changes.",
+    "gates": "Applicable behavioral/negative tests and git diff --check run. No configured secrets/static/dependency/property-fuzz gate found in this branch manifest; none installed or claimed. No network scanner was run."
+  },
+  "task11_handoff": {
+    "ordinary_exit": "DRAINING CAS and matching in-band frame are provisional only. Guard exit 0 does not imply runner pass. Missing executable/setup failure/zero launched attempts require Task 11 to inspect actual runner facts.",
+    "cancel": "Cooperative cancellation emits raw child facts then authenticated draining and exits 128+signal; execution-timeout is a typed Problem, not inferred solely from raw child exit.",
+    "forced_or_failed_handoff": "SIGKILL, failed scheduler handoff or unavailable control notification is not a successful execution. Guard cannot notify after killing itself. Independent quiescence/recovery must keep missing outcomes incomplete.",
+    "orphan": "After EOF/reset, current child is reaped, later spawning closes, and scheduler DRAINING can commit without a notification; no durable final outcome/baseline is fabricated.",
+    "ownership": "Caller owns guard reaping, non-signalling post-reap ESRCH plus observed-escape absence, FINALIZING/source checks/publication/release. Existing scheduler recovery is exercised without changing scheduler.py.",
+    "residual_risks": [
+      "Observation immediately before Popen cannot atomically prevent controller death between the check and fork. The newly added post-phase check narrows this inherent race; the registered group remains charged if it occurs.",
+      "A bounded group snapshot is only cancellation cleanup guidance. It does not establish quiescence, arbitrary daemon containment, or absence of an unobserved escaped descendant.",
+      "Linux evidence only. No macOS lifecycle run, real Task 11 CLI/end-to-end final publication, or full-suite/release gate was performed."
+    ]
+  },
+  "cleanup": "Three obsolete signal/EOF fixtures removed after no caller references remained; one IPC workload fixture now owns these variants. Prior implementation commits retained. Pre-existing untracked audit brief left untouched.",
   "concerns": [
-    "Missing deterministic coverage: parent death at registration/fork/drain/finalize barriers, descendant escape/quiescence/ESRCH ordering, and scheduler-owned uncertainty retention.",
-    "No full suite was run."
+    "Independent Opus repair review remains the orchestrator's next gate; no known unaddressed T7-01..T7-12 implementation finding is being passed off as complete.",
+    "Full suite is deliberately deferred by this task assignment and the scoped bootstrap workflow."
   ]
 }

@@ -1,0 +1,33 @@
+Verified implementation commit: 6b7f6528d36de433fa879035a0992ba7c4602138
+Command: scripts/ptest-bootstrap tests/ng/test_guard.py tests/ng/test_contracts.py tests/ng/test_scheduler.py --durations=15
+Working directory: /home/ingmar/worktrees/ptest/cx-ng-product/task-7-revive
+Exit code: 0
+Collected: 240 tests. The initial tool yield showed collection and the first three guard dots.
+Below is the unmodified completion-output chunk returned by the final wait:
+
+.............................................. [ 20%]
+.........                                                                [ 24%]
+tests/ng/test_contracts.py ............................................. [ 42%]
+.........                                                                [ 46%]
+tests/ng/test_scheduler.py ............................................. [ 65%]
+........................................................................ [ 95%]
+...........                                                              [100%]
+
+============================= slowest 15 durations =============================
+3.47s call     tests/ng/test_guard.py::test_forced_kill_retains_charge_and_never_notifies_draining[grandchild]
+3.42s call     tests/ng/test_guard.py::test_forced_kill_retains_charge_and_never_notifies_draining[ignore]
+2.18s call     tests/ng/test_guard.py::test_unread_notifications_hit_bounded_send_deadline_and_close_spawn
+2.00s call     tests/ng/test_guard.py::test_six_independent_clients_obey_grants_and_recover_only_after_owner_death[4]
+1.05s call     tests/ng/test_guard.py::test_six_independent_clients_obey_grants_and_recover_only_after_owner_death[1]
+0.76s call     tests/ng/test_guard.py::test_partial_active_frame_does_not_block_execution_deadline
+0.72s call     tests/ng/test_guard.py::test_timeout_fact_preserves_raw_status_and_closes_spawn[attempt]
+0.71s call     tests/ng/test_guard.py::test_timeout_fact_preserves_raw_status_and_closes_spawn[compound]
+0.41s call     tests/ng/test_guard.py::test_observed_escape_retains_charge_and_unrelated_sentinel_survives
+0.40s call     tests/ng/test_guard.py::test_active_eof_reaps_without_repolling_closed_peer_and_drains
+0.39s call     tests/ng/test_guard.py::test_controller_sigkill_at_lifecycle_barriers[drained]
+0.38s call     tests/ng/test_guard.py::test_controller_sigkill_at_lifecycle_barriers[drain]
+0.37s call     tests/ng/test_guard.py::test_active_controller_group_signal_forwards_private_cancel[15]
+0.36s call     tests/ng/test_guard.py::test_active_controller_group_signal_forwards_private_cancel[2]
+0.30s call     tests/ng/test_guard.py::test_revoked_real_grant_refuses_late_guard
+============================= 240 passed in 27.45s =============================
+
