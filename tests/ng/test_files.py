@@ -323,6 +323,7 @@ def main():
         "ok": True,
         "argv": argv,
         "fixture_domain": fixture,
+        "ptest_config": os.environ.get("PTEST_CONFIG"),
         "leaked_control_vars": sorted(
             var for var in os.environ if var.startswith("PTEST_")),
     }
@@ -476,7 +477,7 @@ WRAPPER_VALUE_OPTS = (
     "--result-json",
 )
 WRAPPER_BOOL_OPTS = (
-    "--changed", "--full", "--no-setup", "--fresh", "--local", "--shadow",
+    "--changed", "--full", "--no-setup", "--shadow",
 )
 def main():
     argv = sys.argv[1:]
@@ -505,7 +506,7 @@ def main():
         sys.stderr.write("mini target requires wrapper --result-json\\n")
         return 2
     Path.cwd().joinpath(export).write_text(json.dumps(
-        {"ok": True, "wrapper": wrapper, "native": native}))
+        {"ok": True, "argv": argv, "wrapper": wrapper, "native": native}))
     return 0
 raise SystemExit(main())
 """
@@ -523,6 +524,29 @@ def test_invoke_generated_export_precedes_native_tail(case, tmp_path):
     assert completed.result["native"] == ["tests/test_x.py"]
     assert completed.result["wrapper"]["--result-json"].startswith(
         "ptest-result-")
+    assert len(list(project.glob("ptest-result-*.json"))) == 1
+
+
+@pytest.mark.parametrize("removed_alias", ["--fresh", "--local"])
+def test_invoke_removed_alias_keeps_following_result_in_native_tail(
+        case, tmp_path, removed_alias):
+    """Removed aliases begin the native tail, even before --result-json."""
+    domain = case.domain()
+    project = case.project(domain)
+    pythonpath = _write_mini_target(tmp_path, MINI_PREFIX_MAIN)
+    completed = case.invoke(
+        domain, project, removed_alias, "--result-json", "r.json",
+        env={"PYTHONPATH": pythonpath}, timeout=20.0,
+    )
+    assert completed.code == 0
+    assert completed.result is not None
+    assert completed.result["wrapper"]["--result-json"].startswith(
+        "ptest-result-")
+    assert completed.result["native"] == [
+        removed_alias, "--result-json", "r.json"]
+    assert completed.result["argv"][-3:] == [
+        removed_alias, "--result-json", "r.json"]
+    assert not (project / "r.json").exists()
     assert len(list(project.glob("ptest-result-*.json"))) == 1
 def test_invoke_native_option_looking_tokens_are_not_overrides(
         case, tmp_path):
@@ -722,18 +746,18 @@ def test_invoke_purges_inherited_control_vars(case, tmp_path, monkeypatch):
     )
     assert completed.code == 0
     assert "PTEST_RUN_ID" not in completed.result["leaked_control_vars"]
-def test_invoke_explicit_env_override_passes_through(case, tmp_path):
-    """Explicit env= control vars reach the child for override tests."""
+def test_invoke_explicit_ptest_config_override_passes_through(case, tmp_path):
+    """Explicit PTEST_CONFIG reaches the child after fixture cleanup."""
     domain = case.domain()
     project = case.project(domain)
     pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
     completed = case.invoke(
         domain, project,
-        env={"PYTHONPATH": pythonpath, "PTEST_RUN_ID": "explicit-override"},
+        env={"PYTHONPATH": pythonpath, "PTEST_CONFIG": "explicit-override"},
         timeout=20.0,
     )
     assert completed.code == 0
-    assert "PTEST_RUN_ID" in completed.result["leaked_control_vars"]
+    assert completed.result["ptest_config"] == "explicit-override"
 def test_invoke_stream_select_failure_raises_fixture_error(
         case, tmp_path, monkeypatch):
     """A select/read failure must not look like a normal empty result."""

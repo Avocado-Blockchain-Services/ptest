@@ -1,9 +1,9 @@
 """Shared NG fixtures (test-only, Task0 owned).
 
-Provides ``case`` (a :class:`CaseFactory`) and removes legacy-only
-``PTEST_CONFIG`` plus stale ptest marker variables from the Python test
-process. A dedicated negative test deliberately sets the override to prove
-production rejection still works.
+Provides ``case`` (a :class:`CaseFactory`) and clears temporary pre-T13
+bootstrap hygiene variables, including ``PTEST_CONFIG``, from the Python test
+process. Dedicated tests preserve NG no-legacy-read invariance and verify that
+explicit child-environment overrides are applied after fixture cleanup.
 """
 from __future__ import annotations
 

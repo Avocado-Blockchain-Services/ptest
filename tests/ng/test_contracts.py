@@ -310,9 +310,7 @@ def _full_payloads():
         },
         "register": {
             "root": "/repo", "initialized": False,
-            "legacy_present": True, "legacy_local": None,
             "proposed_runner": "pytest", "commands": [_full_command_data()],
-            "legacy_alias_count": 0,
             "required_actions": ["initialize"], "warnings": [],
         },
     }
@@ -357,6 +355,98 @@ def test_eight_public_documents_parse():
     for internal in ("sequence", "input_before", "input_after",
                      "policy_digest"):
         assert internal not in history_doc.data["summaries"][0]
+
+
+def test_clean_break_removes_legacy_register_and_init_surfaces():
+    forbidden = {
+        "adopt_local", "legacy-adoption-required", "legacy_present",
+        "legacy_local", "legacy_alias_count", "adopt-local",
+        "initialize-aliases",
+    }
+    assert not forbidden.intersection(C.REASON_CODES)
+    assert not forbidden.intersection(C.REQUIRED_ACTIONS)
+    assert set(C.InitOptions.__dataclass_fields__) == {
+        "runner", "dry_run", "reveal_command",
+    }
+    options = C.InitOptions(runner=None, dry_run=True, reveal_command=False)
+    assert options.dry_run is True
+    with pytest.raises(TypeError):
+        C.InitOptions(
+            runner=None, dry_run=True, reveal_command=False,
+            adopt_local=True,
+        )
+
+    preview = C.RegisterPreview(
+        root="/repo", initialized=False, proposed_runner="pytest",
+        commands=(C.summarize_command(
+            C.RunnerKind.PYTEST, C.Mode.FULL, ["-q"], workers=1,
+            provenance=("test",)),),
+        required_actions=("initialize",),
+        warnings=(),
+    )
+    assert not any(hasattr(preview, name) for name in forbidden)
+
+    schema = json.dumps(C.PUBLIC_SCHEMAS["register"], sort_keys=True)
+    assert not any(term in schema for term in forbidden)
+    fresh_keys = {
+        "root", "initialized", "proposed_runner", "commands",
+        "required_actions", "warnings",
+    }
+    schema_path = (Path(__file__).resolve().parents[2]
+                   / "docs" / "schemas" / "v1" / "register.json")
+    shipped_schema = schema_path.read_text(encoding="utf-8")
+    assert not any(term in shipped_schema for term in forbidden)
+    register_schema = json.loads(shipped_schema)["properties"]["data"]
+    assert set(register_schema["required"]) == fresh_keys
+    assert set(register_schema["properties"]) == fresh_keys
+    fresh = _full_payloads()["register"]
+    raw = C.encode_public_document("register", dict(
+        fresh,
+        legacy_present=True,
+        legacy_local=None,
+        legacy_alias_count=7,
+    ))
+    rendered = raw.decode()
+    assert not any(term in rendered for term in forbidden)
+    assert set(json.loads(rendered)["data"]) == fresh_keys
+
+    accepted = C.decode_public_document(_hostile_envelope("register", dict(
+        fresh,
+        legacy_present=True,
+        legacy_local=None,
+        legacy_alias_count=7,
+    )))
+    assert not any(term in accepted.data for term in forbidden)
+    assert set(accepted.data) == fresh_keys
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope(
+            "run", dict(_run_data(), reasons=[{
+                "code": "legacy-adoption-required",
+                "message": "removed", "paths": [],
+            }])))
+
+
+@pytest.mark.parametrize("removed_action", ["adopt-local", "initialize-aliases"])
+def test_clean_break_register_preview_rejects_removed_action(removed_action):
+    with pytest.raises(ValueError, match="unknown required action"):
+        C.RegisterPreview(
+            root="/repo", initialized=False, proposed_runner="pytest",
+            required_actions=(removed_action,),
+        )
+
+
+@pytest.mark.parametrize("removed_action", ["adopt-local", "initialize-aliases"])
+def test_clean_break_register_encode_rejects_removed_action(removed_action):
+    with pytest.raises(Problem, match="report-invalid"):
+        C.encode_public_document("register", dict(
+            _full_payloads()["register"], required_actions=[removed_action]))
+
+
+@pytest.mark.parametrize("removed_action", ["adopt-local", "initialize-aliases"])
+def test_clean_break_register_decode_rejects_removed_action(removed_action):
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile_envelope("register", dict(
+            _full_payloads()["register"], required_actions=[removed_action])))
 
 
 def test_generated_schema_files_match_frozen_shapes():
@@ -1146,8 +1236,7 @@ _PUBLIC_DATA_KEYS = {
     "init": {"action", "target", "exists", "warnings", "config"},
     "doctor": {"scope", "readiness", "findings", "limits", "usage",
                "limitations"},
-    "register": {"root", "initialized", "legacy_present", "legacy_local",
-                 "proposed_runner", "commands", "legacy_alias_count",
+    "register": {"root", "initialized", "proposed_runner", "commands",
                  "required_actions", "warnings"},
 }
 
@@ -1315,11 +1404,6 @@ def test_known_string_list_fields_reject_nested_objects():
         with pytest.raises(Problem, match="report-invalid"):
             C.decode_public_document(_hostile_envelope(
                 "run", dict(run, **{name: value})))
-    register = _full_payloads()["register"]
-    register["legacy_alias_count"] = -1
-    with pytest.raises(Problem, match="report-invalid"):
-        C.decode_public_document(
-            _hostile_envelope("register", register))
     assert C.decode_public_document(
         _hostile_envelope("run", run)).error is None
 

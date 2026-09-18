@@ -41,7 +41,7 @@ _WRAPPER_VALUE_OPTS = (
     "--result-json",
 )
 _WRAPPER_BOOL_OPTS = (
-    "--changed", "--full", "--no-setup", "--fresh", "--local", "--shadow",
+    "--changed", "--full", "--no-setup", "--shadow",
 )
 def _prefix_result_json(args: tuple) -> str | None:
     found = None
