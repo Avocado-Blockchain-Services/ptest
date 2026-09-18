@@ -1352,11 +1352,13 @@ def test_interrupted_publication_allows_ineligible_commits_and_retains_failure(
         (_result(case, 9, before=snapshot, checkout=checkout), passed),
     )
     committed_ids = []
+    expected_sequence = 10
     for candidate, inventory in candidates:
         published = H.publish_outcome(domain, checkout, candidate, inventory)
         assert published.committed and published.selection_disabled
         assert published.reasons[0].code == "selection-disabled"
-        assert json.loads(marker.read_bytes())["sequence"] == 10
+        expected_sequence = max(expected_sequence, candidate.sequence)
+        assert json.loads(marker.read_bytes())["sequence"] == expected_sequence
         committed_ids.append(candidate.run_id)
 
     view = H.read_history(domain, checkout)
@@ -1448,6 +1450,110 @@ def test_strictly_newer_clean_full_clears_publication_only_after_commit(
     assert not result["value"].selection_disabled
     assert not H.read_history(domain, checkout).selection_disabled
     assert not (_store_path(domain, checkout).parent / "history-publication.json").exists()
+
+
+def test_publication_uncertainty_tracks_highest_loss_before_recovery(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    passed = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), passed,
+    ).baseline_published
+    original_insert = H._insert_summary
+
+    def interrupted(*_args):
+        raise TypeError("interrupted publication")
+
+    monkeypatch.setattr(H, "_insert_summary", interrupted)
+    for sequence in (10, 30):
+        with pytest.raises(TypeError, match="interrupted publication"):
+            H.publish_outcome(
+                domain, checkout,
+                _result(case, sequence, before=snapshot, checkout=checkout),
+                passed,
+            )
+    marker = _store_path(domain, checkout).parent / "history-publication.json"
+    assert json.loads(marker.read_bytes())["sequence"] == 30
+
+    monkeypatch.setattr(H, "_insert_summary", original_insert)
+    late = H.publish_outcome(
+        domain, checkout,
+        _result(case, 20, before=snapshot, checkout=checkout), passed,
+    )
+    assert late.committed and late.baseline_published and late.selection_disabled
+    assert late.reasons[0].code == "selection-disabled"
+    assert json.loads(marker.read_bytes())["sequence"] == 30
+    assert H.read_history(domain, checkout).selection_disabled
+
+    recovery = H.publish_outcome(
+        domain, checkout,
+        _result(case, 31, before=snapshot, checkout=checkout), passed,
+    )
+    assert recovery.committed and recovery.baseline_published
+    assert not recovery.selection_disabled
+    assert not marker.exists()
+    assert not H.read_history(domain, checkout).selection_disabled
+
+
+def test_live_writer_inheriting_uncertainty_does_not_mask_it(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    passed = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 1, before=snapshot, checkout=checkout), passed,
+    ).baseline_published
+    original_insert = H._insert_summary
+
+    def interrupted(*_args):
+        raise TypeError("interrupted publication")
+
+    monkeypatch.setattr(H, "_insert_summary", interrupted)
+    with pytest.raises(TypeError, match="interrupted publication"):
+        H.publish_outcome(
+            domain, checkout,
+            _result(case, 10, before=snapshot, checkout=checkout), passed,
+        )
+
+    reserved = threading.Event()
+    release = threading.Event()
+    result = {}
+    errors = []
+
+    def blocked_insert(connection, incoming, incoming_inventory):
+        reserved.set()
+        assert release.wait(timeout=3)
+        return original_insert(connection, incoming, incoming_inventory)
+
+    def publish():
+        try:
+            result["value"] = H.publish_outcome(
+                domain, checkout,
+                _result(case, 30, before=snapshot, checkout=checkout), passed,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            errors.append(exc)
+
+    monkeypatch.setattr(H, "_insert_summary", blocked_insert)
+    writer = threading.Thread(name="inherited-publication-writer", target=publish)
+    writer.start()
+    assert reserved.wait(timeout=3)
+    marker = _store_path(domain, checkout).parent / "history-publication.json"
+    try:
+        assert json.loads(marker.read_bytes())["sequence"] == 30
+        view = H.read_history(domain, checkout)
+        assert view.selection_disabled
+        assert view.limitations[0].code == "selection-disabled"
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive() and not errors
+    assert result["value"].committed and result["value"].baseline_published
+    assert not result["value"].selection_disabled
+    assert not marker.exists()
 
 
 def test_reader_classification_at_every_healthy_publication_boundary(case, monkeypatch):

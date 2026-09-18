@@ -455,20 +455,26 @@ def _reserve_publication(
     directory: Path, sequence: int, capacity: int | None,
     publication: int | None,
 ) -> None:
-    active = {
-        "version": 1,
-        "pid": os.getpid(),
-        "birth": psutil.Process(os.getpid()).create_time(),
-        "sequence": sequence,
-    }
-    publish_atomic(
-        directory, _ACTIVE_PUBLICATION_NAME, _json_bytes(active).encode("utf-8"),
-    )
+    inherited_uncertainty = publication is not None
+    if not inherited_uncertainty:
+        active = {
+            "version": 1,
+            "pid": os.getpid(),
+            "birth": psutil.Process(os.getpid()).create_time(),
+            "sequence": sequence,
+        }
+        publish_atomic(
+            directory, _ACTIVE_PUBLICATION_NAME, _json_bytes(active).encode("utf-8"),
+        )
     try:
-        if publication is None:
-            publish_atomic(directory, _PUBLICATION_MARKER_NAME, _json_bytes({
-                "version": 1, "code": "selection-disabled", "sequence": sequence,
-            }).encode("utf-8"))
+        # Advance generic uncertainty before touching the database. A writer
+        # inheriting uncertainty deliberately has no active-health exemption:
+        # otherwise raising the marker to its own sequence would mask the
+        # earlier possibly-lost publication while this writer is live.
+        publish_atomic(directory, _PUBLICATION_MARKER_NAME, _json_bytes({
+            "version": 1, "code": "selection-disabled",
+            "sequence": max(sequence, publication or 0),
+        }).encode("utf-8"))
         _store_capacity_reserve(
             directory, max(sequence, capacity or 0, publication or 0),
         )
