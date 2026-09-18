@@ -394,6 +394,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous[signum] = signal.signal(signum, signals.handler)
     enqueued_at = time.monotonic()
+    queue_s = None
     ticket = None
     grant = None
     try:
@@ -430,6 +431,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             time.sleep(min(C.SCHEDULER_POLL_S, max(0, admission.deadline - time.monotonic())))
         if grant is None:
             raise _problem("ownership-uncertain", "scheduler grant was incomplete")
+        queue_s = time.monotonic() - enqueued_at
         # A signal delivered in the narrow GRANTED window must cancel before
         # any guard is spawned.  If the CAS loses to registration, the guard
         # receives the authenticated cancellation frame immediately.
@@ -480,10 +482,11 @@ def execute(domain: C.DomainPaths, config: C.Config,
                            granted=grant,
                            reasons=(_reason("protocol-mismatch", "guard handoff was incomplete"),),
                            attempt=attempt_result,
-                           queue_s=time.monotonic() - enqueued_at,
+                           queue_s=queue_s,
                            execution_s=execution_s)
         # begin_finalization is intentionally after both the authenticated
         # in-band handoff and guard reaping; finish is always last.
+        finalization_started = time.monotonic()
         proof = scheduler.begin_finalization(domain, grant)
         signal_number = None
         final_code = raw
@@ -515,13 +518,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
                          phase="complete", started=started, runner_code=raw,
                          exit_code=final_code if final_code is not None else 70,
                          origin=origin, signal_number=signal_number, granted=grant,
-                         attempt=attempt_result, queue_s=time.monotonic() - enqueued_at,
+                         attempt=attempt_result, queue_s=queue_s,
                          execution_s=execution_s)
         scheduler.finish(domain, grant, proof, C.Finalization(
             outcome_id=None, status=status, exit_code=result.exit_code,
             source_valid=False, committed=True,
         ))
-        return result
+        return replace(
+            result,
+            timings=replace(result.timings, finalization_s=(
+                time.monotonic() - finalization_started)),
+        )
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
