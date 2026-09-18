@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import files, platform, render, scheduler
+from . import files, platform, render, scheduler, source
 from .runners import adapter_for
 
 
@@ -120,6 +120,9 @@ def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
             exit_code: int, origin: str, signal_number: int | None = None,
             granted: C.Grant | None = None, reasons: tuple = (),
             attempt: C.AttemptResult | None = None,
+            limitations: tuple = (), input_before: C.InputSnapshot | None = None,
+            input_after: C.InputSnapshot | None = None,
+            source_valid: bool = False,
             queue_s: float | None = None, execution_s: float | None = None,
             finalization_s: float | None = None) -> C.RunResult:
     attempts = () if attempt is None else (attempt,)
@@ -134,11 +137,100 @@ def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
         memory_estimate_mb=None if granted is None else granted.memory_estimate_mb,
         reserved_memory_mb=None if granted is None else granted.reserved_memory_mb,
         runner_exit_code=runner_code, exit_code=exit_code,
-        exit_origin=origin, signal=signal_number, source_valid=False,
+        exit_origin=origin, signal=signal_number, source_valid=source_valid,
         full_gate_eligible=False, baseline_published=False, counts=None,
         timings=timings, attempts=attempts, reasons=tuple(reasons),
         limitations=(_reason("unsupported-capability",
-                             "command execution has no inventory or source identity"),),
+                             "command execution has no inventory or verified runtime identity"),
+                     *tuple(limitations)),
+        input_before=input_before, input_after=input_after,
+    )
+
+
+def _unknown_snapshot(problem: C.Problem | None = None) -> C.InputSnapshot:
+    code = "unknown-input" if problem is None else problem.code
+    return C.InputSnapshot(
+        digest=None, compatibility=None, head=None, clean=False,
+        limitations=(_reason(code, "source snapshot is unavailable"),),
+    )
+
+
+def _capture_source(domain: C.DomainPaths, config: C.Config,
+                    request: C.RunRequest, *, ensure_key: bool) -> C.InputSnapshot:
+    """Capture typed source evidence without making it an execution blocker."""
+    def normalize(snapshot_item: C.InputSnapshot) -> C.InputSnapshot:
+        if snapshot_item.limitations:
+            return snapshot_item
+        if snapshot_item.digest is None or snapshot_item.compatibility is None:
+            return replace(
+                snapshot_item,
+                limitations=(_reason("unknown-input", "source identity is incomplete"),),
+            )
+        return snapshot_item
+
+    if ensure_key:
+        try:
+            source.ensure_fingerprint_key(domain)
+        except (C.Problem, OSError) as exc:
+            problem = exc if isinstance(exc, C.Problem) else None
+            try:
+                return normalize(source.snapshot(domain, config, None, request.base))
+            except (C.Problem, OSError):
+                return _unknown_snapshot(problem)
+    try:
+        return normalize(source.snapshot(domain, config, None, request.base))
+    except (C.Problem, OSError):
+        return _unknown_snapshot()
+
+
+def _source_limitations(*snapshots: C.InputSnapshot | None) -> tuple[C.Reason, ...]:
+    seen = set()
+    result = []
+    for snapshot_item in snapshots:
+        if snapshot_item is None:
+            continue
+        for limitation in snapshot_item.limitations:
+            marker = (limitation.code, limitation.message, limitation.paths)
+            if marker not in seen:
+                seen.add(marker)
+                result.append(limitation)
+    return tuple(result)
+
+
+def _unique_reasons(reasons: tuple[C.Reason, ...]) -> tuple[C.Reason, ...]:
+    seen = set()
+    result = []
+    for reason in reasons:
+        marker = (reason.code, reason.message, reason.paths)
+        if marker not in seen:
+            seen.add(marker)
+            result.append(reason)
+    return tuple(result)
+
+
+def _source_changed(before: C.InputSnapshot | None,
+                    after: C.InputSnapshot | None) -> bool:
+    if before is None or after is None:
+        return False
+    if before.digest is not None and after.digest is not None:
+        if before.digest != after.digest:
+            return True
+        if (before.compatibility is not None and after.compatibility is not None
+                and before.compatibility != after.compatibility):
+            return True
+    return False
+
+
+def _source_valid(before: C.InputSnapshot | None,
+                  after: C.InputSnapshot | None) -> bool:
+    if before is None or after is None:
+        return False
+    return bool(
+        before.digest is not None and after.digest is not None
+        and before.compatibility is not None and after.compatibility is not None
+        and before.compatibility == after.compatibility
+        and before.digest == after.digest
+        and not before.limitations and not after.limitations
     )
 
 
@@ -537,6 +629,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 return _export(domain, checkout, request, _cancel_result(
                     run_id, checkout, request, plan, command, signals.number, queue_s))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
+        # Capture the initial identity after exclusive admission and queue wait,
+        # immediately before launching the admitted command.
+        input_before = _capture_source(domain, effective, request, ensure_key=True)
         try:
             raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
         except (C.Problem, OSError):
@@ -553,7 +648,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 run_id=run_id, checkout=checkout, request=request, plan=plan,
                 command=command, status=status, phase="execution", started=started,
                 runner_code=None, exit_code=code, origin=origin, signal_number=number,
-                granted=grant, reasons=reasons, queue_s=queue_s))
+                granted=grant, reasons=reasons,
+                limitations=_source_limitations(input_before),
+                input_before=input_before, queue_s=queue_s))
         raw = None if frames.facts is None else frames.facts["raw_exit_code"]
         guard_problem = (None if frames.facts is None or frames.facts["problem"] is None
                          else C.Problem(**frames.facts["problem"]))
@@ -586,8 +683,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
                          phase="complete", started=started, runner_code=raw,
                          exit_code=final_code if final_code is not None else 70,
                          origin=origin, signal_number=signal_number, granted=grant,
-                         reasons=reasons, attempt=attempt_result, queue_s=queue_s,
-                         execution_s=execution_s)
+                         reasons=reasons, limitations=_source_limitations(input_before),
+                         input_before=input_before, attempt=attempt_result,
+                         queue_s=queue_s, execution_s=execution_s)
         if not protocol_valid:
             if not frames.registered:
                 # A missing notification is not proof of no registration. The
@@ -597,8 +695,25 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 except C.Problem:
                     result = _incomplete(result, _reason("ownership-uncertain", "pending grant remains unconfirmed"))
             return _export(domain, checkout, request, result)
-        # Only authenticated DRAINING plus guard reap permits this proof. All
-        # requested publication stays under the lease; finish remains last.
+        # Only authenticated DRAINING plus guard reap permits this proof. Take
+        # the post-run snapshot while the lease is held, before finalization.
+        input_after = _capture_source(domain, effective, request, ensure_key=False)
+        source_valid = _source_valid(input_before, input_after)
+        result = replace(
+            result,
+            source_valid=source_valid,
+            input_after=input_after,
+            limitations=_unique_reasons(
+                result.limitations + _source_limitations(input_after)),
+            attempts=tuple(replace(item, source_valid=source_valid)
+                           for item in result.attempts),
+        )
+        if _source_changed(input_before, input_after):
+            result = _incomplete(
+                result,
+                _reason("changed-during-run",
+                        "relevant source inputs changed during execution; verify the final input state"),
+            )
         finalization_started = time.monotonic()
         try:
             proof = scheduler.begin_finalization(domain, grant)
@@ -610,7 +725,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         def finalize(exported: C.RunResult) -> None:
             scheduler.finish(domain, grant, proof, C.Finalization(
                 outcome_id=None, status=exported.status, exit_code=exported.exit_code,
-                source_valid=False, committed=True,
+                source_valid=exported.source_valid, committed=True,
             ))
 
         result = _export(domain, checkout, request, result, finalize=finalize)

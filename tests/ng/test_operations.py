@@ -137,6 +137,15 @@ def _execute(root, domain, **options):
     return operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL, **options))
 
 
+def _source_snapshots(monkeypatch, *digests):
+    snapshots = [C.InputSnapshot(
+        digest=digest, compatibility="command-test-compatibility",
+        head="a" * 40, clean=True,
+    ) for digest in digests]
+    monkeypatch.setattr(operations.source, "ensure_fingerprint_key", lambda _domain: None)
+    monkeypatch.setattr(operations.source, "snapshot", lambda *args, **kwargs: snapshots.pop(0))
+
+
 def _guard_fault(monkeypatch, mode):
     monkeypatch.setenv("TEST_GUARD_FAULT", mode)
     monkeypatch.setattr(operations, "_GUARD_SCRIPT",
@@ -169,6 +178,81 @@ def test_command_missing_executable_is_failed_127(case):
     result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
     assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.FAILED, 127, None)
     assert any(reason.code == "missing-executable" for reason in result.reasons)
+
+
+def test_command_unchanged_source_preserves_runner_result_and_records_snapshots(case, monkeypatch):
+    domain = case.domain()
+    root = _command_project(case, domain, args=("exit", "0"))
+    _source_snapshots(monkeypatch, "a" * 64, "a" * 64)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.PASSED, 0, 0)
+    assert result.input_before.digest == result.input_after.digest == "a" * 64
+    assert result.baseline_published is False
+    assert result.full_gate_eligible is False
+
+
+def test_command_source_change_with_zero_exit_is_incomplete_70(case, monkeypatch):
+    domain = case.domain()
+    root = _command_project(case, domain)
+    changed = root / "runtime-input.txt"
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text(encoding="utf-8").replace(
+            'args = []', f'args = ["modify-exit", "{changed}", "0"]'),
+        encoding="utf-8",
+    )
+    _source_snapshots(monkeypatch, "a" * 64, "b" * 64)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.INCOMPLETE, 70, 0)
+    assert any(reason.code == "changed-during-run" for reason in result.reasons)
+    assert result.source_valid is False
+    assert result.full_gate_eligible is False
+    assert result.baseline_published is False
+    changed_reason = next(reason for reason in result.reasons
+                          if reason.code == "changed-during-run")
+    assert changed_reason.paths == ()
+    assert "runtime-input.txt" not in changed_reason.message
+
+
+def test_command_source_change_with_runner_failure_preserves_runner_exit(case, monkeypatch):
+    domain = case.domain()
+    root = _command_project(case, domain)
+    changed = root / "runtime-input.txt"
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text(encoding="utf-8").replace(
+            'args = []', f'args = ["modify-exit", "{changed}", "23"]'),
+        encoding="utf-8",
+    )
+    _source_snapshots(monkeypatch, "a" * 64, "b" * 64)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.INCOMPLETE, 23, 23)
+    assert result.exit_origin == "runner"
+    assert any(reason.code == "changed-during-run" for reason in result.reasons)
+
+
+def test_command_unknown_snapshot_is_not_source_valid_or_gate_eligible(case, monkeypatch):
+    domain = case.domain()
+    root = _command_project(case, domain, args=("exit", "0"))
+    unknown = C.InputSnapshot(
+        digest=None, compatibility=None, head=None, clean=False,
+        limitations=(C.Reason(code="unknown-input", message="snapshot unavailable"),),
+    )
+    monkeypatch.setattr(operations.source, "ensure_fingerprint_key", lambda _domain: None)
+    monkeypatch.setattr(operations.source, "snapshot", lambda *args, **kwargs: unknown)
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (C.Status.PASSED, 0, 0)
+    assert result.source_valid is False
+    assert result.full_gate_eligible is False
+    assert result.input_before is unknown
+    assert result.input_after is unknown
+    assert any(reason.code == "unknown-input" for reason in result.limitations)
 
 
 def test_command_from_subdirectory_uses_project_root(case):

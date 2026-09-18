@@ -19,6 +19,10 @@ def main():
         from pathlib import Path
         Path(tokens[0]).write_text("launched")
         return 0
+    if mode == "modify-exit":
+        from pathlib import Path
+        Path(tokens[0]).write_text("runner modification")
+        return int(tokens[1]) if len(tokens) > 1 else 0
     if mode == "cancel":
         signal.signal(signal.SIGINT, lambda *_: sys.exit(int(tokens[1])))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(tokens[1])))
