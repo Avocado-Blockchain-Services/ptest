@@ -1,0 +1,248 @@
+{
+  "task": "T0 clean-break contract and helper repair",
+  "owner": "Luna xhigh",
+  "delivery_status": "implemented; valid edits left unstaged because shared git metadata is read-only",
+  "commit": {
+    "status": "blocked_by_shared_git_metadata",
+    "requested": "fix: repair T0 clean-break contracts and helper grammar",
+    "exact_error": "fatal: Unable to create '/home/ingmar/code/tools/ptest/.git/worktrees/task-0-repair/index.lock': Read-only file system",
+    "staged": false
+  },
+  "independent_audit_approval": false,
+  "scope": {
+    "workspace": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0-repair",
+    "owned_files_only": true,
+    "unowned_worktrees_touched": false
+  },
+  "changed_contracts": [
+    "Removed InitOptions.adopt_local and its validation.",
+    "Removed legacy-adoption-required from REASON_CODES.",
+    "Removed legacy_present, legacy_local, and legacy_alias_count from RegisterPreview, register validation, projection, and generated schema.",
+    "Removed adopt-local and initialize-aliases from required actions; retained initialize, choose-runner, author-command, and review-existing-config.",
+    "Preserved additive-unknown public decode projection and strict known-field validation semantics."
+  ],
+  "negative_contracts": [
+    "Removed terms are absent from the register descriptor/schema and serialized fresh register output.",
+    "Payloads containing removed register fields project without those fields; removed required actions and reason codes are rejected.",
+    "A removed first token (--fresh or --local) starts the untouched native tail; a later --result-json r.json is not the helper export.",
+    "Inherited PTEST_CONFIG is cleared as temporary pre-T13 hygiene, while an explicit case.invoke(env=...) PTEST_CONFIG override reaches the child unchanged."
+  ],
+  "evidence": {
+    "red": [
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py -k 'clean_break or removed_alias or explicit_ptest_config'",
+        "exit": 1,
+        "result": "1 failed, 3 passed, 108 deselected; clean-break contract assertion observed the legacy reason code before source repair."
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_files.py -k removed_alias (with the old --fresh/--local grammar temporarily restored, then restored to repaired bytes)",
+        "exit": 1,
+        "result": "2 failed, 62 deselected; both aliases incorrectly treated r.json as the helper export, proving regression sensitivity."
+      }
+    ],
+    "green": [
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py -k 'clean_break or removed_alias or explicit_ptest_config'",
+        "exit": 0,
+        "result": "4 passed, 108 deselected."
+      },
+      {
+        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py",
+        "exit": 0,
+        "result": "112 passed in 2.68s."
+      }
+    ],
+    "schema_generation": {
+      "write_command": "UV_CACHE_DIR=.pipeline/local/uv-cache uv run --locked --no-sync python scripts/export-schemas.py",
+      "write_exit": 0,
+      "check_command": "UV_CACHE_DIR=.pipeline/local/uv-cache uv run --locked --no-sync python scripts/export-schemas.py --check",
+      "check_exit": 0,
+      "result": "Generated register schema is drift-free. protocol-v1.json was regenerated and is unchanged."
+    },
+    "quality": [
+      {
+        "command": "git diff --check",
+        "exit": 0,
+        "result": "No whitespace errors."
+      },
+      {
+        "command": "graphify update .",
+        "exit": 0,
+        "result": "AST graph updated: 2944 nodes, 5033 edges, 222 communities; expected zero-node warning for JSON artifacts implementation.json, review.json, and protocol-v1.json."
+      },
+      {
+        "command": "scripts/ptest-bootstrap where",
+        "exit": 0,
+        "result": "Frozen dispatcher verified by SHA256, local backend, one worker, current worktree."
+      }
+    ]
+  },
+  "explicit_files": {
+    "source": [
+      "src/ptest/contracts.py",
+      "tests/ng/support.py",
+      "tests/ng/conftest.py",
+      "tests/ng/test_contracts.py",
+      "tests/ng/test_files.py"
+    ],
+    "generated_changed": [
+      "docs/schemas/v1/register.json"
+    ],
+    "generated_checked_unchanged": [
+      "src/ptest/runtime/protocol-v1.json"
+    ],
+    "evidence": [
+      ".pipeline/out/task-0-clean-break-repair.json"
+    ]
+  },
+  "dan_three_passes": [
+    {
+      "pass": 1,
+      "name": "ownership and contract inventory",
+      "result": "Read the brief, repository instructions, context, normative spec/design/plan, and Muse reference; changed only declared files and inventoried removed runtime/schema terms."
+    },
+    {
+      "pass": 2,
+      "name": "small TDD repair",
+      "result": "Added non-vacuous public clean-break and helper-tail regressions; observed RED against old behavior, implemented the minimal source/helper changes, and observed focused plus complete scoped GREEN."
+    },
+    {
+      "pass": 3,
+      "name": "evidence and delivery smell sweep",
+      "result": "Regenerated/checks schemas, ran diff and graph checks, reviewed the owned diff, recorded limits and gates, and did not issue independent audit approval."
+    }
+  ],
+  "gates": {
+    "passed": [
+      "focused TDD regressions",
+      "complete owned contract/file scopes",
+      "generated schema drift check",
+      "git diff whitespace check",
+      "graphify AST update"
+    ],
+    "not_run_or_out_of_scope": [
+      "Bandit, dependency audit, and Gitleaks security scanners were not run; no scanner infrastructure is in this T0 ownership or brief.",
+      "The bootstrap refuses --full by design; no repository-wide full gate was claimed."
+    ]
+  },
+  "unverified_limits": [
+    "Only the Linux worktree environment was exercised; macOS behavior remains for the platform matrix.",
+    "Downstream CLI consumers and T1/T2/T3 integration were not exercised in this barrier task.",
+    "No independent Opus/Astra audit approval is claimed by this implementer report."
+  ],
+  "focused_audit_hardening": {
+    "owner": "Astra xhigh",
+    "date": "2026-09-18",
+    "brief": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/briefs/task-0-astra-repair1.md",
+    "review_source": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.pipeline/out/task-0-opus-clean-break-repair.jsonl",
+    "delivery_status": "DONE_WITH_CONCERNS: both confirmed LOW findings repaired; commit blocked by read-only shared git metadata",
+    "prior_evidence": "The original Luna repair, evidence and limitations above are retained as historical evidence. This object records the focused Astra follow-up and its newly observed results.",
+    "owned_files": [
+      "tests/ng/test_contracts.py",
+      "tests/ng/test_files.py",
+      ".pipeline/out/task-0-clean-break-repair.json"
+    ],
+    "repairs": [
+      "MINI_PREFIX_MAIN exports raw sys.argv[1:] as argv. Both removed-alias cases assert argv[-3:] equals [removed_alias, --result-json, r.json], independently of parsed native. Existing default-export, parsed-native and r.json-absence assertions remain.",
+      "The clean-break test reads the shipped docs/schemas/v1/register.json, checks forbidden terms are absent, and checks that required and properties contain exactly root, initialized, proposed_runner, commands, required_actions and warnings.",
+      "Separate parameterized tests cover adopt-local and initialize-aliases through RegisterPreview construction (ValueError), public encode (Problem/report-invalid), and hostile decode (Problem/report-invalid).",
+      "Hostile decode of obsolete additive fields succeeds and produces exactly the six fresh keys. The existing exact producer projection, forbidden-field and removed-reason-code assertions remain."
+    ],
+    "negative_contracts": {
+      "identity": "N/A: no credentials or authentication changes in this test-only repair.",
+      "authorization": "N/A: no actor permissions or protected-operation changes.",
+      "tenancy": "N/A: no tenant boundary changes; subprocess cases retain their existing isolated fixture domains.",
+      "input": "Obsolete action values must fail at construction, encoding and hostile decoding; obsolete additive fields must be dropped rather than rejected or retained.",
+      "state": "A removed alias begins the literal native tail; the later --result-json must not replace the generated helper export or create r.json.",
+      "exposure": "The shipped register schema and projected data must expose exactly the six fresh fields, with no obsolete terms. Raw argv is added only to a miniature test target's fixture result.",
+      "availability": "N/A for new runtime controls: only bounded miniature tests change, using existing 20-second subprocess timeouts and the one-worker bootstrap.",
+      "dependencies": "Native child argv and generated JSON are checked at their actual boundaries; no dependencies, runner setup, production contracts or external services change.",
+      "absent_from_spec": []
+    },
+    "evidence": {
+      "red": [
+        {
+          "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py -k 'clean_break or removed_alias'",
+          "exit": 1,
+          "result": "2 failed, 7 passed, 109 deselected in 0.38s. Both removed-alias cases failed with KeyError: 'argv' after adding the raw-tail assertion and before adding argv to MINI_PREFIX_MAIN. The strengthened contract checks already passed against the approved implementation."
+        },
+        {
+          "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k 'clean_break_register'",
+          "exit": 1,
+          "result": "6 failed, 48 deselected in 0.34s. For sensitivity only, temporary monkeypatches in the owned tests added each removed action to C.REQUIRED_ACTIONS in memory. Both constructor cases failed with DID NOT RAISE ValueError; all four encode/decode cases failed with DID NOT RAISE Problem. All temporary monkeypatch edits were removed with apply_patch before GREEN; production files were never mutated."
+        }
+      ],
+      "green": [
+        {
+          "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py -k 'clean_break or removed_alias'",
+          "exit": 0,
+          "result": "9 passed, 109 deselected in 0.33s."
+        },
+        {
+          "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py",
+          "exit": 0,
+          "result": "118 passed in 2.81s. Frozen dispatcher SHA256 verified by bootstrap; local backend, one worker, current worktree."
+        }
+      ],
+      "quality": [
+        {
+          "command": "git diff --check",
+          "exit": 0,
+          "result": "No whitespace errors."
+        },
+        {
+          "command": "graphify update .",
+          "exit": 0,
+          "result": "Local AST graph updated: 2947 nodes, 5039 edges, 225 communities. No semantic extraction or provider API used. Existing warnings remain: implementation.json, review.json and protocol-v1.json produced zero nodes and are absent from the graph."
+        },
+        {
+          "command": "python3 -m json.tool .pipeline/out/task-0-clean-break-repair.json > /dev/null",
+          "exit": 0,
+          "result": "Report JSON parses successfully."
+        }
+      ],
+      "preservation": {
+        "protected_file_sha256_unchanged": {
+          "src/ptest/contracts.py": "7f8c7f1183725d0413165fcb3aca955d2ff0a822ecec55933b4cae69302aa55e",
+          "docs/schemas/v1/register.json": "de1f11d4b20ef8a114d69598c5a789839e51d896dc56a7296f5afa6f0dfc4cf7",
+          "src/ptest/runtime/protocol-v1.json": "b10821bb330dd7b9b7ef4ee62a73db56bf675c89b743b0bad17521944bca9165",
+          "tests/ng/support.py": "c79781f0d7d94046459494c7c01881a2796ef531986be432e1276dca9d1c201c",
+          "tests/ng/conftest.py": "6e91839dc9741b7399854921f2420f42803a19301b0a117f8cb46251c5562eb5",
+          "scripts/ptest-bootstrap": "be5b7f1c30ba5a5ed509277d22eaed7bedb21433b2ffd4bbba3ad991866732cb"
+        },
+        "approved_test_edits": "Read-only in-memory removal of only the Astra hardening exactly reproduced both pre-edit test-file SHA256 digests: test_contracts.py=5c3cf90a4a7be4014490f23127f6346132a95ddfb7a49ea24f51b110b77bb027; test_files.py=74440459f27937a6ab77c41a0605bf75695a3f4c007e5f26a3866a2b26f3c9fc.",
+        "unowned_worktrees_touched": false,
+        "source_edit_method": "apply_patch only; bootstrap/test and required local graph tooling generated their own isolated artifacts."
+      }
+    },
+    "self_review": {
+      "verdict": "APPROVE",
+      "scope": "Read-only final review of the two focused hardening repairs against the brief, Opus LOW findings, frozen public projection contract and A11 child-argv evidence requirement.",
+      "coverage": [
+        "Correctness and tests: real subprocess raw argv, preserved filesystem export checks, generated schema, both obsolete actions across all three public boundaries, exact additive projection.",
+        "Architecture and maintainability: production contracts and helpers unchanged; separate parameterized rejection tests replace the narrower single-action decode assertion; no unrelated cleanup introduced.",
+        "Security, data and reliability: reviewed boundary assertions and scope preservation; no new runtime state, dependency, service or trust boundary.",
+        "Delivery: complete requested scoped run passed; metadata prevents staging or committing."
+      ],
+      "findings": [],
+      "independent_audit_approval": false
+    },
+    "commit": {
+      "status": "blocked_by_shared_git_metadata",
+      "requested": "fix: harden T0 clean-break contract regressions",
+      "attempted_command": "git add -- tests/ng/test_contracts.py tests/ng/test_files.py .pipeline/out/task-0-clean-break-repair.json",
+      "exit": 128,
+      "exact_error": "fatal: Unable to create '/home/ingmar/code/tools/ptest/.git/worktrees/task-0-repair/index.lock': Read-only file system",
+      "staged": false,
+      "commit_created": false
+    },
+    "limits": [
+      "This is implementer self-review, not a new independent Opus or Astra audit approval.",
+      "The schema/projection additions passed against the already approved implementation; no separate on-disk schema or projection mutant RED is claimed.",
+      "Only the requested two-file scope was run. The bootstrap explicitly refuses --full until the controller final-gate switch; no repository-wide or integration gate is claimed.",
+      "No schema regeneration or export --check rerun was needed for this test-only follow-up; shipped schema assertions ran in the focused and complete scoped suites.",
+      "Bandit, dependency audit and Gitleaks were not run; scanner infrastructure and dependency changes are outside this ownership. No new property/fuzz gate was added.",
+      "Linux was exercised; macOS, later T11 real CLI forwarding and downstream integration remain outside this focused helper/contract repair."
+    ]
+  }
+}

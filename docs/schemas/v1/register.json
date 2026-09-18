@@ -66,19 +66,6 @@
         "initialized": {
           "type": "boolean"
         },
-        "legacy_alias_count": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "legacy_local": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "legacy_present": {
-          "type": "boolean"
-        },
         "proposed_runner": {
           "enum": [
             "pytest",
@@ -96,11 +83,9 @@
         "required_actions": {
           "items": {
             "enum": [
-              "adopt-local",
               "author-command",
               "choose-runner",
               "initialize",
-              "initialize-aliases",
               "review-existing-config"
             ],
             "type": "string"
@@ -139,11 +124,8 @@
       "required": [
         "root",
         "initialized",
-        "legacy_present",
-        "legacy_local",
         "proposed_runner",
         "commands",
-        "legacy_alias_count",
         "required_actions",
         "warnings"
       ],

@@ -141,7 +141,7 @@ STATIC_PLAN_INVENTORY_CAP = 10000
 
 REASON_CODES = frozenset({
     "initialization-required", "unsupported-platform", "unsupported-capability",
-    "invalid-config", "unsafe-path", "legacy-adoption-required",
+    "invalid-config", "unsafe-path",
     "missing-executable", "nested-invocation", "queue-timeout",
     "coordinator-unavailable", "coordinator-corrupt", "protocol-mismatch",
     "capacity-exceeded", "ownership-uncertain",
@@ -162,8 +162,8 @@ FINDING_CODES = frozenset({
 })
 
 REQUIRED_ACTIONS = frozenset({
-    "initialize", "choose-runner", "adopt-local", "author-command",
-    "initialize-aliases", "review-existing-config",
+    "initialize", "choose-runner", "author-command",
+    "review-existing-config",
 })
 
 RUN_PHASES = frozenset({
@@ -1506,12 +1506,11 @@ class InitOptions:
     runner: RunnerKind | None
     dry_run: bool
     reveal_command: bool
-    adopt_local: bool
 
     def __post_init__(self) -> None:
         if self.runner is not None:
             object.__setattr__(self, "runner", _check_enum("init.runner", self.runner, RunnerKind))
-        for field in ("dry_run", "reveal_command", "adopt_local"):
+        for field in ("dry_run", "reveal_command"):
             object.__setattr__(self, field, _check_bool(f"init.{field}", getattr(self, field)))
 
 
@@ -1599,20 +1598,14 @@ class ConfigResolution:
 class RegisterPreview:
     root: str
     initialized: bool
-    legacy_present: bool
-    legacy_local: bool | None
     proposed_runner: RunnerKind | None
     commands: tuple = ()
-    legacy_alias_count: int = 0
     required_actions: tuple = ()
     warnings: tuple = ()
 
     def __post_init__(self) -> None:
         _check_str("register.root", self.root)
         object.__setattr__(self, "initialized", _check_bool("register.initialized", self.initialized))
-        object.__setattr__(self, "legacy_present", _check_bool("register.legacy_present", self.legacy_present))
-        if self.legacy_local is not None:
-            object.__setattr__(self, "legacy_local", _check_bool("register.legacy_local", self.legacy_local))
         if self.proposed_runner is not None:
             object.__setattr__(self, "proposed_runner",
                                _check_enum("register.proposed_runner", self.proposed_runner, RunnerKind))
@@ -1621,7 +1614,6 @@ class RegisterPreview:
             if not isinstance(item, CommandSummary):
                 raise TypeError("register.commands entries must be CommandSummary")
         object.__setattr__(self, "commands", items)
-        _check_int("register.legacy_alias_count", self.legacy_alias_count, lo=0)
         actions = _as_str_tuple("register.required_actions", self.required_actions)
         for action in actions:
             if action not in REQUIRED_ACTIONS:
@@ -2492,11 +2484,6 @@ def _validate_doctor_payload(data: dict) -> None:
 def _validate_register_payload(data: dict) -> None:
     _need_str(data, "root")
     _need_bool(data, "initialized")
-    _need_bool(data, "legacy_present")
-    if "legacy_local" not in data:
-        raise _invalid("report-invalid", "missing required field 'legacy_local'")
-    if data["legacy_local"] is not None and not isinstance(data["legacy_local"], bool):
-        raise _invalid("report-invalid", "register.legacy_local must be boolean or null")
     if "proposed_runner" not in data:
         raise _invalid("report-invalid", "missing required field 'proposed_runner'")
     if (data["proposed_runner"] is not None
@@ -2505,8 +2492,6 @@ def _validate_register_payload(data: dict) -> None:
         raise _invalid("report-invalid", "register.proposed_runner is unknown")
     for entry in _need_list(data, "commands"):
         _check_command_dict(entry, "register.commands entry")
-    _need_int(data, "legacy_alias_count")
-    _check_int_field(data, "legacy_alias_count", "register", lo=0)
     actions = _need_list(data, "required_actions")
     for action in actions:
         if not _is_known(action, REQUIRED_ACTIONS):
@@ -2737,12 +2722,9 @@ def _project_doctor_payload(data: dict) -> dict:
 def _project_register_payload(data: dict) -> dict:
     return {
         "root": data["root"], "initialized": data["initialized"],
-        "legacy_present": data["legacy_present"],
-        "legacy_local": data["legacy_local"],
         "proposed_runner": data["proposed_runner"],
         "commands": [_project_command(entry)
                      for entry in data["commands"]],
-        "legacy_alias_count": data["legacy_alias_count"],
         "required_actions": list(data["required_actions"]),
         "warnings": [_project_reason(entry)
                      for entry in data["warnings"]],
@@ -3566,21 +3548,17 @@ PUBLIC_SCHEMAS: dict = {
         "properties": {
             "root": {"type": "string"},
             "initialized": {"type": "boolean"},
-            "legacy_present": {"type": "boolean"},
-            "legacy_local": {"type": ["boolean", "null"]},
             "proposed_runner": {
                 "type": ["string", "null"],
                 "enum": [item.value for item in RunnerKind] + [None],
             },
             "commands": {"type": "array", "items": _command_schema()},
-            "legacy_alias_count": {"type": "integer", "minimum": 0},
             "required_actions": {"type": "array",
                                  "items": {"type": "string",
                                            "enum": sorted(REQUIRED_ACTIONS)}},
             "warnings": {"type": "array", "items": _reason_schema()},
         },
-        "required": ["root", "initialized", "legacy_present", "legacy_local",
-                     "proposed_runner", "commands", "legacy_alias_count",
+        "required": ["root", "initialized", "proposed_runner", "commands",
                      "required_actions", "warnings"],
     }),
 }
