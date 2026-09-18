@@ -1,0 +1,115 @@
+{
+  "task": "11D",
+  "slice": "scoped-pytest-basic-serial-execution",
+  "status": "implemented-scoped-tier-awaiting-root-review",
+  "scope": [
+    "src/ptest/adapters/pytest.py",
+    "src/ptest/operations.py",
+    "src/ptest/runtime/pytest_bridge.py",
+    "tests/ng/test_task_11d_pytest.py",
+    ".pipeline/out/task-11d-pytest.json"
+  ],
+  "source_commit": "56cf9d0",
+  "tests_commit": "ecaad5e",
+  "evidence_commit_pending": true,
+  "implemented": [
+    "Operations admit Pytest only for scoped mode with setup, shadow and probe disabled; automatic/full/other native modes fail before scheduler admission.",
+    "Scoped Pytest requests reserve exactly one nonexclusive scheduler slot regardless of the requested worker count.",
+    "An executor-owned private report binding is allocated after grant, passed with run/nonce/attempt identity, authenticated in guard runner facts by its exact basename, and consumed only after guard draining/reap and scheduler finalization begins.",
+    "Missing, malformed, mismatched or incomplete terminal reports make a zero native exit incomplete with exit 70 while preserving a nonzero native exit and adding the report evidence reason.",
+    "The Pytest adapter advertises basic_serial only for scoped plans, preserves literal native args/reporters/coverage tokens, and never adds xdist for the one-slot tier.",
+    "The bridge validates the enumerated CPython/Pytest runtime boundary, private report path and identity, writes one bounded exclusive terminal report after pytest.main, and rejects xdist/remote controls before execution."
+  ],
+  "red_green": [
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k native_cli",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "stage": "pre-slice RED against deferred native boundary",
+      "exit_code": 1,
+      "output": "22 native_cli cases failed: basic-serial candidate cases were still stopped by unsupported-capability native profile execution is deferred; hostile-control cases likewise did not reach the scoped bridge contract."
+    },
+    {
+      "command": "ptest tests/ng/test_task_11d_pytest.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "stage": "first focused RED after tests were authored, before adapter/bridge implementation",
+      "exit_code": 1,
+      "output": "4 passed, 2 failed: Pytest preparation remained UNAVAILABLE and the bridge did not yet produce the bound terminal report."
+    },
+    {
+      "command": "ptest tests/ng/test_task_11d_pytest.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "stage": "post-commit focused GREEN",
+      "exit_code": 0,
+      "output": "[ptest] local: uv run --with pytest --with pytest-xdist pytest -n 2 tests/ng/test_task_11d_pytest.py; 7 passed in 0.50s."
+    },
+    {
+      "command": "ptest tests/ng/test_pytest_adapter.py -k 'not native_cli' tests/ng/test_reports.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "stage": "scoped adapter/report regression subset",
+      "exit_code": 0,
+      "output": "218 passed in 0.80s."
+    },
+    {
+      "command": "ptest tests/ng/test_operations.py -k 'command_'",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "stage": "generic command lifecycle regression subset",
+      "exit_code": 0,
+      "output": "22 passed in 4.52s."
+    }
+  ],
+  "verified": [
+    "Pre-admission refusal and no scheduler enqueue for Pytest full/automatic/setup requests.",
+    "One-slot nonexclusive admission with requested workers=8, private report identity/path binding, exact guard fact matching, post-reap report consumption and cleanup.",
+    "Scoped literal suffix preservation, basic_serial capability, absence of generated xdist flags, and native nonzero exit/report agreement.",
+    "Controller-only focused and regression checks listed above; no raw test runner was called."
+  ],
+  "not_verified": [
+    "ptest --full was not run because the Task11D brief explicitly forbids it and root owns whole-suite verification.",
+    "The existing native_cli fixture matrix remains intentionally unsupported for full/automatic execution; no real candidate scoped project fixture was executed in this slice.",
+    "The operation-level missing/bad/refused-report and native-zero/nonzero disagreement matrix beyond the shared Task11C report abuse tests was not expanded after the requested vertical-slice checkpoint.",
+    "Foreign-owner and concurrent replacement timing probes, and external static/dependency scanners, were not run."
+  ],
+  "deferred": [
+    "Pytest full, automatic, selection, setup, shadow, probe, baseline, source-valid, history and full-gate publication remain unsupported by design.",
+    "Vitest, Go, Cargo, public schema, CLI, remote/API/TUI and dependency changes remain outside Task11D."
+  ],
+  "claims_vs_shipped": {
+    "shipped": "A scoped Pytest basic-serial bridge/operations vertical slice with one nonexclusive slot and private authenticated terminal evidence.",
+    "not_claimed": "Native qualification, full-suite support, full/automatic evidence, source validity, baseline/history/full-gate eligibility or whole-product completion."
+  },
+  "checks": [
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "exit_code": 0,
+      "output": "AST extraction rebuilt 4457 nodes, 9725 edges and 296 communities; seven JSON/protocol files produced zero nodes and were warned absent."
+    },
+    {
+      "command": "git diff --check",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-pytest",
+      "exit_code": 0,
+      "output": "clean after source/tests commits and graph update"
+    }
+  ],
+  "dan_three_passes": {
+    "pass_1_re_read": "Re-read the changed adapter, operations lifecycle, bridge, focused tests and Task11D brief after the green controller run; report consumption remains after DRAINING/reap and no full-gate claim is made.",
+    "pass_2_source_of_truth": "Checked the existing reports binding/consumer, guard runner-facts basename, prepared-run env path, scheduler admission fields and pytest capability tier rather than adding a second report schema or public result shape.",
+    "pass_3_smell_sweep": "Searched native/report/xdist symbols across the changed modules and focused tests; no shell command construction, dependency, CLI, public schema, Vitest or remote path was added. Known native CLI failures are retained as deferred scope, not hidden."
+  },
+  "security_gates": {
+    "run": [
+      "secure-by-spec abuse-oriented focused tests through ptest",
+      "scoped adapter/report and generic operation regression subsets through ptest",
+      "graphify AST update",
+      "git diff --check"
+    ],
+    "not_run": "No ptest full, deployment, push, audit, static scanner, dependency advisory scan or external service was used."
+  },
+  "commits": {
+    "tests": "ecaad5e",
+    "source": "56cf9d0",
+    "evidence": null
+  },
+  "confidence": "medium",
+  "confidence_reason": "The focused controller evidence and scoped regressions are fresh and green, but root-owned whole-suite verification and real preprovisioned native fixture execution remain intentionally outside this checkpoint."
+}
