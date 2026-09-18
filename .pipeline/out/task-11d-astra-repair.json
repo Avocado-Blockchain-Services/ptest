@@ -1,0 +1,88 @@
+{
+  "task": "11D Opus repair",
+  "date": "2026-09-18",
+  "status": "repair-implemented-scoped-verification-passed-qualification-incomplete-awaiting-review",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra",
+  "base_commit": "da4a996",
+  "commits": {
+    "red_tests": "6d4c08b",
+    "expanded_tests": "79addda",
+    "source": "96ba611"
+  },
+  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11d-pytest/6158482f-7416-46b9-a57b-d1b99eddb9bf.jsonl",
+  "qualification": {
+    "executed": "Linux x86_64, CPython 3.13.11, pytest 9.1.1, pluggy 1.6.0; xdist absent",
+    "interpreter": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/.venv/bin/python",
+    "method": "Existing provisioned controller interpreter, selected explicitly by each miniature project's config. Candidate ptest invokes its real guard, real scheduler, trusted bridge, real pytest.main, and report consumer. No fixture install, environment symlink, raw test runner, fake pytest or fake guard is used by the new acceptance suite.",
+    "unqualified": [
+      "pytest 8.4.2 pass/fail: no preprovisioned interpreter supplied (2 skips)",
+      "pytest 9.0.3 pass/fail: no preprovisioned interpreter supplied (2 skips)",
+      "pytest 9.1.0 pass/fail: no preprovisioned interpreter supplied (2 skips)",
+      "Real installed xdist rejection: no preprovisioned xdist interpreter supplied (1 skip)",
+      "Real unsupported pytest version rejection: no preprovisioned interpreter supplied (1 skip)",
+      "Other CPython versions, macOS, optional pytest-cov/coverage tuple, independent-repository adoption"
+    ],
+    "limitation": "The bridge still enumerates the original four candidate pytest versions. This repair provides real evidence for only the tuple above; it does not promote the other candidates or close their qualification requirement. Explicit PTEST_TEST_PYTHON_<version> overrides run those cases only when already provisioned. Missing tuples are visible skips, not successful native runs."
+  },
+  "repair_mapping": {
+    "B1": "Replaced the fake-guard operation test with real subprocess pass/fail execution, stdout, native exits, one granted slot, post-quiescence report consumption, one-time consume, cleanup and real scheduler release. Qualification remains partial for unavailable tuples.",
+    "B2": "Real subprocess tests now cover absent/malformed/forged/mismatched/replayed reports, native/report exit disagreement, exclusive report-write collision with zero/nonzero exits, exact report-name mismatch, early bridge refusal, cancellation, literal suffix, queued config mutation, same-checkout serialization, cross-checkout overlap, source-change reasons and reporter/cleanup preservation. Real installed xdist and unsupported-version tests are authored but skipped without provisioned interpreters.",
+    "B3": "Authenticated bridge refusals produce incomplete/ptest-origin results while retaining observed child code. Missing or rejected reports also produce incomplete without losing nonzero native codes. Pytest's own usage exit 4 is complete native evidence unless the owned plugin actually refused. Exit agreement is checked before a refusal report can change origin.",
+    "B4": "After grant and before launch, re-resolve and compare the complete local config. Changed arguments, runner kind, invalid TOML and removed config cancel the pending grant without executing the queued test. Scoped source invalidation reasons are retained while source_valid stays false.",
+    "B5": "Ignore pluggy's None blocked-plugin entries. Refuse known execution-control plugins and unowned registered critical hook implementations, including specname aliases and plugins registered during configure. Real blocked-xdist, conftest plugin, repeat-plugin and alias tests exercise these controls.",
+    "B6": "Claims now say before collection, after conftest/plugin imports. A real conftest writes a side-effect marker before qualification refuses the unowned executor; test collection and the executor do not run."
+  },
+  "security_contracts": {
+    "identity": "Grant run/nonce/attempt/report identity must match; real nonce, attempt and previous-grant replay mutations cannot produce a pass.",
+    "authorization": "The admitted serial slot cannot authorize an unowned executor or a changed queued command; plugin controls and fresh config comparison refuse before collection/launch respectively.",
+    "tenancy": "Local checkout/run isolation applies rather than remote tenants. Two real runs serialize on one checkout and overlap on different checkouts. Report allocation/cleanup remains binding-scoped.",
+    "input": "Literal shell metacharacters and flag-looking suffix values reach native pytest unchanged; no shell expansion. Invalid report bytes and report identity/exit mutations fail closed.",
+    "state": "Report consume occurs in FINALIZING after real guard drain/reap, cannot replay, and valid consumed reports are removed. Cancellation releases the checkout for a subsequent real run. Config changes cancel pending grants.",
+    "exposure": "Private report identities and snapshots are not copied into public results. Native output remains verbatim; bridge reasons use fixed messages and an existing public reason code.",
+    "availability": "Native scoped pytest requests reserve one slot despite workers=8. Fixture waits are condition-based with explicit deadlines. The existing bounded report reader and private-file contract remain unchanged.",
+    "dependencies": "No dependency installation or package metadata update. Existing controller runtime and standard-library subprocess fixtures only. Real reporter and pytest_unconfigure hooks remain active.",
+    "absent_from_original_spec": "No new domain policy. Hook specname aliases and disagreeing refusal-report origin were derived executable abuse cases needed to enforce the existing hook ownership and native-exit contracts."
+  },
+  "controller": {
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+    "executable": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap",
+    "environment": {"PYTHONPATH": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra/src"},
+    "test_paths": "All paths below are absolute paths under /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra/tests/ng/.",
+    "frozen_dispatcher": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "frozen_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "workers": 1,
+    "network_or_install": false
+  },
+  "test_runs": [
+    {"stage": "initial RED, before source edits", "files": ["test_pytest_scoped_subprocess.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 1, "output": "15 failed, 12 passed, 6 skipped in 30.42s", "interpretation": "14 product failures; cancellation fixture incorrectly accessed LeaseView.owner (one test error, not product RED)."},
+    {"stage": "corrected cancellation fixture before source edits", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "cancellation", "--tb=short"], "exit_code": 0, "output": "1 passed, 32 deselected in 1.58s"},
+    {"stage": "first repair run", "files": ["test_pytest_scoped_subprocess.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 1, "output": "3 failed, 24 passed, 6 skipped in 24.26s", "interpretation": "Three reason assertions used native-config-invalid, which is outside the public Reason vocabulary. Corrected to existing unsupported-capability while retaining the private marker."},
+    {"stage": "all existing adapter/operation/Task11D tests before boundary update", "files": ["test_pytest_adapter.py", "test_operations.py", "test_task_11d_pytest.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 1, "output": "23 failed, 218 passed in 19.93s", "interpretation": "22 existing native_cli cases expected deferred FULL/automatic/setup success; 1 fake-guard test used a config different from disk. Orchestrator authorized current-tier unsupported assertions with future acceptance preserved in fixture README; fake operation test replaced by real coverage. All 65 command operation tests passed."},
+    {"stage": "expanded subprocess run", "files": ["test_pytest_scoped_subprocess.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 1, "output": "1 failed, 30 passed, 8 skipped in 26.99s", "interpretation": "Early fault injection patched the module callable after the registry captured it, so no fault was delivered. Corrected fixture to mutate the manifest at the real launch boundary; no fake guard added."},
+    {"stage": "repeat plugin RED", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "repeat_plugin", "--tb=short"], "exit_code": 1, "output": "1 failed, 39 deselected in 0.89s", "interpretation": "A repeat plugin using generation hooks bypassed the execution-hook-only gate."},
+    {"stage": "early refusal and repeat GREEN", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "early_bridge or repeat_plugin", "--tb=short"], "exit_code": 0, "output": "2 passed, 38 deselected in 1.18s"},
+    {"stage": "scoped combined GREEN", "files": ["test_pytest_scoped_subprocess.py", "test_pytest_adapter.py", "test_operations.py", "test_task_11d_pytest.py", "test_reports.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 0, "output": "339 passed, 8 skipped in 46.78s"},
+    {"stage": "targeted write/source/cancel checks", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "write_collision or source_change or native_tuple or cancellation", "--tb=short", "--durations=5"], "exit_code": 1, "output": "1 failed, 5 passed, 6 skipped, 31 deselected in 5.18s", "interpretation": "Source-change reason passed; fixture incorrectly expected private input snapshots in the public export. Corrected assertion to observable changed file and public reason."},
+    {"stage": "registered hook alias RED", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "hook_alias", "--tb=short"], "exit_code": 1, "output": "1 failed, 43 deselected in 0.86s", "interpretation": "A specname-aliased execution hook bypassed attribute-name inspection. Replaced it with inspection of pluggy's actual registered hook implementations."},
+    {"stage": "expanded combined GREEN", "files": ["test_pytest_scoped_subprocess.py", "test_pytest_adapter.py", "test_operations.py", "test_task_11d_pytest.py", "test_reports.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 0, "output": "343 passed, 8 skipped in 53.19s"},
+    {"stage": "disagreeing refusal report RED", "files": ["test_pytest_scoped_subprocess.py"], "args": ["-k", "disagreeing_refusal", "--tb=short"], "exit_code": 1, "output": "1 failed, 44 deselected in 0.93s", "interpretation": "A bridge-refused report with exit4 incorrectly changed observed native exit1's origin to ptest. Exit agreement now precedes refusal classification."},
+    {"stage": "final combined GREEN", "files": ["test_pytest_scoped_subprocess.py", "test_pytest_adapter.py", "test_operations.py", "test_task_11d_pytest.py", "test_reports.py"], "args": ["--tb=short", "--durations=12"], "exit_code": 0, "output": "344 passed, 8 skipped in 52.98s", "real_subprocess_suite": "37 passed, 8 unqualified skips among 45 cases", "durations": "Slowest final case 1.59s (two real cross-checkout runs). Other multi-process/scheduler cases 1.17-1.58s. No final test exceeded 2s."}
+  ],
+  "checks": [
+    {"command": "graphify update .", "exit_code": 0, "output": "4487 nodes, 9820 edges, 302 communities; AST only; seven JSON/protocol sources produced zero nodes."},
+    {"command": "graphify update .", "exit_code": 0, "output": "Final source refresh: 4488 nodes, 9824 edges, 299 communities; AST only; seven JSON/protocol sources produced zero nodes. No semantic provider or model token usage. Labels/wiki were not used as fresh semantic evidence."},
+    {"command": "git diff --check", "exit_code": 0}
+  ],
+  "gates": {
+    "run": "All listed tests through the frozen ptest controller; scoped report/adapter/operations regression coverage; graphify AST update; whitespace validation.",
+    "missing": "No checked-in applicable secrets/static/dependency security gate script in this stage. No scanner installed or external advisory scan run.",
+    "not_run": "No ptest --full, independent audit, dependency installation, push, integration, deployment, installed-CLI replacement or real-provider service."
+  },
+  "residual_limits": [
+    "B1/B2 cannot be claimed fully qualified across all candidate runtimes: eight explicit skips remain. The orchestrator must supply provisioned interpreters before promoting those cases.",
+    "Full/automatic/setup/shadow/probe, native inventory/selection, source-valid/full-gate/baseline/history publication remain outside this scoped tier.",
+    "Invalid, forged or unreadable report files remain retained by the existing reports.py contract. Cleanup deletes only the exact successfully consumed inode; write-collision tests prove existing files are not overwritten. Protocol-invalid or unconfirmed-quiescence runs retain report state for recovery. No unsafe broad discard API was introduced.",
+    "Plugin/conftest code can execute before the collection gate. This is trusted local execution, not a sandbox against malicious same-user code.",
+    "Coverage plugin qualification and unprovisioned third-party execution plugin distributions remain unverified; unqualified critical hook owners are refused, not silently disabled."
+  ]
+}
