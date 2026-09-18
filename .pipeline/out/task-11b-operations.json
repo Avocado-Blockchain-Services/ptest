@@ -3,7 +3,8 @@
   "scope": "guarded generic command execution lifecycle",
   "status": "implemented_not_verified",
   "commits": [
-    "d028f73"
+    "d028f73",
+    "493c023"
   ],
   "red_green": [
     {
@@ -13,6 +14,11 @@
     },
     {
       "command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k 'runner_registry_is_closed_and_generic_is_exclusive'",
+      "status": "unavailable",
+      "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'command_success_preserves_literal_argv_and_streams or command_preserves_stdout_and_stderr_bytes or command_nonzero_or_signal'",
       "status": "unavailable",
       "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
     },
@@ -33,7 +39,8 @@
     "Scoped command tails are appended in a private effective runner config; automatic command mode is full and excludes user tails.",
     "Guard launch uses a socketpair and manifest pipe with close_fds/start_new_session; child stdout/stderr remain inherited and raw child status is read only from authenticated runner-facts.",
     "Controller validates run/nonce/direction/order/attempt/report facts and requires matching DRAINING, guard reap, begin_finalization proof, and finish before a terminal result.",
-    "Typed command results retain unknown counts and false full-gate/baseline eligibility; CLI resolves config/domain once and delegates a literal RunRequest."
+    "Typed command results retain unknown counts and false full-gate/baseline eligibility; CLI resolves config/domain once and delegates a literal RunRequest.",
+    "Guard launch strips inherited ptest control variables, rejects literal tails outside scoped mode, and cancels pre-registration adapter/launch failures without guessing release."
   ],
   "verified": [
     "Python syntax compilation",
