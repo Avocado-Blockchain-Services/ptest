@@ -1,0 +1,106 @@
+{
+  "task": 5,
+  "status": "ready-for-controller-review",
+  "implemented": [
+    "prepare builds a literal project-interpreter command for the trusted stdlib bridge (src/ptest/adapters/pytest.py:53-112).",
+    "serial admission does not add or disable xdist; a parallel grant adds exactly -n <grant.slots> (src/ptest/adapters/pytest.py:82-90).",
+    "remote/proxy and user-owned xdist controls are rejected before bridge import (src/ptest/adapters/pytest.py:20-29).",
+    "the bridge validates its generated descriptor, grant range, CPython 3.11-3.14, then invokes pytest.main with only its additive plugin (src/ptest/runtime/pytest_bridge.py:20-83)."
+  ],
+  "verified": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k 'not native_cli' --durations=10",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-5",
+      "exit_code": 0,
+      "output": "16 passed in 0.03s",
+      "raw_log": ".pipeline/local/task-5-green-final.log"
+    },
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-5",
+      "exit_code": 0,
+      "output": "Code graph updated."
+    },
+    {
+      "command": "git diff --check",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-5",
+      "exit_code": 0,
+      "output": "no output"
+    }
+  ],
+  "red_evidence": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k non_interpreter --durations=10",
+      "exit_code": 1,
+      "output": "Failed: DID NOT RAISE Problem",
+      "raw_log": ".pipeline/local/task-5-red-launcher.log"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k unsupported_interpreter --durations=10",
+      "exit_code": 1,
+      "output": "AttributeError: module 'ptest.runtime.pytest_bridge' has no attribute '_python_version'",
+      "raw_log": ".pipeline/local/task-5-red-version.log"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k 'serial_without or grant_and_attempt' --durations=10",
+      "exit_code": 2,
+      "output": "ModuleNotFoundError: No module named 'ptest.adapters.pytest'",
+      "raw_log": ".pipeline/local/task-5-red.log",
+      "note": "This initial module-absence import error is recorded accurately; later RED checks exercised behavioral assertions."
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "serial preparation has no -n or no:xdist and summary workers equals one",
+      "status": "MET",
+      "evidence": "tests/ng/test_pytest_adapter.py:49-57; src/ptest/adapters/pytest.py:82-90"
+    },
+    {
+      "criterion": "native pytest.main bridge and additive plugin",
+      "status": "MET (unit-level)",
+      "evidence": "src/ptest/runtime/pytest_bridge.py:52-83"
+    },
+    {
+      "criterion": "remote/proxy rejection before runner import",
+      "status": "MET (preparation path)",
+      "evidence": "tests/ng/test_pytest_adapter.py:70-76; src/ptest/adapters/pytest.py:20-29"
+    },
+    {
+      "criterion": "pytest9 fixture matrix, coverage/reporters/inventory corruption and actual native subprocess cases",
+      "status": "DEFERRED",
+      "reason": "Task T11 owns candidate-pTest subprocess execution; no native_cli profile was run here by instruction."
+    }
+  ],
+  "smell_sweep": {
+    "bugs": "Checked adapter lines 20-112 and bridge lines 20-83. The final reread found that a non-interpreter launcher would invoke pytest against the bridge file rather than execute it; added the explicit interpreter gate and regression at tests/ng/test_pytest_adapter.py:84-89.",
+    "duplicates": "rg for prepare, pytest_bridge, OwnedPlugin, native-config-invalid and xdist found no existing adapter/bridge owner; src/ptest/adapters/__init__.py and src/ptest/runtime/__init__.py were placeholder packages.",
+    "layering": "Preparation owns contract-to-argv translation; bridge is intentionally ptest-import-free in the target interpreter (src/ptest/runtime/pytest_bridge.py:1-6).",
+    "hacks_todos": "No TODO/FIXME/stub/fallback was introduced. Native subprocess coverage is explicitly deferred, not silently emulated.",
+    "test_sensitivity": "Removing serial xdist suppression, grant-attempt validation, pre-import remote rejection, interpreter gate, descriptor route, or worker range checks fails tests at lines 49-57, 70-89, 99-120.",
+    "contract_drift": "No shared contracts changed. Consumers/producers checked: PreparedRun, Config, Plan, Grant and AttemptIdentity in src/ptest/contracts.py; no existing prepare consumer exists.",
+    "security": "Applies: untrusted argv and project interpreter boundary are guarded at adapter lines 20-29, 45-50 and bridge lines 20-49; no secrets, tenant, network, API or remote service surface exists.",
+    "money_math_time": "N/A: workers are bounded integer capacity, no money/timezone/rounding behavior.",
+    "ux": "Applies: invalid controls raise stable native-config-invalid messages before pytest import/execution.",
+    "legacy": "No legacy runner path or compatibility shim was added.",
+    "dependencies": "No dependency or lockfile change; bridge relies only on standard library until pytest import.",
+    "configuration": "Protocol location and grant fields are centralized through PreparedRun.env_updates; schema remains T0 runtime/protocol-v1.json.",
+    "edge_paths": "Covered: serial, selected literal metacharacters, remote/parallel inputs, mismatch, invalid launcher, malformed grant workers, unsupported interpreter. Empty plan and native execution/teardown/restart are not verified and remain T11 work."
+  },
+  "claimed_vs_shipped_delta": "The foundational preparation and bridge are shipped; the extensive version/configuration/reporter/coverage/native fixture matrix is not shipped in this task handoff.",
+  "stubbed_todo_deferred": "No code TODOs. T11 native_cli execution remains deferred by the task boundary.",
+  "discovered_but_not_fixed": "The frozen plan requires a broad pytest9 profile and bridge event inventory protocol. That needs T11 orchestration/real fixture execution and was not invented without its caller contract.",
+  "owned_files": [
+    "src/ptest/adapters/pytest.py",
+    "src/ptest/runtime/pytest_bridge.py",
+    "tests/ng/test_pytest_adapter.py",
+    ".pipeline/out/task-5.json"
+  ],
+  "touched_files": [
+    "src/ptest/adapters/pytest.py",
+    "src/ptest/runtime/pytest_bridge.py",
+    "tests/ng/test_pytest_adapter.py",
+    ".pipeline/out/task-5.json"
+  ],
+  "confidence": "medium",
+  "confidence_reason": "Focused local preparation behavior is tested, but actual candidate-pTest/native pytest profile execution is intentionally deferred to T11."
+}
