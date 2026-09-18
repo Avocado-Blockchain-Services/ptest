@@ -1420,7 +1420,8 @@ def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
         )
         guard, guard_absent = _observe_process(row["guard_pid"])
         valid = (not escaped and guard_absent and group.exists is False
-                 and group.permission and row["grant_time"] is not None
+                 and group.permission and isinstance(row["grant_time"], (int, float))
+                 and not isinstance(row["grant_time"], bool)
                  and group.checked_at >= row["grant_time"])
         if not valid:
             _finalization_failure(conn, grant.run_id, escaped=escaped)
