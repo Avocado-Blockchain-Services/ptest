@@ -1,0 +1,72 @@
+{
+  "task": "6",
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "",
+  "report_path": ".pipeline/out/task-6.json",
+  "test_summary": "10 unit/static tests passed; native_cli intentionally not run before Task 11",
+  "implemented": [
+    "prepare(config, plan, grant, attempt) produces literal argv, ptest-owned worker environment, redacted command summary, and strict grant/attempt consistency checks (src/ptest/adapters/vitest.py:18-74).",
+    "The Node bridge resolves Vitest from the project cwd, uses public parseCLI/createVitest/configureVitest APIs, rejects user-owned worker controls and unsafe modes, validates a single forks project, and closes in finally (src/ptest/runtime/vitest_bridge.mjs:10-153).",
+    "Exact 3.2.7 advanced and 3.1.4/3.2.6/3.2.7 basic fixture metadata plus generated package-lock v3 files are present without node_modules (tests/ng/fixtures/vitest/)."
+  ],
+  "verified": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_vitest_adapter.py -k 'not native_cli' --durations=10",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-6",
+      "exit": 0,
+      "output": "10 passed, 4 deselected in 0.02s",
+      "raw_log": ".pipeline/local/task-6-green-final.log"
+    },
+    {
+      "command": "node --check src/ptest/runtime/vitest_bridge.mjs",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-6",
+      "exit": 0,
+      "output": "NODE_CHECK_EXIT=0",
+      "raw_log": ".pipeline/local/task-6-node-check.log"
+    },
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-6",
+      "exit": 0,
+      "output": "Code graph updated.",
+      "raw_log": ".pipeline/local/task-6-graphify-final.log"
+    },
+    {
+      "command": "npm install --package-lock-only --ignore-scripts --no-audit --no-fund (each of advanced-3.2.7, basic-3.1.4, basic-3.2.6, basic-3.2.7)",
+      "cwd": "tests/ng/fixtures/vitest/<fixture>",
+      "exit": 0,
+      "output": "four package-lock.json files generated; find printed no node_modules directories",
+      "network": "npm registry metadata resolution was permitted by the Task 6 brief; lifecycle scripts were disabled"
+    }
+  ],
+  "not_verified": [
+    "Native Vitest subprocess behavior, coverage terminal parity, macOS, and Node/Vitest 3.2.7 execution are NOT RUN. Task 11 must execute native_cli only through candidate ptest before promotion.",
+    "The fixture dependency advisory/license/maintenance release gate is NOT RUN; no runtime dependency was added to ptest itself."
+  ],
+  "deferred": [
+    "The complete native_cli adversarial matrix (pool/config/env caps, reporters, coverage failures, typecheck/workspace/API/watch rejection, and changed-input outcomes) requires the candidate executor and is owned for execution by Task 11."
+  ],
+  "discovered_but_not_fixed": [
+    "PreparedRun does not carry a bridge report path in the available frozen call surface; bridge event persistence/decoding must be wired by Task 11 without changing this adapter's public preparation contract."
+  ],
+  "acceptance": [
+    "[x] safe preparation/bounds fixture: tests/ng/test_vitest_adapter.py:50-58; src/ptest/adapters/vitest.py:41-72.",
+    "[x] unit scope through ptest: verified command above; bridge public API and lifecycle static assertions at tests/ng/test_vitest_adapter.py:107-138.",
+    "[x] fixture pins and uninstalled package metadata: tests/ng/test_vitest_adapter.py:141-153; tests/ng/fixtures/vitest/*/package.json and package-lock.json.",
+    "[DEFERRED] native_cli behavioral execution: candidate ptest is unavailable until Task 11; no raw Vitest/npm test command was used."
+  ],
+  "three_passes": {
+    "pass1_reread": "Re-read every owned source/test/fixture text and parsed all four generated lockfiles. New observation: the bridge must resolve Vitest from cwd rather than its installed package location; fixed by loadProjectVitest at src/ptest/runtime/vitest_bridge.mjs:12-21 before final verification.",
+    "pass2_source_of_truth": "Re-read Task 6 plan/design bridge flow and the Vitest v3 API. parseCLI returns singular filter, and exact module IDs are absolute; the bridge uses parsed.filter and resolves selected paths before matching (src/ptest/runtime/vitest_bridge.mjs:113-144). Advanced uses globTestSpecifications/init/runTestSpecifications, while basic_serial uses start without init. Native execution remains explicitly deferred.",
+    "pass3_smell_sweep": "Bugs/error: missing module errors are caught by main().catch after deferred project resolution (src/ptest/runtime/vitest_bridge.mjs:12-21,149-152). Duplicate paths: rg found no existing Vitest adapter/bridge. Wrong layer: argv preparation stays Python; project module resolution is Node bridge. No shell/child-process fallback. No dependencies outside mandated fixture devDependencies. Tests fail if no-op removes worker env/grant validation/public flow literals. Contract consumers searched: PreparedRun/bridge symbols; only this new adapter produces them before T11 registry wiring. Security applies: literal argv and unsafe worker/mode rejection covered. Money/time/UX do not apply. Legacy compatibility does not apply: clean-break new files only. Config centralization applies: all worker controls are in this adapter/bridge, no global config. Edge coverage: happy, empty execution, mismatched grant, literal arguments, missing module handling path, repeated preparation; real cancellation/restart/native coverage are untested and deferred."
+  },
+  "owned_files": [
+    "src/ptest/adapters/vitest.py",
+    "src/ptest/runtime/vitest_bridge.mjs",
+    "tests/ng/test_vitest_adapter.py",
+    "tests/ng/fixtures/vitest/",
+    ".pipeline/out/task-6.json"
+  ],
+  "touched_files_outside_owned_set": [],
+  "confidence": "medium: preparation and syntax/static contracts have direct evidence, but promotion depends on the intentionally deferred candidate-pTest native subprocess matrix."
+}
