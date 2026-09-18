@@ -289,23 +289,61 @@ def _native_prepared(config: C.Config, plan: C.Plan, grant: C.Grant,
 def _command(config: C.Config, plan: C.Plan, grant: C.Grant) -> C.PreparedRun:
     if config.runner.kind is not C.RunnerKind.COMMAND:
         raise _problem("native-config-invalid", "command preparation requires runner.kind=command")
-    if plan.execution != "full":
-        raise _problem("unsupported-capability", "literal command profiles cannot claim scoped or selected execution")
-    argv = config.runner.launcher + config.runner.args + config.runner.full_args
-    return C.PreparedRun(
-        argv=argv, cwd=_project_root(config), env_updates=(),
-        capability=C.Capability(
-            execution=C.ExecutionTier.EXCLUSIVE_COMMAND, selection=False,
-            lifecycle="cooperative-process-group",
-            limitations=(C.Reason(
-                code="unsupported-capability",
-                message="Task11 must set AdmissionRequest.exclusive=True using requires_exclusive(config) before admission; exclusive admission does not prove or contain inner command parallelism; Task11 preserves native outcomes",
-            ),),
-        ),
-        summary=C.summarize_command(C.RunnerKind.COMMAND, plan.mode, argv,
-                                    workers=grant.slots,
-                                    provenance=("literal-exclusive-command",)),
-    )
+    if plan.execution not in ("full", "scoped"):
+        if plan.execution == "selected":
+            raise _problem(
+                "unsupported-capability",
+                "literal command profiles do not support selected execution",
+            )
+        raise _problem("native-config-invalid", "literal command plan is not executable")
+    if plan.files:
+        # A generic command has no inventory or file selector contract.  In
+        # particular, caller argv must stay in the ephemeral runner config;
+        # Plan.files is a public selection field, not an argv side channel.
+        raise _problem(
+            "unsupported-capability",
+            "literal command profiles do not accept public plan files",
+        )
+    if plan.execution == "scoped" and plan.mode is not C.Mode.SCOPED:
+        raise _problem(
+            "native-config-invalid",
+            "scoped command execution requires an explicit scoped plan",
+        )
+
+    try:
+        # RunnerConfig validates each configured argv sequence.  PreparedRun
+        # is the shared final bound for the combined child argv (including
+        # token count, per-token UTF-8 size, aggregate UTF-8 size and NULs).
+        # Keep these tuples untouched: no shell string is ever formed or
+        # reparsed, and scoped execution deliberately excludes full_args.
+        common = tuple(config.runner.launcher) + tuple(config.runner.args)
+        argv = (common if plan.execution == "scoped"
+                else common + tuple(config.runner.full_args))
+        summary = C.summarize_command(
+            C.RunnerKind.COMMAND, plan.mode, argv,
+            workers=grant.slots,
+            provenance=("literal-exclusive-command",),
+        )
+        return C.PreparedRun(
+            argv=argv, cwd=_project_root(config), env_updates=(),
+            capability=C.Capability(
+                execution=C.ExecutionTier.EXCLUSIVE_COMMAND, selection=False,
+                lifecycle="cooperative-process-group",
+                limitations=(C.Reason(
+                    code="unsupported-capability",
+                    message="Task11 must set AdmissionRequest.exclusive=True using requires_exclusive(config) before admission; exclusive admission does not prove or contain inner command parallelism; Task11 preserves native outcomes",
+                ),),
+            ),
+            summary=summary,
+        )
+    except (TypeError, ValueError) as exc:
+        # Do not leak malformed token values through adapter errors.  The
+        # contracts own the exact limits; this layer maps their construction
+        # failures to the stable adapter problem code.
+        raise _problem(
+            "native-config-invalid",
+            "literal command argv violates the configured bounds",
+        ) from exc
 
 
 def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,

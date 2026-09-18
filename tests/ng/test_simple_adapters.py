@@ -168,9 +168,109 @@ def test_command_preserves_literal_tokens_and_requires_exclusive_admission(tmp_p
     assert "does not prove or contain inner command parallelism" in warning
 
 
+def test_command_scoped_uses_only_common_args_and_full_adds_full_args(tmp_path):
+    common = (
+        "literal value with spaces",
+        'quote"and\'mark',
+        "ümlaut-値",
+        "$(not-shell-expanded)",
+        "--looks-like-a-flag",
+        "; && |",
+    )
+    full_only = ("full-only value with spaces", "--full-flag", "Ω")
+    config = _config(tmp_path, C.RunnerKind.COMMAND, args=common, full_args=full_only)
+
+    scoped = prepare(
+        config,
+        C.Plan(mode=C.Mode.SCOPED, execution="scoped"),
+        _grant(),
+        _attempt(),
+    )
+    full = prepare(config, C.Plan(mode=C.Mode.FULL, execution="full"), _grant(), _attempt())
+
+    assert scoped.argv == config.runner.launcher + common
+    assert full.argv == config.runner.launcher + common + full_only
+    assert full.argv != scoped.argv
+    assert full_only[0] not in scoped.argv
+
+
+def test_command_rejects_public_file_payloads(tmp_path):
+    plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=("literal argv",))
+    with pytest.raises(C.Problem, match="unsupported-capability"):
+        prepare(_config(tmp_path, C.RunnerKind.COMMAND), plan, _grant(), _attempt())
+
+
+@pytest.mark.parametrize("execution", ["selected", "none", "malformed"])
+def test_command_rejects_non_command_plan_shapes(tmp_path, execution):
+    plan = object.__new__(C.Plan)
+    object.__setattr__(plan, "mode", C.Mode.SCOPED)
+    object.__setattr__(plan, "execution", execution)
+    object.__setattr__(plan, "files", ())
+    object.__setattr__(plan, "reasons", ())
+    object.__setattr__(plan, "input_digest", None)
+    object.__setattr__(plan, "compatibility", None)
+    object.__setattr__(plan, "baseline_run_id", None)
+    object.__setattr__(plan, "static_preview", False)
+    with pytest.raises(C.Problem):
+        prepare(_config(tmp_path, C.RunnerKind.COMMAND), plan, _grant(), _attempt())
+
+
+@pytest.mark.parametrize("mode", [C.Mode.FULL, C.Mode.AUTOMATIC])
+def test_command_scoped_execution_requires_explicit_scoped_mode(tmp_path, mode):
+    plan = C.Plan(mode=mode, execution="scoped")
+    with pytest.raises(C.Problem, match="native-config-invalid"):
+        prepare(_config(tmp_path, C.RunnerKind.COMMAND), plan, _grant(), _attempt())
+
+
+def test_command_plan_full_does_not_claim_selection_or_inventory(tmp_path):
+    config = _config(
+        tmp_path,
+        C.RunnerKind.COMMAND,
+        args=("--input", "all"),
+        full_args=("--coverage",),
+    )
+    prepared = prepare(
+        config,
+        C.Plan(mode=C.Mode.AUTOMATIC, execution="full"),
+        _grant(),
+        _attempt(),
+    )
+    assert prepared.capability.execution is C.ExecutionTier.EXCLUSIVE_COMMAND
+    assert prepared.capability.selection is False
+
+
+def test_command_rejects_oversized_combined_argv_without_echoing_tokens(tmp_path):
+    token = "x" * 16384
+    config = _config(
+        tmp_path,
+        C.RunnerKind.COMMAND,
+        args=tuple(token for _ in range(8)),
+        full_args=(token,),
+    )
+    with pytest.raises(C.Problem, match="native-config-invalid") as caught:
+        prepare(config, C.Plan(mode=C.Mode.FULL, execution="full"), _grant(), _attempt())
+    assert token not in str(caught.value)
+
+
+def test_command_rejects_malformed_runner_argv_as_typed_problem(tmp_path):
+    config = _config(tmp_path, C.RunnerKind.COMMAND)
+    runner = object.__new__(C.RunnerConfig)
+    object.__setattr__(runner, "kind", C.RunnerKind.COMMAND)
+    object.__setattr__(runner, "launcher", ("literal-tool",))
+    object.__setattr__(runner, "args", ("ok", 7))
+    object.__setattr__(runner, "full_args", ())
+    object.__setattr__(runner, "test_roots", ())
+    object.__setattr__(runner, "workers", 2)
+    object.__setattr__(runner, "lifecycle", "cooperative-process-group")
+    config = replace(config, runner=runner)
+    with pytest.raises(C.Problem, match="native-config-invalid"):
+        prepare(config, C.Plan(mode=C.Mode.SCOPED, execution="scoped"), _grant(), _attempt())
+
+
 def test_command_rejects_implicit_scoped_selection(tmp_path):
     with pytest.raises(C.Problem, match="unsupported-capability"):
-        prepare(_config(tmp_path, C.RunnerKind.COMMAND), _plan(execution="scoped"),
+        prepare(_config(tmp_path, C.RunnerKind.COMMAND),
+                C.Plan(mode=C.Mode.SCOPED, execution="selected"),
                 _grant(), _attempt())
 
 
