@@ -1,0 +1,20 @@
+{
+  "task": "8",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-8/b313b949-7ad0-41c4-be3a-2d908151bb28.jsonl",
+  "reviewed_range": "8c4ea6c..e587e13",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_source.py tests/ng/test_selection.py --tb=short --durations=10",
+    "result": "80 passed in 3.74s",
+    "diff_check": "git diff --check 8c4ea6c..e587e13: clean"
+  },
+  "approved_repair": "e26374e",
+  "notes": [
+    "Ignored content is never an automatic exemption; undeclared ignored inputs force a full plan.",
+    "Selection does not execute Git content filters; conversion or raw-byte uncertainty forces a full plan.",
+    "T11 must preserve private history boundaries: snapshot file metadata must not be exported or shared.",
+    "A later validated profile may address generated caches; v1 conservatively treats unowned ignored caches as dirty."
+  ]
+}
