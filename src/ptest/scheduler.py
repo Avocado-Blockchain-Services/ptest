@@ -974,10 +974,9 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
                    reason_message="owner and group absent; outcome incomplete")
     elif not _same_identity(owner, row):
         _uncertain(row, "finalizer identity is indeterminate")
-    elif row["state"] != "UNCERTAIN":
-        # The existing nonce/generation still owns this transition. A concurrent
-        # poll cannot revoke a live caller during final input/outcome publication.
-        row.update(state="FINALIZING", phase="finalization")
+    # A live owner retains its exact state, including the authenticated DRAINING
+    # handoff. Only begin_finalization may consume that handoff; group absence
+    # alone must not make a RUNNING guard death look like clean completion.
     return row
 
 

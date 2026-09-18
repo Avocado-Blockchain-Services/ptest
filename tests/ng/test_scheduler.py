@@ -117,14 +117,17 @@ def _configure(domain, slots=2, jobs=2, memory=64):
     domain.machine_config.chmod(0o600)
 
 
-def test_poller_preserves_live_finalizer_and_checkout_charge(case, world):
+def test_poller_preserves_live_finalizer_and_checkout_charge(case, world, monkeypatch):
     domain = case.domain()
     ticket, grant = _running(case, domain, world)
     follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
     _gone(world, world.guard)
+    proof = begin_finalization(domain, grant)
     assert poll(domain, ticket).state is C.LeaseState.FINALIZING
     assert poll(domain, follower).grant is None
-    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    finish(domain, grant, proof, _final())
     assert poll(domain, ticket).state is C.LeaseState.RELEASED
     assert poll(domain, follower).grant is not None
 
@@ -691,7 +694,7 @@ def test_real_guard_forged_proof_and_multiprocess_finalizer_poller(case, forged)
         finish(domain, grant, _proof(grant, guard.pgid, time.monotonic()), _final())
         events.append(poll(domain, ticket).state.value)
     assert events == ((["live-proof-rejected"] if forged else []) +
-                      ["guard-reaped", "UNCERTAIN" if forged else "FINALIZING", "RELEASED"])
+                      ["guard-reaped", "UNCERTAIN" if forged else "RUNNING", "RELEASED"])
 
 
 def _racing_admission(domain, request, barrier, channel):
@@ -1509,6 +1512,7 @@ def test_configured_unknown_memory_reserves_the_declared_budget(case, monkeypatc
 
 def test_cancel_pending_requires_exact_owner_and_ticket_sequence(case, world):
     domain = case.domain(slots=1, jobs=1)
+    _running(case, domain, world, "blocker")
     ticket = enqueue(domain, _request(case, domain, "queued"))
     wrong_owner = replace(world.owner, birth=world.owner.birth + 1)
 
@@ -1592,18 +1596,24 @@ def test_begin_finalization_returns_bound_proof_and_retains_claims(case, world, 
     assert poll(domain, follower).grant is None
 
 
-def test_begin_finalization_fails_closed_for_missing_guard(case, world):
+@pytest.mark.parametrize("state", ["GRANTED", "DRAINING"])
+def test_begin_finalization_fails_closed_for_missing_guard(case, world, state):
     domain = case.domain(slots=1, jobs=1)
     ticket = enqueue(domain, _request(case, domain, "unregistered"))
     grant = poll(domain, ticket).grant
     follower = enqueue(domain, _request(case, domain, "follower"))
     assert grant is not None
+    # DRAINING with no registered guard is malformed durable state; exercise
+    # that guard check independently of the ordinary GRANTED state gate.
+    if state == "DRAINING":
+        _sql(domain, "UPDATE jobs SET state='DRAINING',phase='draining' WHERE run_id=?",
+             (grant.run_id,))
 
     with pytest.raises(C.Problem) as caught:
         begin_finalization(domain, grant)
 
     assert caught.value.code == "ownership-uncertain"
-    assert poll(domain, ticket).state is C.LeaseState.GRANTED
+    assert poll(domain, ticket).state.value == state
     assert poll(domain, follower).grant is None
 
 
@@ -1627,11 +1637,13 @@ def test_begin_finalization_fails_closed_for_live_or_ambiguous_group(
 def test_begin_finalization_fails_closed_for_escaped_descendant(case, world, monkeypatch):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
-    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=900002)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=world.guard.pgid)
     world.identities[child.pid] = child
     world.children[world.guard.pid] = [child.pid]
     assert poll(domain, ticket).state is C.LeaseState.RUNNING
     assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
+    world.identities[child.pid] = replace(child, pgid=child.pid)
     world.children.clear()
     _gone(world, world.guard)
 
@@ -1641,6 +1653,7 @@ def test_begin_finalization_fails_closed_for_escaped_descendant(case, world, mon
     assert caught.value.code == "ownership-uncertain"
     assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
     assert _sql(domain, "SELECT slots FROM jobs WHERE run_id=?", (grant.run_id,)) == [(1,)]
+    assert poll(domain, follower).grant is None
 
 
 def test_finish_rechecks_scheduler_proof_and_retains_capacity_on_stale_proof(
@@ -1672,3 +1685,217 @@ def test_finish_releases_only_after_begin_finalization_proof_rechecks(case, worl
 
     assert poll(domain, ticket).state is C.LeaseState.RELEASED
     assert poll(domain, follower).grant is not None
+
+
+@pytest.mark.parametrize("observer", ["poll", "reconcile"])
+def test_begin_finalization_preserves_draining_across_follower_recovery(
+        case, world, monkeypatch, observer):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
+    _gone(world, world.guard)
+
+    if observer == "poll":
+        assert poll(domain, follower).grant is None
+    else:
+        before = domain.ledger.read_bytes()
+        view = next(item for item in reconcile(domain) if item.run_id == grant.run_id)
+        assert view.state is C.LeaseState.DRAINING
+        assert view.phase == "draining"
+        assert domain.ledger.read_bytes() == before
+    assert _sql(domain, "SELECT state,phase FROM jobs WHERE run_id=?",
+                (grant.run_id,)) == [("DRAINING", "draining")]
+
+    proof = begin_finalization(domain, grant)
+    assert poll(domain, follower).grant is None
+    assert poll(domain, ticket).state is C.LeaseState.FINALIZING
+    finish(domain, grant, proof, _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+    assert poll(domain, follower).grant is not None
+
+
+@pytest.mark.parametrize("observer", ["none", "poll", "reconcile"])
+def test_begin_finalization_rejects_guard_death_without_draining_handoff(
+        case, world, observer):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    _gone(world, world.guard)
+
+    if observer == "poll":
+        assert poll(domain, follower).grant is None
+    elif observer == "reconcile":
+        view = next(item for item in reconcile(domain) if item.run_id == grant.run_id)
+        assert view.state is C.LeaseState.RUNNING
+        assert view.phase == "setup"
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+    assert caught.value.code == "ownership-uncertain"
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert poll(domain, follower).grant is None
+    assert _sql(domain, "SELECT state,phase FROM jobs WHERE run_id=?",
+                (grant.run_id,)) == [("RUNNING", "setup")]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("run_id", "b" * 32), ("nonce", "b" * 64), ("generation", 99),
+     ("slots", 2), ("domain_id", "b" * 32), ("memory_estimate_mb", 10),
+     ("reserved_memory_mb", 10)],
+)
+def test_begin_finalization_rejects_each_forged_grant_without_poisoning_handoff(
+        case, world, monkeypatch, field, value):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
+    _gone(world, world.guard)
+    before = domain.ledger.read_bytes()
+
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, replace(grant, **{field: value}))
+    assert caught.value.code == "ownership-uncertain"
+    assert domain.ledger.read_bytes() == before
+    assert poll(domain, ticket).state is C.LeaseState.DRAINING
+    assert poll(domain, follower).grant is None
+    proof = begin_finalization(domain, grant)
+    finish(domain, grant, proof, _final())
+    assert poll(domain, follower).grant is not None
+
+
+@pytest.mark.parametrize("observation", ["absent", "replaced", "unknown", "uid", "pgid"])
+def test_begin_finalization_rejects_lost_owner_authority(
+        case, world, monkeypatch, observation):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
+    _gone(world, world.guard)
+    if observation in {"absent", "unknown"}:
+        world.identities.pop(world.owner.pid)
+        if observation == "absent":
+            world.absent.add(world.owner.pid)
+    else:
+        field, value = {"replaced": ("birth", world.owner.birth + 1),
+                        "uid": ("uid", world.owner.uid + 1),
+                        "pgid": ("pgid", world.owner.pgid + 1)}[observation]
+        world.identities[world.owner.pid] = replace(world.owner, **{field: value})
+
+    # All quiescence checks can pass: only owner authority rejects this call.
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+    assert caught.value.code == "ownership-uncertain"
+    assert _sql(domain, "SELECT state,slots,final_status FROM jobs WHERE run_id=?",
+                (grant.run_id,)) == [("UNCERTAIN", 1, None)]
+    assert _sql(domain, "SELECT state,nonce FROM jobs WHERE run_id=?",
+                (follower.run_id,)) == [("QUEUED", None)]
+
+    # Restore owner observation before recovery, which may separately release
+    # an owner-absent lease. The failed finalization itself retains every claim.
+    world.identities[world.owner.pid] = world.owner
+    world.absent.discard(world.owner.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert poll(domain, follower).grant is None
+    with pytest.raises(C.Problem):
+        begin_finalization(domain, grant)
+
+
+def test_begin_finalization_rejects_boot_mismatch_without_mutation(case, world, monkeypatch):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
+    _gone(world, world.guard)
+    before = domain.ledger.read_bytes()
+
+    with monkeypatch.context() as boot_context:
+        boot_context.setattr(scheduler, "_boot_identity", lambda: "different-boot")
+        with pytest.raises(C.Problem) as caught:
+            begin_finalization(domain, grant)
+    assert caught.value.code == "ownership-uncertain"
+    assert domain.ledger.read_bytes() == before
+    # Restore boot observation before polling: actual boot recovery is separate.
+    assert poll(domain, ticket).state is C.LeaseState.DRAINING
+    assert poll(domain, follower).grant is None
+
+
+@pytest.mark.parametrize("grant_time", [None, "invalid", True])
+def test_begin_finalization_rejects_malformed_grant_time(
+        case, world, monkeypatch, grant_time):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    with monkeypatch.context() as guard_context:
+        assert scheduler.mark_draining(domain, grant, _draining_guard(guard_context, world))
+    _gone(world, world.guard)
+    if grant_time is True:
+        # SQLite coerces bound booleans to REAL 1.0. Inject True at the read
+        # boundary to exercise the bool check rather than a valid float.
+        original_open = scheduler._open_state
+
+        def boolean_row(cursor, values):
+            row = dict(zip((column[0] for column in cursor.description), values))
+            if row.get("run_id") == grant.run_id and "grant_time" in row:
+                row["grant_time"] = True
+            return row
+
+        def open_boolean_row(*args, **kwargs):
+            conn, info = original_open(*args, **kwargs)
+            conn.row_factory = boolean_row
+            return conn, info
+
+        monkeypatch.setattr(scheduler, "_open_state", open_boolean_row)
+    else:
+        _sql(domain, "UPDATE jobs SET grant_time=? WHERE run_id=?", (grant_time, grant.run_id))
+
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+    assert caught.value.code == "ownership-uncertain"
+    if grant_time is True:
+        monkeypatch.setattr(scheduler, "_open_state", original_open)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert poll(domain, follower).grant is None
+    assert _sql(domain, "SELECT slots,final_status FROM jobs WHERE run_id=?",
+                (grant.run_id,)) == [(1, None)]
+
+
+@pytest.mark.parametrize("winner", ["registration", "cancellation"])
+def test_cancel_pending_registration_interleave_rechecks_state_after_lock(
+        case, world, monkeypatch, winner):
+    domain = case.domain(slots=1, jobs=1)
+    ticket = enqueue(domain, _request(case, domain, "contended"))
+    grant = poll(domain, ticket).grant
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    assert grant is not None
+    original_begin = scheduler._begin
+    entered = []
+
+    def commit_winner_before_lock(conn):
+        # The losing call already opened the ledger. Commit the competing call
+        # at its transaction boundary, then let it acquire the real SQLite lock.
+        monkeypatch.setattr(scheduler, "_begin", original_begin)
+        if winner == "registration":
+            entered.append(register_guard(domain, grant, world.guard))
+        else:
+            entered.append(cancel_pending(domain, ticket, world.owner))
+        original_begin(conn)
+
+    monkeypatch.setattr(scheduler, "_begin", commit_winner_before_lock)
+    if winner == "registration":
+        assert cancel_pending(domain, ticket, world.owner) is False
+        assert poll(domain, ticket).state is C.LeaseState.RUNNING
+        assert poll(domain, follower).grant is None
+        assert _sql(domain, "SELECT guard_pid FROM jobs WHERE run_id=?",
+                    (grant.run_id,)) == [(world.guard.pid,)]
+    else:
+        assert register_guard(domain, grant, world.guard) is False
+        assert poll(domain, ticket).state is C.LeaseState.CANCELLED
+        assert poll(domain, follower).grant is not None
+        assert _sql(domain, "SELECT guard_pid,nonce FROM jobs WHERE run_id=?",
+                    (grant.run_id,)) == [(None, None)]
+    assert entered == [True]
