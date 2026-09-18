@@ -1561,7 +1561,7 @@ def test_cancel_pending_wins_before_registration_without_killing_a_future_guard(
     assert poll(domain, follower).grant is not None
 
 
-def test_begin_finalization_returns_bound_proof_and_retains_claims(case, world):
+def test_begin_finalization_returns_bound_proof_and_retains_claims(case, world, monkeypatch):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
     follower = enqueue(domain, _request(case, domain, "follower"))
@@ -1570,6 +1570,7 @@ def test_begin_finalization_returns_bound_proof_and_retains_claims(case, world):
         "SELECT checkout_id,slots,memory_estimate,reserved_memory FROM jobs WHERE run_id=?",
         (grant.run_id,),
     )
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
     _gone(world, world.guard)
 
     proof = begin_finalization(domain, grant)
@@ -1607,10 +1608,12 @@ def test_begin_finalization_fails_closed_for_missing_guard(case, world):
 
 
 @pytest.mark.parametrize("exists", [True, None])
-def test_begin_finalization_fails_closed_for_live_or_ambiguous_group(case, world, exists):
+def test_begin_finalization_fails_closed_for_live_or_ambiguous_group(
+        case, world, monkeypatch, exists):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
     follower = enqueue(domain, _request(case, domain, "follower"))
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
     world.groups[world.guard.pgid] = exists
 
     with pytest.raises(C.Problem) as caught:
@@ -1621,13 +1624,14 @@ def test_begin_finalization_fails_closed_for_live_or_ambiguous_group(case, world
     assert poll(domain, follower).grant is None
 
 
-def test_begin_finalization_fails_closed_for_escaped_descendant(case, world):
+def test_begin_finalization_fails_closed_for_escaped_descendant(case, world, monkeypatch):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
     child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=900002)
     world.identities[child.pid] = child
     world.children[world.guard.pid] = [child.pid]
     assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
     world.children.clear()
     _gone(world, world.guard)
 
@@ -1639,10 +1643,12 @@ def test_begin_finalization_fails_closed_for_escaped_descendant(case, world):
     assert _sql(domain, "SELECT slots FROM jobs WHERE run_id=?", (grant.run_id,)) == [(1,)]
 
 
-def test_finish_rechecks_scheduler_proof_and_retains_capacity_on_stale_proof(case, world):
+def test_finish_rechecks_scheduler_proof_and_retains_capacity_on_stale_proof(
+        case, world, monkeypatch):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
     follower = enqueue(domain, _request(case, domain, "follower"))
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
     _gone(world, world.guard)
     proof = begin_finalization(domain, grant)
     stale = replace(proof, generation=proof.generation + 1)
@@ -1654,10 +1660,11 @@ def test_finish_rechecks_scheduler_proof_and_retains_capacity_on_stale_proof(cas
     assert poll(domain, follower).grant is None
 
 
-def test_finish_releases_only_after_begin_finalization_proof_rechecks(case, world):
+def test_finish_releases_only_after_begin_finalization_proof_rechecks(case, world, monkeypatch):
     domain = case.domain(slots=1, jobs=1)
     ticket, grant = _running(case, domain, world)
     follower = enqueue(domain, _request(case, domain, "follower"))
+    assert scheduler.mark_draining(domain, grant, _draining_guard(monkeypatch, world))
     _gone(world, world.guard)
     proof = begin_finalization(domain, grant)
 

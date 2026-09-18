@@ -1401,8 +1401,7 @@ def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
         if info["boot_id"] != _boot_identity():
             _fail("ownership-uncertain", "finalization boot identity is stale")
         row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (grant.run_id,)).fetchone()
-        if row is None or not _matches_grant(row, grant, info) or row["state"] not in {
-                "RUNNING", "DRAINING"}:
+        if row is None or not _matches_grant(row, grant, info) or row["state"] != "DRAINING":
             _fail("ownership-uncertain", "finalization grant does not match a live lease")
         row = dict(row)
         if row["guard_pid"] is None:
@@ -1438,7 +1437,7 @@ def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
         )
         cursor = conn.execute(
             """UPDATE jobs SET state='FINALIZING',phase='finalization'
-               WHERE run_id=? AND nonce=? AND generation=? AND state IN ('RUNNING','DRAINING')
+               WHERE run_id=? AND nonce=? AND generation=? AND state='DRAINING'
                  AND guard_pid=? AND guard_birth=? AND guard_uid=? AND guard_pgid=?""",
             (grant.run_id, grant.nonce, grant.generation, row["guard_pid"],
              row["guard_birth"], row["guard_uid"], row["guard_pgid"]),
