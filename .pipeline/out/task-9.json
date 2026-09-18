@@ -1,43 +1,87 @@
 {
   "status": "DONE_WITH_CONCERNS",
   "commit": "",
-  "test_summary": "cwd=/home/ingmar/worktrees/ptest/cx-ng-product/task-9; UV_CACHE_DIR=.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_doctor.py tests/ng/test_resources.py --durations=10; exit=0; 10 passed in 0.05s; all durations <0.005s.",
+  "test_summary": "scripts/ptest-bootstrap tests/ng/test_doctor.py tests/ng/test_resources.py --durations=10; exit 0; 83 passed in 0.22s. Slowest two calls 0.01s; all remaining top-ten durations <0.005s.",
   "report_path": ".pipeline/out/task-9.json",
   "concerns": [
-    "T11 exclusively owns renderer/CLI integration: repair_prompt rendering and public doctor output are not implemented or runtime-verified here.",
-    "No native execution/probe boundary was crossed: static inspector has no runner, package-manager, network, native-config-import, repository-write, or domain-state behavior.",
-    "No commit was created, per launch instruction."
+    "This repair is uncommitted by instruction. The original implementation is already committed as 6adcb8e and original evidence as c5f3754; prior no-commit/head=d4ec9bb claims were stale.",
+    "Recorded per-test timing integration remains a frozen producer/consumer contract gap: inspect has no CheckoutIdentity; read_history(domain, checkout) returns HistoryView without per-test durations. Timing stays unknown and the limitation is in each report.",
+    "T11 alone owns CLI dispatch, public doctor rendering/escaping, final rendered-document bytes, and bounded repair_prompt construction. Those were not changed or verified here."
   ],
   "base": "d4ec9bb",
-  "head": "d4ec9bb",
+  "head": "c5f37547a02a3558267197ac77bd02f49fb8361b",
   "runtime": "CPython 3.13.11; pytest 9.1.1; ptest bootstrap bundle U1mnf3 SHA256 3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
   "implemented": [
-    "Bounded non-executing inspect(domain, config, limits, scope) static traversal with no-follow bounded file reads.",
-    "Fixed Finding catalog hypotheses, unknown readiness in each area, and durable static-evidence-insufficient limitation.",
-    "Bundled local agent guide and database/cache/files-ports/processes/time-network/factories recipes."
+    "No-execution static inspect with descriptor-relative no-follow directory enumeration and shared safe bounded file reads, including intermediate scope and priority-root components.",
+    "Bounded directory enumeration, file/line/rule/AST deadline checks, all nine maximum scan limits, AST node/depth limits, safe parser failures, fixed regex input length, and a bounded fixed-port pattern.",
+    "Deterministic scan order for discovered files: declared tests, fixture/conftest/setup files, runner/ptest config, sources. Missing/unsafe/unreached declared roots are explicit; cap-limited discovery cannot claim completeness.",
+    "Strict UTF-8 path validation, redacted control/surrogate names, generated/secret-like exclusions, binary/non-UTF8 content skipping.",
+    "Static slow/integration markers no longer emit timing.slow-test; a pure observed-duration classifier covers <0.5 healthy, [0.5,2) inspect, [2,3] optimize, >3 investigate and rejects invalid durations.",
+    "Bad/good executable local SQLite/cache/file/socket resource fixtures with preexisting neighbor sentinels and real per-run/worker setup execution counting; all six bundled recipes are loaded and checked."
   ],
   "verified": [
-    "Focused no-import, all fixed-catalog, priority/limit, symlink-race, special-file, dotenv, deep syntax, terminal-control, raised-bound, output/deadline, package-resource, SQLite/cache/socket/neighbor/worker-setup assertions via the scoped bootstrap command (exit 0).",
-    "git diff --check exited 0 after final edits; graphify update . exited 0 and rebuilt 3539 nodes / 7046 edges."
+    "Initial targeted RED: 36 failed/11 passed, including actual left-associative RecursionError and unary MemoryError at default limits. Complete short-output log: .pipeline/out/task-9-repair-red-short.log.",
+    "Extended secret/generated-name RED: 8 failed/13 passed/47 deselected. Log: .pipeline/out/task-9-repair-privacy-red.log.",
+    "Mutation sensitivity: owned database/cache tests fail when cleanup is forced global; setup test fails with observed count 3 rather than 1. .pipeline/out/task-9-repair-mutation.log also contains an invalid-enum readiness attempt (not counted as readiness sensitivity).",
+    "Valid-enum readiness mutation to ready-for-declared-capability fails the exact readiness assertion: .pipeline/out/task-9-repair-readiness-mutation.log. All mutations restored.",
+    "Final GREEN: 83 passed in 0.22s, exit 0; .pipeline/out/task-9-repair-green.log. Includes deadlines inside enumeration/files/lines, 262000-character adversarial line, all numeric maxima, unsafe path encodings, intermediate symlink isolation, priority/privacy, absent state, timing boundaries, package resources and ownership fixtures.",
+    "git diff --check exited 0.",
+    "graphify update . exited 0, AST-only: 3589 nodes, 7153 edges, 243 communities. Log: .pipeline/out/task-9-repair-graph.log."
   ],
   "not_verified": [
-    "T11 renderer/CLI/public JSON behavior and any native execution boundary.",
-    "Performance target at the 2,000-file/16MiB bound and dynamic probes."
+    "No T11 CLI/public JSON/human rendering or repair prompt integration; no final rendered-document byte proof.",
+    "No per-test timing lookup from persisted history because the required frozen input/output interface is absent.",
+    "No maximum-size 2000-file/16MiB p95/RSS benchmark, real Redis/Valkey/database server, native runner execution, or dynamic probe.",
+    "No full-suite run: Task 9 requires scoped scripts/ptest-bootstrap only; this wrapper explicitly refuses --full until the orchestrator final gate.",
+    "No newly installed secret/static/dependency scanners or property/fuzz framework. No applicable configured scanner gates were found in pyproject.toml or scripts; .github is absent."
   ],
-  "deferred": [],
+  "deferred": [
+    {
+      "owner": "Controller with contracts/history/doctor owners (T0/T3/T9), then T11 wiring as required",
+      "item": "Define a domain+checkout-scoped per-test timing observation input/output. Do not infer checkout identity or read normal state; current HistoryView exposes no per-test durations."
+    },
+    {
+      "owner": "T11",
+      "item": "CLI, human/public JSON rendering, untrusted-path escaping, final diagnostic/prompt byte limits, and repair_prompt rendering."
+    },
+    {
+      "owner": "T14 acceptance/benchmark stage",
+      "item": "Measure completed uncapped doctor at 2000 files/16MiB against the approved p95/RSS targets."
+    }
+  ],
   "discovered_but_not_fixed": [
-    "DoctorReport usage.output_bytes is a conservative finding-payload budget; T11 remains responsible for final rendered-document bytes."
+    "DoctorReport usage.output_bytes budgets finding payload only; final serialized document and repair_prompt byte bounds remain renderer responsibilities.",
+    "Elapsed checks are cooperative around bounded parser and filesystem operations; they cannot interrupt an individual blocking kernel I/O call.",
+    "graphify emitted existing zero-node warnings for implementation.json, review.json, protocol-v1.json; no semantic extraction or wiki/label refresh was performed or relied upon."
   ],
   "owned_files": [
     "src/ptest/doctor.py",
-    "src/ptest/resources/agent-guide.md",
-    "src/ptest/resources/recipes/*.md",
     "tests/ng/test_doctor.py",
     "tests/ng/test_resources.py",
-    "tests/ng/fixtures/doctor/*",
-    ".pipeline/out/task-9.json"
+    "tests/ng/fixtures/doctor/ownership.py",
+    ".pipeline/out/task-9.json",
+    ".pipeline/out/task-9-repair-*.log"
   ],
   "touched_outside_owned_set": [
-    "graphify-out/*: generated AST refresh required by AGENTS.md; not task source."
+    "graphify-out/*: required generated AST refresh; no task source outside ownership changed."
+  ],
+  "implementation_commit": "6adcb8e",
+  "repair_base": "c5f37547a02a3558267197ac77bd02f49fb8361b",
+  "repair_worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-9",
+  "repair_branch": "cx-ng-product-task-9",
+  "security_contracts": {
+    "identity": "N/A: no authentication/credential processing is added.",
+    "authorization": "Source and embedded prompt instructions cannot execute, import native config, invoke agents, or authorize a probe.",
+    "tenancy": "Component-wise no-follow scopes and priority roots stay within the selected tree; supplied fixture-domain scans do not read/create normal state.",
+    "input": "All scan fields enforce MAX_SCAN_LIMITS; malformed syntax and names yield bounded/redacted limitations.",
+    "state": "Static inspection mutates no repository or domain state; recipe cleanup affects only its run/worker resource ownership.",
+    "exposure": "Secret-like inputs and unsupported names are excluded without path disclosure; no raw source excerpts enter findings.",
+    "availability": "Bounded entry enumeration and file/AST/line/regex work; cooperative deadline checks inside traversal and content processing.",
+    "dependencies": "AST and filesystem reads only in doctor; resource tests use local SQLite, shared in-memory cache clients and loopback sockets."
+  },
+  "evidence_notes": [
+    "The first verbose RED output exceeded tool output capacity; it was rerun with short traceback formatting and stable parameter IDs before implementation. The complete short rerun is retained; the redundant truncated scratch log was removed.",
+    "Intermediate repaired runs: 45 passed/2 failed (overstrict capped-skip count and counting legitimate in-tree config as an outside read); corrected those test assumptions. 62 passed, then 74 passed/1 failed (fake deadline elapsed on config before the intended source); scoped that test to its source. Extended privacy RED then 83 passed.",
+    "A second invalid readiness mutation used observed (also outside the enum) and failed validation; only the later ready-for-declared-capability mutation establishes behavioral assertion sensitivity."
   ]
 }
