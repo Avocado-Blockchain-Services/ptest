@@ -34,6 +34,11 @@ _GUARD_SCRIPT = (
 )
 _FRAME_TIMEOUT_S = 2.0
 _POLL_S = 0.05
+_CONTROL_ENV = frozenset({
+    "PTEST_CONFIG", "PTEST_RUN_ID", "PTEST_ATTEMPT_ID", "PTEST_WORKER_ID",
+    "PTEST_RESOURCE_PREFIX", "PTEST_PROJECT_ID", "PTEST_CHECKOUT_ID",
+    "PTEST_STATE_DIR", "PTEST_HOME", "PTEST_FIXTURE_DOMAIN",
+})
 
 
 def _problem(code: str, message: str, *, phase: str = _PHASE,
@@ -279,6 +284,8 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
              str(guard_peer.fileno()), str(manifest_read)),
             close_fds=True, pass_fds=(guard_peer.fileno(), manifest_read),
             start_new_session=True,
+            env={name: value for name, value in os.environ.items()
+                 if name not in _CONTROL_ENV},
         )
         guard_peer.close()
         os.close(manifest_read)
@@ -368,6 +375,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise _problem("unsupported-capability", "native profile execution is deferred")
     if config.setup is not None or request.shadow or request.probe is not None:
         raise _problem("unsupported-capability", "setup, shadow and probe execution are deferred")
+    if request.mode is not C.Mode.SCOPED and request.argv:
+        raise _problem("invalid-config", "literal command arguments require scoped mode")
     adapter = adapter_for(config.runner.kind)
     if not adapter.requires_exclusive(config):
         raise _problem("unsupported-capability", "command execution requires exclusive admission")
@@ -429,7 +438,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
                                   signals.number, time.monotonic() - enqueued_at)
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
-        prepared = adapter.prepare(effective, plan, grant, attempt)
+        try:
+            prepared = adapter.prepare(effective, plan, grant, attempt)
+        except BaseException:
+            # No guard exists yet, so an adapter rejection must not leave a
+            # never-registered GRANTED lease charging the checkout.
+            scheduler.cancel_pending(domain, ticket, owner)
+            raise
         prepared = replace(prepared, env_updates=prepared.env_updates + (
             ("PTEST_PROJECT_ID", checkout.project_id),
             ("PTEST_CHECKOUT_ID", checkout.checkout_id),
@@ -438,7 +453,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
             ("PTEST_WORKER_ID", "w000"),
             ("PTEST_RESOURCE_PREFIX", attempt.resource_prefix),
         ))
-        raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
+        try:
+            raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
+        except BaseException:
+            # A launch failure before registration is still cancellable.  Once
+            # registration wins the CAS, cancellation deliberately retains the
+            # live lease for scheduler recovery instead of guessing release.
+            scheduler.cancel_pending(domain, ticket, owner)
+            raise
         raw = None if frames.facts is None else frames.facts["raw_exit_code"]
         protocol_valid = (frames.invalid is None and frames.registered and
                           frames.phase and frames.facts is not None and frames.draining and
