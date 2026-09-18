@@ -91,6 +91,13 @@ _FULL_NARROWING_OPTIONS = {
     "--fixtures", "--funcargs", "--fixtures-per-test", "--markers",
     "--cache-show", "-h", "--help", "-V", "--version",
 }
+# Pytest 9 implements --strict, --strict-config and --strict-markers through
+# OverrideIniAction, which appends exactly these entries to option.override_ini.
+# They only tighten native config/marker strictness, so full mode preserves
+# them; every other override_ini value remains a redirect refusal.
+_SAFE_STRICT_OVERRIDES = frozenset({
+    "strict=true", "strict_config=true", "strict_markers=true",
+})
 
 
 def _short_redirect_cluster(token: str) -> bool:
@@ -407,8 +414,11 @@ class OwnedPlugin:
                 if option_name in redirects or redirect_cluster:
                     self._refuse("full pytest plans cannot redirect native configuration")
             if any(getattr(option, name, None) for name in
-                   ("noconftest", "pyargs", "confcutdir", "override_ini", "basetemp")):
+                   ("noconftest", "pyargs", "confcutdir", "basetemp")):
                 self._refuse("full pytest plans cannot redirect native configuration")
+            for entry in getattr(option, "override_ini", None) or ():
+                if not isinstance(entry, str) or entry.strip() not in _SAFE_STRICT_OVERRIDES:
+                    self._refuse("full pytest plans cannot redirect native configuration")
             roots = self.roots
             _validate_full_roots(roots)
             if config.args != list(roots):

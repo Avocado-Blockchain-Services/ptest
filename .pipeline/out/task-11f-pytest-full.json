@@ -6,23 +6,28 @@
   "branch": "cx-ng-pytest-full",
   "base": "94477a7",
   "audit_repair_base": "095d247532433cf6471ec57717d58451e4e4288a",
+  "repair_base": "ce44135af59d3ede7b127e28410b219d540d0399",
   "implemented": [
     "Explicit Pytest full admission, mode/execution pairing, one-slot grant, exact full argv and root/full-argument queue revalidation.",
     "Frozen bridge mode/roots/report identity with repeated effective-root, native-control, executor-hook and terminal-report checks.",
     "Exact opt-in Pytest full generated-output policy with no-follow validation, tracked/declared-input precedence and the ptest-pytest-full-content-v1 digest domain.",
     "Conditional static where capability text for Pytest scoped/full, dot-root scoped-only behavior, setup refusal and prepared-only Vitest.",
     "Native result/source/report lifecycle preserves output, failure/signal precedence, cooperative inventory limitations, incomplete evidence and owned lease finalization.",
-    "Audit repairs reject PYTEST_ADDOPTS/ini narrowing and redirects, including combined -qc/-vc/-sc forms before native parsing, bind effective config.option root/ini paths, reject every loaded xdist plugin, preserve the default digest payload, and keep generic command-full planning unchanged."
+    "Audit repairs reject PYTEST_ADDOPTS/ini narrowing and redirects, including combined -qc/-vc/-sc forms before native parsing, bind effective config.option root/ini paths, reject every loaded xdist plugin, preserve the default digest payload, and keep generic command-full planning unchanged.",
+    "Final finding 1 (HIGH): cli._summary reports the enforced serial worker count 1 for both Pytest scoped/full command summaries; generic command summaries keep their configured count.",
+    "Final finding 2 (MEDIUM): bridge preserves pytest 9 safe strict controls by accepting only the exact override_ini entries strict=true, strict_config=true and strict_markers=true; every other -o/--override-ini value remains refused.",
+    "Final finding 3 (MEDIUM): real committed-Git full subprocess coverage for plain plus wrapper forms of pytest_collection_modifyitems, pytest_runtest_makereport, pytest_report_teststatus and pytest_sessionfinish, a live pytest_-prefixed specname alias and late registration; each refused with exit 4 and ptest origin before any test body runs.",
+    "Final finding 4 (MEDIUM): static where tests for non-Git, config-less nested-root and over-budget fixtures prove no execution or source reads with identical conditional text, plus a real sparse-file scan-limit full run ending incomplete/70 with a scan-limit limitation."
   ],
   "security_contracts": {
     "identity": "Automatic, selected, setup, shadow, probe and Vitest execution remain unavailable; full mode cannot downgrade or redefine roots through environment mutation.",
     "authorization": "A queued full-args/root/config mutation is rejected before guard launch and leaves no active grant.",
-    "input": "Native narrowing/config redirection, argfiles, positional node IDs, duplicate/unsafe roots and unowned full hooks fail closed.",
+    "input": "Native narrowing/config redirection, argfiles, positional node IDs, duplicate/unsafe roots and unowned full hooks fail closed. Only the three exact strict-true override_ini entries survive; strict=false and every other -o value refuses.",
     "state": "Signals, missing/mismatched/replayed reports, source changes, export collisions and finalization uncertainty preserve nonzero/incomplete outcomes and do not certify a gate.",
     "exposure": "Where and run payloads retain redaction and the existing public/private schemas; no argv, environment values or source excerpts are added.",
     "availability": "The bounded scanner, one-slot scheduler and process-group guard remain the only execution path; no dependency install, network or fallback runner was added.",
     "dependencies": "No package, lockfile, bootstrap, installed CLI, remote backend or public schema changed.",
-    "residual": "Allowed collection-finish mutation and native setup/fixture skips can change the effective item list; inventory/count/full-gate claims therefore remain false/null."
+    "residual": "Allowed collection-finish mutation and native setup/fixture skips can change the effective item list; inventory/count/full-gate claims therefore remain false/null. Specname aliases with non-pytest_ names are dead code ignored by pytest's own plugin manager (verified on 9.1.1/pluggy 1.6.0); live pytest_-prefixed aliases are refused."
   },
   "controller": {
     "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-pytest-full/ptest/src /home/ingmar/worktrees/ptest/cx-ng-pytest-full/ptest/scripts/ptest-bootstrap tests/ng/test_task_11f_pytest.py tests/ng/test_pytest_full_subprocess.py tests/ng/test_pytest_scoped_subprocess.py tests/ng/test_pytest_adapter.py tests/ng/test_task_11d_pytest.py tests/ng/test_operations.py tests/ng/test_reports.py tests/ng/test_cli.py tests/ng/test_vitest_adapter.py tests/ng/test_source.py tests/ng/test_selection.py -q --tb=short --durations=20",
@@ -34,21 +39,39 @@
   },
   "test_runs": [
     {
-      "stage": "audit-repair focused bootstrap scope",
+      "stage": "final-findings RED (deterministic)",
       "exit_code": 0,
-      "output": "288 passed in 18.87s; combined short redirects in args/full_args, attached/separated warning-filter values, effective option path binding, source domain, generic plan, and real full hook cases",
-      "red_green": "GREEN after the R1 HIGH repair edits; no raw runner or dependency installation substituted"
+      "output": "test_cli workers summaries: 2 failed (assert 8 == 1 for where/register scoped summaries), 8 passed; test_pytest_adapter strict preservation: 4 failed (safe strict override_ini entries refused with ptest-bridge-refusal), 7 passed",
+      "red_green": "RED observed against pre-fix implementation; generic-command and arbitrary-override rejection cases already passed"
+    },
+    {
+      "stage": "final-findings RED (real subprocess)",
+      "exit_code": 0,
+      "output": "25 passed, 1 failed: non-pytest_-prefixed specname alias passed through (native ran, changed-during-run 70); investigation proved pytest's own plugin manager ignores marked non-pytest_ attributes, so the live-alias case was corrected to a pytest_-prefixed specname form",
+      "red_green": "RED exposed a dead-code test expectation, not a bridge bypass; corrected test uses the only live alias form"
+    },
+    {
+      "stage": "final-findings GREEN (deterministic)",
+      "exit_code": 0,
+      "output": "307 passed in 3.79s across test_cli.py and test_pytest_adapter.py; slowest 0.21s",
+      "red_green": "GREEN after the cli._summary serial-workers fix and the bridge safe-strict allowlist; no raw runner or dependency installation substituted"
+    },
+    {
+      "stage": "final-findings GREEN (real full subprocess)",
+      "exit_code": 0,
+      "output": "26 passed in 18.26s across test_pytest_full_subprocess.py; slowest 1.35s (root cache/bytecode positive); hook-form refusals each 0.66-0.76s",
+      "red_green": "GREEN: plain/wrapper hook matrix, live specname alias, late registration, safe strict full pass, arbitrary -o refusal and sparse-file scan-limit incomplete/70 all verified on the provisioned tuple"
     },
     {
       "stage": "approved combined scoped bootstrap regression",
       "exit_code": 0,
-      "output": "719 passed, 8 skipped in 91.85s (0:01:31); slowest 20 durations reported, maximum 2.93s",
-      "red_green": "GREEN on the provisioned controller after R1 HIGH audit repairs; skipped versions/xdist/unsupported tuples remain explicitly unqualified"
+      "output": "751 passed, 8 skipped in 109.14s (0:01:49); slowest 20 durations reported, maximum 1.81s (pre-existing scoped checkout-serialization lifecycle test); no 2-3s recurring test, so no optimization was required",
+      "red_green": "GREEN on the provisioned controller after final-findings repairs; skipped versions/xdist/unsupported tuples remain explicitly unqualified"
     }
   ],
   "verified_by_inspection": [
-    "git diff --check",
-    "graphify update . (AST graph refreshed: 4617 nodes, 10083 edges, 306 communities)",
+    "git diff --check (clean)",
+    "graphify update . (AST graph refreshed: 4632 nodes, 10111 edges, 304 communities)",
     "Scoped code/test ownership remains limited to the Task 11F file list; no controller or dependency files were edited."
   ],
   "not_verified": [

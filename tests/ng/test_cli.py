@@ -539,3 +539,116 @@ def _command_config():
         selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
         project_id="ab" * 16,
     )
+
+
+def _write_workers_eight_config(root, kind):
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        f'kind = "{kind}"\n'
+        f'launcher = {json.dumps(["python"] if kind == "pytest" else ["echo"])}\n'
+        'args = ["-q"]\n'
+        'full_args = []\n'
+        'test_roots = ["tests"]\n'
+        "workers = 8\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("command", ["where", "register"])
+def test_pytest_command_summaries_enforce_serial_workers(case, monkeypatch, capsys, command):
+    """A configured workers=8 must still serialize as 1 in Pytest summaries."""
+    import socket
+    import subprocess
+
+    domain = case.domain()
+    root = case.project(domain, kind="pytest")
+    _write_workers_eight_config(root, "pytest")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("inspection executed a runner"))
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("inspection made a network request"))
+    assert main(("--fixture-domain", str(domain.root), command, "--json")) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = C.decode_public_document(captured.out).data
+    assert data["initialized"] is True
+    assert len(data["commands"]) == 2
+    summaries = {item["mode"]: item for item in data["commands"]}
+    assert set(summaries) == {"scoped", "full"}
+    assert summaries["scoped"]["workers"] == 1
+    assert summaries["full"]["workers"] == 1
+
+
+@pytest.mark.parametrize("command", ["where", "register"])
+def test_generic_command_summary_preserves_configured_workers(case, monkeypatch, capsys, command):
+    """The serial enforcement is Pytest-only; generic commands keep workers=8."""
+    import socket
+    import subprocess
+
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    _write_workers_eight_config(root, "command")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("inspection executed a runner"))
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("inspection made a network request"))
+    assert main(("--fixture-domain", str(domain.root), command, "--json")) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = C.decode_public_document(captured.out).data
+    assert data["initialized"] is True
+    assert data["commands"]
+    assert [item["workers"] for item in data["commands"]] == [8] * len(data["commands"])
+
+
+@pytest.mark.parametrize("fixture", ["non_git", "nested_no_root_config", "over_budget"])
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_where_describes_unverified_source_evidence_statically(
+        case, monkeypatch, capsys, fixture, json_mode):
+    """Static where states the full-completion evidence condition without checking it."""
+    import socket
+    import subprocess
+
+    from ptest import source as source_module
+
+    domain = case.domain()
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    test_roots = ["nested/tests"] if fixture == "nested_no_root_config" else ["tests"]
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["python"]\n'
+        "args = []\n"
+        "full_args = []\n"
+        f"test_roots = {json.dumps(test_roots)}\n"
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    for path in test_roots:
+        (root / path).mkdir(parents=True)
+    if fixture == "over_budget":
+        with (root / "payload.bin").open("wb") as stream:
+            stream.truncate(17 * 1024 * 1024)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("where executed a runner"))
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("where made a network request"))
+    monkeypatch.setattr(source_module, "snapshot",
+                        lambda *a, **k: pytest.fail("where read source evidence"))
+    args = ("where", "--json") if json_mode else ("where",)
+    assert main(("--fixture-domain", str(domain.root), *args)) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if json_mode:
+        capability = C.decode_public_document(captured.out).data["capability"]
+        assert capability["execution"] == "basic_serial"
+        text = " ".join(item["message"] for item in capability["limitations"])
+    else:
+        assert "capability: basic_serial" in captured.out
+        text = captured.out
+    assert "incomplete/70" in text

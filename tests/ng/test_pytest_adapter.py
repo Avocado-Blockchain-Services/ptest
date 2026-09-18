@@ -727,3 +727,35 @@ def test_native_cli_deferred_full_cannot_bypass_refusal_with_native_controls(cas
     assert not (root / ".venv").exists()
     assert not domain.ledger.exists()
     assert b"INTERNALERROR" not in result.stderr
+
+
+@pytest.mark.parametrize("overrides", [
+    ["strict=true"],
+    ["strict_config=true"],
+    ["strict_markers=true"],
+    ["strict=true", "strict_config=true", "strict_markers=true"],
+])
+def test_full_bridge_preserves_safe_strict_overrides(bridge_env, overrides):
+    """Pytest 9 implements --strict* flags as override_ini entries; keep them."""
+    hook = pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config(override_ini=overrides))
+    next(hook)
+
+
+@pytest.mark.parametrize("overrides", [
+    ["addopts=-k hidden"],
+    ["cache_dir=/tmp/other"],
+    ["strict_markers=yes"],
+    ["strict=true", "cache_dir=/tmp/other"],
+    ["unknown_ini=1"],
+    ["strict=false"],
+])
+def test_full_bridge_rejects_arbitrary_override_ini(bridge_env, overrides):
+    """Only the exact strict-true entries survive; every other -o value refuses."""
+    with pytest.raises(pytest.UsageError, match="native-config-invalid"):
+        next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config(override_ini=overrides)))
+
+
+def test_full_preparation_preserves_safe_strict_controls():
+    """Static admission already allows the --strict* flag forms for full."""
+    config = _config(args=("--strict-markers", "--strict-config", "--strict"))
+    prepare(config, _plan(), _grant(), _attempt())

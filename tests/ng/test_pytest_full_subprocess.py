@@ -140,38 +140,43 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
     assert completed.result["data"]["status"] == "incomplete"
 
 
-def test_full_forbidden_plain_hook_cannot_certify_a_result(case):
-    domain = case.domain(slots=1, jobs=1)
-    root = case.project(domain, kind="pytest")
-    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
-    (root / "tests").mkdir()
-    (root / "tests" / "conftest.py").write_text("def pytest_sessionfinish(session, exitstatus):\n    pass\n")
-    (root / "tests" / "test_native.py").write_text(
-        "from pathlib import Path\n"
-        "def test_body():\n    Path('body.marker').write_text('ran')\n")
-    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
-    (root / ".ptest.toml").write_text(
-        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
-        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        "lifecycle = \"cooperative-process-group\"\n")
-    _commit_fixture(root)
-    completed = case.invoke(domain, root, "--full", timeout=20)
-    assert completed.code == 4
-    assert b"ptest-bridge-refusal" in completed.stderr
-    assert not (root / "body.marker").exists()
-    assert completed.result is not None
-    data = completed.result["data"]
-    assert data["status"] == "incomplete"
-    assert data["exit_origin"] == "ptest"
-
-
 @pytest.mark.parametrize("hook_source", [
+    "def pytest_collection_modifyitems(session, config, items):\n    pass\n",
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_collection_modifyitems(session, config, items):\n"
+        "    yield\n"
+    ),
+    "def pytest_runtest_makereport(item, call):\n    pass\n",
     (
         "import pytest\n"
         "@pytest.hookimpl(wrapper=True)\n"
         "def pytest_runtest_makereport(item, call):\n"
         "    yield\n"
+    ),
+    "def pytest_report_teststatus(report):\n    pass\n",
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_report_teststatus(report):\n"
+        "    yield\n"
+    ),
+    "def pytest_sessionfinish(session, exitstatus):\n    pass\n",
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    yield\n"
+    ),
+    # Only pytest_-prefixed names take effect as specname aliases: pytest's
+    # plugin manager ignores marked non-pytest_ attributes before consulting
+    # the marker, so this alias must keep its pytest_ prefix to be live.
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(specname='pytest_sessionfinish')\n"
+        "def pytest_aliased_observer(session, exitstatus):\n"
+        "    pass\n"
     ),
     (
         "import pytest\n"
@@ -192,7 +197,7 @@ def test_full_forbidden_plain_hook_cannot_certify_a_result(case):
         "    config.pluginmanager.register(Alias(), 'alias')\n"
     ),
 ])
-def test_full_forbidden_wrapper_late_and_alias_hooks_refuse_from_git(case, hook_source):
+def test_full_forbidden_hook_forms_refuse_from_git(case, hook_source):
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
@@ -326,3 +331,88 @@ def test_full_preserves_native_failure_exit(case):
     assert completed.code == 1
     assert completed.result["data"]["runner_exit_code"] == 1
     assert completed.result["data"]["status"] == "incomplete"
+
+
+def test_git_pytest_full_preserves_safe_strict_controls(case):
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\"]\nfull_args = [\"--strict-markers\", \"--strict-config\", \"--strict\"]\n"
+        "test_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
+    _commit_fixture(root)
+    completed = case.invoke(domain, root, "--full", timeout=20)
+    assert completed.code == 0
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "passed"
+    assert data["exit_origin"] == "runner"
+    assert (root / "body.marker").read_text() == "ran"
+
+
+@pytest.mark.parametrize("source", ["env", "ini"])
+def test_git_full_arbitrary_override_ini_remains_refused(case, source):
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    env = None
+    if source == "env":
+        env = {"PYTEST_ADDOPTS": "-o cache_dir=/tmp/elsewhere"}
+    else:
+        (root / "pytest.ini").write_text(
+            "[pytest]\ncache_dir = .pytest_cache\naddopts = -o cache_dir=/tmp/elsewhere\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
+    _commit_fixture(root)
+    completed = case.invoke(domain, root, "--full", env=env, timeout=20)
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "body.marker").exists()
+
+
+def test_git_full_over_budget_fixture_is_incomplete_with_scan_limit(case):
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
+    _commit_fixture(root)
+    with (root / "payload.bin").open("wb") as stream:
+        stream.truncate(17 * 1024 * 1024)
+    completed = case.invoke(domain, root, "--full", timeout=20)
+    assert completed.code == 70
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "incomplete"
+    assert any(item["code"] == "scan-limit" for item in data["limitations"])
+    assert (root / "body.marker").read_text() == "ran"

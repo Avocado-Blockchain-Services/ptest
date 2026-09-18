@@ -54,7 +54,12 @@ the scoped lifecycle. Full mode retains configured `runner.args`, appends
 of the requested worker count, freezes mode/roots before project import, and
 authenticates the existing private terminal report. It rejects native
 narrowing, redirect/configuration controls, executor hooks, dot roots, setup,
-automatic/selected/shadow/probe requests and `--base`. Allowed terminal/log/
+automatic/selected/shadow/probe requests and `--base`. The safe
+`--strict`/`--strict-config`/`--strict-markers` flags are preserved (pytest 9
+expresses them as exact strict-true override-ini entries); every other
+`-o`/`--override-ini` value remains refused. Static `where`/`register`
+summaries report the enforced serial worker count (1) for Pytest while generic
+commands keep their configured count. Allowed terminal/log/
 cleanup hooks remain additive; collection-finish item mutation and setup-time
 skips are explicitly cooperative limitations, so inventory, counts, source
 validity and full-gate claims remain unavailable.
@@ -68,9 +73,14 @@ missing/non-Git/over-budget evidence makes a zero run incomplete/70 while
 preserving an observed native nonzero.
 
 The implementation evidence in `.pipeline/out/task-11f-pytest-full.json` records
-the exact controller command and the final repair regression: 719 passed and 8
-explicitly unqualified tuples skipped in 91.85s on Linux CPython 3.13.11 /
-pytest 9.1.1 / pluggy 1.6.0. Pytest 8.4.2, 9.0.3 and 9.1.0, xdist, coverage,
+the exact controller command and the final repair regression: 751 passed and 8
+explicitly unqualified tuples skipped in 109.14s on Linux CPython 3.13.11 /
+pytest 9.1.1 / pluggy 1.6.0. Real full-subprocess coverage now includes plain
+plus wrapper forms of collection-modifyitems, runtest-makereport,
+report-teststatus and sessionfinish, a live pytest_-prefixed specname alias and
+late registration (each refused with exit 4 and ptest origin before any test
+body runs), preserved safe strict controls, and a sparse-file scan-limit case
+that ends incomplete/70. Pytest 8.4.2, 9.0.3 and 9.1.0, xdist, coverage,
 macOS and independent-repository adoption remain explicitly unqualified.
 
 Residual native qualification outside this slice includes bounded xdist worker

@@ -342,16 +342,20 @@ def _checkout(config: C.Config) -> C.CheckoutIdentity:
 
 
 def _summary(config: C.Config) -> C.ConfigSummary:
+    # Pytest executes under the enforced one-slot basic-serial grant, so its
+    # static summaries report the effective serial worker count rather than
+    # the configured value. Generic commands keep their configured count.
+    workers = 1 if config.runner.kind is C.RunnerKind.PYTEST else config.runner.workers
     scoped = C.summarize_command(
         config.runner.kind, C.Mode.SCOPED,
         config.runner.launcher + config.runner.args,
-        workers=config.runner.workers, provenance=("config",),
+        workers=workers, provenance=("config",),
     )
     full = C.summarize_command(
         config.runner.kind, C.Mode.FULL,
         config.runner.launcher + config.runner.args + config.runner.full_args
         + (config.runner.test_roots if config.runner.kind is C.RunnerKind.PYTEST else ()),
-        workers=config.runner.workers, provenance=("config",),
+        workers=workers, provenance=("config",),
     )
     return C.summarize_config(config, scoped=scoped, full=full)
 
