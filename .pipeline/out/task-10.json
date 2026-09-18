@@ -1,0 +1,37 @@
+{
+  "task": 10,
+  "status": "implemented-preparation-only",
+  "acceptance": {
+    "go_controls": "MET: simple.py injects -count=1, -p, -parallel, -cpu and GOMAXPROCS; owned CLI/config/environment controls reject.",
+    "cargo_controls": "MET: explicit standard Cargo target required, -j and libtest --test-threads inject; jobs and custom harnesses reject.",
+    "literal_command": "MET: argv tokens are concatenated as tuples only, no shell or output parsing; capability is exclusive_command.",
+    "native_execution": "DEFERRED TO TASK11: no Go/Cargo/command subprocess was executed in this task."
+  },
+  "tests": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k cached_success",
+      "exit_code": 0,
+      "evidence": "1 passed, 14 deselected in 0.03s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'project_build_jobs or custom_harness'",
+      "exit_code": 0,
+      "evidence": "2 passed, 19 deselected in 0.02s"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli'",
+      "exit_code": 0,
+      "evidence": "22 passed in 0.05s"
+    }
+  ],
+  "deferred_to_task11": [
+    "candidate ptest execution of Go/Cargo/command fixture matrix",
+    "missing executable exit 127, custom nonzero exit, and signal preservation",
+    "native profile promotion from unavailable to bounded_native after fixture evidence",
+    "registry dispatch, admission wiring, CLI, and result publication"
+  ],
+  "not_run": [
+    "ptest --full is intentionally omitted: the Task10 brief authorizes only the bootstrap task scope.",
+    "No native runner CLI was invoked; Task10 is literal preparation only."
+  ]
+}
