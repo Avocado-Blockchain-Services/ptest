@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import re
 
 from ptest import contracts as C
 
@@ -11,22 +13,34 @@ _PARALLEL_OPTIONS = {
     "-n", "--numprocesses", "--maxprocesses", "--dist",
     "--max-worker-restart",
 }
+_NARROWING_OPTIONS = {
+    "--deselect", "--lf", "--last-failed", "--ff", "--failed-first",
+    "--sw", "--stepwise", "--sw-skip", "--stepwise-skip", "--testmon",
+    "--ignore", "--ignore-glob", "--collect-only", "--co", "--maxfail",
+}
 
 
 def _problem(code: str, message: str) -> C.Problem:
     return C.Problem(code=code, message=message, phase="execution")
 
 
-def _reject_unowned_controls(argv: tuple[str, ...]) -> None:
+def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
     """Reject controls that would bypass the admission grant before import."""
     for token in argv:
         option = token.split("=", 1)[0]
         if option in _REMOTE_OPTIONS or option in _PARALLEL_OPTIONS:
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
-        if token.startswith("-n") and token != "-q":
+        # pytest 9 expands @files; do not read a second source of hidden controls.
+        # Flag-only short options can precede a value-taking -n/-k/-m in a cluster.
+        short = re.match(r"^-[qvxslhV]*([nkm])", token)
+        if token.startswith("@") or (short and short[1] == "n"):
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
+        if full and (option in _NARROWING_OPTIONS or "::" in token
+                     or (short and short[1] in {"k", "m"})
+                     or re.fullmatch(r"-[qvs]*x[qvs]*", token)):
+            raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")
 
 
 def _project_root(config: C.Config) -> Path:
@@ -44,8 +58,13 @@ def _bridge_path() -> Path:
 
 def _require_python_launcher(launcher: tuple[str, ...]) -> None:
     """A bridge file is meaningful only when the selected launcher is Python."""
-    executable = Path(launcher[-1]).name.lower()
-    if executable not in {"python", "python3"} and not executable.startswith("python3."):
+    interpreter = Path(launcher[-1])
+    valid_python = interpreter.name in {
+        "python", "python3", "python3.11", "python3.12", "python3.13", "python3.14",
+    }
+    direct = len(launcher) == 1 and (interpreter.is_absolute() or launcher[0] == interpreter.name)
+    locked_uv = launcher == ("uv", "run", "--locked", "--no-sync", "python")
+    if not valid_python or not (direct or locked_uv):
         raise _problem("native-config-invalid",
                        "pytest bridge requires a CPython interpreter launcher")
 
@@ -64,27 +83,24 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         raise TypeError("prepare requires Config, Plan, Grant and AttemptIdentity")
     if grant.run_id != attempt.run_id or grant.slots != attempt.worker_count:
         raise _problem("admission-invalid", "pytest attempt does not match its admission grant")
-    if config.runner.workers != grant.slots:
-        raise _problem("admission-invalid", "pytest configured workers do not match admission grant")
     if plan.execution == "none":
         raise _problem("native-config-invalid", "pytest bridge cannot execute an empty plan")
+    if plan.execution == "selected":
+        raise _problem("unsupported-capability", "pytest selection requires qualified native inventory evidence")
 
     _require_python_launcher(config.runner.launcher)
     native = config.runner.args
-    _reject_unowned_controls(native + config.runner.full_args)
+    _reject_unowned_controls(native + config.runner.full_args + plan.files,
+                            full=plan.execution == "full")
     if plan.execution == "full":
         native += config.runner.full_args
     else:
-        if not plan.files:
-            raise _problem("native-config-invalid", "pytest selected plan has no files")
         native += plan.files
 
     generated: tuple[str, ...] = ()
-    capability = C.ExecutionTier.BASIC_SERIAL
     if grant.slots > 1:
         native += ("-n", str(grant.slots))
         generated = (f"xdist-workers={grant.slots}",)
-        capability = C.ExecutionTier.ADVANCED
     if plan.execution == "full":
         native += config.runner.test_roots
     argv = config.runner.launcher + (str(_bridge_path()),) + native
@@ -95,14 +111,17 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             ("PTEST_BRIDGE_PROTOCOL", str(Path(__file__).parents[1] / "runtime" / "protocol-v1.json")),
             ("PTEST_GRANT_WORKERS", str(grant.slots)),
             ("PTEST_RUN_ID", grant.run_id),
-            ("PTEST_GRANT_NONCE", grant.nonce),
+            ("PTEST_EXECUTION", plan.execution),
+            ("PTEST_TEST_ROOTS", json.dumps(config.runner.test_roots)),
         ),
         capability=C.Capability(
-            execution=capability, selection=False,
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(
                 code="unsupported-capability",
-                message="native effective configuration is validated in the project interpreter",
+                message=("unqualified pytest foundation: native_cli checks, terminal/coverage "
+                         "and inventory evidence pending; cannot launch as a supported profile "
+                         "or publish full gates"),
             ),),
         ),
         summary=C.summarize_command(
