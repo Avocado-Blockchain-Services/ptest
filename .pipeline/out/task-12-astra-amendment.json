@@ -1,0 +1,101 @@
+{
+  "task": "task-12-astra-amendment",
+  "status": "design-amendment-ready-for-review",
+  "author": "architect-agent (Astra)",
+  "created": "2026-09-18",
+  "base": "71fb7399a49f34cd27c5737fe375a461988fc001",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-task12-design/ptest",
+  "branch": "cx-ng-task12-design",
+  "documentation_only": true,
+  "task_12_implementation_complete": false,
+  "owned_files": [
+    "docs/designs/2026-09-18-ptest-ng-task12-amendment.md",
+    "docs/plans/2026-09-17-ptest-ng.md",
+    ".pipeline/out/task-12-astra-amendment.json"
+  ],
+  "candidate_evidence_only": [
+    "479e7393ffc60ac0b2ed98fa8a3ec298f02576b9",
+    "5ebcbd962952fa17d9bc35ef81c65b47fb255173",
+    "f699d638c36c6db85c521ecdcb299de0f4a946a6"
+  ],
+  "ordered_deliverables": [
+    {
+      "id": "T12a",
+      "scope": "Shared authenticated guard decision protocol, typed quarantine/history publication and pure diagnostic planning",
+      "gate": "Scoped G1-G3 and H1-H2 evidence, ordinary-run regressions, Opus contract approval"
+    },
+    {
+      "id": "T12b",
+      "scope": "Actual advanced pytest/Vitest selection, verified runtime/baseline handoff and distinct supported parallel identities; ordinary single-attempt integration",
+      "gate": "Q-PY-SELECT, Q-PY-PROBE, Q-VT-SELECT and Q-VT-PROBE real native evidence plus Opus qualification approval"
+    },
+    {
+      "id": "T12c",
+      "scope": "One-lease shadow/probe orchestration, exact grammar and truthful compound outcomes",
+      "gate": "S1-S3, P1-P3, C1-C2; both first-class bad-policy sensitivity cases, positive probes, Opus M3 gate and root-owned final integrated test gate"
+    }
+  ],
+  "frozen_decisions": {
+    "guard_protocol": {
+      "version": 2,
+      "unrelated_protocol_versions_unchanged": true,
+      "ready": "attempt-ready",
+      "decision": "attempt-decision",
+      "authentication": ["run_id", "grant_nonce", "grant_generation", "attempt_id", "one_use_gate_token"],
+      "decision_timeout_s": 30,
+      "frame_transfer_timeout_s": 2,
+      "gates": "Every execution attempt; no ungated fallback; EOF, stop, cancellation, timeout or invalid frames close subsequent spawning"
+    },
+    "shadow": {
+      "requires": "Qualified advanced first-class profile and genuine nonempty strict selected plan with compatible complete baseline",
+      "ordinary_selected_failure": "Full still executes; first nonzero remains",
+      "attempt_timeout_s": null,
+      "compound_timeout_s": 600,
+      "changed_grammar": "--shadow --changed is valid automatic grammar",
+      "unqualified_exit": 2,
+      "unqualified_reason": "unsupported-capability",
+      "incomplete_full": "Not a confirmed or inferred omitted-test miss; no promotion or quarantine clearing",
+      "baseline_publication": false
+    },
+    "history": {
+      "quarantine_code": "selection-shadow-quarantine",
+      "quarantine_api": "publish_shadow_outcome(domain, checkout, result, comparison) -> PublishResult",
+      "probe_api": "publish_probe_outcome(domain, checkout, result, evidence) -> PublishResult",
+      "storage": "Dedicated typed selector row under the existing history writer lock and transaction",
+      "recovery": "Newer successful explicit eligible comparison, changed policy or compatibility, compatible clean full baseline after correction, exact expected-row match",
+      "unrelated_health_markers": "Never removed or reset by comparison",
+      "compound_failures": "Union of all attempt failures survives later same-compound passes"
+    },
+    "probe": {
+      "qualification_required": "First-class supported parallel worker identity and explicit run-worker-namespaced local isolation",
+      "attempt_timeout_min_s": 1,
+      "attempt_timeout_default_s": 30,
+      "attempt_timeout_max_s": 120,
+      "compound_timeout_s": 600,
+      "repeat_min": 1,
+      "repeat_default": 2,
+      "repeat_max": 5,
+      "attempts_max": 10,
+      "workers_default": 2,
+      "minimum_parallel_grant": 2,
+      "insufficient_workers": "Exit 2/capacity-exceeded; blocked parallel portion, no serial-only success substitute",
+      "unqualified": "Exit 2/unsupported-capability, no launch; rejection alone does not complete probes"
+    },
+    "post_admission_rejection": "Authenticated cancel_pending before registration; owned guard cancellation and proof/finalization after registration; never abandon a grant",
+    "product_scope": "Local-first only; no remote execution, cloud operations, model calls, live installation, deployment or publication"
+  },
+  "qualification_prerequisites": [
+    {"id": "Q-PY-SELECT", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-PY-PROBE", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-VT-SELECT", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-VT-PROBE", "required": true, "baseline_status": "unqualified"}
+  ],
+  "verification": {
+    "tests_run": false,
+    "reason": "Documentation-only instruction; no tests, dependency installation or runtime edits are authorized",
+    "completed_document_checks": ["Re-read changed documents", "Check contradictions and placeholders", "Parse JSON", "git diff --check"],
+    "commit_scope": "Only the three declared documentation/artifact files; supplied untracked brief remains untouched"
+  },
+  "unresolved_product_ambiguities": [],
+  "next_gate": "Existing Opus design review before implementation consumes the new shared contracts"
+}
