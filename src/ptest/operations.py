@@ -89,10 +89,11 @@ def _summary(config: C.Config, plan: C.Plan, request: C.RunRequest,
                                            else ("literal-exclusive-command",)))
 
 
-def _plan(request: C.RunRequest) -> C.Plan:
+def _plan(request: C.RunRequest,
+          runner_kind: C.RunnerKind | None = None) -> C.Plan:
     if request.mode is C.Mode.SCOPED:
         return C.Plan(mode=C.Mode.SCOPED, execution="scoped", static_preview=False)
-    if request.mode is C.Mode.FULL:
+    if request.mode is C.Mode.FULL and runner_kind is C.RunnerKind.PYTEST:
         return C.Plan(mode=C.Mode.FULL, execution="full", static_preview=False)
     # Automatic command mode is a real full command, never a guessed selected
     # subset.  The source/selection lifecycle is intentionally deferred.
@@ -596,7 +597,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
 
     checkout = _checkout(config)
     run_id = secrets.token_hex(16)
-    plan = _plan(request)
+    plan = _plan(request, config.runner.kind)
     # The command summary is redacted and never includes token values.
     requested_slots = 1 if native_pytest else min(
         config.runner.workers,

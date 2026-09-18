@@ -338,7 +338,7 @@ def _mac(key: bytes, value: object) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _pytest_full_generated(path: str, roots: tuple[str, ...], included: set[str]) -> str | None:
+def _pytest_full_generated(path: str, included: set[str]) -> str | None:
     """Return the source relation for one exact Pytest full-run byproduct."""
     if path in {
         ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
@@ -353,8 +353,6 @@ def _pytest_full_generated(path: str, roots: tuple[str, ...], included: set[str]
     if match is None:
         return None
     source = match.group("parent") + match.group("module") + ".py"
-    if not any(path.startswith(root + "/") for root in roots):
-        return None
     if source not in included:
         return None
     return source
@@ -436,7 +434,7 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         generated = set()
         if pytest_full_outputs:
             for path in untracked | undeclared_ignored:
-                relation = _pytest_full_generated(path, config.runner.test_roots, candidate_paths)
+                relation = _pytest_full_generated(path, candidate_paths)
                 if relation is None:
                     continue
                 # Filtering is allowed only after the same no-follow regular
@@ -483,9 +481,13 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         external = _mac(key, [environment, [(f.path, f.digest, f.mode, f.size)
                                             for f in files if f.path in declared_ignored]])
         identity = [(f.path, f.digest, f.mode, f.size) for f in files]
-        digest = _mac(key, [_IDENTITY_PROTOCOL,
-                            "ptest-pytest-full-content-v1" if pytest_full_outputs else "default-v1",
-                            identity, external])
+        if pytest_full_outputs:
+            digest = _mac(key, [_IDENTITY_PROTOCOL,
+                                "ptest-pytest-full-content-v1", identity, external])
+        else:
+            # Preserve the Task 11D digest payload for every default caller;
+            # the execution-only domain is deliberately opt-in and separate.
+            digest = _mac(key, [_IDENTITY_PROTOCOL, identity, external])
         compatibility = None
         limitations = ()
         if pytest_full_outputs:

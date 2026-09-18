@@ -237,7 +237,35 @@ def test_pytest_full_snapshot_excludes_only_root_cache_and_bytecode(case):
     assert "tests/__pycache__/test_a.cpython-313-pytest-9.1.1.pyc" not in {item.path for item in after.files}
 
 
+def test_pytest_full_snapshot_excludes_root_conftest_and_imported_src_bytecode(case):
+    """Full output filtering follows source/module identity, not test roots."""
+    from ptest import source as source_module
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / "conftest.py").write_text("VALUE = 1\n")
+    (root / "src" / "__pycache__").mkdir(parents=True)
+    (root / "src" / "helper.py").write_text("VALUE = 2\n")
+    (root / "src" / "__pycache__" / "helper.cpython-313.pyc").write_bytes(b"pyc")
+    (root / "__pycache__").mkdir()
+    (root / "__pycache__" / "conftest.cpython-313.pyc").write_bytes(b"pyc")
+    _git(root, "add", "conftest.py", "src/helper.py")
+    _git(root, "commit", "-m", "root conftest and imported module")
+    (root / ".gitignore").write_text("__pycache__/\n**/__pycache__/\n")
+    _git(root, "add", ".gitignore")
+    _git(root, "commit", "-m", "ignore bytecode")
+
+    result = source_module.snapshot(domain, config, None, None, pytest_full_outputs=True)
+
+    paths = {item.path for item in result.files}
+    assert "__pycache__/conftest.cpython-313.pyc" not in paths
+    assert "src/__pycache__/helper.cpython-313.pyc" not in paths
+
+
 def test_pytest_full_digest_domain_is_execution_only_and_separate(case):
+    from ptest import source as source_module
     from ptest.source import ensure_fingerprint_key
 
     domain, _ = _repository(case)
@@ -250,6 +278,17 @@ def test_pytest_full_digest_domain_is_execution_only_and_separate(case):
     assert normal.compatibility is not None
     assert full.compatibility is None
     assert any("execution-only" in item.message for item in full.limitations)
+    # Non-opt-in callers retain the Task 11D digest payload byte-for-byte;
+    # only the explicit full-output domain receives the new tag.
+    key = source_module._key(domain)
+    assert key is not None
+    identity = [(item.path, item.digest, item.mode, item.size) for item in normal.files]
+    # The external HMAC is empty for this policy and is still part of the
+    # established payload shape.  Build it through the same helper to avoid
+    # exposing environment values in the assertion.
+    expected = source_module._mac(key, [source_module._IDENTITY_PROTOCOL, identity,
+                                       source_module._mac(key, [[], []])])
+    assert normal.digest == expected
 
 
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",

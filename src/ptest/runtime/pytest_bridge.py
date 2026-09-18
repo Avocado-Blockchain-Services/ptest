@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,120 @@ def _validate_full_roots(roots: tuple[str, ...]) -> None:
                 or "::" in root
                 or any(part in {"", ".", ".."} for part in root.split("/"))):
             _fail("full pytest roots must be literal project-relative paths")
+
+
+_FULL_REDIRECT_OPTIONS = {
+    "-c", "--config-file", "--rootdir", "--confcutdir", "--noconftest",
+    "--pyargs", "-o", "--override-ini", "--basetemp",
+}
+_FULL_NARROWING_OPTIONS = {
+    "-k", "--keyword", "-m", "--markexpr", "--deselect", "--lf",
+    "--last-failed", "--ff", "--failed-first", "--sw", "--stepwise",
+    "--sw-skip", "--stepwise-skip", "--testmon", "--ignore", "--ignore-glob",
+    "--collect-only", "--co", "--maxfail", "-x", "--setup-only", "--setup-plan",
+    "--fixtures", "--funcargs", "--fixtures-per-test", "--markers",
+    "--cache-show", "-h", "--help", "-V", "--version",
+}
+
+
+def _split_addopts(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            return tuple(shlex.split(value, posix=True))
+        except ValueError:
+            _fail("pytest addopts contains malformed quoting")
+    if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    _fail("pytest addopts has an invalid shape")
+
+
+def _full_addopts(config: Any) -> tuple[str, ...]:
+    """Return controls that native addopts sources supplied to Pytest."""
+    env = _split_addopts(os.environ.get("PYTEST_ADDOPTS"))
+    try:
+        configured = config.getini("addopts")
+    except (AttributeError, ValueError, TypeError):
+        configured = ()
+    return env + _split_addopts(configured)
+
+
+def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
+    for index, token in enumerate(tokens):
+        option = token.split("=", 1)[0]
+        redirect_cluster = token.startswith(("-c", "-o")) and token not in {"-c", "-o"}
+        short_narrow = len(token) > 2 and token.startswith(("-k", "-m"))
+        maxfail_zero = (option == "--maxfail" and (
+            token.partition("=")[2] == "0"
+            or ("=" not in token and index + 1 < len(tokens) and tokens[index + 1] == "0")
+        ))
+        if (token.startswith("@") or option in _FULL_REDIRECT_OPTIONS
+                or option in _FULL_NARROWING_OPTIONS or redirect_cluster or short_narrow
+                or "::" in token) and not maxfail_zero:
+            _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
+
+
+def _validate_native_paths(config: Any, checkout_root: str | None,
+                           config_path: str | None) -> None:
+    """Bind Pytest's effective config paths to the admitted checkout."""
+    if not checkout_root:
+        return
+    try:
+        expected = os.path.realpath(checkout_root)
+    except (TypeError, ValueError):
+        _fail("pytest checkout root binding is invalid")
+    if not os.path.isabs(checkout_root) or not expected:
+        _fail("pytest checkout root binding is invalid")
+
+    def real(value: object) -> str:
+        try:
+            text = os.fspath(value)
+        except TypeError:
+            _fail("pytest native configuration paths are invalid")
+        if not isinstance(text, str) or not os.path.isabs(text):
+            _fail("pytest native configuration paths are invalid")
+        return os.path.realpath(text)
+
+    effective_roots = []
+    for name in ("rootdir", "rootpath"):
+        value = getattr(config, name, None)
+        if value is None:
+            continue
+        native_root = real(value)
+        try:
+            inside = os.path.commonpath((expected, native_root)) == expected
+        except ValueError:
+            inside = False
+        if not inside:
+            _fail("pytest native configuration paths are outside the admitted checkout")
+        effective_roots.append(native_root)
+    if effective_roots and len(set(effective_roots)) != 1:
+        _fail("pytest native configuration root metadata disagrees")
+
+    inipath = getattr(config, "inipath", None)
+    inifilename = getattr(config, "inifilename", None)
+    if inipath is None:
+        if inifilename not in (None, ""):
+            _fail("pytest native configuration paths have no matching ini path")
+    else:
+        ini = real(inipath)
+        if os.path.commonpath((expected, ini)) != expected:
+            _fail("pytest native configuration paths are outside the admitted checkout")
+        if inifilename in (None, ""):
+            inifilename = os.path.basename(ini)
+        if not isinstance(inifilename, str) or inifilename != os.path.basename(ini):
+            _fail("pytest native configuration paths have mismatched ini metadata")
+        try:
+            if os.path.islink(os.fspath(inipath)) or not os.path.isfile(os.fspath(inipath)):
+                _fail("pytest native configuration ini path is not a regular file")
+        except OSError:
+            _fail("pytest native configuration ini path is unavailable")
+
+    if config_path:
+        configured = real(config_path)
+        if os.path.commonpath((expected, configured)) != expected:
+            _fail("pytest ptest configuration path is outside the admitted checkout")
 
 
 def _report_binding() -> tuple[Path, dict[str, str]] | None:
@@ -158,6 +273,10 @@ class OwnedPlugin:
                  roots: tuple[str, ...] | None = None) -> None:
         self.workers = workers
         self.execution = execution if execution is not None else os.environ.get("PTEST_EXECUTION")
+        # Capture the executor-owned checkout/config binding before project
+        # imports can mutate the environment.
+        self.checkout_root = os.environ.get("PTEST_PYTEST_CHECKOUT_ROOT")
+        self.config_path = os.environ.get("PTEST_PYTEST_CONFIG_PATH")
         if roots is None:
             try:
                 decoded = json.loads(os.environ.get("PTEST_TEST_ROOTS", "null"))
@@ -188,21 +307,7 @@ class OwnedPlugin:
                     continue
                 module = getattr(plugin, "__name__", "")
                 if name in {"xdist", "pytest-xdist"} or str(module).startswith("xdist"):
-                    # xdist is commonly installed in a shared interpreter.  Its
-                    # plugin being auto-loaded is harmless for a one-slot run
-                    # when no transport/worker option activated it; the later
-                    # effective-option checks still refuse every active path.
-                    configured_workers = getattr(option, "numprocesses", None)
-                    active_xdist = (
-                        self.workers > 1
-                        or configured_workers not in (None, 0, "0")
-                        or bool(getattr(option, "tx", None))
-                        or bool(getattr(option, "px", None))
-                        or bool(getattr(option, "rsyncdir", None))
-                    )
-                    if active_xdist:
-                        self._refuse("pytest xdist is not owned by the serial grant")
-                    continue
+                    self._refuse("pytest xdist is not owned by the serial grant")
                 executors = {"forked", "parallel", "rerunfailures", "repeat", "timeout", "loop"}
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")
                 package = str(module).split(".", 1)[0].removeprefix("pytest_")
@@ -247,6 +352,15 @@ class OwnedPlugin:
         if maximum is not None and str(maximum) != str(self.workers):
             self._refuse("xdist maximum worker count differs from admission grant")
         if self.execution == "full":
+            try:
+                # ``pytest_cmdline_main`` runs before native root/config
+                # discovery is complete; effective path fields are enforced
+                # on the first post-configure gate below.
+                if generated:
+                    _validate_native_paths(config, self.checkout_root, self.config_path)
+                _reject_full_addopts(_full_addopts(config))
+            except BridgeRefusal as refusal:
+                self._refuse(refusal.message)
             narrowing = ("keyword", "markexpr", "deselect", "lf", "failedfirst",
                          "stepwise", "stepwise_skip", "testmon", "ignore",
                          "ignore_glob", "maxfail", "collectonly", "pyargs",

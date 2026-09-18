@@ -33,7 +33,7 @@ def _problem(code: str, message: str) -> C.Problem:
 
 def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
     """Reject controls that would bypass the admission grant before import."""
-    for token in argv:
+    for index, token in enumerate(argv):
         option = token.split("=", 1)[0]
         if option in _REMOTE_OPTIONS or option in _PARALLEL_OPTIONS:
             raise _problem("native-config-invalid",
@@ -45,10 +45,14 @@ def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> No
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
         redirect_cluster = token.startswith(("-c", "-o")) and token not in {"-c", "-o"}
+        maxfail_zero = (full and option == "--maxfail" and (
+            token.partition("=")[2] == "0"
+            or ("=" not in token and index + 1 < len(argv) and argv[index + 1] == "0")
+        ))
         if full and (option in _NARROWING_OPTIONS or option in _FULL_REDIRECT_OPTIONS
                      or redirect_cluster or "::" in token
                      or (short and short[1] in {"k", "m"})
-                     or re.fullmatch(r"-[qvs]*x[qvs]*", token)):
+                     or re.fullmatch(r"-[qvs]*x[qvs]*", token)) and not maxfail_zero:
             raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")
 
 
@@ -107,6 +111,19 @@ def inspect_capability(config: C.Config) -> C.Capability:
             execution=C.ExecutionTier.UNAVAILABLE, selection=False,
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(code=problem.code, message=problem.message),),
+        )
+    try:
+        _reject_unowned_controls(config.runner.args + config.runner.full_args
+                                 + config.runner.test_roots, full=False)
+    except C.Problem:
+        return C.Capability(
+            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group",
+            limitations=(C.Reason(
+                code="unsupported-capability",
+                message=("pytest basic-serial is unavailable for shared native controls; "
+                         "remove parallel, remote or argfile configuration"),
+            ),),
         )
     limitations = [C.Reason(
         code="unsupported-capability",
@@ -202,6 +219,9 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             ("PTEST_RUN_ID", grant.run_id),
             ("PTEST_EXECUTION", plan.execution),
             ("PTEST_TEST_ROOTS", json.dumps(config.runner.test_roots)),
+            ("PTEST_PYTEST_CHECKOUT_ROOT", str(_project_root(config).resolve())),
+            ("PTEST_PYTEST_CONFIG_PATH", "" if config.config_path is None
+             else str(config.config_path.resolve())),
         ),
         capability=C.Capability(
             execution=execution, selection=False,

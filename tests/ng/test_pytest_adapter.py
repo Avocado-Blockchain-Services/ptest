@@ -13,7 +13,7 @@ import runpy
 import pytest
 
 from ptest import contracts as C
-from ptest.adapters.pytest import prepare
+from ptest.adapters.pytest import inspect_capability, prepare
 from ptest.runtime import pytest_bridge
 
 
@@ -153,6 +153,23 @@ def test_full_preparation_advertises_basic_serial_with_claim_limits():
     assert "PTEST_GRANT_NONCE" not in dict(prepared.env_updates)
 
 
+@pytest.mark.parametrize("args", [("-n", "2"), ("--tx", "popen//python"), ("@native-args.txt",)])
+def test_static_where_marks_shared_controls_unavailable(args):
+    capability = inspect_capability(_config(args=args))
+
+    assert capability.execution is C.ExecutionTier.UNAVAILABLE
+    assert any("shared" in item.message or "parallel" in item.message
+               or "native controls" in item.message for item in capability.limitations)
+
+
+def test_static_where_keeps_scoped_basic_serial_for_full_only_controls():
+    capability = inspect_capability(_config(args=("-k", "slow")))
+
+    assert capability.execution is C.ExecutionTier.BASIC_SERIAL
+    assert any("full execution" in item.message or "native controls" in item.message
+               for item in capability.limitations)
+
+
 def test_unqualified_preparation_refuses_selected_plan():
     with pytest.raises(C.Problem, match="unsupported-capability"):
         prepare(_config(), _plan(execution="selected", files=("tests/a.py",)), _grant(), _attempt())
@@ -197,6 +214,12 @@ def test_native_controls_cannot_bypass_preparation_through_other_sources(unsafe,
 def test_full_preparation_refuses_narrowing(args):
     with pytest.raises(C.Problem, match="native-config-invalid"):
         prepare(_config(args=args), _plan(), _grant(), _attempt())
+
+
+def test_full_preparation_allows_explicit_zero_maxfail():
+    prepared = prepare(_config(args=("--maxfail", "0")), _plan(), _grant(), _attempt())
+
+    assert prepared.argv[2:4] == ("--maxfail", "0")
 
 
 @pytest.mark.parametrize("test_root", ["-V", "--version", "--co", "@args.txt"])
@@ -244,9 +267,22 @@ def _native_config(**options):
                            getini=lambda name: [], invocation_params=SimpleNamespace(args=()))
 
 
-def test_local_xdist_generated_popen_transports_are_accepted():
-    pytest_bridge.OwnedPlugin(2).pytest_configure(
-        _native_config(numprocesses=2, tx=["popen", "popen"]))
+def test_loaded_xdist_is_refused_even_when_native_options_are_inactive():
+    plugin = object()
+    manager = SimpleNamespace(
+        list_name_plugin=lambda: (("xdist", plugin),),
+        hook=SimpleNamespace(**{
+            name: SimpleNamespace(get_hookimpls=lambda: [])
+            for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+                         "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+                         "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_runtest_makereport",
+                         "pytest_report_teststatus", "pytest_sessionfinish")
+        }),
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="xdist"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 
 @pytest.mark.parametrize("options", [
@@ -395,6 +431,54 @@ def test_full_bridge_keeps_captured_roots_after_environment_mutation(bridge_env,
     config = _native_config(); config.args = ["other"]
     with pytest.raises(pytest.UsageError, match="inventory differs"):
         plugin.pytest_configure(config)
+
+
+@pytest.mark.parametrize("value", ["-k hidden", "-x", "--deselect=tests/test_a.py::test_x",
+                                    "-c alternate.ini", "--config-file=alternate.ini",
+                                    "--rootdir=/tmp/other"])
+def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monkeypatch, value):
+    monkeypatch.setenv("PYTEST_ADDOPTS", value)
+
+    with pytest.raises(pytest.UsageError, match="full pytest plans"):
+        next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config()))
+
+
+@pytest.mark.parametrize("value", [["-k", "hidden"], ["-x"], ["--deselect=tests/a.py::test_x"],
+                                    ["-c", "alternate.ini"], ["--rootdir=/tmp/other"]])
+def test_full_bridge_rejects_addopts_controls_from_ini(bridge_env, value):
+    config = _native_config()
+    config.getini = lambda name: value if name == "addopts" else []
+
+    with pytest.raises(pytest.UsageError, match="full pytest plans"):
+        next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
+
+
+def test_full_bridge_requires_trusted_effective_root_paths(bridge_env, monkeypatch, tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(checkout))
+    config = _native_config()
+    config.rootdir = tmp_path / "outside"
+    config.rootpath = config.rootdir
+    config.inipath = checkout / "pytest.ini"
+    config.inifilename = "pytest.ini"
+
+    with pytest.raises(pytest.UsageError, match="native configuration paths"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+def test_full_bridge_accepts_trusted_effective_root_paths(bridge_env, monkeypatch, tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(checkout))
+    config = _native_config()
+    config.rootdir = checkout
+    config.rootpath = checkout
+    config.inipath = checkout / "pytest.ini"
+    config.inifilename = "pytest.ini"
+    (checkout / "pytest.ini").write_text("[pytest]\n")
+
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",

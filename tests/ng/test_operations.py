@@ -49,6 +49,27 @@ def _run_data(completed):
     return completed.result["data"]
 
 
+def test_generic_command_full_retains_selection_disabled_plan_reason(case):
+    request = C.RunRequest(mode=C.Mode.FULL)
+
+    plan = operations._plan(request)
+
+    assert plan.execution == "full"
+    assert plan.reasons == (C.Reason(
+        code="selection-disabled",
+        message="command profiles execute the configured full gate",
+    ),)
+
+
+def test_pytest_full_plan_is_the_only_early_full_plan_without_generic_reason(case):
+    request = C.RunRequest(mode=C.Mode.FULL)
+
+    plan = operations._plan(request, C.RunnerKind.PYTEST)
+
+    assert plan.execution == "full"
+    assert plan.reasons == ()
+
+
 def test_command_success_preserves_literal_argv_and_streams(case):
     domain = case.domain()
     tokens = ("space value", "quoted 'value'", "--looks-like-a-flag", "$(not shell)", "界")

@@ -10,10 +10,12 @@ The actual controller run, versions, failures and skips are recorded in
 in `.pipeline/out/task-11d-astra-repair.json`, `.pipeline/out/task-11d-nested-hook-repair.json`
 and `.pipeline/out/task-11d-sol-repair.json`.
 
-Current `native_cli` tests in `test_pytest_adapter.py` assert the Task 11D boundary:
-FULL, AUTOMATIC and setup are typed unsupported before admission or dependency
-execution. This does not qualify any candidate tuple. Scoped subprocess tests
-exercise candidate ptest, the real guard and scheduler, native pytest, private
+The locked-dependency fixture tests retain the setup-declared refusal boundary:
+AUTOMATIC, explicit FULL with setup, and setup-scoped requests are typed
+unsupported before admission or dependency execution. The explicit no-setup
+FULL path is exercised separately by `test_pytest_full_subprocess.py` on the
+already provisioned controller tuple. Scoped subprocess tests exercise candidate
+ptest, the real guard and scheduler, native pytest, private
 terminal reports and cleanup. Runtime checks precede pytest import where possible;
 initial plugin qualification precedes test collection, after initial
 conftest/plugin imports. Qualification repeats after all collection-finish
@@ -66,14 +68,12 @@ missing/non-Git/over-budget evidence makes a zero run incomplete/70 while
 preserving an observed native nonzero.
 
 The implementation evidence in `.pipeline/out/task-11f-pytest-full.json` records
-the exact controller command and the current qualification prerequisite. The
-assigned worktree does not currently contain the provisioned pytest tuple, so
-no candidate runtime/version is claimed qualified until the mandated controller
-bootstrap can execute. Pytest 8.4.2, 9.0.3, 9.1.0 and 9.1.1, xdist, coverage,
+the exact controller command and the final repair regression: 701 passed and 8
+explicitly unqualified tuples skipped in 104.83s on Linux CPython 3.13.11 /
+pytest 9.1.1 / pluggy 1.6.0. Pytest 8.4.2, 9.0.3 and 9.1.0, xdist, coverage,
 macOS and independent-repository adoption remain explicitly unqualified.
 
-Still to author/execute at the native qualification stage: bounded xdist worker
-instrumentation/inventory, full pytest 9 TOML precedence, coverage thresholds,
-custom reporter preservation/corruption, collection/setup/teardown errors, unknown
-critical hooks and the interpreter/runner/plugin compatibility rejection matrix.
+Residual native qualification outside this slice includes bounded xdist worker
+instrumentation/inventory, coverage thresholds, collection/setup/teardown error
+matrix expansion, and the broader interpreter/runner/plugin compatibility matrix.
 This fixture subset is not the entire Task 5 acceptance matrix.
