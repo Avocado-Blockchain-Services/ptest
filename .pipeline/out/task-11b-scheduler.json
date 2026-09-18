@@ -16,7 +16,7 @@
     "begin_finalization transitions valid work to FINALIZING and returns a bound QuiescenceProof without releasing claims",
     "finish shares only the uncertainty transition helper and independently rechecks the proof before releasing"
   ],
-  "source_commit": "7832fb8",
+  "source_commits": ["7832fb8", "4dbf01e"],
   "tests": [
     {
       "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'mark_draining or finish_releases_only_with_a_complete_quiescence_proof'",
@@ -46,7 +46,7 @@
     "warning": "7 JSON/schema/fixture files produced zero AST nodes; no semantic extraction or external provider was used"
   },
   "dan_three_passes": {
-    "pass_1_contract": "Re-read design section 7, contracts.py records, scheduler state transitions, and the focused test fixture. Verified exact owner/sequence authentication, guard-null cancellation CAS, durable grant matching, claim retention, and proof binding to run/generation/pgid.",
+    "pass_1_contract": "Re-read design section 7, contracts.py records, scheduler state transitions, and the focused test fixture. Verified exact owner/sequence authentication, guard-null cancellation CAS, durable grant matching, authenticated DRAINING handoff requirement, claim retention, and proof binding to run/generation/pgid.",
     "pass_2_race_security": "Checked cancel-vs-register ordering: cancellation commits only while guard_pid is NULL, while register_guard requires GRANTED and the same transaction lock; either cancellation wins and registration returns false, or registration wins and cancellation returns false. Checked missing/live/unknown/escaped descendant paths fail closed without releasing capacity. Checked finish performs fresh group, guard, descendant, owner, timestamp, and proof-field validation.",
     "pass_3_integration_maintenance": "Inspected callers and exports, kept CLI/operations/guard/adapters/contracts untouched, consolidated the duplicate finalization uncertainty update, ran py_compile/diff checks, refreshed graphify after source changes, and confirmed only the declared source/test files were in the source commit. Runtime pytest verification remains unavailable because the mandated bootstrap environment has no pytest and installation was explicitly out of scope."
   },
