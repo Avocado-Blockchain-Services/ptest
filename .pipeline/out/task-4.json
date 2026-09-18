@@ -1,0 +1,12 @@
+{
+  "status": "BLOCKED",
+  "commit": "",
+  "test_summary": "Focused: UV_CACHE_DIR=... scripts/ptest-bootstrap tests/ng/test_scheduler.py -k budget_one -> 1 passed, 9 deselected in 0.05s. Owned module: UV_CACHE_DIR=... scripts/ptest-bootstrap tests/ng/test_scheduler.py -> 10 passed in 0.12s. Both used the frozen local bootstrap, one worker, and pytest -p no:xdist. Python compile checks and git diff --check passed. graphify update . exited 0 with local AST-only refresh: 3110 nodes, 5555 edges, 230 communities; it warned only about the pre-existing non-code JSON inputs implementation.json, review.json and protocol-v1.json.",
+  "report_path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-4/.pipeline/out/task-4.json",
+  "concerns": [
+    "The bootstrap wrapper explicitly refuses --full until the separate final-gate switch, so the integrated full suite was not run here.",
+    "The finished files could not be committed: Git must create /home/ingmar/code/tools/ptest/.git/worktrees/task-4/index.lock, and that shared Git admin path is read-only in this workspace. No commit was created.",
+    "The implementation has negative coverage for fixture containment, absent-state nonmutation, marker/DB identity validation, FIFO/resource blocking, capacity, memory accounting, timeout, guard CAS and incomplete quiescence; multi-process race timing, real guard crash/signal recovery, macOS behavior and external security scanners remain later-gate evidence.",
+    "No legacy ledger/config import, environment redirection, remote scheduling, daemon, model API or unscheduled fallback was added. Existing uncertain state fails closed and is never repaired or deleted."
+  ]
+}
