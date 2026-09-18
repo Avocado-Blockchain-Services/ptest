@@ -1,7 +1,7 @@
 {
   "task": "11D Opus repair",
   "date": "2026-09-18",
-  "status": "repair-implemented-scoped-verification-passed-qualification-incomplete-awaiting-review",
+  "status": "historical-repair-rejected-by-opus-r1-followup-in-task-11d-nested-hook-repair",
   "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra",
   "base_commit": "da4a996",
   "commits": {
@@ -29,12 +29,12 @@
     "B2": "Real subprocess tests now cover absent/malformed/forged/mismatched/replayed reports, native/report exit disagreement, exclusive report-write collision with zero/nonzero exits, exact report-name mismatch, early bridge refusal, cancellation, literal suffix, queued config mutation, same-checkout serialization, cross-checkout overlap, source-change reasons and reporter/cleanup preservation. Real installed xdist and unsupported-version tests are authored but skipped without provisioned interpreters.",
     "B3": "Authenticated bridge refusals produce incomplete/ptest-origin results while retaining observed child code. Missing or rejected reports also produce incomplete without losing nonzero native codes. Pytest's own usage exit 4 is complete native evidence unless the owned plugin actually refused. Exit agreement is checked before a refusal report can change origin.",
     "B4": "After grant and before launch, re-resolve and compare the complete local config. Changed arguments, runner kind, invalid TOML and removed config cancel the pending grant without executing the queued test. Scoped source invalidation reasons are retained while source_valid stays false.",
-    "B5": "Ignore pluggy's None blocked-plugin entries. Refuse known execution-control plugins and unowned registered critical hook implementations, including specname aliases and plugins registered during configure. Real blocked-xdist, conftest plugin, repeat-plugin and alias tests exercise these controls.",
-    "B6": "Claims now say before collection, after conftest/plugin imports. A real conftest writes a side-effect marker before qualification refuses the unowned executor; test collection and the executor do not run."
+    "B5": "Ignore pluggy's None blocked-plugin entries. The pre-collection gate refuses known execution-control plugins and unowned registered critical hooks already loaded, including specname aliases and configure-time registrations. The listed tests cover those paths only. Opus R1 found that collection-loaded nested conftests bypass this historical gate; the followup evidence is task-11d-nested-hook-repair.json.",
+    "B6": "The root-conftest fixture proves refusal before collection, after initial conftest/plugin imports: its import marker is present and its collection/executor markers are absent. This timing claim did not cover collection-loaded nested conftests."
   },
   "security_contracts": {
     "identity": "Grant run/nonce/attempt/report identity must match; real nonce, attempt and previous-grant replay mutations cannot produce a pass.",
-    "authorization": "The admitted serial slot cannot authorize an unowned executor or a changed queued command; plugin controls and fresh config comparison refuse before collection/launch respectively.",
+    "authorization": "The intended contract forbids unowned executors and changed queued commands under an admitted serial slot. This historical repair verifies root/configure-time plugin refusal and fresh config comparison; Opus R1 found a nested-conftest gap in the plugin control.",
     "tenancy": "Local checkout/run isolation applies rather than remote tenants. Two real runs serialize on one checkout and overlap on different checkouts. Report allocation/cleanup remains binding-scoped.",
     "input": "Literal shell metacharacters and flag-looking suffix values reach native pytest unchanged; no shell expansion. Invalid report bytes and report identity/exit mutations fail closed.",
     "state": "Report consume occurs in FINALIZING after real guard drain/reap, cannot replay, and valid consumed reports are removed. Cancellation releases the checkout for a subsequent real run. Config changes cancel pending grants.",
@@ -83,6 +83,6 @@
     "Full/automatic/setup/shadow/probe, native inventory/selection, source-valid/full-gate/baseline/history publication remain outside this scoped tier.",
     "Invalid, forged or unreadable report files remain retained by the existing reports.py contract. Cleanup deletes only the exact successfully consumed inode; write-collision tests prove existing files are not overwritten. Protocol-invalid or unconfirmed-quiescence runs retain report state for recovery. No unsafe broad discard API was introduced.",
     "Plugin/conftest code can execute before the collection gate. This is trusted local execution, not a sandbox against malicious same-user code.",
-    "Coverage plugin qualification and unprovisioned third-party execution plugin distributions remain unverified; unqualified critical hook owners are refused, not silently disabled."
+    "Coverage plugin qualification and unprovisioned third-party execution plugin distributions remain unverified. Active pytest-cov --cov runs are refused by the critical-hook gate, including wrappers; argument preservation alone is not compatibility. The historical gate refuses only critical hook owners loaded before collection; Opus R1 found the nested-conftest bypass."
   ]
 }

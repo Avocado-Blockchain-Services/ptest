@@ -6,14 +6,21 @@ them. `test_pytest_scoped_subprocess.py` uses an already provisioned controller
 interpreter or an explicitly supplied `PTEST_TEST_PYTHON_8_4_2` (and corresponding
 version) interpreter. Absent tuples skip with an explicit unqualified reason.
 The actual controller run, versions, failures and skips are recorded in
-`.pipeline/out/task-11d-astra-repair.json`.
+`.pipeline/out/task-11d-astra-repair.json`, with the nested-conftest correction
+recorded in `.pipeline/out/task-11d-nested-hook-repair.json`.
 
 Current `native_cli` tests in `test_pytest_adapter.py` assert the Task 11D boundary:
 FULL, AUTOMATIC and setup are typed unsupported before admission or dependency
 execution. This does not qualify any candidate tuple. Scoped subprocess tests
 exercise candidate ptest, the real guard and scheduler, native pytest, private
 terminal reports and cleanup. Runtime checks precede pytest import where possible;
-plugin qualification precedes test collection, after conftest/plugin imports.
+initial plugin qualification precedes test collection, after initial
+conftest/plugin imports. Qualification repeats at collection finish to reject
+unowned execution hooks from nested conftests before test execution. Nested
+conftest imports and test-module collection can already have run at this point.
+This is local execution, not a sandbox. The current critical-hook gate also
+refuses unqualified plugin wrappers, including active pytest-cov `--cov` runs;
+preserving coverage arguments does not qualify those runs.
 
 Pending full-tier acceptance (preserved from Task 5): basic serial automatic/full
 pass and native failure across 8.4.2, 9.0.3, 9.1.0 and 9.1.1; candidate-owned
