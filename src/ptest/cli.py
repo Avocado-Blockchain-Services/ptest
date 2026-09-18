@@ -266,17 +266,14 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         return ParsedArgs(command=command, json=json_output, prompt=prompt,
                           scope=scope, **limits)
     if command == "guide":
-        write = None
-        index = 0
-        while index < len(args):
-            token = args[index]
-            if token == "--write":
-                write, index = _value(args, index, token)
-                continue
-            if token != "--json":
-                raise _problem("invalid-config", "unknown inspection option")
-            index += 1
-        return ParsedArgs(command=command, json="--json" in args, write=write)
+        if not args:
+            return ParsedArgs(command=command)
+        if args[0] != "--write":
+            raise _problem("invalid-config", "unknown inspection option")
+        write, index = _value(args, 0, "--write")
+        if index != len(args):
+            raise _problem("invalid-config", "unknown inspection option")
+        return ParsedArgs(command=command, write=write)
     raise _problem("invalid-config", "unknown command")
 
 
@@ -335,8 +332,7 @@ def _summary(config: C.Config) -> C.ConfigSummary:
     return C.summarize_config(config, scoped=scoped, full=full)
 
 
-def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None,
-                   *, reveal: bool = False) -> dict:
+def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None) -> dict:
     config = resolution.config
     if config is None:
         return {
@@ -345,7 +341,7 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None,
             "commands": [], "effective_limits": {"max_slots": None,
             "max_jobs": None, "memory_mb": None, "repo_workers": None},
             "provenance": list(resolution.provenance),
-            "warnings": [_reason for _reason in []],
+            "warnings": [],
         }
     adapter_for(config.runner.kind)  # closed registry validation only
     capability = {
@@ -404,7 +400,7 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
     if json_output:
         sys.stdout.buffer.write(_document(kind, error=problem, domain=domain))
     else:
-        print(str(problem), file=sys.stderr)
+        print(render.terminal_text(problem), file=sys.stderr)
     return 2 if problem.code not in {"coordinator-unavailable", "queue-timeout"} else 75
 
 
@@ -419,15 +415,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     if command == "guide":
         text = render.render_guide()
         if parsed.write is not None:
-            try:
-                files.create_exclusive(cwd, parsed.write, text.encode("utf-8"), private=False)
-            except C.Problem as problem:
-                return _emit_error(problem, kind="register", json_output=parsed.json)
-        if parsed.json:
-            # Guide has no public envelope kind; JSON mode is intentionally a
-            # strict usage error rather than an invented schema.
-            problem = _problem("invalid-config", "guide JSON output is unsupported")
-            return _emit_error(problem, kind="register", json_output=True)
+            root = config_api.resolve_config(cwd).root
+            files.create_exclusive(root, parsed.write, text.encode("utf-8"), private=False)
         sys.stdout.write(text)
         return 0
     if command == "init":
@@ -440,7 +429,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if parsed.json:
                 sys.stdout.buffer.write(_document("init", payload))
             else:
-                print(f"{result.action.value}: {result.target}")
+                print(f"{result.action.value}: {render.terminal_text(result.target)}")
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
@@ -492,11 +481,11 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         resolution = config_api.resolve_config(cwd)
         if command == "where":
             domain = platform.domain_paths(parsed.fixture_domain)
-            payload = _where_payload(resolution, domain, reveal=parsed.reveal_command)
+            payload = _where_payload(resolution, domain)
             if parsed.json:
                 sys.stdout.buffer.write(_document("where", payload, domain=domain))
             else:
-                print(f"root: {payload['root']}")
+                print(f"root: {render.terminal_text(payload['root'])}")
                 print(f"initialized: {payload['initialized']}")
             if parsed.reveal_command:
                 if resolution.config is None:
@@ -508,7 +497,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                                + resolution.config.runner.full_args)
                     print(
                         "unredacted-command-disclosure: "
-                        + json.dumps(list(command), ensure_ascii=False),
+                        + json.dumps(list(command), ensure_ascii=True),
                         file=sys.stderr,
                     )
             return 0
@@ -548,16 +537,14 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 print(f"queued: {len(payload['queued'])}\nactive: {len(payload['active'])}")
             return 0
         if command == "history":
+            if parsed.scope is not None:
+                # Public history exposes summaries, not the complete per-test
+                # inventory needed for exact test-ID or file matching.
+                raise _problem("unsupported-capability", "history test/file filters are not supported in this slice")
             domain = platform.domain_paths(parsed.fixture_domain)
             if resolution.config is None:
                 raise resolution.problem or _problem("initialization-required", "project configuration is required")
             payload = history.read_history_payload(domain, _checkout(resolution.config), parsed.history_limit)
-            if parsed.scope is not None:
-                payload["summaries"] = [
-                    item for item in payload["summaries"]
-                    if item["run_id"] == parsed.scope
-                    or any(parsed.scope == test.get("file") for test in [])
-                ]
             if parsed.json:
                 sys.stdout.buffer.write(_document("history", payload, domain=domain))
             else:
@@ -604,7 +591,7 @@ def _lease(item: C.LeaseView) -> dict:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = tuple(sys.argv[1:] if argv is None else argv)
-    json_requested = _json_prefix_requested(raw_args)
+    json_requested = _inspection_json_requested(raw_args)
     try:
         parsed = parse_argv(raw_args)
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
@@ -617,30 +604,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _emit_error(problem, kind=kind, json_output=json_requested)
 
 
-def _json_prefix_requested(args: Sequence[str]) -> bool:
-    """Recognize --json only in an inspection command's closed option list."""
-    values = tuple(args)
-    if values[:1] == ("--fixture-domain",):
-        values = values[2:]
-    if not values or values[0] not in _INSPECTION:
-        return False
-    allowed = {
-        "init": {"--json", "--dry-run", "--reveal-command", "--runner"},
-        "register": {"--json"},
-        "where": {"--json", "--reveal-command"},
-        "status": {"--json"},
-        "history": {"--json", "--limit"},
-        "plan": {"--json", "--base"},
-        "doctor": {"--json", "--prompt", "--scope", "--max-entries",
-                    "--max-files", "--max-file-bytes", "--max-total-bytes"},
-        "guide": {"--json", "--write"},
-    }[values[0]]
-    for token in values[1:]:
-        if token == "--json":
-            return True
-        if token.startswith("-") and token not in allowed:
-            return False
-    return False
+def _inspection_json_requested(args: Sequence[str]) -> bool:
+    """Choose machine errors independent of closed inspection option order.
+
+    Guide is text-only. Execution tails never give --json ptest semantics.
+    """
+    command = _command_from_args(args)
+    return command is not None and command != "guide" and "--json" in args
 
 
 def _command_from_args(args: Sequence[str]) -> str | None:
