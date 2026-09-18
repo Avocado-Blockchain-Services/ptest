@@ -1,7 +1,7 @@
 {
   "task": "11D Opus R1 nested-conftest repair",
   "date": "2026-09-18",
-  "status": "implemented-scoped-verification-passed-awaiting-review",
+  "status": "historical-repair-rejected-by-followup-audit-superseded-by-task-11d-sol-repair",
   "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra2",
   "base_commit": "6de5c4c",
   "source_commit": "bd27646dc94116c46a1d26984767d99a203cfd7f",
@@ -9,7 +9,7 @@
   "finding": {
     "id": "R1",
     "cause": "The final existing validation ran before pytest_collection yielded. A tests/unit/conftest.py reached through the tests directory was imported during collection, after that validation, and could register an unqualified executor.",
-    "change": "A tryfirst wrapper on pytest_collection_finish reuses the existing _validate control after collection and before test execution. Earlier validation remains intact for initially loaded plugins. No second ownership policy or new public result type was added.",
+    "change": "Historical change: a tryfirst wrapper on pytest_collection_finish validated before yielding. Followup audit proved that ordinary trylast collection-finish registration and per-item setup registration still bypassed it; task-11d-sol-repair.json records the superseding repair.",
     "regression": "Three real scoped subprocess cases define pytest_runtestloop, pytest_runtest_protocol or pytest_pyfunc_call in tests/unit/conftest.py. Each asserts incomplete status, ptest exit origin, observed/native exit 4, unsupported-capability reason, private native-config-invalid marker, no executor marker, no root or nested test marker, report cleanup and RELEASED lease. Conftest-import and module-collection markers prove that this is the delayed load path.",
     "evidence_correction": "The previous repair is marked historical/rejected and its B5/B6 claims are restricted to initial/root/configure-time plugins. The fixture README distinguishes before-collection initial qualification from before-test-execution nested qualification and documents that active pytest-cov --cov runs are refused by the existing wrapper-inclusive gate."
   },
@@ -20,7 +20,7 @@
     "input": "No new input or parser. The new cases vary hook names and nested layout while using literal scoped argv through the existing fixture.",
     "state": "A nested-hook refusal must become authenticated incomplete evidence, never passed/native-failure evidence, and must leave no active lease or consumed report.",
     "exposure": "No new public fields or marker payload. The existing fixed refusal message and reason remain in use.",
-    "availability": "The additional validation repeats the existing in-process plugin inspection once per collection finish; no new process, worker, wait or network operation. Test deadlines stay explicit.",
+    "availability": "Historical claim only. The superseding repair's repeated validation points and measured evidence are recorded in task-11d-sol-repair.json.",
     "dependencies": "No dependency or runtime-candidate-table changes. Only the existing pytest hook mechanism and existing validation helper are used.",
     "absent_from_original_spec": "No new domain policy. Collection-time conftest loading is the missing lifecycle case for the already-required executor-ownership contract."
   },
@@ -79,6 +79,7 @@
     "not_run": "No full suite, independent audit, dependency installation, integration, push, deployment, publication or installed CLI replacement."
   },
   "limitations": [
+    "Followup audit rejected this historical repair because validation occurred before other collection-finish implementations and did not revalidate after per-item setup; see task-11d-sol-repair.json.",
     "Only the provisioned CPython 3.13.11 / pytest 9.1.1 runtime was exercised; existing qualification gaps remain unchanged.",
     "Nested conftest imports and test-module collection can execute before the new gate. This is not a sandbox against arbitrary trusted same-user project code.",
     "Known execution-control plugin names remain refused even if unused. Unqualified critical hook wrappers, including active pytest-cov, are still refused; plugin compatibility is not broadened.",
