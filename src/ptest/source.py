@@ -35,6 +35,7 @@ _MAX_GIT_BYTES = 32 * 1024 * 1024
 _TIMEOUT_S = 10.0
 _IDENTITY_PROTOCOL = "ptest-source-v2"
 _OPERATIONS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
+_CONVERSION_ATTRIBUTES = {"crlf", "eol", "filter", "ident", "text", "working-tree-encoding"}
 
 
 def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
@@ -138,49 +139,47 @@ def _records(raw: bytes) -> list[bytes]:
     return records
 
 
-def _changes(raw: bytes) -> tuple[C.Change, ...]:
-    pieces = iter(_records(raw))
-    changes = []
-    for entry in pieces:
-        if len(entry) < 4 or entry[2:3] != b" ":
-            raise _Unavailable("malformed Git status record")
-        state, path = entry[:2], _path(entry[3:])
-        if b"U" in state or state in {b"AA", b"DD"}:
-            raise _Unavailable("Git conflict prevents selection")
-        if state == b"??":
-            changes.append(C.Change(old=None, new=path, kind="untracked"))
-        elif b"R" in state or b"C" in state:
-            changes.append(C.Change(old=_path(next(pieces, b"")), new=path, kind="renamed"))
-        elif b"T" in state or any(value not in b" MAD" for value in state):
-            raise _Unavailable("unsupported Git status type")
-        elif b"D" in state:
-            changes.append(C.Change(old=path, new=None, kind="deleted"))
-        else:
-            changes.append(C.Change(old=None if b"A" in state else path, new=path, kind="modified"))
-    return tuple(changes)
-
-
-def _committed_changes(root: Path, scan: _Scan, older: str, newer: str | None) -> tuple[C.Change, ...]:
-    revisions = (older, newer) if newer is not None else (older,)
-    raw = _git(root, scan, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff",
-               "--no-textconv", *revisions, "--")
-    fields = _records(raw)
-    if len(fields) % 2:
-        raise _Unavailable("malformed Git range records")
+def _raw_changes(raw: bytes) -> tuple[C.Change, ...]:
+    records = _records(raw)
     result = []
-    for index in range(0, len(fields), 2):
-        header, path = fields[index].split(), _path(fields[index + 1])
-        if len(header) != 5 or not header[0].startswith(b":"):
+    index = 0
+    while index < len(records):
+        fields = records[index].split()
+        index += 1
+        if len(fields) != 5 or not fields[0].startswith(b":"):
             raise _Unavailable("malformed Git raw diff record")
-        old_mode, new_mode = header[0][1:], header[1]
+        old_mode, new_mode, status = fields[0][1:], fields[1], fields[4]
         if old_mode != new_mode and b"000000" not in {old_mode, new_mode}:
             raise _Unavailable("Git file mode changed")
-        kind = header[4]
-        if kind not in {b"A", b"M", b"D"}:
+        code = status[:1]
+        if code not in {b"A", b"M", b"D", b"R"} or (code == b"R" and not status[1:].isdigit()):
             raise _Unavailable("unsupported Git range type")
-        result.append(C.Change(old=None if kind == b"A" else path, new=None if kind == b"D" else path,
-                               kind={b"A": "added", b"M": "modified", b"D": "deleted"}[kind]))
+        if index >= len(records):
+            raise _Unavailable("malformed Git range records")
+        old = new = _path(records[index])
+        index += 1
+        if code == b"R":
+            if index >= len(records):
+                raise _Unavailable("malformed Git rename record")
+            new = _path(records[index])
+            index += 1
+        result.append(C.Change(old=None if code == b"A" else old,
+                               new=None if code == b"D" else new,
+                               kind={b"A": "added", b"M": "modified", b"D": "deleted",
+                                     b"R": "renamed"}[code]))
     return tuple(result)
+
+
+def _committed_changes(root: Path, scan: _Scan, older: str, newer: str) -> tuple[C.Change, ...]:
+    raw = _git(root, scan, "diff", "--raw", "-z", "--find-renames", "--no-ext-diff",
+               "--no-textconv", older, newer, "--")
+    return _raw_changes(raw)
+
+
+def _staged_changes(root: Path, scan: _Scan, head: str) -> tuple[C.Change, ...]:
+    raw = _git(root, scan, "diff", "--cached", "--raw", "-z", "--find-renames",
+               "--no-ext-diff", "--no-textconv", head, "--")
+    return _raw_changes(raw)
 
 
 def _revision(root: Path, scan: _Scan, value: str) -> str:
@@ -192,7 +191,7 @@ def _revision(root: Path, scan: _Scan, value: str) -> str:
     return oid.decode("ascii")
 
 
-def _index(raw: bytes) -> dict[str, int]:
+def _index(raw: bytes) -> dict[str, tuple[int, str]]:
     result = {}
     for record in _records(raw):
         metadata, separator, path = record.partition(b"\t")
@@ -206,7 +205,9 @@ def _index(raw: bytes) -> dict[str, int]:
             raise _Unavailable("Git index flags can hide input changes")
         if mode not in {b"100644", b"100755"}:
             raise _Unavailable("symlink or submodule input is unsupported")
-        result[_path(path)] = int(mode, 8)
+        if not re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+            raise _Unavailable("invalid Git index object identity")
+        result[_path(path)] = (int(mode, 8), oid.decode("ascii"))
     if len(result) > _MAX_FILES:
         raise _Unavailable("input file count limit exceeded", "scan-limit")
     return result
@@ -238,16 +239,35 @@ def _stamp(stamp: os.stat_result) -> tuple:
     return stamp.st_dev, stamp.st_ino, stamp.st_mode, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns
 
 
-def _fingerprints(key: bytes, root: Path, paths: set[str], scan: _Scan) -> tuple[C.FileFingerprint, ...]:
+def _present_tracked(root: Path, paths: set[str], scan: _Scan) -> tuple[set[str], set[str]]:
+    present, missing = set(), set()
+    for path in sorted(paths):
+        scan.remaining()
+        try:
+            with _opened(root, path):
+                present.add(path)
+        except FileNotFoundError:
+            missing.add(path)
+    return present, missing
+
+
+def _fingerprints(key: bytes, root: Path, paths: set[str], scan: _Scan,
+                  object_format: str) -> tuple[tuple[C.FileFingerprint, ...], dict[str, str]]:
     if len(paths) > _MAX_FILES:
         raise _Unavailable("input file count limit exceeded", "scan-limit")
+    constructors = {"sha1": hashlib.sha1, "sha256": hashlib.sha256}
+    if object_format not in constructors:
+        raise _Unavailable("unsupported Git object format")
     result, stamps = [], {}
+    object_ids = {}
     for path in sorted(paths):
         scan.remaining()
         with _opened(root, path) as (fd, before):
             if before.st_size > _MAX_FILE_BYTES or scan.read_bytes + before.st_size > _MAX_TOTAL_BYTES:
                 raise _Unavailable("input fingerprint byte limit exceeded", "scan-limit")
             mac = hmac.new(key, digestmod=hashlib.sha256)
+            object_hash = constructors[object_format]()
+            object_hash.update(f"blob {before.st_size}\0".encode("ascii"))
             count = 0
             while True:
                 scan.remaining()
@@ -261,10 +281,12 @@ def _fingerprints(key: bytes, root: Path, paths: set[str], scan: _Scan) -> tuple
                 if count > _MAX_FILE_BYTES or scan.read_bytes > _MAX_TOTAL_BYTES:
                     raise _Unavailable("input fingerprint byte limit exceeded", "scan-limit")
                 mac.update(piece)
+                object_hash.update(piece)
             after = os.fstat(fd)
             if _stamp(before) != _stamp(after) or count != before.st_size:
                 raise _Unavailable("input changed while fingerprinting")
             stamps[path] = _stamp(after)
+            object_ids[path] = object_hash.hexdigest()
             result.append(C.FileFingerprint(path=path, digest=mac.hexdigest(),
                                             mode=stat.S_IMODE(after.st_mode), size=count))
     for path, expected in stamps.items():
@@ -272,7 +294,43 @@ def _fingerprints(key: bytes, root: Path, paths: set[str], scan: _Scan) -> tuple
         with _opened(root, path) as (_, current):
             if _stamp(current) != expected:
                 raise _Unavailable("input changed during snapshot")
-    return tuple(result)
+    return tuple(result), object_ids
+
+
+def _conversion_paths(root: Path, scan: _Scan, paths: set[str]) -> set[str]:
+    """Resolve attributes without asking Git to convert or read file contents."""
+    converted = set()
+    pending: list[str] = []
+    size = 0
+
+    def inspect(chunk: list[str]) -> None:
+        raw = _git(root, scan, "check-attr", "-z", "--all", "--", *chunk)
+        records = _records(raw)
+        if len(records) % 3:
+            raise _Unavailable("malformed Git attribute evidence")
+        allowed = set(chunk)
+        for index in range(0, len(records), 3):
+            path = _path(records[index])
+            try:
+                attribute = records[index + 1].decode("ascii", "strict")
+                value = records[index + 2].decode("utf-8", "strict")
+            except UnicodeError as exc:
+                raise _Unavailable("unsafe Git attribute evidence") from exc
+            if path not in allowed:
+                raise _Unavailable("unexpected Git attribute path")
+            if attribute in _CONVERSION_ATTRIBUTES and value != "unset":
+                converted.add(path)
+
+    for path in sorted(paths):
+        encoded_size = len(path.encode("utf-8")) + 1
+        if pending and (len(pending) >= 256 or size + encoded_size > 32 * 1024):
+            inspect(pending)
+            pending, size = [], 0
+        pending.append(path)
+        size += encoded_size
+    if pending:
+        inspect(pending)
+    return converted
 
 
 def _mac(key: bytes, value: object) -> str:
@@ -304,9 +362,17 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         top = _git(root, scan, "rev-parse", "--show-toplevel").rstrip(b"\n")
         if os.fsdecode(top) != os.fspath(root):
             raise _Unavailable("Git root does not match checkout")
+        filter_config = _git(root, scan, "config", "--includes", "--get-regexp",
+                             r"^filter\.", absent_ok=True)
+        if filter_config:
+            raise _Unavailable("Git filter configuration prevents static source inspection")
         # Avoid any operation that could fetch missing promisor objects.
         if _git(root, scan, "config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.promisor)$", absent_ok=True):
             raise _Unavailable("partial clone requires unavailable local evidence")
+        autocrlf_raw = _git(root, scan, "config", "--get", "core.autocrlf", absent_ok=True)
+        autocrlf = autocrlf_raw.strip().lower() if autocrlf_raw is not None else b"false"
+        if autocrlf not in {b"false", b"true", b"input"}:
+            raise _Unavailable("unsupported Git line-ending configuration")
         git_dir = Path(os.fsdecode(_git(root, scan, "rev-parse", "--absolute-git-dir").rstrip(b"\n")))
         if any(os.path.lexists(git_dir / marker) for marker in _OPERATIONS):
             raise _Unavailable("in-progress Git operation prevents selection")
@@ -321,31 +387,52 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         index_args = ("ls-files", "--stage", "-v", "-z")
         indexed = _git(root, scan, *index_args)
         tracked = _index(indexed)
-        status_args = ("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all")
-        status = _git(root, scan, *status_args)
-        working = tuple(change for change in _changes(status)
-                        if not (change.kind == "untracked" and _matches(change.new, config.selection.non_input_outputs)))
+        object_format = _git(root, scan, "rev-parse", "--show-object-format").strip().decode("ascii")
+        staged = _staged_changes(root, scan, head)
+        untracked_raw = _git(root, scan, "ls-files", "--others", "--exclude-standard", "-z")
+        untracked = {_path(path) for path in _records(untracked_raw)}
+        untracked = {path for path in untracked
+                     if not _matches(path, config.selection.non_input_outputs)}
+        ignored_raw = _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        ignored_all = {_path(path) for path in _records(ignored_raw)}
+        declared_ignored = {path for path in ignored_all
+                            if _matches(path, config.selection.ignored_inputs)}
+        undeclared_ignored = {path for path in ignored_all
+                              if path not in declared_ignored
+                              and not _matches(path, config.selection.non_input_outputs)}
+        present, deleted = _present_tracked(root, set(tracked), scan)
+        paths = present | untracked | declared_ignored | undeclared_ignored
+        files, object_ids = _fingerprints(key, root, paths, scan, object_format)
+        raw_changed = {path for path in present if object_ids[path] != tracked[path][1]}
+        attribute_converted = _conversion_paths(root, scan, raw_changed)
+        converted = set(attribute_converted)
+        if autocrlf != b"false":
+            converted.update(raw_changed)
+        raw_changes = tuple(C.Change(old=path, new=path,
+                                     kind="raw" if path in converted else "modified")
+                            for path in sorted(raw_changed))
+        mode_changed = {f.path for f in files if f.path in tracked
+                        and bool(f.mode & 0o111) != bool(tracked[f.path][0] & 0o111)}
+        working = tuple(dict.fromkeys((*staged,
+            *(C.Change(old=path, new=None, kind="deleted") for path in sorted(deleted)),
+            *raw_changes,
+            *(C.Change(old=path, new=path, kind="mode") for path in sorted(mode_changed)),
+            *(C.Change(old=None, new=path, kind="untracked") for path in sorted(untracked)),
+            *(C.Change(old=None, new=path, kind="ignored") for path in sorted(undeclared_ignored)))))
         changes = tuple(dict.fromkeys((*changes, *working)))
-        if working:
-            # Raw diff proves mode safety even for chmod staged in the index.
-            _committed_changes(root, scan, head, None)
-        deleted = {change.old for change in working if change.kind == "deleted"}
-        paths = set(tracked) - deleted
-        paths.update(change.new for change in working if change.new is not None)
-        ignored = set()
-        if config.selection.ignored_inputs:
-            raw = _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
-                       *config.selection.ignored_inputs)
-            ignored = {_path(path) for path in _records(raw)}
-            paths.update(ignored)
-        files = _fingerprints(key, root, paths, scan)
-        if any(bool(f.mode & 0o111) != bool(tracked[f.path] & 0o111) for f in files if f.path in tracked):
+        if mode_changed:
             raise _Unavailable("file mode differs from Git index")
         if (_revision(root, scan, "HEAD") != head or _git(root, scan, *index_args) != indexed
-                or _git(root, scan, *status_args) != status):
+                or _git(root, scan, "ls-files", "--others", "--exclude-standard", "-z") != untracked_raw
+                or _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z") != ignored_raw
+                or _git(root, scan, "config", "--includes", "--get-regexp",
+                        r"^filter\.", absent_ok=True) != filter_config
+                or _git(root, scan, "config", "--get", "core.autocrlf", absent_ok=True) != autocrlf_raw
+                or _conversion_paths(root, scan, raw_changed) != attribute_converted):
             raise _Unavailable("Git evidence changed during snapshot")
         environment = [(name, name in os.environ, os.environ.get(name)) for name in sorted(config.selection.environment)]
-        external = _mac(key, [environment, [(f.path, f.digest, f.mode, f.size) for f in files if f.path in ignored]])
+        external = _mac(key, [environment, [(f.path, f.digest, f.mode, f.size)
+                                            for f in files if f.path in declared_ignored]])
         identity = [(f.path, f.digest, f.mode, f.size) for f in files]
         digest = _mac(key, [_IDENTITY_PROTOCOL, identity, external])
         compatibility = None

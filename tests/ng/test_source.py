@@ -195,7 +195,7 @@ def _baseline(case, config, snap):
                    policy_digest=hashlib.sha256(repr(config.selection).encode()).hexdigest())
 
 
-def test_ignored_caches_do_not_dirty_or_change_a_clean_snapshot(case):
+def test_undeclared_ignored_content_is_not_an_automatic_exemption(case):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case)
@@ -209,9 +209,93 @@ def test_ignored_caches_do_not_dirty_or_change_a_clean_snapshot(case):
     (root / ".venv").mkdir()
     (root / ".venv/cache").write_bytes(b"cache")
     after = snapshot(domain, config, None, None)
-    assert after.clean and after.changes == ()
-    assert before.digest == after.digest
-    assert {item.path for item in after.files} == {".gitignore", "src/a.py", "tests/test_a.py"}
+    ignored = {change.new for change in after.changes if change.kind == "ignored"}
+    assert not after.clean
+    assert ignored == {".venv/cache", "src/__pycache__/a.pyc"}
+    assert before.digest != after.digest
+    assert ignored.issubset({item.path for item in after.files})
+
+
+@pytest.mark.parametrize("with_docs_change", [False, True])
+def test_undeclared_ignored_runtime_input_forces_full(case, with_docs_change):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".gitignore").write_text("local_settings.py\n")
+    (root / "tests/other.py").write_text("pass\n")
+    _git(root, "add", ".gitignore", "tests/other.py")
+    _git(root, "commit", "-m", "selection fixture")
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(
+        enabled=True, closed_inputs=True, input_roots=("src", "tests"), no_tests=("docs",),
+        groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
+    before = snapshot(domain, config, None, None)
+    baseline = replace(_baseline(case, config, before),
+                       inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
+    (root / "src/local_settings.py").write_text("RUNTIME_FLAG = True\n")
+    assert _git(root, "check-ignore", "src/local_settings.py") == "src/local_settings.py"
+    if with_docs_change:
+        (root / "docs").mkdir()
+        (root / "docs/readme.md").write_text("docs only\n")
+
+    after = snapshot(domain, config, baseline, None)
+    plan = choose_plan(config, after, C.HistoryView(baseline=baseline), case.request())
+
+    assert any(change.kind == "ignored" and change.new == "src/local_settings.py"
+               for change in after.changes)
+    assert plan.execution == "full"
+
+
+def test_raw_crlf_change_hidden_by_git_conversion_forces_full(case):
+    from ptest.source import ensure_fingerprint_key
+    from ptest.selection import choose_plan
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".gitattributes").write_text("*.txt text\n")
+    (root / "src/golden.txt").write_bytes(b"expected\n")
+    (root / "tests/other.py").write_text("pass\n")
+    _git(root, "add", ".gitattributes", "src/golden.txt", "tests/other.py")
+    _git(root, "commit", "-m", "conversion fixture")
+    config = replace(_config(case, domain), selection=C.SelectionPolicy(
+        enabled=True, closed_inputs=True, input_roots=("src", "tests"), no_tests=("docs",),
+        groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
+    before = snapshot(domain, config, None, None)
+    baseline = replace(_baseline(case, config, before),
+                       inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
+    (root / "src/golden.txt").write_bytes(b"expected\r\n")
+    (root / "docs").mkdir()
+    (root / "docs/readme.md").write_text("docs only\n")
+    assert subprocess.run(("git", "-C", str(root), "diff", "--quiet", "--", "src/golden.txt")).returncode == 0
+
+    after = snapshot(domain, config, baseline, None)
+    plan = choose_plan(config, after, C.HistoryView(baseline=baseline), case.request())
+
+    assert any(change.kind == "raw" and change.new == "src/golden.txt"
+               for change in after.changes)
+    assert plan.execution == "full"
+
+
+def test_snapshot_never_executes_configured_process_filter(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".gitattributes").write_text("*.dat filter=sentinel\n")
+    (root / "src/input.dat").write_bytes(b"original\n")
+    _git(root, "add", ".gitattributes", "src/input.dat")
+    _git(root, "commit", "-m", "filter fixture")
+    marker = domain.root / "filter-executed"
+    driver = domain.root / "filter-driver"
+    driver.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    driver.chmod(0o700)
+    _git(root, "config", "filter.sentinel.process", str(driver))
+    _git(root, "config", "filter.sentinel.required", "true")
+    (root / "src/input.dat").write_bytes(b"changed\n")
+
+    result = snapshot(domain, _config(case, domain), None, None)
+
+    assert result.digest is None
+    assert result.limitations
+    assert not marker.exists()
 
 
 def test_committed_delta_does_not_mark_worktree_dirty_and_newer_base_cannot_hide_it(case):
@@ -400,10 +484,12 @@ def test_real_divergent_commit_is_not_accepted_as_baseline_or_base(case):
     assert snapshot(domain, config, None, other.head).digest is None
 
 
-def test_declared_non_input_output_does_not_change_identity(case):
+def test_declared_non_input_ignored_output_does_not_change_identity(case):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".gitignore").write_text("reports/\n")
+    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore declared output")
     config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
         input_roots=("src", "tests"), non_input_outputs=("reports",)))
     before = snapshot(domain, config, None, None)
