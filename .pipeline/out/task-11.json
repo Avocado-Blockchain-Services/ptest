@@ -1,0 +1,39 @@
+{
+  "task": "11",
+  "slice": "11A-static-integration",
+  "status": "implemented-slice",
+  "implemented": [
+    "strict prefix-only execution parsing with literal runner suffixes",
+    "full/changed narrowing rejection",
+    "closed five-profile runner registry",
+    "shared PublicDocument JSON rendering",
+    "bounded doctor repair prompt and bundled guide",
+    "static init/register/where/status/history/plan/doctor/guide dispatch",
+    "module entrypoint"
+  ],
+  "verified": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py",
+    "result": "281 passed",
+    "syntax": "PYTHONPATH=src uv run --locked --no-sync python -m compileall -q src/ptest",
+    "diff_check": "git diff --check"
+  },
+  "not_verified": [
+    "scheduler/guard/adapter subprocess execution",
+    "stdout/stderr and native exit/signal fidelity",
+    "history publication and baseline eligibility",
+    "changed-input revalidation and finalization",
+    "candidate ptest self-hosting and full suite"
+  ],
+  "deferred": [
+    "operations.py execution lifecycle is intentionally owned by the next slice",
+    "operations-focused tests and real subprocess fixtures",
+    "final ptest --full and Opus High audit"
+  ],
+  "discovered_but_not_fixed": [],
+  "blockers": [],
+  "confidence": "focused static integration only; not a complete Task 11 acceptance claim",
+  "commits": {
+    "source_tests": "0c2703d",
+    "evidence": "pending"
+  }
+}
