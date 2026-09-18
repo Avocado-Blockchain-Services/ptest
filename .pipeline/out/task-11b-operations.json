@@ -42,7 +42,7 @@
     {
       "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py --tb=short --durations=15",
       "status": "passed",
-      "evidence": "7 passed in 2.35s; slowest test 0.39s"
+      "evidence": "7 passed in 2.32s; slowest test 0.36s (final post-repair controller run)"
     },
     {
       "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py -k 'runner_registry_is_closed_and_generic_is_exclusive' --tb=short --durations=15",
