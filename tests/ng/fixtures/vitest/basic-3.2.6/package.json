@@ -1,0 +1,9 @@
+{
+  "name": "ptest-vitest-basic-3-2-6",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@vitest/coverage-v8": "3.2.6",
+    "vitest": "3.2.6"
+  }
+}
