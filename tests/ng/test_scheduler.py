@@ -3,15 +3,914 @@ from __future__ import annotations
 
 import os
 import time
+import errno
+import json
+import multiprocessing
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import psutil
 
 from ptest import contracts as C
 from ptest import platform
 import ptest.scheduler as scheduler
 from ptest.scheduler import enqueue, finish, poll, reconcile, register_guard
+
+
+@pytest.fixture
+def world(monkeypatch):
+    """Kernel observations and monotonic time; no elapsed-time race assertions."""
+    owner = platform.process_identity(os.getpid())
+    guard = C.ProcessIdentity(pid=900001, birth=1.0, uid=os.getuid(), pgid=900001)
+    state = SimpleNamespace(now=100.0, owner=owner, guard=guard,
+                            identities={owner.pid: owner, guard.pid: guard},
+                            absent=set(), groups={guard.pgid: True},
+                            children={}, parents={}, inaccessible=set())
+
+    def process(pid):
+        if pid in state.inaccessible:
+            raise psutil.AccessDenied(pid)
+        if pid in state.absent:
+            raise psutil.NoSuchProcess(pid)
+        return SimpleNamespace(pid=pid, ppid=lambda: state.parents.get(pid, 0),
+                               children=lambda: [process(p) for p in state.children.get(pid, ())])
+
+    def kill(pid, signal):
+        assert signal == 0
+        if pid in state.absent:
+            raise ProcessLookupError(errno.ESRCH, "fixture absent")
+        if pid in state.inaccessible:
+            raise PermissionError(errno.EPERM, "fixture inaccessible")
+
+    monkeypatch.setattr(scheduler, "_now", lambda: state.now)
+    monkeypatch.setattr(platform, "process_identity", lambda pid: state.identities.get(pid))
+    monkeypatch.setattr(platform, "probe_group", lambda pgid: C.GroupObservation(
+        exists=state.groups.get(pgid, False),
+        permission=state.groups.get(pgid, False) is not None, checked_at=state.now))
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(psutil, "Process", process)
+    return state
+
+
+def _running(case, domain, world, label="running", **kwargs):
+    ticket = enqueue(domain, _request(case, domain, label, **kwargs))
+    grant = poll(domain, ticket).grant
+    assert grant is not None
+    assert register_guard(domain, grant, world.guard)
+    return ticket, grant
+
+
+def _proof(grant, pgid, now, **kwargs):
+    return C.QuiescenceProof(run_id=grant.run_id, generation=grant.generation,
+                            pgid=pgid, checked_at=now, group_absent=True,
+                            escaped_survivors=kwargs.get("escaped", False))
+
+
+def _final():
+    return C.Finalization(outcome_id=None, status=C.Status.PASSED, exit_code=0,
+                          source_valid=True, committed=True)
+
+
+def _gone(world, identity):
+    world.identities.pop(identity.pid, None)
+    world.absent.add(identity.pid)
+    world.groups[identity.pgid] = False
+
+
+def _sql(domain, query):
+    with sqlite3.connect(domain.ledger) as conn:
+        return conn.execute(query).fetchall()
+
+
+def _configure(domain, slots=2, jobs=2, memory=64):
+    domain.machine_config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    domain.machine_config.write_text(f"max_slots = {slots}\nmax_jobs = {jobs}\n" +
+                                     ("" if memory is None else f"memory_mb = {memory}\n"))
+    domain.machine_config.chmod(0o600)
+
+
+def test_poller_preserves_live_finalizer_and_checkout_charge(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    _gone(world, world.guard)
+    assert poll(domain, ticket).state is C.LeaseState.FINALIZING
+    assert poll(domain, follower).grant is None
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+    assert poll(domain, follower).grant is not None
+
+
+@pytest.mark.parametrize("exists", [True, None])
+def test_caller_quiescence_booleans_cannot_release_live_or_unknown_group(case, world, exists):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    world.groups[world.guard.pgid] = exists
+    with pytest.raises(C.Problem) as caught:
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert caught.value.code == "ownership-uncertain"
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+
+
+@pytest.mark.parametrize("field,value", [("nonce", "b" * 64), ("generation", 99),
+                                        ("domain_id", "b" * 32), ("slots", 2),
+                                        ("memory_estimate_mb", 10), ("reserved_memory_mb", 10)])
+def test_forged_grant_never_poisons_a_legitimate_row(case, world, field, value):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    before = domain.ledger.read_bytes()
+    with pytest.raises(C.Problem):
+        finish(domain, replace(grant, **{field: value}),
+               _proof(grant, world.guard.pgid, world.now), _final())
+    assert domain.ledger.read_bytes() == before
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+
+@pytest.mark.parametrize("observation", ["none", "eperm", "reuse", "uid", "absent"])
+def test_unregistered_grant_releases_only_for_proven_absence(case, world, observation):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    grant = poll(domain, ticket).grant
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    world.identities.pop(world.owner.pid)
+    if observation == "eperm":
+        world.inaccessible.add(world.owner.pid)
+    elif observation in {"reuse", "uid"}:
+        world.identities[world.owner.pid] = replace(world.owner, **(
+            {"birth": world.owner.birth + 1} if observation == "reuse" else {"uid": os.getuid() + 1}))
+    elif observation == "absent":
+        world.absent.add(world.owner.pid)
+    result = poll(domain, ticket)
+    assert result.state is (C.LeaseState.CANCELLED if observation == "absent" else C.LeaseState.UNCERTAIN)
+    assert register_guard(domain, grant, world.guard) is False
+    if observation != "absent":
+        assert poll(domain, follower).grant is None
+
+
+def test_new_boot_atomically_cancels_old_work_and_rebases_time(case, world, monkeypatch):
+    domain = case.domain()
+    monkeypatch.setattr(platform, "boot_identity", lambda: "boot-a")
+    ticket, grant = _running(case, domain, world)
+    queued = enqueue(domain, _request(case, domain, "queued"))
+    inode = domain.ledger.stat().st_ino
+    monkeypatch.setattr(platform, "boot_identity", lambda: "boot-b")
+    world.now = 2.0
+    before = domain.ledger.read_bytes()
+    assert all(item.state is C.LeaseState.CANCELLED for item in reconcile(domain))
+    assert domain.ledger.read_bytes() == before
+    fresh = enqueue(domain, _request(case, domain, "fresh"))
+    assert poll(domain, fresh).grant is not None
+    for old in (ticket, queued):
+        state = poll(domain, old)
+        assert state.state is C.LeaseState.CANCELLED
+        assert state.grant is None
+        assert state.problem.code == "ownership-uncertain"
+    assert domain.ledger.stat().st_ino == inode
+    assert _sql(domain, "SELECT boot_id FROM domain") == [("boot-b",)]
+    assert all(item.age_s == 0 for item in reconcile(domain))
+    assert register_guard(domain, grant, world.guard) is False
+
+
+def test_deadline_behind_blocked_head_expires_and_frees_pending_capacity(case, world, monkeypatch):
+    domain = case.domain(slots=2, jobs=2)
+    first = enqueue(domain, _request(case, domain, "first", locks=("db",)))
+    assert poll(domain, first).grant is not None
+    head = enqueue(domain, _request(case, domain, "head", locks=("db",)))
+    tail = enqueue(domain, _request(case, domain, "tail", deadline=105))
+    monkeypatch.setattr(scheduler, "MAX_PENDING_JOBS", 2, raising=False)
+    world.now = 106
+    result = poll(domain, tail)
+    assert result.state is C.LeaseState.CANCELLED
+    assert result.problem.code == "queue-timeout"
+    assert poll(domain, head).grant is None
+    later = enqueue(domain, _request(case, domain, "later"))
+    assert poll(domain, later).position == 1
+
+
+def test_existing_status_is_read_only_and_reports_current_queue_wait(case, world):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    assert poll(domain, ticket).grant is not None
+    tail = enqueue(domain, _request(case, domain, "tail"))
+    world.now += 17
+    _gone(world, world.owner)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in domain.root.iterdir()}
+    views = {item.run_id: item for item in reconcile(domain)}
+    assert views[ticket.run_id].state is C.LeaseState.CANCELLED
+    assert views[tail.run_id].queue_wait_s == 17
+    assert views[tail.run_id].age_s == 17
+    assert before == {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in domain.root.iterdir()}
+
+
+@pytest.mark.parametrize("memory", [128, None])
+def test_memory_budget_loosening_waits_for_idle(case, world, monkeypatch, tmp_path, memory):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain)
+    ticket, grant = _running(case, domain, world)
+    _configure(domain, memory=memory)
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert _sql(domain, "SELECT config_memory,config_generation FROM domain") == [(64, 0)]
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    enqueue(domain, _request(case, domain, "after"))
+    assert _sql(domain, "SELECT config_memory,config_generation FROM domain") == [(memory, 1)]
+
+
+def test_nested_active_guard_and_inaccessible_ancestry_fail_closed(case, world):
+    domain = case.domain()
+    _running(case, domain, world)
+    world.parents[world.owner.pid] = world.guard.pid
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "nested"))
+    assert caught.value.code == "nested-invocation"
+    world.parents.clear()
+    world.inaccessible.add(world.owner.pid)
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "unknown"))
+    assert caught.value.code == "ownership-uncertain"
+    assert _sql(domain, "SELECT count(*) FROM jobs") == [(1,)]
+
+
+def test_observed_escape_survives_reparenting_and_blocks_forged_release(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=900002)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    world.children.clear()
+    _gone(world, world.guard)
+    with pytest.raises(C.Problem) as caught:
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert caught.value.code == "ownership-uncertain"
+    view = reconcile(domain)[0]
+    assert view.state is C.LeaseState.UNCERTAIN
+    assert view.reasons[0].code == "unsupported-detached-descendant"
+    world.identities.pop(child.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    world.absent.add(child.pid)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_default_queue_survives_two_240_second_predecessors(case, world):
+    domain = case.domain()
+    first, grant = _running(case, domain, world, "first")
+    second = enqueue(domain, _request(case, domain, "second"))
+    third = enqueue(domain, _request(case, domain, "third"))
+    short = enqueue(domain, _request(case, domain, "short", deadline=400))
+    for ticket in (first, second):
+        world.now += 240
+        _gone(world, world.guard)
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+        if ticket == first:
+            grant = poll(domain, second).grant
+            world.identities[world.guard.pid] = world.guard
+            world.absent.remove(world.guard.pid)
+            world.groups[world.guard.pgid] = True
+            assert register_guard(domain, grant, world.guard)
+    assert poll(domain, third).grant is not None
+    assert poll(domain, short).problem.code == "queue-timeout"
+    assert next(v for v in reconcile(domain) if v.run_id == third.run_id).queue_wait_s == 480
+
+
+@pytest.mark.parametrize("kind", ["slots", "jobs", "memory", "checkout", "lock", "exclusive"])
+def test_atomic_admission_honors_each_independent_resource_bound(case, world, monkeypatch, tmp_path, kind):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain, slots=2, jobs=1 if kind == "jobs" else 2,
+               memory=64 if kind == "memory" else None)
+    request = _request(case, domain, "first", slots=2 if kind == "slots" else 1,
+                       memory_mb=40, locks=("db",) if kind == "lock" else (),
+                       exclusive=kind == "exclusive")
+    first = enqueue(domain, request)
+    grant = poll(domain, first).grant
+    assert grant.memory_estimate_mb == 40 * grant.slots
+    other = _request(case, domain, "other", memory_mb=40, locks=request.locks)
+    if kind == "checkout":
+        other = replace(other, checkout=request.checkout)
+    second = enqueue(domain, other)
+    assert poll(domain, second).grant is None
+    assert _sql(domain, "SELECT count(*) FROM jobs WHERE state='GRANTED'") == [(1,)]
+
+
+def test_lowering_limits_and_introducing_memory_budget_keep_existing_charge(case, world, monkeypatch, tmp_path):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain, slots=4, jobs=2, memory=None)
+    first = enqueue(domain, _request(case, domain, "first", slots=3))
+    assert poll(domain, first).grant.slots == 3
+    _configure(domain, slots=2, jobs=1, memory=64)
+    second = enqueue(domain, _request(case, domain, "second"))
+    assert poll(domain, second).grant is None
+    assert _sql(domain, "SELECT config_slots,config_jobs,config_memory FROM domain") == [(2, 1, 64)]
+    assert poll(domain, first).grant.slots == 3
+
+
+@pytest.mark.parametrize("memory", [None, 64])
+def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case, world, monkeypatch, tmp_path, memory):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    assert scheduler.effective_limits(domain) == C.EffectiveLimits()
+    assert not domain.root.exists()
+    _configure(domain, memory=memory)
+    assert scheduler.effective_limits(domain) == C.EffectiveLimits(max_slots=2, max_jobs=2, memory_mb=memory)
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    assert poll(domain, ticket).grant is not None
+    _configure(domain, slots=4, jobs=3, memory=128)
+    before = domain.ledger.read_bytes()
+    assert scheduler.effective_limits(domain) == C.EffectiveLimits(max_slots=2, max_jobs=2, memory_mb=memory)
+    assert domain.ledger.read_bytes() == before
+
+
+def test_lowered_memory_budget_waits_for_existing_reservation_to_drain(case, world, monkeypatch, tmp_path):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain, memory=128)
+    ticket, grant = _running(case, domain, world, memory_mb=80)
+    _configure(domain, memory=64)
+    follower = enqueue(domain, _request(case, domain, "follower", memory_mb=10))
+    assert poll(domain, ticket).grant.reserved_memory_mb == 80
+    assert poll(domain, follower).grant is None
+    assert scheduler.effective_limits(domain).memory_mb == 64
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, follower).grant.reserved_memory_mb == 10
+
+
+def test_unavailable_boot_never_mutates_existing_state(case, world, monkeypatch):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    before = domain.ledger.read_bytes()
+    monkeypatch.setattr(platform, "boot_identity", lambda: None)
+    with pytest.raises(C.Problem) as caught:
+        poll(domain, ticket)
+    assert caught.value.code == "state-unavailable"
+    assert domain.ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", ["marker-replaced", "db-replaced", "corrupt", "oversize",
+                                  "symlink", "hardlink", "marker-missing", "db-missing"])
+def test_hostile_or_partial_existing_state_never_recreates_ledger(case, world, tmp_path, mode):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    marker = domain.root / "domain.json"
+    outside = tmp_path / "untouched"
+    outside.write_bytes(b"outside sentinel")
+    outside.chmod(0o600)
+    if mode in {"marker-replaced", "db-replaced"}:
+        target = marker if mode == "marker-replaced" else domain.ledger
+        replacement = domain.root / "replacement"
+        replacement.write_bytes(target.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(target)
+    elif mode == "corrupt":
+        domain.ledger.write_bytes(b"corrupt sqlite")
+    elif mode == "oversize":
+        with domain.ledger.open("r+b") as stream:
+            stream.truncate(16 * 1024 * 1024 + 1)
+    elif mode in {"symlink", "hardlink"}:
+        domain.ledger.unlink()
+        if mode == "symlink":
+            domain.ledger.symlink_to(outside)
+        else:
+            os.link(outside, domain.ledger)
+    elif mode == "marker-missing":
+        marker.unlink()
+    else:
+        domain.ledger.unlink()
+    with pytest.raises(C.Problem) as caught:
+        poll(domain, ticket)
+    assert caught.value.code in {"unsafe-path", "coordinator-corrupt", "capacity-exceeded"}
+    assert outside.read_bytes() == b"outside sentinel"
+    if mode == "db-missing":
+        assert not domain.ledger.exists()
+
+
+def test_interrupted_empty_initialization_completes_marker_without_recreating(case, world, monkeypatch):
+    domain = case.domain()
+    create = scheduler.files.create_exclusive
+
+    def interrupted(root, name, content, **kwargs):
+        if name == "domain.json":
+            raise C.Problem(code="state-unavailable", message="fixture interruption",
+                            phase="scheduler", retryable=False)
+        return create(root, name, content, **kwargs)
+
+    monkeypatch.setattr(scheduler.files, "create_exclusive", interrupted)
+    with pytest.raises(C.Problem):
+        enqueue(domain, _request(case, domain, "interrupted"))
+    inode = domain.ledger.stat().st_ino
+    monkeypatch.setattr(scheduler.files, "create_exclusive", create)
+    ticket = enqueue(domain, _request(case, domain, "restart"))
+    assert poll(domain, ticket).grant is not None
+    assert domain.ledger.stat().st_ino == inode
+    assert _sql(domain, "SELECT count(*) FROM jobs") == [(1,)]
+
+
+def _initializer(domain, request, channel, pause_publish=False, report_lock=False):
+    if pause_publish:
+        original = scheduler.files.create_exclusive
+
+        def create(root, name, data, **kwargs):
+            if name == "domain.json":
+                channel.send("publishing")
+                assert channel.recv() == "continue"
+            return original(root, name, data, **kwargs)
+
+        scheduler.files.create_exclusive = create
+    if report_lock:
+        original_lock = scheduler._open_bootstrap
+        reported = False
+
+        def lock(*args, **kwargs):
+            nonlocal reported
+            if not reported:
+                channel.send("locking")
+                reported = True
+            return original_lock(*args, **kwargs)
+
+        scheduler._open_bootstrap = lock
+    try:
+        ticket = enqueue(domain, request)
+        channel.send(("admitted", poll(domain, ticket).state.value))
+    except C.Problem as error:
+        channel.send(("error", error.code))
+    finally:
+        channel.close()
+
+
+def _receive(channel):
+    assert channel.poll(2), "bounded IPC deadline exceeded"
+    return channel.recv()
+
+
+def _join(process):
+    process.join(2)
+    if process.is_alive():
+        process.terminate()
+        process.join(2)
+        pytest.fail("fixture process exceeded deadline")
+    assert process.exitcode == 0
+
+
+def test_two_initializers_serialize_partial_marker_publication(case):
+    domain = case.domain(slots=1, jobs=1)
+    ctx = multiprocessing.get_context("fork")
+    one, child_one = ctx.Pipe()
+    two, child_two = ctx.Pipe()
+    first = ctx.Process(target=_initializer, args=(domain, _request(case, domain, "first"), child_one, True))
+    second = ctx.Process(target=_initializer, args=(domain, _request(case, domain, "second"), child_two, False, True))
+    first.start()
+    events = [_receive(one)]
+    second.start()
+    try:
+        events.append(_receive(two))
+    finally:
+        one.send("continue")
+        _join(first)
+        _join(second)
+    events += [_receive(one)]
+    if events[1] == "locking":
+        events += [_receive(two)]
+    one.close()
+    two.close()
+    assert events == ["publishing", "locking", ("admitted", "GRANTED"), ("admitted", "QUEUED")]
+    assert _sql(domain, "SELECT count(*) FROM jobs WHERE state='GRANTED'") == [(1,)]
+
+
+def _group_child(channel):
+    os.setsid()
+    channel.send(platform.process_identity(os.getpid()))
+    assert channel.recv() == "exit"
+    channel.close()
+
+
+@contextmanager
+def _live_group():
+    ctx = multiprocessing.get_context("fork")
+    parent, child = ctx.Pipe()
+    proc = ctx.Process(target=_group_child, args=(child,))
+    proc.start()
+    try:
+        yield _receive(parent), parent, proc
+    finally:
+        if proc.is_alive():
+            parent.send("exit")
+        _join(proc)
+        parent.close()
+
+
+def _poller(domain, ticket, channel):
+    channel.send(poll(domain, ticket).state.value)
+    channel.close()
+
+
+@pytest.mark.parametrize("forged", [False, True])
+def test_real_guard_forged_proof_and_multiprocess_finalizer_poller(case, forged):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    grant = poll(domain, ticket).grant
+    events = []
+    with _live_group() as (guard, control, proc):
+        assert register_guard(domain, grant, guard)
+        if forged:
+            with pytest.raises(C.Problem):
+                finish(domain, grant, _proof(grant, guard.pgid, time.monotonic()), _final())
+            events.append("live-proof-rejected")
+        control.send("exit")
+        _join(proc)
+        events.append("guard-reaped")
+        ctx = multiprocessing.get_context("fork")
+        parent, child = ctx.Pipe()
+        poller = ctx.Process(target=_poller, args=(domain, ticket, child))
+        poller.start()
+        events.append(_receive(parent))
+        _join(poller)
+        parent.close()
+        finish(domain, grant, _proof(grant, guard.pgid, time.monotonic()), _final())
+        events.append(poll(domain, ticket).state.value)
+    assert events == ((["live-proof-rejected"] if forged else []) +
+                      ["guard-reaped", "UNCERTAIN" if forged else "FINALIZING", "RELEASED"])
+
+
+def _racing_admission(domain, request, barrier, channel):
+    original = scheduler._grant_queued_locked
+
+    def logged(conn, info, now):
+        previous = {r[0] for r in conn.execute("SELECT run_id FROM jobs WHERE state='GRANTED'")}
+        original(conn, info, now)
+        for row in conn.execute("SELECT run_id,slots,reserved_memory FROM jobs WHERE state='GRANTED' ORDER BY sequence"):
+            if row[0] not in previous:
+                channel.send(("grant", *tuple(row)))
+
+    scheduler._grant_queued_locked = logged
+    barrier.wait(2)
+    ticket = enqueue(domain, request)
+    poll(domain, ticket)
+    channel.send(("done", ticket.sequence))
+    channel.close()
+
+
+@pytest.mark.parametrize("kind", ["slots", "jobs", "memory", "lock"])
+def test_multiprocess_admission_event_log_respects_bounds(case, monkeypatch, tmp_path, kind):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    _configure(domain, slots=2, jobs=1 if kind == "jobs" else 2,
+               memory=64 if kind == "memory" else None)
+    ctx = multiprocessing.get_context("fork")
+    barrier = ctx.Barrier(4)
+    processes, channels = [], []
+    for index in range(3):
+        parent, child = ctx.Pipe()
+        request = _request(case, domain, f"race{index}", slots=2 if kind == "slots" else 1,
+                           memory_mb=40, locks=("db",) if kind == "lock" else ())
+        process = ctx.Process(target=_racing_admission, args=(domain, request, barrier, child))
+        process.start()
+        processes.append(process)
+        channels.append(parent)
+    barrier.wait(2)
+    events = []
+    for process, channel in zip(processes, channels):
+        for _ in range(4):
+            event = _receive(channel)
+            events.append(event)
+            if event[0] == "done":
+                break
+        else:
+            pytest.fail("event log exceeded fixture bound")
+        _join(process)
+        channel.close()
+    grants = [e for e in events if e[0] == "grant"]
+    assert len(grants) == 1
+    assert grants[0][2] == (2 if kind == "slots" else 1)
+    assert grants[0][3] == 40 * grants[0][2]
+    assert sorted(e[1] for e in events if e[0] == "done") == [1, 2, 3]
+    assert _sql(domain, "SELECT count(*) FROM jobs WHERE state='QUEUED'") == [(2,)]
+
+
+def test_stale_platform_group_observation_cannot_authorize_release(case, world, monkeypatch):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    _gone(world, world.guard)
+    proof = _proof(grant, world.guard.pgid, world.now)
+    world.now += 10
+    monkeypatch.setattr(platform, "probe_group", lambda pgid: C.GroupObservation(
+        exists=False, permission=True, checked_at=proof.checked_at))
+    with pytest.raises(C.Problem):
+        finish(domain, grant, proof, _final())
+    assert _sql(domain, "SELECT state FROM jobs") == [("UNCERTAIN",)]
+
+
+def test_descendant_escaping_during_absence_probe_retains_charge(case, world, monkeypatch):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = replace(world.guard, pid=900002, birth=2.0)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    world.children.clear()
+    _gone(world, world.guard)
+
+    def escape(pgid):
+        world.identities[child.pid] = replace(child, pgid=child.pid)
+        return C.GroupObservation(exists=False, permission=True, checked_at=world.now)
+
+    monkeypatch.setattr(platform, "probe_group", escape)
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert _sql(domain, "SELECT state FROM jobs") == [("UNCERTAIN",)]
+
+
+@pytest.mark.parametrize("quota,cpuset,expected", [("300000 100000", "0-15", 1),
+                                                  ("max 100000", "0-3", 2),
+                                                  ("max 100000", "0-15", 4)])
+def test_persisted_defaults_include_cgroup_ancestor_bounds(case, world, monkeypatch, tmp_path, quota, cpuset, expected):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    monkeypatch.setattr(scheduler.os, "sched_getaffinity", lambda _: set(range(16)))
+    monkeypatch.setattr(scheduler.os, "cpu_count", lambda: 16)
+    kernel = {
+        "/proc/self/cgroup": "0::/parent/leaf\n",
+        "/proc/self/mountinfo": "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+        "/sys/fs/cgroup/cpu.max": "max 100000",
+        "/sys/fs/cgroup/cpuset.cpus.effective": "0-15",
+        "/sys/fs/cgroup/parent/cpu.max": quota,
+        "/sys/fs/cgroup/parent/cpuset.cpus.effective": cpuset,
+        "/sys/fs/cgroup/parent/leaf/cpu.max": "max 100000",
+        "/sys/fs/cgroup/parent/leaf/cpuset.cpus.effective": "0-15",
+    }
+    monkeypatch.setattr(scheduler, "_read_cpu_file", lambda path: kernel[str(path)], raising=False)
+    ticket = enqueue(domain, _request(case, domain, "cpu", slots=8))
+    assert poll(domain, ticket).grant.slots == expected
+    assert f"max_slots = {expected}\n" in domain.machine_config.read_text()
+
+
+def test_unreadable_cpu_quota_falls_back_to_one_with_diagnostic(monkeypatch):
+    monkeypatch.setattr(scheduler.os, "sched_getaffinity", lambda _: set(range(16)))
+    monkeypatch.setattr(scheduler.os, "cpu_count", lambda: 16)
+
+    def unavailable(path):
+        raise PermissionError("fixture kernel file unavailable")
+
+    monkeypatch.setattr(scheduler, "_read_cpu_file", unavailable, raising=False)
+    with pytest.warns(RuntimeWarning, match="CPU"):
+        config = scheduler._default_machine_config()
+    assert config == b"max_slots = 1\nmax_jobs = 1\n"
+
+
+@pytest.mark.parametrize("proof_time", [99.0, 101.0])
+def test_proof_before_grant_or_from_future_cannot_release(case, world, proof_time):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    _gone(world, world.guard)
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, proof_time), _final())
+    assert _sql(domain, "SELECT state FROM jobs") == [("UNCERTAIN",)]
+
+
+@pytest.mark.parametrize("owner", ["absent", "none", "reused"])
+def test_dead_or_uncertain_owner_never_promotes_pass(case, world, owner):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    _gone(world, world.guard)
+    world.identities.pop(world.owner.pid)
+    if owner == "absent":
+        world.absent.add(world.owner.pid)
+    elif owner == "reused":
+        world.identities[world.owner.pid] = replace(world.owner, birth=world.owner.birth + 1)
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert _sql(domain, "SELECT final_committed FROM jobs") == [(None,)]
+    if owner == "absent":
+        assert reconcile(domain)[0].state is C.LeaseState.RELEASED
+    else:
+        assert reconcile(domain)[0].state is C.LeaseState.UNCERTAIN
+
+
+def test_unknown_descendant_scan_is_persisted_even_after_guard_exits(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    world.inaccessible.add(world.guard.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    world.inaccessible.clear()
+    _gone(world, world.guard)
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert _sql(domain, "SELECT uncertain FROM observations WHERE pid=0") == [(1,)]
+
+
+def test_reported_unknown_escape_is_not_forgotten_by_a_later_proof(case, world):
+    domain = case.domain()
+    _, grant = _running(case, domain, world)
+    _gone(world, world.guard)
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now, escaped=True), _final())
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert reconcile(domain)[0].reasons[0].code == "unsupported-detached-descendant"
+
+
+def test_fixture_checkout_symlink_escape_rejected_before_state_creation(case, tmp_path):
+    domain = case.domain()
+    escape = domain.root / "escape"
+    escape.symlink_to(tmp_path, target_is_directory=True)
+    request = _request(case, domain, "escape")
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, request)
+    assert caught.value.code == "unsafe-path"
+    assert not domain.ledger.exists()
+
+
+def test_normal_domain_cannot_be_redirected_and_ignores_environment(case, world, monkeypatch, tmp_path):
+    domain = _normal_domain(monkeypatch, tmp_path)
+    sentinel = tmp_path / "legacy-config"
+    sentinel.write_bytes(b"not toml; must never be read")
+    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PTEST_CONFIG", "PTEST_RUN_ID"):
+        monkeypatch.setenv(name, str(sentinel))
+    with pytest.raises(C.Problem) as caught:
+        enqueue(replace(domain, root=tmp_path), _request(case, domain, "redirected"))
+    assert caught.value.code == "unsafe-path"
+    ticket = enqueue(domain, _request(case, domain, "canonical"))
+    assert poll(domain, ticket).grant is not None
+    assert sentinel.read_bytes() == b"not toml; must never be read"
+
+
+def test_scheduler_has_no_remote_legacy_or_process_launch_dependency():
+    import ast
+
+    tree = ast.parse(Path(scheduler.__file__).read_text())
+    imports = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+               for alias in node.names}
+    assert not imports & {"subprocess", "socket", "requests", "httpx", "spot_queue", "spot_controller"}
+    assert not any(isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv", "Popen", "system"}
+                   for node in ast.walk(tree))
+
+
+def test_enqueue_expires_all_deadlines_before_pending_limit_check(case, world, monkeypatch):
+    domain = case.domain()
+    first = enqueue(domain, _request(case, domain, "first"))
+    assert poll(domain, first).grant is not None
+    enqueue(domain, _request(case, domain, "head"))
+    enqueue(domain, _request(case, domain, "expired", deadline=105))
+    monkeypatch.setattr(scheduler, "MAX_PENDING_JOBS", 2)
+    world.now = 106
+    ticket = enqueue(domain, _request(case, domain, "replacement"))
+    assert poll(domain, ticket).position == 1
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "overflow"))
+    assert caught.value.code == "capacity-exceeded"
+
+
+@pytest.mark.parametrize("mode", ["corrupt", "oversize", "symlink", "hardlink", "protocol", "wrong-mode"])
+def test_hostile_domain_marker_is_rejected_without_outside_writes(case, world, tmp_path, mode):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    before = domain.ledger.read_bytes()
+    marker = domain.root / "domain.json"
+    outside = tmp_path / "outside"
+    outside.write_bytes(marker.read_bytes())
+    outside.chmod(0o600)
+    saved = outside.read_bytes()
+    if mode == "corrupt":
+        marker.write_bytes(b"not json")
+    elif mode == "oversize":
+        marker.write_bytes(b" " * 65537)
+    elif mode == "protocol":
+        data = json.loads(marker.read_bytes())
+        data["protocol_version"] += 1
+        marker.write_text(json.dumps(data))
+    elif mode == "wrong-mode":
+        marker.chmod(0o644)
+    else:
+        marker.unlink()
+        if mode == "symlink":
+            marker.symlink_to(outside)
+        else:
+            os.link(outside, marker)
+    with pytest.raises(C.Problem) as caught:
+        poll(domain, ticket)
+    assert caught.value.code in {"coordinator-corrupt", "unsafe-path", "protocol-mismatch", "capacity-exceeded"}
+    assert domain.ledger.read_bytes() == before
+    assert outside.read_bytes() == saved
+
+
+def test_unidentified_empty_ledger_is_never_initialized_over(case, world):
+    domain = case.domain()
+    domain.ledger.touch(mode=0o600)
+    inode = domain.ledger.stat().st_ino
+    with pytest.raises(C.Problem):
+        enqueue(domain, _request(case, domain, "first"))
+    assert domain.ledger.stat().st_ino == inode
+    assert domain.ledger.read_bytes() == b""
+    assert not (domain.root / "domain.json").exists()
+
+
+@pytest.mark.parametrize("value", ["true", "2"])
+def test_fixture_marker_version_must_be_exact_supported_integer(case, world, value):
+    domain = case.domain()
+    domain.marker.write_text(domain.marker.read_text().replace("version = 1", f"version = {value}"))
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "first"))
+    assert caught.value.code == "invalid-config"
+    assert not domain.ledger.exists()
+
+
+def test_fixture_limits_cannot_exceed_the_miniature_boundary(case, world):
+    domain = case.domain(slots=5, jobs=1)
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "first"))
+    assert caught.value.code == "invalid-config"
+    assert not domain.ledger.exists()
+
+
+def test_database_replacement_between_validation_and_open_is_rejected(case, world, monkeypatch):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    replacement = domain.root / "replacement"
+    replacement.write_bytes(domain.ledger.read_bytes())
+    replacement.chmod(0o600)
+    original = scheduler.storage.open_database
+
+    def raced(*args, **kwargs):
+        replacement.replace(domain.ledger)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler.storage, "open_database", raced)
+    with pytest.raises(C.Problem) as caught:
+        poll(domain, ticket)
+    assert caught.value.code == "unsafe-path"
+
+
+def test_storage_failure_does_not_admit_or_fall_back(case, world, monkeypatch):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "first"))
+    before = domain.ledger.read_bytes()
+
+    def full(*args, **kwargs):
+        raise C.Problem(code="capacity-exceeded", message="fixture storage full",
+                        phase="storage", retryable=False)
+
+    monkeypatch.setattr(scheduler.storage, "open_database", full)
+    with pytest.raises(C.Problem) as caught:
+        poll(domain, ticket)
+    assert caught.value.code == "capacity-exceeded"
+    assert domain.ledger.read_bytes() == before
+
+
+def test_deadline_is_rechecked_after_waiting_for_the_transaction(case, world, monkeypatch):
+    domain = case.domain()
+    ticket = enqueue(domain, _request(case, domain, "deadline", deadline=105))
+    original = scheduler._begin
+
+    def waited(conn):
+        original(conn)
+        world.now = 106
+
+    monkeypatch.setattr(scheduler, "_begin", waited)
+    result = poll(domain, ticket)
+    assert result.state is C.LeaseState.CANCELLED
+    assert result.problem.code == "queue-timeout"
+    assert result.grant is None
+
+
+@pytest.mark.parametrize("failure", ["write", "commit"])
+def test_transaction_disk_errors_are_typed_and_always_close_connection(case, world, monkeypatch, failure):
+    domain = case.domain()
+    enqueue(domain, _request(case, domain, "first"))
+    before = domain.ledger.read_bytes()
+    original = scheduler.storage.open_database
+    closed = []
+
+    class FailingConnection:
+        def __init__(self, conn):
+            object.__setattr__(self, "conn", conn)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def __setattr__(self, name, value):
+            setattr(self.conn, name, value)
+
+        def execute(self, sql, *args):
+            if failure == "write" and "INSERT INTO jobs" in sql:
+                raise sqlite3.OperationalError("fixture disk full")
+            return self.conn.execute(sql, *args)
+
+        def commit(self):
+            if failure == "commit":
+                raise sqlite3.OperationalError("fixture disk full")
+            return self.conn.commit()
+
+        def close(self):
+            closed.append(True)
+            self.conn.close()
+
+    monkeypatch.setattr(scheduler.storage, "open_database",
+                        lambda *args, **kwargs: FailingConnection(original(*args, **kwargs)))
+    with pytest.raises(C.Problem) as caught:
+        enqueue(domain, _request(case, domain, "failed"))
+    assert caught.value.code == "coordinator-unavailable"
+    assert closed == [True]
+    assert domain.ledger.read_bytes() == before
 
 
 def _request(case, domain, label: str, *, slots: int = 1,
