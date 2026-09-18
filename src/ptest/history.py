@@ -8,16 +8,27 @@ ordering and baseline eligibility.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import time
+import urllib.parse
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import contracts as C
-from .files import create_exclusive, ensure_private_dir, read_regular, validate_private_dir
+from .files import (
+    create_exclusive,
+    ensure_private_dir,
+    publish_atomic,
+    read_regular,
+    validate_private_dir,
+    validate_private_file,
+)
 from .storage import open_database
 
 HISTORY_MAX_BYTES = C.HISTORY_MAX_BYTES
@@ -27,6 +38,8 @@ HISTORY_RETAIN_DAYS = C.HISTORY_RETAIN_DAYS
 _PHASE = "history"
 _STORE_NAME = "history.sqlite3"
 _DISABLED_MARKER_NAME = "history-disabled.json"
+_CAPACITY_MARKER_NAME = "history-capacity.json"
+_WRITER_LOCK_NAME = "history-writer.lock"
 _CHECKOUTS_NAME = "checkouts"
 _SCHEMA_VERSION = 1
 _REQUIRED_TABLES = frozenset({
@@ -39,14 +52,127 @@ _FAILED_ATTEMPT_STATUSES = frozenset({
 })
 _WHOLE_GATE_KEY = "whole-gate"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SQLITE_BUSY_TIMEOUT_S = 2.0
+_SQLITE_BUSY_TIMEOUT_MS = 2000
+_COMPACT_MIN_FREE_BYTES = 2 * 1024 * 1024
+_RECONCILIATION_MAX_ROWS = 200
+_TRANSIENT_SQLITE_CODES = frozenset({
+    getattr(sqlite3, "SQLITE_BUSY", 5),
+    getattr(sqlite3, "SQLITE_LOCKED", 6),
+    getattr(sqlite3, "SQLITE_CANTOPEN", 14),
+    getattr(sqlite3, "SQLITE_READONLY", 8),
+    getattr(sqlite3, "SQLITE_IOERR", 10),
+})
+_SQLITE_FULL_CODE = getattr(sqlite3, "SQLITE_FULL", 13)
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL,
+        finished_at TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        input_before TEXT,
+        input_after TEXT,
+        policy_digest TEXT,
+        source_digest TEXT,
+        compatibility TEXT,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        inventory TEXT
+    )
+    """,
+    """
+    CREATE TABLE baselines (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        run_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        head TEXT NOT NULL,
+        input_digest TEXT NOT NULL,
+        compatibility TEXT NOT NULL,
+        inventory TEXT NOT NULL,
+        policy_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE obligations (
+        obligation_key TEXT PRIMARY KEY,
+        file TEXT,
+        test_id TEXT,
+        sequence INTEGER NOT NULL,
+        source_digest TEXT,
+        compatibility TEXT,
+        reason TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE reconciliations (
+        reconciliation_key TEXT PRIMARY KEY,
+        file TEXT,
+        test_id TEXT,
+        sequence INTEGER NOT NULL,
+        compatibility TEXT,
+        outcome TEXT NOT NULL
+    )
+    """,
+)
 
 
 class _HistoryStateError(Exception):
     """A typed store error whose message never contains stored user data."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, retain_uncertainty: bool = False) -> None:
         self.code = code
+        self.retain_uncertainty = retain_uncertainty
         super().__init__(code)
+
+
+def _sqlite_error_code(exc: sqlite3.Error) -> int | None:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code if isinstance(code, int) else None
+
+
+def _is_sqlite_full(exc: sqlite3.Error) -> bool:
+    return (
+        _sqlite_error_code(exc) == _SQLITE_FULL_CODE
+        or "database or disk is full" in str(exc).lower()
+    )
+
+
+def _is_transient_sqlite(exc: sqlite3.Error) -> bool:
+    code = _sqlite_error_code(exc)
+    if code is not None and code & 0xff in _TRANSIENT_SQLITE_CODES:
+        return True
+    text = str(exc).lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "database is locked",
+            "database table is locked",
+            "database schema is locked",
+            "unable to open database file",
+            "cannot open database file",
+            "i/o error",
+        )
+    )
+
+
+def _state_error_for_sqlite(exc: sqlite3.Error) -> _HistoryStateError:
+    if _is_sqlite_full(exc):
+        return _HistoryStateError("capacity-exceeded")
+    if _is_transient_sqlite(exc):
+        return _HistoryStateError("coordinator-unavailable")
+    return _HistoryStateError("coordinator-corrupt")
+
+
+def _can_persist_disabled_marker(code: str) -> bool:
+    return code == "coordinator-corrupt"
 
 
 def _problem(code: str, message: str) -> C.Problem:
@@ -167,6 +293,94 @@ def _write_disabled_marker(
         return
 
 
+@contextmanager
+def _writer_lock(domain: C.DomainPaths, checkout: C.CheckoutIdentity):
+    """Serialize bounded recovery and capacity-marker changes across publishers.
+
+    SQLite still owns schema/transaction locking. This private advisory lock
+    spans the committed pruning/VACUUM/retry steps without replacing DB inodes.
+    Reads never create or acquire it; kernel ownership ends on process death.
+    """
+    directory = _history_directory(domain, checkout, create=True)
+    assert directory is not None
+    try:
+        create_exclusive(directory, _WRITER_LOCK_NAME, b"")
+    except C.Problem as exc:
+        if exc.code != "already-exists":
+            raise
+    path = directory / _WRITER_LOCK_NAME
+    validate_private_file(path)
+    before = os.lstat(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise _HistoryStateError("unsafe-path")
+        deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _HistoryStateError("coordinator-unavailable") from None
+                time.sleep(0.01)
+        yield directory
+    finally:
+        os.close(fd)
+
+
+def _capacity_sequence(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> int | None:
+    directory = _history_directory(domain, checkout, create=False)
+    if directory is None:
+        return None
+    try:
+        validate_private_file(directory / _CAPACITY_MARKER_NAME)
+        value = json.loads(read_regular(directory, _CAPACITY_MARKER_NAME, 512))
+    except C.Problem as exc:
+        if exc.code == "state-unavailable":
+            return None
+        raise
+    except (ValueError, UnicodeError):
+        raise _HistoryStateError("coordinator-corrupt") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "code", "sequence"}
+        or value["version"] != 1 or value["code"] != "capacity-exceeded"
+        or type(value["sequence"]) is not int or value["sequence"] < 0
+    ):
+        raise _HistoryStateError("coordinator-corrupt")
+    return value["sequence"]
+
+
+def _remember_capacity(domain: C.DomainPaths, checkout: C.CheckoutIdentity, sequence: int) -> None:
+    with _writer_lock(domain, checkout) as directory:
+        previous = _capacity_sequence(domain, checkout)
+        if previous is None or previous < sequence:
+            _store_capacity(directory, sequence)
+
+
+def _store_capacity(directory: Path, sequence: int) -> None:
+    publish_atomic(directory, _CAPACITY_MARKER_NAME, _json_bytes({
+        "version": 1, "code": "capacity-exceeded", "sequence": sequence,
+    }).encode("utf-8"))
+
+
+def _restore_capacity(directory: Path, sequence: int | None) -> None:
+    if sequence is not None:
+        _store_capacity(directory, sequence)
+    else:
+        validate_private_file(directory / _CAPACITY_MARKER_NAME)
+        (directory / _CAPACITY_MARKER_NAME).unlink()
+
+
+def _selection_marker(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> str | None:
+    permanent = _disabled_marker(domain, checkout)
+    if permanent is not None:
+        return permanent
+    return "capacity-exceeded" if _capacity_sequence(domain, checkout) is not None else None
+
+
 def _open_store(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity, *, create: bool,
 ) -> sqlite3.Connection | None:
@@ -174,6 +388,51 @@ def _open_store(
     if directory is None:
         return None
     path = directory / _STORE_NAME
+    if not create:
+        connection = None
+        try:
+            validate_private_file(path)
+        except C.Problem as exc:
+            if exc.code == "state-unavailable":
+                return None
+            raise
+        try:
+            if path.stat().st_size > HISTORY_MAX_BYTES:
+                raise _HistoryStateError("capacity-exceeded")
+            if path.stat().st_size == 0:
+                return None
+            before = os.lstat(path)
+            absolute = path if path.is_absolute() else Path(os.path.abspath(path))
+            target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=ro"
+            connection = sqlite3.connect(
+                target, uri=True, timeout=_SQLITE_BUSY_TIMEOUT_S,
+            )
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+            # Every validation and payload SELECT must see the same committed
+            # state; otherwise a concurrent baseline replacement can look like
+            # a missing/corrupt run halfway through a read.
+            connection.execute("BEGIN")
+            if not _schema_tables(connection):
+                connection.close()
+                return None
+            _validate_schema(
+                connection, project_id=checkout.project_id,
+                checkout_id=checkout.checkout_id,
+            )
+            after = os.lstat(path)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise _HistoryStateError("unsafe-path")
+            return connection
+        except Exception as exc:
+            try:
+                if connection is not None:
+                    connection.close()
+            except sqlite3.Error:
+                pass
+            if isinstance(exc, sqlite3.Error):
+                raise _state_error_for_sqlite(exc) from None
+            raise
     for attempt in range(3):
         try:
             os.lstat(path)
@@ -199,6 +458,10 @@ def _open_store(
             # persistent corruption still fails closed below.
             if attempt < 2 and exc.code in {"already-exists", "coordinator-corrupt"}:
                 continue
+            if exc.code == "coordinator-corrupt":
+                # T0's opener maps pragma lock errors to this same code. Only
+                # our own schema/content validation is positive corruption.
+                raise _HistoryStateError("coordinator-unavailable") from None
             raise
         except sqlite3.Error:
             if attempt < 2:
@@ -210,73 +473,51 @@ def _open_store(
 def _ensure_schema(
     connection: sqlite3.Connection, *, new: bool, project_id: str, checkout_id: str,
 ) -> None:
-    if new:
-        connection.executescript(
-            """
-            CREATE TABLE metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE runs (
-                run_id TEXT PRIMARY KEY,
-                sequence INTEGER NOT NULL,
-                finished_at TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                input_before TEXT,
-                input_after TEXT,
-                policy_digest TEXT,
-                source_digest TEXT,
-                compatibility TEXT,
-                mode TEXT NOT NULL,
-                status TEXT NOT NULL,
-                inventory TEXT
-            );
-            CREATE TABLE baselines (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                run_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                head TEXT NOT NULL,
-                input_digest TEXT NOT NULL,
-                compatibility TEXT NOT NULL,
-                inventory TEXT NOT NULL,
-                policy_digest TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE obligations (
-                obligation_key TEXT PRIMARY KEY,
-                file TEXT,
-                test_id TEXT,
-                sequence INTEGER NOT NULL,
-                source_digest TEXT,
-                compatibility TEXT,
-                reason TEXT NOT NULL
-            );
-            CREATE TABLE reconciliations (
-                reconciliation_key TEXT PRIMARY KEY,
-                file TEXT,
-                test_id TEXT,
-                sequence INTEGER NOT NULL,
-                compatibility TEXT,
-                outcome TEXT NOT NULL
-            );
-            CREATE INDEX runs_by_sequence ON runs(sequence DESC);
-            INSERT INTO metadata(key, value) VALUES
-                ('schema_version', '1'),
-                ('selection_disabled', '0');
-            """
-        )
-        connection.executemany(
-            "INSERT INTO metadata(key, value) VALUES (?, ?)",
-            (("project_id", project_id), ("checkout_id", checkout_id)),
-        )
+    del new  # An empty, previously interrupted file is safe to initialize.
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        tables = _schema_tables(connection)
+        if not tables:
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            connection.execute("CREATE INDEX runs_by_sequence ON runs(sequence DESC)")
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES (?, ?), (?, ?), (?, ?), (?, ?)",
+                (
+                    "schema_version", "1", "selection_disabled", "0",
+                    "project_id", project_id, "checkout_id", checkout_id,
+                ),
+            )
+        else:
+            _validate_schema(
+                connection, project_id=project_id, checkout_id=checkout_id,
+            )
         connection.commit()
-        return
-    tables = frozenset(
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def _schema_tables(connection: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(
         row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
     )
+
+
+def _validate_schema(
+    connection: sqlite3.Connection, *, project_id: str, checkout_id: str,
+) -> None:
+    tables = _schema_tables(connection)
     if not _REQUIRED_TABLES.issubset(tables):
+        raise _HistoryStateError("coordinator-corrupt")
+    indexes = frozenset(
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+    )
+    if "runs_by_sequence" not in indexes:
         raise _HistoryStateError("coordinator-corrupt")
     version = connection.execute(
         "SELECT value FROM metadata WHERE key = 'schema_version'"
@@ -302,6 +543,11 @@ def _ensure_schema(
 
 
 def _check_quota(connection: sqlite3.Connection) -> None:
+    """Defend against an externally changed cap or an incorrectly bounded opener.
+
+    Normal writes use max_page_count; this check is not capacity prediction.
+    Read-only opening separately bounds the actual file size.
+    """
     page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
     page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
     if page_size <= 0 or page_count < 0 or page_size * page_count > HISTORY_MAX_BYTES:
@@ -512,13 +758,9 @@ def _validate_private_runs(connection: sqlite3.Connection) -> None:
             inventory = _inventory_from_dict(_decode_json(row[11]))
         else:
             inventory = None
-        snapshot = snapshots[1] or snapshots[0]
-        if snapshot is None:
-            expected_digest = summary["plan"]["input_digest"]
-            expected_compatibility = summary["plan"]["compatibility"]
-        else:
-            expected_digest = snapshot.digest
-            expected_compatibility = snapshot.compatibility
+        expected_digest, expected_compatibility = _snapshots_identity(
+            snapshots[0], snapshots[1], summary,
+        )
         if row[7] != expected_digest or row[8] != expected_compatibility:
             raise _HistoryStateError("coordinator-corrupt")
         if inventory is not None and len({item.id for item in inventory.tests}) != len(inventory.tests):
@@ -637,37 +879,60 @@ def read_history(
     _validate_arguments(domain, checkout)
     connection = None
     try:
+        marker_code = _selection_marker(domain, checkout)
         connection = _open_store(domain, checkout, create=False)
         if connection is None:
+            if marker_code is not None:
+                return _disabled_view(_problem(marker_code, "history selection is disabled"))
             return C.HistoryView(
                 baseline=None, obligations=(), selection_disabled=False,
                 limitations=(_reason("no-baseline", "no history has been recorded"),),
             )
         baseline, obligations, disabled, limitations = _read_state(
-            connection, _disabled_marker(domain, checkout),
+            connection, marker_code,
         )
         return C.HistoryView(
             baseline=baseline, obligations=obligations,
             selection_disabled=disabled, limitations=limitations,
         )
     except _HistoryStateError as exc:
-        _write_disabled_marker(domain, checkout, exc.code)
+        if _can_persist_disabled_marker(exc.code):
+            _write_disabled_marker(domain, checkout, exc.code)
         return _disabled_view(_problem(exc.code, "history state is unavailable"))
     except C.Problem as exc:
-        _write_disabled_marker(domain, checkout, exc.code)
+        if _can_persist_disabled_marker(exc.code):
+            _write_disabled_marker(domain, checkout, exc.code)
         return _disabled_view(exc)
-    except (OSError, sqlite3.Error):
-        _write_disabled_marker(domain, checkout, "coordinator-unavailable")
+    except OSError:
         return _disabled_view(_problem("coordinator-unavailable", "history state is unavailable"))
+    except sqlite3.Error as exc:
+        state_error = _state_error_for_sqlite(exc)
+        if _can_persist_disabled_marker(state_error.code):
+            _write_disabled_marker(domain, checkout, state_error.code)
+        return _disabled_view(_problem(state_error.code, "history state is unavailable"))
     finally:
         if connection is not None:
             connection.close()
 
 
-def _result_identity(result: C.RunResult) -> tuple[str | None, str | None]:
-    snapshot = result.input_after or result.input_before
+def _snapshots_identity(
+    before: C.InputSnapshot | None, after: C.InputSnapshot | None,
+    summary: dict | None = None,
+) -> tuple[str | None, str | None]:
+    if before is not None and after is not None:
+        if before.digest != after.digest or before.compatibility != after.compatibility:
+            return None, None
+    snapshot = after or before
     if snapshot is not None:
         return snapshot.digest, snapshot.compatibility
+    if summary is None:
+        return None, None
+    return summary["plan"]["input_digest"], summary["plan"]["compatibility"]
+
+
+def _result_identity(result: C.RunResult) -> tuple[str | None, str | None]:
+    if result.input_before is not None or result.input_after is not None:
+        return _snapshots_identity(result.input_before, result.input_after)
     return result.plan.input_digest, result.plan.compatibility
 
 
@@ -729,6 +994,12 @@ def _conclusive_pass(
         and result.exit_code == 0
         and result.runner_exit_code == 0
         and result.mode in {C.Mode.AUTOMATIC, C.Mode.SCOPED, C.Mode.FULL}
+        and not any(
+            item.outcome in _FAILURE_OUTCOMES | {C.Outcome.UNKNOWN}
+            for item in inventory.tests
+        )
+        and len({item.id for item in inventory.tests}) == len(inventory.tests)
+        and all(item.id and item.file for item in inventory.tests)
     )
 
 
@@ -789,6 +1060,7 @@ def _clear_passed_obligations(
 ) -> None:
     if not _conclusive_pass(result, inventory):
         return
+    clean_full = _clean_full(result, inventory, require_tests=True)
     records = {
         item.id: item for item in inventory.tests if item.outcome is _SUCCESS_OUTCOME
     }
@@ -805,7 +1077,10 @@ def _clear_passed_obligations(
             or obligation.file != record.file
         ):
             continue
-        if not _same_compatibility(obligation, result):
+        if obligation.compatibility is None:
+            if not clean_full:
+                continue
+        elif not _same_compatibility(obligation, result):
             continue
         connection.execute(
             "DELETE FROM obligations WHERE obligation_key = ?", (row[0],)
@@ -815,7 +1090,7 @@ def _clear_passed_obligations(
 def _reconcile_full_inventory(
     connection: sqlite3.Connection, result: C.RunResult, inventory: C.Inventory,
 ) -> None:
-    if not _clean_full(result, inventory, require_tests=False):
+    if not _clean_full(result, inventory, require_tests=True):
         return
     _, compatibility = _result_identity(result)
     rows = connection.execute(
@@ -826,7 +1101,15 @@ def _reconcile_full_inventory(
     files = {item.file for item in inventory.tests}
     for row in rows:
         obligation = _obligation_from_row(row[1:])
-        if not _same_compatibility(obligation, result):
+        if obligation.file is None and obligation.test_id is None:
+            # Baseline publication owns whole-gate recovery; it is not a
+            # deleted-test reconciliation.
+            continue
+        if obligation.compatibility is None:
+            # A clean full inventory is the only evidence that can recover an
+            # obligation created before source compatibility was known.
+            pass
+        elif not _same_compatibility(obligation, result):
             continue
         if obligation.test_id is not None and obligation.test_id in ids:
             continue
@@ -940,67 +1223,253 @@ def _publish_baseline(
         ),
     )
     connection.execute(
-        "DELETE FROM obligations WHERE obligation_key = ? AND sequence < ? "
-        "AND compatibility = ?",
-        (_WHOLE_GATE_KEY, result.sequence, snapshot.compatibility),
+        "DELETE FROM obligations WHERE obligation_key = ? AND sequence < ?",
+        (_WHOLE_GATE_KEY, result.sequence),
     )
     return True
 
 
-def _prune(connection: sqlite3.Connection) -> None:
+def _value_size(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bytes):
+        return len(value)
+    return len(str(value).encode("utf-8"))
+
+
+def _run_storage_size(row: sqlite3.Row | tuple) -> int:
+    return sum(_value_size(value) for value in row[1:])
+
+
+def _obligation_storage_size(connection: sqlite3.Connection) -> int:
+    rows = connection.execute(
+        "SELECT obligation_key, file, test_id, sequence, source_digest, "
+        "compatibility, reason FROM obligations"
+    ).fetchall()
+    return sum(_value_size(value) for row in rows for value in row)
+
+
+def _reconciliation_storage_size(connection: sqlite3.Connection) -> int:
+    rows = connection.execute(
+        "SELECT reconciliation_key, file, test_id, sequence, compatibility, outcome "
+        "FROM reconciliations"
+    ).fetchall()
+    return sum(_value_size(value) for row in rows for value in row)
+
+
+def _baseline_storage_size(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT singleton, run_id, sequence, head, input_digest, compatibility, "
+        "inventory, policy_digest, created_at FROM baselines WHERE singleton = 1"
+    ).fetchone()
+    return 0 if row is None else sum(_value_size(value) for value in row)
+
+
+def _utc_time(timestamp: str) -> datetime:
+    value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _candidate_time(result: C.RunResult) -> datetime:
+    try:
+        return _utc_time(result.finished_at)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _incoming_storage_size(
+    result: C.RunResult, inventory: C.Inventory | None,
+) -> int:
+    before = _json_bytes(_snapshot_dict(result.input_before)) if result.input_before else None
+    after = _json_bytes(_snapshot_dict(result.input_after)) if result.input_after else None
+    source_digest, compatibility = _result_identity(result)
+    stored_inventory = None if inventory is None else _json_bytes(_inventory_dict(inventory))
+    return sum(
+        _value_size(value)
+        for value in (
+            result.run_id, result.sequence, result.finished_at,
+            _json_bytes(C.serialize_run_result(result)), before, after,
+            result.policy_digest, source_digest, compatibility,
+            result.mode.value, result.status.value, stored_inventory,
+        )
+    )
+
+
+def _prune(
+    connection: sqlite3.Connection, *, protected_run_ids: tuple[str, ...] = (),
+    incoming_bytes: int = 0, now: datetime,
+) -> bool:
     protected = connection.execute(
         "SELECT run_id FROM baselines WHERE singleton = 1"
     ).fetchone()
-    protected_id = None if protected is None else protected[0]
+    protected_ids = set(protected_run_ids)
+    if protected is not None:
+        protected_ids.add(protected[0])
     rows = connection.execute(
-        "SELECT run_id, sequence FROM runs ORDER BY sequence DESC, rowid DESC"
+        "SELECT run_id, sequence, summary, input_before, input_after, policy_digest, "
+        "source_digest, compatibility, mode, status, inventory "
+        "FROM runs ORDER BY sequence DESC, rowid DESC"
     ).fetchall()
     keep = {
         row[0] for row in rows[:max(0, int(HISTORY_MAX_SUMMARIES))]
     }
-    if protected_id is not None:
-        keep.add(protected_id)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=HISTORY_RETAIN_DAYS)
-    for run_id, _ in rows:
-        if run_id == protected_id:
+    keep.update(protected_ids)
+    cutoff = now - timedelta(days=HISTORY_RETAIN_DAYS)
+    removed = False
+    for row in rows:
+        run_id = row[0]
+        if run_id in protected_ids:
             continue
-        row = connection.execute(
+        finished_at = connection.execute(
             "SELECT finished_at FROM runs WHERE run_id = ?", (run_id,)
         ).fetchone()
-        if row is None:
+        if finished_at is None:
             continue
         try:
-            timestamp = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
-            old = timestamp.astimezone(timezone.utc) < cutoff
+            old = _utc_time(finished_at[0]) < cutoff
         except (TypeError, ValueError, OverflowError):
             old = False
         if old or run_id not in keep:
             connection.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+            removed = True
 
+    reconciliation_rows = connection.execute(
+        "SELECT reconciliation_key, sequence FROM reconciliations "
+        "ORDER BY sequence DESC, rowid DESC"
+    ).fetchall()
+    reconciliation_cap = max(1, min(_RECONCILIATION_MAX_ROWS, int(HISTORY_MAX_SUMMARIES)))
+    for reconciliation_key, _sequence in reconciliation_rows[reconciliation_cap:]:
+        connection.execute(
+            "DELETE FROM reconciliations WHERE reconciliation_key = ?",
+            (reconciliation_key,),
+        )
+        removed = True
 
-def publish_outcome(
-    domain: C.DomainPaths,
-    checkout: C.CheckoutIdentity,
-    result: C.RunResult,
-    inventory: C.Inventory | None,
-) -> C.PublishResult:
-    """Commit one immutable result and reconcile durable obligations atomically."""
-    _validate_arguments(domain, checkout)
-    if not isinstance(result, C.RunResult):
-        raise TypeError("history result must be RunResult")
-    if inventory is not None and not isinstance(inventory, C.Inventory):
-        raise TypeError("history inventory must be Inventory or None")
-    connection = None
-    try:
-        marker_code = _disabled_marker(domain, checkout)
-        if marker_code is not None:
-            return C.PublishResult(
-                committed=False, baseline_published=False, selection_disabled=True,
-                reasons=(_reason(marker_code, "history selection is disabled"),),
+    # Use logical sizes to choose expendable rows, but rely on SQLite's actual
+    # INSERT/SQLITE_FULL result below as the physical capacity authority.
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    reserve = page_size * 4
+    logical_budget = max(0, HISTORY_MAX_BYTES - reserve)
+    current = connection.execute(
+        "SELECT run_id, sequence, summary, input_before, input_after, policy_digest, "
+        "source_digest, compatibility, mode, status, inventory FROM runs"
+    ).fetchall()
+    logical = sum(_run_storage_size(row) for row in current)
+    logical += (
+        _obligation_storage_size(connection)
+        + _reconciliation_storage_size(connection)
+        + _baseline_storage_size(connection)
+        + incoming_bytes
+    )
+    physical = page_size * int(connection.execute("PRAGMA page_count").fetchone()[0])
+    physical_shortfall = max(0, physical + incoming_bytes - HISTORY_MAX_BYTES)
+    freed = 0
+    candidates = [
+        row for row in sorted(current, key=lambda item: (item[1], item[0]))
+        if row[0] not in protected_ids
+    ]
+    for row in candidates:
+        if logical <= logical_budget and freed >= physical_shortfall:
+            break
+        connection.execute("DELETE FROM runs WHERE run_id = ?", (row[0],))
+        size = _run_storage_size(row)
+        logical -= size
+        freed += size
+        removed = True
+    if logical > logical_budget or freed < physical_shortfall:
+        reconciliation_rows = connection.execute(
+            "SELECT reconciliation_key, file, test_id, sequence, compatibility, outcome "
+            "FROM reconciliations ORDER BY sequence ASC, rowid ASC"
+        ).fetchall()
+        for row in reconciliation_rows:
+            if logical <= logical_budget and freed >= physical_shortfall:
+                break
+            connection.execute(
+                "DELETE FROM reconciliations WHERE reconciliation_key = ?", (row[0],)
             )
-        connection = _open_store(domain, checkout, create=True)
-        assert connection is not None
-        connection.execute("BEGIN IMMEDIATE")
+            size = sum(_value_size(value) for value in row)
+            logical -= size
+            freed += size
+            removed = True
+    return removed
+
+
+def _needs_compaction(connection: sqlite3.Connection) -> bool:
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+    pages = int(connection.execute("PRAGMA page_count").fetchone()[0])
+    return page_size * freelist >= _COMPACT_MIN_FREE_BYTES and freelist * 4 >= pages
+
+
+def _compact(connection: sqlite3.Connection) -> None:
+    """Reclaim pages only after the pruning transaction has committed."""
+    connection.execute("VACUUM")
+
+
+def _maintenance_prune(
+    connection: sqlite3.Connection, result: C.RunResult,
+    inventory: C.Inventory | None,
+) -> None:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        pruned = _prune(
+            connection,
+            protected_run_ids=(result.run_id,),
+            incoming_bytes=_incoming_storage_size(result, inventory),
+            now=_candidate_time(result),
+        )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    if pruned and _needs_compaction(connection):
+        _best_effort_compaction(connection)
+
+
+def _best_effort_compaction(connection: sqlite3.Connection) -> None:
+    try:
+        _compact(connection)
+    except (sqlite3.Error, OSError):
+        # VACUUM uses temporary space and may fail even after a valid commit.
+        # It is optional maintenance, never evidence of a failed publication.
+        pass
+
+
+def _capacity_prune(connection: sqlite3.Connection, run_id: str, batch: int) -> bool:
+    """Evict real rows after SQLITE_FULL, independent of size estimates.
+
+    The writer lock prevents concurrent publishers replenishing candidates.
+    Geometrically growing batches exhaust ordinary runs first, then bounded
+    reconciliation records. Baseline and compact failure/gate rows survive.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        rows = connection.execute(
+            "SELECT run_id FROM runs WHERE run_id != ? AND run_id NOT IN "
+            "(SELECT run_id FROM baselines) ORDER BY sequence ASC, run_id ASC LIMIT ?",
+            (run_id, batch),
+        ).fetchall()
+        if rows:
+            connection.executemany("DELETE FROM runs WHERE run_id = ?", rows)
+        else:
+            rows = connection.execute(
+                "SELECT reconciliation_key FROM reconciliations "
+                "ORDER BY sequence ASC, reconciliation_key ASC LIMIT ?", (batch,),
+            ).fetchall()
+            connection.executemany("DELETE FROM reconciliations WHERE reconciliation_key = ?", rows)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return bool(rows)
+
+
+def _publish_transaction(
+    connection: sqlite3.Connection, result: C.RunResult,
+    inventory: C.Inventory | None,
+) -> tuple[bool, bool]:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
         _insert_summary(connection, result, inventory)
         source_digest, compatibility = _result_identity(result)
         if inventory is not None:
@@ -1030,41 +1499,171 @@ def publish_outcome(
         baseline_published = False
         if inventory is not None:
             baseline_published = _publish_baseline(connection, result, inventory)
-        _prune(connection)
+        pruned = _prune(
+            connection, protected_run_ids=(result.run_id,),
+            now=_candidate_time(result),
+        )
         _check_quota(connection)
+        _read_state(connection)
         connection.commit()
-        reasons = () if baseline_published else _baseline_reasons(result, inventory)
+    except BaseException:
+        connection.rollback()
+        raise
+    return baseline_published, pruned
+
+
+def _publish_with_recovery(
+    connection: sqlite3.Connection, result: C.RunResult, inventory: C.Inventory | None,
+) -> tuple[bool, bool]:
+    try:
+        _maintenance_prune(connection, result, inventory)
+    except sqlite3.Error as exc:
+        if not _is_sqlite_full(exc):
+            raise
+        # Even deleting estimated surplus can need a page. Try publication
+        # and the same exhaustive recovery path rather than declaring full
+        # while evictable rows are still present.
+    # The finite candidate set cannot grow while the caller holds the checkout
+    # lock. Growing batches exhaust it; one final compacted retry also covers
+    # protected-only stores that already have free pages.
+    remaining = connection.execute(
+        "SELECT (SELECT COUNT(*) FROM runs) + (SELECT COUNT(*) FROM reconciliations)"
+    ).fetchone()[0]
+    batch = 1
+    exhausted = False
+    for _attempt in range(remaining + 2):
+        try:
+            return _publish_transaction(connection, result, inventory)
+        except (sqlite3.Error, _HistoryStateError) as exc:
+            full = (_is_sqlite_full(exc) if isinstance(exc, sqlite3.Error)
+                    else exc.code == "capacity-exceeded")
+            if not full:
+                if _attempt and isinstance(exc, sqlite3.Error) and _is_transient_sqlite(exc):
+                    raise _HistoryStateError(
+                        "coordinator-unavailable", retain_uncertainty=True,
+                    ) from None
+                raise
+            if exhausted:
+                raise _HistoryStateError("capacity-exceeded") from None
+            try:
+                removed = _capacity_prune(connection, result.run_id, batch)
+            except (sqlite3.Error, OSError):
+                # Recovery was interrupted, not exhausted. Preserve the
+                # already-reserved FULL evidence across this unavailable call.
+                raise _HistoryStateError(
+                    "coordinator-unavailable", retain_uncertainty=True,
+                ) from None
+            batch *= 2
+            exhausted = not removed
+            _best_effort_compaction(connection)
+    raise AssertionError("capacity recovery did not exhaust its finite candidates")
+
+
+def _publish_locked(
+    connection: sqlite3.Connection, domain: C.DomainPaths,
+    checkout: C.CheckoutIdentity, result: C.RunResult, inventory: C.Inventory | None,
+) -> C.PublishResult:
+    with _writer_lock(domain, checkout) as directory:
+        marker_code = _disabled_marker(domain, checkout)
+        if marker_code is not None:
+            raise _HistoryStateError(marker_code)
+        capacity = _capacity_sequence(domain, checkout)
+        _read_state(connection)  # Never prune malformed evidence into apparent health.
+        # Reserve the small uncertainty record BEFORE touching DB evidence. A
+        # full disk after rollback must not require another allocation to fail
+        # closed. A crash leaves conservative uncertainty; transient errors
+        # restore the pre-call state. An existing capacity gap needs a newer
+        # clean full gate, not merely this publication's successful commit.
+        _store_capacity(directory, max(result.sequence, capacity or 0))
+        try:
+            baseline_published, pruned = _publish_with_recovery(connection, result, inventory)
+        except (sqlite3.Error, _HistoryStateError, C.Problem, OSError) as exc:
+            if isinstance(exc, sqlite3.Error):
+                unavailable = _is_transient_sqlite(exc)
+            else:
+                unavailable = isinstance(exc, OSError) or exc.code in {
+                    "coordinator-unavailable", "state-unavailable",
+                }
+            if unavailable and not getattr(exc, "retain_uncertainty", False):
+                try:
+                    _restore_capacity(directory, capacity)
+                except (C.Problem, OSError):
+                    pass  # An unavailable filesystem still leaves uncertainty.
+            raise
+
+        # Commit is final. No maintenance error below can retry publication or
+        # change its receipt. Retain the marker unless a newer full gate can
+        # account for ALL lost outcomes, including an overlapping late failure.
+        disabled = True
+        if (capacity is None or (result.sequence > capacity
+                and _clean_full(result, inventory, require_tests=True)
+                and all(item.outcome is _SUCCESS_OUTCOME for item in inventory.tests))):
+            try:
+                _restore_capacity(directory, None)
+            except (C.Problem, OSError):
+                pass  # A failed clear is conservative, and never uncommits.
+            else:
+                disabled = False
+        if pruned:
+            try:
+                if _needs_compaction(connection):
+                    _best_effort_compaction(connection)
+            except (sqlite3.Error, OSError):
+                pass
+        reasons = (() if baseline_published else _baseline_reasons(result, inventory))
+        if disabled:
+            reasons = (_reason("capacity-exceeded", "history selection is disabled"),)
         return C.PublishResult(
             committed=True, baseline_published=baseline_published,
-            selection_disabled=False, reasons=reasons,
+            selection_disabled=disabled, reasons=reasons,
         )
-    except _HistoryStateError as exc:
-        if connection is not None:
-            connection.rollback()
-        _write_disabled_marker(domain, checkout, exc.code)
-        return C.PublishResult(
-            committed=False, baseline_published=False, selection_disabled=True,
-            reasons=(_reason(exc.code, "history state is unavailable"),),
-        )
-    except C.Problem as exc:
-        if connection is not None:
-            connection.rollback()
-        _write_disabled_marker(domain, checkout, exc.code)
-        return C.PublishResult(
-            committed=False, baseline_published=False, selection_disabled=True,
-            reasons=(_reason(exc.code, "history state is unavailable"),),
-        )
-    except (OSError, sqlite3.Error):
-        if connection is not None:
-            connection.rollback()
-        _write_disabled_marker(domain, checkout, "coordinator-unavailable")
-        return C.PublishResult(
-            committed=False, baseline_published=False, selection_disabled=True,
-            reasons=(_reason("coordinator-unavailable", "history state is unavailable"),),
-        )
+
+
+def publish_outcome(
+    domain: C.DomainPaths,
+    checkout: C.CheckoutIdentity,
+    result: C.RunResult,
+    inventory: C.Inventory | None,
+) -> C.PublishResult:
+    """Commit one immutable result and reconcile durable obligations atomically."""
+    _validate_arguments(domain, checkout)
+    if not isinstance(result, C.RunResult):
+        raise TypeError("history result must be RunResult")
+    if inventory is not None and not isinstance(inventory, C.Inventory):
+        raise TypeError("history inventory must be Inventory or None")
+    connection = None
+    try:
+        marker_code = _disabled_marker(domain, checkout)
+        if marker_code is not None:
+            return C.PublishResult(
+                committed=False, baseline_published=False, selection_disabled=True,
+                reasons=(_reason(marker_code, "history selection is disabled"),),
+            )
+        connection = _open_store(domain, checkout, create=True)
+        assert connection is not None
+        return _publish_locked(connection, domain, checkout, result, inventory)
+    except (_HistoryStateError, C.Problem) as exc:
+        code = exc.code
+    except OSError:
+        code = "coordinator-unavailable"
+    except sqlite3.Error as exc:
+        code = _state_error_for_sqlite(exc).code
     finally:
         if connection is not None:
             connection.close()
+    if _can_persist_disabled_marker(code):
+        _write_disabled_marker(domain, checkout, code)
+    elif code == "capacity-exceeded":
+        try:
+            _remember_capacity(domain, checkout, result.sequence)
+        except (_HistoryStateError, C.Problem, OSError):
+            # The current call must still fail closed if the filesystem cannot
+            # persist even the small external marker.
+            pass
+    return C.PublishResult(
+        committed=False, baseline_published=False, selection_disabled=True,
+        reasons=(_reason(code, "history state is unavailable"),),
+    )
 
 
 def _history_payload(
@@ -1077,12 +1676,17 @@ def _history_payload(
         raise _problem("invalid-bound", "history limit must be between 1 and 200")
     connection = None
     try:
+        marker_code = _selection_marker(domain, checkout)
         connection = _open_store(domain, checkout, create=False)
         if connection is None:
+            if marker_code is not None:
+                raise _HistoryStateError(marker_code)
             return {"summaries": [], "obligations": []}
         _, obligations, _, _ = _read_state(
-            connection, _disabled_marker(domain, checkout),
+            connection, marker_code,
         )
+        if marker_code is not None:
+            raise _HistoryStateError(marker_code)
         data = {
             "summaries": list(_summary_rows(connection, limit)),
             "obligations": [_obligation_dict(item) for item in obligations],
@@ -1090,14 +1694,20 @@ def _history_payload(
         raw = C.encode_public_document("history", data)
         return C.decode_public_document(raw).data
     except _HistoryStateError as exc:
-        _write_disabled_marker(domain, checkout, exc.code)
+        if _can_persist_disabled_marker(exc.code):
+            _write_disabled_marker(domain, checkout, exc.code)
         raise _problem(exc.code, "history state is unavailable") from None
     except C.Problem as exc:
-        _write_disabled_marker(domain, checkout, exc.code)
+        if _can_persist_disabled_marker(exc.code):
+            _write_disabled_marker(domain, checkout, exc.code)
         raise _problem(exc.code, "history state is unavailable") from None
-    except (OSError, sqlite3.Error):
-        _write_disabled_marker(domain, checkout, "coordinator-unavailable")
+    except OSError:
         raise _problem("coordinator-unavailable", "history state is unavailable") from None
+    except sqlite3.Error as exc:
+        state_error = _state_error_for_sqlite(exc)
+        if _can_persist_disabled_marker(state_error.code):
+            _write_disabled_marker(domain, checkout, state_error.code)
+        raise _problem(state_error.code, "history state is unavailable") from None
     finally:
         if connection is not None:
             connection.close()
