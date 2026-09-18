@@ -94,7 +94,7 @@ class NativeReportBinding:
     )
 
     def __post_init__(self) -> None:
-        if self.protocol != PROTOCOL_VERSION:
+        if type(self.protocol) is not int or self.protocol != PROTOCOL_VERSION:
             raise TypeError("report binding has an unsupported protocol")
         object.__setattr__(self, "run_id", _check_hex(self.run_id, _RUN_ID_RE))
         object.__setattr__(self, "nonce", _check_hex(self.nonce, _NONCE_RE))
@@ -137,7 +137,7 @@ class NativeTerminalReport:
     problem: str | None = None
 
     def __post_init__(self) -> None:
-        if self.protocol != PROTOCOL_VERSION:
+        if type(self.protocol) is not int or self.protocol != PROTOCOL_VERSION:
             raise TypeError("terminal report has an unsupported protocol")
         object.__setattr__(self, "run_id", _check_hex(self.run_id, _RUN_ID_RE))
         object.__setattr__(self, "nonce", _check_hex(self.nonce, _NONCE_RE))
@@ -241,10 +241,19 @@ def allocate_report(
     raise AssertionError("unreachable")
 
 
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate report field")
+    return dict(pairs)
+
+
 def _decode(binding: NativeReportBinding, raw: bytes) -> NativeTerminalReport:
     try:
         text = raw.decode("utf-8")
-        decoder = json.JSONDecoder(parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        decoder = json.JSONDecoder(
+            object_pairs_hook=_unique_fields,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
         value, end = decoder.raw_decode(text)
         if text[end:].strip() or not isinstance(value, dict):
             raise ValueError
@@ -269,8 +278,10 @@ def _decode(binding: NativeReportBinding, raw: bytes) -> NativeTerminalReport:
 
 
 def consume_report(binding: NativeReportBinding) -> NativeTerminalReport:
-    """Read one post-quiescence report through bounded no-follow access."""
+    """Consume a binding once, after quiescence, through bounded no-follow access."""
     binding = _binding(binding)
+    if binding._created_identity is not None:
+        _reject()
     try:
         F.validate_private_file(binding.path)
         before = _identity(binding.path)
