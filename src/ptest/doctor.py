@@ -11,6 +11,7 @@ import ast
 from contextlib import contextmanager
 from dataclasses import fields
 import heapq
+import json
 import math
 import os
 import re
@@ -33,6 +34,9 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FIXTURE_DIRS = frozenset({"fixtures", "fixture", "setup", "__fixtures__"})
 _CONFIG_NAMES = frozenset({".ptest.toml", "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "package.json"})
 _LINE_CHARS = 4096  # A fixed work bound, including regex input; never raised by callers.
+_PATH_BYTES = 4096  # Bounds caller/config path evidence before it can enter a report.
+_DOCUMENT_RESERVE = 65536  # Fixed report envelope, scope, readiness, limits, and usage.
+_PHYSICAL_NEWLINE = re.compile(r"\r\n|\r|\n")
 _TIMING_MISSING = "Timing unavailable: inspect has no checkout identity or per-test history timing input."
 
 # code, pattern, severity, consequence, remediation, verification
@@ -65,7 +69,8 @@ def _safe_text(value: str) -> bool:
 def _safe_scope(scope: str | None) -> str | None:
     if scope is None:
         return None
-    if not isinstance(scope, str) or not scope or scope.startswith("/") or not _safe_text(scope):
+    if (not isinstance(scope, str) or not scope or scope.startswith("/")
+            or not _safe_text(scope) or len(scope.encode("utf-8")) > _PATH_BYTES):
         raise C.Problem(code="unsafe-path", message="doctor scope is not a safe relative path", phase=_PHASE)
     parts = scope.split("/")
     if any(part in {"", ".", ".."} for part in parts):
@@ -122,11 +127,25 @@ def _lines_for_python(text: str, limits: C.ScanLimits, check_deadline) -> set[in
 
 
 def _finding_bytes(finding: C.Finding) -> int:
-    """Conservative UTF-8 budget for the renderer-owned finding payload."""
-    fields = (finding.code, finding.severity, finding.confidence, finding.path or "",
-              finding.evidence_type, finding.consequence, finding.remediation,
-              finding.verification)
-    return sum(len(field.encode("utf-8")) for field in fields) + 32
+    """UTF-8 bytes for one compact public finding object plus a separator."""
+    payload = {
+        "code": finding.code, "severity": finding.severity,
+        "confidence": finding.confidence, "path": finding.path,
+        "line": finding.line, "evidence_type": finding.evidence_type,
+        "consequence": finding.consequence, "remediation": finding.remediation,
+        "verification": finding.verification,
+    }
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
+
+
+def _reason_bytes(reason: C.Reason) -> int:
+    """UTF-8 bytes for one compact public limitation object plus a separator."""
+    payload = {"code": reason.code, "message": reason.message, "paths": reason.paths}
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
+
+
+_OUTPUT_LIMIT_REASON = _reason("scan-limit", "Doctor diagnostic output limit reached.")
+_OUTPUT_LIMIT_BYTES = _reason_bytes(_OUTPUT_LIMIT_REASON)
 
 
 class _Deadline(Exception):
@@ -172,11 +191,40 @@ class _Scan:
 
     def __init__(self, root: Path, limits: C.ScanLimits):
         self.root, self.limits = root, limits
+        self.payload_limit = limits.output_bytes - min(_DOCUMENT_RESERVE, limits.output_bytes // 4)
         self.began = time.monotonic()
         self.entries = self.files = self.total_bytes = self.skipped = self.output_bytes = 0
         self.truncated = False
         self.findings: list[C.Finding] = []
         self.limitations: list[C.Reason] = []
+        self._limitation_set: set[C.Reason] = set()
+        self._output_limited = False
+
+    def _hit_output_limit(self):
+        self.truncated = True
+        if self._output_limited:
+            return
+        self._output_limited = True
+        size = _OUTPUT_LIMIT_BYTES
+        # A caller may supply a payload budget smaller than any Reason. In
+        # that degenerate case truncated remains the only representable cap
+        # evidence; never exceed the requested budget to describe the cap.
+        if self.output_bytes + size <= self.payload_limit:
+            self.limitations.append(_OUTPUT_LIMIT_REASON)
+            self._limitation_set.add(_OUTPUT_LIMIT_REASON)
+            self.output_bytes += size
+
+    def _add_limitation(self, reason: C.Reason):
+        if reason in self._limitation_set or self._output_limited:
+            return
+        size = _reason_bytes(reason)
+        reserve = _OUTPUT_LIMIT_BYTES
+        if self.output_bytes + size + reserve > self.payload_limit:
+            self._hit_output_limit()
+            return
+        self.limitations.append(reason)
+        self._limitation_set.add(reason)
+        self.output_bytes += size
 
     def check_deadline(self):
         if time.monotonic() - self.began >= self.limits.elapsed_s:
@@ -185,11 +233,11 @@ class _Scan:
 
     def limit(self, message: str, *paths: str):
         self.truncated = True
-        self.limitations.append(_reason("scan-limit", message, *paths))
+        self._add_limitation(_reason("scan-limit", message, *paths))
 
     def skip(self, message: str, *paths: str, code: str = "unsafe-path"):
         self.skipped += 1
-        self.limitations.append(_reason(code, message, *paths))
+        self._add_limitation(_reason(code, message, *paths))
 
     def discover(self, start: str, priority: tuple[str, ...]) -> list[tuple[str, int]]:
         # No whole-directory sorted(scandir(...)): materialize at most the entry
@@ -307,7 +355,7 @@ class _Scan:
         if rel.endswith(".py") and syntax_lines is None:
             self.skip("Doctor could not safely analyze source syntax.", rel, code="static-evidence-insufficient")
             return
-        for line_number, line in enumerate(text.splitlines(), 1):
+        for line_number, line in enumerate(_PHYSICAL_NEWLINE.split(text), 1):
             self.check_deadline()
             if line_number > limits.ast_nodes:
                 self.limit("Doctor source-line limit reached.", rel)
@@ -325,8 +373,8 @@ class _Scan:
                     if len(self.findings) >= limits.findings:
                         self.limit("Doctor finding limit reached.")
                         return
-                    if self.output_bytes + size > limits.output_bytes:
-                        self.limit("Doctor output-byte limit reached.")
+                    if self.output_bytes + size + _OUTPUT_LIMIT_BYTES > self.payload_limit:
+                        self._hit_output_limit()
                         return
                     self.findings.append(finding)
                     self.output_bytes += size
@@ -361,11 +409,9 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
             scan.source(relative, size)
     except _Deadline:
         pass
-    scan.limitations.extend((
-        _reason("static-evidence-insufficient", "Static inspection cannot certify parallel safety."),
-        _reason("static-evidence-insufficient", _TIMING_MISSING),
-    ))
-    limitations = tuple(dict.fromkeys(scan.limitations))
+    scan._add_limitation(_reason("static-evidence-insufficient", "Static inspection cannot certify parallel safety."))
+    scan._add_limitation(_reason("static-evidence-insufficient", _TIMING_MISSING))
+    limitations = tuple(scan.limitations)
     findings = tuple(scan.findings)
     usage = C.ScanUsage(entries=scan.entries, files=scan.files, file_bytes=scan.total_bytes,
                         total_bytes=scan.total_bytes, findings=len(findings), output_bytes=scan.output_bytes,

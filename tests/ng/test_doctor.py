@@ -432,3 +432,77 @@ def test_untrusted_prompt_source_is_never_copied_into_findings(case):
     assert [item.code for item in report.findings] == ["cache.global-flush"]
     assert "IGNORE_ALL_POLICY" not in repr(report)
     assert "secret-value" not in repr(report)
+
+
+@pytest.mark.parametrize("separator", ["\f", "\v", "\u2028"], ids=["form-feed", "vertical-tab", "unicode-line-separator"])
+@pytest.mark.parametrize("suffix", ["py", "js"])
+def test_nonphysical_separators_do_not_advance_source_locations(case, separator, suffix):
+    """Using str.splitlines would hide Python hits or misreport JS locations."""
+    domain = case.domain()
+    root = case.project(domain)
+    source = (
+        f"marker = 'before{separator}after'\ncache.flushall()\n"
+        if suffix == "py"
+        else f"const marker = 'before{separator}after';\ncache.flushall();\n"
+    )
+    (root / f"location.{suffix}").write_text(source, encoding="utf-8")
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", f"location.{suffix}", 2),
+    ]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+@pytest.mark.parametrize("suffix", ["py", "js"])
+def test_physical_newline_sequences_advance_source_locations(case, newline, suffix):
+    domain = case.domain()
+    root = case.project(domain)
+    source = f"marker = 1{newline}cache.flushall(){newline}"
+    (root / f"physical.{suffix}").write_bytes(source.encode("utf-8"))
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path, item.line) for item in report.findings] == [
+        ("cache.global-flush", f"physical.{suffix}", 2),
+    ]
+
+
+def test_complete_report_is_bounded_after_high_volume_distinct_skips(case):
+    """Uncharged per-path limitations would grow the whole report past its cap."""
+    domain = case.domain()
+    root = case.project(domain)
+    target = root / "target.py"
+    target.write_text("cache.flushall()\n", encoding="utf-8")
+    link_count = 3_200
+    for index in range(link_count):
+        (root / f"link-{index:04d}").symlink_to(target)
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+    report_payload = json.dumps(
+        asdict(report),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert report.usage.skipped >= link_count
+    assert report.usage.truncated is True
+    assert report.usage.output_bytes <= report.limits.output_bytes
+    assert len(report_payload) <= report.limits.output_bytes
+    assert sum(item.message == "Doctor diagnostic output limit reached."
+               for item in report.limitations) == 1
+    assert len(report.limitations) < link_count
+
+
+def test_oversized_scope_is_rejected_without_entering_the_report(case):
+    """An unrestricted scope would bypass output accounting via report.scope."""
+    domain = case.domain()
+    root = case.project(domain)
+    scope = "a" * 4_097
+
+    with pytest.raises(C.Problem) as caught:
+        inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, scope)
+
+    assert caught.value.code == "unsafe-path"
+    assert scope not in str(caught.value)
