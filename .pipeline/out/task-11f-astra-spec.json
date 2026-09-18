@@ -1,0 +1,37 @@
+{
+  "task": "11F Pytest explicit full basic-serial specification",
+  "date": "2026-09-18",
+  "status": "specification-authored-awaiting-review",
+  "author": "architect-agent (Astra)",
+  "inspected_base": "f26dd56397f6f056c74247829d2641dcd9f76e0d",
+  "plan": "docs/superpowers/plans/2026-09-18-ptest-ng-pytest-full-basic-serial.md",
+  "owned_files": [
+    "docs/superpowers/plans/2026-09-18-ptest-ng-pytest-full-basic-serial.md",
+    ".pipeline/out/task-11f-astra-spec.json"
+  ],
+  "scope": [
+    "Explicit Pytest full basic_serial only, alongside unchanged accepted scoped execution",
+    "Truthful static where reporting for Pytest scoped/full and Vitest prepared/unavailable",
+    "Strict roots, immutable mode binding, native narrowing refusal, existing guarded report lifecycle and conservative source/publication claims"
+  ],
+  "runtime_qualification": "No new qualification; prior Task 11D evidence covers scoped Linux x86_64 / CPython 3.13.11 / pytest 9.1.1 / pluggy 1.6.0 without xdist only.",
+  "tests": {
+    "run": false,
+    "reason": "Specification-only work; AGENTS.md prohibits tests and dependency installation at this stage. RED/GREEN commands are future acceptance requirements, not completed evidence."
+  },
+  "verification": [
+    "Read AGENTS.md, .pipeline/context.md, accepted design/product contracts, Task 11D/11E acceptance records and current implementation/tests",
+    "Used existing graphify query for navigation without rebuilding or semantic extraction",
+    "JSON parsed successfully with python3 -m json.tool; placeholder scan found no TBD/TODO/incomplete-step markers",
+    "Commit is restricted to the two declared specification/evidence documents; no tests or source files are included"
+  ],
+  "not_authorized_here": [
+    "runtime or test edits",
+    "dependency or tuple installation",
+    "automatic/selection/setup/shadow/probe activation",
+    "Vitest activation or native parallelism",
+    "source-validity/full-gate/history/baseline publication",
+    "remote/backend or legacy product runtime substitution",
+    "packaging, live CLI installation, main merge, push, publication or deployment"
+  ]
+}
