@@ -1,0 +1,43 @@
+{
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "",
+  "test_summary": "cwd=/home/ingmar/worktrees/ptest/cx-ng-product/task-9; UV_CACHE_DIR=.pipeline/local/uv-cache scripts/ptest-bootstrap tests/ng/test_doctor.py tests/ng/test_resources.py --durations=10; exit=0; 10 passed in 0.05s; all durations <0.005s.",
+  "report_path": ".pipeline/out/task-9.json",
+  "concerns": [
+    "T11 exclusively owns renderer/CLI integration: repair_prompt rendering and public doctor output are not implemented or runtime-verified here.",
+    "No native execution/probe boundary was crossed: static inspector has no runner, package-manager, network, native-config-import, repository-write, or domain-state behavior.",
+    "No commit was created, per launch instruction."
+  ],
+  "base": "d4ec9bb",
+  "head": "d4ec9bb",
+  "runtime": "CPython 3.13.11; pytest 9.1.1; ptest bootstrap bundle U1mnf3 SHA256 3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+  "implemented": [
+    "Bounded non-executing inspect(domain, config, limits, scope) static traversal with no-follow bounded file reads.",
+    "Fixed Finding catalog hypotheses, unknown readiness in each area, and durable static-evidence-insufficient limitation.",
+    "Bundled local agent guide and database/cache/files-ports/processes/time-network/factories recipes."
+  ],
+  "verified": [
+    "Focused no-import, all fixed-catalog, priority/limit, symlink-race, special-file, dotenv, deep syntax, terminal-control, raised-bound, output/deadline, package-resource, SQLite/cache/socket/neighbor/worker-setup assertions via the scoped bootstrap command (exit 0).",
+    "git diff --check exited 0 after final edits; graphify update . exited 0 and rebuilt 3539 nodes / 7046 edges."
+  ],
+  "not_verified": [
+    "T11 renderer/CLI/public JSON behavior and any native execution boundary.",
+    "Performance target at the 2,000-file/16MiB bound and dynamic probes."
+  ],
+  "deferred": [],
+  "discovered_but_not_fixed": [
+    "DoctorReport usage.output_bytes is a conservative finding-payload budget; T11 remains responsible for final rendered-document bytes."
+  ],
+  "owned_files": [
+    "src/ptest/doctor.py",
+    "src/ptest/resources/agent-guide.md",
+    "src/ptest/resources/recipes/*.md",
+    "tests/ng/test_doctor.py",
+    "tests/ng/test_resources.py",
+    "tests/ng/fixtures/doctor/*",
+    ".pipeline/out/task-9.json"
+  ],
+  "touched_outside_owned_set": [
+    "graphify-out/*: generated AST refresh required by AGENTS.md; not task source."
+  ]
+}
