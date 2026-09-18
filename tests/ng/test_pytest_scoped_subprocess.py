@@ -219,6 +219,170 @@ def test_real_collection_finish_cannot_install_the_test_loop(case):
     _released(domain)
 
 
+def test_real_outer_collection_finish_wrapper_cannot_install_the_test_loop(case):
+    domain = case.domain()
+    root = _project(case, domain)
+    nested = root / "tests/unit"
+    nested.mkdir()
+    (nested / "conftest.py").write_text(
+        "import pytest\nfrom pathlib import Path\n"
+        "class Executor:\n"
+        "    def pytest_runtestloop(self, session):\n"
+        "        Path('outer-collection-finish-executor-ran').touch()\n"
+        "        return True\n"
+        "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+        "def pytest_collection_finish(session):\n"
+        "    yield\n"
+        "    Path('outer-collection-finish-ran').touch()\n"
+        "    session.config.pluginmanager.register(Executor(), 'outer-collection-finish-executor')\n"
+    )
+    (nested / "test_nested.py").write_text(
+        "from pathlib import Path\nPath('outer-collection-finish-collected').touch()\n"
+        "def test_nested():\n    Path('outer-collection-finish-test-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "outer-collection-finish-collected").exists()
+    assert (root / "outer-collection-finish-ran").exists()
+    assert not (root / "outer-collection-finish-executor-ran").exists()
+    assert not (root / "outer-collection-finish-test-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
+def test_real_yield_fixture_teardown_cannot_install_protocol_suppression(case):
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "tests/test_native.py").unlink()
+    (root / "tests/test_late_protocol.py").write_text(
+        "import pytest\nfrom pathlib import Path\n"
+        "class Executor:\n"
+        "    @pytest.hookimpl(tryfirst=True)\n"
+        "    def pytest_runtest_protocol(self, item, nextitem):\n"
+        "        Path('teardown-protocol-executor-ran').touch()\n"
+        "        return True\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def register_after_call(request):\n"
+        "    yield\n"
+        "    if not request.config.pluginmanager.hasplugin('teardown-protocol-executor'):\n"
+        "        Path('teardown-protocol-registered').touch()\n"
+        "        request.config.pluginmanager.register(Executor(), 'teardown-protocol-executor')\n"
+        "def test_first():\n    Path('teardown-first-test-ran').touch()\n"
+        "def test_later():\n    Path('teardown-later-test-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "teardown-first-test-ran").exists()
+    assert (root / "teardown-protocol-registered").exists()
+    assert not (root / "teardown-protocol-executor-ran").exists()
+    assert not (root / "teardown-later-test-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
+def test_real_setup_skip_registration_cannot_install_protocol_suppression(case):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\nfrom pathlib import Path\n"
+        "CONFIG = None\n"
+        "class Executor:\n"
+        "    @pytest.hookimpl(tryfirst=True)\n"
+        "    def pytest_runtest_protocol(self, item, nextitem):\n"
+        "        Path('skip-protocol-executor-ran').touch()\n"
+        "        return True\n"
+        "def pytest_configure(config):\n"
+        "    global CONFIG\n    CONFIG = config\n"
+        "def pytest_runtest_setup(item):\n"
+        "    if item.name == 'test_skip':\n        pytest.skip('ordinary setup skip')\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    if report.when == 'setup' and report.outcome == 'skipped' and not CONFIG.pluginmanager.hasplugin('skip-protocol-executor'):\n"
+        "        Path('skip-protocol-registered').touch()\n"
+        "        CONFIG.pluginmanager.register(Executor(), 'skip-protocol-executor')\n"
+    ))
+    (root / "tests/test_native.py").unlink()
+    (root / "tests/test_skip_protocol.py").write_text(
+        "from pathlib import Path\n"
+        "def test_skip():\n    Path('skip-body-ran').touch()\n"
+        "def test_later():\n    Path('skip-later-body-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "skip-protocol-registered").exists()
+    assert not (root / "skip-protocol-executor-ran").exists()
+    assert not (root / "skip-body-ran").exists()
+    assert not (root / "skip-later-body-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=["pass", "native-fail"])
+def test_real_last_item_teardown_registration_cannot_certify_completion(case, failure):
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\nfrom pathlib import Path\n"
+        "class Executor:\n"
+        "    @pytest.hookimpl(tryfirst=True)\n"
+        "    def pytest_runtest_protocol(self, item, nextitem):\n"
+        "        Path('last-item-executor-ran').touch()\n"
+        "        return True\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def register_after_last_item(request):\n"
+        "    yield\n"
+        "    if not request.config.pluginmanager.hasplugin('last-item-executor'):\n"
+        "        Path('last-item-protocol-registered').touch()\n"
+        "        request.config.pluginmanager.register(Executor(), 'last-item-executor')\n"
+    ))
+    (root / "tests/test_native.py").unlink()
+    (root / "tests/test_last_item.py").write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "def test_last_item():\n"
+        "    Path('last-item-body-ran').touch()\n"
+        "    assert os.environ.get('FIXTURE_FAILURE') != '1'\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10,
+                         env={"FIXTURE_FAILURE": str(int(failure))})
+
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    expected_exit = 1 if failure else 4
+    assert result.code == data["runner_exit_code"] == expected_exit
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "last-item-body-ran").exists()
+    assert (root / "last-item-protocol-registered").exists()
+    assert not (root / "last-item-executor-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
 @pytest.mark.parametrize(
     ("registration", "registered_marker"),
     [
@@ -270,7 +434,7 @@ def test_real_per_item_setup_cannot_replace_the_test_body(case, registration, re
         (root / "per-item-second-test-ran").exists(),
     ) == ("incomplete", False, False, False)
     assert data["exit_origin"] == "ptest"
-    assert result.code == data["runner_exit_code"] == 1
+    assert result.code == data["runner_exit_code"] == 4
     assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
     assert b"native-config-invalid" in result.stderr
     assert (root / "per-item-collected").exists()

@@ -143,6 +143,7 @@ class OwnedPlugin:
     def __init__(self, workers: int) -> None:
         self.workers = workers
         self.refused = False
+        self._config: Any | None = None
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -151,6 +152,7 @@ class OwnedPlugin:
         raise UsageError(f"native-config-invalid: {message}")
 
     def _validate(self, config: Any, *, generated: bool) -> None:
+        self._config = config
         option = config.option
         manager = getattr(config, "pluginmanager", None)
         if manager is not None:
@@ -237,6 +239,16 @@ class OwnedPlugin:
         self._validate(session.config, generated=True)
         return result
 
+    def pytest_runtestloop(self, session: Any) -> Any:
+        """Check execution hooks immediately before entering the test loop."""
+        self._validate(session.config, generated=True)
+        return (yield)
+
+    def pytest_runtest_protocol(self, item: Any, nextitem: Any) -> Any:
+        """Check execution hooks before each item can replace its protocol."""
+        self._validate(item.config, generated=True)
+        return (yield)
+
     def pytest_runtest_call(self, item: Any) -> Any:
         """Check per-item registrations at the test-body execution boundary."""
         self._validate(item.config, generated=True)
@@ -297,14 +309,25 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(tryfirst=True)(OwnedPlugin.pytest_configure)
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_collection)
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_collection_finish)
+        pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_runtestloop)
+        pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_runtest_protocol)
         pytest.hookimpl(wrapper=True, tryfirst=True)(OwnedPlugin.pytest_runtest_call)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(OwnedPlugin.pytest_xdist_setupnodes)
         plugin = OwnedPlugin(workers)
         native_exit = int(pytest.main(list(argv), plugins=[plugin]))
         bridge_exit = native_exit
+        # Hooks may register only after the final item boundary (for example
+        # from teardown). Qualify the completed native run before allowing the
+        # bridge to certify its terminal report.
+        if plugin._config is not None:
+            try:
+                plugin._validate(plugin._config, generated=True)
+            except pytest.UsageError:
+                pass
         if plugin.refused:
             problem = "bridge-refused"
-            return native_exit
+            bridge_exit = 4 if native_exit == 0 else native_exit
+            return bridge_exit
         complete = True
         problem = "native-failure" if native_exit else None
         return native_exit
