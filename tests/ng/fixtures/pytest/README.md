@@ -31,6 +31,15 @@ current critical-hook gate also refuses unqualified plugin wrappers, including
 active pytest-cov `--cov` runs; preserving coverage arguments does not qualify
 those runs.
 
+This scoped tier preserves native Pytest's ordinary partial-selection semantics
+and deliberately publishes no inventory, count, source-validity, baseline, or
+history claim. Native collection/setup-only modes, deselection in project code,
+and native outcome rewriting are therefore not proof that every discoverable
+test body ran; they are outside this executor-ownership control. A late bridge
+refusal always makes the result incomplete with ptest origin. If Pytest had
+already observed a genuine nonzero exit, ptest preserves that nonzero code for
+diagnosis while withholding a certified native result.
+
 The current evidence executes only the provisioned Linux CPython 3.13.11 /
 pytest 9.1.1 / pluggy 1.6.0 tuple. Pytest 8.4.2, 9.0.3 and 9.1.0, an installed
 xdist tuple and an unsupported pytest runtime remain explicit unqualified skips
