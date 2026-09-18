@@ -619,6 +619,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _static_dispatch(parsed, Path.cwd())
         resolution = config_api.resolve_config(Path.cwd())
         if resolution.config is None:
+            # An explicit runner suffix has already crossed ptest's closed
+            # prefix grammar.  Without a configured adapter there is no
+            # capability authority to execute it; classify that request as
+            # unavailable without inspecting or echoing its literal tokens.
+            # Bare/automatic execution keeps the initialization guidance.
+            if parsed.runner_argv:
+                raise _problem(
+                    "unsupported-capability",
+                    "literal execution requires a configured runner profile",
+                )
             raise resolution.problem or _problem(
                 "initialization-required", "project configuration is required",
             )
