@@ -8,6 +8,8 @@ Author: architect-agent
 
 Inspected baseline: `f26dd56397f6f056c74247829d2641dcd9f76e0d`
 
+Review amendment: resolves Claude Opus High findings B1/H1 on plan commit `1dfea81`. The inspected baseline above records source research, not the future implementation base; the worker must record its actual assigned base SHA before editing.
+
 **Goal:** Make static doctor repair guidance self-contained and honest about scan coverage, add bounded cache-hazard spellings, and state the scoped/full verification sequence explicitly.
 
 **Architecture:** Retain `inspect(domain, config, limits, scope) -> DoctorReport` and the pure `repair_prompt(report) -> str` boundary. Existing structured reports supply trusted scan metadata; escaped finding and limitation records remain delimited untrusted evidence. Timing ingestion is explicitly deferred because the existing interface cannot safely supply attributable observations within this slice.
@@ -34,7 +36,7 @@ Inspected baseline: `f26dd56397f6f056c74247829d2641dcd9f76e0d`
 | Question | Answer and rationale |
 |---|---|
 | Can existing history safely produce `timing.slow-test` here? | No. Keep timing unknown and do not add a history call or synthetic observation input. See the evidence and future gate below. |
-| Which prompt fields belong before untrusted evidence? | Exact relative scope/root convention, all four readiness states, effective scan limits, recorded usage/skips/truncation, and a fixed static-hypothesis caveat. Values must be typed, escaped, bounded data. |
+| Which prompt fields belong before untrusted evidence? | Exact relative scope/root convention, every supplied readiness entry in its original order, effective scan limits, recorded usage/skips/truncation, and a fixed static-hypothesis caveat. Values must be typed, escaped, bounded data; missing areas are not invented and duplicate areas are not reconciled. |
 | How broad is cache detection? | Recognize Redis/Valkey flush spellings and explicit cache-named receiver clear methods using bounded lexical rules. Avoid matching arbitrary `.clear()`, key deletion, or similarly named non-cache methods. |
 | Does general cache support prove shared-resource misuse? | No. A cache-named receiver may refer to an owned local instance; retain medium-confidence static evidence and require caller/ownership review. |
 | What user-requested guidance already exists? | One database per worker per run; expensive setup once per run/worker; per-test records/factories; cache namespaces; files, ports, fixtures, child processes, time, and network. Preserve this text and executable ownership examples. |
@@ -75,7 +77,7 @@ Existing bucket tests must continue rejecting booleans, strings, negative values
 | `tests/ng/test_doctor.py` | Positive/negative cache matrix and timing/no-state regression evidence. |
 | `tests/ng/test_render.py` | Scan metadata, full finding context, delimiter, bounds, and pure-renderer regressions. |
 | `tests/ng/test_resources.py` | Bundled guide assertions for the exact scoped/final sequence and guidance. Preserve existing ownership tests. |
-| `.pipeline/out/doctor-hardening.json` | New task-owned implementation evidence: range, exact commands/outcomes, durations, skips, limitations, reviewer result. |
+| `.pipeline/out/doctor-hardening.json` | New task-owned implementation evidence: actual assigned base SHA, final head SHA/range, exact commands/outcomes, durations, skips, limitations, reviewer result. |
 
 Do not modify `contracts.py`, history/storage/platform, CLI/operations/adapters, schemas, configs, recipes, fixture ownership helpers, dependencies, or lockfiles. Parent owns integration and gate orchestration. A discovered need for another production owner is a plan amendment, not permission to expand this task.
 
@@ -89,24 +91,24 @@ Trusted prefix order:
 2. The actual bundled guide, still loaded through `_guide()`; missing package data remains `state-unavailable`.
 3. Fixed caveat: “Static findings are hypotheses. No findings does not certify parallel safety. Scan limits and missing evidence constrain this advice.”
 4. One machine-readable physical line beginning `Scan context: ` followed by ASCII-escaped JSON with exactly `scope`, `readiness`, `limits`, and `usage`.
-5. Fixed explanation that `scope=[]` means the resolved repository root, nonempty scope lists exact inspected relative targets, and null limits/usage mean unavailable metadata. It must distinguish scan `usage.truncated` from later prompt evidence truncation.
+5. Fixed explanation that `scope=[]` means the resolved repository root, nonempty scope lists exact inspected relative targets, and null limits/usage mean unavailable metadata. Readiness entries are copied in order; missing areas are not assessed and repeated areas are not reconciled. It must distinguish scan `usage.truncated` from later prompt evidence truncation.
 6. `BEGIN UNTRUSTED DOCTOR EVIDENCE` and bounded records, then the existing closing delimiter.
 
-`scope` preserves `list(report.scope)` exactly; do not invent an absolute root, treat an empty list as “no scan,” or truncate a target into a different path. `readiness` contains the four known areas with their recorded states; absent areas, if representable, render unknown. Copy numerical/bool limits and usage exactly from the typed report, including skipped count and truncation; do not recompute or reinterpret existing `file_bytes` accounting. Readiness reason text and limitation/path text remain inside the untrusted evidence section, never executable instructions in the prefix. Caller-selected path strings in metadata remain JSON data, escaped on a single physical line.
+`scope` preserves `list(report.scope)` exactly; do not invent an absolute root, treat an empty list as “no scan,” or truncate a target into a different path. `readiness` is exactly `[{"area": r.area, "state": r.state} for r in report.readiness]`: preserve order, partial tuples, duplicate areas, and even conflicting states on duplicate entries. An empty tuple becomes `[]`; do not fill missing areas with unknown, sort, deduplicate, select a winning state, or infer an overall readiness judgment. The static inspector continues producing its existing four unknown areas; the pure renderer does not strengthen the wider `DoctorReport` contract. Copy numerical/bool limits and usage exactly from the typed report, including skipped count and truncation; do not recompute or reinterpret existing `file_bytes` accounting. Readiness reason text and limitation/path text remain inside the untrusted evidence section, never executable instructions in the prefix. Caller-selected path strings in metadata remain JSON data, escaped on a single physical line.
 
-Finding records retain all nine existing public fields: code, severity, confidence, path, line, evidence_type, consequence, remediation, verification. Include limitations and readiness reasons as escaped data records after findings. Do not include source snippets, native commands, environment values, or unrelated file contents. Prefix metadata does not promote any evidence string to trusted instructions.
+Finding records retain all nine existing public fields: code, severity, confidence, path, line, evidence_type, consequence, remediation, verification. Include limitations and readiness reasons as escaped data records after findings. Associate each readiness-reason record with its zero-based `readiness_index`, `area`, and `state` so reasons remain attributable when areas repeat; this is prompt-only data, not a public schema change. Do not include source snippets, native commands, environment values, or unrelated file contents. Prefix metadata does not promote any evidence string to trusted instructions.
 
 Budget the complete UTF-8 prefix, closing delimiter, and truncation marker before admitting evidence. Never truncate trusted context into an ambiguous value. If exact context plus bundled guide and reserved suffix/marker cannot fit `MAX_PROMPT_BYTES`, return `C.Problem(code="invalid-bound", phase="render")`; no output fragment. The evidence loop admits only complete JSON records, stops at the first omitted record, and shows the existing truncation marker. Every successful result has one opening and one closing delimiter as whole lines and is at most 65536 bytes. `usage.truncated=false` must not hide independent prompt truncation.
 
 ### Cache lexical contract
 
-Keep the existing `cache.global-flush` code, high severity, medium confidence, and `static-pattern` evidence. Match `flushall`, `flushdb`, `flushAll`, `flushDb`, `flushDB`, and uppercase variants using a bounded case-insensitive alternative with the existing identifier boundary and call parenthesis. A spelling change does not certify shared use; remediation asks the agent to inspect the receiver and ownership.
+Use only the existing `cache.global-flush` code for both Redis/Valkey flush calls and general cache-wide clear calls. `C.FINDING_CODES`, the public doctor schema enum, the design catalog, and their parity tests remain unchanged. Both detection branches retain the existing high severity, medium confidence, and `static-pattern` evidence: severity describes possible destructive impact, while confidence and explicit hypothesis wording acknowledge uncertain receiver type/ownership. Do not introduce another finding code or lower existing flush severity.
 
-Add `cache.global-clear` with medium severity/confidence and `static-pattern`. Recognize a dot-method call whose immediate receiver is a bounded identifier with an explicit cache token, followed by one of `clear`, `clearAll`, `clear_all`, `invalidateAll`, or `invalidate_all` and a call parenthesis. Match cache tokens only at an entire identifier or snake/camel token boundary: `cache`, `caches`, `shared_cache`, `cache_client`, `cacheClient`, `memoryCache`, `applicationCache`, and `obj.cache` qualify; `cacheable`, `cachet`, `showcase`, and `cachedValue` do not. No import/type resolution, alias inference, bracket-property parser, multiline parser, AST rewrite, or new package. Document these lexical limits; not finding an alias remains unknown.
+The flush branch matches `flushall`, `flushdb`, `flushAll`, `flushDb`, `flushDB`, and uppercase variants using a bounded case-insensitive alternative with the existing identifier boundary and call parenthesis. The clear branch recognizes a dot-method call whose immediate receiver is a bounded identifier with an explicit cache token, followed by one of `clear`, `clearAll`, `clear_all`, `invalidateAll`, or `invalidate_all` and a call parenthesis. Match cache tokens only at an entire identifier or snake/camel token boundary: `cache`, `caches`, `shared_cache`, `cache_client`, `cacheClient`, `memoryCache`, `applicationCache`, and `obj.cache` qualify; `cacheable`, `cachet`, `showcase`, and `cachedValue` do not. No import/type resolution, alias inference, bracket-property parser, multiline parser, AST rewrite, or new package. Document these lexical limits; not finding an alias remains unknown.
 
-Implementation can use one private bounded helper for receiver tokenization and a compiled call expression if necessary; avoid a sprawling single regex or duplicated scanner. Tokenization operates only on the already bounded line/receiver and splits snake case and lower-to-upper camel transitions. Match the token `cache` or `caches` case-insensitively. At most one finding per code per line; keep all existing finding/output/deadline accounting.
+Retain a single `_RULES` row for `cache.global-flush` and its shared consequence/remediation/verification fields. Extend only its matching predicate: `bool(pattern.search(line)) or (code == "cache.global-flush" and _cache_clear_call(line))`, where the private `_cache_clear_call(line: str) -> bool` uses one compiled call expression and bounded receiver tokenization. This preserves one catalog entry and one finding per code per line even when both branches match; no duplicate-code catalog rows or second scanner. Tokenization operates only on the already bounded line/receiver and splits snake case and lower-to-upper camel transitions. Match the token `cache` or `caches` case-insensitively. Keep all existing finding/output/deadline accounting.
 
-Consequence: a cache-wide clear may erase another worker/run's entries. Remediation: verify receiver lifetime and ownership; use checkout/run/worker key namespaces and delete only owned keys, or demonstrate an exclusively owned disposable cache. Verification: preserve a neighboring run/worker sentinel during cleanup. Broad clear on an owned cache remains a review hypothesis, never an automatic refactor instruction.
+Use common catalog prose that truthfully covers both branches. Consequence: a cache-wide flush or clear may erase another worker/run's entries. Remediation: verify receiver lifetime and ownership; use checkout/run/worker key namespaces and delete only owned keys, or demonstrate an exclusively owned disposable cache. Verification: preserve a neighboring run/worker sentinel during cleanup. Broad clear on an owned cache remains a review hypothesis, never an automatic refactor instruction.
 
 | Positive examples | Required negative examples |
 |---|---|
@@ -123,7 +125,7 @@ This remains lexical evidence: strings/comments may resemble calls in non-Python
 
 Files: `doctor.py`, `test_doctor.py`. Complexity: small. Dependency: reviewed plan.
 
-- [ ] Add parametrized positive and negative cases from the exact matrix above, using `_resolution`, `case.domain()`, and `case.project(domain)` already in the test module. Put JS snippets in temporary `tests/cache.test.js`; Python snippets in valid temporary Python source. Assert exact code/path/line, severity/confidence/evidence type and parallel/timing unknown by area.
+- [ ] Add parametrized positive and negative cases from the exact matrix above, using `_resolution`, `case.domain()`, and `case.project(domain)` already in the test module. Put JS snippets in temporary `tests/cache.test.js`; Python snippets in valid temporary Python source. Every positive emits `cache.global-flush` with high severity/medium confidence/`static-pattern`; assert exact path/line and parallel/timing unknown by area. Put a flush and clear on one line and assert exactly one finding with safe shared remediation/verification. Existing catalog parity assertions must remain valid without editing the closed code list or schemas.
 - [ ] Example first RED regression:
 
 ```python
@@ -140,10 +142,10 @@ def test_cache_hardening_camelcase(case):
     assert next(r for r in report.readiness if r.area == "parallel").state == "unknown"
 ```
 
-- [ ] Run `ptest tests/ng/test_doctor.py -k cache_hardening` and record expected RED for currently missed spellings and general clear.
+- [ ] Run `ptest tests/ng/test_doctor.py -k cache_hardening --durations=20` and record expected RED for currently missed spellings and general clear.
 - [ ] Implement the bounded lexical changes. Keep fixed catalog prose; never copy matched source into a finding. Add helper tests for snake/camel token boundaries only if a helper is introduced.
-- [ ] Run the same scoped command GREEN. Then run `ptest tests/ng/test_doctor.py` for catalog, byte/entry/file/output/deadline limits, unsafe-path and timing regressions.
-- [ ] Add a regression with a fake source timing marker and history/environment sentinels: scan emits no `timing.slow-test`, timing is unknown, domain/state contents are unchanged, and normal-state/history APIs are not called. Keep existing exact bucket boundary/invalid-value tests; do not manufacture RED for unchanged correct behavior.
+- [ ] Run the same scoped command GREEN. Then run `ptest tests/ng/test_doctor.py --durations=20` for catalog, byte/entry/file/output/deadline limits, unsafe-path and timing regressions.
+- [ ] Extend the existing `test_static_markers_do_not_claim_observed_timing_or_read_state` only where needed, retaining its fake source timing marker, normal-state read sentinel, environment redirect, and unchanged-domain assertions. Add history API failure sentinels or other genuinely missing negative evidence in that test; do not duplicate its coverage in a new parallel test. Scan emits no `timing.slow-test`, timing stays unknown, and state remains untouched. Keep existing exact bucket boundary/invalid-value tests; do not manufacture RED for unchanged correct behavior.
 
 Acceptance: supported spellings produce concrete hypotheses, clean negatives do not produce cache findings, readiness stays unknown, and bounds/static behavior remain intact.
 
@@ -167,13 +169,13 @@ assert context["readiness"] == [
 ]
 ```
 
-- [ ] Add null usage/limits and empty-root-scope cases; prove no defaults are invented. Verify complete finding fields and reason records occur inside the untrusted section.
-- [ ] Run `ptest tests/ng/test_render.py -k 'scan_context or prompt'` and record RED for omitted context/fields.
+- [ ] Add null usage/limits, empty-root-scope, and readiness tuples with zero entries, one area, reordered areas, and duplicate parallel entries with different states/reasons. Use the exact list-comprehension assertion above for every case: preserve entries/order/states with no fill-in, sorting, deduplication, or conflict resolution. Verify complete finding fields and indexed readiness-reason records occur inside the untrusted section, preserving duplicate-entry association.
+- [ ] Run `ptest tests/ng/test_render.py -k 'scan_context or prompt' --durations=20` and record RED for omitted context/fields.
 - [ ] Implement the prefix and whole-record evidence budget using existing projection, ASCII JSON escaping and package resource loader. Reserve suffix and truncation marker before evidence admission; retain original truncation behavior.
 - [ ] Add hostility cases: newlines/CR/ESC/NUL/bidi controls/Unicode separators in scope, paths, reasons and remediation; forged delimiter lines; multibyte long strings; an oversized exact context; many records; scan truncation independently true/false. Assert no physical delimiter injection, no terminal controls, no raw sentinel source/env/argv, explicit truncation or `invalid-bound`, and no over-limit successful prompt.
 - [ ] For oversized context/guide, assert failure before returning text. For bounded data, assert exactly one whole-line opening/closing delimiter and successful JSON decoding of each admitted record.
 - [ ] Patch process/network/history/domain-resolution entrypoints with failure sentinels while calling the pure renderer with a report. Bundle reads remain permitted; repository/state reads and writes are forbidden.
-- [ ] Run the focused command GREEN, then `ptest tests/ng/test_render.py tests/ng/test_doctor.py`.
+- [ ] Run the focused command GREEN, then `ptest tests/ng/test_render.py tests/ng/test_doctor.py --durations=20`.
 
 Acceptance: a recipient can see exact scan reach and uncertainty without the originating command, and untrusted strings cannot acquire instruction authority or break the cap.
 
@@ -182,7 +184,7 @@ Acceptance: a recipient can see exact scan reach and uncertainty without the ori
 Files: `agent-guide.md`, `test_resources.py`, prompt constraint prose in `render.py` if still necessary. Complexity: small. Dependency: Task 2 prefix budget must be rerun after guide changes.
 
 - [ ] Extend `test_agent_guide_contains_local_nonexecuting_repair_workflow` to assert scoped `ptest` during repair precedes one exact `ptest --full` final gate; preserve existing database/factory/cache statements and forbid any claim that a static scan measured timings.
-- [ ] Run `ptest tests/ng/test_resources.py -k agent_guide` and record RED for the missing final command.
+- [ ] Run `ptest tests/ng/test_resources.py -k agent_guide --durations=20` and record RED for the missing final command.
 - [ ] Replace the guide's final paragraph with:
 
 ```markdown
@@ -201,16 +203,16 @@ input and reports timing as unknown; do not infer durations from source.
 ```
 
 - [ ] Keep only the minimal command-sequence summary in the renderer's fixed constraints; the bundled guide stays the detailed source of repair guidance. Do not duplicate the guide into recipes or another TUI file.
-- [ ] Run `ptest tests/ng/test_resources.py -k agent_guide` GREEN, then `ptest tests/ng/test_doctor.py tests/ng/test_render.py tests/ng/test_resources.py`. Record individual durations and investigate any deterministic regression over 3 seconds.
+- [ ] Run `ptest tests/ng/test_resources.py -k agent_guide --durations=20` GREEN, then `ptest tests/ng/test_doctor.py tests/ng/test_render.py tests/ng/test_resources.py --durations=20`. Record the reported durations and investigate any deterministic regression over 3 seconds; use an affected scoped `ptest ... --durations=0` run if complete per-test timing detail is needed. Never call the runner directly for timing output.
 
 Acceptance: installed guide and generated prompt both request the same scoped/final workflow; DB-per-worker/run, factories, all cache types and other parallel blockers remain visible.
 
 ### Task 4: Evidence, documentation and independent gate
 
-- [ ] Record RED/GREEN commands and exit codes, changed files/range, actual test counts, durations, skips, timing deferral and remaining lexical limitations in the new task-owned evidence file. Do not report an unrun service/probe/native integration as tested.
+- [ ] Before editing, record `git rev-parse HEAD` from the actual assigned implementation worktree as `base_sha` in the new task-owned evidence file; do not copy this plan's historical inspected baseline. On handoff record `head_sha`, the actual `base_sha..head_sha` review range, RED/GREEN commands and exit codes, changed files, actual test counts, durations, skips, timing deferral and remaining lexical limitations. Do not report an unrun service/probe/native integration as tested.
 - [ ] Run `git diff --check`, scoped regression checks needed after any repair, and `graphify update .` in each source-changed checkout before handoff. No graph refresh for this plan-only commit. Do not run semantic extraction.
 - [ ] Have Claude Opus High audit the plan before implementation and the final owned range after implementation, using `audit-spec`. Record the actual model identifier/reasoning setting and verdict; do not silently substitute a model.
-- [ ] Require no unresolved correctness/security findings, no out-of-scope file changes, meaningful RED before GREEN, and all negative contracts below. Opus must specifically check history non-use, full-prefix byte budgeting, forged delimiters in metadata, unknown readiness, case/token boundary false positives, and exact `ptest --full` guide wording.
+- [ ] Require no unresolved correctness/security findings, no out-of-scope file changes, meaningful RED before GREEN, and all negative contracts below. Opus must specifically check history non-use, full-prefix byte budgeting, forged delimiters in metadata, exact readiness copying including partial/duplicate entries, unchanged inspector unknown readiness, use of the existing cache finding code without schema/catalog drift, case/token boundary false positives, and exact `ptest --full` guide wording.
 - [ ] If rejected, repair only the bounded findings, rerun affected scoped checks, and obtain a fresh focused review. Parent integrates the approved commit serially, then runs one final integrated `ptest --full`; task-only GREEN is not the final product gate.
 
 ## Required security negative contracts
@@ -240,3 +242,5 @@ Success means cache hazards in the positive matrix are visible, negatives remain
 ## Plan verification
 
 The writing-plans and graphify workflows informed this source-grounded brief. The graph query located doctor/history/render ownership; inspected source is authoritative for the timing decision. Self-review maps all four requested audit findings to explicit decisions/tasks, preserves existing DB/factory/resource guidance, and keeps absent timing support visible. No tests, dependency setup, production edits, or graph rebuild were performed for this specification-only change.
+
+The review amendment resolves B1 by keeping one existing `cache.global-flush` catalog entry for both match branches with consistent high severity/medium confidence and common safe guidance. It resolves H1 by copying readiness entries exactly, including partial/duplicate lists, with explicit tests and indexed reason attribution. It also adds scoped `ptest` duration flags, extends the named existing timing/no-state regression rather than duplicating it, and requires the actual implementation base/head range in evidence. All prior scope and no-write constraints remain in force; Opus re-review is still required before implementation.
