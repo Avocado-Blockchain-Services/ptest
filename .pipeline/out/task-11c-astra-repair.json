@@ -1,0 +1,106 @@
+{
+  "task": "11C",
+  "date": "2026-09-18",
+  "status": "repaired-awaiting-independent-rereview",
+  "base_commit": "79ed227",
+  "source_tests_commit": "e155317a1d6e4b1cc1a79c90c51cddd4d02963c8",
+  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11c-reports/168badc3-ba22-45ba-85bd-378a01603582.jsonl",
+  "owned_files": [
+    "src/ptest/reports.py",
+    "tests/ng/test_reports.py",
+    ".pipeline/out/task-11c.json",
+    ".pipeline/out/task-11c-astra-repair.json"
+  ],
+  "changes": {
+    "B1": "JSONDecoder uses an object_pairs_hook that rejects repeated names before dict construction. Each of the 12 record fields has a same-value duplicate regression; additional records attempt refusal-to-pass and failure-to-pass overwrites.",
+    "B2": "Both frozen dataclasses require type(protocol) is int and the frozen protocol value. Binding construction, direct record construction and file consumption reject true, 1.0, string 1, and integer 2.",
+    "B3": "consume_report rejects a binding whose successful-consumption identity is already set before accessing its target. Successful consumption retains the first identity; cleanup does not reset consumption. Invalid reads do not record identity or remove the file.",
+    "gaps": "Added valid-but-mismatched execution mode/profile, absent target, bad field types (including attempt and bridge exit), exact capacity-exceeded error, correction after invalid reads, and replay/replacement cleanup tests. Corrected the original evidence claims.",
+    "test_cleanup": "The replacement test retains the original inode by renaming the consumed file instead of unlinking it before replacement, avoiding nondeterministic inode reuse. Existing protocol=2 coverage moved into the protocol matrix instead of remaining duplicated."
+  },
+  "negative_contracts": {
+    "identity": "Duplicate names or nonexact protocol types must not become terminal evidence. Run/nonce/attempt/runner/mode/profile must match the binding.",
+    "authorization": "Only successful validation grants cleanup authority for the exact file identity. Invalid input and replay cannot grant cleanup authority over a replacement.",
+    "tenancy": "Existing checkout/domain path isolation and no-follow helpers remain in force; this repair adds no cross-checkout access path. Same-uid malicious concurrency is outside the verified property.",
+    "input": "Duplicate ambiguity, field type coercion, malformed payloads and excessive bytes must be rejected; the size error is specifically capacity-exceeded.",
+    "state": "A binding is single-use after successful consumption, including after cleanup; an invalid first read leaves it usable for corrected input.",
+    "exposure": "Existing fixed report errors and private field allowlist remain; exact absent/oversized error messages are asserted without paths or input contents.",
+    "availability": "Existing REPORT_MAX_BYTES+1 bounded read is retained; oversized input is rejected before JSON parsing.",
+    "dependencies": "Only the stdlib JSON decoder and existing private-file helpers are involved. No dependency, subprocess, native bridge or public schema changes."
+  },
+  "test_environment": {
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra",
+    "controller": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap",
+    "source_import": "PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src",
+    "mode": "Frozen ptest dispatcher, local backend, one worker; controller virtualenv with this worktree's source and tests. No worktree virtualenv was created or shared."
+  },
+  "red_green": [
+    {
+      "stage": "RED, tests added before production edits",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_reports.py --tb=short --durations=15",
+      "exit_code": 1,
+      "result": "22 failed, 49 passed in 0.48s",
+      "failure_breakdown": "14 duplicate-record cases, 6 bool/float protocol cases across the three entry points, and 2 replay/cleanup cases failed with DID NOT RAISE. String/wrong-integer protocol and the other added gap regressions already passed; no pre-fix failure is claimed for them."
+    },
+    {
+      "stage": "B1 GREEN after duplicate hook only",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_reports.py -k 'repeated_key or duplicate_keys' --tb=short --durations=5",
+      "exit_code": 0,
+      "result": "14 passed, 57 deselected in 0.08s"
+    },
+    {
+      "stage": "B2 GREEN after exact protocol checks",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_reports.py -k protocol --tb=short --durations=5",
+      "exit_code": 0,
+      "result": "13 passed, 58 deselected in 0.06s"
+    },
+    {
+      "stage": "Focused GREEN after B3 replay guard",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_reports.py --tb=short --durations=15",
+      "exit_code": 0,
+      "result": "71 passed in 0.22s"
+    },
+    {
+      "stage": "Reports/contracts/files/adapter integration subset",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_reports.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_contracts.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_files.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_pytest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-astra/tests/ng/test_vitest_adapter.py -k 'not native_cli' --tb=short --durations=15",
+      "exit_code": 0,
+      "result": "438 passed, 26 deselected in 9.66s",
+      "excluded": "Native CLI cases remain deferred by the foundation brief; this run makes no claim that those cases pass."
+    }
+  ],
+  "duration_review": "Focused slowest test was the real 16 MiB oversized-file case at 0.05s. Integration slowest were existing retained-pipe subprocess/watchdog tests at 1.05s and 1.00s; read their timeout assertions and retained-pipe purpose. Other reported integration cases were below 0.2s. No new sleeps or slow tests were added.",
+  "checks": [
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "result": "Initialized this checkout's AST graph: 4443 nodes, 9696 edges, 298 communities. Seven non-AST JSON files produced zero nodes. No model extraction or source upload; labels/wiki were not used."
+    },
+    {
+      "command": "git diff --check; git diff --cached --check",
+      "exit_code": 0,
+      "result": "Whitespace checks passed before the source/tests commit."
+    }
+  ],
+  "dan_three_passes": {
+    "pass_1_re_read": "Re-read the production and abuse-test changes against the initial full-file read. The duplicate hook rejects names before dict collapse; exact protocol checks cover both constructors; the consumed identity is set only after decoding succeeds and is not reset by cleanup.",
+    "pass_2_source_of_truth": "Compared the repair and original foundation briefs, Opus B1/B2/B3 and notes, design report bounds/identity/native-scope constraints, existing private-file helpers and callers. Verified through real files that invalid reads retain the target, replay cannot overwrite cleanup identity, and restoring the first file still permits cleanup.",
+    "pass_3_smell_sweep": "Searched report/binding/consumer symbols. There are no production consumers outside this foundation yet. The existing consumed identity also represents the spent state, avoiding a second mutable flag or global replay registry. Preserved existing no-follow/path/byte bounds and kept CLI, adapters, native execution and public schemas unchanged. Improved the existing inode replacement fixture and removed overlapping protocol=2 test coverage."
+  },
+  "security_gates": {
+    "run": ["focused abuse/regression tests", "contracts/files/adapter integration subset", "git whitespace checks", "AST graph refresh"],
+    "not_run": "Bandit, Gitleaks, dependency-advisory and property/fuzz scanners are not configured in this slice. No .github workflow exists here; pyproject and scripts expose no scanner gate. The design's broader security/release gates remain separate work; none is claimed passed."
+  },
+  "not_verified": [
+    "ptest --full, explicitly reserved for root",
+    "Native CLI execution and report production/operations wiring",
+    "Real foreign-owner fixtures or concurrent hostile replacement during the lstat/read/unlink windows",
+    "Concurrent consumes of the same binding or replay through a reconstructed/copied binding; the repaired contract is sequential consumption of the executor-owned binding",
+    "Public result/history conversion or independent audit"
+  ],
+  "residual_risks": [
+    "The pre-existing shared read helper does not compare its opened descriptor identity with the before/after lstat identities; same-uid replacement during that window remains outside this repair.",
+    "Cleanup still has the pre-existing lstat-to-unlink race; deterministic replacement before cleanup is covered, not an atomic unlink identity guarantee."
+  ],
+  "preserved_untracked_file": ".pipeline/briefs/task-11c-opus-repair.md",
+  "scope_boundaries": "No full suite, independent audit, push, deploy, dependency install, installed-CLI replacement or native execution implementation was performed."
+}
