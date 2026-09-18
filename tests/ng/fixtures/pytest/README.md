@@ -15,12 +15,16 @@ execution. This does not qualify any candidate tuple. Scoped subprocess tests
 exercise candidate ptest, the real guard and scheduler, native pytest, private
 terminal reports and cleanup. Runtime checks precede pytest import where possible;
 initial plugin qualification precedes test collection, after initial
-conftest/plugin imports. Qualification repeats at collection finish to reject
-unowned execution hooks from nested conftests before test execution. Nested
-conftest imports and test-module collection can already have run at this point.
-This is local execution, not a sandbox. The current critical-hook gate also
-refuses unqualified plugin wrappers, including active pytest-cov `--cov` runs;
-preserving coverage arguments does not qualify those runs.
+conftest/plugin imports. Qualification repeats after all collection-finish
+implementations to reject executors registered there, then again at each test
+body's call boundary after setup hooks and fixtures. Nested conftest imports,
+test-module collection and setup registration side effects can already have run
+at these points. This is local execution, not a sandbox; the controls prevent
+ordinary unowned executors from certifying a false pass, but do not claim to
+contain hostile project code that catches or forges internal failures. The
+current critical-hook gate also refuses unqualified plugin wrappers, including
+active pytest-cov `--cov` runs; preserving coverage arguments does not qualify
+those runs.
 
 Pending full-tier acceptance (preserved from Task 5): basic serial automatic/full
 pass and native failure across 8.4.2, 9.0.3, 9.1.0 and 9.1.1; candidate-owned

@@ -818,7 +818,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     )
                 elif not native_report.terminal_complete:
                     report_reason = _reason("unsupported-capability",
-                                            "pytest bridge refused execution before collection")
+                                            "pytest bridge refused test execution")
                     # An authenticated bridge refusal is not a native test
                     # failure. Retain the observed child code for diagnosis.
                     result = replace(result, exit_origin="ptest")

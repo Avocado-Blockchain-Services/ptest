@@ -178,6 +178,108 @@ def test_real_nested_execution_hook_is_refused_before_tests(case, hook):
     _released(domain)
 
 
+def test_real_collection_finish_cannot_install_the_test_loop(case):
+    domain = case.domain()
+    root = _project(case, domain)
+    nested = root / "tests/unit"
+    nested.mkdir()
+    (nested / "conftest.py").write_text(
+        "import pytest\nfrom pathlib import Path\n"
+        "class Executor:\n"
+        "    def pytest_runtestloop(self, session):\n"
+        "        Path('collection-finish-executor-ran').touch()\n"
+        "        return True\n"
+        "@pytest.hookimpl(trylast=True)\n"
+        "def pytest_collection_finish(session):\n"
+        "    Path('collection-finish-ran').touch()\n"
+        "    session.config.pluginmanager.register(Executor(), 'collection-finish-executor')\n"
+    )
+    (nested / "test_nested.py").write_text(
+        "from pathlib import Path\nPath('collection-finish-collected').touch()\n"
+        "def test_nested():\n    Path('collection-finish-test-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert (
+        data["status"],
+        (root / "collection-finish-executor-ran").exists(),
+        (root / "collection-finish-test-ran").exists(),
+    ) == ("incomplete", False, False)
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 4
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "collection-finish-collected").exists()
+    assert (root / "collection-finish-ran").exists()
+    assert not (root / "tests-ran").exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
+@pytest.mark.parametrize(
+    ("registration", "registered_marker"),
+    [
+        (
+            "def pytest_runtest_setup(item):\n"
+            "    if not item.config.pluginmanager.hasplugin('setup-hook-executor'):\n"
+            "        Path('setup-hook-registered').touch()\n"
+            "        item.config.pluginmanager.register(Executor(), 'setup-hook-executor')\n",
+            "setup-hook-registered",
+        ),
+        (
+            "@pytest.fixture(autouse=True)\n"
+            "def register_executor(request):\n"
+            "    if not request.config.pluginmanager.hasplugin('fixture-executor'):\n"
+            "        Path('autouse-fixture-registered').touch()\n"
+            "        request.config.pluginmanager.register(Executor(), 'fixture-executor')\n",
+            "autouse-fixture-registered",
+        ),
+    ],
+    ids=["setup-hook", "autouse-fixture"],
+)
+def test_real_per_item_setup_cannot_replace_the_test_body(case, registration, registered_marker):
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "tests/test_native.py").unlink()
+    nested = root / "tests/unit"
+    nested.mkdir()
+    (nested / "conftest.py").write_text(
+        "import pytest\nfrom pathlib import Path\n"
+        "class Executor:\n"
+        "    def pytest_pyfunc_call(self, pyfuncitem):\n"
+        "        Path('per-item-executor-ran').touch()\n"
+        "        return True\n"
+        + registration
+    )
+    (nested / "test_nested.py").write_text(
+        "from pathlib import Path\nPath('per-item-collected').touch()\n"
+        "def test_first():\n    Path('per-item-first-test-ran').touch()\n"
+        "def test_second():\n    Path('per-item-second-test-ran').touch()\n"
+    )
+
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+
+    data = _data(result)
+    assert (
+        data["status"],
+        (root / "per-item-executor-ran").exists(),
+        (root / "per-item-first-test-ran").exists(),
+        (root / "per-item-second-test-ran").exists(),
+    ) == ("incomplete", False, False, False)
+    assert data["exit_origin"] == "ptest"
+    assert result.code == data["runner_exit_code"] == 1
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert (root / "per-item-collected").exists()
+    assert (root / registered_marker).exists()
+    assert not list((domain.root / "checkouts").glob("*/reports/*"))
+    _no_claims(data)
+    _released(domain)
+
+
 def test_real_native_usage_error_is_not_a_bridge_refusal(case):
     domain = case.domain()
     root = _project(case, domain)
