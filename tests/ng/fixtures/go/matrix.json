@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "status": "NOT_RUN_NATIVE_TASK11",
+  "execution_entrypoint": "candidate ptest inside an explicit private fixture-domain",
+  "runner": {"kind": "go", "launcher": ["go"], "args": ["-v"], "test_roots": ["./first", "./second"], "workers": 2},
+  "cases": [
+    {"id": "two-packages-rerun-no-cache", "project": "project", "prepare_tier": "unavailable", "expected_tier_after_qualification": "bounded_native", "repeat": 2, "env": {"PTEST_FIXTURE_TRACE": "{run_output}/go.trace"}, "expected_exit_code": 0, "expected_signal": null, "expected_trace_starts_per_run": 8, "max_concurrent_test_processes": 1, "max_concurrent_tests": 2, "expected_gomaxprocs": 2, "counts": null},
+    {"id": "assertion-failure", "project": "project", "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_MODE": "fail"}, "expected_exit_code": 1, "expected_signal": null},
+    {"id": "inner-exit-is-native-go-failure", "project": "project", "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_MODE": "exit"}, "inner_exit_code": 23, "expected_exit_code": 1, "expected_signal": null},
+    {"id": "inner-signal-is-native-go-failure", "project": "project", "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_MODE": "signal"}, "inner_signal": 15, "expected_exit_code": 1, "expected_signal": null},
+    {"id": "missing-executable", "project": "project", "launcher": ["{run_output}/missing-go"], "prepare_tier": "unavailable", "expected_exit_code": 127, "expected_signal": null},
+    {"id": "forwarded-owned-control", "project": "project", "args": ["-args", "-test.parallel=64"], "prepare_error": "unsupported-capability", "expected_exit_code": 2, "expected_signal": null},
+    {"id": "narrowing-full-gate", "project": "project", "args": ["--test.run=^$"], "prepare_error": "unsupported-capability", "expected_exit_code": 2, "expected_signal": null}
+  ]
+}
