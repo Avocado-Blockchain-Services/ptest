@@ -1,9 +1,4 @@
-"""Preparation for the finite, local Vitest bridge profile.
-
-This module deliberately prepares literal argv and generated environment values
-only.  Resolving or executing a project's Node/Vitest installation belongs to
-the admitted bridge process, never to configuration preview or preparation.
-"""
+"""Preparation for the intentionally unavailable Vitest basic-serial bridge."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,72 +6,66 @@ from pathlib import Path
 from ptest import contracts as C
 
 
+def _problem(code: str, message: str) -> C.Problem:
+    return C.Problem(code=code, message=message, phase="execution")
+
+
 def _bridge_path() -> Path:
     return Path(__file__).resolve().parents[1] / "runtime" / "vitest_bridge.mjs"
 
 
-def _validate_inputs(config: C.Config, plan: C.Plan, grant: C.Grant,
-                     attempt: C.AttemptIdentity) -> None:
-    if config.runner.kind is not C.RunnerKind.VITEST:
-        raise ValueError("Vitest adapter requires runner.kind=vitest")
-    if plan.execution not in ("full", "selected", "scoped"):
-        raise ValueError("Vitest adapter cannot prepare an empty execution plan")
-    if config.runner.workers != grant.slots or attempt.worker_count != grant.slots:
-        raise ValueError("Vitest worker count must equal the admitted grant")
-    if grant.run_id != attempt.run_id:
-        raise ValueError("Vitest attempt must belong to the admitted grant run")
+def _project_root(config: C.Config) -> Path:
+    if config.checkout is not None:
+        return config.checkout.root
+    if config.config_path is not None:
+        return config.config_path.parent
+    raise _problem("native-config-invalid", "Vitest configuration has no project root")
 
 
-def _native_args(config: C.Config, plan: C.Plan) -> tuple[str, ...]:
-    """Keep repository arguments literal; only ptest-owned paths are appended."""
-    args = tuple(config.runner.args)
-    if plan.execution == "full":
-        return args + tuple(config.runner.full_args)
-    return args + tuple(plan.files)
+def _require_node_launcher(launcher: tuple[str, ...]) -> None:
+    """Accept a direct ``node`` PATH lookup or exactly one absolute node path."""
+    if len(launcher) != 1:
+        raise _problem("native-config-invalid", "Vitest bridge requires one direct Node launcher")
+    executable = launcher[0]
+    candidate = Path(executable)
+    if executable != "node" and not (candidate.is_absolute() and candidate.name in {"node", "node.exe"}):
+        raise _problem("native-config-invalid", "Vitest bridge requires a direct Node launcher")
 
 
 def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             attempt: C.AttemptIdentity) -> C.PreparedRun:
-    """Create the bridge invocation for one already-admitted Vitest attempt."""
-    _validate_inputs(config, plan, grant, attempt)
-    workers = str(grant.slots)
-    native_args = _native_args(config, plan)
-    cwd = (config.checkout.root if config.checkout is not None
-           else (config.config_path.parent if config.config_path is not None else Path.cwd()))
+    """Prepare a literal, one-slot scoped request; execution remains unavailable.
+
+    Report allocation is executor-owned, so ``report_path`` deliberately remains
+    unset here. The bridge refuses to load a project when that binding is absent.
+    """
+    if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.VITEST:
+        raise _problem("native-config-invalid", "Vitest adapter requires runner.kind=vitest")
+    if not isinstance(plan, C.Plan) or not isinstance(grant, C.Grant) or not isinstance(attempt, C.AttemptIdentity):
+        raise TypeError("prepare requires Config, Plan, Grant and AttemptIdentity")
+    if plan.mode is not C.Mode.SCOPED or plan.execution != "scoped":
+        raise _problem("unsupported-capability", "Vitest foundation only prepares explicit scoped execution")
+    if not plan.files:
+        raise _problem("native-config-invalid", "Vitest scoped preparation requires requested files")
+    if grant.run_id != attempt.run_id or grant.slots != 1 or attempt.worker_count != 1:
+        raise _problem("admission-invalid", "Vitest basic-serial attempt requires one admitted slot")
+    _require_node_launcher(config.runner.launcher)
+
+    native_args = tuple(config.runner.args) + tuple(plan.files)
     argv = tuple(config.runner.launcher) + (str(_bridge_path()), "--") + native_args
     return C.PreparedRun(
-        argv=argv,
-        cwd=cwd,
+        argv=argv, cwd=_project_root(config),
         env_updates=(
-            ("PTEST_VITEST_WORKERS", workers),
+            ("PTEST_RUN_ID", grant.run_id), ("PTEST_GRANT_NONCE", grant.nonce),
             ("PTEST_VITEST_ATTEMPT", attempt.attempt_id),
-            ("PTEST_VITEST_EXECUTION", plan.execution),
-            ("PTEST_RUN_ID", grant.run_id),
-            ("PTEST_GRANT_NONCE", grant.nonce),
-            ("VITEST_MAX_FORKS", workers),
-            ("VITEST_MIN_FORKS", workers),
-            ("VITEST_MAX_THREADS", workers),
-            ("VITEST_MIN_THREADS", workers),
+            ("PTEST_VITEST_EXECUTION", "scoped"), ("PTEST_VITEST_PROFILE", "basic_serial"),
+            ("PTEST_VITEST_WORKERS", "1"), ("VITEST_MAX_FORKS", "1"),
+            ("VITEST_MIN_FORKS", "1"), ("VITEST_MAX_THREADS", "1"), ("VITEST_MIN_THREADS", "1"),
         ),
-        capability=C.Capability(
-            execution=C.ExecutionTier.UNAVAILABLE,
-            selection=False,
-            lifecycle="cooperative-process-group",
-            limitations=(C.Reason(
-                code="unsupported-capability",
-                message="Native profile acceptance and private report binding require the executor; "
-                        "selection and baseline evidence are unavailable.",
-            ),),
-        ),
-        summary=C.summarize_command(
-            C.RunnerKind.VITEST,
-            plan.mode,
-            argv,
-            generated_options=(
-                f"vitest.workers={workers}",
-                f"vitest.maxConcurrency={workers}",
-            ),
-            workers=grant.slots,
-            provenance=("native-vitest-bridge",),
-        ),
+        capability=C.Capability(execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            lifecycle="cooperative-process-group", limitations=(C.Reason(
+                code="unsupported-capability", message=("Vitest basic_serial is prepared only; "
+                "executor-owned report allocation and real native tuple qualification are unavailable.")),)),
+        summary=C.summarize_command(C.RunnerKind.VITEST, plan.mode, argv, workers=1,
+            generated_options=("vitest.workers=1",), provenance=("vitest-basic-serial-prepared",)),
     )
