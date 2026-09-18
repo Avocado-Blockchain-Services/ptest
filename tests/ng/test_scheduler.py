@@ -19,7 +19,15 @@ import psutil
 from ptest import contracts as C
 from ptest import platform
 import ptest.scheduler as scheduler
-from ptest.scheduler import enqueue, finish, poll, reconcile, register_guard
+from ptest.scheduler import (
+    begin_finalization,
+    cancel_pending,
+    enqueue,
+    finish,
+    poll,
+    reconcile,
+    register_guard,
+)
 
 
 @pytest.fixture
@@ -1497,3 +1505,163 @@ def test_configured_unknown_memory_reserves_the_declared_budget(case, monkeypatc
     assert first_state.grant.memory_estimate_mb is None
     assert first_state.grant.reserved_memory_mb == 64
     assert second_state.state is C.LeaseState.QUEUED
+
+
+def test_cancel_pending_requires_exact_owner_and_ticket_sequence(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket = enqueue(domain, _request(case, domain, "queued"))
+    wrong_owner = replace(world.owner, birth=world.owner.birth + 1)
+
+    assert cancel_pending(domain, ticket, wrong_owner) is False
+    assert cancel_pending(domain, replace(ticket, sequence=ticket.sequence + 1), world.owner) is False
+    assert poll(domain, ticket).state is C.LeaseState.QUEUED
+
+
+def test_cancel_pending_cancels_only_the_authenticated_queued_ticket(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    first = enqueue(domain, _request(case, domain, "first"))
+    second = enqueue(domain, _request(case, domain, "second"))
+
+    assert cancel_pending(domain, first, world.owner) is True
+    assert poll(domain, first).state is C.LeaseState.CANCELLED
+    assert poll(domain, second).grant is not None
+
+
+def test_cancel_pending_cancels_an_unregistered_grant_and_releases_claims(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    first = enqueue(domain, _request(case, domain, "first"))
+    grant = poll(domain, first).grant
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    assert grant is not None
+
+    assert cancel_pending(domain, first, world.owner) is True
+    assert poll(domain, first).state is C.LeaseState.CANCELLED
+    assert poll(domain, follower).grant is not None
+
+
+def test_cancel_pending_registration_race_keeps_registered_work_live(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+
+    assert cancel_pending(domain, ticket, world.owner) is False
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert grant is not None
+
+
+def test_cancel_pending_wins_before_registration_without_killing_a_future_guard(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket = enqueue(domain, _request(case, domain, "unregistered"))
+    grant = poll(domain, ticket).grant
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    assert grant is not None
+
+    assert cancel_pending(domain, ticket, world.owner) is True
+    assert register_guard(domain, grant, world.guard) is False
+    assert poll(domain, ticket).state is C.LeaseState.CANCELLED
+    assert poll(domain, follower).grant is not None
+
+
+def test_begin_finalization_returns_bound_proof_and_retains_claims(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    claims = _sql(
+        domain,
+        "SELECT checkout_id,slots,memory_estimate,reserved_memory FROM jobs WHERE run_id=?",
+        (grant.run_id,),
+    )
+    _gone(world, world.guard)
+
+    proof = begin_finalization(domain, grant)
+
+    assert proof == C.QuiescenceProof(
+        run_id=grant.run_id,
+        generation=grant.generation,
+        pgid=world.guard.pgid,
+        checked_at=world.now,
+        group_absent=True,
+        escaped_survivors=False,
+    )
+    assert poll(domain, ticket).state is C.LeaseState.FINALIZING
+    assert _sql(
+        domain,
+        "SELECT checkout_id,slots,memory_estimate,reserved_memory FROM jobs WHERE run_id=?",
+        (grant.run_id,),
+    ) == claims
+    assert poll(domain, follower).grant is None
+
+
+def test_begin_finalization_fails_closed_for_missing_guard(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket = enqueue(domain, _request(case, domain, "unregistered"))
+    grant = poll(domain, ticket).grant
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    assert grant is not None
+
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+
+    assert caught.value.code == "ownership-uncertain"
+    assert poll(domain, ticket).state is C.LeaseState.GRANTED
+    assert poll(domain, follower).grant is None
+
+
+@pytest.mark.parametrize("exists", [True, None])
+def test_begin_finalization_fails_closed_for_live_or_ambiguous_group(case, world, exists):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    world.groups[world.guard.pgid] = exists
+
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+
+    assert caught.value.code == "ownership-uncertain"
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert poll(domain, follower).grant is None
+
+
+def test_begin_finalization_fails_closed_for_escaped_descendant(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(), pgid=900002)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    world.children.clear()
+    _gone(world, world.guard)
+
+    with pytest.raises(C.Problem) as caught:
+        begin_finalization(domain, grant)
+
+    assert caught.value.code == "ownership-uncertain"
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert _sql(domain, "SELECT slots FROM jobs WHERE run_id=?", (grant.run_id,)) == [(1,)]
+
+
+def test_finish_rechecks_scheduler_proof_and_retains_capacity_on_stale_proof(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    _gone(world, world.guard)
+    proof = begin_finalization(domain, grant)
+    stale = replace(proof, generation=proof.generation + 1)
+
+    with pytest.raises(C.Problem):
+        finish(domain, grant, stale, _final())
+
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert poll(domain, follower).grant is None
+
+
+def test_finish_releases_only_after_begin_finalization_proof_rechecks(case, world):
+    domain = case.domain(slots=1, jobs=1)
+    ticket, grant = _running(case, domain, world)
+    follower = enqueue(domain, _request(case, domain, "follower"))
+    _gone(world, world.guard)
+    proof = begin_finalization(domain, grant)
+
+    finish(domain, grant, proof, _final())
+
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+    assert poll(domain, follower).grant is not None

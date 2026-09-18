@@ -1324,6 +1324,135 @@ def _matches_grant(row: sqlite3.Row | dict, grant: Grant, info: dict) -> bool:
             and row["reserved_memory"] == grant.reserved_memory_mb and info["domain_id"] == grant.domain_id)
 
 
+def _matches_owner(row: sqlite3.Row | dict, owner: ProcessIdentity) -> bool:
+    """Authenticate a cancellation caller against the durable owner identity."""
+    return (owner.pid == os.getpid() and owner.uid == os.getuid()
+            and owner.pid == row["owner_pid"]
+            and owner.birth == row["owner_birth"]
+            and owner.uid == row["owner_uid"]
+            and owner.pgid == row["owner_pgid"]
+            and platform.process_identity(owner.pid) == owner)
+
+
+def cancel_pending(domain: DomainPaths, ticket: Ticket, owner: ProcessIdentity) -> bool:
+    """Cancel only an exact owner's queued or never-registered grant.
+
+    The transaction deliberately does not reconcile or recover any other row.
+    Registration and cancellation contend on the same ``BEGIN IMMEDIATE`` lock;
+    whichever CAS commits first determines whether the grant is still
+    unregistered, so a registered live guard can never be cancelled here.
+    """
+    if not isinstance(ticket, Ticket):
+        raise TypeError("scheduler ticket must be Ticket")
+    if not isinstance(owner, ProcessIdentity):
+        raise TypeError("scheduler owner must be ProcessIdentity")
+    conn, info = _open_state(domain, create=False)
+    ok = False
+    try:
+        _begin(conn)
+        if info["boot_id"] != _boot_identity():
+            ok = True
+            return False
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE run_id=? AND sequence=?",
+            (ticket.run_id, ticket.sequence),
+        ).fetchone()
+        if row is None or not _matches_owner(row, owner):
+            ok = True
+            return False
+        if row["state"] not in {"QUEUED", "GRANTED"} or row["guard_pid"] is not None:
+            ok = True
+            return False
+        cursor = conn.execute(
+            """UPDATE jobs SET state='CANCELLED',phase='complete',nonce=NULL,generation=NULL
+               WHERE run_id=? AND sequence=? AND state IN ('QUEUED','GRANTED')
+                 AND guard_pid IS NULL AND owner_pid=? AND owner_birth=?
+                 AND owner_uid=? AND owner_pgid=?""",
+            (ticket.run_id, ticket.sequence, owner.pid, owner.birth, owner.uid, owner.pgid),
+        )
+        ok = True
+        return cursor.rowcount == 1
+    except sqlite3.Error:
+        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    finally:
+        _finish_transaction(conn, ok)
+
+
+def _finalization_failure(conn: sqlite3.Connection, run_id: str, *, escaped: bool) -> None:
+    conn.execute(
+        """UPDATE jobs SET state='UNCERTAIN',reason_code=?,reason_message=?
+           WHERE run_id=? AND state NOT IN ('RELEASED','CANCELLED')""",
+        ("unsupported-detached-descendant" if escaped else "ownership-uncertain",
+         "observed descendants are escaped or indeterminate" if escaped else
+         "finalization lacked current ownership and quiescence proof", run_id),
+    )
+
+
+def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
+    """Prove quiescence and enter ``FINALIZING`` while retaining every claim."""
+    if not isinstance(grant, Grant):
+        raise TypeError("scheduler grant must be Grant")
+    conn, info = _open_state(domain, create=False)
+    ok = False
+    commit_on_error = False
+    try:
+        _begin(conn)
+        info = _domain_info(conn)
+        if info["boot_id"] != _boot_identity():
+            _fail("ownership-uncertain", "finalization boot identity is stale")
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (grant.run_id,)).fetchone()
+        if row is None or not _matches_grant(row, grant, info) or row["state"] not in {
+                "RUNNING", "DRAINING"}:
+            _fail("ownership-uncertain", "finalization grant does not match a live lease")
+        row = dict(row)
+        if row["guard_pid"] is None:
+            _fail("ownership-uncertain", "finalization guard was never registered")
+
+        owner, owner_absent = _observe_process(row["owner_pid"])
+        if owner_absent or not _same_identity(owner, row):
+            _finalization_failure(conn, grant.run_id, escaped=False)
+            commit_on_error = True
+            _fail("ownership-uncertain", "finalization owner identity is indeterminate")
+
+        observations = _observations(conn, row, persist=True)
+        group = platform.probe_group(row["guard_pgid"])
+        escaped = _escaped_or_unknown(
+            row, observations, require_absent=group.exists is False
+        )
+        guard, guard_absent = _observe_process(row["guard_pid"])
+        valid = (not escaped and guard_absent and group.exists is False
+                 and group.permission and row["grant_time"] is not None
+                 and group.checked_at >= row["grant_time"])
+        if not valid:
+            _finalization_failure(conn, grant.run_id, escaped=escaped)
+            commit_on_error = True
+            _fail("ownership-uncertain", "finalization lacked current ownership and quiescence proof")
+
+        proof = QuiescenceProof(
+            run_id=grant.run_id,
+            generation=grant.generation,
+            pgid=row["guard_pgid"],
+            checked_at=group.checked_at,
+            group_absent=True,
+            escaped_survivors=False,
+        )
+        cursor = conn.execute(
+            """UPDATE jobs SET state='FINALIZING',phase='finalization'
+               WHERE run_id=? AND nonce=? AND generation=? AND state IN ('RUNNING','DRAINING')
+                 AND guard_pid=? AND guard_birth=? AND guard_uid=? AND guard_pgid=?""",
+            (grant.run_id, grant.nonce, grant.generation, row["guard_pid"],
+             row["guard_birth"], row["guard_uid"], row["guard_pgid"]),
+        )
+        if cursor.rowcount != 1:
+            _fail("ownership-uncertain", "finalization lease changed during proof")
+        ok = True
+        return proof
+    except sqlite3.Error:
+        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    finally:
+        _finish_transaction(conn, ok or commit_on_error)
+
+
 def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
            final: Finalization) -> None:
     """Commit finalization only after a typed, conservative quiescence proof."""
@@ -1364,10 +1493,7 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
                  and _observe_process(row["guard_pid"])[1]
                  and _same_identity(owner, row))
         if not valid:
-            conn.execute("UPDATE jobs SET state='UNCERTAIN',reason_code=?,reason_message=? WHERE run_id=?",
-                         ("unsupported-detached-descendant" if escaped else "ownership-uncertain",
-                          "observed descendants are escaped or indeterminate" if escaped else
-                          "finalization lacked current ownership and quiescence proof", grant.run_id))
+            _finalization_failure(conn, grant.run_id, escaped=escaped)
             commit_on_error = True
             _fail("ownership-uncertain", "finalization proof did not establish safe release")
         conn.execute("UPDATE jobs SET state='FINALIZING',phase='finalization' WHERE run_id=? AND nonce=? AND generation=?",
@@ -1386,4 +1512,7 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
         _finish_transaction(conn, ok or commit_on_error)
 
 
-__all__ = ["enqueue", "poll", "register_guard", "mark_draining", "reconcile", "finish", "effective_limits"]
+__all__ = [
+    "enqueue", "poll", "register_guard", "mark_draining", "cancel_pending",
+    "begin_finalization", "reconcile", "finish", "effective_limits",
+]
