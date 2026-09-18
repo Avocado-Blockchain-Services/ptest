@@ -1,11 +1,12 @@
 {
   "task": "11",
   "slice": "11A-static-integration",
-  "status": "repaired-slice-awaiting-opus-high",
-  "repair_pass": "first Astra repair after original Luna implementation",
+  "status": "sol-repaired-slice-awaiting-opus-high",
+  "repair_pass": "final Sol B1-R repair after Astra repair and Opus High re-audit",
   "repair_base": "62c43e4ce47499272ee3ba5b72a36c332773f04c",
   "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11",
   "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11/58093f7d-6ae1-468e-b4c4-855f4b6c1666.jsonl",
+  "final_review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11/65df51be-c8c5-47cc-bbd6-e66b224fdeca.jsonl",
   "implemented": [
     "strict prefix-only execution parsing with literal runner suffixes",
     "full/changed narrowing rejection",
@@ -20,24 +21,25 @@
     "B4: one terminal_text helper escapes unprintable characters and caps human display fields at 1024 UTF-8 bytes; typed JSON path values remain intact",
     "B5: main-level fixture-domain text/JSON coverage for all static dispatch, including populated queue/history, init preview/create/repeat, redaction and labelled reveal",
     "repair constraints precede untrusted prompt evidence; complete JSON evidence lines are delimited and bounded with the closing delimiter retained",
-    "missing bundled guide raises a typed error; configured-project guide export resolves from project root and preserves exclusive/no-overwrite behavior"
+    "missing bundled guide raises a typed error; configured-project guide export resolves from project root and preserves exclusive/no-overwrite behavior",
+    "B1-R: one leading-prefix walk rejects repeated fixture domains and supplies parser dispatch, inspection error kind and JSON-mode detection without inspecting execution runner tails"
   ],
   "verified": {
     "command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10",
     "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11",
     "exit_code": 0,
-    "result": "341 passed in 2.33s",
-    "owned_test_count": 70,
-    "raw_log": ".pipeline/local/task-11a-repair-final-scoped-2.log",
+    "result": "343 passed in 2.32s",
+    "owned_test_count": 72,
+    "raw_log": "tool transcript only",
     "diff_check": {"command": "git diff --check", "exit_code": 0, "output": "empty"},
     "graphify": {
       "command": "graphify update .",
       "exit_code": 0,
-      "raw_log": ".pipeline/local/task-11a-repair-graphify.log",
-      "output": "4266 nodes, 9024 edges, 305 communities; AST only, no LLM",
+      "raw_log": "tool transcript only",
+      "output": "4275 nodes, 9040 edges, 294 communities; AST only, no LLM",
       "warning": "7 JSON/schema/fixture files produced zero AST nodes and are absent from the graph; no semantic extraction was run. Community/wiki metadata is not used as repair evidence."
     },
-    "durations": "Longest new case 0.02s (populated queue/history). Longest scoped case 0.89s: test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings; inspected its 200 long-path findings and 256-level traversal fixture. No case exceeded 2s."
+    "durations": "Longest scoped case 0.97s: test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings. New repeated-prefix cases were below the 0.005s reporting threshold. No case exceeded 2s."
   },
   "test_runs": [
     {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py --durations=10", "exit_code": 1, "result": "15 failed, 31 passed in 0.64s", "raw_log": ".pipeline/local/task-11a-repair-red-cli.log", "evidence": "Observed B1 ordering, B2 guide, B3 false empty history, B4 raw root-control regressions before production edits."},
@@ -50,7 +52,12 @@
     {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10", "exit_code": 0, "result": "338 passed in 2.30s", "raw_log": ".pipeline/local/task-11a-repair-final-scoped.log"},
     {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py --durations=10", "exit_code": 0, "result": "69 passed in 0.36s", "raw_log": ".pipeline/local/task-11a-repair-green-coverage.log"},
     {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k guide_rejects", "exit_code": 1, "result": "1 failed, 3 passed, 61 deselected in 0.14s", "raw_log": ".pipeline/local/task-11a-repair-red-guide-repeat.log", "evidence": "Observed repeated --write accepted before enforcing the single optional destination grammar."},
-    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10", "exit_code": 0, "result": "341 passed in 2.33s", "raw_log": ".pipeline/local/task-11a-repair-final-scoped-2.log"}
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10", "exit_code": 0, "result": "341 passed in 2.33s", "raw_log": ".pipeline/local/task-11a-repair-final-scoped-2.log"},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k repeated_fixture_domain", "exit_code": 1, "result": "2 failed, 65 deselected in 0.22s", "raw_log": "tool transcript only", "evidence": "Observed B1-R before production edits: the text form executed where and returned 0; the exact JSON form returned exit 2 with empty stdout, so the shared public decoder rejected it as non-JSON."},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k repeated_fixture_domain", "exit_code": 0, "result": "2 passed, 65 deselected in 0.10s", "raw_log": "tool transcript only", "evidence": "Both text and exact JSON repeated-domain contracts passed after the single-prefix-walk repair."},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k 'repeated_fixture_domain or execution_parser_stops or runner_looking_flags or literal_execution_tail'", "exit_code": 0, "result": "9 passed, 58 deselected in 0.08s", "raw_log": "tool transcript only", "evidence": "Repeated globals fail closed while execution suffix boundaries remain literal."},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py --durations=10", "exit_code": 0, "result": "67 passed in 0.28s", "raw_log": "tool transcript only"},
+    {"command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10", "exit_code": 0, "result": "343 passed in 2.32s", "raw_log": "tool transcript only"}
   ],
   "environment": {
     "runtime": "Linux, Python 3.13.11, pytest 9.1.1, pluggy 1.6.0; own worktree environment",
@@ -64,9 +71,9 @@
     "identity": "Existing fixture-domain marker validation is consumed; no new credential/identity mechanism. Tests use explicit actual fixture domains.",
     "authorization": "Inspection may not launch subprocesses/network/repository code; only explicit valid init or guide export may write. Tests guard Popen/create_connection and compare fixture trees.",
     "tenancy": "Queue/history data belongs to the resolved checkout inside the private fixture domain; populated tests assert checkout identity and unchanged files.",
-    "input": "Unknown/refused options, duplicate guide export options and controls/Unicode paths cannot change channels, forge terminal output, or cause rejected writes.",
-    "state": "Guide export and init repetition preserve existing bytes; rejected guide options create no destination.",
-    "exposure": "Distinct arbitrary launcher/scoped/full tokens omitted from all default output; explicit where reveal is labelled stderr and not persisted. JSON uses the shared public decoder.",
+    "input": "Unknown/refused options, repeated leading fixture-domain options, duplicate guide export options and controls/Unicode paths cannot change channels, forge terminal output, or cause rejected writes.",
+    "state": "Repeated fixture domains fail before inspection dispatch and preserve the fixture tree; guide export and init repetition preserve existing bytes; rejected guide options create no destination.",
+    "exposure": "Repeated-domain errors omit both arbitrary domain values and trailing bogus tokens. Distinct arbitrary launcher/scoped/full tokens remain omitted from default output; explicit where reveal is labelled stderr and not persisted. JSON uses the shared public decoder.",
     "availability": "Human fields capped in UTF-8 bytes; prompt capped at 65536 bytes with complete escaped evidence records and retained fixed constraints/delimiters.",
     "dependencies": "Reuse config/files/history/scheduler/doctor public APIs and importlib package data. No producer edits, shell interpretation, new dependencies, model calls or provider integrations."
   },
@@ -95,7 +102,7 @@
   "security_gates": {
     "run": ["focused negative behavioral tests through scripts/ptest-bootstrap", "shared public descriptor validation", "git diff --check"],
     "not_run": "Bandit/Gitleaks/dependency-advisory release gates: no configured executable gate in this slice, no dependency/CI change; root's integration/release gate remains responsible. No network scan or source upload.",
-    "property_scope": "Deterministic option-order, Unicode/control and prompt-bound matrices only; no general fuzzing claim."
+    "property_scope": "Deterministic option-order, repeated-global, Unicode/control and prompt-bound matrices only; no general fuzzing claim."
   },
   "not_verified": [
     "scheduler/guard/adapter subprocess execution",
@@ -117,16 +124,17 @@
   "discovered_but_not_fixed": [
     "Reviewer-noted init --json differs from frozen grammar; retained because this repair explicitly requests init JSON coverage. Grammar/product alignment remains with the next integration slice.",
     "init --reveal-command still prints a label rather than an exact preview and is not limited to dry-run; requires a separate integration repair.",
-    "Repeated leading --fixture-domain and --queue-timeout handling, ignored plan --base, optional guide pointer snippets, missing normal-domain history behavior and raw unexpected-exception mapping remain the reviewer's broader grammar/lifecycle follow-ups.",
+    "Repeated --queue-timeout handling, ignored plan --base, optional guide pointer snippets, missing normal-domain history behavior and raw unexpected-exception mapping remain the reviewer's broader grammar/lifecycle follow-ups.",
     "Guide export now uses the root returned by config resolution; uninitialized resolution still uses cwd under the existing producer contract. No config-discovery semantics were rewritten."
   ],
-  "blockers": ["Independent Opus High review is required before accepting this repair; no self-approval issued."],
-  "confidence": "High for B1-B5 scoped repair evidence; Task 11B and overall Task 11 acceptance remain unverified/deferred.",
+  "blockers": ["A fresh independent Opus High review is required before accepting the Sol B1-R repair; no self-approval issued."],
+  "confidence": "High for the observed B1-R RED/GREEN evidence and scoped regression only; Opus High acceptance, Task 11B and overall Task 11 remain unverified/deferred.",
   "owned_and_touched_files": ["src/ptest/cli.py", "src/ptest/render.py", "tests/ng/test_cli.py", "tests/ng/test_render.py", ".pipeline/out/task-11.json"],
   "untouched_user_agent_files": [".pipeline/briefs/task-11-muse.md", ".pipeline/briefs/task-11a-astra-repair.md", ".pipeline/briefs/task-11a-opus-review.md"],
   "commits": {
     "original_source_tests": "0c2703d",
     "original_evidence": "62c43e4ce47499272ee3ba5b72a36c332773f04c",
-    "repair_source_tests": "691073f0192096d8274992b078f42acde9723bcf"
+    "repair_source_tests": "691073f0192096d8274992b078f42acde9723bcf",
+    "sol_repair_source_tests": "42c9b05fb7db3f73819b9dee35720852dfa97a9e"
   }
 }
