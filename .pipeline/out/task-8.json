@@ -1,0 +1,11 @@
+{
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "",
+  "test_summary": "scripts/ptest-bootstrap tests/ng/test_source.py tests/ng/test_selection.py: 20 passed after final source/selection edits; git diff --check: exit 0; graphify update .: exit 0. No direct full suite was run during this resumed task.",
+  "report_path": ".pipeline/out/task-8.json",
+  "concerns": [
+    "T11 integration boundary: no CLI/executor caller yet exists for snapshot(), choose_plan(), or ensure_fingerprint_key(); runtime revalidation, queue invalidation, and execution-only key creation are not integrated here.",
+    "The owned tests cover committed/base, dirty/untracked, staged rename/delete, mode, conflict, gitlink, shallow ancestor, absent-key static behavior, HMAC environment identity, scan file/byte/deadline envelopes, and pure conservative selection; per-file 16MiB fixture coverage remains omitted because the same bounded reader branch is exercised by the total-byte envelope.",
+    "Static source collection conservatively treats every tracked file as fingerprint-relevant and therefore may promote benign output changes to full until T11/profile integration supplies validated output policy evidence."
+  ]
+}
