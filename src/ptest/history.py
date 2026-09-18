@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import psutil
+
 from . import contracts as C
 from .files import (
     create_exclusive,
@@ -39,6 +41,9 @@ _PHASE = "history"
 _STORE_NAME = "history.sqlite3"
 _DISABLED_MARKER_NAME = "history-disabled.json"
 _CAPACITY_MARKER_NAME = "history-capacity.json"
+_CAPACITY_RESERVE_NAME = "history-capacity-reserve.json"
+_PUBLICATION_MARKER_NAME = "history-publication.json"
+_ACTIVE_PUBLICATION_NAME = "history-publication-active.json"
 _WRITER_LOCK_NAME = "history-writer.lock"
 _CHECKOUTS_NAME = "checkouts"
 _SCHEMA_VERSION = 1
@@ -330,13 +335,15 @@ def _writer_lock(domain: C.DomainPaths, checkout: C.CheckoutIdentity):
         os.close(fd)
 
 
-def _capacity_sequence(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> int | None:
+def _capacity_sequence_for(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity, name: str,
+) -> int | None:
     directory = _history_directory(domain, checkout, create=False)
     if directory is None:
         return None
     try:
-        validate_private_file(directory / _CAPACITY_MARKER_NAME)
-        value = json.loads(read_regular(directory, _CAPACITY_MARKER_NAME, 512))
+        validate_private_file(directory / name)
+        value = json.loads(read_regular(directory, name, 512))
     except C.Problem as exc:
         if exc.code == "state-unavailable":
             return None
@@ -353,32 +360,168 @@ def _capacity_sequence(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> i
     return value["sequence"]
 
 
-def _remember_capacity(domain: C.DomainPaths, checkout: C.CheckoutIdentity, sequence: int) -> None:
-    with _writer_lock(domain, checkout) as directory:
-        previous = _capacity_sequence(domain, checkout)
-        if previous is None or previous < sequence:
-            _store_capacity(directory, sequence)
+def _capacity_sequence(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> int | None:
+    return _capacity_sequence_for(domain, checkout, _CAPACITY_MARKER_NAME)
 
 
-def _store_capacity(directory: Path, sequence: int) -> None:
-    publish_atomic(directory, _CAPACITY_MARKER_NAME, _json_bytes({
+def _capacity_reserve_sequence(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+) -> int | None:
+    return _capacity_sequence_for(domain, checkout, _CAPACITY_RESERVE_NAME)
+
+
+def _store_capacity_reserve(directory: Path, sequence: int) -> None:
+    publish_atomic(directory, _CAPACITY_RESERVE_NAME, _json_bytes({
         "version": 1, "code": "capacity-exceeded", "sequence": sequence,
     }).encode("utf-8"))
 
 
-def _restore_capacity(directory: Path, sequence: int | None) -> None:
-    if sequence is not None:
-        _store_capacity(directory, sequence)
-    else:
-        validate_private_file(directory / _CAPACITY_MARKER_NAME)
-        (directory / _CAPACITY_MARKER_NAME).unlink()
+def _remove_marker(directory: Path, name: str) -> None:
+    try:
+        validate_private_file(directory / name)
+    except C.Problem as exc:
+        if exc.code == "state-unavailable":
+            return
+        raise
+    (directory / name).unlink()
+
+
+def _clear_capacity(directory: Path) -> None:
+    _remove_marker(directory, _CAPACITY_MARKER_NAME)
+
+
+def _publication_sequence(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+) -> int | None:
+    directory = _history_directory(domain, checkout, create=False)
+    if directory is None:
+        return None
+    try:
+        validate_private_file(directory / _PUBLICATION_MARKER_NAME)
+        value = json.loads(read_regular(directory, _PUBLICATION_MARKER_NAME, 512))
+    except C.Problem as exc:
+        if exc.code == "state-unavailable":
+            return None
+        raise
+    except (ValueError, UnicodeError):
+        raise _HistoryStateError("coordinator-corrupt") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "code", "sequence"}
+        or value["version"] != 1 or value["code"] != "selection-disabled"
+        or type(value["sequence"]) is not int or value["sequence"] < 0
+    ):
+        raise _HistoryStateError("coordinator-corrupt")
+    return value["sequence"]
+
+
+def _publication_is_active(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity, sequence: int,
+) -> bool:
+    directory = _history_directory(domain, checkout, create=False)
+    if directory is None:
+        return False
+    try:
+        validate_private_file(directory / _ACTIVE_PUBLICATION_NAME)
+        value = json.loads(read_regular(directory, _ACTIVE_PUBLICATION_NAME, 512))
+    except C.Problem as exc:
+        if exc.code == "state-unavailable":
+            return False
+        raise
+    except (ValueError, UnicodeError):
+        raise _HistoryStateError("coordinator-corrupt") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "pid", "birth", "sequence"}
+        or value["version"] != 1
+        or type(value["pid"]) is not int or value["pid"] <= 0
+        or type(value["birth"]) not in {int, float} or value["birth"] < 0
+        or type(value["sequence"]) is not int or value["sequence"] != sequence
+    ):
+        raise _HistoryStateError("coordinator-corrupt")
+    try:
+        birth = psutil.Process(value["pid"]).create_time()
+    except (psutil.Error, OSError):
+        return False
+    return abs(birth - float(value["birth"])) < 0.001
+
+
+def _reserve_publication(directory: Path, sequence: int, capacity: int | None) -> None:
+    active = {
+        "version": 1,
+        "pid": os.getpid(),
+        "birth": psutil.Process(os.getpid()).create_time(),
+        "sequence": sequence,
+    }
+    publish_atomic(
+        directory, _ACTIVE_PUBLICATION_NAME, _json_bytes(active).encode("utf-8"),
+    )
+    try:
+        publish_atomic(directory, _PUBLICATION_MARKER_NAME, _json_bytes({
+            "version": 1, "code": "selection-disabled", "sequence": sequence,
+        }).encode("utf-8"))
+        _store_capacity_reserve(directory, max(sequence, capacity or 0))
+    except BaseException:
+        for name in (
+            _CAPACITY_RESERVE_NAME, _PUBLICATION_MARKER_NAME, _ACTIVE_PUBLICATION_NAME,
+        ):
+            try:
+                _remove_marker(directory, name)
+            except (C.Problem, OSError):
+                pass
+        raise
+
+
+def _discard_publication_reservation(directory: Path) -> None:
+    first_error = None
+    for name in (
+        _CAPACITY_RESERVE_NAME, _PUBLICATION_MARKER_NAME, _ACTIVE_PUBLICATION_NAME,
+    ):
+        try:
+            _remove_marker(directory, name)
+        except (C.Problem, OSError) as exc:
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error
+
+
+def _retain_publication_uncertainty(directory: Path) -> None:
+    # Both operations are deallocations. If either fails, the generic
+    # publication marker still takes precedence over a false capacity claim.
+    _remove_marker(directory, _CAPACITY_RESERVE_NAME)
+    _remove_marker(directory, _ACTIVE_PUBLICATION_NAME)
+
+
+def _claim_reserved_capacity(directory: Path) -> None:
+    # Once the active marker is gone readers conservatively see generic
+    # uncertainty until the publication marker is removed. The already-created
+    # reserve then becomes the durable capacity claim without allocating space.
+    _remove_marker(directory, _ACTIVE_PUBLICATION_NAME)
+    _remove_marker(directory, _PUBLICATION_MARKER_NAME)
+    os.replace(directory / _CAPACITY_RESERVE_NAME, directory / _CAPACITY_MARKER_NAME)
 
 
 def _selection_marker(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> str | None:
     permanent = _disabled_marker(domain, checkout)
     if permanent is not None:
         return permanent
-    return "capacity-exceeded" if _capacity_sequence(domain, checkout) is not None else None
+    # Re-read a disappearing publication marker once so a healthy writer's
+    # cleanup cannot create a transient false disable. Reads never create,
+    # mutate or lock history state.
+    for _attempt in range(2):
+        capacity = _capacity_sequence(domain, checkout)
+        publication = _publication_sequence(domain, checkout)
+        reserve = _capacity_reserve_sequence(domain, checkout)
+        if publication is None:
+            return "capacity-exceeded" if capacity is not None or reserve is not None else None
+        if capacity is not None:
+            return "capacity-exceeded"
+        if _publication_is_active(domain, checkout, publication):
+            return None
+        if _publication_sequence(domain, checkout) is None:
+            continue
+        return "selection-disabled"
+    return "selection-disabled"
 
 
 def _open_store(
@@ -1560,50 +1703,88 @@ def _publish_with_recovery(
 
 
 def _publish_locked(
-    connection: sqlite3.Connection, domain: C.DomainPaths,
-    checkout: C.CheckoutIdentity, result: C.RunResult, inventory: C.Inventory | None,
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+    result: C.RunResult, inventory: C.Inventory | None,
 ) -> C.PublishResult:
     with _writer_lock(domain, checkout) as directory:
         marker_code = _disabled_marker(domain, checkout)
         if marker_code is not None:
             raise _HistoryStateError(marker_code)
+        if _publication_sequence(domain, checkout) is not None:
+            raise _HistoryStateError("selection-disabled")
+        reserve = _capacity_reserve_sequence(domain, checkout)
         capacity = _capacity_sequence(domain, checkout)
-        _read_state(connection)  # Never prune malformed evidence into apparent health.
-        # Reserve the small uncertainty record BEFORE touching DB evidence. A
-        # full disk after rollback must not require another allocation to fail
-        # closed. A crash leaves conservative uncertainty; transient errors
-        # restore the pre-call state. An existing capacity gap needs a newer
-        # clean full gate, not merely this publication's successful commit.
-        _store_capacity(directory, max(result.sequence, capacity or 0))
-        try:
-            baseline_published, pruned = _publish_with_recovery(connection, result, inventory)
-        except (sqlite3.Error, _HistoryStateError, C.Problem, OSError) as exc:
-            if isinstance(exc, sqlite3.Error):
-                unavailable = _is_transient_sqlite(exc)
+        if reserve is not None:
+            if capacity is None or reserve > capacity:
+                os.replace(
+                    directory / _CAPACITY_RESERVE_NAME,
+                    directory / _CAPACITY_MARKER_NAME,
+                )
+                capacity = reserve
             else:
-                unavailable = isinstance(exc, OSError) or exc.code in {
-                    "coordinator-unavailable", "state-unavailable",
-                }
-            if unavailable and not getattr(exc, "retain_uncertainty", False):
+                _remove_marker(directory, _CAPACITY_RESERVE_NAME)
+        # An active marker without generic uncertainty is from a writer that
+        # never reached the database. The exclusive writer lock proves it no
+        # longer owns publication, so it is safe to discard here.
+        _remove_marker(directory, _ACTIVE_PUBLICATION_NAME)
+        _reserve_publication(directory, result.sequence, capacity)
+        connection = None
+        try:
+            connection = _open_store(domain, checkout, create=True)
+            assert connection is not None
+            _read_state(connection)  # Never prune malformed evidence into apparent health.
+            baseline_published, pruned = _publish_with_recovery(connection, result, inventory)
+        except BaseException as exc:
+            capacity_observed = (
+                (isinstance(exc, sqlite3.Error) and _is_sqlite_full(exc))
+                or (isinstance(exc, (_HistoryStateError, C.Problem))
+                    and exc.code == "capacity-exceeded")
+                or getattr(exc, "retain_uncertainty", False)
+            )
+            safe_transient = (
+                (isinstance(exc, sqlite3.Error) and _is_transient_sqlite(exc))
+                or (isinstance(exc, (_HistoryStateError, C.Problem))
+                    and exc.code in {"coordinator-unavailable", "state-unavailable"}
+                    and not getattr(exc, "retain_uncertainty", False))
+            )
+            try:
+                if capacity_observed:
+                    _claim_reserved_capacity(directory)
+                elif safe_transient:
+                    _discard_publication_reservation(directory)
+                else:
+                    _retain_publication_uncertainty(directory)
+            except (C.Problem, OSError):
+                # All failure cleanups are conservative: a surviving generic
+                # marker disables selection, and a surviving reserve can only
+                # claim capacity after generic uncertainty is absent.
+                pass
+            if connection is not None:
                 try:
-                    _restore_capacity(directory, capacity)
-                except (C.Problem, OSError):
-                    pass  # An unavailable filesystem still leaves uncertainty.
+                    connection.close()
+                except sqlite3.Error:
+                    pass
             raise
 
         # Commit is final. No maintenance error below can retry publication or
         # change its receipt. Retain the marker unless a newer full gate can
         # account for ALL lost outcomes, including an overlapping late failure.
-        disabled = True
-        if (capacity is None or (result.sequence > capacity
-                and _clean_full(result, inventory, require_tests=True)
-                and all(item.outcome is _SUCCESS_OUTCOME for item in inventory.tests))):
+        disabled_code = None
+        if capacity is not None and not (
+            result.sequence > capacity
+            and _clean_full(result, inventory, require_tests=True)
+            and all(item.outcome is _SUCCESS_OUTCOME for item in inventory.tests)
+        ):
+            disabled_code = "capacity-exceeded"
+        elif capacity is not None:
             try:
-                _restore_capacity(directory, None)
+                _clear_capacity(directory)
             except (C.Problem, OSError):
-                pass  # A failed clear is conservative, and never uncommits.
-            else:
-                disabled = False
+                disabled_code = "capacity-exceeded"
+        try:
+            _discard_publication_reservation(directory)
+        except (C.Problem, OSError):
+            disabled_code = disabled_code or "selection-disabled"
         if pruned:
             try:
                 if _needs_compaction(connection):
@@ -1611,11 +1792,12 @@ def _publish_locked(
             except (sqlite3.Error, OSError):
                 pass
         reasons = (() if baseline_published else _baseline_reasons(result, inventory))
-        if disabled:
-            reasons = (_reason("capacity-exceeded", "history selection is disabled"),)
+        if disabled_code is not None:
+            reasons = (_reason(disabled_code, "history selection is disabled"),)
+        connection.close()
         return C.PublishResult(
             committed=True, baseline_published=baseline_published,
-            selection_disabled=disabled, reasons=reasons,
+            selection_disabled=disabled_code is not None, reasons=reasons,
         )
 
 
@@ -1631,7 +1813,6 @@ def publish_outcome(
         raise TypeError("history result must be RunResult")
     if inventory is not None and not isinstance(inventory, C.Inventory):
         raise TypeError("history inventory must be Inventory or None")
-    connection = None
     try:
         marker_code = _disabled_marker(domain, checkout)
         if marker_code is not None:
@@ -1639,27 +1820,15 @@ def publish_outcome(
                 committed=False, baseline_published=False, selection_disabled=True,
                 reasons=(_reason(marker_code, "history selection is disabled"),),
             )
-        connection = _open_store(domain, checkout, create=True)
-        assert connection is not None
-        return _publish_locked(connection, domain, checkout, result, inventory)
+        return _publish_locked(domain, checkout, result, inventory)
     except (_HistoryStateError, C.Problem) as exc:
         code = exc.code
     except OSError:
         code = "coordinator-unavailable"
     except sqlite3.Error as exc:
         code = _state_error_for_sqlite(exc).code
-    finally:
-        if connection is not None:
-            connection.close()
     if _can_persist_disabled_marker(code):
         _write_disabled_marker(domain, checkout, code)
-    elif code == "capacity-exceeded":
-        try:
-            _remember_capacity(domain, checkout, result.sequence)
-        except (_HistoryStateError, C.Problem, OSError):
-            # The current call must still fail closed if the filesystem cannot
-            # persist even the small external marker.
-            pass
     return C.PublishResult(
         committed=False, baseline_published=False, selection_disabled=True,
         reasons=(_reason(code, "history state is unavailable"),),

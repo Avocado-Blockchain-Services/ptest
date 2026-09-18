@@ -11,6 +11,7 @@ import pwd
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -1204,6 +1205,205 @@ def test_transient_publish_failure_leaves_no_permanent_capacity_or_corruption(ca
     assert not (directory / "history-capacity.json").exists()
 
 
+def test_read_during_healthy_publish_stays_usable_without_touching_history(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    baseline = _result(case, 1, before=snapshot, checkout=checkout)
+    assert H.publish_outcome(domain, checkout, baseline, inventory).baseline_published
+    publishing = threading.Event()
+    release = threading.Event()
+    original_insert = H._insert_summary
+    result = {}
+
+    def blocked_insert(connection, incoming, incoming_inventory):
+        if incoming.sequence == 2:
+            publishing.set()
+            assert release.wait(timeout=3)
+        return original_insert(connection, incoming, incoming_inventory)
+
+    def publish():
+        result["value"] = H.publish_outcome(
+            domain, checkout, _result(case, 2, checkout=checkout), inventory,
+        )
+
+    monkeypatch.setattr(H, "_insert_summary", blocked_insert)
+    writer = threading.Thread(name="healthy-history-writer", target=publish)
+    writer.start()
+    assert publishing.wait(timeout=3)
+    directory = _store_path(domain, checkout).parent
+    before = _tree_snapshot(directory)
+    try:
+        view = H.read_history(domain, checkout)
+        assert view.baseline is not None and view.baseline.run_id == baseline.run_id
+        assert view.selection_disabled is False
+        assert _tree_snapshot(directory) == before
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive()
+    assert result["value"].committed and not result["value"].selection_disabled
+
+
+def test_read_during_healthy_publish_cleanup_stays_usable(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    baseline = _result(case, 1, before=snapshot, checkout=checkout)
+    assert H.publish_outcome(domain, checkout, baseline, inventory).baseline_published
+    cleanup_boundary = threading.Event()
+    release = threading.Event()
+    original_remove = H._remove_marker
+    active_removals = 0
+    result = {}
+
+    def paused_remove(directory, name):
+        nonlocal active_removals
+        original_remove(directory, name)
+        if (threading.current_thread().name == "healthy-cleanup-writer"
+                and name == H._ACTIVE_PUBLICATION_NAME):
+            active_removals += 1
+            if active_removals == 2:
+                cleanup_boundary.set()
+                assert release.wait(timeout=3)
+
+    def publish():
+        result["value"] = H.publish_outcome(
+            domain, checkout, _result(case, 2, checkout=checkout), inventory,
+        )
+
+    monkeypatch.setattr(H, "_remove_marker", paused_remove)
+    writer = threading.Thread(name="healthy-cleanup-writer", target=publish)
+    writer.start()
+    assert cleanup_boundary.wait(timeout=3)
+    try:
+        view = H.read_history(domain, checkout)
+        assert view.baseline is not None and view.baseline.run_id == baseline.run_id
+        assert not view.selection_disabled
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive()
+    assert result["value"].committed and not result["value"].selection_disabled
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, TypeError])
+def test_interrupted_publish_is_uncertain_without_false_capacity(case, monkeypatch, failure):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    baseline = _result(case, 1, before=snapshot, checkout=checkout)
+    assert H.publish_outcome(domain, checkout, baseline, inventory).baseline_published
+
+    def interrupted(*_args):
+        raise failure("interrupted publication")
+
+    monkeypatch.setattr(H, "_insert_summary", interrupted)
+    with pytest.raises(failure, match="interrupted publication"):
+        H.publish_outcome(
+            domain, checkout, _result(case, 2, checkout=checkout), inventory,
+        )
+    view = H.read_history(domain, checkout)
+    assert view.baseline is not None and view.baseline.run_id == baseline.run_id
+    assert view.selection_disabled
+    assert view.limitations[0].code == "selection-disabled"
+    assert not (_store_path(domain, checkout).parent / "history-capacity.json").exists()
+
+
+def test_ineligible_commits_preserve_original_capacity_sequence(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout, _result(case, 1, before=snapshot, checkout=checkout), inventory,
+    ).baseline_published
+    original_insert = H._insert_summary
+    monkeypatch.setattr(H, "_insert_summary", lambda *_args: (_ for _ in ()).throw(_full_error()))
+    failed = H.publish_outcome(
+        domain, checkout, _result(case, 10, status="failed", checkout=checkout),
+        case.inventory(("tests/test_a.py",), outcome="failed"),
+    )
+    assert not failed.committed and failed.reasons[0].code == "capacity-exceeded"
+    monkeypatch.setattr(H, "_insert_summary", original_insert)
+    marker = _store_path(domain, checkout).parent / "history-capacity.json"
+    assert json.loads(marker.read_bytes())["sequence"] == 10
+
+    candidates = (
+        (_result(case, 20, before=snapshot, checkout=checkout, mode=C.Mode.SCOPED), inventory),
+        (_result(case, 21, before=snapshot, checkout=checkout),
+         case.inventory(("tests/test_a.py",), outcome="skipped")),
+        (_result(case, 22, before=_snapshot(case, clean=False), checkout=checkout), inventory),
+        (_result(case, 9, before=snapshot, checkout=checkout), inventory),
+    )
+    for candidate, candidate_inventory in candidates:
+        published = H.publish_outcome(domain, checkout, candidate, candidate_inventory)
+        assert published.committed and published.selection_disabled
+        assert json.loads(marker.read_bytes())["sequence"] == 10
+
+
+def test_old_capacity_failure_cannot_resurrect_after_newer_full_recovery(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    inventory = case.inventory(("tests/test_a.py",), outcome="passed")
+    assert H.publish_outcome(
+        domain, checkout, _result(case, 1, before=snapshot, checkout=checkout), inventory,
+    ).baseline_published
+    old_released_lock = threading.Event()
+    let_old_return = threading.Event()
+    original_insert = H._insert_summary
+    original_lock = H._writer_lock
+    results = {}
+    old_lock_entries = []
+
+    def insert(connection, incoming, incoming_inventory):
+        if incoming.sequence == 10:
+            raise _full_error()
+        return original_insert(connection, incoming, incoming_inventory)
+
+    @contextmanager
+    def interleaved_lock(*args):
+        old_entry = threading.current_thread().name == "old-capacity-failure"
+        if old_entry:
+            old_lock_entries.append(True)
+        try:
+            with original_lock(*args) as directory:
+                yield directory
+        except BaseException:
+            if old_entry and len(old_lock_entries) == 1:
+                old_released_lock.set()
+                assert let_old_return.wait(timeout=3)
+            raise
+
+    def publish(sequence):
+        results[sequence] = H.publish_outcome(
+            domain, checkout,
+            _result(case, sequence, before=snapshot, checkout=checkout), inventory,
+        )
+
+    monkeypatch.setattr(H, "_insert_summary", insert)
+    monkeypatch.setattr(H, "_writer_lock", interleaved_lock)
+    old = threading.Thread(name="old-capacity-failure", target=publish, args=(10,))
+    old.start()
+    assert old_released_lock.wait(timeout=3)
+    newer = threading.Thread(name="newer-full-recovery", target=publish, args=(20,))
+    newer.start()
+    newer.join(timeout=5)
+    assert not newer.is_alive()
+    assert results[20].committed and not results[20].selection_disabled
+    let_old_return.set()
+    old.join(timeout=5)
+    assert not old.is_alive()
+    assert not results[10].committed and results[10].selection_disabled
+    assert len(old_lock_entries) == 1
+    assert not H.read_history(domain, checkout).selection_disabled
+    assert not (_store_path(domain, checkout).parent / "history-capacity.json").exists()
+
+
 @pytest.mark.parametrize("failure", ["database is locked", "database or disk is full"])
 def test_interrupted_capacity_recovery_retains_uncertainty_without_claiming_exhaustion(case, monkeypatch, failure):
     domain = case.domain()
@@ -1548,9 +1748,18 @@ def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch
     lock = threading.Lock()
     first_inspection = threading.Event()
     peer_attempting = threading.Event()
+    peer_entered_schema = threading.Event()
     release_first = threading.Event()
     observations = []
     first_thread = None
+    original_writer_lock = H._writer_lock
+
+    @contextmanager
+    def observed_writer_lock(*args):
+        if threading.current_thread().name == "initializer-b":
+            peer_attempting.set()
+        with original_writer_lock(*args) as directory:
+            yield directory
 
     def synchronized_ensure(connection, *args, **kwargs):
         nonlocal first_thread
@@ -1558,10 +1767,7 @@ def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch
             if first_thread is None:
                 first_thread = threading.current_thread().name
             elif threading.current_thread().name != first_thread:
-                connection.set_trace_callback(
-                    lambda statement: peer_attempting.set()
-                    if statement.strip().upper() == "BEGIN IMMEDIATE" else None
-                )
+                peer_entered_schema.set()
         return original_ensure(connection, *args, **kwargs)
 
     original_tables = H._schema_tables
@@ -1577,6 +1783,7 @@ def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch
 
     monkeypatch.setattr(H, "_ensure_schema", synchronized_ensure)
     monkeypatch.setattr(H, "_schema_tables", observed_tables)
+    monkeypatch.setattr(H, "_writer_lock", observed_writer_lock)
     results = []
     errors = []
 
@@ -1598,6 +1805,7 @@ def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch
     assert first_inspection.wait(timeout=5)
     peer.start()
     assert peer_attempting.wait(timeout=5)
+    assert not peer_entered_schema.is_set()
     release_first.set()
     first.join(timeout=10)
     peer.join(timeout=10)
