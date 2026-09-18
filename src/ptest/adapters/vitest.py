@@ -50,15 +50,23 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         env_updates=(
             ("PTEST_VITEST_WORKERS", workers),
             ("PTEST_VITEST_ATTEMPT", attempt.attempt_id),
+            ("PTEST_VITEST_EXECUTION", plan.execution),
+            ("PTEST_RUN_ID", grant.run_id),
+            ("PTEST_GRANT_NONCE", grant.nonce),
             ("VITEST_MAX_FORKS", workers),
             ("VITEST_MIN_FORKS", workers),
             ("VITEST_MAX_THREADS", workers),
             ("VITEST_MIN_THREADS", workers),
         ),
         capability=C.Capability(
-            execution=C.ExecutionTier.ADVANCED,
-            selection=True,
+            execution=C.ExecutionTier.UNAVAILABLE,
+            selection=False,
             lifecycle="cooperative-process-group",
+            limitations=(C.Reason(
+                code="unsupported-capability",
+                message="Native profile acceptance and private report binding require the executor; "
+                        "selection and baseline evidence are unavailable.",
+            ),),
         ),
         summary=C.summarize_command(
             C.RunnerKind.VITEST,
