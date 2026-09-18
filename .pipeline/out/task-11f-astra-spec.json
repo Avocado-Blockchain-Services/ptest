@@ -1,10 +1,11 @@
 {
   "task": "11F Pytest explicit full basic-serial specification",
   "date": "2026-09-18",
-  "status": "specification-amended-after-opus-rejection-awaiting-focused-rereview",
+  "status": "specification-repaired-after-opus-approval-with-notes-awaiting-focused-confirmation",
   "author": "architect-agent (Astra)",
   "inspected_base": "1dfea81d71417d1c6e07d7ff7b7477cd29829a55",
   "original_spec_commit": "3e54bcd",
+  "repair_base": "30f788fabeac676b2edd82ede9514eb4e6581132",
   "original_runtime_base": "f26dd56397f6f056c74247829d2641dcd9f76e0d",
   "plan": "docs/superpowers/plans/2026-09-18-ptest-ng-pytest-full-basic-serial.md",
   "owned_files": [
@@ -14,9 +15,9 @@
   "scope": [
     "Explicit Pytest full basic_serial only, alongside unchanged accepted scoped execution",
     "Truthful static where reporting for Pytest scoped/full and Vitest prepared/unavailable",
-    "Strict roots, immutable mode binding, exact plain/wrapper full-hook refusal policy, existing guarded report lifecycle and conservative source/publication claims",
-    "Proposed bounded ownership expansion to source.py/test_source.py for an opt-in execution-only generated-artifact digest; default source/selection semantics unchanged",
-    "Dot-root full refusal and scoped-only inspection; explicit non-Git/scan-limit incomplete outcomes and conditional where capability"
+    "Strict roots, immutable mode binding, exact plain/wrapper full-hook refusal policy, disclosed cooperative collection-finish/setup limits, existing guarded report lifecycle and conservative source/publication claims",
+    "Proposed bounded ownership expansion to source.py/test_source.py for an opt-in execution-only generated-artifact digest; root-configured positive cache evidence and config-less nested-cache incomplete evidence; default source/selection semantics unchanged",
+    "Dot-root and base-with-full refusal; scoped-only dot-root inspection; explicit Pytest-full non-Git/scan-limit incomplete outcomes; unchanged generic command-full source semantics; conditional where capability"
   ],
   "runtime_qualification": "No new qualification; prior Task 11D evidence covers scoped Linux x86_64 / CPython 3.13.11 / pytest 9.1.1 / pluggy 1.6.0 without xdist only.",
   "tests": {
@@ -26,15 +27,19 @@
   "verification": [
     "Read AGENTS.md, .pipeline/context.md, accepted design/product contracts, Task 11D/11E acceptance records and current implementation/tests",
     "Used existing graphify query for navigation without rebuilding or semantic extraction",
-    "JSON parsed successfully with python3 -m json.tool; placeholder scan found no TBD/TODO/incomplete-step markers",
+    "The repair is documentation-only; no tests, installations or graph refresh were run",
     "Verified Opus F1/F2 against current source.snapshot and selection-policy validation; corrected the plan rather than claiming existing generated-output support",
+    "Verified the approval notes against current operations source invalidation, CLI base parsing and bridge hook lifecycle; chose an explicit cooperative-inventory limitation with real disposition tests rather than a new item-tracking system",
     "Commit is restricted to the two declared specification/evidence documents; no tests or source files are included"
   ],
   "review_dispositions": {
     "F1": "Exact full-only generated-artifact policy and source/test ownership added; fresh real pytest cache/bytecode creation and two unchanged full passes required without suppression or prewarming.",
     "F2": "Full with dot roots refuses before admission while scoped stays available. Non-Git/unreadable/over-budget source evidence produces incomplete full, zero-to-70 conversion and retained native failures. Static where describes an unverified conditional tier and performs no source scan.",
     "F3": "Exact existing and full-only forbidden hook names specified, including plain/wrapper/alias semantics; named surviving observation/cleanup hooks and real positive/negative cases required.",
-    "notes": "Whole-gate failure-obligation recording and clearing are deferred. Static capability is conditional on execution-time tuple/profile/source checks. Bootstrap private config writes and frozen outer legacy dispatcher are disclosed; no harness changes or executions in this specification repair."
+    "N1": "Permitted plain/outer-wrapper pytest_collection_finish item mutation and setup-time skips are explicit cooperative-trust limitations in where/results/evidence. Real accepted disposition tests must keep inventory/count/source/gate claims unavailable; the forbidden hook set is not broadened.",
+    "N2": "The positive native fixture must commit root-level Pytest config so default cache output is at checkout root. A separate config-less nested-root cache fixture must remain unfiltered and produce changed/incomplete/70; where names native cache placement as unchecked.",
+    "N3": "Missing-either-digest incompleteness is explicit-Pytest-full-only; operations regressions preserve generic command-full non-Git/current behavior and equal Pytest-full digests pass with compatibility-only limitations. Full plus base is rejected at CLI and direct admission, and bytecode classification refers to the source in the parent of __pycache__.",
+    "notes": "Whole-gate failure-obligation recording and clearing are deferred. Static capability is conditional on execution-time tuple/profile/source/cache checks and cooperative inventory/setup semantics. Bootstrap private config writes and frozen outer legacy dispatcher are disclosed; no harness changes or executions in this specification repair."
   },
   "not_authorized_here": [
     "runtime or test edits",
