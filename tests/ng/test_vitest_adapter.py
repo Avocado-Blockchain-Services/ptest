@@ -195,6 +195,27 @@ def test_bridge_terminal_is_private_protocol_bound_and_after_close(bridge_run):
     assert next(e for e in events if e["event"] == "reporters")["userRetained"] is True
 
 
+def test_bridge_accepts_vitest_resolved_middleware_api_default(bridge_run):
+    result, events, terminal, _ = bridge_run()
+    assert result.returncode == 0, result.stderr
+    assert next(e for e in events if e["event"] == "resolved-config") == {
+        "event": "resolved-config",
+        "api": {
+            "middlewareMode": True,
+            "allowWrite": True,
+            "allowExec": True,
+            "token": "00000000-0000-4000-8000-000000000000",
+        },
+        "projects": [],
+        "poolMatchGlobs": [],
+        "browser": {"enabled": False},
+        "typecheck": {"enabled": False},
+        "bail": 0,
+    }
+    assert any(event["event"] == "run" for event in events)
+    assert terminal["status"] == "passed"
+
+
 @pytest.mark.parametrize("version", ["3.1.4", "3.2.6"])
 def test_bridge_basic_serial_never_accepts_selected_execution(bridge_run, version):
     result, events, terminal, _ = bridge_run(version=version, execution="selected")
@@ -219,7 +240,7 @@ def test_bridge_basic_serial_uses_native_filters_without_prior_init(bridge_run):
 @pytest.mark.parametrize("unsafe", [
     {"pool": "threads"}, {"poolMatchGlobs": [["**", "./custom-pool.mjs"]]},
     {"typecheck": {"enabled": True}}, {"browser": {"enabled": True}},
-    {"watch": True}, {"api": {"port": 1234}}, {"workspace": "workspace.mjs"},
+    {"watch": True}, {"workspace": "workspace.mjs"},
     {"projects": ["other"]}, {"maxWorkers": 8}, {"minWorkers": 8},
     {"maxConcurrency": 8}, {"poolOptions": {"forks": {"maxForks": 8, "minForks": 8}}},
 ])
@@ -227,6 +248,30 @@ def test_bridge_rejects_unsafe_effective_root_and_project_before_tests(bridge_ru
     result, events, terminal, _ = bridge_run(scenario={target: unsafe})
     assert result.returncode != 0
     assert not any(e["event"] in {"init", "run", "start", "glob"} for e in events)
+    assert terminal["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("target", ["root", "project"])
+@pytest.mark.parametrize("api", [
+    {
+        "middlewareMode": True,
+        "allowWrite": True,
+        "allowExec": True,
+        "token": "00000000-0000-4000-8000-000000000000",
+        "port": 1234,
+    },
+    {
+        "middlewareMode": False,
+        "allowWrite": True,
+        "allowExec": True,
+        "token": "00000000-0000-4000-8000-000000000000",
+    },
+])
+def test_bridge_rejects_api_listener_or_non_middleware_shape_before_tests(
+        bridge_run, target, api):
+    result, events, terminal, _ = bridge_run(scenario={target: {"api": api}})
+    assert result.returncode != 0
+    assert not any(event["event"] in {"init", "run", "start", "glob"} for event in events)
     assert terminal["status"] == "incomplete"
 
 

@@ -17,10 +17,33 @@ export function parseCLI(argv) {
 
 export async function createVitest(mode, options, overrides) {
   trace('create', { mode, options })
+  // Vitest 3.2.6 dist/chunks/coverage.DfSpMS-b.js:3517-3539,3810-3814
+  // resolves api:false to this middleware-only object and adds a token.
+  const resolvedDefaults = {
+    api: {
+      middlewareMode: true,
+      allowWrite: true,
+      allowExec: true,
+      token: '00000000-0000-4000-8000-000000000000',
+    },
+    projects: [],
+    poolMatchGlobs: [],
+    browser: { enabled: false },
+    typecheck: { enabled: false },
+    bail: 0,
+  }
   const config = {
-    ...options, reporters: ['default'], teardownTimeout: 20,
+    ...options, ...resolvedDefaults, reporters: ['default'], teardownTimeout: 20,
     ...scenario.root,
   }
+  trace('resolved-config', {
+    api: config.api,
+    projects: config.projects,
+    poolMatchGlobs: config.poolMatchGlobs,
+    browser: config.browser,
+    typecheck: config.typecheck,
+    bail: config.bail,
+  })
   const plugins = [...overrides.plugins]
   if (scenario.foreignHook) plugins.push({
     name: scenario.foreignHook, configureVitest() { trace('foreign-hook') },

@@ -92,8 +92,17 @@ function nonempty(value) {
   return Array.isArray(value) ? value.length > 0 : Boolean(value)
 }
 
+function unsafeApi(api) {
+  if (api === undefined || api === null || api === false) return false
+  // Vitest 3.2.6 coverage.DfSpMS-b.js:3517-3539,3810-3814 resolves
+  // api:false to middleware mode; cli-api.DWGBtMmz.js:10213 listens only
+  // when the resolved object has a port.
+  return typeof api !== 'object' || api.middlewareMode !== true
+    || (api.port !== undefined && api.port !== null)
+}
+
 function validateModes(config) {
-  if (config.watch || enabled(config.browser) || config.api || nonempty(config.workspace)
+  if (config.watch || enabled(config.browser) || unsafeApi(config.api) || nonempty(config.workspace)
       || nonempty(config.projects) || enabled(config.typecheck) || nonempty(config.poolMatchGlobs)
       || (config.pool && config.pool !== 'forks') || config.standalone || config.mergeReports) {
     fail('unsafe Vitest mode, workspace, typecheck or pool')
