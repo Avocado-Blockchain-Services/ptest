@@ -7,6 +7,7 @@ import socket
 import struct
 import subprocess
 import sys
+import signal
 from pathlib import Path
 
 import pytest
@@ -173,7 +174,8 @@ def _read_frame(sock: socket.socket, manifest: C.LaunchManifest) -> C.ControlFra
     return C.decode_control_frame(bytes(prefix + body), expected_nonce=manifest.grant.nonce)
 
 
-def _isolated_guard(manifest: C.LaunchManifest, *, drain: bool = True):
+def _isolated_guard(manifest: C.LaunchManifest, *, drain: bool = True,
+                    queued_control: bytes | None = None):
     guard_sock, parent_sock = socket.socketpair()
     manifest_read, manifest_write = os.pipe()
     env = dict(os.environ, GUARD_CONTROL_FD=str(guard_sock.fileno()),
@@ -184,9 +186,90 @@ def _isolated_guard(manifest: C.LaunchManifest, *, drain: bool = True):
     )
     guard_sock.close()
     os.close(manifest_read)
+    if queued_control is not None:
+        parent_sock.sendall(queued_control)
     os.write(manifest_write, C.encode_launch_manifest(manifest))
     os.close(manifest_write)
     return child, parent_sock
+
+
+def _cancel(manifest: C.LaunchManifest, signal_number: int = 15) -> bytes:
+    return C.encode_control_frame(C.ControlFrame(
+        protocol=1, run_id=manifest.grant.run_id, nonce=manifest.grant.nonce,
+        kind="cancel", payload={"signal": signal_number}))
+
+
+def test_queued_cancel_before_manifest_never_launches(case, tmp_path):
+    marker = tmp_path / "must-not-exist"
+    manifest = _manifest(case, marker)
+    process, control = _isolated_guard(manifest, queued_control=_cancel(manifest))
+    try:
+        assert _read_frame(control, manifest).kind == "registered"
+        assert process.wait(timeout=_RECOVERY_WATCHDOG_S) != 0
+        assert marker.exists() is False
+        assert all(frame.kind not in {"phase", "draining"} for frame in _frames(control, manifest))
+    finally:
+        control.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_RECOVERY_WATCHDOG_S)
+
+
+def test_parent_closing_before_manifest_never_launches_second_attempt(case, tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    base = _manifest(case, first)
+    first_run = C.PreparedRun(argv=(sys.executable, "-c", f"from pathlib import Path; Path({str(first)!r}).write_text('ran')"),
+                              cwd=base.domain.root)
+    second_run = C.PreparedRun(argv=(sys.executable, "-c", f"from pathlib import Path; Path({str(second)!r}).write_text('ran')"),
+                               cwd=base.domain.root)
+    manifest = C.LaunchManifest(protocol=1, domain=base.domain, grant=base.grant, setup=None,
+                                attempts=(first_run, second_run), attempt_ids=("a001", "a002"),
+                                setup_timeout_s=1, attempt_timeout_s=30, compound_timeout_s=30)
+    closing = C.encode_control_frame(C.ControlFrame(
+        protocol=1, run_id=manifest.grant.run_id, nonce=manifest.grant.nonce,
+        kind="parent-closing", payload={}))
+    process, control = _isolated_guard(manifest, queued_control=closing)
+    try:
+        assert _read_frame(control, manifest).kind == "registered"
+        assert process.wait(timeout=_RECOVERY_WATCHDOG_S) == 0
+        assert first.exists() is False
+        assert second.exists() is False
+    finally:
+        control.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_RECOVERY_WATCHDOG_S)
+
+
+def test_grace_expiry_kills_its_own_group_without_draining(case, tmp_path):
+    marker = tmp_path / "child-state"
+    base = _manifest(case, marker)
+    ready_path = tmp_path / "ready.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(ready_path))
+    listener.listen(1)
+    listener.settimeout(_RECOVERY_WATCHDOG_S)
+    prepared = C.PreparedRun(argv=(sys.executable, str(_FIXTURES / "ignore_term.py"), str(marker), str(ready_path)),
+                             cwd=base.domain.root)
+    manifest = C.LaunchManifest(protocol=1, domain=base.domain, grant=base.grant, setup=None,
+                                attempts=(prepared,), attempt_ids=("a001",), setup_timeout_s=1,
+                                attempt_timeout_s=0.1, compound_timeout_s=30)
+    process, control = _isolated_guard(manifest)
+    try:
+        assert _read_frame(control, manifest).kind == "registered"
+        assert _read_frame(control, manifest).kind == "phase"
+        ready, _ = listener.accept()
+        ready.close()
+        assert process.wait(timeout=_RECOVERY_WATCHDOG_S) == -signal.SIGKILL
+        assert marker.read_text() == "started"
+        assert all(frame.kind != "draining" for frame in _frames(control, manifest))
+    finally:
+        listener.close()
+        control.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_RECOVERY_WATCHDOG_S)
 
 
 @pytest.mark.parametrize("cancel_signal", [2, 15])
