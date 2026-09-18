@@ -29,6 +29,12 @@ _DOMAIN_MARKER_NAME = "domain.json"
 _MACHINE_CONFIG_NAME = "machine.toml"
 _FIXTURE_MARKER_NAME = "fixture-domain.toml"
 _HEX32_RE = re.compile(r"[0-9a-f]{32}\Z")
+_DARWIN_BOOT_SESSION_NAME = b"kern.bootsessionuuid"
+_DARWIN_BOOT_SESSION_MAX_BYTES = 128
+_BOOT_SESSION_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
 
 _LINUX_FILESYSTEMS = frozenset({"ext4", "xfs", "btrfs", "tmpfs"})
 _DARWIN_FILESYSTEMS = frozenset({"apfs", "hfs"})
@@ -353,8 +359,27 @@ def domain_paths(fixture: Path | None) -> DomainPaths:
     return _fixture_domain(fixture)
 
 
+def _process_birth(process) -> float:
+    """Read psutil 7.2.2's private native kernel start stamp.
+
+    The native observation is boot-relative on Linux and a raw start-time
+    stamp on macOS.  It is an equality-only token within one matching boot
+    identity, not a wall-clock or ordering value.  A psutil pin upgrade must
+    revalidate this private contract before changing the pinned dependency.
+    """
+    native = getattr(process, "_proc")
+    observe = getattr(native, "create_time")
+    raw_birth = observe(monotonic=True)
+    if isinstance(raw_birth, bool):
+        raise TypeError("process birth observation is not numeric")
+    birth = float(raw_birth)
+    if not math.isfinite(birth) or birth < 0:
+        raise ValueError("process birth observation is invalid")
+    return birth
+
+
 def process_identity(pid: int) -> ProcessIdentity | None:
-    """Observe a process birth, real/effective uid and process group.
+    """Observe a kernel process-start stamp, uid and process group.
 
     A process that disappears, is inaccessible, has split real/effective
     ownership, or changes identity during the observation is indeterminate.
@@ -365,7 +390,7 @@ def process_identity(pid: int) -> ProcessIdentity | None:
         return None
     try:
         process = psutil.Process(pid)
-        birth = float(process.create_time())
+        birth = _process_birth(process)
         uids = process.uids()
         real_uid = uids.real
         effective_uid = uids.effective
@@ -375,11 +400,12 @@ def process_identity(pid: int) -> ProcessIdentity | None:
                 or real_uid < 0 or real_uid != effective_uid):
             return None
         pgid = os.getpgid(pid)
-        if float(process.create_time()) != birth:
+        if _process_birth(psutil.Process(pid)) != birth:
             return None
         return ProcessIdentity(pid=pid, birth=birth, uid=real_uid, pgid=pgid)
     except (psutil.Error, ProcessLookupError, PermissionError, OSError,
-            ValueError, TypeError):
+            AttributeError, NotImplementedError, OverflowError, ValueError,
+            TypeError):
         return None
 
 
@@ -414,6 +440,41 @@ def _read_linux_boot_id() -> str | None:
     return value
 
 
+def _read_darwin_boot_session_uuid() -> str | None:
+    """Read a bounded kernel boot-session UUID through Darwin's native API."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        sysctlbyname = libc.sysctlbyname
+        sysctlbyname.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        )
+        sysctlbyname.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(_DARWIN_BOOT_SESSION_MAX_BYTES)
+        length = ctypes.c_size_t(_DARWIN_BOOT_SESSION_MAX_BYTES)
+        if sysctlbyname(
+                _DARWIN_BOOT_SESSION_NAME, ctypes.byref(buffer),
+                ctypes.byref(length), None, 0) != 0:
+            return None
+        if length.value <= 0 or length.value > _DARWIN_BOOT_SESSION_MAX_BYTES:
+            return None
+        raw = bytes(buffer[:length.value])
+        if raw.endswith(b"\x00"):
+            raw = raw[:-1]
+        if len(raw) != 36:
+            return None
+        value = raw.decode("ascii").lower()
+    except (AttributeError, OSError, TypeError, UnicodeError, ValueError,
+            OverflowError):
+        return None
+    if _BOOT_SESSION_UUID_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
 def boot_identity() -> str:
     """Return a boot-stable identity, failing closed if it is unavailable."""
     system = _os_kind()
@@ -422,11 +483,7 @@ def boot_identity() -> str:
         if value is None:
             _fail("state-unavailable", "kernel boot identity is unavailable")
         return value
-    try:
-        value = float(psutil.boot_time())
-    except (OSError, psutil.Error, TypeError, ValueError):
-        _fail("state-unavailable", "kernel boot-time observation is unavailable")
-        raise AssertionError("unreachable")
-    if not math.isfinite(value) or value < 0:
-        _fail("state-unavailable", "kernel boot-time observation is invalid")
-    return f"macos:{value:.6f}"
+    value = _read_darwin_boot_session_uuid()
+    if value is None:
+        _fail("state-unavailable", "kernel boot-session identity is unavailable")
+    return f"macos:{value}"

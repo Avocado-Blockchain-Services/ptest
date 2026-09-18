@@ -1,9 +1,11 @@
 """Platform-domain and process-identity contracts (Task 2)."""
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
 import stat
+import sys
 from types import SimpleNamespace
 
 import psutil
@@ -23,6 +25,31 @@ def _make_account_home(tmp_path):
     home = tmp_path / "account"
     home.mkdir(mode=0o700)
     return home
+
+
+class _FakeNativeProcess:
+    def __init__(self, birth):
+        self.birth = birth
+
+    def create_time(self, monotonic=False):
+        assert monotonic is True
+        return self.birth
+
+
+class _FakeSysctlByName:
+    def __init__(self, result, payload):
+        self.result = result
+        self.payload = payload
+
+    def __call__(self, name, old_value, old_length, new_value, new_length):
+        assert name == b"kern.bootsessionuuid"
+        length = ctypes.cast(
+            old_length, ctypes.POINTER(ctypes.c_size_t)).contents
+        length.value = len(self.payload)
+        if self.payload:
+            ctypes.memmove(old_value, self.payload, min(
+                len(self.payload), 128))
+        return self.result
 
 
 def test_domain_ignores_home_and_xdg(monkeypatch):
@@ -323,8 +350,24 @@ def test_process_identity_returns_none_when_inaccessible(monkeypatch):
     assert P.process_identity(123) is None
 
 
+def test_process_identity_fails_closed_without_monotonic_birth_api(monkeypatch):
+    class NoMonotonicBirthProcess:
+        def create_time(self):
+            return 10.0
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid(), effective=os.getuid())
+
+    monkeypatch.setattr(P.psutil, "Process", lambda pid: NoMonotonicBirthProcess())
+    monkeypatch.setattr(P.os, "getpgid", lambda pid: 456)
+
+    assert P.process_identity(123) is None
+
+
 def test_process_identity_rejects_mismatched_real_effective_uid(monkeypatch):
     class FakeProcess:
+        _proc = _FakeNativeProcess(10.0)
+
         def create_time(self):
             return 10.0
 
@@ -338,6 +381,8 @@ def test_process_identity_rejects_mismatched_real_effective_uid(monkeypatch):
 
 def test_process_identity_never_reads_process_argv_or_environment(monkeypatch):
     class FakeProcess:
+        _proc = _FakeNativeProcess(10.0)
+
         def create_time(self):
             return 10.0
 
@@ -367,21 +412,106 @@ def test_process_identity_returns_none_for_reused_or_gone_pid(monkeypatch):
     assert P.process_identity(123) is None
 
 
-def test_process_identity_rejects_pid_reuse_during_observation(monkeypatch):
-    class ReusedProcess:
-        def __init__(self):
-            self._births = iter((10.0, 11.0))
-
-        def create_time(self):
-            return next(self._births)
+def test_process_identity_returns_none_when_second_observation_is_gone(
+        monkeypatch):
+    class LiveProcess:
+        _proc = _FakeNativeProcess(10.0)
 
         def uids(self):
             return SimpleNamespace(real=os.getuid(), effective=os.getuid())
 
-    monkeypatch.setattr(P.psutil, "Process", lambda pid: ReusedProcess())
+    observations = iter((LiveProcess(), psutil.NoSuchProcess(pid=123)))
+
+    def process_factory(pid):
+        observation = next(observations)
+        if isinstance(observation, BaseException):
+            raise observation
+        return observation
+
+    monkeypatch.setattr(P.psutil, "Process", process_factory)
     monkeypatch.setattr(P.os, "getpgid", lambda pid: 456)
 
     assert P.process_identity(123) is None
+
+
+def test_process_identity_returns_none_when_getpgid_races_process_exit(
+        monkeypatch):
+    class LiveProcess:
+        _proc = _FakeNativeProcess(10.0)
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid(), effective=os.getuid())
+
+    monkeypatch.setattr(P.psutil, "Process", lambda pid: LiveProcess())
+
+    def gone(pid):
+        raise ProcessLookupError(pid, "gone")
+
+    monkeypatch.setattr(P.os, "getpgid", gone)
+
+    assert P.process_identity(123) is None
+
+
+def test_process_identity_rejects_pid_reuse_between_independent_observations(
+        monkeypatch):
+    class CachedProcess:
+        def __init__(self, birth):
+            self._proc = _FakeNativeProcess(birth)
+            self._wall_clock_birth = birth
+
+        def create_time(self):
+            return self._wall_clock_birth
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid(), effective=os.getuid())
+
+    births = iter((10.0, 11.0))
+    instances = []
+
+    def process_factory(pid):
+        process = CachedProcess(next(births))
+        instances.append(process)
+        return process
+
+    monkeypatch.setattr(P.psutil, "Process", process_factory)
+    monkeypatch.setattr(P.os, "getpgid", lambda pid: 456)
+
+    assert P.process_identity(123) is None
+    assert len(instances) == 2
+
+
+def test_process_identity_uses_boot_relative_birth_across_wall_clock_change(
+        monkeypatch):
+    class CachedProcess:
+        def __init__(self, wall_clock_birth):
+            self._proc = _FakeNativeProcess(42.0)
+            self._wall_clock_birth = wall_clock_birth
+
+        def create_time(self):
+            return self._wall_clock_birth
+
+        def uids(self):
+            return SimpleNamespace(real=os.getuid(), effective=os.getuid())
+
+    wall_clock_births = iter((1000.0, 900.0))
+    monkeypatch.setattr(
+        P.psutil, "Process", lambda pid: CachedProcess(next(wall_clock_births)))
+    monkeypatch.setattr(P.os, "getpgid", lambda pid: 456)
+
+    identity = P.process_identity(123)
+
+    assert identity is not None
+    assert identity.birth == 42.0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="psutil private identity contract is Linux-only")
+def test_process_birth_matches_psutil_private_linux_identity():
+    process = psutil.Process(os.getpid())
+
+    observed = P._process_birth(process)
+
+    assert observed == process._ident[1]
 
 
 def test_probe_group_uses_signal_zero_without_signalling(monkeypatch):
@@ -455,6 +585,42 @@ def test_boot_identity_changes_when_kernel_observation_changes(monkeypatch):
 def test_boot_identity_fails_closed_when_observation_is_inaccessible(monkeypatch):
     monkeypatch.setattr(P.sys, "platform", "linux")
     monkeypatch.setattr(P, "_read_linux_boot_id", lambda: None)
+
+    with pytest.raises(Problem, match="state-unavailable"):
+        P.boot_identity()
+
+
+def test_darwin_boot_identity_ignores_wall_clock_boot_time(monkeypatch):
+    monkeypatch.setattr(P.sys, "platform", "darwin")
+    session = b"01234567-89ab-cdef-0123-456789abcdef\x00"
+    sysctl = _FakeSysctlByName(0, session)
+    monkeypatch.setattr(P.ctypes, "CDLL",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            sysctlbyname=sysctl))
+    wall_clock = iter((100.0, 200.0))
+    monkeypatch.setattr(P.psutil, "boot_time", lambda: next(wall_clock))
+
+    assert P.boot_identity() == "macos:01234567-89ab-cdef-0123-456789abcdef"
+    assert P.boot_identity() == "macos:01234567-89ab-cdef-0123-456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "result,payload",
+    [
+        (1, b""),
+        (0, b"not-a-boot-session\x00"),
+        (0, b"x" * 129),
+    ],
+)
+def test_darwin_boot_identity_fails_closed_for_bad_boot_session_data(
+        monkeypatch, result, payload):
+    monkeypatch.setattr(P.sys, "platform", "darwin")
+    sysctl = _FakeSysctlByName(result, payload)
+    monkeypatch.setattr(P.ctypes, "CDLL",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            sysctlbyname=sysctl))
+    monkeypatch.setattr(P.psutil, "boot_time",
+                        lambda: pytest.fail("wall-clock fallback"))
 
     with pytest.raises(Problem, match="state-unavailable"):
         P.boot_identity()
