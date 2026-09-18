@@ -3,13 +3,14 @@
   "status": "DONE_WITH_CONCERNS",
   "commit": "",
   "report_path": ".pipeline/out/task-6.json",
-  "scope": "Uncommitted Astra repair of Task 6 foundation after Opus rejection at 5ce96df. Only adapter, bridge, owned tests/fixtures and evidence changed. No native Vitest, install, commit, push, registry or contract edit.",
-  "audit_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-6/0512c6c1-9c24-455b-b555-1b4eb8bb5c4b.jsonl (StructuredOutput tool input; complete blocking T6-1..T6-5 and notes read)",
-  "test_summary": "97 passed in 3.47s through scripts/ptest-bootstrap; Node API-double execution only. Slowest green test 0.06s.",
+  "scope": "Uncommitted Sol correction of accepted Opus finding T6R-1 on the Task 6 foundation. Only the bridge, owned tests/API double and evidence changed. No native Vitest, install, commit, push, registry, CLI, contract, design or legacy edit.",
+  "audit_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-6/1da8a29c-8056-422c-8c72-7d94244f0b91.jsonl (latest full Opus StructuredOutput at lines 156-157; T6R-1 and all notes read)",
+  "test_summary": "Task 6: 100 passed in 2.42s through scoped ptest; slowest test 0.06s. Integrated: 852 passed in 12.16s through ptest --full. Node API-double execution only; no native Vitest.",
   "implemented": [
+    "T6R-1: validateModes now accepts only the absent/false pre-resolution API setting or a resolved middlewareMode:true object without a port. A listener port and non-middleware resolved shape still fail closed. The API double now emits the Vitest 3.2.6 resolved defaults for api/projects/poolMatchGlobs/browser/typecheck/bail, with source-cited shape and explicit positive/root/project negative regression coverage.",
     "T6-1: parseCLI receives ['vitest', 'run', ...nativeArgv]. Executable local Node API-double test proves every literal token survives the real bridge; obsolete string-based implementation assertions removed.",
     "T6-2: prepare returns ExecutionTier.UNAVAILABLE, selection=False, with an explicit limitation. Execution/run/nonce/attempt are propagated to the bridge. Basic serial rejects selected plans; all bridge terminal events remain selection=False and baseline_eligible=False.",
-    "T6-3: root and every project config are validated before tests for exact forks/worker/fork/concurrency bounds and disabled watch/browser/API/workspace/projects/typecheck/poolMatchGlobs. Unknown configureVitest owners are rejected by object identity, including a spoofed owned-plugin name. Resolved reporter retention is checked before and after execution; public onInit/onFinished callbacks prove instantiated retention without reading private ctx.reporters.",
+    "T6-3: root and every project config are validated before tests for exact forks/worker/fork/concurrency bounds and disabled watch/browser/API listener/workspace/projects/typecheck/poolMatchGlobs. Unknown configureVitest owners are rejected by object identity, including a spoofed owned-plugin name. Resolved reporter retention is checked before and after execution; public onInit/onFinished callbacks prove instantiated retention without reading private ctx.reporters.",
     "T6-4: the bridge requires an executor-bound external private report path. It exclusively creates a 0600 non-symlink artifact and writes one bounded JSON line with protocol/run_id/nonce/event plus attempt and truthful terminal facts. Native stdout/stderr remain unchanged. Completion waits for event-loop drain after native coverage and close; failures, coverage exit codes, native code 70, unresolved promises and teardown timeout/error retain accurate status.",
     "T6-5: full positional filters and effective testNamePattern/shard/changed/related/project/bail narrowing reject. Only execution=full calls runTestSpecifications with allTestsRun=true. Scoped filters retain native glob semantics; selected modules must match unique exact project/forks specifications. Empty advanced inventories cannot pass a gate.",
     "Other confirmed notes: coverage-v8 must exactly match Vitest when enabled; normalized user worker/pool control spellings reject; teardown watchdog is bounded at at most 10 seconds and preserves an existing native failure.",
@@ -51,6 +52,26 @@
       "raw_log": ".pipeline/local/task-6-astra-repair1-green.log"
     },
     {
+      "command": "ptest tests/ng/test_vitest_adapter.py -k 'resolved_middleware_api_default or api_listener_or_non_middleware_shape' --tb=short --durations=10",
+      "exit": 1,
+      "result": "Observed T6R-1 RED after making the API double faithful: the positive resolved middleware-only default failed with bridge exit 70; all four root/project listener or non-middleware negative cases passed. Summary: 1 failed, 4 passed in 0.46s."
+    },
+    {
+      "command": "ptest tests/ng/test_vitest_adapter.py -k 'resolved_middleware_api_default or api_listener_or_non_middleware_shape' --tb=short --durations=10",
+      "exit": 0,
+      "result": "Focused T6R-1 GREEN: 5 passed in 0.45s; positive real-default shape ran and reported passed, root/project listener and non-middleware shapes stopped before collection/execution."
+    },
+    {
+      "command": "ptest tests/ng/test_vitest_adapter.py --tb=short --durations=10",
+      "exit": 0,
+      "result": "Task 6 GREEN: 100 passed in 2.42s; slowest test 0.06s. No native Vitest installation or execution."
+    },
+    {
+      "command": "ptest --full",
+      "exit": 0,
+      "result": "Integrated suite GREEN: 852 passed in 12.16s with two capped workers."
+    },
+    {
       "command": "node --check on runtime/vitest_bridge.mjs, fixtures/vitest/stub-node.mjs, advanced-3.2.7/adversarial.config.mjs and uncovered.mjs",
       "exit": 0,
       "result": "All four syntax checks passed. Node v26.8.2."
@@ -65,6 +86,12 @@
       "exit": 0,
       "result": "AST update completed: 3446 nodes, 6443 edges, 243 communities; no semantic extraction.",
       "warning": "Three JSON schema files produced zero AST nodes: implementation.json, review.json, protocol-v1.json. Labels/wiki not used as post-change evidence."
+    },
+    {
+      "command": "graphify update .",
+      "exit": 0,
+      "result": "Post-T6R-1 AST update completed: 3453 nodes, 6451 edges, 249 communities; no semantic extraction.",
+      "warning": "Three JSON schema files produced zero AST nodes: implementation.json, review.json, protocol-v1.json."
     }
   ],
   "security": {
@@ -72,6 +99,7 @@
       "Literal token loss or shell reinterpretation",
       "Unqualified advanced/selection or baseline claims",
       "Grant overrun through project pools, typecheck, worker options or inherited environment",
+      "Resolved middleware-only API default rejected, or listener/non-middleware API admitted",
       "Foreign control hooks or removed reporters",
       "Narrowed/empty/unobserved workload labeled full/passed",
       "Report overwrite, symlink/public directory, invalid identity or mixed stdout",
@@ -80,19 +108,19 @@
     "identity": "Attempt/run/nonce shape and binding tested. Account authentication is N/A: trusted local same-user runner process, no service login.",
     "authorization": "Report writes require a private current-user parent and exclusive new regular path; report overwrite/symlink/public-parent tests.",
     "tenancy": "N/A: no service tenancy. Run/attempt binding isolates evidence; Task 11 owns domain allocation.",
-    "input": "Literal argv, normalized worker controls, unsupported config, finite version table and identity fields exercised.",
+    "input": "Literal argv, normalized worker controls, real resolved middleware API defaults, unsafe API listener/non-middleware shapes, unsupported config, finite version table and identity fields exercised.",
     "state": "Reporter disappearance, repeated/unfinished lifecycle, coverage-then-close failure and stalled close regressions.",
     "exposure": "Terminal schema allowlist is asserted; native output remains native, bridge errors omit argument/path/nonce contents.",
     "availability": "Worker/fork/concurrency equality tested at root/project/environment. One bounded terminal event; timeout tests use 20ms fixture deadlines (green max 0.06s). The pre-fix hanging-close RED required the test's 3s subprocess timeout.",
     "dependencies": "Only project-local Node module resolution; exact coverage-v8 metadata check. No dependency installation or native runner execution.",
-    "gates": "Existing project has no configured secrets scanner, security static analyzer, dependency advisory scanner or property/fuzz gate in pyproject/scripts; none added outside scope. Executable abuse regressions and Node syntax checks ran. Native dependencies/advisories and lifecycle scripts remain the release/T11 gate."
+    "gates": "Existing project has no configured secrets scanner, security static analyzer, dependency advisory scanner or property/fuzz gate in pyproject/scripts; none added outside scope. Executable abuse regressions ran through ptest, including the integrated suite. Native dependencies/advisories and lifecycle scripts remain the release/T11 gate."
   },
   "contract_correction": "The former report's claim that PreparedRun lacks report_path was false: contracts.py defines it. The actual frozen-boundary limitation is that prepare(config, plan, grant, attempt) receives no DomainPaths/private allocator. Per controller direction, prepare leaves report_path=None and capability UNAVAILABLE; Task 11 must allocate a private run artifact and bind both PreparedRun.report_path and PTEST_VITEST_REPORT_PATH before launch. Missing binding fails before importing Vitest.",
   "not_verified": [
     "No native Vitest package was installed or run. Temporary fake node_modules in test tmp dirs hold only the handwritten API double; repository fixtures have no node_modules.",
     "Native 3.1.4/3.2.6/3.2.7 compatibility, real pools/concurrent tests, native configureVitest timing, reporters, coverage parity, worker identities, snapshot/config mutation and cancellation/process-group absence remain Task 11.",
     "No advanced inventory/test-outcome identity telemetry or baseline promotion. The 3.2.7 native path is a candidate advanced API flow; a separately qualified 3.2.7 basic fallback policy is still required before advertising that tier.",
-    "No macOS native evidence, advisory/license release gate or integrated ptest --full. Task-local bootstrap explicitly rejects --full; the controller owns final integrated verification.",
+    "No macOS native evidence or advisory/license release gate. Integrated ptest --full is green, but native Vitest execution remains Task 11.",
     "Startup failures before createVitest returns do not expose a context to close; startup/cancellation containment and group-drain evidence remain the external guard/Task 11 boundary. The watchdog only covers a returned context."
   ],
   "deferred": [
