@@ -179,10 +179,8 @@ def test_doctor_handles_symlink_swap_output_and_deadline_without_state_access(ca
     target.write_text("\n".join("cache.flushall()" for _ in range(20)), encoding="utf-8")
     cap = C.ScanLimits(entries=20, files=20, file_bytes=4096, total_bytes=8192,
                        findings=20, output_bytes=1, elapsed_s=8, depth=8, ast_nodes=1000)
-    report = inspect(domain, _resolution(case, root), cap, None)
-    assert report.findings == ()
-    assert report.usage.output_bytes == 0
-    assert report.usage.truncated is True
+    with pytest.raises(C.Problem, match="invalid-bound"):
+        inspect(domain, _resolution(case, root), cap, None)
 
     ticks = iter((0.0, 9.0, 9.0))
     monkeypatch.setattr(doctor.time, "monotonic", lambda: next(ticks))
@@ -493,6 +491,113 @@ def test_complete_report_is_bounded_after_high_volume_distinct_skips(case):
     assert sum(item.message == "Doctor diagnostic output limit reached."
                for item in report.limitations) == 1
     assert len(report.limitations) < link_count
+
+
+def _mkdir_chain(root: Path, components: list[str]) -> int:
+    """Create a path beyond PATH_MAX without resolving the whole path at once."""
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in components:
+            try:
+                os.mkdir(component, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings(case):
+    """Scope/readiness/path evidence must not escape the serialized byte cap."""
+    domain = case.domain()
+    root = case.project(domain)
+    scope_components = ["s" * 255] * 15
+    scope = "/".join(scope_components)
+    assert len(scope.encode("utf-8")) == 3_839
+
+    scope_descriptor = _mkdir_chain(root, scope_components)
+    try:
+        for index in range(C.DEFAULT_SCAN_LIMITS.findings):
+            name = "f" * 249 + f"{index:03d}.py"
+            assert len(name.encode("utf-8")) == 255
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=scope_descriptor,
+            )
+            try:
+                os.write(descriptor, b"cache.flushall()\n")
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(scope_descriptor)
+
+    deep_descriptor = _mkdir_chain(root, [*scope_components, *(["d" * 255] * 241)])
+    try:
+        os.symlink("missing", "l" * 255, dir_fd=deep_descriptor)
+    finally:
+        os.close(deep_descriptor)
+
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, scope)
+    report_payload = json.dumps(
+        asdict(report),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert report.findings
+    assert report.usage.skipped >= 1
+    assert report.usage.truncated is True
+    assert report.usage.output_bytes == len(report_payload)
+    assert C.DEFAULT_SCAN_LIMITS.output_bytes - len(report_payload) < 16_384
+    assert len(report_payload) <= C.DEFAULT_SCAN_LIMITS.output_bytes
+    assert all(
+        path is None or len(path.encode("utf-8")) <= 4_096
+        for path in (finding.path for finding in report.findings)
+    )
+    assert all(
+        len(path.encode("utf-8")) <= 4_096
+        for reason in (*report.limitations, *(item for readiness in report.readiness
+                                               for item in readiness.reasons))
+        for path in reason.paths
+    )
+
+
+def test_output_byte_floor_rejects_smaller_limit_and_honors_boundary(case):
+    """Every accepted tiny limit must fit the complete compact document."""
+    import ptest.doctor as doctor
+
+    domain = case.domain()
+    root = case.project(domain)
+    too_small = replace(
+        C.DEFAULT_SCAN_LIMITS,
+        output_bytes=doctor.MIN_DOCTOR_OUTPUT_BYTES - 1,
+    )
+    with pytest.raises(C.Problem, match="invalid-bound"):
+        inspect(domain, _resolution(case, root), too_small, None)
+
+    boundary = replace(
+        C.DEFAULT_SCAN_LIMITS,
+        output_bytes=doctor.MIN_DOCTOR_OUTPUT_BYTES,
+    )
+    report = inspect(domain, _resolution(case, root), boundary, None)
+    report_payload = json.dumps(
+        asdict(report),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert report.usage.output_bytes == len(report_payload)
+    assert len(report_payload) <= boundary.output_bytes
 
 
 def test_oversized_scope_is_rejected_without_entering_the_report(case):

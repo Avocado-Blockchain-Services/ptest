@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import asdict, fields
 import heapq
 import json
 import math
@@ -35,7 +35,9 @@ _FIXTURE_DIRS = frozenset({"fixtures", "fixture", "setup", "__fixtures__"})
 _CONFIG_NAMES = frozenset({".ptest.toml", "pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "package.json"})
 _LINE_CHARS = 4096  # A fixed work bound, including regex input; never raised by callers.
 _PATH_BYTES = 4096  # Bounds caller/config path evidence before it can enter a report.
-_DOCUMENT_RESERVE = 65536  # Fixed report envelope, scope, readiness, limits, and usage.
+# Below this explicit input floor even a useful pathless report has too little
+# room for the public envelope plus deterministic truncation evidence.
+MIN_DOCTOR_OUTPUT_BYTES = 4096
 _PHYSICAL_NEWLINE = re.compile(r"\r\n|\r|\n")
 _TIMING_MISSING = "Timing unavailable: inspect has no checkout identity or per-test history timing input."
 
@@ -55,7 +57,8 @@ _RULES = (
 
 
 def _reason(code: str, message: str, *paths: str) -> C.Reason:
-    return C.Reason(code=code, message=message, paths=tuple(paths))
+    bounded = tuple(path for value in paths if (path := _report_path(value)) is not None)
+    return C.Reason(code=code, message=message, paths=bounded)
 
 
 def _safe_text(value: str) -> bool:
@@ -64,6 +67,14 @@ def _safe_text(value: str) -> bool:
     except UnicodeEncodeError:
         return False
     return not _CONTROL.search(value)
+
+
+def _report_path(value: str) -> str | None:
+    """Return bounded, encodable path evidence or omit it without approximation."""
+    if (not isinstance(value, str) or not value or not _safe_text(value)
+            or len(value.encode("utf-8")) > _PATH_BYTES):
+        return None
+    return value
 
 
 def _safe_scope(scope: str | None) -> str | None:
@@ -78,12 +89,17 @@ def _safe_scope(scope: str | None) -> str | None:
     return scope
 
 
-def _readiness(findings: tuple[C.Finding, ...], limitations: tuple[C.Reason, ...]) -> tuple[C.Readiness, ...]:
+def _readiness(has_findings: bool, has_limitations: bool) -> tuple[C.Readiness, ...]:
     parallel_reasons = [_reason("static-evidence-insufficient", "Static inspection cannot prove run/worker isolation.")]
-    if findings:
+    if has_findings:
         parallel_reasons.append(_reason("static-evidence-insufficient", "Static findings require repository review before parallel execution."))
-    if limitations:
-        parallel_reasons.extend(limitations[:1])
+    if has_limitations:
+        # Readiness stays actionable without duplicating caller-controlled path
+        # evidence from limitations outside the output ledger.
+        parallel_reasons.append(_reason(
+            "static-evidence-insufficient",
+            "Static inspection has limitations; review report limitations.",
+        ))
     return (
         C.Readiness(area="execution", state="unknown", reasons=(_reason("static-evidence-insufficient", "Doctor does not execute repository code."),)),
         C.Readiness(area="parallel", state="unknown", reasons=tuple(parallel_reasons)),
@@ -148,6 +164,60 @@ _OUTPUT_LIMIT_REASON = _reason("scan-limit", "Doctor diagnostic output limit rea
 _OUTPUT_LIMIT_BYTES = _reason_bytes(_OUTPUT_LIMIT_REASON)
 
 
+def _compact_report_bytes(report: C.DoctorReport) -> bytes:
+    """Canonical compact bytes governed by ScanLimits.output_bytes."""
+    return json.dumps(
+        asdict(report),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _usage_envelope(limits: C.ScanLimits) -> C.ScanUsage:
+    """Widest bounded usage representation reserved before payload admission."""
+    return C.ScanUsage(
+        entries=limits.entries,
+        files=limits.files,
+        file_bytes=limits.total_bytes,
+        total_bytes=limits.total_bytes,
+        findings=limits.findings,
+        output_bytes=limits.output_bytes,
+        elapsed_s=1.7976931348623157e308,
+        skipped=999_999_999_999_999_999,
+        truncated=True,
+    )
+
+
+def _scope_tuple(scope: str | None) -> tuple[str, ...]:
+    return () if scope is None else (scope,)
+
+
+def _report_envelope_bytes(limits: C.ScanLimits, scope: str | None) -> int:
+    """Conservative serialized envelope size, excluding ledger payload items."""
+    report = C.DoctorReport(
+        scope=_scope_tuple(scope),
+        readiness=_readiness(True, True),
+        findings=(),
+        limits=limits,
+        usage=_usage_envelope(limits),
+        limitations=(),
+    )
+    return len(_compact_report_bytes(report))
+
+
+def _minimum_document_bytes(limits: C.ScanLimits, scope: str | None) -> int:
+    """Smallest safe capped document for this exact limits/scope envelope."""
+    report = C.DoctorReport(
+        scope=_scope_tuple(scope),
+        readiness=_readiness(False, True),
+        findings=(),
+        limits=limits,
+        usage=_usage_envelope(limits),
+        limitations=(_OUTPUT_LIMIT_REASON,),
+    )
+    return len(_compact_report_bytes(report))
+
+
 class _Deadline(Exception):
     pass
 
@@ -189,9 +259,9 @@ def _priority(relative: str, test_roots: tuple[str, ...]) -> tuple[int, str]:
 class _Scan:
     """Mutable accounting for one bounded, read-only scan."""
 
-    def __init__(self, root: Path, limits: C.ScanLimits):
+    def __init__(self, root: Path, limits: C.ScanLimits, scope: str | None):
         self.root, self.limits = root, limits
-        self.payload_limit = limits.output_bytes - min(_DOCUMENT_RESERVE, limits.output_bytes // 4)
+        self.payload_limit = max(0, limits.output_bytes - _report_envelope_bytes(limits, scope))
         self.began = time.monotonic()
         self.entries = self.files = self.total_bytes = self.skipped = self.output_bytes = 0
         self.truncated = False
@@ -368,7 +438,7 @@ class _Scan:
             for code, pattern, severity, consequence, remediation, verification in _RULES:
                 self.check_deadline()
                 if pattern.search(line):
-                    finding = C.Finding(code=code, severity=severity, confidence="medium", path=rel, line=line_number, evidence_type="static-pattern", consequence=consequence, remediation=remediation, verification=verification)
+                    finding = C.Finding(code=code, severity=severity, confidence="medium", path=_report_path(rel), line=line_number, evidence_type="static-pattern", consequence=consequence, remediation=remediation, verification=verification)
                     size = _finding_bytes(finding)
                     if len(self.findings) >= limits.findings:
                         self.limit("Doctor finding limit reached.")
@@ -378,6 +448,77 @@ class _Scan:
                         return
                     self.findings.append(finding)
                     self.output_bytes += size
+
+
+def _assemble_report(
+    scan: _Scan,
+    scope: str | None,
+    findings: tuple[C.Finding, ...],
+    limitations: tuple[C.Reason, ...],
+    elapsed_s: float,
+) -> C.DoctorReport:
+    """Build a report whose usage byte count equals its compact serialization."""
+    output_bytes = 0
+    while True:
+        usage = C.ScanUsage(
+            entries=scan.entries,
+            files=scan.files,
+            file_bytes=scan.total_bytes,
+            total_bytes=scan.total_bytes,
+            findings=len(findings),
+            output_bytes=output_bytes,
+            elapsed_s=elapsed_s,
+            skipped=scan.skipped,
+            truncated=scan.truncated,
+        )
+        report = C.DoctorReport(
+            scope=_scope_tuple(scope),
+            readiness=_readiness(bool(findings), bool(limitations)),
+            findings=findings,
+            limits=scan.limits,
+            usage=usage,
+            limitations=limitations,
+        )
+        serialized_bytes = len(_compact_report_bytes(report))
+        if serialized_bytes == output_bytes:
+            return report
+        output_bytes = serialized_bytes
+
+
+def _finalize_report(scan: _Scan, scope: str | None) -> C.DoctorReport:
+    """Enforce the complete-document cap even if envelope fields evolve."""
+    findings = list(scan.findings)
+    limitations = list(scan.limitations)
+    elapsed_s = time.monotonic() - scan.began
+    while True:
+        report = _assemble_report(
+            scan,
+            scope,
+            tuple(findings),
+            tuple(limitations),
+            elapsed_s,
+        )
+        if report.usage.output_bytes <= scan.limits.output_bytes:
+            return report
+        scan.truncated = True
+        if _OUTPUT_LIMIT_REASON not in limitations:
+            limitations.append(_OUTPUT_LIMIT_REASON)
+        if findings:
+            findings.pop()
+            continue
+        removable = next(
+            (index for index in range(len(limitations) - 1, -1, -1)
+             if limitations[index] != _OUTPUT_LIMIT_REASON),
+            None,
+        )
+        if removable is not None:
+            limitations.pop(removable)
+            continue
+        raise C.Problem(
+            code="invalid-bound",
+            message="doctor output limit cannot hold the report envelope",
+            phase=_PHASE,
+        )
 
 
 def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLimits,
@@ -391,9 +532,13 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
         raise TypeError("inspect requires DomainPaths, ConfigResolution and ScanLimits")
     if any(getattr(limits, field.name) > getattr(C.MAX_SCAN_LIMITS, field.name) for field in fields(C.ScanLimits)):
         raise C.Problem(code="invalid-bound", message="doctor scan limit exceeds the finite maximum", phase=_PHASE)
+    if limits.output_bytes < MIN_DOCTOR_OUTPUT_BYTES:
+        raise C.Problem(code="invalid-bound", message="doctor output limit is below the finite minimum", phase=_PHASE)
     root = Path(config.root)
     display_scope = _safe_scope(scope)
-    scan = _Scan(root, limits)
+    if limits.output_bytes < _minimum_document_bytes(limits, display_scope):
+        raise C.Problem(code="invalid-bound", message="doctor output limit cannot hold the report envelope", phase=_PHASE)
+    scan = _Scan(root, limits, display_scope)
     priority = []
     if scope is None and config.config is not None:
         for item in config.config.runner.test_roots:
@@ -411,11 +556,4 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
         pass
     scan._add_limitation(_reason("static-evidence-insufficient", "Static inspection cannot certify parallel safety."))
     scan._add_limitation(_reason("static-evidence-insufficient", _TIMING_MISSING))
-    limitations = tuple(scan.limitations)
-    findings = tuple(scan.findings)
-    usage = C.ScanUsage(entries=scan.entries, files=scan.files, file_bytes=scan.total_bytes,
-                        total_bytes=scan.total_bytes, findings=len(findings), output_bytes=scan.output_bytes,
-                        elapsed_s=time.monotonic() - scan.began, skipped=scan.skipped, truncated=scan.truncated)
-    return C.DoctorReport(scope=(() if display_scope is None else (display_scope,)),
-                          readiness=_readiness(findings, limitations), findings=findings,
-                          limits=limits, usage=usage, limitations=limitations)
+    return _finalize_report(scan, display_scope)
