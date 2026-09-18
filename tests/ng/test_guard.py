@@ -285,8 +285,12 @@ def test_active_cancel_signals_only_owned_guard_group_and_never_drains(
     listener.settimeout(_RECOVERY_WATCHDOG_S)
     prepared = C.PreparedRun(argv=(sys.executable, str(_FIXTURES / "wait_for_signal.py"), str(marker), str(ready_path)),
                              cwd=case.domain().root)
+    later = tmp_path / "must-not-run"
+    later_run = C.PreparedRun(
+        argv=(sys.executable, "-c", f"from pathlib import Path; Path({str(later)!r}).write_text('ran')"),
+        cwd=case.domain().root)
     manifest = C.LaunchManifest(protocol=1, domain=manifest.domain, grant=manifest.grant,
-                                setup=None, attempts=(prepared,), attempt_ids=("a001",),
+                                setup=None, attempts=(prepared, later_run), attempt_ids=("a001", "a002"),
                                 setup_timeout_s=1, attempt_timeout_s=30, compound_timeout_s=30)
     process, control = _isolated_guard(manifest)
     try:
@@ -301,6 +305,7 @@ def test_active_cancel_signals_only_owned_guard_group_and_never_drains(
         control.sendall(cancel)
         assert process.wait(timeout=_RECOVERY_WATCHDOG_S) != 0
         assert marker.read_text() == "terminated"
+        assert later.exists() is False
         assert all(frame.kind != "draining" for frame in _frames(control, manifest))
     finally:
         listener.close()
