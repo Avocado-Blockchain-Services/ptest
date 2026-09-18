@@ -1,9 +1,11 @@
 {
   "task": "11F Pytest explicit full basic-serial specification",
   "date": "2026-09-18",
-  "status": "specification-authored-awaiting-review",
+  "status": "specification-amended-after-opus-rejection-awaiting-focused-rereview",
   "author": "architect-agent (Astra)",
-  "inspected_base": "f26dd56397f6f056c74247829d2641dcd9f76e0d",
+  "inspected_base": "1dfea81d71417d1c6e07d7ff7b7477cd29829a55",
+  "original_spec_commit": "3e54bcd",
+  "original_runtime_base": "f26dd56397f6f056c74247829d2641dcd9f76e0d",
   "plan": "docs/superpowers/plans/2026-09-18-ptest-ng-pytest-full-basic-serial.md",
   "owned_files": [
     "docs/superpowers/plans/2026-09-18-ptest-ng-pytest-full-basic-serial.md",
@@ -12,7 +14,9 @@
   "scope": [
     "Explicit Pytest full basic_serial only, alongside unchanged accepted scoped execution",
     "Truthful static where reporting for Pytest scoped/full and Vitest prepared/unavailable",
-    "Strict roots, immutable mode binding, native narrowing refusal, existing guarded report lifecycle and conservative source/publication claims"
+    "Strict roots, immutable mode binding, exact plain/wrapper full-hook refusal policy, existing guarded report lifecycle and conservative source/publication claims",
+    "Proposed bounded ownership expansion to source.py/test_source.py for an opt-in execution-only generated-artifact digest; default source/selection semantics unchanged",
+    "Dot-root full refusal and scoped-only inspection; explicit non-Git/scan-limit incomplete outcomes and conditional where capability"
   ],
   "runtime_qualification": "No new qualification; prior Task 11D evidence covers scoped Linux x86_64 / CPython 3.13.11 / pytest 9.1.1 / pluggy 1.6.0 without xdist only.",
   "tests": {
@@ -23,8 +27,15 @@
     "Read AGENTS.md, .pipeline/context.md, accepted design/product contracts, Task 11D/11E acceptance records and current implementation/tests",
     "Used existing graphify query for navigation without rebuilding or semantic extraction",
     "JSON parsed successfully with python3 -m json.tool; placeholder scan found no TBD/TODO/incomplete-step markers",
+    "Verified Opus F1/F2 against current source.snapshot and selection-policy validation; corrected the plan rather than claiming existing generated-output support",
     "Commit is restricted to the two declared specification/evidence documents; no tests or source files are included"
   ],
+  "review_dispositions": {
+    "F1": "Exact full-only generated-artifact policy and source/test ownership added; fresh real pytest cache/bytecode creation and two unchanged full passes required without suppression or prewarming.",
+    "F2": "Full with dot roots refuses before admission while scoped stays available. Non-Git/unreadable/over-budget source evidence produces incomplete full, zero-to-70 conversion and retained native failures. Static where describes an unverified conditional tier and performs no source scan.",
+    "F3": "Exact existing and full-only forbidden hook names specified, including plain/wrapper/alias semantics; named surviving observation/cleanup hooks and real positive/negative cases required.",
+    "notes": "Whole-gate failure-obligation recording and clearing are deferred. Static capability is conditional on execution-time tuple/profile/source checks. Bootstrap private config writes and frozen outer legacy dispatcher are disclosed; no harness changes or executions in this specification repair."
+  },
   "not_authorized_here": [
     "runtime or test edits",
     "dependency or tuple installation",
