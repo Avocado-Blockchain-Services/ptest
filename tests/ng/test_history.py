@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import hashlib
 import importlib.util
 import io
 import json
@@ -93,6 +94,31 @@ def _store_path(domain, checkout):
     return domain.root / "checkouts" / checkout.checkout_id / "history.sqlite3"
 
 
+def _downgrade_store_to_pre_t12a(path: Path) -> None:
+    """Remove only T12a's additive schema, preserving a valid base store."""
+    connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE selection_quarantine")
+    connection.execute("DROP TABLE attempt_evidence")
+    connection.execute("DROP TABLE comparison_receipts")
+    connection.execute("ALTER TABLE baselines RENAME TO baselines_t12a")
+    connection.execute(
+        "CREATE TABLE baselines ("
+        "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+        "run_id TEXT NOT NULL, sequence INTEGER NOT NULL, head TEXT NOT NULL, "
+        "input_digest TEXT NOT NULL, compatibility TEXT NOT NULL, "
+        "inventory TEXT NOT NULL, policy_digest TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO baselines "
+        "SELECT singleton, run_id, sequence, head, input_digest, compatibility, "
+        "inventory, policy_digest, created_at FROM baselines_t12a"
+    )
+    connection.execute("DROP TABLE baselines_t12a")
+    connection.commit()
+    connection.close()
+
+
 def _full_error():
     error = sqlite3.OperationalError("database or disk is full")
     error.sqlite_errorcode = sqlite3.SQLITE_FULL
@@ -176,8 +202,13 @@ def _shadow_outcome(case, checkout, *, sequence, run_id, snapshot,
     selected_inventory = case.inventory(
         ("tests/test_a.py",), outcome="passed")
     full_inventory = case.inventory(
-        ("tests/test_a.py", "tests/test_b.py"),
-        outcome=full_outcome)
+        ("tests/test_a.py", "tests/test_b.py"), outcome="passed")
+    if full_outcome == "failed":
+        full_inventory = replace(
+            full_inventory,
+            tests=(full_inventory.tests[0], replace(
+                full_inventory.tests[1], outcome=C.Outcome.FAILED)),
+        )
     selected_plan = C.Plan(
         mode=C.Mode.SHADOW, execution="selected",
         files=("tests/test_a.py",), input_digest=snapshot.digest,
@@ -193,15 +224,218 @@ def _shadow_outcome(case, checkout, *, sequence, run_id, snapshot,
     selected = C.AttemptEvidence(
         attempt_id="a001", result=selected_result,
         inventory=selected_inventory, terminal_complete=True,
-        parallel_identity=False, runtime_identity="pytest:9")
+        parallel_identity=False, runtime_identity="66" * 32)
     full = C.AttemptEvidence(
         attempt_id="a002", result=full_result, inventory=full_inventory,
         terminal_complete=True, parallel_identity=False,
-        runtime_identity="pytest:9")
+        runtime_identity="66" * 32)
     verdict = "matched" if full_outcome == "passed" else "suspected-miss"
     return result, C.ShadowComparison(
         selected=selected, full=full, verdict=verdict,
         expected_quarantine=expected_quarantine)
+
+
+def _evidence(attempt_id, records, *, status=C.Status.PASSED,
+              terminal_complete=True, inventory_complete=True):
+    code = 0 if status is C.Status.PASSED else 23
+    attempt = C.AttemptResult(
+        attempt_id=attempt_id, phase="execution", status=status,
+        raw_exit_code=code, final_exit_code=code, source_valid=True,
+        inventory_complete=inventory_complete,
+    )
+    inventory = C.Inventory(
+        adapter="pytest", version="9.1.1", complete=inventory_complete,
+        tests=tuple(
+            C.TestRecord(
+                id=f"{file}::{name}", file=file, outcome=outcome,
+                setup_s=None, call_s=0.01, teardown_s=None,
+            )
+            for file, name, outcome in records
+        ),
+        digest="55" * 32,
+    )
+    return C.AttemptEvidence(
+        attempt_id=attempt_id, result=attempt, inventory=inventory,
+        terminal_complete=terminal_complete, parallel_identity=False,
+        runtime_identity="66" * 32,
+    )
+
+
+def _seed_quarantine(case, domain, checkout):
+    snapshot = _snapshot(case, compatibility="compat-v1")
+    policy = "22" * 32
+    baseline = replace(_result(
+        case, 0, before=snapshot, after=snapshot,
+        policy_digest=policy, checkout=checkout), run_id="0" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    divergent, comparison = _shadow_outcome(
+        case, checkout, sequence=1, run_id="1" * 32,
+        snapshot=snapshot, policy_digest=policy,
+        baseline_run_id=baseline.run_id,
+    )
+    assert H.publish_shadow_outcome(
+        domain, checkout, divergent, comparison).committed
+    quarantine = H.read_history(domain, checkout).selection_quarantine
+    assert quarantine is not None
+    return snapshot, policy, quarantine
+
+
+@pytest.mark.parametrize(
+    ("selected_records", "selected_status", "full_records", "full_status",
+     "terminal_complete", "expected"),
+    (
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),), C.Status.PASSED,
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),
+             ("tests/test_b.py", "test_b", C.Outcome.PASSED)), C.Status.PASSED,
+            True, "matched",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.FAILED),), C.Status.FAILED,
+            (("tests/test_a.py", "test_a", C.Outcome.FAILED),
+             ("tests/test_b.py", "test_b", C.Outcome.PASSED)), C.Status.FAILED,
+            True, "matched",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.FAILED),), C.Status.FAILED,
+            (("tests/test_a.py", "test_a", C.Outcome.FAILED),
+             ("tests/test_b.py", "test_b", C.Outcome.FAILED)), C.Status.FAILED,
+            True, "suspected-miss",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),), C.Status.PASSED,
+            (("tests/test_a.py", "test_a", C.Outcome.FAILED),
+             ("tests/test_b.py", "test_b", C.Outcome.PASSED)), C.Status.FAILED,
+            True, "unclassified-divergence",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),), C.Status.PASSED,
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),
+             ("tests/test_b.py", "test_b", C.Outcome.FAILED)), C.Status.FAILED,
+            True, "suspected-miss",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),), C.Status.PASSED,
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),
+             ("tests/test_b.py", "test_b", C.Outcome.PASSED)), C.Status.FAILED,
+            True, "unclassified-divergence",
+        ),
+        (
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),), C.Status.PASSED,
+            (("tests/test_a.py", "test_a", C.Outcome.PASSED),
+             ("tests/test_b.py", "test_b", C.Outcome.PASSED)), C.Status.PASSED,
+            False, "incomplete",
+        ),
+    ),
+)
+def test_shadow_verdict_uses_test_identity_and_inventory(
+        selected_records, selected_status, full_records, full_status,
+        terminal_complete, expected):
+    selected = _evidence(
+        "a001", selected_records, status=selected_status,
+        terminal_complete=terminal_complete,
+    )
+    full = _evidence(
+        "a002", full_records, status=full_status,
+        terminal_complete=terminal_complete,
+    )
+
+    assert H._derived_shadow_verdict(selected, full) == expected
+
+
+@pytest.mark.parametrize(
+    ("interruption", "expected_evidence"),
+    (("timeout", ("a001", "a002")),
+     ("cancelled", ("a001",)),
+     ("source-invalidated", ("a001",))),
+)
+def test_incomplete_shadow_persists_observations_and_whole_gate_obligation(
+        case, interruption, expected_evidence):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    before = _snapshot(case)
+    baseline = replace(_result(
+        case, 0, before=before, after=before, checkout=checkout,
+        policy_digest="22" * 32,
+    ), run_id="0" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+
+    selected = _evidence(
+        "a001", (("tests/test_a.py", "test_a", C.Outcome.FAILED),),
+        status=C.Status.FAILED,
+    )
+    not_run = C.AttemptResult(
+        attempt_id="a002", phase="execution", status=C.Status.NOT_RUN,
+        raw_exit_code=None, final_exit_code=None, source_valid=False,
+        inventory_complete=False,
+    )
+    after = before
+    status = C.Status.INCOMPLETE
+    signal = None
+    reasons = (C.Reason(code="execution-timeout", message="full timed out"),)
+    full = None
+    if interruption == "timeout":
+        full_result = C.AttemptResult(
+            attempt_id="a002", phase="execution", status=C.Status.INCOMPLETE,
+            raw_exit_code=-15, final_exit_code=70, source_valid=True,
+            inventory_complete=False,
+        )
+        full = C.AttemptEvidence(
+            attempt_id="a002", result=full_result, inventory=None,
+            terminal_complete=False, parallel_identity=False,
+            runtime_identity="66" * 32,
+        )
+    else:
+        full_result = not_run
+        if interruption == "cancelled":
+            status = C.Status.CANCELLED
+            signal = 2
+            reasons = ()
+        else:
+            after = _snapshot(case, digest="77" * 32)
+            reasons = (C.Reason(
+                code="changed-during-run", message="source changed"),)
+    plan = C.Plan(
+        mode=C.Mode.SHADOW, execution="selected",
+        files=("tests/test_a.py",), input_digest=before.digest,
+        compatibility=before.compatibility, baseline_run_id=baseline.run_id,
+    )
+    result = replace(_result(
+        case, 1, run_id="7" * 32, mode=C.Mode.SHADOW, status=status,
+        before=before, after=after, checkout=checkout,
+        policy_digest="22" * 32, runner_exit_code=17, exit_code=17,
+        source_valid=interruption != "source-invalidated",
+        full_gate_eligible=False,
+        attempts=(selected.result, full_result), reasons=reasons,
+    ), plan=plan, signal=signal)
+    comparison = C.ShadowComparison(
+        selected=selected, full=full, verdict="incomplete",
+        expected_quarantine=None,
+    )
+
+    published = H.publish_shadow_outcome(
+        domain, checkout, result, comparison)
+
+    assert published.committed is True
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        assert tuple(row[0] for row in connection.execute(
+            "SELECT attempt_id FROM attempt_evidence WHERE run_id = ? "
+            "ORDER BY attempt_id", (result.run_id,),
+        )) == expected_evidence
+        obligations = connection.execute(
+            "SELECT obligation_key, reason FROM obligations ORDER BY obligation_key"
+        ).fetchall()
+    assert ("test:tests/test_a.py::test_a", "prior-failure") in obligations
+    assert ("whole-gate", "full-gate-obligation") in obligations
+    assert H.read_history(domain, checkout).selection_quarantine is None
 
 
 def test_shadow_quarantine_requires_exact_newer_corrected_comparison(case):
@@ -264,6 +498,164 @@ def test_shadow_quarantine_requires_exact_newer_corrected_comparison(case):
     assert unrelated.read_text() == "sentinel"
 
 
+@pytest.mark.parametrize(
+    ("scenario", "baseline_compatibility", "baseline_policy"),
+    (
+        ("older-sequence", "compat-v2", "33" * 32),
+        ("stale-expected-row", "compat-v2", "33" * 32),
+        ("same-policy-and-compatibility", "compat-v1", "22" * 32),
+        ("timeout", "compat-v2", "33" * 32),
+    ),
+)
+def test_ineligible_shadow_cannot_clear_quarantine(
+        case, scenario, baseline_compatibility, baseline_policy):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, _, quarantine = _seed_quarantine(case, domain, checkout)
+    snapshot = _snapshot(case, compatibility=baseline_compatibility)
+    baseline = replace(_result(
+        case, 3, before=snapshot, after=snapshot,
+        policy_digest=baseline_policy, checkout=checkout), run_id="3" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    sequence = 1 if scenario == "older-sequence" else 4
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=sequence, run_id="4" * 32,
+        snapshot=snapshot, policy_digest=baseline_policy,
+        full_outcome="passed", expected_quarantine=quarantine,
+        baseline_run_id=baseline.run_id,
+    )
+    if scenario == "stale-expected-row":
+        comparison = replace(
+            comparison,
+            expected_quarantine=replace(quarantine, run_id="f" * 32),
+        )
+    elif scenario == "timeout":
+        full_result = replace(
+            comparison.full.result, status=C.Status.INCOMPLETE,
+            raw_exit_code=-15, final_exit_code=70,
+            inventory_complete=False,
+        )
+        full = replace(
+            comparison.full, result=full_result, inventory=None,
+            terminal_complete=False,
+        )
+        result = replace(
+            result, status=C.Status.INCOMPLETE,
+            runner_exit_code=-15, exit_code=70,
+            attempts=(comparison.selected.result, full_result),
+            reasons=(C.Reason(
+                code="execution-timeout", message="full timed out"),),
+        )
+        comparison = replace(
+            comparison, full=full, verdict="incomplete")
+
+    assert H.publish_shadow_outcome(
+        domain, checkout, result, comparison).committed
+    assert H.read_history(domain, checkout).selection_quarantine == quarantine
+
+
+@pytest.mark.parametrize("correction", ["policy", "compatibility"])
+def test_new_baseline_with_one_real_correction_can_clear_exact_quarantine(
+        case, correction):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, old_policy, quarantine = _seed_quarantine(case, domain, checkout)
+    compatibility = "compat-v2" if correction == "compatibility" else "compat-v1"
+    policy = "33" * 32 if correction == "policy" else old_policy
+    snapshot = _snapshot(case, compatibility=compatibility)
+    baseline = replace(_result(
+        case, 3, before=snapshot, after=snapshot,
+        policy_digest=policy, checkout=checkout), run_id="3" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=4, run_id="4" * 32,
+        snapshot=snapshot, policy_digest=policy,
+        full_outcome="passed", expected_quarantine=quarantine,
+        baseline_run_id=baseline.run_id,
+    )
+
+    assert H.publish_shadow_outcome(
+        domain, checkout, result, comparison).committed
+    assert H.read_history(domain, checkout).selection_quarantine is None
+
+
+def test_other_checkout_comparison_cannot_clear_quarantine(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, _, quarantine = _seed_quarantine(case, domain, checkout)
+    other_root = F.ensure_private_dir(domain.root, "other-checkout")
+    other = C.CheckoutIdentity(
+        project_id=checkout.project_id,
+        checkout_id=hashlib.sha256(
+            os.fsencode(os.path.realpath(other_root))).hexdigest()[:32],
+        root=other_root,
+    )
+    snapshot = _snapshot(case, compatibility="compat-v2")
+    baseline = replace(_result(
+        case, 3, before=snapshot, after=snapshot,
+        policy_digest="33" * 32, checkout=other), run_id="3" * 32)
+    assert H.publish_outcome(
+        domain, other, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    result, comparison = _shadow_outcome(
+        case, other, sequence=4, run_id="4" * 32,
+        snapshot=snapshot, policy_digest="33" * 32,
+        full_outcome="passed", expected_quarantine=quarantine,
+        baseline_run_id=baseline.run_id,
+    )
+
+    assert H.publish_shadow_outcome(
+        domain, other, result, comparison).committed
+    assert H.read_history(domain, checkout).selection_quarantine == quarantine
+    assert H.read_history(domain, other).selection_quarantine is None
+
+
+def test_health_markers_and_quarantine_bytes_are_preserved_together(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _, _, quarantine = _seed_quarantine(case, domain, checkout)
+    directory = _store_path(domain, checkout).parent
+    payloads = {
+        "history-disabled.json": b'{"version":1,"code":"coordinator-corrupt"}',
+        "history-capacity.json": (
+            b'{"version":1,"code":"capacity-exceeded","sequence":9}'),
+        "history-publication.json": (
+            b'{"version":1,"code":"selection-disabled","sequence":9}'),
+    }
+    for name, payload in payloads.items():
+        F.create_exclusive(directory, name, payload)
+    before = {name: (directory / name).read_bytes() for name in payloads}
+    snapshot = _snapshot(case, compatibility="compat-v2")
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=4, run_id="4" * 32,
+        snapshot=snapshot, policy_digest="33" * 32,
+        full_outcome="passed", expected_quarantine=quarantine,
+        baseline_run_id="3" * 32,
+    )
+
+    published = H.publish_shadow_outcome(
+        domain, checkout, result, comparison)
+
+    assert published.committed is False
+    assert published.reasons[0].code == "coordinator-corrupt"
+    assert {name: (directory / name).read_bytes()
+            for name in payloads} == before
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        assert connection.execute(
+            "SELECT run_id FROM selection_quarantine WHERE singleton = 1"
+        ).fetchone() == (quarantine.run_id,)
+
+
 def test_probe_persists_ordered_attempt_evidence_without_fabricated_inventory(case):
     domain = case.domain()
     checkout = case.checkout(domain)
@@ -288,7 +680,7 @@ def test_probe_persists_ordered_attempt_evidence_without_fabricated_inventory(ca
             inventory=case.inventory((f"tests/test_{index}.py",),
                                      outcome="passed"),
             terminal_complete=True, parallel_identity=True,
-            runtime_identity="pytest:9")
+            runtime_identity="66" * 32)
         for index, attempt in enumerate(attempts, 1))
 
     published = H.publish_probe_outcome(
@@ -303,6 +695,218 @@ def test_probe_persists_ordered_attempt_evidence_without_fabricated_inventory(ca
             "ORDER BY attempt_id", (result.run_id,)).fetchall() == [
                 ("a001",), ("a002",)]
     assert H.read_history(domain, checkout).selection_quarantine is None
+
+
+def test_pruning_compound_run_removes_attempts_and_receipt_atomically(
+        case, monkeypatch):
+    monkeypatch.setattr(H, "HISTORY_MAX_SUMMARIES", 1)
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    first, first_comparison = _shadow_outcome(
+        case, checkout, sequence=1, run_id="8" * 32,
+        snapshot=snapshot, policy_digest="22" * 32,
+        full_outcome="passed",
+    )
+    second, second_comparison = _shadow_outcome(
+        case, checkout, sequence=2, run_id="9" * 32,
+        snapshot=snapshot, policy_digest="22" * 32,
+        full_outcome="passed",
+    )
+    assert H.publish_shadow_outcome(
+        domain, checkout, first, first_comparison).committed
+    assert H.publish_shadow_outcome(
+        domain, checkout, second, second_comparison).committed
+
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        assert connection.execute(
+            "SELECT run_id FROM runs ORDER BY sequence"
+        ).fetchall() == [(second.run_id,)]
+        assert connection.execute(
+            "SELECT DISTINCT run_id FROM attempt_evidence"
+        ).fetchall() == [(second.run_id,)]
+        assert connection.execute(
+            "SELECT run_id FROM comparison_receipts"
+        ).fetchall() == [(second.run_id,)]
+
+
+def test_compound_evidence_counts_toward_logical_quota(case, monkeypatch):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=1, run_id="8" * 32,
+        snapshot=snapshot, policy_digest="22" * 32,
+        full_outcome="passed",
+    )
+    records = tuple(
+        ("tests/test_a.py", f"test_{index}_{'x' * 1000}", C.Outcome.PASSED)
+        for index in range(200)
+    )
+    selected = _evidence("a001", records)
+    full = _evidence(
+        "a002", (*records,
+                 ("tests/test_b.py", "test_b", C.Outcome.PASSED)),
+    )
+    result = replace(result, attempts=(selected.result, full.result))
+    comparison = replace(comparison, selected=selected, full=full)
+    assert H.publish_shadow_outcome(
+        domain, checkout, result, comparison).committed
+
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        run_rows = connection.execute(
+            "SELECT run_id, sequence, summary, input_before, input_after, "
+            "policy_digest, source_digest, compatibility, mode, status, inventory "
+            "FROM runs"
+        ).fetchall()
+        run_bytes = sum(
+            sum(len(str(value).encode()) for value in row[1:] if value is not None)
+            for row in run_rows
+        )
+        compound_rows = connection.execute(
+            "SELECT run_id, attempt_id, result, inventory, terminal_complete, "
+            "parallel_identity, runtime_identity FROM attempt_evidence"
+        ).fetchall()
+        compound_rows += connection.execute(
+            "SELECT run_id, verdict, expected_quarantine FROM comparison_receipts"
+        ).fetchall()
+        compound_bytes = sum(
+            sum(len(str(value).encode()) for value in row if value is not None)
+            for row in compound_rows
+        )
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+        reserve = page_size * 4
+        limit = reserve + run_bytes + 1
+        assert limit < reserve + run_bytes + compound_bytes
+        monkeypatch.setattr(H, "HISTORY_MAX_BYTES", limit)
+
+        class LogicalQuotaConnection:
+            def execute(self, statement, parameters=()):
+                if statement == "PRAGMA page_count":
+                    return type("PageCount", (), {"fetchone": lambda self: (0,)})()
+                return connection.execute(statement, parameters)
+
+        connection.execute("BEGIN IMMEDIATE")
+        removed = H._prune(
+            LogicalQuotaConnection(), now=H._candidate_time(result))
+        connection.commit()
+        assert removed is True
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempt_evidence").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM comparison_receipts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("orphan", ["attempt", "receipt"])
+def test_orphaned_compound_evidence_disables_history_without_clearing_quarantine(
+        case, orphan):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    baseline = replace(_result(
+        case, 0, before=snapshot, after=snapshot,
+        policy_digest="22" * 32, checkout=checkout), run_id="0" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=1, run_id="8" * 32,
+        snapshot=snapshot, policy_digest="22" * 32,
+        baseline_run_id=baseline.run_id,
+    )
+    assert H.publish_shadow_outcome(
+        domain, checkout, result, comparison).committed
+    quarantine = H.read_history(domain, checkout).selection_quarantine
+    assert quarantine is not None
+
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        if orphan == "attempt":
+            connection.execute(
+                "INSERT INTO attempt_evidence "
+                "SELECT ?, attempt_id, result, inventory, terminal_complete, "
+                "parallel_identity, runtime_identity FROM attempt_evidence "
+                "WHERE run_id = ? AND attempt_id = 'a001'",
+                ("f" * 32, result.run_id),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO comparison_receipts "
+                "SELECT ?, verdict, expected_quarantine "
+                "FROM comparison_receipts WHERE run_id = ?",
+                ("f" * 32, result.run_id),
+            )
+        connection.commit()
+
+    view = H.read_history(domain, checkout)
+    assert view.baseline is None
+    assert view.selection_quarantine is None
+    assert view.limitations[0].code == "coordinator-corrupt"
+    marker = _store_path(domain, checkout).parent / "history-disabled.json"
+    assert json.loads(marker.read_bytes())["code"] == "coordinator-corrupt"
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        assert connection.execute(
+            "SELECT run_id FROM selection_quarantine WHERE singleton = 1"
+        ).fetchone() == (quarantine.run_id,)
+
+
+@pytest.mark.parametrize("failure", ["interrupted", "disk-full"])
+def test_failed_compound_commit_never_acknowledges_partial_publication(
+        case, monkeypatch, failure):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    baseline = replace(_result(
+        case, 0, before=snapshot, after=snapshot,
+        policy_digest="22" * 32, checkout=checkout), run_id="0" * 32)
+    assert H.publish_outcome(
+        domain, checkout, baseline,
+        case.inventory(("tests/test_a.py", "tests/test_b.py"),
+                       outcome="passed"),
+    ).baseline_published
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=1, run_id="8" * 32,
+        snapshot=snapshot, policy_digest="22" * 32,
+        baseline_run_id=baseline.run_id,
+    )
+
+    def fail_store(*_args):
+        if failure == "disk-full":
+            raise _full_error()
+        raise TypeError("interrupted compound publication")
+
+    monkeypatch.setattr(H, "_store_attempt_evidence", fail_store)
+    if failure == "interrupted":
+        with pytest.raises(TypeError, match="interrupted compound publication"):
+            H.publish_shadow_outcome(domain, checkout, result, comparison)
+    else:
+        published = H.publish_shadow_outcome(
+            domain, checkout, result, comparison)
+        assert published.committed is False
+        assert published.reasons[0].code == "capacity-exceeded"
+
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", (result.run_id,)
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempt_evidence WHERE run_id = ?",
+            (result.run_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM comparison_receipts WHERE run_id = ?",
+            (result.run_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM selection_quarantine"
+        ).fetchone() == (0,)
+    view = H.read_history(domain, checkout)
+    assert view.selection_disabled is True
+    assert view.limitations[0].code == (
+        "selection-disabled" if failure == "interrupted"
+        else "capacity-exceeded")
 
 
 def test_shadow_failure_from_first_attempt_survives_later_full_pass(case):
@@ -2465,6 +3069,81 @@ def test_partial_nonempty_schema_read_persists_corruption(case):
             read(domain, checkout)
     assert path.read_bytes() == before
     assert json.loads((directory / "history-disabled.json").read_bytes())["code"] == "coordinator-corrupt"
+
+
+def test_pre_t12a_store_reads_without_mutation_then_writer_upgrades(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    initial = _result(
+        case, 1, before=snapshot, after=snapshot, checkout=checkout,
+    )
+    inventory = case.inventory(("tests/test_old.py",), outcome="passed")
+    assert H.publish_outcome(domain, checkout, initial, inventory).committed
+    path = _store_path(domain, checkout)
+    _downgrade_store_to_pre_t12a(path)
+    before = path.read_bytes()
+
+    view = H.read_history(domain, checkout)
+
+    assert view.selection_disabled is False
+    assert view.selection_quarantine is None
+    assert view.baseline is not None
+    assert view.baseline.runtime_identity is None
+    assert path.read_bytes() == before
+    assert not path.with_name("history-disabled.json").exists()
+
+    newer = replace(_result(
+        case, 2, before=snapshot, after=snapshot, checkout=checkout,
+    ), runtime_identity="44" * 32)
+    assert H.publish_outcome(domain, checkout, newer, inventory).committed
+    connection = sqlite3.connect(path)
+    tables = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    baseline_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(baselines)")
+    }
+    connection.close()
+    assert H._REQUIRED_TABLES.issubset(tables)
+    assert "runtime_identity" in baseline_columns
+    assert H.read_history(domain, checkout).baseline.runtime_identity == "44" * 32
+
+
+def test_writer_never_upgrades_a_partial_compound_schema(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    initial = _result(
+        case, 1, before=snapshot, after=snapshot, checkout=checkout,
+    )
+    inventory = case.inventory(("tests/test_old.py",), outcome="passed")
+    assert H.publish_outcome(domain, checkout, initial, inventory).committed
+    path = _store_path(domain, checkout)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE comparison_receipts")
+        connection.commit()
+
+    published = H.publish_outcome(
+        domain, checkout,
+        replace(initial, run_id="f" * 32, sequence=2), inventory,
+    )
+
+    assert published.committed is False
+    assert published.reasons[0].code == "coordinator-corrupt"
+    with sqlite3.connect(path) as connection:
+        assert "comparison_receipts" not in {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE run_id = ?", ("f" * 32,)
+        ).fetchone() == (0,)
+    assert json.loads(
+        path.with_name("history-disabled.json").read_bytes()
+    )["code"] == "coordinator-corrupt"
 
 
 def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch):

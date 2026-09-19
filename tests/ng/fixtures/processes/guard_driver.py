@@ -21,6 +21,8 @@ def main() -> int:
     stats_path = os.environ.pop("GUARD_STATS", "")
     advance = float(os.environ.pop("GUARD_ADVANCE_AFTER_FACTS", "0"))
     decision_timeout = os.environ.pop("GUARD_DECISION_TIMEOUT", "")
+    scan_limit_after_phase = os.environ.pop(
+        "GUARD_SCAN_LIMIT_AFTER_PHASE", "")
     if decision_timeout:
         guard.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = float(decision_timeout)
     clock_offset = [0.0]
@@ -81,6 +83,8 @@ def main() -> int:
     def emit(*args, **kwargs):
         result = original_emit(*args, **kwargs)
         if args[2] == "phase":
+            if scan_limit_after_phase:
+                guard._MAX_GROUP_SCAN = int(scan_limit_after_phase)
             barrier("fork")
         if args[2] == "runner-facts":
             clock_offset[0] += advance

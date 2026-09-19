@@ -131,6 +131,13 @@ class Harness:
             f"from pathlib import Path; Path({str(path)!r}).write_text('ran')"),
             cwd=self.root)
 
+    def write_exit(self, path, code):
+        return C.PreparedRun(argv=(
+            sys.executable, "-c",
+            f"from pathlib import Path; Path({str(path)!r}).write_text('ran'); "
+            f"raise SystemExit({code})",
+        ), cwd=self.root)
+
     def listener(self, name):
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         peer.bind(str(self.domain.root / (self.root.name + name)))
@@ -151,13 +158,17 @@ class Harness:
         return prepared
 
     def start(self, *, stage="", raw=None, queued=None, failure="", stats=False,
-              advance=0, decision_timeout=None):
+              advance=0, decision_timeout=None,
+              scan_limit_after_phase=None):
         env = dict(os.environ, GUARD_CONTROL_FD=str(self.control_guard.fileno()),
                    GUARD_MANIFEST_FD=str(self.manifest_read),
                    GUARD_FAILURE=failure,
                    GUARD_ADVANCE_AFTER_FACTS=str(advance),
                    GUARD_DECISION_TIMEOUT=("" if decision_timeout is None
                                            else str(decision_timeout)),
+                   GUARD_SCAN_LIMIT_AFTER_PHASE=(
+                       "" if scan_limit_after_phase is None
+                       else str(scan_limit_after_phase)),
                    GUARD_STATS=str(self.root / "stats") if stats else "")
         if stage:
             self.barrier = self.listener("b")
@@ -385,6 +396,104 @@ def test_replayed_attempt_decision_cannot_launch_later_attempt(harness):
     assert not h.later.exists()
 
 
+@pytest.mark.parametrize("later_code", [0, 1])
+def test_ordered_attempt_gates_preserve_earlier_exit_after_setup(
+        harness, later_code):
+    h = harness()
+    h.manifest = replace(
+        h.manifest,
+        setup=h.write(h.root / "setup"),
+        attempts=(h.write_exit(h.marker, 23),
+                  h.write_exit(h.later, later_code)),
+        attempt_ids=("a001", "a002"),
+    )
+
+    h.start()
+    assert h.finish()[0] == 0
+
+    assert (h.root / "setup").read_text() == "ran"
+    assert h.marker.read_text() == "ran"
+    assert h.later.read_text() == "ran"
+    ready = [frame.payload for frame in h.frames
+             if frame.kind == "attempt-ready"]
+    assert [(item["attempt_id"], item["previous_attempt_id"])
+            for item in ready] == [("a001", None), ("a002", "a001")]
+    assert ready[0]["gate_token"] != ready[1]["gate_token"]
+    facts = [frame.payload for frame in h.frames
+             if frame.kind == "runner-facts"]
+    assert [(item["phase"], item["attempt_id"], item["raw_exit_code"])
+            for item in facts] == [
+                ("setup", "a001", 0),
+                ("execution", "a001", 23),
+                ("execution", "a002", later_code),
+            ]
+
+
+def test_early_authenticated_decision_is_not_future_authority(harness):
+    h = harness()
+    h.auto_decide = False
+    early = C.ControlFrame(
+        protocol=C.GUARD_PROTOCOL_VERSION,
+        run_id=h.manifest.grant.run_id,
+        nonce=h.manifest.grant.nonce,
+        kind="attempt-decision",
+        payload={
+            "attempt_id": "a001",
+            "generation": h.manifest.grant.generation,
+            "gate_token": "d" * 32,
+            "action": "continue",
+            "reason": None,
+        },
+    )
+
+    h.start(queued=C.encode_control_frame(early))
+
+    assert h.finish()[0] == 70
+    assert not h.marker.exists()
+    assert h.row()["guard_pid"] is None
+
+
+@pytest.mark.parametrize("fault", ["generation", "wrong-direction"])
+def test_misdirected_or_wrong_generation_decision_never_launches(
+        harness, fault):
+    h = harness()
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    ready = h.read()
+    assert ready.kind == "attempt-ready"
+    if fault == "generation":
+        h.decision(ready, generation=ready.payload["generation"] + 1)
+    else:
+        h.control.sendall(C.encode_control_frame(C.ControlFrame(
+            protocol=C.GUARD_PROTOCOL_VERSION,
+            run_id=h.manifest.grant.run_id,
+            nonce=h.manifest.grant.nonce,
+            kind="phase",
+            payload={"phase": "execution", "attempt_id": "a001"},
+        )))
+
+    assert h.finish()[0] == 70
+    assert not h.marker.exists()
+    assert h.row()["state"] == "DRAINING"
+
+
+def test_authenticated_stop_closes_spawn_without_synthetic_facts(harness):
+    h = harness()
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    ready = h.read()
+    assert ready.kind == "attempt-ready"
+    h.decision(ready, action="stop", reason="unknown-input")
+
+    assert h.finish()[0] == 0
+    assert not h.marker.exists()
+    assert not any(frame.kind in {"phase", "runner-facts"}
+                   for frame in h.frames)
+    assert h.frames[-1].kind == "draining"
+
+
 def test_attempt_gate_eof_cancellation_and_watchdog_never_launch(harness):
     eof = harness(label="eof")
     eof.auto_decide = False
@@ -416,6 +525,28 @@ def test_attempt_gate_eof_cancellation_and_watchdog_never_launch(harness):
     assert timed.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 70
     assert not timed.marker.exists()
     assert timed.row()["state"] == "DRAINING"
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("delivery", ["pid", "group"])
+def test_signal_while_waiting_for_attempt_decision_never_launches(
+        harness, signum, delivery):
+    h = harness()
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+
+    if delivery == "pid":
+        os.kill(h.process.pid, signum)
+    else:
+        os.killpg(h.process.pid, signum)
+
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 128 + signum
+    assert not h.marker.exists()
+    assert not any(frame.kind in {"phase", "runner-facts"}
+                   for frame in h.frames)
+    assert h.frames[-1].kind == "draining"
 
 
 @pytest.mark.parametrize("signum", [2, 15])
@@ -666,6 +797,50 @@ def test_forced_kill_retains_charge_and_never_notifies_draining(harness, mode):
     assert h.row()["final_status"] is None
 
 
+def test_exited_direct_child_with_live_descendant_never_reaches_next_gate(
+        harness):
+    h = harness(owner=True)
+    h.workload("orphan")
+    h.start()
+    owned = h.running(count=2)
+
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == -signal.SIGKILL
+    assert any(info["mode"] == "ignore" for _, info in owned)
+    assert not h.later.exists()
+    assert not any(
+        frame.kind == "attempt-ready"
+        and frame.payload["attempt_id"] == "a002"
+        for frame in h.frames)
+    assert h.row()["state"] == "RUNNING"
+    follower = harness(domain=h.domain, owner=True, label="q")
+    assert follower.grant is None
+
+
+def test_observation_limit_exhaustion_never_reaches_next_gate_or_releases(
+        harness):
+    h = harness(owner=True)
+    h.manifest = replace(
+        h.manifest,
+        attempts=(h.write(h.marker), h.write(h.later)),
+        attempt_ids=("a001", "a002"),
+    )
+    # The test driver lowers the real guard's bounded group scan only after
+    # the first phase is authorized, so this exercises predecessor evidence
+    # rather than blocking admission or the first decision gate.
+    h.start(scan_limit_after_phase=0)
+
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == -signal.SIGKILL
+    assert h.marker.read_text() == "ran"
+    assert not h.later.exists()
+    assert not any(
+        frame.kind == "attempt-ready"
+        and frame.payload["attempt_id"] == "a002"
+        for frame in h.frames)
+    assert h.row()["state"] == "RUNNING"
+    follower = harness(domain=h.domain, owner=True, label="q")
+    assert follower.grant is None
+
+
 def test_observed_escape_retains_charge_and_unrelated_sentinel_survives(harness):
     h = harness(owner=True)
     h.workload("escaped")
@@ -827,7 +1002,7 @@ def test_group_presence_until_guard_is_reaped(harness):
     assert platform.probe_group(h.process.pid).exists is False
 
 
-def test_compound_deadline_spans_setup_and_attempts_with_truthful_unstarted_fact(harness):
+def test_compound_deadline_emits_no_facts_for_unstarted_attempt(harness):
     h = harness()
     h.manifest = replace(h.manifest, setup=h.write(h.root / "setup"),
                          attempts=(h.write(h.marker), h.write(h.later)),
@@ -841,11 +1016,12 @@ def test_compound_deadline_spans_setup_and_attempts_with_truthful_unstarted_fact
     assert h.marker.read_text() == "ran"
     assert not h.later.exists()
     facts = [f.payload for f in h.frames if f.kind == "runner-facts"]
-    assert len(facts) == 3
-    assert facts[-1]["attempt_id"] == "a002"
-    assert facts[-1]["raw_exit_code"] is None
-    assert facts[-1]["problem"]["code"] == "execution-timeout"
-    assert "compound" in facts[-1]["problem"]["message"]
+    assert [(fact["phase"], fact["attempt_id"]) for fact in facts] == [
+        ("setup", "a001"), ("execution", "a001")]
+    assert not any(
+        frame.kind == "runner-facts"
+        and frame.payload["attempt_id"] == "a002"
+        for frame in h.frames)
     assert h.frames[-1].kind == "draining"
 
 

@@ -593,8 +593,11 @@ def _incomplete(result: C.RunResult, reason: C.Reason) -> C.RunResult:
         result, status=C.Status.INCOMPLETE, phase="finalization",
         exit_code=code, exit_origin=result.exit_origin if result.exit_code else "ptest",
         reasons=result.reasons + (reason,),
-        attempts=tuple(replace(attempt, status=C.Status.INCOMPLETE,
-                               final_exit_code=code) for attempt in result.attempts),
+        attempts=tuple(
+            attempt if attempt.status is C.Status.NOT_RUN
+            else replace(
+                attempt, status=C.Status.INCOMPLETE, final_exit_code=code)
+            for attempt in result.attempts),
     )
 
 
@@ -807,6 +810,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
             nonlocal gate_snapshot
             gate_snapshot = _capture_source(
                 domain, effective, request, ensure_key=False)
+            if (native_pytest and plan.execution == "full"
+                    and (input_before.digest is None
+                         or gate_snapshot.digest is None)):
+                return _reason(
+                    "unknown-input",
+                    "required pytest content identity is unavailable")
             return _source_invalidation(input_before, gate_snapshot)
 
         try:
@@ -866,9 +875,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
         status, final_code, origin, signal_number = _outcome(
             raw, signals.number, guard_problem, incomplete)
         attempt_result = C.AttemptResult(
-            attempt_id="a001", phase="execution", status=status,
-            raw_exit_code=raw, final_exit_code=final_code, source_valid=False,
-            inventory_complete=False, timings=C.Timings(execution_s=execution_s),
+            attempt_id="a001", phase="execution",
+            status=C.Status.NOT_RUN if stopped_handoff else status,
+            raw_exit_code=None if stopped_handoff else raw,
+            final_exit_code=None if stopped_handoff else final_code,
+            source_valid=False, inventory_complete=False,
+            timings=None if stopped_handoff else C.Timings(
+                execution_s=execution_s),
         )
         result = _result(run_id=run_id, checkout=checkout, request=request,
                          plan=plan, command=command, status=status,
@@ -891,7 +904,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # the post-run snapshot while the lease is held, before finalization.
         input_after = _capture_source(domain, effective, request, ensure_key=False)
         source_valid = _source_valid(input_before, input_after)
-        if native_pytest and not stopped_at_gate:
+        if stopped_at_gate or native_pytest:
             source_valid = False
         result = replace(
             result,

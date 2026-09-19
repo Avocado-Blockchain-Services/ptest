@@ -358,7 +358,7 @@ def _git_pytest_project(case, domain):
 
 
 def test_pytest_full_missing_source_evidence_is_incomplete_while_command_full_passes(case):
-    """The missing-either-digest rule is Pytest-full-only; command full keeps its semantics."""
+    """Required native identity stops at a001; command full keeps its semantics."""
     domain = case.domain()
     command_root = _command_project(case, domain, args=("exit", "0"))
     command_result = _execute(command_root, domain)
@@ -370,11 +370,14 @@ def test_pytest_full_missing_source_evidence_is_incomplete_while_command_full_pa
 
     assert pytest_result.input_before.digest is None
     assert (pytest_result.status, pytest_result.exit_code,
-            pytest_result.runner_exit_code) == (C.Status.INCOMPLETE, 70, 0)
+            pytest_result.runner_exit_code) == (C.Status.INCOMPLETE, 70, None)
     assert pytest_result.exit_origin == "ptest"
     assert pytest_result.source_valid is False
     assert pytest_result.full_gate_eligible is False
     assert any(reason.code == "unknown-input" for reason in pytest_result.reasons)
+    assert pytest_result.attempts[0].status is C.Status.NOT_RUN
+    assert pytest_result.attempts[0].raw_exit_code is None
+    assert pytest_result.attempts[0].final_exit_code is None
     assert pytest_result.attempts[0].inventory_complete is False
 
 
@@ -530,8 +533,39 @@ def test_attempt_gate_blocks_launch_when_source_changed_after_admission(
 
     assert (result.status, result.exit_code, result.runner_exit_code) == (
         C.Status.INCOMPLETE, 70, None)
+    assert result.source_valid is False
+    assert len(result.attempts) == 1
+    assert result.attempts[0].status is C.Status.NOT_RUN
+    assert result.attempts[0].raw_exit_code is None
+    assert result.attempts[0].final_exit_code is None
+    assert result.attempts[0].timings is None
     assert not (root / "launch-marker").exists()
     assert any(reason.code == "changed-during-run" for reason in result.reasons)
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
+
+
+def test_pytest_unknown_identity_stops_at_first_gate_without_launch(case):
+    domain = case.domain()
+    root = _pytest_project(case, domain)
+    marker = root / "native-launched"
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('launched')\n"
+        "def test_body():\n"
+        "    assert True\n"
+    )
+
+    result = _execute(root, domain)
+
+    assert not marker.exists()
+    assert (result.status, result.exit_code, result.runner_exit_code) == (
+        C.Status.INCOMPLETE, 70, None)
+    assert result.source_valid is False
+    assert result.attempts[0].status is C.Status.NOT_RUN
+    assert result.attempts[0].raw_exit_code is None
+    assert result.attempts[0].final_exit_code is None
+    assert result.attempts[0].timings is None
+    assert any(reason.code == "unknown-input" for reason in result.reasons)
     assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
 
 

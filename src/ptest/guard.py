@@ -49,7 +49,6 @@ class _State:
     child: subprocess.Popen | None = None
     grace_deadline: float | None = None
     spawned: bool = False
-    stop_reason: str | None = None
 
     def cancel(self, signum: int) -> None:
         # First cancellation wins, including signals reflected by our killpg.
@@ -272,7 +271,6 @@ class _Control:
         decision = self.decision
         self.decision = None
         if decision.payload["action"] == "stop":
-            self.state.stop_reason = decision.payload["reason"]
             self.state.spawn_closed = True
             return False
         return True
@@ -479,11 +477,6 @@ def run_guard(control_fd: int, manifest_fd: int) -> int:
                     attempt_id=attempt_id,
                     previous_attempt_id=previous_attempt_id,
                     compound_deadline=compound_deadline):
-                if (state.problem is not None
-                        and state.problem.code == "execution-timeout"):
-                    _runner_facts(
-                        control, prepared, attempt_id, "execution", None,
-                        state.problem)
                 break
             _run_one(control, manifest, prepared, attempt_id, "execution",
                      manifest.attempt_timeout_s, compound_deadline, identity, state)

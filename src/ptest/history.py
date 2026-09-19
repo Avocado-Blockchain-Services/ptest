@@ -627,7 +627,9 @@ def _open_store(
             _validate_schema(
                 connection, project_id=checkout.project_id,
                 checkout_id=checkout.checkout_id,
+                required_tables=_BASE_REQUIRED_TABLES,
             )
+            _compound_schema_present(connection)
             after = os.lstat(path)
             if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise _HistoryStateError("unsafe-path")
@@ -701,16 +703,9 @@ def _ensure_schema(
                 connection, project_id=project_id, checkout_id=checkout_id,
                 required_tables=_BASE_REQUIRED_TABLES,
             )
-            missing = _COMPOUND_TABLES - tables
-            if missing:
+            if not _compound_schema_present(connection):
                 for statement in _COMPOUND_SCHEMA_STATEMENTS:
-                    table = statement.split("CREATE TABLE ", 1)[1].split(" ", 1)[0]
-                    if table in missing:
-                        connection.execute(statement)
-            baseline_columns = {
-                row[1] for row in connection.execute(
-                    "PRAGMA table_info(baselines)")}
-            if "runtime_identity" not in baseline_columns:
+                    connection.execute(statement)
                 connection.execute(
                     "ALTER TABLE baselines ADD COLUMN runtime_identity TEXT")
             _validate_schema(
@@ -729,6 +724,20 @@ def _schema_tables(connection: sqlite3.Connection) -> frozenset[str]:
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
     )
+
+
+def _compound_schema_present(connection: sqlite3.Connection) -> bool:
+    tables = _schema_tables(connection)
+    present = tables & _COMPOUND_TABLES
+    baseline_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(baselines)")
+    }
+    has_runtime_identity = "runtime_identity" in baseline_columns
+    if not present and not has_runtime_identity:
+        return False
+    if present == _COMPOUND_TABLES and has_runtime_identity:
+        return True
+    raise _HistoryStateError("coordinator-corrupt")
 
 
 def _validate_schema(
@@ -961,12 +970,16 @@ def _quarantine_from_row(
 
 
 def _validate_compound_evidence(connection: sqlite3.Connection) -> None:
+    run_ids = {
+        row[0] for row in connection.execute("SELECT run_id FROM runs").fetchall()
+    }
     rows = connection.execute(
         "SELECT run_id, attempt_id, result, inventory, terminal_complete, "
         "parallel_identity, runtime_identity FROM attempt_evidence"
     ).fetchall()
     for run_id, attempt_id, result_text, inventory_text, terminal, parallel, runtime in rows:
-        if (not isinstance(run_id, str) or not isinstance(attempt_id, str)
+        if (not isinstance(run_id, str) or run_id not in run_ids
+                or not isinstance(attempt_id, str)
                 or not isinstance(result_text, str)
                 or terminal not in (0, 1) or parallel not in (0, 1)
                 or (runtime is not None and not isinstance(runtime, str))):
@@ -986,15 +999,25 @@ def _validate_compound_evidence(connection: sqlite3.Connection) -> None:
             raise _HistoryStateError("coordinator-corrupt") from None
         if attempt.attempt_id != attempt_id:
             raise _HistoryStateError("coordinator-corrupt")
+        inventory = None
         if inventory_text is not None:
             if not isinstance(inventory_text, str):
                 raise _HistoryStateError("coordinator-corrupt")
-            _inventory_from_dict(_decode_json(inventory_text))
+            inventory = _inventory_from_dict(_decode_json(inventory_text))
+        try:
+            C.AttemptEvidence(
+                attempt_id=attempt_id, result=attempt,
+                inventory=inventory, terminal_complete=bool(terminal),
+                parallel_identity=bool(parallel), runtime_identity=runtime,
+            )
+        except (TypeError, ValueError):
+            raise _HistoryStateError("coordinator-corrupt") from None
     receipts = connection.execute(
         "SELECT run_id, verdict, expected_quarantine FROM comparison_receipts"
     ).fetchall()
     for run_id, verdict, expected_text in receipts:
-        if (not isinstance(run_id, str) or verdict not in {
+        if (not isinstance(run_id, str) or run_id not in run_ids
+                or verdict not in {
                 "matched", "suspected-miss", "unclassified-divergence",
                 "incomplete"}):
             raise _HistoryStateError("coordinator-corrupt")
@@ -1139,9 +1162,11 @@ def _read_state(
     ).fetchone()
     if disabled_row is None or disabled_row[0] not in {"0", "1"}:
         raise _HistoryStateError("coordinator-corrupt")
+    compound_schema = _compound_schema_present(connection)
+    runtime_column = ", runtime_identity" if compound_schema else ""
     baseline_row = connection.execute(
         "SELECT run_id, sequence, head, input_digest, compatibility, inventory, "
-        "policy_digest, created_at, runtime_identity"
+        f"policy_digest, created_at{runtime_column}"
         " FROM baselines WHERE singleton = 1"
     ).fetchone()
     baseline = None
@@ -1152,7 +1177,7 @@ def _read_state(
                 input_digest=baseline_row[3], compatibility=baseline_row[4],
                 inventory=_inventory_from_dict(_decode_json(baseline_row[5])),
                 policy_digest=baseline_row[6], created_at=baseline_row[7],
-                runtime_identity=baseline_row[8],
+                runtime_identity=baseline_row[8] if compound_schema else None,
             )
         except (TypeError, ValueError):
             raise _HistoryStateError("coordinator-corrupt") from None
@@ -1161,15 +1186,18 @@ def _read_state(
         "FROM obligations ORDER BY sequence ASC, obligation_key ASC"
     ).fetchall()
     obligations = tuple(_obligation_from_row(row) for row in rows)
-    quarantine = _quarantine_from_row(connection.execute(
-        "SELECT code, run_id, sequence, policy_digest, compatibility, "
-        "input_digest, verdict FROM selection_quarantine WHERE singleton = 1"
-    ).fetchone())
+    quarantine = None
+    if compound_schema:
+        quarantine = _quarantine_from_row(connection.execute(
+            "SELECT code, run_id, sequence, policy_digest, compatibility, "
+            "input_digest, verdict FROM selection_quarantine WHERE singleton = 1"
+        ).fetchone())
     # Validate every retained public row before making history usable.  A
     # malformed summary is uncertainty, not a reason to silently discard it.
     _validate_private_runs(connection)
     _validate_reconciliations(connection)
-    _validate_compound_evidence(connection)
+    if compound_schema:
+        _validate_compound_evidence(connection)
     if baseline is not None:
         _validate_baseline(connection, baseline, baseline_row[1])
     if marker_code is not None:
@@ -1594,6 +1622,48 @@ def _baseline_storage_size(connection: sqlite3.Connection) -> int:
     return 0 if row is None else sum(_value_size(value) for value in row)
 
 
+def _quarantine_storage_size(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT singleton, code, run_id, sequence, policy_digest, "
+        "compatibility, input_digest, verdict FROM selection_quarantine "
+        "WHERE singleton = 1"
+    ).fetchone()
+    return 0 if row is None else sum(_value_size(value) for value in row)
+
+
+def _attempt_evidence_storage_size(
+        connection: sqlite3.Connection, run_id: str | None = None) -> int:
+    statement = (
+        "SELECT run_id, attempt_id, result, inventory, terminal_complete, "
+        "parallel_identity, runtime_identity FROM attempt_evidence"
+    )
+    parameters: tuple = ()
+    if run_id is not None:
+        statement += " WHERE run_id = ?"
+        parameters = (run_id,)
+    rows = connection.execute(statement, parameters).fetchall()
+    return sum(_value_size(value) for row in rows for value in row)
+
+
+def _comparison_receipt_storage_size(
+        connection: sqlite3.Connection, run_id: str | None = None) -> int:
+    statement = (
+        "SELECT run_id, verdict, expected_quarantine FROM comparison_receipts"
+    )
+    parameters: tuple = ()
+    if run_id is not None:
+        statement += " WHERE run_id = ?"
+        parameters = (run_id,)
+    rows = connection.execute(statement, parameters).fetchall()
+    return sum(_value_size(value) for row in rows for value in row)
+
+
+def _delete_run(connection: sqlite3.Connection, run_id: str) -> None:
+    connection.execute("DELETE FROM attempt_evidence WHERE run_id = ?", (run_id,))
+    connection.execute("DELETE FROM comparison_receipts WHERE run_id = ?", (run_id,))
+    connection.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+
+
 def _utc_time(timestamp: str) -> datetime:
     value = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
@@ -1608,12 +1678,14 @@ def _candidate_time(result: C.RunResult) -> datetime:
 
 def _incoming_storage_size(
     result: C.RunResult, inventory: C.Inventory | None,
+    evidence: tuple[C.AttemptEvidence, ...] = (),
+    comparison: C.ShadowComparison | None = None,
 ) -> int:
     before = _json_bytes(_snapshot_dict(result.input_before)) if result.input_before else None
     after = _json_bytes(_snapshot_dict(result.input_after)) if result.input_after else None
     source_digest, compatibility = _result_identity(result)
     stored_inventory = None if inventory is None else _json_bytes(_inventory_dict(inventory))
-    return sum(
+    size = sum(
         _value_size(value)
         for value in (
             result.run_id, result.sequence, result.finished_at,
@@ -1622,6 +1694,16 @@ def _incoming_storage_size(
             result.mode.value, result.status.value, stored_inventory,
         )
     )
+    for item in evidence:
+        size += _value_size(result.run_id)
+        size += sum(_value_size(value) for value in _attempt_evidence_dict(item))
+    if comparison is not None:
+        expected = (
+            None if comparison.expected_quarantine is None
+            else _json_bytes(_quarantine_dict(comparison.expected_quarantine)))
+        size += sum(_value_size(value) for value in (
+            result.run_id, comparison.verdict, expected))
+    return size
 
 
 def _prune(
@@ -1659,7 +1741,7 @@ def _prune(
         except (TypeError, ValueError, OverflowError):
             old = False
         if old or run_id not in keep:
-            connection.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+            _delete_run(connection, run_id)
             removed = True
 
     reconciliation_rows = connection.execute(
@@ -1688,6 +1770,9 @@ def _prune(
         _obligation_storage_size(connection)
         + _reconciliation_storage_size(connection)
         + _baseline_storage_size(connection)
+        + _quarantine_storage_size(connection)
+        + _attempt_evidence_storage_size(connection)
+        + _comparison_receipt_storage_size(connection)
         + incoming_bytes
     )
     physical = page_size * int(connection.execute("PRAGMA page_count").fetchone()[0])
@@ -1700,8 +1785,12 @@ def _prune(
     for row in candidates:
         if logical <= logical_budget and freed >= physical_shortfall:
             break
-        connection.execute("DELETE FROM runs WHERE run_id = ?", (row[0],))
-        size = _run_storage_size(row)
+        size = (
+            _run_storage_size(row)
+            + _attempt_evidence_storage_size(connection, row[0])
+            + _comparison_receipt_storage_size(connection, row[0])
+        )
+        _delete_run(connection, row[0])
         logical -= size
         freed += size
         removed = True
@@ -1738,13 +1827,16 @@ def _compact(connection: sqlite3.Connection) -> None:
 def _maintenance_prune(
     connection: sqlite3.Connection, result: C.RunResult,
     inventory: C.Inventory | None,
+    evidence: tuple[C.AttemptEvidence, ...] = (),
+    comparison: C.ShadowComparison | None = None,
 ) -> None:
     connection.execute("BEGIN IMMEDIATE")
     try:
         pruned = _prune(
             connection,
             protected_run_ids=(result.run_id,),
-            incoming_bytes=_incoming_storage_size(result, inventory),
+            incoming_bytes=_incoming_storage_size(
+                result, inventory, evidence, comparison),
             now=_candidate_time(result),
         )
         connection.commit()
@@ -1779,7 +1871,8 @@ def _capacity_prune(connection: sqlite3.Connection, run_id: str, batch: int) -> 
             (run_id, batch),
         ).fetchall()
         if rows:
-            connection.executemany("DELETE FROM runs WHERE run_id = ?", rows)
+            for (candidate_run_id,) in rows:
+                _delete_run(connection, candidate_run_id)
         else:
             rows = connection.execute(
                 "SELECT reconciliation_key FROM reconciliations "
@@ -1852,10 +1945,23 @@ def _evidence_passes(evidence: C.AttemptEvidence | None) -> bool:
 def _apply_quarantine_transition(
         connection: sqlite3.Connection, result: C.RunResult,
         comparison: C.ShadowComparison) -> None:
+    if comparison.verdict == "incomplete":
+        return
+    if comparison.verdict == "matched" and comparison.expected_quarantine is None:
+        return
+    baseline, obligations, disabled, limitations, quarantine = _read_state(
+        connection)
+    history = C.HistoryView(
+        baseline=baseline, obligations=obligations,
+        selection_disabled=disabled, limitations=limitations,
+        selection_quarantine=quarantine,
+    )
+    if not _shadow_transition_eligible(history, result, comparison):
+        return
     source_digest, compatibility = _result_identity(result)
-    assert source_digest is not None
-    assert compatibility is not None
-    assert result.policy_digest is not None
+    if (source_digest is None or compatibility is None
+            or result.policy_digest is None):
+        return
     if comparison.verdict in {
             "suspected-miss", "unclassified-divergence"}:
         quarantine = C.SelectionQuarantine(
@@ -1997,7 +2103,8 @@ def _publish_with_recovery(
     comparison: C.ShadowComparison | None = None,
 ) -> tuple[bool, bool]:
     try:
-        _maintenance_prune(connection, result, inventory)
+        _maintenance_prune(
+            connection, result, inventory, evidence, comparison)
     except sqlite3.Error as exc:
         if not _is_sqlite_full(exc):
             raise
@@ -2206,21 +2313,26 @@ def _validate_compound_binding(
     if (result.project_id != checkout.project_id
             or result.checkout_id != checkout.checkout_id):
         raise ValueError("compound result does not match checkout")
-    source_digest, compatibility = _result_identity(result)
-    if (source_digest is None or compatibility is None
-            or result.policy_digest is None):
-        raise ValueError("compound result source and policy bindings are required")
+    if result.policy_digest is None:
+        raise ValueError("compound result policy binding is required")
     if len({item.attempt_id for item in evidence}) != len(evidence):
         raise ValueError("compound evidence attempt ids must be distinct")
-    expected_ids = tuple(f"a{index:03d}" for index in range(1, len(evidence) + 1))
-    if tuple(item.attempt_id for item in evidence) != expected_ids:
-        raise ValueError("compound evidence must be ordered and contiguous")
-    by_id = {item.attempt_id: item.result for item in evidence}
-    for attempt in result.attempts:
-        if by_id.get(attempt.attempt_id) != attempt:
+    result_ids = tuple(item.attempt_id for item in result.attempts)
+    expected_ids = tuple(
+        f"a{index:03d}" for index in range(1, len(result.attempts) + 1))
+    if result_ids != expected_ids:
+        raise ValueError("compound result attempts must be ordered and contiguous")
+    if tuple(item.attempt_id for item in evidence) != result_ids[:len(evidence)]:
+        raise ValueError("compound evidence must be an ordered observed prefix")
+    for attempt, observed in zip(result.attempts, evidence, strict=False):
+        if observed.result != attempt:
             raise ValueError("compound evidence does not match result attempts")
-    if len(result.attempts) != len(evidence):
-        raise ValueError("compound result must retain every attempt")
+    for attempt in result.attempts[len(evidence):]:
+        if (attempt.status is not C.Status.NOT_RUN
+                or attempt.raw_exit_code is not None
+                or attempt.final_exit_code is not None
+                or attempt.timings is not None):
+            raise ValueError("unobserved compound attempts must be not-run")
 
 
 def _derived_shadow_verdict(
@@ -2228,26 +2340,54 @@ def _derived_shadow_verdict(
         full: C.AttemptEvidence | None) -> str:
     if selected is None or full is None:
         return "incomplete"
-    selected_pass = _evidence_passes(selected)
-    full_pass = _evidence_passes(full)
-    if selected_pass and full_pass:
-        return "matched"
-    if (selected_pass and full.terminal_complete
-            and full.inventory is not None and full.inventory.complete
-            and (full.result.status is C.Status.FAILED
-                 or any(item.outcome in _FAILURE_OUTCOMES
-                        for item in full.inventory.tests))):
-        return "suspected-miss"
     if (not selected.terminal_complete or not full.terminal_complete
             or selected.inventory is None or full.inventory is None
-            or not selected.inventory.complete or not full.inventory.complete):
+            or not selected.inventory.complete or not full.inventory.complete
+            or not selected.result.inventory_complete
+            or not full.result.inventory_complete
+            or not selected.result.source_valid or not full.result.source_valid
+            or selected.result.status in {
+                C.Status.INCOMPLETE, C.Status.CANCELLED, C.Status.NOT_RUN}
+            or full.result.status in {
+                C.Status.INCOMPLETE, C.Status.CANCELLED, C.Status.NOT_RUN}
+            or any(item.outcome is C.Outcome.UNKNOWN
+                   for item in (*selected.inventory.tests,
+                                *full.inventory.tests))):
         return "incomplete"
-    return "unclassified-divergence"
+    selected_by_id = {item.id: item for item in selected.inventory.tests}
+    full_by_id = {item.id: item for item in full.inventory.tests}
+    selected_files = {item.file for item in selected.inventory.tests}
+    full_selected_ids = {
+        item.id for item in full.inventory.tests if item.file in selected_files
+    }
+    if set(selected_by_id) != full_selected_ids:
+        return "incomplete"
+    if any(
+            selected_by_id[test_id].outcome != full_by_id[test_id].outcome
+            for test_id in selected_by_id):
+        return "unclassified-divergence"
+    if any(
+            item.outcome in _FAILURE_OUTCOMES
+            and item.file not in selected_files
+            for item in full.inventory.tests):
+        return "suspected-miss"
+    attributed_selected_failure = any(
+        item.outcome in _FAILURE_OUTCOMES
+        for item in selected.inventory.tests)
+    attributed_full_failure = any(
+        item.outcome in _FAILURE_OUTCOMES
+        for item in full.inventory.tests)
+    if ((selected.result.status is C.Status.FAILED)
+            != attributed_selected_failure
+            or (full.result.status is C.Status.FAILED)
+            != attributed_full_failure):
+        return "unclassified-divergence"
+    return "matched"
 
 
-def _validate_shadow_eligibility(
+def _shadow_transition_eligible(
         history: C.HistoryView, result: C.RunResult,
-        comparison: C.ShadowComparison) -> None:
+        comparison: C.ShadowComparison) -> bool:
     selected, full = comparison.selected, comparison.full
     baseline = history.baseline
     if (selected is None or full is None
@@ -2264,13 +2404,14 @@ def _validate_shadow_eligibility(
             or not selected.inventory.complete or not full.inventory.complete
             or selected.runtime_identity is None
             or selected.runtime_identity != full.runtime_identity):
-        raise ValueError("shadow comparison is not bound to eligible evidence")
+        return False
     selected_files = {item.file for item in selected.inventory.tests}
     full_files = {item.file for item in full.inventory.tests}
     if (selected.attempt_id != "a001" or full.attempt_id != "a002"
             or selected_files != set(result.plan.files)
             or not selected_files < full_files):
-        raise ValueError("shadow comparison is not a genuine selected/full pair")
+        return False
+    return True
 
 
 def _publish_compound(
@@ -2316,8 +2457,6 @@ def publish_shadow_outcome(
         item for item in (comparison.selected, comparison.full)
         if item is not None)
     _validate_compound_binding(checkout, result, evidence, C.Mode.SHADOW)
-    _validate_shadow_eligibility(
-        read_history(domain, checkout), result, comparison)
     if comparison.verdict != _derived_shadow_verdict(
             comparison.selected, comparison.full):
         raise ValueError("shadow verdict does not match retained evidence")

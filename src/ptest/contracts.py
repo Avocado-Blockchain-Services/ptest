@@ -831,7 +831,7 @@ class Baseline:
         _check_hex("baseline.policy_digest", self.policy_digest, 64)
         _check_str("baseline.created_at", self.created_at)
         if self.runtime_identity is not None:
-            _check_str("baseline.runtime_identity", self.runtime_identity)
+            _check_hex("baseline.runtime_identity", self.runtime_identity, 64)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -871,6 +871,8 @@ class CompoundSupport:
             _check_bool("support.parallel_identity", self.parallel_identity))
         if self.profile is not None:
             _check_str("support.profile", self.profile)
+        elif self.selection or self.parallel_identity:
+            raise ValueError("qualified support requires a profile")
         items = _check_tuple("support.limitations", self.limitations)
         for item in items:
             if not isinstance(item, Reason):
@@ -904,7 +906,7 @@ class AttemptEvidence:
             self, "parallel_identity",
             _check_bool("evidence.parallel_identity", self.parallel_identity))
         if self.runtime_identity is not None:
-            _check_str("evidence.runtime_identity", self.runtime_identity)
+            _check_hex("evidence.runtime_identity", self.runtime_identity, 64)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1323,7 +1325,7 @@ class RunResult:
         if self.policy_digest is not None:
             _check_hex("result.policy_digest", self.policy_digest, 64)
         if self.runtime_identity is not None:
-            _check_str("result.runtime_identity", self.runtime_identity)
+            _check_hex("result.runtime_identity", self.runtime_identity, 64)
 
 
 def serialize_run_result(result: RunResult) -> dict:
@@ -1887,7 +1889,8 @@ class ControlFrame:
     payload: dict
 
     def __post_init__(self) -> None:
-        if self.protocol != GUARD_PROTOCOL_VERSION:
+        if (not _is_int(self.protocol)
+                or self.protocol != GUARD_PROTOCOL_VERSION):
             raise ValueError("control protocol must be 2")
         _check_hex("control.run_id", self.run_id, 32)
         _check_hex("control.nonce", self.nonce, 64)
@@ -2010,7 +2013,8 @@ class LaunchManifest:
     compound_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
-        if self.protocol != GUARD_PROTOCOL_VERSION:
+        if (not _is_int(self.protocol)
+                or self.protocol != GUARD_PROTOCOL_VERSION):
             raise ValueError("manifest protocol must be 2")
         if not isinstance(self.domain, DomainPaths):
             raise TypeError("manifest.domain must be DomainPaths")
@@ -3086,7 +3090,8 @@ def decode_control_frame(data: bytes | bytearray, *,
         if key not in ("protocol", "run_id", "nonce", "kind", "payload"):
             raise _invalid("protocol-mismatch",
                            "control frame carries an unknown field")
-    if obj.get("protocol") != GUARD_PROTOCOL_VERSION:
+    if (not _is_int(obj.get("protocol"))
+            or obj["protocol"] != GUARD_PROTOCOL_VERSION):
         raise _invalid("protocol-mismatch", "control frame has the wrong protocol")
     try:
         _check_hex("control.run_id", obj.get("run_id"), 32)
@@ -3299,7 +3304,9 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
         obj = _decode_private_json(body)
     except (RecursionError, UnicodeDecodeError, ValueError):
         raise _invalid("protocol-mismatch", "manifest is not JSON") from None
-    if not isinstance(obj, dict) or obj.get("protocol") != GUARD_PROTOCOL_VERSION:
+    if (not isinstance(obj, dict)
+            or not _is_int(obj.get("protocol"))
+            or obj["protocol"] != GUARD_PROTOCOL_VERSION):
         raise _invalid("protocol-mismatch", "manifest has the wrong protocol")
     for key in obj:
         if key not in ("protocol", "domain", "grant", "setup", "attempts",

@@ -738,13 +738,14 @@ def test_attempt_decision_requires_authenticated_protocol_v2_gate_fields():
 
 
 def test_shadow_and_quarantine_records_are_typed_and_runtime_identity_is_private():
-    result = replace(_secret_result(["-q"]), runtime_identity="pytest:9")
+    runtime_identity = "a" * 64
+    result = replace(_secret_result(["-q"]), runtime_identity=runtime_identity)
     inventory = C.Inventory(
         adapter="pytest", version="9", complete=True, tests=(), digest="1" * 64)
     evidence = C.AttemptEvidence(
         attempt_id="a001", result=result.attempts[0], inventory=inventory,
         terminal_complete=True, parallel_identity=True,
-        runtime_identity="pytest:9")
+        runtime_identity=runtime_identity)
     quarantine = C.SelectionQuarantine(
         code="selection-shadow-quarantine", run_id=RUN_ID, sequence=7,
         policy_digest="f" * 64, compatibility="c", input_digest="e" * 64,
@@ -772,6 +773,33 @@ def test_shadow_and_quarantine_records_are_typed_and_runtime_identity_is_private
         replace(quarantine, verdict="matched")
     with pytest.raises(ValueError):
         replace(comparison, verdict="unknown")
+
+    baseline = C.Baseline(
+        run_id=RUN_ID, head="a" * 40, input_digest="b" * 64,
+        compatibility="compat", inventory=inventory,
+        policy_digest="c" * 64, created_at="2099-01-01T00:00:00+00:00",
+        runtime_identity=runtime_identity,
+    )
+    for invalid in ("pytest:9", "A" * 64, "g" * 64, "a" * 63):
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            replace(result, runtime_identity=invalid)
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            replace(evidence, runtime_identity=invalid)
+        with pytest.raises(ValueError, match="64 lowercase hex"):
+            replace(baseline, runtime_identity=invalid)
+
+    for capability in ("selection", "parallel_identity"):
+        with pytest.raises(ValueError, match="qualified support requires a profile"):
+            C.CompoundSupport(
+                selection=capability == "selection",
+                parallel_identity=capability == "parallel_identity",
+                profile=None,
+                limitations=(),
+            )
+    assert C.CompoundSupport(
+        selection=False, parallel_identity=False,
+        profile=None, limitations=(),
+    ).profile is None
 
 
 def test_manifest_decoder_hides_offending_values(case):
@@ -1623,6 +1651,23 @@ def test_private_protocol_v2_codecs_reject_duplicate_json_keys(case):
     with pytest.raises(Problem, match="protocol-mismatch"):
         C.decode_launch_manifest(
             struct.pack(">I", len(manifest_body)) + manifest_body)
+
+
+def test_private_protocol_version_requires_json_integer(case):
+    control_body = json.dumps({
+        "protocol": 2.0, "run_id": RUN_ID, "nonce": NONCE,
+        "kind": "cancel", "payload": {"signal": 2},
+    }).encode()
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(
+            struct.pack(">I", len(control_body)) + control_body)
+
+    manifest_body = json.loads(C.encode_launch_manifest(
+        _valid_manifest(case))[4:])
+    manifest_body["protocol"] = 2.0
+    encoded = json.dumps(manifest_body).encode()
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_launch_manifest(struct.pack(">I", len(encoded)) + encoded)
 
 
 def _valid_manifest(case):
