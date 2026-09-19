@@ -1,0 +1,165 @@
+{
+  "task": "T12a authenticated launch handoff and quarantine substrate",
+  "status": "implemented_and_scoped_green",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-12a",
+  "base_commit": "a78c7a238c3f",
+  "commit": "f38acc1127f696ee727d996893875c89aafccf01",
+  "scope": "T12a only; no T12b, T12c, or product-completion claim",
+  "changed_files": [
+    "src/ptest/contracts.py",
+    "src/ptest/runtime/protocol-v1.json",
+    "src/ptest/guard.py",
+    "src/ptest/operations.py",
+    "src/ptest/history.py",
+    "src/ptest/selection.py",
+    "tests/ng/test_contracts.py",
+    "tests/ng/test_guard.py",
+    "tests/ng/test_operations.py",
+    "tests/ng/test_history.py",
+    "tests/ng/test_selection.py",
+    "tests/ng/fixtures/processes/guard_client.py",
+    "tests/ng/fixtures/processes/guard_driver.py",
+    "tests/ng/fixtures/command/guard_faults.py"
+  ],
+  "owned_unchanged": [
+    "tests/ng/fixtures/processes/guard_workload.py"
+  ],
+  "implementation": [
+    "Added a private protocol-v2 attempt-ready/attempt-decision handshake while retaining protocol-v1 public/native/bridge semantics.",
+    "Bound every execution attempt to an authenticated one-use gate token and a decision watchdog capped at 30 seconds inside the compound deadline.",
+    "Made malformed, wrong-token, replayed, early, EOF, cancellation, timeout, and uncertain-predecessor paths fail closed before any later child spawn.",
+    "Preserved ordinary public execute, run_guard, and history behavior and avoided any legacy configuration, alias, migration, cloud, backend, API, or model path.",
+    "Added history-owned typed SelectionQuarantine state, attempt evidence, comparison receipts, strict evidence validation, and exact expected-row quarantine clearing.",
+    "Added pure choose_shadow_plans policy selection and quarantine-aware automatic full-mode fallback without clearing unrelated health or corruption markers.",
+    "Regenerated the runtime protocol descriptor; protocol-v1 domain meanings remain unchanged and private control/launch schemas are explicitly version 2."
+  ],
+  "security_negative_contracts": [
+    "Wrong, malformed, early, or replayed authenticated decisions never launch a child.",
+    "EOF, cancellation, watchdog expiry, changed/unknown source identity, and live/unknown descendants close subsequent spawn and retain capacity through the existing finalization boundary.",
+    "One-use gate tokens are random, attempt-bound, action-bound, and rejected after consumption.",
+    "Private JSON rejects duplicate object keys and non-finite numbers; protocol versions are isolated.",
+    "Quarantine publication requires genuine selected/full attempt evidence for the current baseline and runtime identity.",
+    "Quarantine clear is an atomic expected-row delete only after a newer qualifying corrected comparison and an intervening matching clean baseline; unrelated health/corruption markers are never widened or cleared."
+  ],
+  "test_evidence": [
+    {
+      "stage": "baseline_before_changes",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+      "exit_code": 0,
+      "outcome": "314 passed in 48.81s"
+    },
+    {
+      "stage": "red_contract_gate",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k attempt_decision_requires_authenticated_protocol_v2_gate_fields",
+      "exit_code": 1,
+      "outcome": "Behavioral RED: GUARD_PROTOCOL_VERSION was absent."
+    },
+    {
+      "stage": "green_contract_gate",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k attempt_decision_requires_authenticated_protocol_v2_gate_fields",
+      "exit_code": 0,
+      "outcome": "1 passed, 54 deselected"
+    },
+    {
+      "stage": "red_guard_wrong_and_replay",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k 'wrong_token or replay'",
+      "exit_code": 1,
+      "outcome": "Behavioral RED: the protocol-v1 guard reached EOF before emitting attempt-ready."
+    },
+    {
+      "stage": "green_guard_wrong_and_replay",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k 'wrong_token or replay'",
+      "exit_code": 0,
+      "outcome": "2 passed, 58 deselected"
+    },
+    {
+      "stage": "red_operations_gate",
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k attempt_gate",
+      "exit_code": 1,
+      "outcome": "Behavioral RED: operations still emitted a protocol-v1 launch manifest and had no authenticated decision exchange."
+    },
+    {
+      "stage": "green_operations_gate",
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k attempt_gate",
+      "exit_code": 0,
+      "outcome": "1 passed, 69 deselected"
+    },
+    {
+      "stage": "red_selection_quarantine",
+      "command": "scripts/ptest-bootstrap tests/ng/test_selection.py -k quarantine",
+      "exit_code": 1,
+      "outcome": "Behavioral RED: choose_shadow_plans was absent."
+    },
+    {
+      "stage": "green_selection_quarantine",
+      "command": "scripts/ptest-bootstrap tests/ng/test_selection.py -k quarantine",
+      "exit_code": 0,
+      "outcome": "1 passed, 25 deselected"
+    },
+    {
+      "stage": "red_strict_private_json",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k duplicate_private_json",
+      "exit_code": 1,
+      "outcome": "Behavioral RED: duplicate JSON keys were accepted."
+    },
+    {
+      "stage": "green_strict_private_json",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k duplicate_private_json",
+      "exit_code": 0,
+      "outcome": "1 passed, 56 deselected"
+    },
+    {
+      "stage": "green_guard_eof_cancel_watchdog",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k 'eof or cancel or watchdog'",
+      "exit_code": 0,
+      "outcome": "1 passed, 60 deselected"
+    },
+    {
+      "stage": "green_guard_module",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py",
+      "exit_code": 0,
+      "outcome": "61 passed in 28.00s"
+    },
+    {
+      "stage": "green_operations_module",
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py",
+      "exit_code": 0,
+      "outcome": "70 passed in 18.61s"
+    },
+    {
+      "stage": "final_owned_scope",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+      "exit_code": 0,
+      "outcome": "325 passed in 51.23s"
+    }
+  ],
+  "generation_and_checks": [
+    {
+      "command": ".venv/bin/python scripts/export-schemas.py",
+      "exit_code": 0,
+      "outcome": "Regenerated src/ptest/runtime/protocol-v1.json; no generated documentation drift."
+    },
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "outcome": "Rebuilt 4727 nodes, 10427 edges, 310 communities.",
+      "note": "Graphify reported seven source/data files with zero AST nodes, including generated JSON; semantic extraction and wiki refresh were not used."
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "outcome": "clean"
+    },
+    {
+      "command": "git status --short and git diff --name-only",
+      "exit_code": 0,
+      "outcome": "All implementation changes were confined to the frozen T12a owned set."
+    }
+  ],
+  "remaining_limitations": [
+    "T12b and T12c adapters, CLI, scheduler integration, source/config work, and full product qualification remain outside this task.",
+    "No cloud, provider, remote backend, live CLI install, push, merge, publication, or deployment was performed.",
+    "Only the frozen owned scoped suite was run; repository-wide product completion is not claimed.",
+    "The task report is recorded in a separate evidence commit because a commit cannot contain its own final object ID."
+  ]
+}
