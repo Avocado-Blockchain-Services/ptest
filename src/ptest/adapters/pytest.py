@@ -114,13 +114,6 @@ def inspect_capability(config: C.Config) -> C.Capability:
     """Describe Pytest's static conditional capability without native I/O."""
     if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
         raise _problem("native-config-invalid", "pytest adapter requires pytest config")
-    if config.setup is not None:
-        return C.Capability(
-            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
-            lifecycle="cooperative-process-group",
-            limitations=(C.Reason(code="unsupported-capability",
-                                  message="pytest setup declarations are unsupported in this tier"),),
-        )
     try:
         _require_python_launcher(config.runner.launcher)
     except C.Problem as problem:
@@ -150,9 +143,10 @@ def inspect_capability(config: C.Config) -> C.Capability:
                  "incomplete/70; inventory/counts/full gates remain unavailable"),
     ), C.Reason(
         code="unsupported-capability",
-        message=("allowed plain/wrapper pytest_collection_finish code may mutate the effective item list, "
-                 "and setup/fixtures may skip; automatic/setup/shadow/probe, selection, history, "
-                 "baseline and whole-gate obligations remain unavailable"),
+        message=("declared setup executes under the guard with its configured network and lifecycle-script "
+                 "implications; automatic, shadow and probe remain unavailable; setup/fixtures may skip "
+                 "and allowed plain/wrapper pytest_collection_finish code may mutate the effective item "
+                 "list; selection, history, baseline and whole-gate obligations remain unavailable"),
     )]
     if "." in config.runner.test_roots:
         limitations.insert(0, C.Reason(

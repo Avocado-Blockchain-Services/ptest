@@ -223,7 +223,7 @@ def test_where_reveal_is_labelled_stderr_only_and_never_persisted(
     [
         ("pytest", ("tests",), False, "basic_serial", "inventory"),
         ("pytest", (".",), False, "basic_serial", "dot test root"),
-        ("pytest", ("tests",), True, "unavailable", "setup declarations"),
+        ("pytest", ("tests",), True, "basic_serial", "collection_finish"),
         ("vitest", ("tests",), False, "unavailable", "prepared only"),
     ],
 )
@@ -270,6 +270,8 @@ def test_where_describes_conditional_pytest_and_prepared_vitest_without_executio
         assert f"capability: {expected}" in captured.out
         text = captured.out
     assert limitation in text
+    if setup:
+        assert "declared setup executes" in text
 
 
 @pytest.mark.parametrize("target", ["tests/test_cache.py", "tests/test_cache.py::test_a", "ab" * 16])
@@ -467,7 +469,15 @@ def test_human_errors_escape_and_bound_path_evidence(
 
 @pytest.mark.parametrize("argv", [("-k", "--json"), ("tests/a.py", "--json"),
                                   ("--", "where", "--json")])
-def test_json_inside_literal_execution_tail_stays_runner_data(argv, capsys):
+def test_json_inside_literal_execution_tail_stays_runner_data(
+        argv, tmp_path, monkeypatch, capsys):
+    # Keep this parser negative test outside the repository's native config:
+    # it must reject before scheduler admission, independently of setup.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "ptest.operations.scheduler.enqueue",
+        lambda *args, **kwargs: pytest.fail("parser rejection admitted a run"),
+    )
     assert parse_argv(argv).runner_argv == (argv[1:] if argv[0] == "--" else argv)
     assert main(argv) == 2
     captured = capsys.readouterr()

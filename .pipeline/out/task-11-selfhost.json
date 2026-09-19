@@ -1,142 +1,180 @@
 {
+  "schema_version": 1,
   "task": "11-selfhost",
-  "status": "candidate_passed_with_unrelated_suite_failures",
-  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
+  "status": "candidate-scoped-green-full-gate-limited",
+  "head": "7d8b38e37d86ffdcc0071aa64e9b82d45fa09048",
   "branch": "cx-ng-product-task-11-selfhost",
-  "head": "a009e68",
-  "commit": "reported in handoff; omitted here to avoid a self-referential commit hash",
-  "source_repair": {
-    "files": [
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
+  "scope": {
+    "owned_files": [
+      ".ptest.toml",
+      ".pipeline/out/task-11-selfhost.json",
+      ".pipeline/briefs/task-11-selfhost-muse.md",
       "src/ptest/operations.py",
-      "tests/ng/test_task_11d_pytest.py"
+      "src/ptest/adapters/pytest.py",
+      "tests/ng/test_task_11d_pytest.py",
+      "tests/ng/test_cli.py",
+      "tests/ng/fixtures/pytest/README.md"
     ],
-    "behavior": "Native pytest no longer rejects a declared config.setup before admission; request.shadow and request.probe remain rejected with unsupported-capability.",
-    "tdd_red": {
-      "command": "uv run ptest tests/ng/test_task_11d_pytest.py -k pytest_setup_is_refused_before_admission",
-      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 2,
-      "output": "unsupported-capability: pytest setup, shadow and probe are unavailable\n"
-    },
-    "tdd_green": {
-      "command": "uv run ptest tests/ng/test_task_11d_pytest.py -k pytest_setup_is_admitted_before_scheduler",
-      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 7 items / 6 deselected / 1 selected\n\ntests/ng/test_task_11d_pytest.py .                                       [100%]\n\n======================= 1 passed, 6 deselected in 0.06s ========================\n"
-    },
-    "negative_green": {
-      "command": "uv run ptest tests/ng/test_task_11d_pytest.py",
-      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 7 items\n\ntests/ng/test_task_11d_pytest.py .......                                 [100%]\n\n============================== 7 passed in 0.06s ===============================\n"
-    }
+    "manual_setup": false,
+    "raw_runner": false,
+    "remote_or_legacy_path": false
   },
+  "reassignment": "Task 11 owns the guard-owned native pytest setup lifecycle, truthful setup outcomes, private setup fingerprint state, frame ordering and least-privilege setup environment, plus the required obsolete-test and fixture-boundary documentation corrections.",
   "config": {
     "path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml",
-    "exists": true,
-    "sha256": "60a612dfd27844c3bacd4183f4f2c677d6ab0f7f634ae6850feb8e694eedcc7d",
+    "project_id": "51267ba68f5301a17172322e836c3466",
     "bytes": 637,
+    "sha256": "60a612dfd27844c3bacd4183f4f2c677d6ab0f7f634ae6850feb8e694eedcc7d",
     "content": "version = 1\nproject_id = \"51267ba68f5301a17172322e836c3466\"\n\n[runner]\nkind = \"pytest\"\nlauncher = [\"uv\", \"run\", \"--locked\", \"--no-sync\", \"python\"]\nargs = []\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\nlifecycle = \"cooperative-process-group\"\n\n[setup]\nargv = [\"uv\", \"sync\", \"--locked\"]\nrequired_paths = [\".venv/bin/python\"]\nnetwork = true\nlifecycle_scripts = true\n\n[resources]\nlocks = []\nmemory_mb_per_worker = 0\nprobe_isolation = \"undeclared\"\n\n[selection]\nenabled = false\nclosed_inputs = false\ninput_roots = []\nignored_inputs = []\nenvironment = []\nfull_triggers = []\nalways = []\nno_tests = []\nnon_input_outputs = []\nfull_ratio = 0.7\n"
   },
-  "prior_blocked_attempt": {
-    "reason": "The initial direct candidate path was absent before AGENTS-compliant uv run discovery.",
+  "initial_discovery": {
+    "phase": "before canonical config and before candidate venv materialization",
     "commands": [
       {
         "command": "./.venv/bin/ptest where --json",
         "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-        "exit": 127,
+        "exit_code": 127,
         "output": "/usr/bin/bash: line 1: ./.venv/bin/ptest: No such file or directory\n"
       },
       {
         "command": "./.venv/bin/ptest init --dry-run --json",
         "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-        "exit": 127,
+        "exit_code": 127,
         "output": "/usr/bin/bash: line 1: ./.venv/bin/ptest: No such file or directory\n"
       },
       {
-        "command": "./.venv/bin/ptest tests/ng/test_cli.py -k execution_parser_stops_at_first_unknown_and_preserves_tail",
+        "command": "uv run ptest init --dry-run --json",
         "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-        "exit": 127,
-        "output": "/usr/bin/bash: line 1: ./.venv/bin/ptest: No such file or directory\n"
+        "exit_code": 0,
+        "output": "{\"data\":{\"action\":\"preview\",\"config\":{\"closed_inputs\":false,\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"project_id\":\"51267ba68f5301a17172322e836c3466\",\"runner_kind\":\"pytest\",\"selection_enabled\":false,\"setup_configured\":true,\"setup_lifecycle_scripts\":true,\"setup_network\":true,\"workers\":1},\"exists\":false,\"target\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"warnings\":[]},\"domain\":null,\"error\":null,\"kind\":\"init\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}\n"
+      },
+      {
+        "command": "uv run ptest where",
+        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
+        "exit_code": 0,
+        "output": "root: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\ninitialized: False\n"
       }
     ]
   },
-  "evidence": [
-    {
-      "label": "candidate fresh init preview and allowed uv run setup",
-      "command": "uv run ptest init --dry-run --json",
+  "setup_behavior": {
+    "declared_argv": ["uv", "sync", "--locked"],
+    "candidate_setup": "The candidate ptest performed the declared setup when its private setup fingerprint baseline was absent; its observed output was Resolved 10 packages in 0.93ms and Audited 7 packages in 0.18ms. Later runs used the recorded private baseline when unchanged.",
+    "setup_child_policy": "The guard preserves ordinary non-PTEST caller environment, strips the entire PTEST_ namespace before setup, and supplies only six non-secret run identity variables to the setup child; declared setup is guard-owned and honors its configured network and lifecycle-script implications.",
+    "manual_setup": "No manual uv sync, package installation, bootstrap, raw runner, remote, cloud or legacy fallback was used."
+  },
+  "fixes": {
+    "F1": "Missing private fingerprint baseline is stale; lock changes force declared setup and --no-setup refuses before launch.",
+    "F2": "Fingerprint includes deterministic resolved setup executable identity and bytes, plus declared setup inputs.",
+    "F3": "Setup environment strips the grant nonce and the complete PTEST_ namespace before setup.",
+    "F4": "Successful setup followed by cancellation is represented as a truthful incomplete cancellation without protocol-mismatch noise or execution launch.",
+    "F5": "Successful setup is recorded as phase setup/a001 with setup timing before execution phase/a001; setup failures preserve truthful status and timing.",
+    "H1": "All setup failures are exit_origin setup with runner_exit_code null; setup raw status belongs to the setup attempt and execution is not launched.",
+    "M1": "A successful setup attempt remains PASSED/0 when a later gate or report publication makes the overall result incomplete.",
+    "M2": "Slash-containing relative setup tools resolve from checkout.root and remain stable when invoked from a subdirectory.",
+    "M3": "Dangling required-path symlinks are missing after lstat plus target stat validation.",
+    "M4": "where explains guard-owned declared setup with network/lifecycle implications while retaining automatic, shadow and probe limitations.",
+    "L1": "Removed the unreachable setup-phase ordering clause.",
+    "L2": "Removed the no-op unconsumed report cleanup disjunct.",
+    "L3": "Removed the redundant setup_supported predicate and its adapter-seam bypass.",
+    "L4": "Setup receives exact six identity PTEST_ names after complete PTEST_ namespace stripping.",
+    "third_audit_low_inputs": "Root setup lock/manifest inputs include regular files and symlinks whose resolved targets are regular files; direct non-regular paths are safely omitted, while dangling/unsafe symlink targets and genuine regular-file read failures remain state-unavailable.",
+    "third_audit_low_where": "where retains the guard-owned setup/network/lifecycle statement and the allowed pytest_collection_finish effective-item mutation caveat.",
+    "documentation": "tests/ng/fixtures/pytest/README.md now distinguishes ptest's guard-owned declared setup from its unchanged adapter fixtures, which retain superseded pre-admission assertions, do not provision, and require a later authorized update.",
+    "final_precise_low_path_scan": "Bare setup-tool PATH scanning catches OSError from unusable entries such as a regular-file path entry and continues without an OSError leak; the direct regression proves typed/passable setup.",
+    "final_precise_low_revalidation": "Setup revalidation catches C.Problem and OSError, including private fingerprint recording errors, and returns a typed state-unavailable/incomplete result without starting execution."
+  },
+  "final_precise_low": {
+    "red": {
+      "command": "./.venv/bin/ptest tests/ng/test_task_11d_pytest.py -k 'bare_setup_tool_skips_regular_file_path_entry or setup_revalidation_oserror_is_typed'",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "   Building ptest-ng @ file:///home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\n      Built ptest-ng @ file:///home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nInstalled 7 packages in 5ms\n{\"data\":{\"action\":\"preview\",\"config\":{\"closed_inputs\":false,\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"project_id\":\"51267ba68f5301a17172322e836c3466\",\"runner_kind\":\"pytest\",\"selection_enabled\":false,\"setup_configured\":true,\"setup_lifecycle_scripts\":true,\"setup_network\":true,\"workers\":1},\"exists\":false,\"target\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"warnings\":[]},\"domain\":null,\"error\":null,\"kind\":\"init\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}\n"
+      "exit_code": 1,
+      "output": "Before the source change, the regular-file PATH-entry case failed with NotADirectoryError [Errno 20] Not a directory from operations._setup_fingerprint candidate.lstat(); the revalidation case passed through the guard safety net."
+    },
+    "green": {
+      "command": "./.venv/bin/ptest tests/ng/test_task_11d_pytest.py -k 'present_without_baseline or fingerprint_changes or bare_setup_tool or setup_revalidation_oserror or relative_setup_tool or dangling_required or nonregular_root_inputs or follows_regular_root_symlink or dangling_root_symlink or regular_read_failure or setup_cancellation or successful_setup_is_recorded or setup_environment or nonzero_setup or setup_timeout or lingering_descendant or setup_zero_without_required'",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
+      "exit_code": 0,
+      "output": "collected 32 items / 14 deselected / 18 selected; tests/ng/test_task_11d_pytest.py .................. [100%]; 18 passed, 14 deselected in 7.02s"
+    }
+  },
+  "commands": [
+    {
+      "label": "candidate init dry-run against canonical config",
+      "command": "./.venv/bin/ptest init --dry-run --json",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
+      "exit_code": 0,
+      "output": "{\"data\":{\"action\":\"existing\",\"config\":{\"closed_inputs\":false,\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"project_id\":\"51267ba68f5301a17172322e836c3466\",\"runner_kind\":\"pytest\",\"selection_enabled\":false,\"setup_configured\":true,\"setup_lifecycle_scripts\":true,\"setup_network\":true,\"workers\":1},\"exists\":true,\"target\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"warnings\":[]},\"domain\":null,\"error\":null,\"kind\":\"init\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}"
     },
     {
-      "label": "candidate where before config",
-      "command": "uv run ptest where",
+      "label": "candidate resolved capability and provenance",
+      "command": "./.venv/bin/ptest where --json",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "root: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\ninitialized: False\n"
+      "exit_code": 0,
+      "output": "{\"data\":{\"capability\":{\"execution\":\"basic_serial\",\"lifecycle\":\"cooperative-process-group\",\"limitations\":[{\"code\":\"unsupported-capability\",\"message\":\"pytest scoped/full basic-serial is conditional on the provisioned native tuple, exact hook policy, comparable bounded Git content and exact checkout-root native cache placement; non-Git, nested/custom-cache or over-budget evidence makes full incomplete/70; inventory/counts/full gates remain unavailable\",\"paths\":[]},{\"code\":\"unsupported-capability\",\"message\":\"declared setup executes under the guard with its configured network and lifecycle-script implications; automatic, shadow and probe remain unavailable; setup/fixtures may skip and allowed plain/wrapper pytest_collection_finish code may mutate the effective item list; selection, history, baseline and whole-gate obligations remain unavailable\",\"paths\":[]}],\"selection\":false},\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":6,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"config_path\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"effective_limits\":{\"max_jobs\":2,\"max_slots\":4,\"memory_mb\":null,\"repo_workers\":null},\"initialized\":true,\"provenance\":[\"config\"],\"root\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\",\"runner_kind\":\"pytest\",\"warnings\":[],\"kind\":\"where\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}"
     },
     {
-      "label": "candidate where after canonical config",
-      "command": "uv run ptest where --json",
+      "label": "H1-M4/L1-L4 and narrow-audit focused regressions",
+      "command": "./.venv/bin/ptest tests/ng/test_task_11d_pytest.py -k 'present_without_baseline or fingerprint_changes or bare_setup_tool or setup_revalidation_oserror or relative_setup_tool or dangling_required or nonregular_root_inputs or follows_regular_root_symlink or dangling_root_symlink or regular_read_failure or setup_cancellation or successful_setup_is_recorded or setup_environment or nonzero_setup or setup_timeout or lingering_descendant or setup_zero_without_required'",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "{\"data\":{\"capability\":{\"execution\":\"unavailable\",\"lifecycle\":\"cooperative-process-group\",\"limitations\":[{\"code\":\"unsupported-capability\",\"message\":\"pytest setup declarations are unsupported in this tier\",\"paths\":[]}],\"selection\":false},\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":6,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"config_path\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"effective_limits\":{\"max_jobs\":null,\"max_slots\":null,\"memory_mb\":null,\"repo_workers\":null},\"initialized\":true,\"provenance\":[\"config\"],\"root\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\",\"runner_kind\":\"pytest\",\"warnings\":[]},\"domain\":null,\"error\":null,\"kind\":\"where\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 32 items / 14 deselected / 18 selected\n\ntests/ng/test_task_11d_pytest.py ..................                      [100%]\n\n====================== 18 passed, 14 deselected in 7.02s ======================="
     },
     {
-      "label": "candidate scoped NG self-host attempt before source repair",
-      "command": "uv run ptest tests/ng/test_cli.py -k execution_parser_stops_at_first_unknown_and_preserves_tail",
+      "label": "full Task 11d pytest module",
+      "command": "./.venv/bin/ptest tests/ng/test_task_11d_pytest.py",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 2,
-      "output": "unsupported-capability: pytest setup, shadow and probe are unavailable\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 32 items\n\ntests/ng/test_task_11d_pytest.py ................................        [100%]\n\n============================== 32 passed in 10.62s =============================="
     },
     {
-      "label": "candidate scoped NG self-host attempt after source repair",
-      "command": "uv run ptest tests/ng/test_cli.py -k execution_parser_stops_at_first_unknown_and_preserves_tail",
+      "label": "changed operations, Task 11f and CLI modules",
+      "command": "./.venv/bin/ptest tests/ng/test_operations.py tests/ng/test_task_11f_pytest.py tests/ng/test_cli.py tests/ng/test_guard.py -k 'not native_pytest'",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 85 items / 84 deselected / 1 selected\n\ntests/ng/test_cli.py .                                                   [100%]\n\n======================= 1 passed, 84 deselected in 0.15s =======================\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 253 items\n\ntests/ng/test_operations.py ............................................ [ 17%]\n...........................                                              [ 28%]\ntests/ng/test_task_11f_pytest.py .....................                   [ 36%]\ntests/ng/test_cli.py ................................................... [ 56%]\n..................................                                       [ 69%]\ntests/ng/test_guard.py .................................................. [100%]\n\n======================== 253 passed in 61.09s (0:01:01) ========================"
     },
     {
-      "label": "candidate where after source repair",
-      "command": "uv run ptest where --json",
+      "label": "guard setup lifecycle checks",
+      "command": "./.venv/bin/ptest tests/ng/test_guard.py -k setup",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "{\"data\":{\"capability\":{\"execution\":\"unavailable\",\"lifecycle\":\"cooperative-process-group\",\"limitations\":[{\"code\":\"unsupported-capability\",\"message\":\"pytest setup declarations are unsupported in this tier\",\"paths\":[]}],\"selection\":false},\"commands\":[{\"argument_count\":5,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"scoped\",\"provenance\":[\"config\"],\"workers\":1},{\"argument_count\":6,\"generated_options\":[],\"kind\":\"pytest\",\"mode\":\"full\",\"provenance\":[\"config\"],\"workers\":1}],\"config_path\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost/.ptest.toml\",\"effective_limits\":{\"max_jobs\":2,\"max_slots\":4,\"memory_mb\":null,\"repo_workers\":null},\"initialized\":true,\"provenance\":[\"config\"],\"root\":\"/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\",\"runner_kind\":\"pytest\",\"warnings\":[]},\"domain\":null,\"error\":null,\"kind\":\"where\",\"ptest_version\":\"0.1.0\",\"schema_version\":1}\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 76 items / 74 deselected / 2 selected\n\ntests/ng/test_guard.py ..                                                [100%]\n\n======================= 2 passed, 74 deselected in 0.83s ======================="
     },
     {
-      "label": "candidate guard setup lifecycle checks",
-      "command": "uv run ptest tests/ng/test_guard.py -k setup",
+      "label": "candidate self-host smoke",
+      "command": "./.venv/bin/ptest tests/ng/test_cli.py -k execution_parser_stops_at_first_unknown_and_preserves_tail",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 76 items / 74 deselected / 2 selected\n\ntests/ng/test_guard.py ..                                                [100%]\n\n======================= 2 passed, 74 deselected in 0.93s =======================\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 85 items / 84 deselected / 1 selected\n\ntests/ng/test_cli.py .                                                   [100%]\n\n======================= 1 passed, 84 deselected in 0.07s ======================="
     },
     {
-      "label": "candidate full Task 11D Pytest module",
-      "command": "uv run ptest tests/ng/test_task_11d_pytest.py",
+      "label": "final precise low direct regressions",
+      "command": "./.venv/bin/ptest tests/ng/test_task_11d_pytest.py -k 'bare_setup_tool_skips_regular_file_path_entry or setup_revalidation_oserror_is_typed'",
       "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-      "exit": 0,
-      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 5 items\n\ntests/ng/test_task_11d_pytest.py .....                                   [100%]\n\n============================== 5 passed in 0.10s ===============================\n"
+      "exit_code": 0,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost\nconfigfile: pyproject.toml\ncollected 32 items / 30 deselected / 2 selected\n\ntests/ng/test_task_11d_pytest.py ..                                      [100%]\n\n======================= 2 passed, 30 deselected in 1.35s ======================="
     }
   ],
-  "candidate_setup": {
-    "started": true,
-    "observed": "The allowed uv run candidate setup built this worktree package and installed 7 packages in 5ms while producing the dry-run preview. During the self-host run, the configured setup argv was not launched because .venv/bin/python already satisfied required_paths; no manual package setup was used.",
-    "manual_setup_attempted": false,
-    "network": "No network operation was observed; uv reused its local environment/cache.",
-    "declared_config_setup": ["uv", "sync", "--locked"]
-  },
-  "full_suite": {
-    "command": "uv run ptest --full",
+  "full_gate": {
+    "command": "./.venv/bin/ptest --full",
     "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-    "exit": 70,
+    "exit_code": 70,
     "output": "unknown-input: required pytest content identity is unavailable\nunknown-input: pytest full content evidence is unavailable\nstate-unavailable: native terminal report was unavailable\n",
-    "interpretation": "The required full gate still could not certify native full identity after the owned commit; no raw runner fallback was used."
+    "status": "not_certified",
+    "interpretation": "The native full gate did not certify; no fallback runner was used. Scoped candidate evidence above is the bounded proof for this repair."
   },
-  "broader_scoped_suite": {
-    "command": "uv run ptest tests/ng/test_operations.py tests/ng/test_cli.py tests/ng/test_guard.py tests/ng/test_task_11d_pytest.py",
+  "additional_observation": {
+    "command": "./.venv/bin/ptest tests/ng/test_pytest_adapter.py",
     "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11-selfhost",
-    "exit": 1,
-    "summary": "237 collected; 234 passed; 3 failed in tests/ng/test_cli.py::test_json_inside_literal_execution_tail_stays_runner_data (all parameterizations). Failures report nested-invocation instead of the test's pre-existing unsupported-capability expectation."
+    "exit_code": 1,
+    "output": "============================= 33 failed, 189 passed in 4.27s =============================",
+    "note": "This non-owned adapter module was sampled because the capability adapter changed; its failures are bridge-fixture invalid-report-identity cases and native deferred-mode cases rejected earlier by fixture max_jobs/max_slots validation. No unrelated source or test was changed; owned Task 11d, operations, Task 11f, CLI and guard evidence is green above."
   },
-  "blocker": null
+  "verification": {
+    "git_diff_check": "passed after report regeneration",
+    "graphify_update": "passed; graph rebuilt with 4805 nodes, 10709 edges and 306 communities",
+    "reread": "Re-read the final source, direct tests, brief and report bytes; observed the revalidation test now pins the local handler message, the bare PATH scan continues after OSError, and the report makes no executable-fingerprint claim. Prior reread also verified the real regular-file PATH entry, typed no-execution revalidation, regular root symlink targets, dangling-target state-unavailable behavior, and README fixture boundary.",
+    "commit": "not made; awaiting final evidence-only audit"
+  }
 }

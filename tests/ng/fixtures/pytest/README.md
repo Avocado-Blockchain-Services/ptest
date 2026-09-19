@@ -10,12 +10,16 @@ The actual controller run, versions, failures and skips are recorded in
 in `.pipeline/out/task-11d-astra-repair.json`, `.pipeline/out/task-11d-nested-hook-repair.json`
 and `.pipeline/out/task-11d-sol-repair.json`.
 
-The locked-dependency fixture tests retain the setup-declared refusal boundary:
-AUTOMATIC, explicit FULL with setup, and setup-scoped requests are typed
-unsupported before admission or dependency execution. The explicit no-setup
-FULL path is exercised separately by `test_pytest_full_subprocess.py` on the
-already provisioned controller tuple. Scoped subprocess tests exercise candidate
-ptest, the real guard and scheduler, native pytest, private
+ptest's declared-setup boundary is guard-owned: explicit FULL and setup-scoped
+requests execute the exact declared setup under the guard before native pytest,
+while automatic, selected, shadow and probe requests remain typed unsupported.
+`--no-setup` refuses missing or stale declared dependencies before admission to
+a child. The locked-dependency fixture tests in
+`test_pytest_adapter.py` still assert the superseded pre-admission refusal and
+do not provision an environment; they need a later explicitly authorized
+adapter/fixture update. The explicit no-setup FULL path is exercised separately
+by `test_pytest_full_subprocess.py` on the already provisioned controller tuple.
+Scoped subprocess tests exercise candidate ptest, the real guard and scheduler, native pytest, private
 terminal reports and cleanup. Runtime checks precede pytest import where possible;
 initial plugin qualification precedes test collection, after initial
 conftest/plugin imports. Qualification repeats after all collection-finish
@@ -53,8 +57,9 @@ the scoped lifecycle. Full mode retains configured `runner.args`, appends
 `runner.full_args` and the exact configured roots, grants one slot regardless
 of the requested worker count, freezes mode/roots before project import, and
 authenticates the existing private terminal report. It rejects native
-narrowing, redirect/configuration controls, executor hooks, dot roots, setup,
-automatic/selected/shadow/probe requests and `--base`. The safe
+narrowing, redirect/configuration controls, executor hooks, dot roots,
+automatic/selected/shadow/probe requests and `--base`; declared setup is
+accepted only through the guard-owned setup lifecycle. The safe
 `--strict`/`--strict-config`/`--strict-markers` flags are preserved (pytest 9
 expresses them as exact strict-true override-ini entries); every other
 `-o`/`--override-ini` value remains refused. Static `where`/`register`
