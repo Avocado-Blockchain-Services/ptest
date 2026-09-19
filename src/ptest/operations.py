@@ -291,6 +291,9 @@ class _Frames:
         self.eof = False
         self.invalid: C.Problem | None = None
         self.registered = False
+        self.ready: dict | None = None
+        self.decision_sent = False
+        self.decision_reason: C.Reason | None = None
         self.phase = False
         self.facts: dict | None = None
         self.draining = False
@@ -304,7 +307,8 @@ class _Frames:
             self._fail("guard frame identity does not match the grant")
             return
         if frame.kind == "registered":
-            if self.registered or self.phase or self.facts is not None or self.draining:
+            if (self.registered or self.ready is not None or self.phase
+                    or self.facts is not None or self.draining):
                 self._fail("registered frame was duplicated or out of order")
                 return
             try:
@@ -317,8 +321,26 @@ class _Frames:
                 return
             self.registered = True
             return
+        if frame.kind == "attempt-ready":
+            if (not self.registered or self.ready is not None or self.phase
+                    or self.facts is not None or self.draining):
+                self._fail("attempt-ready frame was duplicated or out of order")
+                return
+            if (frame.payload["attempt_id"] != "a001"
+                    or frame.payload["previous_attempt_id"] is not None
+                    or frame.payload["generation"] != self.grant.generation
+                    or frame.payload["deadline_monotonic"] <= time.monotonic()
+                    or frame.payload["deadline_monotonic"] > (
+                        time.monotonic()
+                        + C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S + _FRAME_TIMEOUT_S)):
+                self._fail("attempt-ready frame does not match the command attempt")
+                return
+            self.ready = dict(frame.payload)
+            return
         if frame.kind == "phase":
-            if not self.registered or self.phase or self.facts is not None or self.draining:
+            if (self.ready is None or not self.decision_sent or self.phase
+                    or self.facts is not None or self.draining
+                    or self.decision_reason is not None):
                 self._fail("phase frame was out of order")
                 return
             if (frame.payload["phase"] != "execution" or
@@ -339,7 +361,12 @@ class _Frames:
             self.facts = dict(frame.payload)
             return
         if frame.kind == "draining":
-            if (self.facts is None or self.draining or
+            handoff_complete = (
+                self.facts is not None
+                or (self.ready is not None and self.decision_sent
+                    and self.decision_reason is not None and not self.phase)
+            )
+            if (not handoff_complete or self.draining or
                     frame.payload["provisional_artifact_id"] is not None):
                 self._fail("draining frame was duplicated or out of order")
                 return
@@ -385,7 +412,8 @@ class _Frames:
 
 def _send_cancel(peer: socket.socket, grant: C.Grant, signum: int) -> bool:
     try:
-        frame = C.ControlFrame(protocol=1, run_id=grant.run_id,
+        frame = C.ControlFrame(protocol=C.GUARD_PROTOCOL_VERSION,
+                               run_id=grant.run_id,
                                nonce=grant.nonce, kind="cancel",
                                payload={"signal": signum})
         peer.sendall(C.encode_control_frame(frame))
@@ -394,11 +422,42 @@ def _send_cancel(peer: socket.socket, grant: C.Grant, signum: int) -> bool:
         return False
 
 
+def _send_attempt_decision(peer: socket.socket, grant: C.Grant,
+                           frames: _Frames,
+                           reason: C.Reason | None) -> bool:
+    if frames.ready is None or frames.decision_sent:
+        return False
+    action = "continue" if reason is None else "stop"
+    payload = {
+        "attempt_id": frames.ready["attempt_id"],
+        "generation": frames.ready["generation"],
+        "gate_token": frames.ready["gate_token"],
+        "action": action,
+        "reason": None if reason is None else reason.code,
+    }
+    try:
+        frame = C.ControlFrame(
+            protocol=C.GUARD_PROTOCOL_VERSION,
+            run_id=grant.run_id,
+            nonce=grant.nonce,
+            kind="attempt-decision",
+            payload=payload,
+        )
+        peer.sendall(C.encode_control_frame(frame))
+    except (OSError, C.Problem, TypeError, ValueError):
+        frames._fail("attempt decision could not be delivered")
+        return False
+    frames.decision_sent = True
+    frames.decision_reason = reason
+    return True
+
+
 def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
                   prepared: C.PreparedRun) -> tuple[subprocess.Popen, socket.socket,
                                                     _Frames]:
     manifest = C.LaunchManifest(
-        protocol=1, domain=domain, grant=grant, setup=None,
+        protocol=C.GUARD_PROTOCOL_VERSION,
+        domain=domain, grant=grant, setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=C.DEFAULT_SETUP_TIMEOUT_S,
         attempt_timeout_s=None,
@@ -455,8 +514,9 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
 
 
 def _run_guard(domain: C.DomainPaths, grant: C.Grant,
-               prepared: C.PreparedRun, signals: _Signals) -> tuple[int, _Frames,
-                                                                      float]:
+               prepared: C.PreparedRun, signals: _Signals,
+               decide: Callable[[], C.Reason | None]) -> tuple[int, _Frames,
+                                                               float]:
     process, control, frames = _launch_guard(domain, grant, prepared)
     started = time.monotonic()
     cancel_sent = False
@@ -468,6 +528,15 @@ def _run_guard(domain: C.DomainPaths, grant: C.Grant,
             ready, _, _ = select.select([control], [], [], wait)
             if ready:
                 frames.drain()
+            if (frames.ready is not None and not frames.decision_sent
+                    and frames.invalid is None and signals.number is None):
+                try:
+                    reason = decide()
+                except BaseException:
+                    reason = _reason(
+                        "state-unavailable",
+                        "source identity could not be revalidated at launch")
+                _send_attempt_decision(control, grant, frames, reason)
             if frames.invalid is not None and not cancel_sent:
                 cancel_sent = _send_cancel(control, grant, signal.SIGTERM)
         process.wait()
@@ -732,8 +801,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 return _export(domain, checkout, request, _cancel_result(
                     run_id, checkout, request, plan, command, signals.number, queue_s))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
+        gate_snapshot: C.InputSnapshot | None = None
+
+        def decide_attempt() -> C.Reason | None:
+            nonlocal gate_snapshot
+            gate_snapshot = _capture_source(
+                domain, effective, request, ensure_key=False)
+            return _source_invalidation(input_before, gate_snapshot)
+
         try:
-            raw_guard, frames, execution_s = _run_guard(domain, grant, prepared, signals)
+            raw_guard, frames, execution_s = _run_guard(
+                domain, grant, prepared, signals, decide_attempt)
         except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
@@ -754,13 +832,26 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raw = None if frames.facts is None else frames.facts["raw_exit_code"]
         guard_problem = (None if frames.facts is None or frames.facts["problem"] is None
                          else C.Problem(**frames.facts["problem"]))
-        protocol_valid = (frames.invalid is None and frames.registered and
-                          frames.phase and frames.facts is not None and frames.draining and
-                          frames.eof)
+        stopped_at_gate = frames.decision_reason is not None
+        continued_handoff = (
+            frames.ready is not None and frames.decision_sent
+            and frames.phase and frames.facts is not None)
+        stopped_handoff = (
+            stopped_at_gate and frames.ready is not None
+            and frames.decision_sent and not frames.phase
+            and frames.facts is None)
+        protocol_valid = (
+            frames.invalid is None and frames.registered
+            and (continued_handoff or stopped_handoff)
+            and frames.draining and frames.eof)
         reasons = ()
-        incomplete = not protocol_valid
+        incomplete = not protocol_valid or stopped_at_gate
         if incomplete:
-            reasons += (_reason("protocol-mismatch", "guard handoff was incomplete"),)
+            if not protocol_valid:
+                reasons += (_reason(
+                    "protocol-mismatch", "guard handoff was incomplete"),)
+        if frames.decision_reason is not None:
+            reasons += (frames.decision_reason,)
         if guard_problem is not None:
             if guard_problem.code == "missing-executable":
                 incomplete = incomplete or raw is not None
@@ -768,7 +859,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             else:
                 incomplete = True
                 reasons += (_reason("state-unavailable", "guard execution failed or exceeded its deadline"),)
-        elif raw is None or (raw_guard != 0 and signals.number is None):
+        elif ((raw is None and not stopped_at_gate)
+              or (raw_guard != 0 and signals.number is None)):
             incomplete = True
             reasons += (_reason("state-unavailable", "guard execution did not complete normally"),)
         status, final_code, origin, signal_number = _outcome(
@@ -799,7 +891,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # the post-run snapshot while the lease is held, before finalization.
         input_after = _capture_source(domain, effective, request, ensure_key=False)
         source_valid = _source_valid(input_before, input_after)
-        if native_pytest:
+        if native_pytest and not stopped_at_gate:
             source_valid = False
         result = replace(
             result,

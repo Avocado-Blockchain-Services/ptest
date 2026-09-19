@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -544,7 +545,7 @@ def test_encode_rejects_data_with_error():
 
 def _frame(kind="cancel", payload=None):
     return C.ControlFrame(
-        protocol=1, run_id=RUN_ID, nonce=NONCE,
+        protocol=C.GUARD_PROTOCOL_VERSION, run_id=RUN_ID, nonce=NONCE,
         kind=kind, payload=dict(payload or {"signal": 2}),
     )
 
@@ -576,7 +577,8 @@ def test_frame_oversize_rejected():
     with pytest.raises(Problem, match="protocol-mismatch"):
         C.decode_control_frame(length + b'{"protocol":1}')
     oversized = C.ControlFrame(
-        protocol=1, run_id=RUN_ID, nonce=NONCE, kind="phase",
+        protocol=C.GUARD_PROTOCOL_VERSION, run_id=RUN_ID, nonce=NONCE,
+        kind="phase",
         payload={"phase": "execution", "attempt_id": "x" * 70000},
     )
     with pytest.raises(Problem, match="protocol-mismatch"):
@@ -585,7 +587,7 @@ def test_frame_oversize_rejected():
 
 def test_frame_wrong_protocol_rejected():
     body = json.dumps({
-        "protocol": 2, "run_id": RUN_ID, "nonce": NONCE,
+        "protocol": 1, "run_id": RUN_ID, "nonce": NONCE,
         "kind": "cancel", "payload": {"signal": 2},
     }).encode()
     raw = struct.pack(">I", len(body)) + body
@@ -596,7 +598,7 @@ def test_frame_wrong_protocol_rejected():
 def test_frame_wrong_kind_shape_rejected():
     with pytest.raises(ValueError, match="requires"):
         C.ControlFrame(
-            protocol=1, run_id=RUN_ID, nonce=NONCE,
+            protocol=C.GUARD_PROTOCOL_VERSION, run_id=RUN_ID, nonce=NONCE,
             kind="cancel", payload={"blob": "x"},
         )
 
@@ -604,7 +606,7 @@ def test_frame_wrong_kind_shape_rejected():
 def _nested_frame_raw(depth):
     pad = "[" * depth + "]" * depth
     body = (
-        '{"protocol":1,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
+        '{"protocol":2,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
         + '","kind":"cancel","payload":{"signal":2,"pad":' + pad + "}}"
     ).encode()
     assert len(body) <= C.CONTROL_FRAME_MAX_BYTES
@@ -644,7 +646,8 @@ def test_manifest_pathological_nesting_is_typed_rejection(case):
         capability=None, summary=None,
     )
     manifest = C.LaunchManifest(
-        protocol=1, domain=domain, grant=grant, setup=None,
+        protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+        setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=300.0, attempt_timeout_s=30.0,
         compound_timeout_s=600.0,
@@ -663,7 +666,7 @@ def test_manifest_pathological_nesting_is_typed_rejection(case):
 def test_control_frame_values_validated_per_kind():
     guard = {"pid": 1, "birth": 0.0, "uid": 0, "pgid": 1}
     frame = C.ControlFrame(
-        protocol=1, run_id=RUN_ID, nonce=NONCE,
+        protocol=C.GUARD_PROTOCOL_VERSION, run_id=RUN_ID, nonce=NONCE,
         kind="registered", payload={"guard": guard},
     )
     assert C.decode_control_frame(
@@ -683,9 +686,92 @@ def test_control_frame_values_validated_per_kind():
     ):
         with pytest.raises((TypeError, ValueError)):
             C.ControlFrame(
-                protocol=1, run_id=RUN_ID, nonce=NONCE,
+                protocol=C.GUARD_PROTOCOL_VERSION, run_id=RUN_ID, nonce=NONCE,
                 kind=kind, payload=payload,
             )
+
+
+def test_attempt_decision_requires_authenticated_protocol_v2_gate_fields():
+    assert C.PROTOCOL_VERSION == 1
+    assert C.GUARD_PROTOCOL_VERSION == 2
+
+    frame = C.ControlFrame(
+        protocol=C.GUARD_PROTOCOL_VERSION,
+        run_id=RUN_ID,
+        nonce=NONCE,
+        kind="attempt-decision",
+        payload={
+            "attempt_id": "a001",
+            "generation": 0,
+            "gate_token": "0123456789abcdef0123456789abcdef",
+            "action": "continue",
+            "reason": None,
+        },
+    )
+    assert C.decode_control_frame(C.encode_control_frame(frame)) == frame
+
+    with pytest.raises(ValueError, match="control protocol"):
+        C.ControlFrame(
+            protocol=C.PROTOCOL_VERSION,
+            run_id=RUN_ID,
+            nonce=NONCE,
+            kind="attempt-decision",
+            payload=frame.payload,
+        )
+
+    for bad_payload in (
+        {**frame.payload, "generation": True},
+        {**frame.payload, "gate_token": "0" * 31},
+        {**frame.payload, "action": "continue", "reason": "unknown-input"},
+        {**frame.payload, "action": "stop", "reason": None},
+        {**frame.payload, "action": "stop", "reason": "not-a-reason"},
+        {**frame.payload, "extra": "field"},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            C.ControlFrame(
+                protocol=C.GUARD_PROTOCOL_VERSION,
+                run_id=RUN_ID,
+                nonce=NONCE,
+                kind="attempt-decision",
+                payload=bad_payload,
+            )
+
+
+def test_shadow_and_quarantine_records_are_typed_and_runtime_identity_is_private():
+    result = replace(_secret_result(["-q"]), runtime_identity="pytest:9")
+    inventory = C.Inventory(
+        adapter="pytest", version="9", complete=True, tests=(), digest="1" * 64)
+    evidence = C.AttemptEvidence(
+        attempt_id="a001", result=result.attempts[0], inventory=inventory,
+        terminal_complete=True, parallel_identity=True,
+        runtime_identity="pytest:9")
+    quarantine = C.SelectionQuarantine(
+        code="selection-shadow-quarantine", run_id=RUN_ID, sequence=7,
+        policy_digest="f" * 64, compatibility="c", input_digest="e" * 64,
+        verdict="suspected-miss")
+    plans = C.ShadowPlans(
+        selected=result.plan,
+        full=replace(result.plan, execution="full", files=()),
+        quarantine=quarantine)
+    comparison = C.ShadowComparison(
+        selected=evidence, full=evidence, verdict="suspected-miss",
+        expected_quarantine=quarantine)
+    support = C.CompoundSupport(
+        selection=True, parallel_identity=True, profile="pytest:9",
+        limitations=())
+
+    assert plans.quarantine is quarantine
+    assert comparison.expected_quarantine is quarantine
+    assert support.parallel_identity is True
+    assert "runtime_identity" not in C.serialize_run_result(result)
+    assert C.HistoryView(
+        baseline=None, selection_quarantine=quarantine,
+    ).selection_quarantine is quarantine
+
+    with pytest.raises(ValueError):
+        replace(quarantine, verdict="matched")
+    with pytest.raises(ValueError):
+        replace(comparison, verdict="unknown")
 
 
 def test_manifest_decoder_hides_offending_values(case):
@@ -701,7 +787,8 @@ def test_manifest_decoder_hides_offending_values(case):
         capability=None, summary=None,
     )
     manifest = C.LaunchManifest(
-        protocol=1, domain=domain, grant=grant, setup=None,
+        protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+        setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=300.0, attempt_timeout_s=30.0,
         compound_timeout_s=600.0,
@@ -727,7 +814,7 @@ def test_manifest_decoder_hides_offending_values(case):
 
 def test_control_frame_decoder_hides_offending_values():
     body = (
-        '{"protocol":1,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
+        '{"protocol":2,"run_id":"' + RUN_ID + '","nonce":"' + NONCE
         + '","kind":"cancel","payload":{"signal":999}}'
     ).encode()
     raw = struct.pack(">I", len(body)) + body
@@ -838,7 +925,8 @@ def test_launch_manifest_rejects_bad_attempts(case):
         ),
     )
     good = C.LaunchManifest(
-        protocol=1, domain=domain, grant=grant, setup=None,
+        protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+        setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=300.0, attempt_timeout_s=30.0,
         compound_timeout_s=600.0,
@@ -848,14 +936,16 @@ def test_launch_manifest_rejects_bad_attempts(case):
     assert decoded.attempt_ids == ("a001",)
     with pytest.raises(ValueError):
         C.LaunchManifest(
-            protocol=1, domain=domain, grant=grant, setup=None,
+            protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+            setup=None,
             attempts=(prepared,), attempt_ids=("a001", "a002"),
             setup_timeout_s=300.0, attempt_timeout_s=30.0,
             compound_timeout_s=600.0,
         )
     with pytest.raises(ValueError):
         C.LaunchManifest(
-            protocol=1, domain=domain, grant=grant, setup=None,
+            protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+            setup=None,
             attempts=(), attempt_ids=(),
             setup_timeout_s=300.0, attempt_timeout_s=30.0,
             compound_timeout_s=600.0,
@@ -1466,7 +1556,8 @@ def test_closed_enums_reject_malformed_values():
 
 
 def _control_raw(payload_dict, kind="cancel", extra_top=None):
-    obj = {"protocol": 1, "run_id": RUN_ID, "nonce": NONCE,
+    obj = {"protocol": C.GUARD_PROTOCOL_VERSION,
+           "run_id": RUN_ID, "nonce": NONCE,
            "kind": kind, "payload": payload_dict}
     if extra_top:
         obj.update(extra_top)
@@ -1520,6 +1611,20 @@ def test_private_frame_rejects_unknown_fields():
             _control_raw(problem_extra, "runner-facts"))
 
 
+def test_private_protocol_v2_codecs_reject_duplicate_json_keys(case):
+    control = _control_raw({"signal": 2})
+    control_body = b'{"protocol":2,' + control[5:]
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_control_frame(
+            struct.pack(">I", len(control_body)) + control_body)
+
+    manifest = C.encode_launch_manifest(_valid_manifest(case))
+    manifest_body = b'{"protocol":2,' + manifest[5:]
+    with pytest.raises(Problem, match="protocol-mismatch"):
+        C.decode_launch_manifest(
+            struct.pack(">I", len(manifest_body)) + manifest_body)
+
+
 def _valid_manifest(case):
     domain = case.domain()
     grant = C.Grant(
@@ -1541,7 +1646,8 @@ def _valid_manifest(case):
         ),
     )
     return C.LaunchManifest(
-        protocol=1, domain=domain, grant=grant, setup=None,
+        protocol=C.GUARD_PROTOCOL_VERSION, domain=domain, grant=grant,
+        setup=None,
         attempts=(prepared,), attempt_ids=("a001",),
         setup_timeout_s=300.0, attempt_timeout_s=30.0,
         compound_timeout_s=600.0,

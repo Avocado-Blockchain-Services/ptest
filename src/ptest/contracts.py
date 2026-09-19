@@ -23,6 +23,7 @@ from pathlib import Path
 PTEST_VERSION = "0.1.0"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
+GUARD_PROTOCOL_VERSION = 2
 
 PUBLIC_KINDS = (
     "init", "register", "plan", "where",
@@ -114,6 +115,7 @@ DEFAULT_QUEUE_TIMEOUT_S = 1800.0
 MAX_QUEUE_TIMEOUT_S = 86400.0
 DEFAULT_SETUP_TIMEOUT_S = 300.0
 DEFAULT_ATTEMPT_TIMEOUT_S = 30.0
+DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = 30.0
 MAX_COMPOUND_TIMEOUT_S = 600.0
 CANCEL_GRACE_S = 3.0
 SCHEDULER_POLL_S = 0.25
@@ -151,7 +153,9 @@ REASON_CODES = frozenset({
     "report-invalid", "state-unavailable", "no-tests-needed",
     "selection-disabled", "scan-limit", "static-evidence-insufficient",
     "probe-isolation-required", "unredacted-command-disclosure",
-    "already-exists", "invalid-bound",
+    "already-exists", "invalid-bound", "execution-timeout",
+    "attempt-decision-timeout", "selection-shadow-quarantine",
+    "probe-no-conflict-observed", "probe-conflict-observed",
 })
 
 FINDING_CODES = frozenset({
@@ -179,7 +183,13 @@ READINESS_STATES = frozenset({
 
 CONTROL_KINDS = frozenset({
     "cancel", "parent-closing", "registered", "phase",
-    "runner-facts", "draining",
+    "runner-facts", "draining", "attempt-ready", "attempt-decision",
+})
+
+ATTEMPT_DECISION_STOP_REASONS = frozenset({
+    "changed-during-run", "unknown-input", "report-invalid",
+    "incomplete-inventory", "unsupported-capability", "execution-timeout",
+    "state-unavailable",
 })
 
 LOCK_PATTERN = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
@@ -809,6 +819,7 @@ class Baseline:
     inventory: Inventory
     policy_digest: str
     created_at: str
+    runtime_identity: str | None = None
 
     def __post_init__(self) -> None:
         _check_hex("baseline.run_id", self.run_id, 32)
@@ -819,6 +830,8 @@ class Baseline:
             raise TypeError("baseline.inventory must be Inventory")
         _check_hex("baseline.policy_digest", self.policy_digest, 64)
         _check_str("baseline.created_at", self.created_at)
+        if self.runtime_identity is not None:
+            _check_str("baseline.runtime_identity", self.runtime_identity)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -844,11 +857,87 @@ class Obligation:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CompoundSupport:
+    selection: bool
+    parallel_identity: bool
+    profile: str | None
+    limitations: tuple = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "selection",
+                           _check_bool("support.selection", self.selection))
+        object.__setattr__(
+            self, "parallel_identity",
+            _check_bool("support.parallel_identity", self.parallel_identity))
+        if self.profile is not None:
+            _check_str("support.profile", self.profile)
+        items = _check_tuple("support.limitations", self.limitations)
+        for item in items:
+            if not isinstance(item, Reason):
+                raise TypeError("support.limitations entries must be Reason")
+        object.__setattr__(self, "limitations", items)
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttemptEvidence:
+    attempt_id: str
+    result: AttemptResult
+    inventory: Inventory | None
+    terminal_complete: bool
+    parallel_identity: bool
+    runtime_identity: str | None
+
+    def __post_init__(self) -> None:
+        _check_str("evidence.attempt_id", self.attempt_id)
+        if not ATTEMPT_ID_PATTERN.fullmatch(self.attempt_id):
+            raise ValueError("evidence.attempt_id must match a001-a010")
+        if not isinstance(self.result, AttemptResult):
+            raise TypeError("evidence.result must be AttemptResult")
+        if self.result.attempt_id != self.attempt_id:
+            raise ValueError("evidence result attempt_id must match")
+        if self.inventory is not None and not isinstance(self.inventory, Inventory):
+            raise TypeError("evidence.inventory must be Inventory or None")
+        object.__setattr__(
+            self, "terminal_complete",
+            _check_bool("evidence.terminal_complete", self.terminal_complete))
+        object.__setattr__(
+            self, "parallel_identity",
+            _check_bool("evidence.parallel_identity", self.parallel_identity))
+        if self.runtime_identity is not None:
+            _check_str("evidence.runtime_identity", self.runtime_identity)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SelectionQuarantine:
+    code: str
+    run_id: str
+    sequence: int
+    policy_digest: str
+    compatibility: str
+    input_digest: str
+    verdict: str
+
+    def __post_init__(self) -> None:
+        if self.code != "selection-shadow-quarantine":
+            raise ValueError(
+                "quarantine.code must be selection-shadow-quarantine")
+        _check_hex("quarantine.run_id", self.run_id, 32)
+        _check_int("quarantine.sequence", self.sequence, lo=0)
+        _check_hex("quarantine.policy_digest", self.policy_digest, 64)
+        _check_str("quarantine.compatibility", self.compatibility,
+                   allow_empty=True)
+        _check_hex("quarantine.input_digest", self.input_digest, 64)
+        if self.verdict not in ("suspected-miss", "unclassified-divergence"):
+            raise ValueError("quarantine.verdict is invalid")
+
+
+@dataclass(frozen=True, kw_only=True)
 class HistoryView:
     baseline: Baseline | None
     obligations: tuple = ()
     selection_disabled: bool = False
     limitations: tuple = ()
+    selection_quarantine: SelectionQuarantine | None = None
 
     def __post_init__(self) -> None:
         if self.baseline is not None and not isinstance(self.baseline, Baseline):
@@ -865,6 +954,11 @@ class HistoryView:
             if not isinstance(item, Reason):
                 raise TypeError("history.limitations entries must be Reason")
         object.__setattr__(self, "limitations", items)
+        if (self.selection_quarantine is not None
+                and not isinstance(self.selection_quarantine,
+                                   SelectionQuarantine)):
+            raise TypeError(
+                "history.selection_quarantine must be SelectionQuarantine or None")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -895,6 +989,46 @@ class Plan:
         if self.baseline_run_id is not None:
             _check_hex("plan.baseline_run_id", self.baseline_run_id, 32)
         object.__setattr__(self, "static_preview", _check_bool("plan.static_preview", self.static_preview))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ShadowPlans:
+    selected: Plan
+    full: Plan
+    quarantine: SelectionQuarantine | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.selected, Plan):
+            raise TypeError("shadow.selected must be Plan")
+        if not isinstance(self.full, Plan) or self.full.execution != "full":
+            raise TypeError("shadow.full must be a full Plan")
+        if (self.quarantine is not None
+                and not isinstance(self.quarantine, SelectionQuarantine)):
+            raise TypeError(
+                "shadow.quarantine must be SelectionQuarantine or None")
+
+
+@dataclass(frozen=True, kw_only=True)
+class ShadowComparison:
+    selected: AttemptEvidence | None
+    full: AttemptEvidence | None
+    verdict: str
+    expected_quarantine: SelectionQuarantine | None = None
+
+    def __post_init__(self) -> None:
+        for field in ("selected", "full"):
+            value = getattr(self, field)
+            if value is not None and not isinstance(value, AttemptEvidence):
+                raise TypeError(f"comparison.{field} must be AttemptEvidence or None")
+        if self.verdict not in (
+                "matched", "suspected-miss", "unclassified-divergence",
+                "incomplete"):
+            raise ValueError("comparison.verdict is invalid")
+        if (self.expected_quarantine is not None
+                and not isinstance(self.expected_quarantine,
+                                   SelectionQuarantine)):
+            raise TypeError(
+                "comparison.expected_quarantine must be SelectionQuarantine or None")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1130,6 +1264,7 @@ class RunResult:
     input_before: InputSnapshot | None = None
     input_after: InputSnapshot | None = None
     policy_digest: str | None = None
+    runtime_identity: str | None = None
 
     def __post_init__(self) -> None:
         _check_hex("result.run_id", self.run_id, 32)
@@ -1187,6 +1322,8 @@ class RunResult:
                 raise TypeError(f"result.{field} must be InputSnapshot or None")
         if self.policy_digest is not None:
             _check_hex("result.policy_digest", self.policy_digest, 64)
+        if self.runtime_identity is not None:
+            _check_str("result.runtime_identity", self.runtime_identity)
 
 
 def serialize_run_result(result: RunResult) -> dict:
@@ -1750,8 +1887,8 @@ class ControlFrame:
     payload: dict
 
     def __post_init__(self) -> None:
-        if self.protocol != PROTOCOL_VERSION:
-            raise ValueError("control.protocol must be 1")
+        if self.protocol != GUARD_PROTOCOL_VERSION:
+            raise ValueError("control protocol must be 2")
         _check_hex("control.run_id", self.run_id, 32)
         _check_hex("control.nonce", self.nonce, 64)
         if not _is_known(self.kind, CONTROL_KINDS):
@@ -1771,6 +1908,10 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
         "runner-facts": ("attempt_id", "phase", "raw_exit_code",
                          "report_name", "problem"),
         "draining": ("provisional_artifact_id",),
+        "attempt-ready": ("attempt_id", "previous_attempt_id", "generation",
+                          "gate_token", "deadline_monotonic"),
+        "attempt-decision": ("attempt_id", "generation", "gate_token",
+                             "action", "reason"),
     }[kind]
     for key in required:
         if key not in payload:
@@ -1826,6 +1967,34 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
         if not isinstance(payload["provisional_artifact_id"], str):
             raise TypeError(
                 "draining provisional_artifact_id must be a string or null")
+    if kind in ("attempt-ready", "attempt-decision"):
+        attempt_id = payload["attempt_id"]
+        if not isinstance(attempt_id, str):
+            raise TypeError(f"{kind} attempt_id must be a string")
+        if not ATTEMPT_ID_PATTERN.fullmatch(attempt_id):
+            raise ValueError(f"{kind} attempt_id must match a001-a010")
+        _check_int(f"{kind}.generation", payload["generation"], lo=0)
+        _check_hex(f"{kind}.gate_token", payload["gate_token"], 32)
+    if kind == "attempt-ready":
+        previous = payload["previous_attempt_id"]
+        if previous is not None:
+            if not isinstance(previous, str):
+                raise TypeError(
+                    "attempt-ready previous_attempt_id must be a string or null")
+            if not ATTEMPT_ID_PATTERN.fullmatch(previous):
+                raise ValueError(
+                    "attempt-ready previous_attempt_id must match a001-a010")
+        _check_float("attempt-ready.deadline_monotonic",
+                     payload["deadline_monotonic"], lo=0)
+    if kind == "attempt-decision":
+        action = payload["action"]
+        reason = payload["reason"]
+        if action not in ("continue", "stop"):
+            raise ValueError("attempt-decision action must be continue or stop")
+        if action == "continue" and reason is not None:
+            raise ValueError("attempt-decision continue reason must be null")
+        if action == "stop" and reason not in ATTEMPT_DECISION_STOP_REASONS:
+            raise ValueError("attempt-decision stop reason is invalid")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1841,8 +2010,8 @@ class LaunchManifest:
     compound_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
-        if self.protocol != PROTOCOL_VERSION:
-            raise ValueError("manifest.protocol must be 1")
+        if self.protocol != GUARD_PROTOCOL_VERSION:
+            raise ValueError("manifest protocol must be 2")
         if not isinstance(self.domain, DomainPaths):
             raise TypeError("manifest.domain must be DomainPaths")
         if not isinstance(self.grant, Grant):
@@ -1859,9 +2028,11 @@ class LaunchManifest:
         attempt_ids = _as_str_tuple("manifest.attempt_ids", self.attempt_ids)
         if len(attempt_ids) != len(attempts):
             raise ValueError("manifest.attempt_ids must match attempts in length")
-        for attempt_id in attempt_ids:
-            if not ATTEMPT_ID_PATTERN.fullmatch(attempt_id):
-                raise ValueError("manifest.attempt_ids must match a001-a010")
+        expected_ids = tuple(
+            f"a{index:03d}" for index in range(1, len(attempts) + 1))
+        if attempt_ids != expected_ids:
+            raise ValueError(
+                "manifest.attempt_ids must be distinct and contiguous from a001")
         object.__setattr__(self, "attempt_ids", attempt_ids)
         object.__setattr__(self, "setup_timeout_s",
                            _check_float("manifest.setup_timeout_s", self.setup_timeout_s, lo=0.1))
@@ -2848,6 +3019,27 @@ def _check_nesting(value: object, limit: int, depth: int = 0) -> None:
             stack.append((item, at + 1))
 
 
+def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(_value: str) -> object:
+    raise ValueError("non-finite JSON number")
+
+
+def _decode_private_json(body: bytes) -> object:
+    return json.loads(
+        body.decode("utf-8"),
+        object_pairs_hook=_reject_duplicate_members,
+        parse_constant=_reject_nonfinite_json,
+    )
+
+
 def _frame_object(frame: ControlFrame) -> dict:
     return {
         "protocol": frame.protocol,
@@ -2885,7 +3077,7 @@ def decode_control_frame(data: bytes | bytearray, *,
     if len(body) > length:
         raise _invalid("protocol-mismatch", "control frame has trailing data")
     try:
-        obj = json.loads(body.decode("utf-8"))
+        obj = _decode_private_json(body)
     except (RecursionError, UnicodeDecodeError, ValueError):
         raise _invalid("protocol-mismatch", "control frame is not JSON") from None
     if not isinstance(obj, dict):
@@ -2894,7 +3086,7 @@ def decode_control_frame(data: bytes | bytearray, *,
         if key not in ("protocol", "run_id", "nonce", "kind", "payload"):
             raise _invalid("protocol-mismatch",
                            "control frame carries an unknown field")
-    if obj.get("protocol") != PROTOCOL_VERSION:
+    if obj.get("protocol") != GUARD_PROTOCOL_VERSION:
         raise _invalid("protocol-mismatch", "control frame has the wrong protocol")
     try:
         _check_hex("control.run_id", obj.get("run_id"), 32)
@@ -2911,7 +3103,8 @@ def decode_control_frame(data: bytes | bytearray, *,
         raise _invalid("protocol-mismatch", "control frame has the wrong nonce")
     _check_nesting(payload, CONTROL_FRAME_MAX_NESTING)
     try:
-        return ControlFrame(protocol=1, run_id=obj["run_id"], nonce=obj["nonce"],
+        return ControlFrame(protocol=GUARD_PROTOCOL_VERSION,
+                            run_id=obj["run_id"], nonce=obj["nonce"],
                             kind=kind, payload=payload)
     except (TypeError, ValueError):
         raise _invalid("protocol-mismatch",
@@ -3103,10 +3296,10 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
     if len(body) > length:
         raise _invalid("protocol-mismatch", "manifest has trailing data")
     try:
-        obj = json.loads(body.decode("utf-8"))
+        obj = _decode_private_json(body)
     except (RecursionError, UnicodeDecodeError, ValueError):
         raise _invalid("protocol-mismatch", "manifest is not JSON") from None
-    if not isinstance(obj, dict) or obj.get("protocol") != PROTOCOL_VERSION:
+    if not isinstance(obj, dict) or obj.get("protocol") != GUARD_PROTOCOL_VERSION:
         raise _invalid("protocol-mismatch", "manifest has the wrong protocol")
     for key in obj:
         if key not in ("protocol", "domain", "grant", "setup", "attempts",
@@ -3121,7 +3314,8 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
             setup = _build_prepared(obj["setup"])
         attempts = tuple(_build_prepared(item) for item in obj["attempts"])
         return LaunchManifest(
-            protocol=1, domain=_build_domain(obj["domain"]),
+            protocol=GUARD_PROTOCOL_VERSION,
+            domain=_build_domain(obj["domain"]),
             grant=_build_grant(obj["grant"]), setup=setup,
             attempts=attempts, attempt_ids=tuple(obj["attempt_ids"]),
             setup_timeout_s=obj["setup_timeout_s"],
@@ -3570,6 +3764,7 @@ PUBLIC_SCHEMAS: dict = {
 PROTOCOL_V1_DESCRIPTOR: dict = {
     "protocol": PROTOCOL_VERSION,
     "control_frame": {
+        "protocol": GUARD_PROTOCOL_VERSION,
         "prefix": "uint32-big-endian-byte-length",
         "encoding": "utf-8-json-object",
         "max_bytes": CONTROL_FRAME_MAX_BYTES,
@@ -3589,9 +3784,24 @@ PROTOCOL_V1_DESCRIPTOR: dict = {
                 "problem": "Problem|null",
             },
             "draining": {"provisional_artifact_id": "string|null"},
+            "attempt-ready": {
+                "attempt_id": "string",
+                "previous_attempt_id": "string|null",
+                "generation": "integer",
+                "gate_token": "lowercase-hex-32",
+                "deadline_monotonic": "finite-number",
+            },
+            "attempt-decision": {
+                "attempt_id": "string",
+                "generation": "integer",
+                "gate_token": "lowercase-hex-32",
+                "action": "continue|stop",
+                "reason": "decision-stop-reason|null",
+            },
         },
     },
     "launch_manifest": {
+        "protocol": GUARD_PROTOCOL_VERSION,
         "prefix": "uint32-big-endian-byte-length",
         "encoding": "utf-8-json-object",
         "max_bytes": MANIFEST_MAX_BYTES,

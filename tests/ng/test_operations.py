@@ -428,15 +428,23 @@ def test_source_capture_follows_queue_changes_and_precedes_guard_finalization(ca
         return ensure(*args)
 
     def observed_capture(*args, **kwargs):
-        assert events == (["queued-edit", "key"] if not snapshots else
-                          ["queued-edit", "key", "before", "guard-reaped"])
+        expected_events = (
+            ["queued-edit", "key"] if not snapshots
+            else ["queued-edit", "key", "before"] if len(snapshots) == 1
+            else ["queued-edit", "key", "before", "gate", "guard-reaped"]
+        )
+        assert events == expected_events
         assert (root / "runtime-input.txt").read_text() == "edited while queued"
         leases = scheduler.reconcile(domain)
-        expected_state = C.LeaseState.GRANTED if not snapshots else C.LeaseState.DRAINING
+        expected_state = (
+            C.LeaseState.GRANTED if not snapshots
+            else C.LeaseState.RUNNING if len(snapshots) == 1
+            else C.LeaseState.DRAINING)
         assert any(lease.state is expected_state for lease in leases)
         snapshot = capture(*args, **kwargs)
         snapshots.append(snapshot)
-        events.append("before" if len(snapshots) == 1 else "after")
+        events.append(("before" if len(snapshots) == 1
+                       else "gate" if len(snapshots) == 2 else "after"))
         return snapshot
 
     def observed_guard(*args):
@@ -449,7 +457,7 @@ def test_source_capture_follows_queue_changes_and_precedes_guard_finalization(ca
         return result
 
     def observed_begin(*args):
-        assert events[-1] == "after" and len(snapshots) == 2
+        assert events[-1] == "after" and len(snapshots) == 3
         events.append("finalization")
         return begin(*args)
 
@@ -471,10 +479,12 @@ def test_source_capture_follows_queue_changes_and_precedes_guard_finalization(ca
     result = _execute(root, domain, result_path="result.json")
 
     assert result.exit_code == 0
-    assert result.input_before is snapshots[0] and result.input_after is snapshots[1]
+    assert result.input_before is snapshots[0] and result.input_after is snapshots[2]
     assert result.input_before.digest is not None
     assert result.input_before.digest == result.input_after.digest
-    assert events == ["queued-edit", "key", "before", "guard-reaped", "after", "finalization", "exported-finish"]
+    assert events == ["queued-edit", "key", "before", "gate",
+                      "guard-reaped", "after", "finalization",
+                      "exported-finish"]
 
 
 def test_cancellation_during_source_capture_revokes_grant_without_guard_launch(case, monkeypatch):
@@ -502,6 +512,27 @@ def test_cancellation_during_source_capture_revokes_grant_without_guard_launch(c
     assert not launches
     assert not (root / "launch-marker").exists()
     assert scheduler.reconcile(domain)[0].state is C.LeaseState.CANCELLED
+
+
+def test_attempt_gate_blocks_launch_when_source_changed_after_admission(
+        case, monkeypatch):
+    domain = case.domain()
+    root = _git_command_project(
+        case, domain, args=("marker", "launch-marker"))
+    run_guard = operations._run_guard
+
+    def edit_before_ready(*args, **kwargs):
+        (root / "runtime-input.txt").write_text("changed before ready")
+        return run_guard(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "_run_guard", edit_before_ready)
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code, result.runner_exit_code) == (
+        C.Status.INCOMPLETE, 70, None)
+    assert not (root / "launch-marker").exists()
+    assert any(reason.code == "changed-during-run" for reason in result.reasons)
+    assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
 
 
 @pytest.mark.parametrize("boundary", ["ensure_fingerprint_key", "snapshot"])

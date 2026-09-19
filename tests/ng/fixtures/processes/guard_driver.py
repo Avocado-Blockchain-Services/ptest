@@ -20,6 +20,9 @@ def main() -> int:
     failure = os.environ.pop("GUARD_FAILURE", "")
     stats_path = os.environ.pop("GUARD_STATS", "")
     advance = float(os.environ.pop("GUARD_ADVANCE_AFTER_FACTS", "0"))
+    decision_timeout = os.environ.pop("GUARD_DECISION_TIMEOUT", "")
+    if decision_timeout:
+        guard.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = float(decision_timeout)
     clock_offset = [0.0]
     if advance:
         guard.time = SimpleNamespace(monotonic=lambda: time.monotonic() + clock_offset[0])

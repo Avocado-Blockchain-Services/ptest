@@ -45,6 +45,60 @@ def test_known_group_change_selects_its_declared_test(case):
     assert plan.files == ("tests/test_core.py",)
 
 
+def test_quarantine_forces_auto_full_but_explicit_shadow_can_diagnose_only_it(case):
+    from ptest.selection import choose_plan, choose_shadow_plans
+
+    policy = C.SelectionPolicy(
+        enabled=True, closed_inputs=True, input_roots=("src", "tests"),
+        groups=(C.Group(
+            name="core", sources=("src/core",),
+            tests=("tests/test_core.py",)),),
+    )
+    config = case.config(selection=policy)
+    snapshot = _snapshot(case, changes=(C.Change(
+        old="src/core/a.py", new="src/core/a.py", kind="modified"),))
+    quarantine = C.SelectionQuarantine(
+        code="selection-shadow-quarantine", run_id="a" * 32, sequence=4,
+        policy_digest="b" * 64, compatibility="test-compat-v1",
+        input_digest="c" * 64, verdict="suspected-miss")
+    history = replace(
+        _compatible_history(
+            case, config, ("tests/test_core.py", "tests/test_other.py")),
+        selection_quarantine=quarantine,
+        limitations=(C.Reason(
+            code="selection-shadow-quarantine",
+            message="selection is quarantined"),),
+    )
+    request = case.request()
+
+    automatic = choose_plan(config, snapshot, history, request)
+    assert automatic.execution == "full"
+    assert automatic.reasons[0].code == "selection-shadow-quarantine"
+
+    plans = choose_shadow_plans(
+        config, snapshot, history, request,
+        C.CompoundSupport(
+            selection=True, parallel_identity=False,
+            profile="pytest-select-v1", limitations=()),
+    )
+    assert plans.selected.execution == "selected"
+    assert plans.full.execution == "full"
+    assert plans.quarantine is quarantine
+
+    unhealthy = replace(
+        history,
+        limitations=history.limitations + (C.Reason(
+            code="coordinator-corrupt", message="history is corrupt"),),
+        selection_disabled=True,
+    )
+    assert choose_shadow_plans(
+        config, snapshot, unhealthy, request,
+        C.CompoundSupport(
+            selection=True, parallel_identity=False,
+            profile="pytest-select-v1", limitations=()),
+    ).selected.execution == "full"
+
+
 def test_overlapping_groups_promote_to_actual_full_gate_by_ratio(case):
     from ptest.selection import choose_plan
 

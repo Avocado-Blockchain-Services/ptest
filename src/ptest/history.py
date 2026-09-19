@@ -47,9 +47,13 @@ _ACTIVE_PUBLICATION_NAME = "history-publication-active.json"
 _WRITER_LOCK_NAME = "history-writer.lock"
 _CHECKOUTS_NAME = "checkouts"
 _SCHEMA_VERSION = 1
-_REQUIRED_TABLES = frozenset({
+_BASE_REQUIRED_TABLES = frozenset({
     "metadata", "runs", "baselines", "obligations", "reconciliations",
 })
+_COMPOUND_TABLES = frozenset({
+    "selection_quarantine", "attempt_evidence", "comparison_receipts",
+})
+_REQUIRED_TABLES = _BASE_REQUIRED_TABLES | _COMPOUND_TABLES
 _FAILURE_OUTCOMES = frozenset({C.Outcome.FAILED, C.Outcome.ERROR})
 _SUCCESS_OUTCOME = C.Outcome.PASSED
 _FAILED_ATTEMPT_STATUSES = frozenset({
@@ -102,7 +106,8 @@ _SCHEMA_STATEMENTS = (
         compatibility TEXT NOT NULL,
         inventory TEXT NOT NULL,
         policy_digest TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        runtime_identity TEXT
     )
     """,
     """
@@ -126,7 +131,39 @@ _SCHEMA_STATEMENTS = (
         outcome TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE selection_quarantine (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        code TEXT NOT NULL CHECK (code = 'selection-shadow-quarantine'),
+        run_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        policy_digest TEXT NOT NULL,
+        compatibility TEXT NOT NULL,
+        input_digest TEXT NOT NULL,
+        verdict TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE attempt_evidence (
+        run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        result TEXT NOT NULL,
+        inventory TEXT,
+        terminal_complete INTEGER NOT NULL,
+        parallel_identity INTEGER NOT NULL,
+        runtime_identity TEXT,
+        PRIMARY KEY (run_id, attempt_id)
+    )
+    """,
+    """
+    CREATE TABLE comparison_receipts (
+        run_id TEXT PRIMARY KEY,
+        verdict TEXT NOT NULL,
+        expected_quarantine TEXT
+    )
+    """,
 )
+_COMPOUND_SCHEMA_STATEMENTS = _SCHEMA_STATEMENTS[-3:]
 
 
 class _HistoryStateError(Exception):
@@ -662,6 +699,23 @@ def _ensure_schema(
         else:
             _validate_schema(
                 connection, project_id=project_id, checkout_id=checkout_id,
+                required_tables=_BASE_REQUIRED_TABLES,
+            )
+            missing = _COMPOUND_TABLES - tables
+            if missing:
+                for statement in _COMPOUND_SCHEMA_STATEMENTS:
+                    table = statement.split("CREATE TABLE ", 1)[1].split(" ", 1)[0]
+                    if table in missing:
+                        connection.execute(statement)
+            baseline_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(baselines)")}
+            if "runtime_identity" not in baseline_columns:
+                connection.execute(
+                    "ALTER TABLE baselines ADD COLUMN runtime_identity TEXT")
+            _validate_schema(
+                connection, project_id=project_id,
+                checkout_id=checkout_id,
             )
         connection.commit()
     except BaseException:
@@ -679,9 +733,10 @@ def _schema_tables(connection: sqlite3.Connection) -> frozenset[str]:
 
 def _validate_schema(
     connection: sqlite3.Connection, *, project_id: str, checkout_id: str,
+    required_tables: frozenset[str] = _REQUIRED_TABLES,
 ) -> None:
     tables = _schema_tables(connection)
-    if not _REQUIRED_TABLES.issubset(tables):
+    if not required_tables.issubset(tables):
         raise _HistoryStateError("coordinator-corrupt")
     indexes = frozenset(
         row[0] for row in connection.execute(
@@ -780,6 +835,30 @@ def _inventory_dict(inventory: C.Inventory) -> dict:
     }
 
 
+def _quarantine_dict(quarantine: C.SelectionQuarantine) -> dict:
+    return {
+        "code": quarantine.code,
+        "run_id": quarantine.run_id,
+        "sequence": quarantine.sequence,
+        "policy_digest": quarantine.policy_digest,
+        "compatibility": quarantine.compatibility,
+        "input_digest": quarantine.input_digest,
+        "verdict": quarantine.verdict,
+    }
+
+
+def _attempt_evidence_dict(evidence: C.AttemptEvidence) -> tuple:
+    return (
+        evidence.result.attempt_id,
+        _json_bytes(C._attempt_dict(evidence.result)),
+        None if evidence.inventory is None else _json_bytes(
+            _inventory_dict(evidence.inventory)),
+        int(evidence.terminal_complete),
+        int(evidence.parallel_identity),
+        evidence.runtime_identity,
+    )
+
+
 def _obligation_dict(obligation: C.Obligation) -> dict:
     return {
         "file": obligation.file,
@@ -864,6 +943,69 @@ def _obligation_from_row(row: sqlite3.Row | tuple) -> C.Obligation:
         )
     except (TypeError, ValueError):
         raise _HistoryStateError("coordinator-corrupt") from None
+
+
+def _quarantine_from_row(
+        row: sqlite3.Row | tuple | None) -> C.SelectionQuarantine | None:
+    if row is None:
+        return None
+    try:
+        if len(row) != 7:
+            raise ValueError
+        return C.SelectionQuarantine(
+            code=row[0], run_id=row[1], sequence=row[2],
+            policy_digest=row[3], compatibility=row[4],
+            input_digest=row[5], verdict=row[6])
+    except (TypeError, ValueError):
+        raise _HistoryStateError("coordinator-corrupt") from None
+
+
+def _validate_compound_evidence(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT run_id, attempt_id, result, inventory, terminal_complete, "
+        "parallel_identity, runtime_identity FROM attempt_evidence"
+    ).fetchall()
+    for run_id, attempt_id, result_text, inventory_text, terminal, parallel, runtime in rows:
+        if (not isinstance(run_id, str) or not isinstance(attempt_id, str)
+                or not isinstance(result_text, str)
+                or terminal not in (0, 1) or parallel not in (0, 1)
+                or (runtime is not None and not isinstance(runtime, str))):
+            raise _HistoryStateError("coordinator-corrupt")
+        value = _decode_json(result_text)
+        if not isinstance(value, dict):
+            raise _HistoryStateError("coordinator-corrupt")
+        try:
+            attempt = C.AttemptResult(
+                attempt_id=value["attempt_id"], phase=value["phase"],
+                status=value["status"], raw_exit_code=value["raw_exit_code"],
+                final_exit_code=value["final_exit_code"],
+                source_valid=value["source_valid"],
+                inventory_complete=value["inventory_complete"],
+                timings=None)
+        except (KeyError, TypeError, ValueError):
+            raise _HistoryStateError("coordinator-corrupt") from None
+        if attempt.attempt_id != attempt_id:
+            raise _HistoryStateError("coordinator-corrupt")
+        if inventory_text is not None:
+            if not isinstance(inventory_text, str):
+                raise _HistoryStateError("coordinator-corrupt")
+            _inventory_from_dict(_decode_json(inventory_text))
+    receipts = connection.execute(
+        "SELECT run_id, verdict, expected_quarantine FROM comparison_receipts"
+    ).fetchall()
+    for run_id, verdict, expected_text in receipts:
+        if (not isinstance(run_id, str) or verdict not in {
+                "matched", "suspected-miss", "unclassified-divergence",
+                "incomplete"}):
+            raise _HistoryStateError("coordinator-corrupt")
+        if expected_text is not None:
+            value = _decode_json(expected_text)
+            if not isinstance(value, dict):
+                raise _HistoryStateError("coordinator-corrupt")
+            try:
+                C.SelectionQuarantine(**value)
+            except (TypeError, ValueError):
+                raise _HistoryStateError("coordinator-corrupt") from None
 
 
 def _validated_summary(value: object) -> dict:
@@ -990,14 +1132,16 @@ def _validate_reconciliations(connection: sqlite3.Connection) -> None:
 
 def _read_state(
     connection: sqlite3.Connection, marker_code: str | None = None,
-) -> tuple[C.Baseline | None, tuple[C.Obligation, ...], bool, tuple[C.Reason, ...]]:
+) -> tuple[C.Baseline | None, tuple[C.Obligation, ...], bool,
+           tuple[C.Reason, ...], C.SelectionQuarantine | None]:
     disabled_row = connection.execute(
         "SELECT value FROM metadata WHERE key = 'selection_disabled'"
     ).fetchone()
     if disabled_row is None or disabled_row[0] not in {"0", "1"}:
         raise _HistoryStateError("coordinator-corrupt")
     baseline_row = connection.execute(
-        "SELECT run_id, sequence, head, input_digest, compatibility, inventory, policy_digest, created_at"
+        "SELECT run_id, sequence, head, input_digest, compatibility, inventory, "
+        "policy_digest, created_at, runtime_identity"
         " FROM baselines WHERE singleton = 1"
     ).fetchone()
     baseline = None
@@ -1008,6 +1152,7 @@ def _read_state(
                 input_digest=baseline_row[3], compatibility=baseline_row[4],
                 inventory=_inventory_from_dict(_decode_json(baseline_row[5])),
                 policy_digest=baseline_row[6], created_at=baseline_row[7],
+                runtime_identity=baseline_row[8],
             )
         except (TypeError, ValueError):
             raise _HistoryStateError("coordinator-corrupt") from None
@@ -1016,10 +1161,15 @@ def _read_state(
         "FROM obligations ORDER BY sequence ASC, obligation_key ASC"
     ).fetchall()
     obligations = tuple(_obligation_from_row(row) for row in rows)
+    quarantine = _quarantine_from_row(connection.execute(
+        "SELECT code, run_id, sequence, policy_digest, compatibility, "
+        "input_digest, verdict FROM selection_quarantine WHERE singleton = 1"
+    ).fetchone())
     # Validate every retained public row before making history usable.  A
     # malformed summary is uncertainty, not a reason to silently discard it.
     _validate_private_runs(connection)
     _validate_reconciliations(connection)
+    _validate_compound_evidence(connection)
     if baseline is not None:
         _validate_baseline(connection, baseline, baseline_row[1])
     if marker_code is not None:
@@ -1034,7 +1184,12 @@ def _read_state(
     else:
         disabled = False
         limitations = ()
-    return baseline, obligations, disabled, limitations
+    if quarantine is not None:
+        disabled = True
+        limitations += (_reason(
+            "selection-shadow-quarantine",
+            "selection is quarantined pending a corrected shadow comparison"),)
+    return baseline, obligations, disabled, limitations, quarantine
 
 
 def _disabled_view(problem: C.Problem) -> C.HistoryView:
@@ -1060,12 +1215,13 @@ def read_history(
                 baseline=None, obligations=(), selection_disabled=False,
                 limitations=(_reason("no-baseline", "no history has been recorded"),),
             )
-        baseline, obligations, disabled, limitations = _read_state(
+        baseline, obligations, disabled, limitations, quarantine = _read_state(
             connection, marker_code,
         )
         return C.HistoryView(
             baseline=baseline, obligations=obligations,
             selection_disabled=disabled, limitations=limitations,
+            selection_quarantine=quarantine,
         )
     except _HistoryStateError as exc:
         if _can_persist_disabled_marker(exc.code):
@@ -1382,15 +1538,16 @@ def _publish_baseline(
     snapshot = result.input_after
     assert snapshot is not None
     connection.execute(
-        "INSERT INTO baselines(singleton, run_id, sequence, head, input_digest, compatibility, inventory, policy_digest, created_at) "
-        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "INSERT INTO baselines(singleton, run_id, sequence, head, input_digest, compatibility, inventory, policy_digest, created_at, runtime_identity) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(singleton) DO UPDATE SET run_id=excluded.run_id, sequence=excluded.sequence, "
         "head=excluded.head, input_digest=excluded.input_digest, compatibility=excluded.compatibility, "
-        "inventory=excluded.inventory, policy_digest=excluded.policy_digest, created_at=excluded.created_at",
+        "inventory=excluded.inventory, policy_digest=excluded.policy_digest, "
+        "created_at=excluded.created_at, runtime_identity=excluded.runtime_identity",
         (
             result.run_id, result.sequence, snapshot.head, snapshot.digest,
             snapshot.compatibility, _json_bytes(_inventory_dict(inventory)),
-            result.policy_digest, result.finished_at,
+            result.policy_digest, result.finished_at, result.runtime_identity,
         ),
     )
     connection.execute(
@@ -1431,7 +1588,8 @@ def _reconciliation_storage_size(connection: sqlite3.Connection) -> int:
 def _baseline_storage_size(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         "SELECT singleton, run_id, sequence, head, input_digest, compatibility, "
-        "inventory, policy_digest, created_at FROM baselines WHERE singleton = 1"
+        "inventory, policy_digest, created_at, runtime_identity "
+        "FROM baselines WHERE singleton = 1"
     ).fetchone()
     return 0 if row is None else sum(_value_size(value) for value in row)
 
@@ -1635,13 +1793,145 @@ def _capacity_prune(connection: sqlite3.Connection, run_id: str, batch: int) -> 
     return bool(rows)
 
 
+def _store_attempt_evidence(
+        connection: sqlite3.Connection, run_id: str,
+        evidence: tuple[C.AttemptEvidence, ...]) -> None:
+    for item in evidence:
+        values = _attempt_evidence_dict(item)
+        try:
+            connection.execute(
+                "INSERT INTO attempt_evidence(run_id, attempt_id, result, "
+                "inventory, terminal_complete, parallel_identity, runtime_identity) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, *values),
+            )
+        except sqlite3.IntegrityError:
+            old = connection.execute(
+                "SELECT attempt_id, result, inventory, terminal_complete, "
+                "parallel_identity, runtime_identity FROM attempt_evidence "
+                "WHERE run_id = ? AND attempt_id = ?",
+                (run_id, item.attempt_id),
+            ).fetchone()
+            if old is None or tuple(old) != values:
+                raise _HistoryStateError("coordinator-corrupt") from None
+
+
+def _store_comparison_receipt(
+        connection: sqlite3.Connection, run_id: str,
+        comparison: C.ShadowComparison) -> None:
+    expected = (
+        None if comparison.expected_quarantine is None
+        else _json_bytes(_quarantine_dict(comparison.expected_quarantine)))
+    try:
+        connection.execute(
+            "INSERT INTO comparison_receipts(run_id, verdict, "
+            "expected_quarantine) VALUES (?, ?, ?)",
+            (run_id, comparison.verdict, expected),
+        )
+    except sqlite3.IntegrityError:
+        old = connection.execute(
+            "SELECT verdict, expected_quarantine FROM comparison_receipts "
+            "WHERE run_id = ?", (run_id,)).fetchone()
+        if old is None or tuple(old) != (comparison.verdict, expected):
+            raise _HistoryStateError("coordinator-corrupt") from None
+
+
+def _evidence_passes(evidence: C.AttemptEvidence | None) -> bool:
+    if (evidence is None or not evidence.terminal_complete
+            or evidence.inventory is None or not evidence.inventory.complete):
+        return False
+    result = evidence.result
+    return bool(
+        result.status is C.Status.PASSED
+        and result.raw_exit_code == 0 and result.final_exit_code == 0
+        and all(item.outcome not in _FAILURE_OUTCOMES | {C.Outcome.UNKNOWN}
+                for item in evidence.inventory.tests)
+    )
+
+
+def _apply_quarantine_transition(
+        connection: sqlite3.Connection, result: C.RunResult,
+        comparison: C.ShadowComparison) -> None:
+    source_digest, compatibility = _result_identity(result)
+    assert source_digest is not None
+    assert compatibility is not None
+    assert result.policy_digest is not None
+    if comparison.verdict in {
+            "suspected-miss", "unclassified-divergence"}:
+        quarantine = C.SelectionQuarantine(
+            code="selection-shadow-quarantine", run_id=result.run_id,
+            sequence=result.sequence, policy_digest=result.policy_digest,
+            compatibility=compatibility, input_digest=source_digest,
+            verdict=comparison.verdict)
+        old = _quarantine_from_row(connection.execute(
+            "SELECT code, run_id, sequence, policy_digest, compatibility, "
+            "input_digest, verdict FROM selection_quarantine WHERE singleton = 1"
+        ).fetchone())
+        if old is None or result.sequence > old.sequence:
+            connection.execute(
+                "INSERT INTO selection_quarantine(singleton, code, run_id, "
+                "sequence, policy_digest, compatibility, input_digest, verdict) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET code=excluded.code, "
+                "run_id=excluded.run_id, sequence=excluded.sequence, "
+                "policy_digest=excluded.policy_digest, "
+                "compatibility=excluded.compatibility, "
+                "input_digest=excluded.input_digest, verdict=excluded.verdict",
+                (quarantine.code, quarantine.run_id, quarantine.sequence,
+                 quarantine.policy_digest, quarantine.compatibility,
+                 quarantine.input_digest, quarantine.verdict),
+            )
+        return
+    if comparison.verdict != "matched":
+        return
+    expected = comparison.expected_quarantine
+    if expected is None or not (
+            _evidence_passes(comparison.selected)
+            and _evidence_passes(comparison.full)):
+        return
+    current = _quarantine_from_row(connection.execute(
+        "SELECT code, run_id, sequence, policy_digest, compatibility, "
+        "input_digest, verdict FROM selection_quarantine WHERE singleton = 1"
+    ).fetchone())
+    if current != expected or result.sequence <= current.sequence:
+        return
+    corrected = (
+        result.policy_digest != current.policy_digest
+        or compatibility != current.compatibility)
+    baseline = connection.execute(
+        "SELECT sequence, policy_digest, compatibility FROM baselines "
+        "WHERE singleton = 1"
+    ).fetchone()
+    if not corrected or baseline is None or not (
+            current.sequence < baseline[0] < result.sequence
+            and baseline[1] == result.policy_digest
+            and baseline[2] == compatibility):
+        return
+    cursor = connection.execute(
+        "DELETE FROM selection_quarantine WHERE singleton = 1 AND code = ? "
+        "AND run_id = ? AND sequence = ? AND policy_digest = ? "
+        "AND compatibility = ? AND input_digest = ? AND verdict = ?",
+        (current.code, current.run_id, current.sequence,
+         current.policy_digest, current.compatibility,
+         current.input_digest, current.verdict),
+    )
+    if cursor.rowcount != 1:
+        raise _HistoryStateError("coordinator-corrupt")
+
+
 def _publish_transaction(
     connection: sqlite3.Connection, result: C.RunResult,
     inventory: C.Inventory | None,
+    evidence: tuple[C.AttemptEvidence, ...] = (),
+    comparison: C.ShadowComparison | None = None,
 ) -> tuple[bool, bool]:
     connection.execute("BEGIN IMMEDIATE")
     try:
         _insert_summary(connection, result, inventory)
+        if evidence:
+            _store_attempt_evidence(connection, result.run_id, evidence)
+        if comparison is not None:
+            _store_comparison_receipt(connection, result.run_id, comparison)
         source_digest, compatibility = _result_identity(result)
         if inventory is not None:
             for record in inventory.tests:
@@ -1652,6 +1942,21 @@ def _publish_transaction(
                             file=record.file, test_id=record.id,
                             sequence=result.sequence, source_digest=source_digest,
                             compatibility=compatibility, reason="prior-failure",
+                        ),
+                    )
+        for observed in evidence:
+            if observed.inventory is None:
+                continue
+            for record in observed.inventory.tests:
+                if record.outcome in _FAILURE_OUTCOMES:
+                    _upsert_obligation(
+                        connection,
+                        C.Obligation(
+                            file=record.file, test_id=record.id,
+                            sequence=result.sequence,
+                            source_digest=source_digest,
+                            compatibility=compatibility,
+                            reason="prior-failure",
                         ),
                     )
         failure_reasons = _failure_reasons(result, inventory)
@@ -1670,6 +1975,8 @@ def _publish_transaction(
         baseline_published = False
         if inventory is not None:
             baseline_published = _publish_baseline(connection, result, inventory)
+        if comparison is not None:
+            _apply_quarantine_transition(connection, result, comparison)
         pruned = _prune(
             connection, protected_run_ids=(result.run_id,),
             now=_candidate_time(result),
@@ -1684,7 +1991,10 @@ def _publish_transaction(
 
 
 def _publish_with_recovery(
-    connection: sqlite3.Connection, result: C.RunResult, inventory: C.Inventory | None,
+    connection: sqlite3.Connection, result: C.RunResult,
+    inventory: C.Inventory | None,
+    evidence: tuple[C.AttemptEvidence, ...] = (),
+    comparison: C.ShadowComparison | None = None,
 ) -> tuple[bool, bool]:
     try:
         _maintenance_prune(connection, result, inventory)
@@ -1704,7 +2014,8 @@ def _publish_with_recovery(
     exhausted = False
     for _attempt in range(remaining + 2):
         try:
-            return _publish_transaction(connection, result, inventory)
+            return _publish_transaction(
+                connection, result, inventory, evidence, comparison)
         except (sqlite3.Error, _HistoryStateError) as exc:
             full = (_is_sqlite_full(exc) if isinstance(exc, sqlite3.Error)
                     else exc.code == "capacity-exceeded")
@@ -1733,6 +2044,8 @@ def _publish_with_recovery(
 def _publish_locked(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity,
     result: C.RunResult, inventory: C.Inventory | None,
+    evidence: tuple[C.AttemptEvidence, ...] = (),
+    comparison: C.ShadowComparison | None = None,
 ) -> C.PublishResult:
     with _writer_lock(domain, checkout) as directory:
         marker_code = _disabled_marker(domain, checkout)
@@ -1756,7 +2069,8 @@ def _publish_locked(
             connection = _open_store(domain, checkout, create=True)
             assert connection is not None
             _read_state(connection)  # Never prune malformed evidence into apparent health.
-            baseline_published, pruned = _publish_with_recovery(connection, result, inventory)
+            baseline_published, pruned = _publish_with_recovery(
+                connection, result, inventory, evidence, comparison)
         except BaseException as exc:
             capacity_observed = (
                 (isinstance(exc, sqlite3.Error) and _is_sqlite_full(exc))
@@ -1835,10 +2149,18 @@ def _publish_locked(
         reasons = (() if baseline_published else _baseline_reasons(result, inventory))
         if disabled_code is not None:
             reasons = (_reason(disabled_code, "history selection is disabled"),)
+        quarantine_present = connection.execute(
+            "SELECT 1 FROM selection_quarantine WHERE singleton = 1"
+        ).fetchone() is not None
+        if quarantine_present:
+            reasons += (_reason(
+                "selection-shadow-quarantine",
+                "selection is quarantined pending a corrected shadow comparison"),)
         connection.close()
         return C.PublishResult(
             committed=True, baseline_published=baseline_published,
-            selection_disabled=disabled_code is not None, reasons=reasons,
+            selection_disabled=(disabled_code is not None or quarantine_present),
+            reasons=reasons,
         )
 
 
@@ -1876,6 +2198,148 @@ def publish_outcome(
     )
 
 
+def _validate_compound_binding(
+        checkout: C.CheckoutIdentity, result: C.RunResult,
+        evidence: tuple[C.AttemptEvidence, ...], mode: C.Mode) -> None:
+    if result.mode is not mode:
+        raise ValueError(f"compound result mode must be {mode.value}")
+    if (result.project_id != checkout.project_id
+            or result.checkout_id != checkout.checkout_id):
+        raise ValueError("compound result does not match checkout")
+    source_digest, compatibility = _result_identity(result)
+    if (source_digest is None or compatibility is None
+            or result.policy_digest is None):
+        raise ValueError("compound result source and policy bindings are required")
+    if len({item.attempt_id for item in evidence}) != len(evidence):
+        raise ValueError("compound evidence attempt ids must be distinct")
+    expected_ids = tuple(f"a{index:03d}" for index in range(1, len(evidence) + 1))
+    if tuple(item.attempt_id for item in evidence) != expected_ids:
+        raise ValueError("compound evidence must be ordered and contiguous")
+    by_id = {item.attempt_id: item.result for item in evidence}
+    for attempt in result.attempts:
+        if by_id.get(attempt.attempt_id) != attempt:
+            raise ValueError("compound evidence does not match result attempts")
+    if len(result.attempts) != len(evidence):
+        raise ValueError("compound result must retain every attempt")
+
+
+def _derived_shadow_verdict(
+        selected: C.AttemptEvidence | None,
+        full: C.AttemptEvidence | None) -> str:
+    if selected is None or full is None:
+        return "incomplete"
+    selected_pass = _evidence_passes(selected)
+    full_pass = _evidence_passes(full)
+    if selected_pass and full_pass:
+        return "matched"
+    if (selected_pass and full.terminal_complete
+            and full.inventory is not None and full.inventory.complete
+            and (full.result.status is C.Status.FAILED
+                 or any(item.outcome in _FAILURE_OUTCOMES
+                        for item in full.inventory.tests))):
+        return "suspected-miss"
+    if (not selected.terminal_complete or not full.terminal_complete
+            or selected.inventory is None or full.inventory is None
+            or not selected.inventory.complete or not full.inventory.complete):
+        return "incomplete"
+    return "unclassified-divergence"
+
+
+def _validate_shadow_eligibility(
+        history: C.HistoryView, result: C.RunResult,
+        comparison: C.ShadowComparison) -> None:
+    selected, full = comparison.selected, comparison.full
+    baseline = history.baseline
+    if (selected is None or full is None
+            or result.plan.execution != "selected" or not result.plan.files
+            or result.plan.baseline_run_id is None or baseline is None
+            or baseline.run_id != result.plan.baseline_run_id
+            or baseline.compatibility != result.plan.compatibility
+            or baseline.policy_digest != result.policy_digest
+            or result.input_before is None or result.input_after is None
+            or result.input_before.digest != result.input_after.digest
+            or result.input_before.compatibility != result.input_after.compatibility
+            or not result.source_valid
+            or selected.inventory is None or full.inventory is None
+            or not selected.inventory.complete or not full.inventory.complete
+            or selected.runtime_identity is None
+            or selected.runtime_identity != full.runtime_identity):
+        raise ValueError("shadow comparison is not bound to eligible evidence")
+    selected_files = {item.file for item in selected.inventory.tests}
+    full_files = {item.file for item in full.inventory.tests}
+    if (selected.attempt_id != "a001" or full.attempt_id != "a002"
+            or selected_files != set(result.plan.files)
+            or not selected_files < full_files):
+        raise ValueError("shadow comparison is not a genuine selected/full pair")
+
+
+def _publish_compound(
+        domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+        result: C.RunResult, evidence: tuple[C.AttemptEvidence, ...],
+        comparison: C.ShadowComparison | None) -> C.PublishResult:
+    try:
+        marker_code = _disabled_marker(domain, checkout)
+        if marker_code is not None:
+            return C.PublishResult(
+                committed=False, baseline_published=False,
+                selection_disabled=True,
+                reasons=(_reason(
+                    marker_code, "history selection is disabled"),),
+            )
+        return _publish_locked(
+            domain, checkout, result, None, evidence, comparison)
+    except (_HistoryStateError, C.Problem) as exc:
+        code = exc.code
+    except OSError:
+        code = "coordinator-unavailable"
+    except sqlite3.Error as exc:
+        code = _state_error_for_sqlite(exc).code
+    if _can_persist_disabled_marker(code):
+        _write_disabled_marker(domain, checkout, code)
+    return C.PublishResult(
+        committed=False, baseline_published=False, selection_disabled=True,
+        reasons=(_reason(code, "history state is unavailable"),),
+    )
+
+
+def publish_shadow_outcome(
+        domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+        result: C.RunResult,
+        comparison: C.ShadowComparison) -> C.PublishResult:
+    """Atomically publish shadow evidence and its exact quarantine transition."""
+    _validate_arguments(domain, checkout)
+    if not isinstance(result, C.RunResult):
+        raise TypeError("history result must be RunResult")
+    if not isinstance(comparison, C.ShadowComparison):
+        raise TypeError("shadow comparison must be ShadowComparison")
+    evidence = tuple(
+        item for item in (comparison.selected, comparison.full)
+        if item is not None)
+    _validate_compound_binding(checkout, result, evidence, C.Mode.SHADOW)
+    _validate_shadow_eligibility(
+        read_history(domain, checkout), result, comparison)
+    if comparison.verdict != _derived_shadow_verdict(
+            comparison.selected, comparison.full):
+        raise ValueError("shadow verdict does not match retained evidence")
+    return _publish_compound(
+        domain, checkout, result, evidence, comparison)
+
+
+def publish_probe_outcome(
+        domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+        result: C.RunResult,
+        evidence: tuple[C.AttemptEvidence, ...]) -> C.PublishResult:
+    """Atomically publish ordered probe evidence without baseline authority."""
+    _validate_arguments(domain, checkout)
+    if not isinstance(result, C.RunResult):
+        raise TypeError("history result must be RunResult")
+    if not isinstance(evidence, tuple) or not all(
+            isinstance(item, C.AttemptEvidence) for item in evidence):
+        raise TypeError("probe evidence must be a tuple of AttemptEvidence")
+    _validate_compound_binding(checkout, result, evidence, C.Mode.PROBE)
+    return _publish_compound(domain, checkout, result, evidence, None)
+
+
 def _history_payload(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity, limit: int | None,
 ) -> dict:
@@ -1892,7 +2356,7 @@ def _history_payload(
             if marker_code is not None:
                 raise _HistoryStateError(marker_code)
             return {"summaries": [], "obligations": []}
-        _, obligations, _, _ = _read_state(
+        _, obligations, _, _, _ = _read_state(
             connection, marker_code,
         )
         if marker_code is not None:

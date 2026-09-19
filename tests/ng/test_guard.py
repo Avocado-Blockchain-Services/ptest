@@ -45,7 +45,8 @@ def _frame(peer, manifest):
 
 def _cancel(manifest, signum=15):
     return C.encode_control_frame(C.ControlFrame(
-        protocol=1, run_id=manifest.grant.run_id, nonce=manifest.grant.nonce,
+        protocol=C.GUARD_PROTOCOL_VERSION,
+        run_id=manifest.grant.run_id, nonce=manifest.grant.nonce,
         kind="cancel", payload={"signal": signum}))
 
 
@@ -55,7 +56,8 @@ def _wire(obj):
 
 
 def _bad_control(manifest, case):
-    obj = {"protocol": 1, "run_id": manifest.grant.run_id,
+    obj = {"protocol": C.GUARD_PROTOCOL_VERSION,
+           "run_id": manifest.grant.run_id,
            "nonce": manifest.grant.nonce, "kind": "cancel", "payload": {"signal": 15}}
     if case == "nonce":
         obj["nonce"] = "c" * 64
@@ -107,7 +109,8 @@ class Harness:
             grant = scheduler.poll(self.domain, self.ticket).grant
         self.grant = grant
         self.manifest = None if grant is None else C.LaunchManifest(
-            protocol=1, domain=self.domain, grant=grant, setup=None,
+            protocol=C.GUARD_PROTOCOL_VERSION,
+            domain=self.domain, grant=grant, setup=None,
             attempts=(self.write(self.marker),), attempt_ids=("a001",),
             setup_timeout_s=5, attempt_timeout_s=10, compound_timeout_s=20)
         self.process = None
@@ -115,6 +118,7 @@ class Harness:
         self.peers = []
         self.owned = []
         self.frames = []
+        self.auto_decide = True
 
     def owner_poll(self):
         self.owner.stdin.write(b"poll\n")
@@ -146,11 +150,14 @@ class Harness:
                                 attempt_ids=("a001", "a002") if later else ("a001",))
         return prepared
 
-    def start(self, *, stage="", raw=None, queued=None, failure="", stats=False, advance=0):
+    def start(self, *, stage="", raw=None, queued=None, failure="", stats=False,
+              advance=0, decision_timeout=None):
         env = dict(os.environ, GUARD_CONTROL_FD=str(self.control_guard.fileno()),
                    GUARD_MANIFEST_FD=str(self.manifest_read),
                    GUARD_FAILURE=failure,
                    GUARD_ADVANCE_AFTER_FACTS=str(advance),
+                   GUARD_DECISION_TIMEOUT=("" if decision_timeout is None
+                                           else str(decision_timeout)),
                    GUARD_STATS=str(self.root / "stats") if stats else "")
         if stage:
             self.barrier = self.listener("b")
@@ -176,6 +183,8 @@ class Harness:
     def at_barrier(self):
         deadline = time.monotonic() + _RECOVERY_WATCHDOG_S
         while not select.select([self.barrier], [], [], 0.05)[0]:
+            if select.select([self.control], [], [], 0)[0]:
+                self.read()
             assert self.process.poll() is None, "guard exited before lifecycle barrier"
             assert time.monotonic() < deadline, "lifecycle barrier watchdog expired"
         peer, _ = self.barrier.accept()
@@ -186,6 +195,7 @@ class Harness:
 
     def running(self, count=1):
         assert self.read().kind == "registered"
+        assert self.read().kind == "attempt-ready"
         assert self.read().kind == "phase"
         result = []
         for _ in range(count):
@@ -206,7 +216,26 @@ class Harness:
     def read(self):
         frame = _frame(self.control, self.manifest)
         self.frames.append(frame)
+        if self.auto_decide and frame.kind == "attempt-ready":
+            self.decision(frame)
         return frame
+
+    def decision(self, ready, **overrides):
+        payload = {
+            "attempt_id": ready.payload["attempt_id"],
+            "generation": ready.payload["generation"],
+            "gate_token": ready.payload["gate_token"],
+            "action": "continue",
+            "reason": None,
+        }
+        payload.update(overrides)
+        self.control.sendall(C.encode_control_frame(C.ControlFrame(
+            protocol=C.GUARD_PROTOCOL_VERSION,
+            run_id=self.manifest.grant.run_id,
+            nonce=self.manifest.grant.nonce,
+            kind="attempt-decision",
+            payload=payload,
+        )))
 
     def finish(self, timeout=_RECOVERY_WATCHDOG_S):
         # Read while alive; an implementation may not rely on a large socket
@@ -318,6 +347,75 @@ def test_guard_accepts_launcher_created_session_and_real_draining(harness):
     proof = scheduler.begin_finalization(h.domain, h.grant)
     assert proof.group_absent and proof.pgid == h.process.pid
     assert scheduler.poll(h.domain, h.ticket).state is C.LeaseState.FINALIZING
+
+
+def test_wrong_authenticated_attempt_decision_never_launches_child(harness):
+    h = harness()
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    ready = h.read()
+    assert ready.kind == "attempt-ready"
+    h.decision(ready, gate_token="f" * 32)
+    assert h.finish()[0] == 70
+    assert not h.marker.exists()
+    assert h.row()["state"] == "DRAINING"
+
+
+def test_replayed_attempt_decision_cannot_launch_later_attempt(harness):
+    h = harness()
+    h.auto_decide = False
+    h.manifest = replace(
+        h.manifest,
+        attempts=(h.write(h.marker), h.write(h.later)),
+        attempt_ids=("a001", "a002"),
+    )
+    h.start()
+    assert h.read().kind == "registered"
+    first_ready = h.read()
+    assert first_ready.kind == "attempt-ready"
+    h.decision(first_ready)
+    assert h.read().kind == "phase"
+    assert h.read().kind == "runner-facts"
+    second_ready = h.read()
+    assert second_ready.kind == "attempt-ready"
+    h.decision(first_ready)
+    assert h.finish()[0] == 70
+    assert h.marker.read_text() == "ran"
+    assert not h.later.exists()
+
+
+def test_attempt_gate_eof_cancellation_and_watchdog_never_launch(harness):
+    eof = harness(label="eof")
+    eof.auto_decide = False
+    eof.start()
+    assert eof.read().kind == "registered"
+    assert eof.read().kind == "attempt-ready"
+    eof.control.shutdown(socket.SHUT_WR)
+    assert eof.finish()[0] == 0
+    assert not eof.marker.exists()
+    assert eof.row()["state"] == "DRAINING"
+
+    cancelled = harness(label="cancelled")
+    cancelled.auto_decide = False
+    cancelled.start()
+    assert cancelled.read().kind == "registered"
+    assert cancelled.read().kind == "attempt-ready"
+    cancelled.control.sendall(_cancel(cancelled.manifest))
+    assert cancelled.finish()[0] == 143
+    assert not cancelled.marker.exists()
+    assert cancelled.row()["state"] == "DRAINING"
+
+    timed = harness(label="timed")
+    timed.auto_decide = False
+    timed.start(decision_timeout=0.2)
+    assert timed.read().kind == "registered"
+    ready = timed.read()
+    assert ready.kind == "attempt-ready"
+    assert ready.payload["deadline_monotonic"] > 0
+    assert timed.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 70
+    assert not timed.marker.exists()
+    assert timed.row()["state"] == "DRAINING"
 
 
 @pytest.mark.parametrize("signum", [2, 15])
@@ -713,6 +811,8 @@ def test_eof_channel_never_reads_or_selects_its_closed_peer_again(harness, monke
 def test_group_presence_until_guard_is_reaped(harness):
     h = harness()
     h.start()
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
     deadline = time.monotonic() + _RECOVERY_WATCHDOG_S
     owned = psutil.Process(h.process.pid)
     while owned.status() != psutil.STATUS_ZOMBIE:

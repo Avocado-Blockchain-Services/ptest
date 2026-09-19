@@ -14,7 +14,8 @@ original_emit = guard._Control.emit
 
 def emit(self, kind, payload):
     if mode in {"wrong-nonce", "wrong-run"} and kind == "draining":
-        frame = C.ControlFrame(protocol=1, run_id=("c" * 32 if mode == "wrong-run" else self.manifest.grant.run_id),
+        frame = C.ControlFrame(protocol=C.GUARD_PROTOCOL_VERSION,
+                               run_id=("c" * 32 if mode == "wrong-run" else self.manifest.grant.run_id),
                                nonce=("c" * 64 if mode == "wrong-nonce" else self.manifest.grant.nonce),
                                kind=kind, payload=payload)
         os.write(self.fd, C.encode_control_frame(frame))
@@ -50,10 +51,10 @@ guard._Control.emit = emit
 if mode == "bounded-attempt":
     original_run_one = guard._run_one
 
-    def run_one(control, prepared, attempt_id, phase, timeout_s, *args):
+    def run_one(control, manifest, prepared, attempt_id, phase, timeout_s, *args):
         # Compress only a supplied attempt timeout; None remains unbounded by
         # the probe budget. The real guard still enforces the compound limit.
-        return original_run_one(control, prepared, attempt_id, phase,
+        return original_run_one(control, manifest, prepared, attempt_id, phase,
                                 0 if timeout_s is not None else None, *args)
 
     guard._run_one = run_one

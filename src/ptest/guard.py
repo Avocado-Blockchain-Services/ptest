@@ -8,6 +8,7 @@ from __future__ import annotations
 import errno
 import os
 import select
+import secrets
 import signal
 import struct
 import subprocess
@@ -19,6 +20,7 @@ import psutil
 from . import platform, scheduler
 from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
+    DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, GUARD_PROTOCOL_VERSION,
     MAX_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
     decode_control_frame, decode_launch_manifest, encode_control_frame,
 )
@@ -47,6 +49,7 @@ class _State:
     child: subprocess.Popen | None = None
     grace_deadline: float | None = None
     spawned: bool = False
+    stop_reason: str | None = None
 
     def cancel(self, signum: int) -> None:
         # First cancellation wins, including signals reflected by our killpg.
@@ -121,7 +124,8 @@ def _send(fd: int, frame: ControlFrame) -> None:
 
 
 def _emit(fd: int, manifest: LaunchManifest, kind: str, payload: dict) -> None:
-    _send(fd, ControlFrame(protocol=1, run_id=manifest.grant.run_id,
+    _send(fd, ControlFrame(protocol=GUARD_PROTOCOL_VERSION,
+                           run_id=manifest.grant.run_id,
                            nonce=manifest.grant.nonce, kind=kind, payload=payload))
 
 
@@ -133,6 +137,8 @@ class _Control:
         self.read_open = self.write_open = True
         self.pending = bytearray()
         self.deadline: float | None = None
+        self.expected_decision: tuple[str, int, str] | None = None
+        self.decision: ControlFrame | None = None
 
     def disconnected(self) -> None:
         self.read_open = self.write_open = False
@@ -162,11 +168,22 @@ class _Control:
         if len(self.pending) < 4 + length:
             return
         frame = decode_control_frame(bytes(self.pending), expected_nonce=self.manifest.grant.nonce)
-        if frame.run_id != self.manifest.grant.run_id or frame.kind not in {"cancel", "parent-closing"}:
+        if frame.run_id != self.manifest.grant.run_id or frame.kind not in {
+                "cancel", "parent-closing", "attempt-decision"}:
             raise _problem("protocol-mismatch", "private control is not for this guard")
         self.pending.clear()
         self.deadline = None
-        if frame.kind == "cancel":
+        if frame.kind == "attempt-decision":
+            expected = self.expected_decision
+            actual = (frame.payload["attempt_id"], frame.payload["generation"],
+                      frame.payload["gate_token"])
+            if expected is None or actual != expected:
+                raise _problem(
+                    "protocol-mismatch",
+                    "attempt decision does not match the active one-use gate")
+            self.expected_decision = None
+            self.decision = frame
+        elif frame.kind == "cancel":
             self.state.cancel(frame.payload["signal"])
         else:
             self.read_open = False
@@ -217,6 +234,48 @@ class _Control:
             self.pending.clear()
             self.read_open = False
             self.state.fail(_problem("protocol-mismatch", "invalid private control frame"))
+
+    def await_attempt_decision(
+            self, *, attempt_id: str, previous_attempt_id: str | None,
+            compound_deadline: float) -> bool:
+        now = time.monotonic()
+        deadline = min(
+            now + DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, compound_deadline)
+        if deadline <= now:
+            self.state.fail(_problem(
+                "execution-timeout", "compound execution deadline expired"))
+            return False
+        gate_token = secrets.token_hex(16)
+        generation = self.manifest.grant.generation
+        self.expected_decision = (attempt_id, generation, gate_token)
+        self.decision = None
+        self.emit("attempt-ready", {
+            "attempt_id": attempt_id,
+            "previous_attempt_id": previous_attempt_id,
+            "generation": generation,
+            "gate_token": gate_token,
+            "deadline_monotonic": deadline,
+        })
+        while (self.decision is None and not self.state.spawn_closed
+               and self.state.cancel_signal is None):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.expected_decision = None
+                self.state.fail(_problem(
+                    "attempt-decision-timeout",
+                    "attempt decision watchdog expired"))
+                return False
+            self.poll(min(_POLL_S, remaining))
+        if self.decision is None:
+            self.expected_decision = None
+            return False
+        decision = self.decision
+        self.decision = None
+        if decision.payload["action"] == "stop":
+            self.state.stop_reason = decision.payload["reason"]
+            self.state.spawn_closed = True
+            return False
+        return True
 
 
 def _signal_group(identity, signum: int) -> None:
@@ -285,7 +344,29 @@ def _runner_facts(control: _Control, prepared, attempt_id: str, phase: str,
     })
 
 
-def _run_one(control: _Control, prepared, attempt_id: str,
+def _predecessor_quiescent(
+        manifest: LaunchManifest, identity, state: _State) -> bool:
+    """Require bounded process and scheduler evidence before another spawn."""
+    if _group_needs_cleanup(identity):
+        state.fail(_problem(
+            "ownership-uncertain",
+            "a prior phase still has live or unobservable descendants"))
+        return False
+    lease = next(
+        (item for item in scheduler.reconcile(manifest.domain)
+         if item.run_id == manifest.grant.run_id),
+        None,
+    )
+    if lease is None or lease.state is not scheduler.LeaseState.RUNNING:
+        state.fail(_problem(
+            "ownership-uncertain",
+            "scheduler ancestry is not safe for a subsequent spawn"))
+        return False
+    return True
+
+
+def _run_one(control: _Control, manifest: LaunchManifest, prepared,
+             attempt_id: str,
              phase: str, timeout_s: float | None, compound_deadline: float,
              identity, state: _State) -> int | None:
     ready = _ready(control, state, compound_deadline)
@@ -329,6 +410,11 @@ def _run_one(control: _Control, prepared, attempt_id: str,
         result = state.child.wait()
         state.child = None
         problem = state.problem
+    if problem is None and not _predecessor_quiescent(
+            manifest, identity, state):
+        problem = state.problem
+        if state.cancel_signal is not None:
+            _cancel_and_reap(state, control, identity)
     _runner_facts(control, prepared, attempt_id, phase, result, problem)
     return result
 
@@ -377,15 +463,31 @@ def run_guard(control_fd: int, manifest_fd: int) -> int:
         compound_deadline = time.monotonic() + min(
             manifest.compound_timeout_s or MAX_COMPOUND_TIMEOUT_S, MAX_COMPOUND_TIMEOUT_S)
         if manifest.setup is not None:
-            result = _run_one(control, manifest.setup, manifest.attempt_ids[0],
+            result = _run_one(control, manifest, manifest.setup,
+                              manifest.attempt_ids[0],
                               "setup", manifest.setup_timeout_s, compound_deadline, identity, state)
             if result != 0:
                 state.spawn_closed = True
-        for prepared, attempt_id in zip(manifest.attempts, manifest.attempt_ids, strict=True):
+        previous_attempt_id = None
+        for prepared, attempt_id in zip(
+                manifest.attempts, manifest.attempt_ids, strict=True):
             if state.spawn_closed:
                 break
-            _run_one(control, prepared, attempt_id, "execution",
+            if not _predecessor_quiescent(manifest, identity, state):
+                break
+            if not control.await_attempt_decision(
+                    attempt_id=attempt_id,
+                    previous_attempt_id=previous_attempt_id,
+                    compound_deadline=compound_deadline):
+                if (state.problem is not None
+                        and state.problem.code == "execution-timeout"):
+                    _runner_facts(
+                        control, prepared, attempt_id, "execution", None,
+                        state.problem)
+                break
+            _run_one(control, manifest, prepared, attempt_id, "execution",
                      manifest.attempt_timeout_s, compound_deadline, identity, state)
+            previous_attempt_id = attempt_id
         control.poll()
         state.spawn_closed = True
         if state.cancel_signal is not None and state.spawned:

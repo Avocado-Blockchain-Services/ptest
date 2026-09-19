@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 from . import contracts as C
 
@@ -68,6 +69,10 @@ def choose_plan(config: C.Config, snapshot: C.InputSnapshot,
         return _full(request, snapshot, "selection-disabled", "selection is not explicitly closed")
     if _invalid_policy(policy, config.runner.test_roots):
         return _full(request, snapshot, "policy-invalid", "exclusion overlaps an input contract or contains an unsafe prefix")
+    if history.selection_quarantine is not None:
+        return _full(
+            request, snapshot, "selection-shadow-quarantine",
+            "selection is quarantined pending a corrected shadow comparison")
     if snapshot.digest is None or snapshot.compatibility is None or snapshot.limitations or history.limitations:
         return _full(request, snapshot, "unknown-input", "static input evidence is incomplete")
     baseline = history.baseline
@@ -133,3 +138,33 @@ def choose_plan(config: C.Config, snapshot: C.InputSnapshot,
     return C.Plan(mode=request.mode, execution="selected", files=tuple(sorted(selected)),
                   input_digest=snapshot.digest, compatibility=snapshot.compatibility,
                   baseline_run_id=baseline.run_id, static_preview=True)
+
+
+def choose_shadow_plans(
+        config: C.Config, snapshot: C.InputSnapshot,
+        history: C.HistoryView, request: C.RunRequest,
+        support: C.CompoundSupport) -> C.ShadowPlans:
+    """Build a genuine selected/full diagnostic pair without side effects."""
+    if not isinstance(support, C.CompoundSupport):
+        raise TypeError("shadow support must be CompoundSupport")
+    diagnostic_history = history
+    quarantine = history.selection_quarantine
+    if quarantine is not None:
+        unrelated = tuple(
+            item for item in history.limitations
+            if item.code != "selection-shadow-quarantine")
+        if not unrelated:
+            diagnostic_history = replace(
+                history, selection_quarantine=None, limitations=(),
+                selection_disabled=False)
+    selected = choose_plan(config, snapshot, diagnostic_history, request)
+    if (not support.selection or support.profile is None
+            or support.limitations):
+        selected = _full(
+            request, snapshot, "unsupported-capability",
+            "the runner profile is not qualified for selected/full comparison")
+    full = _full(
+        request, snapshot, "full-gate-obligation",
+        "shadow comparison requires the configured full gate")
+    return C.ShadowPlans(
+        selected=selected, full=full, quarantine=quarantine)

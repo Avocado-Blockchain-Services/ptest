@@ -27,7 +27,8 @@ def cancel(signum, _frame):
     if grant is None:
         raise SystemExit(128 + signum)
     os.write(int(sys.argv[3]), C.encode_control_frame(C.ControlFrame(
-        protocol=1, run_id=grant.run_id, nonce=grant.nonce, kind="cancel",
+        protocol=C.GUARD_PROTOCOL_VERSION,
+        run_id=grant.run_id, nonce=grant.nonce, kind="cancel",
         payload={"signal": signum})))
 
 
