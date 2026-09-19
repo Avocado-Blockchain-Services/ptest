@@ -655,8 +655,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
         if request.mode is C.Mode.FULL and "." in config.runner.test_roots:
             raise _problem("unsupported-capability", "pytest full execution does not support a dot test root")
-        if config.setup is not None or request.shadow or request.probe is not None:
-            raise _problem("unsupported-capability", "pytest setup, shadow and probe are unavailable")
+        if request.shadow or request.probe is not None:
+            raise _problem("unsupported-capability", "pytest shadow and probe are unavailable")
     elif config.runner.kind is not C.RunnerKind.COMMAND:
         raise _problem("unsupported-capability", "native profile execution is deferred")
     if not native_pytest and (config.setup is not None or request.shadow or request.probe is not None):

@@ -62,22 +62,59 @@ def test_pytest_non_scoped_modes_are_refused_before_admission(case, monkeypatch,
         operations.execute(domain, config, C.RunRequest(mode=mode, workers=8))
 
 
-def test_pytest_setup_is_refused_before_admission(case, monkeypatch):
+def test_pytest_setup_is_admitted_before_scheduler(case, monkeypatch):
     domain = case.domain()
     setup = C.SetupConfig(
         argv=("uv", "sync"), required_paths=(".venv",),
         network=False, lifecycle_scripts=False,
     )
-    config = case.config(runner_kind="pytest", setup=setup)
+    config = case.config(
+        runner_kind="pytest", setup=setup,
+        config_path=case.base / ".ptest.toml",
+    )
     monkeypatch.setattr(
         operations.scheduler,
         "enqueue",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("native pytest setup must be rejected before admission")),
+            AssertionError("pytest setup reached scheduler admission")),
     )
 
-    with pytest.raises(C.Problem, match="unsupported-capability"):
+    with pytest.raises(AssertionError, match="reached scheduler admission"):
         operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+
+@pytest.mark.parametrize(
+    "run_request",
+    [
+        pytest.param(C.RunRequest(mode=C.Mode.SCOPED, shadow=True), id="shadow"),
+        pytest.param(
+            C.RunRequest(
+                mode=C.Mode.SCOPED,
+                probe=C.ProbeOptions(scope="tests/test_a.py"),
+            ),
+            id="probe",
+        ),
+    ],
+)
+def test_pytest_shadow_and_probe_stay_refused_with_setup(case, monkeypatch, run_request):
+    domain = case.domain()
+    setup = C.SetupConfig(
+        argv=("uv", "sync"), required_paths=(".venv",),
+        network=False, lifecycle_scripts=False,
+    )
+    config = case.config(
+        runner_kind="pytest", setup=setup,
+        config_path=case.base / ".ptest.toml",
+    )
+    monkeypatch.setattr(
+        operations.scheduler,
+        "enqueue",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("shadow/probe must be refused before admission")),
+    )
+
+    with pytest.raises(C.Problem, match="pytest shadow and probe are unavailable"):
+        operations.execute(domain, config, run_request)
 
 
 def test_pytest_scoped_preparation_is_basic_serial_and_never_adds_xdist():
