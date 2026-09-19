@@ -1,14 +1,15 @@
 {
   "task": "T12a authenticated launch handoff and quarantine substrate",
-  "status": "repair_implemented_and_scoped_green",
+    "status": "repair_complete_and_scoped_green",
   "scope": "T12a only; no T12b, T12c, native-profile qualification, or product-completion claim",
   "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-12a",
   "base_commit": "a78c7a238c3f",
   "implementation_commits": [
-    "f38acc1127f696ee727d996893875c89aafccf01",
-    "463cdd84274b751ce807a5140e3e344c3ef58c7d"
-  ],
-  "repair_commit": "463cdd84274b751ce807a5140e3e344c3ef58c7d",
+        "f38acc1127f696ee727d996893875c89aafccf01",
+        "463cdd84274b751ce807a5140e3e344c3ef58c7d",
+        "3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd"
+    ],
+    "repair_commit": "3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd",
   "changed_files": [
     "src/ptest/contracts.py",
     "src/ptest/runtime/protocol-v1.json",
@@ -26,16 +27,18 @@
     "tests/ng/fixtures/processes/guard_workload.py",
     "tests/ng/fixtures/command/guard_faults.py"
   ],
-  "repair_summary": [
+    "repair_summary": [
+        "Shadow comparison now requires both attempts to retain the same non-null observed runtime identity before any matched, suspected-miss, or unclassified-divergence verdict. Missing or differing identities are incomplete.",
     "A valid pre-T12a base store is now read without mutation, nulls runtime identity, and exposes no quarantine; only a locked writer performs the all-or-nothing additive upgrade. Partial compound schemas and malformed base schemas fail closed.",
     "Shadow verdicts are derived from actual test identities and selected-file attribution: matching outcomes including matching failures are matched, full-only attributable failures are suspected misses, overlap or unattributed disagreement is unclassified, and incomplete evidence is incomplete.",
     "Incomplete, timed-out, cancelled, and source-invalidated shadow results persist every observed attempt, the failure union, and the whole-gate obligation; eligibility gates only quarantine set or clear.",
     "Attempt evidence, comparison receipts, and quarantine rows count toward logical quotas. Pruning removes compound children atomically with their run, and orphaned evidence or receipts disable malformed history.",
     "Runtime identities are strict 64-character lowercase hex digests; protocol fields require actual JSON integers, and qualified CompoundSupport capabilities require a profile.",
     "A stopped first gate is source-invalid, keeps a001 NOT_RUN with null codes/timing, and emits no synthetic runner facts. Missing required native identity at a001 is zero-launch unknown-input.",
-    "Real-process evidence now covers setup/a001 ordering, 23 followed by 0 or 1, fresh one-use tokens, early/wrong-generation/wrong-direction/stop decisions, waiting SIGINT/SIGTERM, a live descendant after direct-child exit, and bounded-observation exhaustion."
+        "Real-process evidence now covers setup/a001 ordering, 23 followed by 0 or 1, fresh one-use tokens, early/wrong-generation/wrong-direction/stop decisions, waiting SIGINT/SIGTERM, parent-only SIGKILL at a pending gate, adverse unknown/deep pending-gate frames with a live neighbor sentinel, a live descendant after direct-child exit, and bounded-observation exhaustion."
   ],
-  "security_negative_contracts": [
+    "security_negative_contracts": [
+        "Missing selected identity, missing full identity, or differing valid runtime identities cannot be classified as a selector divergence and cannot set or clear selection quarantine; publication still retains the incomplete receipt, both observed attempts, and failure obligations.",
     "Malformed, wrong-protocol, wrong-run, wrong-nonce, wrong-generation, wrong-token, early, duplicate, replayed, wrong-direction, truncated, oversized, and out-of-order private traffic cannot authorize a child.",
     "EOF, parent closing, cancellation, decision timeout, source invalidation, unknown required identity, live descendants, and exhausted predecessor observation close all later spawn.",
     "Stopped or unstarted attempts remain NOT_RUN with null raw/final codes and null timing; an expired unopened gate has no synthetic runner-facts frame.",
@@ -45,7 +48,12 @@
     "History corruption, capacity, and publication marker bytes are preserved; no quarantine operation performs wider marker cleanup.",
     "No legacy configuration, migration import, alias, cloud, remote backend, provider API, model, downgrade retry, or compatibility fallback was added."
   ],
-  "audit_disposition": [
+    "audit_disposition": [
+        {
+            "finding": "shadow verdict ignores AttemptEvidence runtime identity",
+            "disposition": "verified_and_fixed",
+            "evidence": "three derivation and three publication cases cover missing selected identity, missing full identity, and differing valid identities; all persist incomplete evidence without changing the existing quarantine"
+        },
     {
       "finding": "pre-T12a store rejected by read path",
       "disposition": "verified_and_fixed",
@@ -213,11 +221,46 @@
       "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
       "outcome": "GREEN before final partial-schema row: 136 passed in 4.26s"
     },
-    {
-      "stage": "full_owned_scope",
-      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
-      "outcome": "GREEN: 365 passed in 61.61s"
-    }
+        {
+            "stage": "full_owned_scope",
+            "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+            "outcome": "GREEN before final identity repair: 365 passed in 61.61s"
+        },
+        {
+            "stage": "red_runtime_identity_verdict",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "RED: 6 failed; all three identity cases derived suspected-miss, and publication rejected the required incomplete verdict"
+        },
+        {
+            "stage": "identity_fix_intermediate",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "3 derivation cases passed; 3 publication assertions exposed a test-fixture ID expectation (test_b versus the real test_x), not a product defect"
+        },
+        {
+            "stage": "green_runtime_identity_verdict",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "GREEN: 6 passed, 137 deselected"
+        },
+        {
+            "stage": "green_g3_pending_gate_processes",
+            "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k 'parent_sigkill_while_attempt_gate_is_pending_never_launches or adverse_frame_at_pending_gate_preserves_neighbor_sentinel'",
+            "outcome": "GREEN on first execution: 3 passed, 73 deselected; characterization evidence for parent-only SIGKILL and real unknown/deep frames with neighbor sentinel preservation"
+        },
+        {
+            "stage": "full_history_after_identity_repair",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
+            "outcome": "GREEN: 143 passed in 4.23s"
+        },
+        {
+            "stage": "green_identity_and_g3_focus",
+            "command": "scripts/ptest-bootstrap tests/ng/test_guard.py tests/ng/test_contracts.py -k 'runtime_identity or parent_sigkill_while_attempt_gate_is_pending_never_launches or adverse_frame_at_pending_gate_preserves_neighbor_sentinel'",
+            "outcome": "GREEN: 4 passed, 130 deselected; strict 64-lower-hex runtime validation remains green"
+        },
+        {
+            "stage": "full_owned_scope_after_identity_repair",
+            "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+            "outcome": "GREEN: 374 passed in 63.35s"
+        }
   ],
   "candidate_ptest_gate": {
     "command": "./.venv/bin/ptest where",
@@ -231,17 +274,17 @@
       "command": "uv run --locked --no-sync python scripts/export-schemas.py",
       "outcome": "exit 0; regenerated runtime/protocol-v1.json and public schemas with no diff. Protocol-v1 public/native/domain semantics remain unchanged; private control/manifest identities remain version 2."
     },
-    {
-      "command": "graphify update .",
-      "outcome": "exit 0; final graph has 4758 nodes, 10569 edges, 307 communities"
+        {
+            "command": "graphify update .",
+            "outcome": "exit 0; final graph has 4762 nodes, 10589 edges, 307 communities"
     },
     {
       "command": "git diff --check",
       "outcome": "exit 0"
     },
-    {
-      "command": "git show --name-only 463cdd84274b751ce807a5140e3e344c3ef58c7d",
-      "outcome": "Only frozen T12a source/test/fixture paths changed"
+        {
+            "command": "git show --name-only 3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd",
+            "outcome": "Only frozen T12a source/test/fixture paths changed"
     }
   ],
   "remaining_limitations": [
