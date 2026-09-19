@@ -67,6 +67,13 @@ def _bad_control(manifest, case):
         obj["kind"] = "unknown"
     elif case == "payload":
         obj["payload"] = {"signal": 9}
+    elif case == "unknown-field":
+        obj["unexpected"] = "not-authority"
+    elif case == "deep":
+        nested = "leaf"
+        for _ in range(20):
+            nested = [nested]
+        obj["payload"]["pad"] = nested
     elif case == "oversize":
         return struct.pack(">I", C.CONTROL_FRAME_MAX_BYTES + 1)
     elif case == "truncated":
@@ -547,6 +554,42 @@ def test_signal_while_waiting_for_attempt_decision_never_launches(
     assert not any(frame.kind in {"phase", "runner-facts"}
                    for frame in h.frames)
     assert h.frames[-1].kind == "draining"
+
+
+def test_parent_sigkill_while_attempt_gate_is_pending_never_launches(
+        harness):
+    h = harness(owner=True)
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+
+    h.kill_owner()
+
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 0
+    assert not h.marker.exists()
+    assert not any(frame.kind in {"phase", "runner-facts"}
+                   for frame in h.frames)
+    assert h.row()["state"] == "DRAINING"
+
+
+@pytest.mark.parametrize("bad", ["unknown-field", "deep"])
+def test_adverse_frame_at_pending_gate_preserves_neighbor_sentinel(
+        harness, bad):
+    h = harness(owner=True)
+    h.auto_decide = False
+    h.start()
+    assert h.read().kind == "registered"
+    assert h.read().kind == "attempt-ready"
+
+    h.control.sendall(_bad_control(h.manifest, bad))
+
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 70
+    assert not h.marker.exists()
+    assert not any(frame.kind in {"phase", "runner-facts"}
+                   for frame in h.frames)
+    assert h.owner.poll() is None
+    assert h.row()["state"] == "DRAINING"
 
 
 @pytest.mark.parametrize("signum", [2, 15])

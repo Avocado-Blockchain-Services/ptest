@@ -2341,6 +2341,9 @@ def _derived_shadow_verdict(
     if selected is None or full is None:
         return "incomplete"
     if (not selected.terminal_complete or not full.terminal_complete
+            or selected.runtime_identity is None
+            or full.runtime_identity is None
+            or selected.runtime_identity != full.runtime_identity
             or selected.inventory is None or full.inventory is None
             or not selected.inventory.complete or not full.inventory.complete
             or not selected.result.inventory_complete

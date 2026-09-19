@@ -348,6 +348,79 @@ def test_shadow_verdict_uses_test_identity_and_inventory(
 
 
 @pytest.mark.parametrize(
+    ("selected_identity", "full_identity"),
+    (
+        (None, "66" * 32),
+        ("66" * 32, None),
+        ("66" * 32, "77" * 32),
+    ),
+)
+def test_shadow_verdict_requires_matching_observed_runtime_identities(
+        selected_identity, full_identity):
+    selected = replace(_evidence(
+        "a001", (("tests/test_a.py", "test_a", C.Outcome.PASSED),),
+    ), runtime_identity=selected_identity)
+    full = replace(_evidence(
+        "a002",
+        (("tests/test_a.py", "test_a", C.Outcome.PASSED),
+         ("tests/test_b.py", "test_b", C.Outcome.FAILED)),
+        status=C.Status.FAILED,
+    ), runtime_identity=full_identity)
+
+    assert H._derived_shadow_verdict(selected, full) == "incomplete"
+
+
+@pytest.mark.parametrize(
+    ("selected_identity", "full_identity"),
+    (
+        (None, "66" * 32),
+        ("66" * 32, None),
+        ("66" * 32, "77" * 32),
+    ),
+)
+def test_incomplete_runtime_identity_comparison_persists_without_quarantine_transition(
+        case, selected_identity, full_identity):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot, policy, quarantine = _seed_quarantine(case, domain, checkout)
+    result, comparison = _shadow_outcome(
+        case, checkout, sequence=2, run_id="2" * 32,
+        snapshot=snapshot, policy_digest=policy,
+        expected_quarantine=quarantine, baseline_run_id="0" * 32,
+    )
+    comparison = replace(
+        comparison,
+        selected=replace(
+            comparison.selected, runtime_identity=selected_identity),
+        full=replace(comparison.full, runtime_identity=full_identity),
+        verdict="incomplete",
+    )
+
+    published = H.publish_shadow_outcome(
+        domain, checkout, result, comparison)
+
+    assert published.committed is True
+    with sqlite3.connect(_store_path(domain, checkout)) as connection:
+        evidence = connection.execute(
+            "SELECT attempt_id, runtime_identity FROM attempt_evidence "
+            "WHERE run_id = ? ORDER BY attempt_id", (result.run_id,),
+        ).fetchall()
+        receipt = connection.execute(
+            "SELECT verdict FROM comparison_receipts WHERE run_id = ?",
+            (result.run_id,),
+        ).fetchone()
+        obligation = connection.execute(
+            "SELECT sequence, reason FROM obligations "
+            "WHERE obligation_key = ?", ("test:tests/test_b.py::test_x",),
+        ).fetchone()
+    assert evidence == [
+        ("a001", selected_identity), ("a002", full_identity)]
+    assert receipt == ("incomplete",)
+    assert obligation == (2, "prior-failure")
+    assert H.read_history(domain, checkout).selection_quarantine == quarantine
+
+
+@pytest.mark.parametrize(
     ("interruption", "expected_evidence"),
     (("timeout", ("a001", "a002")),
      ("cancelled", ("a001",)),
