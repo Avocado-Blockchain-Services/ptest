@@ -373,10 +373,15 @@ def _setup_prepared(config: C.Config, checkout: C.CheckoutIdentity,
 
 
 def _attempt(grant: C.Grant, checkout: C.CheckoutIdentity) -> C.AttemptIdentity:
-    prefix = f"pt_{checkout.checkout_id[:8]}_{grant.run_id}_a001_w000"
-    return C.AttemptIdentity(run_id=grant.run_id, attempt_id="a001",
-                             resource_prefix=prefix,
-                             worker_count=grant.slots)
+    return _attempt_identity(grant, checkout, "a001")
+
+
+def _attempt_identity(grant: C.Grant, checkout: C.CheckoutIdentity,
+                      attempt_id: str, *, workers: int | None = None) -> C.AttemptIdentity:
+    worker_count = grant.slots if workers is None else workers
+    prefix = f"pt_{checkout.checkout_id[:8]}_{grant.run_id}_{attempt_id}_w000"
+    return C.AttemptIdentity(run_id=grant.run_id, attempt_id=attempt_id,
+                             resource_prefix=prefix, worker_count=worker_count)
 
 
 def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
@@ -545,6 +550,35 @@ def _source_complete(snapshot: C.InputSnapshot | None) -> bool:
         snapshot is not None and snapshot.digest is not None
         and snapshot.compatibility is not None and not snapshot.limitations
     )
+
+
+def _probe_scope_path(config: C.Config, options: C.ProbeOptions) -> Path:
+    """Resolve one declared local probe scope without following symlinks."""
+    checkout = _checkout(config)
+    relative = options.scope
+    if (not relative or relative.startswith(("/", "\\"))
+            or "\\" in relative
+            or any(part in {"", ".", ".."} for part in relative.split("/"))):
+        raise _problem("unsafe-path", "probe scope must be a project-relative path")
+    if not any(
+            relative == root or relative.startswith(root + "/")
+            for root in config.runner.test_roots):
+        raise _problem("unsafe-path", "probe scope is outside declared test roots")
+    candidate = checkout.root / relative
+    cursor = checkout.root
+    for part in relative.split("/"):
+        cursor = cursor / part
+        try:
+            stamp = cursor.lstat()
+        except FileNotFoundError:
+            raise _problem("unsafe-path", "probe scope does not exist") from None
+        except OSError:
+            raise _problem("state-unavailable", "probe scope cannot be verified") from None
+        if stat.S_ISLNK(stamp.st_mode):
+            raise _problem("unsafe-path", "probe scope crosses a symlink")
+    if not candidate.is_file() and not candidate.is_dir():
+        raise _problem("unsafe-path", "probe scope is not a file or directory")
+    return candidate
 
 
 class _Signals:
@@ -736,6 +770,159 @@ class _Frames:
             self._fail("guard control channel failed")
 
 
+class _CompoundFrames(_Frames):
+    """Controller-side frame state for the ordered multi-attempt guard."""
+
+    def __init__(self, peer: socket.socket, grant: C.Grant,
+                 launched: C.ProcessIdentity | None,
+                 expected_reports: dict[str, str],
+                 expect_setup: bool = False):
+        super().__init__(peer, grant, launched, None, expect_setup)
+        self.expected_reports = dict(expected_reports)
+        self.expected_attempts = tuple(sorted(expected_reports))
+        self.ready_by_attempt: dict[str, dict] = {}
+        self.facts_by_attempt: dict[str, dict] = {}
+        self.phase_by_attempt: set[str] = set()
+        self.decision_reasons: dict[str, C.Reason | None] = {}
+        self.previous_attempt: str | None = None
+
+    def _accept(self, frame: C.ControlFrame) -> None:
+        if frame.run_id != self.grant.run_id or frame.nonce != self.grant.nonce:
+            self._fail("guard frame identity does not match the grant")
+            return
+        if frame.kind == "registered":
+            if self.registered or self.draining:
+                self._fail("registered frame was duplicated or out of order")
+                return
+            try:
+                identity = C.ProcessIdentity(**frame.payload["guard"])
+            except (TypeError, ValueError):
+                self._fail("registered guard identity is invalid")
+                return
+            if self.launched is None or identity != self.launched:
+                self._fail("registered guard identity does not match the launch")
+                return
+            self.registered = True
+            return
+        if frame.kind == "attempt-ready":
+            attempt_id = frame.payload["attempt_id"]
+            expected_index = len(self.ready_by_attempt)
+            expected_id = self.expected_attempts[expected_index] if expected_index < len(self.expected_attempts) else None
+            if (not self.registered or self.ready is not None and self.decision_sent
+                    or self.phase or self.draining or attempt_id != expected_id
+                    or frame.payload["previous_attempt_id"] != self.previous_attempt
+                    or frame.payload["generation"] != self.grant.generation
+                    or frame.payload["deadline_monotonic"] <= time.monotonic()
+                    or frame.payload["deadline_monotonic"] > time.monotonic() + C.DEFAULT_ATTEMPT_DECISION_TIMEOUT_S + _FRAME_TIMEOUT_S):
+                self._fail("attempt-ready frame does not match the compound attempt")
+                return
+            if self.setup_facts is not None and (
+                    self.setup_facts["raw_exit_code"] != 0
+                    or self.setup_facts["problem"] is not None):
+                self._fail("execution attempt followed unsuccessful setup")
+                return
+            if self.expect_setup and (not self.setup_phase or self.setup_facts is None):
+                self._fail("execution attempt preceded expected setup")
+                return
+            self.ready = dict(frame.payload)
+            self.ready_by_attempt[attempt_id] = dict(frame.payload)
+            self.decision_sent = False
+            self.decision_reason = None
+            self.phase = False
+            self.facts = None
+            return
+        if frame.kind == "phase":
+            phase = frame.payload["phase"]
+            attempt_id = frame.payload["attempt_id"]
+            if phase == "setup":
+                if (not self.expect_setup or not self.registered or self.setup_phase
+                        or self.setup_facts is not None or self.phase
+                        or attempt_id != "a001"):
+                    self._fail("setup phase frame was out of order")
+                    return
+                self.setup_phase = True
+                self.setup_started_at = time.monotonic()
+                return
+            if (attempt_id not in self.ready_by_attempt or not self.decision_sent
+                    or self.decision_reason is not None or self.phase
+                    or self.facts is not None or phase != "execution"):
+                self._fail("execution phase frame was out of order")
+                return
+            self.phase = True
+            self.phase_by_attempt.add(attempt_id)
+            return
+        if frame.kind == "runner-facts":
+            phase = frame.payload["phase"]
+            attempt_id = frame.payload["attempt_id"]
+            if phase == "setup":
+                if (not self.setup_phase or self.setup_facts is not None
+                        or self.phase or attempt_id != "a001"
+                        or frame.payload["report_name"] is not None):
+                    self._fail("setup runner facts were out of order")
+                    return
+                self.setup_facts = dict(frame.payload)
+                self.setup_elapsed_s = max(0.0, time.monotonic() - self.setup_started_at) if self.setup_started_at is not None else None
+                return
+            if (attempt_id not in self.ready_by_attempt or attempt_id not in self.phase_by_attempt
+                    or self.facts is not None or phase != "execution"
+                    or frame.payload["report_name"] != self.expected_reports.get(attempt_id)):
+                self._fail("runner facts do not match the compound attempt")
+                return
+            self.facts = dict(frame.payload)
+            self.facts_by_attempt[attempt_id] = dict(frame.payload)
+            self.phase = False
+            self.previous_attempt = attempt_id
+            self.decision_sent = False
+            self.ready = None
+            return
+        if frame.kind == "draining":
+            observed_all = len(self.facts_by_attempt) == len(self.expected_attempts)
+            stopped = self.decision_reason is not None and self.ready is not None and not self.phase
+            cancelled = self.cancel_sent and self.ready is not None and not self.phase
+            setup_only = self.setup_facts is not None and not self.ready_by_attempt
+            if (not (observed_all or stopped or cancelled or setup_only)
+                    or self.draining or frame.payload["provisional_artifact_id"] is not None):
+                self._fail("draining frame was duplicated or out of order")
+                return
+            self.draining = True
+            return
+        self._fail("caller-only control frame received from guard")
+
+    def drain(self) -> None:
+        if self.eof or self.invalid is not None:
+            return
+        try:
+            while True:
+                piece = self.peer.recv(65536)
+                if not piece:
+                    self.eof = True
+                    if self.pending:
+                        self._fail("guard control frame was truncated")
+                    return
+                self.pending.extend(piece)
+                while len(self.pending) >= 4:
+                    size = int.from_bytes(self.pending[:4], "big")
+                    if size > C.CONTROL_FRAME_MAX_BYTES:
+                        self._fail("guard control frame exceeds its bound")
+                        return
+                    if len(self.pending) < size + 4:
+                        break
+                    raw = bytes(self.pending[:size + 4])
+                    del self.pending[:size + 4]
+                    try:
+                        frame = C.decode_control_frame(raw, expected_nonce=self.grant.nonce)
+                    except C.Problem:
+                        self._fail("guard control frame failed authentication")
+                        return
+                    self._accept(frame)
+                    if self.invalid is not None:
+                        return
+        except (BlockingIOError, InterruptedError):
+            return
+        except (OSError, ValueError, TypeError):
+            self._fail("guard control channel failed")
+
+
 def _send_cancel(peer: socket.socket, grant: C.Grant, signum: int) -> bool:
     try:
         frame = C.ControlFrame(protocol=C.GUARD_PROTOCOL_VERSION,
@@ -775,17 +962,21 @@ def _send_attempt_decision(peer: socket.socket, grant: C.Grant,
         return False
     frames.decision_sent = True
     frames.decision_reason = reason
+    if isinstance(frames, _CompoundFrames):
+        frames.decision_reasons[frames.ready["attempt_id"]] = reason
     return True
 
 
 def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
-                  prepared: C.PreparedRun,
+                  prepared: C.PreparedRun | tuple[C.PreparedRun, ...],
                   setup: C.PreparedRun | None = None) -> tuple[subprocess.Popen, socket.socket,
                                                                _Frames]:
+    attempts = prepared if isinstance(prepared, tuple) else (prepared,)
+    attempt_ids = tuple(f"a{index:03d}" for index in range(1, len(attempts) + 1))
     manifest = C.LaunchManifest(
         protocol=C.GUARD_PROTOCOL_VERSION,
         domain=domain, grant=grant, setup=setup,
-        attempts=(prepared,), attempt_ids=("a001",),
+        attempts=attempts, attempt_ids=attempt_ids,
         setup_timeout_s=C.DEFAULT_SETUP_TIMEOUT_S,
         attempt_timeout_s=None,
         compound_timeout_s=C.MAX_COMPOUND_TIMEOUT_S,
@@ -815,9 +1006,19 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         manifest_write = -1
         controller.setblocking(False)
         launched_identity = launched(process.pid)
+        if len(attempts) > 1:
+            expected_reports = {
+                attempt_id: prepared_item.report_path.name
+                for attempt_id, prepared_item in zip(attempt_ids, attempts, strict=True)
+                if prepared_item.report_path is not None
+            }
+            return process, controller, _CompoundFrames(
+                controller, grant, launched_identity, expected_reports,
+                expect_setup=setup is not None,
+            )
         return process, controller, _Frames(
             controller, grant, launched_identity,
-            None if prepared.report_path is None else prepared.report_path.name,
+            None if attempts[0].report_path is None else attempts[0].report_path.name,
             expect_setup=setup is not None,
         )
     except BaseException:
@@ -915,6 +1116,68 @@ def _outcome(raw: int | None, cancellation: int | None,
     return C.Status.PASSED, 0, "runner", None
 
 
+def _shadow_outcome(
+        *, raw_codes: tuple[int | None, ...], gate_count: int,
+        decision_reason: C.Reason | None = None,
+        report_reason: C.Reason | None = None,
+        handoff_complete: bool = True,
+        cancellation: int | None = None,
+        guard_problem: C.Problem | None = None,
+        setup_raw: int | None = None,
+        setup_problem: C.Problem | None = None,
+        ) -> tuple[C.Status, int, str, int | None, int | None]:
+    """Apply the ordinary raw/cancel/guard precedence to a compound run.
+
+    The returned final tuple is ``status, exit_code, origin, signal,
+    runner_exit_code``.  Raw runner codes stay distinct from shell-compatible
+    final exits; the earliest nonzero raw code wins, otherwise the last
+    observed raw code is retained.
+    """
+    observed = tuple(code for code in raw_codes if code is not None)
+    ordered_codes = ((setup_raw,) if setup_raw is not None else ()) + observed
+    first_failure = next((code for code in ordered_codes if code != 0), None)
+    last_observed = ordered_codes[-1] if ordered_codes else None
+    runner_code = (first_failure if first_failure is not None else last_observed)
+    if setup_raw is None and setup_problem is None:
+        runner_code = first_failure if first_failure is not None else (
+            observed[-1] if observed else None)
+    pre_execution_invalidation = (
+        gate_count == 1 and not observed and decision_reason is not None
+        and decision_reason.code in {"changed-during-run", "unknown-input"})
+    if pre_execution_invalidation:
+        return C.Status.NOT_RUN, 2, "ptest", None, None
+    incomplete = bool(
+        decision_reason is not None or report_reason is not None
+        or not handoff_complete or guard_problem is not None
+        or setup_problem is not None
+        or (not raw_codes and setup_raw is None and cancellation is None))
+    raw = first_failure if first_failure is not None else last_observed
+    status, exit_code, origin, signal_number = _outcome(
+        raw, cancellation, setup_problem or guard_problem, incomplete)
+    if ((setup_raw is not None and setup_raw != 0)
+            or setup_problem is not None):
+        origin = "setup" if signal_number is None else origin
+    return status, exit_code, origin, signal_number, runner_code
+
+
+def _shadow_report_matches_guard(evidence: C.AttemptEvidence,
+                                 guard_raw: int | None) -> bool:
+    """Require native terminal facts to agree with authenticated guard facts."""
+    return (evidence.result.raw_exit_code == guard_raw
+            and evidence.result.final_exit_code == guard_raw)
+
+
+def _guard_fact_problem(facts: dict | None) -> C.Problem | None:
+    payload = None if facts is None else facts.get("problem")
+    if payload is None:
+        return None
+    try:
+        return C.Problem(**payload)
+    except (TypeError, ValueError):
+        return _problem("state-unavailable", "guard reported invalid runner facts",
+                        phase="guard")
+
+
 def _incomplete(result: C.RunResult, reason: C.Reason) -> C.RunResult:
     # The result already contains the centralized native/signal precedence.
     # A later publication/release failure may only replace a zero exit.
@@ -927,7 +1190,14 @@ def _incomplete(result: C.RunResult, reason: C.Reason) -> C.RunResult:
             attempt if (attempt.status is C.Status.NOT_RUN
                         or attempt.phase == "setup")
             else replace(
-                attempt, status=C.Status.INCOMPLETE, final_exit_code=code)
+                attempt,
+                status=C.Status.INCOMPLETE,
+                final_exit_code=(
+                    128 - attempt.raw_exit_code
+                    if (attempt.raw_exit_code is not None
+                        and attempt.raw_exit_code < 0)
+                    else code),
+            )
             for attempt in result.attempts),
     )
 
@@ -971,6 +1241,510 @@ def _export(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
     return result
 
 
+def _execute_probe(domain: C.DomainPaths, config: C.Config,
+                   request: C.RunRequest) -> C.RunResult:
+    """Validate probe admission and fail closed until a native probe qualifies.
+
+    Probe observations are only meaningful when the native adapter has proved
+    distinct worker identities and namespaced resources.  T12b explicitly
+    leaves both first-class probe profiles unsupported, so this path performs
+    validation but never acquires a lease, starts setup, or fabricates a
+    serial-only observation.
+    """
+    options = request.probe
+    if options is None:
+        raise _problem("invalid-config", "probe options are required")
+    _probe_scope_path(config, options)
+    if config.resources.probe_isolation != "run-worker-namespaced":
+        raise _problem("probe-isolation-required",
+                       "probe requires run-worker-namespaced isolation")
+    if config.runner.kind not in {C.RunnerKind.PYTEST, C.RunnerKind.VITEST}:
+        raise _problem("unsupported-capability",
+                       "probe requires a qualified pytest or vitest profile")
+    adapter = adapter_for(config.runner.kind)
+    declared = adapter.qualified_profile(config)
+    if declared is None:
+        name = "Q-PY-PROBE" if config.runner.kind is C.RunnerKind.PYTEST else "Q-VT-PROBE"
+        raise _problem(
+            "unsupported-capability",
+            f"{name} is unsupported-capability; no native worker identity qualification",
+        )
+    support = adapter.compound_support(config, qualified_profile=dict(declared))
+    if not support.parallel_identity:
+        name = "Q-PY-PROBE" if config.runner.kind is C.RunnerKind.PYTEST else "Q-VT-PROBE"
+        raise _problem(
+            "unsupported-capability",
+            f"{name} is unsupported-capability; no native worker identity qualification",
+        )
+    limits = scheduler.effective_limits(domain)
+    if limits.max_slots is not None and limits.max_slots < 2:
+        raise _problem(
+            "capacity-exceeded",
+            "probe requires at least two effective worker slots")
+    # A future qualified profile enters the compound executor below.  Keep
+    # this explicit until its native worker/resource evidence is available;
+    # no static catalog declaration is a probe observation.
+    raise _problem("unsupported-capability", "native probe execution is unavailable")
+
+
+def _execute_shadow(domain: C.DomainPaths, config: C.Config,
+                    request: C.RunRequest) -> C.RunResult:
+    """Run one authenticated selected/full comparison under one guard."""
+    if request.mode is not C.Mode.AUTOMATIC:
+        raise _problem("invalid-config", "shadow execution requires automatic mode")
+    if config.runner.kind is not C.RunnerKind.PYTEST:
+        raise _problem("unsupported-capability",
+                       "shadow requires a qualified pytest selection profile")
+    adapter = adapter_for(config.runner.kind)
+    checkout = _checkout(config)
+    history_view = history.read_history(domain, checkout)
+    catalog = adapter.qualified_profile(config)
+    stored = history.read_qualified_profile(domain, checkout, config.runner.kind)
+    qualified = None
+    if catalog is not None:
+        qualified = (dict(catalog) if history_view.baseline is None
+                     else (None if stored is None else {"source": "stored", **stored}))
+    support = adapter.compound_support(config, qualified_profile=qualified)
+    if not support.selection or support.profile is None or support.limitations:
+        raise _problem("unsupported-capability",
+                       "Q-PY-SELECT is unsupported-capability for this native tuple")
+    planning_runtime = (history_view.baseline.runtime_identity
+                        if history_view.baseline is not None else None)
+    planning_snapshot = _capture_source(
+        domain, config, request, ensure_key=False,
+        execution_tier=C.ExecutionTier.ADVANCED,
+        runtime_identity=planning_runtime,
+        baseline=history_view.baseline,
+    )
+    plans = selection.choose_shadow_plans(
+        config, planning_snapshot, history_view,
+        request, support)
+    if plans.selected.execution != "selected" or not plans.selected.files:
+        raise _problem("unsupported-capability",
+                       "shadow requires a genuine selected plan below full_ratio")
+
+    run_id = secrets.token_hex(16)
+    selected_plan = replace(plans.selected, mode=C.Mode.SHADOW)
+    full_plan = replace(plans.full, mode=C.Mode.SHADOW)
+    command = _summary(config, selected_plan, request, 1)
+    checkout_owner = platform.process_identity(os.getpid())
+    if checkout_owner is None:
+        raise _problem("ownership-uncertain", "caller identity cannot be verified")
+    memory = config.resources.memory_mb_per_worker or None
+    owner = checkout_owner
+    admission = C.AdmissionRequest(
+        run_id=run_id, checkout=checkout, owner=owner, slots=1,
+        exclusive=False, locks=config.resources.locks, memory_mb=memory,
+        deadline=time.monotonic() + request.queue_timeout_s,
+        fixture=domain.fixture,
+    )
+    ticket = scheduler.enqueue(domain, admission)
+    queue_started = time.monotonic()
+    signal_state = _Signals()
+    previous = {signum: signal.signal(signum, signal_state.handler)
+                for signum in (signal.SIGINT, signal.SIGTERM)}
+    grant = None
+    bindings: list[reports.NativeReportBinding] = []
+    frames: _CompoundFrames | None = None
+    try:
+        while True:
+            state = scheduler.poll(domain, ticket)
+            if signal_state.number is not None and state.state in {
+                    C.LeaseState.QUEUED, C.LeaseState.GRANTED}:
+                if scheduler.cancel_pending(domain, ticket, owner):
+                    return _export(domain, checkout, request, _cancel_result(
+                        run_id, checkout, request, selected_plan, command,
+                        signal_state.number, time.monotonic() - queue_started))
+                raise _problem("ownership-uncertain", "shadow cancellation could not be confirmed")
+            if state.state is C.LeaseState.GRANTED:
+                grant = state.grant
+                break
+            if state.state is C.LeaseState.CANCELLED:
+                raise state.problem or _problem("queue-timeout", "shadow admission did not complete", retryable=True)
+            if state.problem is not None and state.state is not C.LeaseState.QUEUED:
+                raise state.problem
+            if time.monotonic() >= admission.deadline:
+                raise _problem("queue-timeout", "admission queue timeout", retryable=True)
+            time.sleep(min(C.SCHEDULER_POLL_S,
+                           max(0.0, admission.deadline - time.monotonic())))
+        assert grant is not None
+        if signal_state.number is not None:
+            if scheduler.cancel_pending(domain, ticket, owner):
+                return _export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, selected_plan, command,
+                    signal_state.number, time.monotonic() - queue_started))
+            raise _problem("ownership-uncertain",
+                           "shadow cancellation could not be confirmed")
+        try:
+            resolved = config_api.resolve_config(checkout.root)
+            if (resolved.problem is not None
+                    or resolved.config != replace(config, checkout=None)):
+                if scheduler.cancel_pending(domain, ticket, owner):
+                    raise _problem(
+                        "changed-during-run",
+                        "pytest configuration changed while awaiting admission")
+                raise _problem("ownership-uncertain",
+                               "shadow configuration invalidation could not be released")
+        except BaseException:
+            if grant is not None:
+                try:
+                    scheduler.cancel_pending(domain, ticket, owner)
+                except (C.Problem, OSError):
+                    pass
+            raise
+        attempts = []
+        prepared_runs = []
+        for attempt_id, plan in (("a001", selected_plan), ("a002", full_plan)):
+            identity = _attempt_identity(grant, checkout, attempt_id, workers=1)
+            prepared = adapter.prepare_advanced(
+                replace(config, runner=replace(config.runner, workers=1)),
+                plan, grant, identity,
+                expected_runtime_identity=(history_view.baseline.runtime_identity
+                                            if history_view.baseline is not None else None),
+            )
+            prepared = replace(prepared, env_updates=prepared.env_updates + (
+                ("PTEST_PROJECT_ID", checkout.project_id),
+                ("PTEST_CHECKOUT_ID", checkout.checkout_id),
+                ("PTEST_RUN_ID", grant.run_id),
+                ("PTEST_ATTEMPT_ID", attempt_id),
+                ("PTEST_WORKER_ID", "w000"),
+                ("PTEST_RESOURCE_PREFIX", identity.resource_prefix),
+                ("PTEST_PYTEST_COMMAND_VARIANTS", _configured_pytest_command_variants(config)),
+            ))
+            binding = reports.allocate_report(
+                domain, checkout, run_id=grant.run_id, nonce=grant.nonce,
+                attempt_id=attempt_id, runner=config.runner.kind,
+                execution_mode=plan.execution, effective_profile="advanced",
+            )
+            prepared = replace(
+                prepared, report_path=binding.path,
+                env_updates=prepared.env_updates + (
+                    ("PTEST_PYTEST_REPORT_PATH", str(binding.path)),
+                    ("PTEST_GRANT_NONCE", grant.nonce),
+                ),
+            )
+            prepared_runs.append(prepared)
+            bindings.append(binding)
+            attempts.append(identity)
+        setup_prepared = _setup_prepared(
+            config, checkout, request, prepared_runs[0], domain, grant,
+            attempts[0])
+
+        input_before = _capture_source(
+            domain, config, request, ensure_key=True,
+            execution_tier=C.ExecutionTier.ADVANCED,
+            runtime_identity=(history_view.baseline.runtime_identity
+                              if history_view.baseline is not None else None),
+            baseline=history_view.baseline,
+        )
+        planning_invalidation = None
+        if not _source_complete(planning_snapshot) or not _source_complete(input_before):
+            planning_invalidation = _reason(
+                "unknown-input", "shadow comparison input identity is unavailable")
+        else:
+            planning_invalidation = _source_invalidation(
+                planning_snapshot, input_before)
+        gate_count = 0
+        gate_after: C.InputSnapshot | None = None
+
+        def decide_compound() -> C.Reason | None:
+            nonlocal gate_count, gate_after
+            gate_count += 1
+            if gate_count == 1 and planning_invalidation is not None:
+                return planning_invalidation
+            gate_after = _capture_source(
+                domain, config, request, ensure_key=False,
+                execution_tier=C.ExecutionTier.ADVANCED,
+                runtime_identity=(history_view.baseline.runtime_identity
+                                  if history_view.baseline is not None else None),
+                baseline=history_view.baseline,
+            )
+            if gate_after.digest is None:
+                return _reason("unknown-input", "shadow source identity is unavailable")
+            return _source_invalidation(input_before, gate_after)
+
+        raw_guard, frames, execution_s = _run_guard(
+            domain, grant, tuple(prepared_runs), signal_state,
+            decide_compound, setup=setup_prepared,
+        )
+        observed = getattr(frames, "facts_by_attempt", {})
+        raw_codes = {
+            attempt_id: facts["raw_exit_code"]
+            for attempt_id, facts in observed.items()
+        }
+        setup_facts = getattr(frames, "setup_facts", None)
+        setup_raw = (None if setup_facts is None
+                     else setup_facts.get("raw_exit_code"))
+        setup_problem = _guard_fact_problem(setup_facts)
+        setup_failed = (
+            setup_facts is not None
+            and (setup_raw != 0 or setup_problem is not None))
+        fact_problems = {
+            attempt_id: problem
+            for attempt_id, facts in observed.items()
+            if (problem := _guard_fact_problem(facts)) is not None
+        }
+        handoff_complete = bool(frames.registered and frames.draining and frames.eof)
+        guard_problem = (frames.invalid or setup_problem
+                         or next(iter(fact_problems.values()), None))
+        guard_exit_problem = False
+        if (raw_guard != 0 and signal_state.number is None
+                and guard_problem is None):
+            guard_problem = _problem(
+                "state-unavailable", "shadow guard exited before clean handoff",
+                phase="guard")
+            guard_exit_problem = True
+        decision_reason = getattr(frames, "decision_reason", None)
+        evidence: list[C.AttemptEvidence] = []
+        evidence_by_id: dict[str, C.AttemptEvidence] = {}
+        report_reason: C.Reason | None = None
+        for index, binding in enumerate(bindings):
+            attempt_id = f"a{index + 1:03d}"
+            if attempt_id not in observed:
+                break
+            try:
+                item = reports.consume_attempt_report(binding)
+                if not _shadow_report_matches_guard(
+                        item, observed[attempt_id].get("raw_exit_code")):
+                    report_reason = _reason(
+                        "report-invalid",
+                        "shadow native report disagreed with guard facts")
+                    break
+                evidence.append(item)
+                evidence_by_id[attempt_id] = item
+            except (C.Problem, OSError):
+                report_reason = _reason("report-invalid", "shadow native report was unavailable")
+                break
+        reasons: tuple[C.Reason, ...] = ()
+        if setup_problem is not None:
+            code = setup_problem.code if setup_problem.code in C.REASON_CODES else "state-unavailable"
+            message = (setup_problem.message if code == setup_problem.code
+                       else "guard reported invalid setup facts")
+            reasons += (_reason(code, message),)
+        for problem in fact_problems.values():
+            code = problem.code if problem.code in C.REASON_CODES else "state-unavailable"
+            message = (problem.message if code == problem.code
+                       else "guard reported invalid runner facts")
+            reasons += (_reason(code, message),)
+        if decision_reason is not None:
+            reasons += (decision_reason,)
+        if report_reason is not None:
+            reasons += (report_reason,)
+        if gate_count < 2 and decision_reason is None and not setup_failed:
+            reasons += (_reason("state-unavailable", "shadow guard handoff was incomplete"),)
+        if guard_exit_problem:
+            reasons += (_reason("state-unavailable",
+                                "shadow guard exited before clean handoff"),)
+        input_after = _capture_source(
+            domain, config, request, ensure_key=False,
+            execution_tier=C.ExecutionTier.ADVANCED,
+            runtime_identity=(history_view.baseline.runtime_identity
+                              if history_view.baseline is not None else None),
+            baseline=history_view.baseline,
+        )
+        source_valid = _source_valid(input_before, input_after)
+        if not source_valid:
+            invalidation = _source_invalidation(input_before, input_after)
+            if invalidation is not None:
+                reasons += (invalidation,)
+        # Report evidence starts source-invalid because the native report
+        # cannot authenticate the controller's final tree.  Promote that
+        # derivative only after the before/after snapshots agree; raw native
+        # status, exit code and inventory completeness remain untouched.
+        if evidence:
+            evidence = [replace(item, result=replace(
+                item.result, source_valid=source_valid)) for item in evidence]
+            evidence_by_id = {item.attempt_id: item for item in evidence}
+        selected_evidence = evidence_by_id.get("a001")
+        full_evidence = evidence_by_id.get("a002")
+        evidence_incomplete = bool(
+            not handoff_complete or guard_problem is not None)
+        if evidence_incomplete:
+            evidence = [
+                replace(item, terminal_complete=False)
+                if (not handoff_complete
+                    or frames.invalid is not None
+                    or fact_problems.get(item.attempt_id) is not None)
+                else item
+                for item in evidence
+            ]
+            evidence_by_id = {item.attempt_id: item for item in evidence}
+            selected_evidence = evidence_by_id.get("a001")
+            full_evidence = evidence_by_id.get("a002")
+        verdict = history.derive_shadow_verdict(selected_evidence, full_evidence)
+        attempt_results = []
+        if setup_facts is not None and not setup_failed:
+            attempt_results.append(C.AttemptResult(
+                attempt_id="a001", phase="setup", status=C.Status.PASSED,
+                raw_exit_code=0, final_exit_code=0, source_valid=False,
+                inventory_complete=False,
+                timings=C.Timings(setup_s=getattr(frames, "setup_elapsed_s", None)),
+            ))
+        for index in range(2):
+            attempt_id = f"a{index + 1:03d}"
+            if attempt_id not in raw_codes:
+                attempt_results.append(C.AttemptResult(
+                    attempt_id=attempt_id, phase="execution",
+                    status=C.Status.NOT_RUN, raw_exit_code=None,
+                    final_exit_code=None, source_valid=False,
+                    inventory_complete=False, timings=None,
+                ))
+                continue
+            raw = raw_codes[attempt_id]
+            item = evidence_by_id.get(attempt_id)
+            attempt_problem = fact_problems.get(attempt_id)
+            # A guard timeout still carries the child's native signal.  Keep
+            # that per-attempt shell mapping (143 for raw -15); the compound
+            # aggregate applies deadline precedence separately below.
+            attempt_guard_problem = (
+                None if raw is not None and raw < 0
+                else attempt_problem or (frames.invalid if raw is None else None))
+            attempt_incomplete = (
+                raw is None
+                or attempt_problem is not None
+                or (report_reason is not None and item is None)
+                or (frames.invalid is not None and item is None))
+            attempt_status, attempt_exit, _, _ = _outcome(
+                raw, None,
+                attempt_guard_problem,
+                incomplete=attempt_incomplete)
+            attempt_results.append(C.AttemptResult(
+                attempt_id=attempt_id, phase="execution", status=attempt_status,
+                raw_exit_code=raw, final_exit_code=attempt_exit,
+                source_valid=source_valid,
+                inventory_complete=item is not None and item.inventory is not None
+                and item.inventory.complete,
+                timings=None,
+            ))
+        observed_codes = tuple(
+            raw_codes[attempt_id] for attempt_id in ("a001", "a002")
+            if attempt_id in raw_codes)
+        status, exit_code, origin, signal_number, runner_code = _shadow_outcome(
+            raw_codes=observed_codes, gate_count=gate_count,
+            decision_reason=decision_reason, report_reason=report_reason,
+            handoff_complete=handoff_complete,
+            cancellation=signal_state.number,
+            guard_problem=guard_problem,
+            setup_raw=setup_raw,
+            setup_problem=setup_problem,
+        )
+        if (decision_reason is not None
+                and decision_reason.code in {"changed-during-run", "unknown-input"}
+                and gate_count == 1 and not observed_codes):
+            reasons = (_reason(
+                "unsupported-capability",
+                "shadow comparison was invalidated before the first attempt"),
+                       *reasons)
+        if verdict == "incomplete" and status is C.Status.PASSED:
+            status, exit_code, origin = C.Status.INCOMPLETE, 70, "ptest"
+        if setup_failed:
+            setup_status, setup_exit, _, _ = _outcome(
+                setup_raw, None, setup_problem,
+                incomplete=setup_problem is not None)
+            attempt_results = [C.AttemptResult(
+                attempt_id="a001", phase="setup", status=setup_status,
+                raw_exit_code=setup_raw, final_exit_code=setup_exit,
+                source_valid=False, inventory_complete=False,
+                timings=C.Timings(setup_s=getattr(frames, "setup_elapsed_s", None)),
+            )]
+            for attempt_id in ("a001", "a002"):
+                attempt_results.append(C.AttemptResult(
+                    attempt_id=attempt_id, phase="execution",
+                    status=C.Status.NOT_RUN, raw_exit_code=None,
+                    final_exit_code=None, source_valid=False,
+                    inventory_complete=False, timings=None,
+                ))
+            origin = "setup" if signal_number is None else origin
+        setup_s = getattr(frames, "setup_elapsed_s", None)
+        execution_elapsed = max(0.0, execution_s - (setup_s or 0.0))
+        result = C.RunResult(
+            run_id=run_id, project_id=checkout.project_id,
+            checkout_id=checkout.checkout_id, mode=C.Mode.SHADOW,
+            status=status, phase="complete", started_at=_iso_now(),
+            finished_at=_iso_now(), plan=selected_plan,
+            command=command, granted_workers=grant.slots,
+            memory_estimate_mb=grant.memory_estimate_mb,
+            reserved_memory_mb=grant.reserved_memory_mb,
+            runner_exit_code=runner_code, signal=signal_number,
+            exit_code=exit_code, exit_origin=origin,
+            source_valid=source_valid, full_gate_eligible=False,
+            baseline_published=False,
+            counts=None, timings=C.Timings(queue_s=time.monotonic() - queue_started,
+                                           setup_s=setup_s,
+                                           execution_s=execution_elapsed),
+            attempts=tuple(attempt_results), reasons=reasons,
+            limitations=_source_limitations(input_before, input_after),
+            sequence=history.next_sequence(domain, checkout),
+            input_before=input_before, input_after=input_after,
+            policy_digest=_policy_digest(config),
+            runtime_identity=(None if selected_evidence is None
+                              else selected_evidence.runtime_identity),
+        )
+        comparison = C.ShadowComparison(
+            selected=selected_evidence, full=full_evidence,
+            verdict=verdict, expected_quarantine=plans.quarantine,
+        )
+        try:
+            publication = history.publish_shadow_outcome(
+                domain, checkout, result, comparison)
+            transition_reasons = ()
+            if verdict in {"suspected-miss", "unclassified-divergence"}:
+                transition_reasons = (_reason(
+                    "selection-shadow-quarantine",
+                    "selection is quarantined pending a corrected shadow comparison"),)
+            result = replace(
+                result,
+                reasons=_unique_reasons(
+                    result.reasons + transition_reasons + publication.reasons),
+            )
+            if not publication.committed:
+                result = _incomplete(result, _reason(
+                    "coordinator-unavailable",
+                    "shadow history could not be committed"))
+                result = replace(result, reasons=_unique_reasons(result.reasons))
+        except (C.Problem, OSError, ValueError, TypeError):
+            result = _incomplete(result, _reason(
+                "coordinator-unavailable", "shadow history could not be committed"))
+        def finalize_shadow(final_result: C.RunResult) -> None:
+            if frames.registered:
+                proof = scheduler.begin_finalization(domain, grant)
+                scheduler.finish(domain, grant, proof, C.Finalization(
+                    outcome_id=None, status=final_result.status,
+                    exit_code=final_result.exit_code,
+                    source_valid=final_result.source_valid, committed=True,
+                ))
+                return
+            if not scheduler.cancel_pending(domain, ticket, owner):
+                raise _problem(
+                    "ownership-uncertain",
+                    "shadow admission could not be released")
+        try:
+            return _export(domain, checkout, request, result,
+                           finalize=finalize_shadow)
+        finally:
+            for binding in bindings:
+                reports.cleanup_report(binding)
+    except BaseException:
+        for binding in bindings:
+            reports.cleanup_report(binding)
+        if grant is not None:
+            try:
+                if frames is not None and frames.registered:
+                    proof = scheduler.begin_finalization(domain, grant)
+                    scheduler.finish(domain, grant, proof, C.Finalization(
+                        outcome_id=None, status=C.Status.INCOMPLETE,
+                        exit_code=70, source_valid=False, committed=False,
+                    ))
+                else:
+                    scheduler.cancel_pending(domain, ticket, owner)
+            except (C.Problem, OSError):
+                pass
+        raise
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def execute(domain: C.DomainPaths, config: C.Config,
             request: C.RunRequest) -> C.RunResult:
     """Run one admitted command and return its typed outcome."""
@@ -978,6 +1752,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise TypeError("execute requires DomainPaths and Config")
     if not isinstance(request, C.RunRequest):
         raise TypeError("execute requires RunRequest")
+    if request.shadow:
+        return _execute_shadow(domain, config, request)
+    if request.probe is not None or request.mode is C.Mode.PROBE:
+        return _execute_probe(domain, config, request)
     native_pytest = config.runner.kind is C.RunnerKind.PYTEST
     native_runner = native_pytest
     adapter = adapter_for(config.runner.kind)
@@ -1022,12 +1800,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
         if request.mode is C.Mode.FULL and "." in config.runner.test_roots:
             raise _problem("unsupported-capability", "pytest full execution does not support a dot test root")
-        if request.shadow or request.probe is not None:
-            raise _problem("unsupported-capability", "pytest shadow and probe are unavailable")
     elif config.runner.kind is not C.RunnerKind.COMMAND:
         raise _problem("unsupported-capability", "native profile execution is deferred")
-    if not native_runner and (config.setup is not None or request.shadow or request.probe is not None):
-        raise _problem("unsupported-capability", "setup, shadow and probe execution are deferred")
+    if not native_runner and config.setup is not None:
+        raise _problem("unsupported-capability", "setup execution is deferred for command profiles")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
     if not native_runner and not adapter.requires_exclusive(config):

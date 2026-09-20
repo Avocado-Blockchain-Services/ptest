@@ -1,0 +1,87 @@
+{
+  "task": "12c",
+  "agent": "luna",
+  "status": "ready-for-sol-audit",
+  "owned_paths": [
+    "src/ptest/operations.py",
+    "src/ptest/cli.py",
+    "tests/ng/test_shadow.py",
+    "tests/ng/test_probes.py",
+    "tests/ng/test_cli.py",
+    "tests/ng/fixtures/shadow/",
+    "tests/ng/fixtures/probes/",
+    ".pipeline/out/task-12c.json",
+    ".pipeline/out/task-12.json"
+  ],
+  "qualification": {
+    "Q-PY-SELECT": "qualified-native-9.1.1-pytest-cov-7.1.0-coverage-7.15.0",
+    "Q-PY-PROBE": "unsupported-capability",
+    "Q-VT-SELECT": "unsupported-capability",
+    "Q-VT-PROBE": "unsupported-capability"
+  },
+  "acceptance": {
+    "S1": "real native selected alpha failure executes selected then full; both raw exit codes are retained and first nonzero remains the result",
+    "S2": "real four-file alpha/beta/gamma/delta fixture with wrong mapping and full_ratio=0.75 selects passing alpha, finds omitted beta failure in full, quarantines selection, falls back to full, reproduces beta scoped, and recovers after committed corrected policy/new full baseline; ratio 0.50 equality widens to full",
+    "S3": "real guarded compound negatives cover second-gate source invalidation, missing handoff, invalid report, fake 600-second expiry, guard-fact problems, active-full source mutation, and active-full deadline expiry; deadline persists a001 evidence and a002 raw -15/final 143 while aggregate remains incomplete/70; current-run quarantine is retained, while a stable fake-31-second two-pass clears corrected quarantine",
+    "P1-P3": "doctor probe grammar asserts exact repeat/worker/timeout bounds and rejects every out-of-range value; validation orders safe scope, isolation, qualified profile, then capacity; FIFO/grant/parallel execution remains deferred behind unavailable probe qualification, so no serial/parallel observations are claimed",
+    "C1-C2": "all automatic shadow spellings parse; mixed full/scoped and probe/static boundaries reject with closed invalid-config; shadow uses one admission/guard, distinct attempt reports, raw evidence and typed shadow publication"
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_shadow.py -q",
+        "result": "37 passed in 119.79s (S1/S2/S3, including strict history binding, active-child source mutation and active deadline evidence)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_history.py tests/ng/test_operations.py -q",
+        "result": "217 passed in 15.45s (history phase/mode rejection and operations publication/signal regressions)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_probes.py tests/ng/test_cli.py tests/ng/test_operations.py -q",
+        "result": "181 passed in 12.50s"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_shadow.py tests/ng/test_probes.py tests/ng/test_cli.py tests/ng/test_operations.py -q",
+        "result": "218 passed in 137.18s (latest qpy owned T12c scope)"
+      },
+      {
+        "command": "ptest tests/ng/test_shadow.py tests/ng/test_probes.py tests/ng/test_cli.py tests/ng/test_operations.py -q",
+        "result": "202 passed, 16 skipped in 13.44s (unqualified qpy-gated shadow scenarios skipped; probes fail closed)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_shadow.py -q -k 'history_allows_only_authenticated_shadow_deadline_no_report or history_rejects_unauthenticated_no_report_attempts'",
+        "result": "5 passed in 0.60s (allowed deadline predecessor/no-report and rejected missing predecessor, positive code, foreign phase, probe mode)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_shadow.py::test_s3_compound_deadline_expires_while_full_child_is_active tests/ng/test_shadow.py::test_shadow_publication_not_committed_forces_incomplete_without_throwing -q",
+        "result": "2 passed in 18.03s (a002 raw -15/final 143 with aggregate 70; typed committed=False publication is incomplete/70)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_shadow.py::test_shadow_publication_not_committed_forces_incomplete_without_throwing -q",
+        "result": "1 passed in 14.04s (committed=False pass is ptest/70; prior runner exit 1 remains runner/1)"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-task12c.RhTu03/bin/python ptest tests/ng/test_pytest_full_subprocess.py tests/ng/test_pytest_scoped_subprocess.py -q",
+        "result": "82 passed, 10 skipped in 60.98s"
+      },
+      {
+        "command": "graphify update .",
+        "result": "completed; graph rebuilt (5047 nodes, 11358 edges, 324 communities); HTML visualization skipped at the configured 5000-node limit"
+      },
+      {
+        "command": "git diff --check && python3 -m json.tool .pipeline/out/task-12c.json && python3 -m json.tool .pipeline/out/task-12.json",
+        "result": "passed"
+      }
+    ],
+    "full_suite": "not run; final integrated suite remains root-owned",
+    "known_flakes": [
+      "An earlier combined run was red because generated fixture bytecode was copied into fresh projects; the fixture now removes generated artifacts and declares nested cache paths as ignored inputs. Latest combined qpy owned run is green.",
+      "No native Q-PY-PROBE or Vitest tuple is available; probe fixtures are intentionally not launched."
+    ]
+  },
+  "limitations": [
+    "No serial/parallel probe, worker identity, namespace, conflict or baseline/quarantine observation is claimed while Q-PY-PROBE and Q-VT-PROBE are unsupported-capability.",
+    "No remote, cloud, API, model, product-resource, dependency or second-executor action was used.",
+    "Root must complete the final integrated audit; no full-suite command was run in this child per task scope."
+  ]
+}

@@ -61,6 +61,37 @@ def test_generic_command_full_retains_selection_disabled_plan_reason(case):
     ),)
 
 
+def test_shadow_report_and_guard_exit_codes_must_match():
+    evidence = C.AttemptEvidence(
+        attempt_id="a001",
+        result=C.AttemptResult(
+            attempt_id="a001", phase="execution", status=C.Status.PASSED,
+            raw_exit_code=0, final_exit_code=0, inventory_complete=True),
+        inventory=None, terminal_complete=True, parallel_identity=False,
+        runtime_identity=None,
+    )
+    assert operations._shadow_report_matches_guard(evidence, 0)
+    assert not operations._shadow_report_matches_guard(evidence, 1)
+    mismatched = replace(evidence, result=replace(evidence.result,
+                                                    final_exit_code=1))
+    assert not operations._shadow_report_matches_guard(mismatched, 0)
+
+
+def test_shadow_public_outcome_preserves_raw_first_failure_and_redacts_values():
+    outcome = operations._shadow_outcome(raw_codes=(0, 23), gate_count=2)
+    assert outcome == (C.Status.FAILED, 23, "runner", None, 23)
+    assert all(token not in json.dumps(outcome, default=str)
+               for token in ("PTEST_", "--cov", "secret"))
+
+
+def test_shadow_guard_problem_cannot_be_reported_as_a_pass():
+    problem = C.Problem(
+        code="ownership-uncertain", message="live descendants", phase="guard")
+    outcome = operations._shadow_outcome(
+        raw_codes=(0, 0), gate_count=2, guard_problem=problem)
+    assert outcome[0:3] == (C.Status.INCOMPLETE, 70, "ptest")
+
+
 def test_pytest_full_plan_is_the_only_early_full_plan_without_generic_reason(case):
     request = C.RunRequest(mode=C.Mode.FULL)
 

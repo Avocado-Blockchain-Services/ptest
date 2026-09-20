@@ -1,0 +1,22 @@
+{
+  "task": "12",
+  "status": "m3-blocked-unqualified-profiles",
+  "task12a": "integrated prerequisite; see existing task-12a evidence",
+  "task12b": {
+    "status": "integrated prerequisite",
+    "qualification": {
+      "Q-PY-SELECT": "qualified-native-9.1.1-pytest-cov-7.1.0-coverage-7.15.0",
+      "Q-PY-PROBE": "unsupported-capability",
+      "Q-VT-SELECT": "unsupported-capability",
+      "Q-VT-PROBE": "unsupported-capability"
+    }
+  },
+  "task12c": {
+    "status": "ready-for-sol-audit",
+    "evidence": ".pipeline/out/task-12c.json",
+    "shadow": "S1/S2 real native evidence and S3 active-full source mutation/deadline evidence passed; deadline retains a001 evidence and a002 raw -15/final 143 while aggregate remains incomplete/70; equality boundary and automatic fallback/recovery are covered",
+    "probe": "fail-closed unsupported-capability; no fake serial/parallel qualification or observations",
+    "limitations": "Q-PY-PROBE, Q-VT-PROBE and Q-VT-SELECT remain unsupported-capability; no positive probe observations exist"
+  },
+  "remaining_gate": "M3 remains incomplete until all four qualifications and positive probe observations exist; root-owned integrated audit remains outstanding"
+}

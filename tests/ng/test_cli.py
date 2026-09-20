@@ -46,7 +46,7 @@ def test_changed_rejects_runner_tail():
     ("where", ("--unknown",), "invalid-config"),
     ("status", ("--bogus",), "invalid-config"),
     ("doctor", ("--unknown",), "invalid-config"),
-    ("doctor", ("--probe", "tests/a.py"), "unsupported-capability"),
+    ("doctor", ("--probe", "tests/a.py"), "invalid-config"),
     ("init", ("--unknown",), "invalid-config"),
     ("register", ("--unknown",), "invalid-config"),
     ("plan", ("--unknown",), "invalid-config"),

@@ -101,6 +101,24 @@ def _number(value: str, *, lo: float, hi: float) -> float:
     return parsed
 
 
+def _probe_integer(value: str, *, lo: int, hi: int) -> int:
+    try:
+        return _integer(value, lo=lo, hi=hi)
+    except C.Problem as problem:
+        if problem.code == "invalid-bound":
+            raise _problem("invalid-config", "probe option value is invalid") from None
+        raise
+
+
+def _probe_number(value: str, *, lo: float, hi: float) -> float:
+    try:
+        return _number(value, lo=lo, hi=hi)
+    except C.Problem as problem:
+        if problem.code == "invalid-bound":
+            raise _problem("invalid-config", "probe option value is invalid") from None
+        raise
+
+
 def _walk_cli_prefix(args: Sequence[str]) -> _CliPrefix:
     """Locate one leading fixture domain and the closed inspection command."""
     fixture = None
@@ -267,6 +285,14 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         json_output = prompt = False
         scope = None
         limits: dict[str, int] = {}
+        probe = False
+        probe_repeat = 2
+        probe_workers = 2
+        probe_timeout = C.DEFAULT_ATTEMPT_TIMEOUT_S
+        probe_no_setup = False
+        probe_result_path = None
+        probe_repeat_seen = probe_workers_seen = probe_timeout_seen = False
+        probe_no_setup_seen = probe_result_path_seen = False
         index = 0
         while index < len(args):
             token = args[index]
@@ -283,10 +309,53 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     limits[token[2:].replace("-", "_")] = _integer(value, lo=1, hi=10**9)
                 continue
             elif token == "--probe":
-                raise _problem("unsupported-capability", "doctor probes are not qualified in this slice")
+                if probe:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                probe = True
+            elif token == "--repeat":
+                value, index = _value(args, index, token)
+                probe_repeat = _probe_integer(value, lo=1, hi=5)
+                probe_repeat_seen = True
+                continue
+            elif token == "--workers":
+                value, index = _value(args, index, token)
+                probe_workers = _probe_integer(value, lo=1, hi=64)
+                probe_workers_seen = True
+                continue
+            elif token == "--attempt-timeout":
+                value, index = _value(args, index, token)
+                probe_timeout = _probe_number(value, lo=1, hi=120)
+                probe_timeout_seen = True
+                continue
+            elif token == "--no-setup":
+                probe_no_setup = True
+                probe_no_setup_seen = True
+            elif token == "--result-json":
+                probe_result_path, index = _value(args, index, token)
+                probe_result_path_seen = True
+                continue
             else:
                 raise _problem("invalid-config", "unknown inspection option")
             index += 1
+        probe_options_seen = (
+            probe_repeat_seen or probe_workers_seen or probe_timeout_seen
+            or probe_no_setup_seen or probe_result_path_seen)
+        if probe:
+            if scope is None:
+                raise _problem("invalid-config", "doctor probe requires --scope")
+            if json_output or prompt:
+                raise _problem("invalid-config", "doctor probe cannot combine output modes")
+            if limits:
+                raise _problem("invalid-config", "doctor probe cannot combine static scan limits")
+            return ParsedArgs(
+                command=command, scope=scope,
+                probe=C.ProbeOptions(scope=scope, repeat=probe_repeat,
+                                     workers=probe_workers,
+                                     attempt_timeout_s=probe_timeout),
+                no_setup=probe_no_setup, result_path=probe_result_path,
+            )
+        if probe_options_seen:
+            raise _problem("invalid-config", "probe options require --probe")
         if json_output and prompt:
             raise _problem("invalid-config", "doctor output modes cannot be combined")
         return ParsedArgs(command=command, json=json_output, prompt=prompt,
@@ -601,6 +670,26 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return 0
         if command == "doctor":
             domain = platform.domain_paths(parsed.fixture_domain)
+            if parsed.probe is not None:
+                if resolution.config is None:
+                    raise resolution.problem or _problem(
+                        "initialization-required",
+                        "project configuration is required",
+                    )
+                result = operations.execute(
+                    domain, resolution.config,
+                    C.RunRequest(
+                        mode=C.Mode.PROBE,
+                        no_setup=parsed.no_setup,
+                        result_path=parsed.result_path,
+                        fixture_domain=parsed.fixture_domain,
+                        probe=parsed.probe,
+                    ),
+                )
+                for reason in result.reasons:
+                    print(render.terminal_text(f"{reason.code}: {reason.message}"),
+                          file=sys.stderr)
+                return result.exit_code
             limits = C.ScanLimits(
                 entries=parsed.max_entries or C.DEFAULT_SCAN_LIMITS.entries,
                 files=parsed.max_files or C.DEFAULT_SCAN_LIMITS.files,

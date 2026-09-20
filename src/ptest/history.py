@@ -2447,17 +2447,57 @@ def _validate_compound_binding(
         raise ValueError("compound result policy binding is required")
     if len({item.attempt_id for item in evidence}) != len(evidence):
         raise ValueError("compound evidence attempt ids must be distinct")
-    result_ids = tuple(item.attempt_id for item in result.attempts)
-    expected_ids = tuple(
-        f"a{index:03d}" for index in range(1, len(result.attempts) + 1))
-    if result_ids != expected_ids:
-        raise ValueError("compound result attempts must be ordered and contiguous")
-    if tuple(item.attempt_id for item in evidence) != result_ids[:len(evidence)]:
-        raise ValueError("compound evidence must be an ordered observed prefix")
-    for attempt, observed in zip(result.attempts, evidence, strict=False):
-        if observed.result != attempt:
+    if any(item.phase not in {"setup", "execution"}
+           for item in result.attempts):
+        raise ValueError("compound attempts may only use setup or execution phases")
+    setup_attempts = tuple(item for item in result.attempts
+                           if item.phase == "setup")
+    execution_attempts = tuple(item for item in result.attempts
+                               if item.phase == "execution")
+    if len(setup_attempts) > 1:
+        raise ValueError("compound result may contain one setup attempt")
+    if setup_attempts and (
+            result.attempts[0] is not setup_attempts[0]
+            or setup_attempts[0].attempt_id != "a001"):
+        raise ValueError("compound setup attempt must precede execution")
+    expected_execution_ids = tuple(
+        f"a{index:03d}" for index in range(1, len(execution_attempts) + 1))
+    execution_ids = tuple(item.attempt_id for item in execution_attempts)
+    if execution_ids != expected_execution_ids:
+        raise ValueError("compound execution attempts must be ordered and contiguous")
+    evidence_ids = tuple(item.attempt_id for item in evidence)
+    if evidence_ids != execution_ids[:len(evidence)]:
+        raise ValueError("compound evidence must be an ordered observed execution prefix")
+    attempts_by_id = {item.attempt_id: item for item in execution_attempts}
+    for observed in evidence:
+        if observed.result != attempts_by_id[observed.attempt_id]:
             raise ValueError("compound evidence does not match result attempts")
-    for attempt in result.attempts[len(evidence):]:
+    observed_ids = set(evidence_ids)
+    for attempt in execution_attempts:
+        if attempt.attempt_id in observed_ids:
+            continue
+        # The sole no-report exception is an authenticated SHADOW compound
+        # deadline after a real a001 predecessor.  The guard's negative
+        # signal remains per-attempt evidence (143 for raw -15), while the
+        # aggregate result remains incomplete/70.
+        deadline_no_report = (
+            mode is C.Mode.SHADOW
+            and result.status is C.Status.INCOMPLETE
+            and result.exit_code == 70
+            and len(execution_attempts) == 2
+            and evidence_ids == ("a001",)
+            and execution_attempts[0].attempt_id == "a001"
+            and execution_attempts[0].status is not C.Status.NOT_RUN
+            and attempt.attempt_id == "a002"
+            and attempt.status is C.Status.INCOMPLETE
+            and attempt.raw_exit_code is not None
+            and attempt.raw_exit_code < 0
+            and attempt.final_exit_code == 128 - attempt.raw_exit_code
+            and any(reason.code == "execution-timeout"
+                    for reason in result.reasons)
+        )
+        if deadline_no_report:
+            continue
         if (attempt.status is not C.Status.NOT_RUN
                 or attempt.raw_exit_code is not None
                 or attempt.final_exit_code is not None
@@ -2465,7 +2505,7 @@ def _validate_compound_binding(
             raise ValueError("unobserved compound attempts must be not-run")
 
 
-def _derived_shadow_verdict(
+def derive_shadow_verdict(
         selected: C.AttemptEvidence | None,
         full: C.AttemptEvidence | None) -> str:
     if selected is None or full is None:
@@ -2516,6 +2556,11 @@ def _derived_shadow_verdict(
             != attributed_full_failure):
         return "unclassified-divergence"
     return "matched"
+
+
+# Backward-compatible internal test seam; the implementation remains the
+# single history-owned classifier above.
+_derived_shadow_verdict = derive_shadow_verdict
 
 
 def _shadow_transition_eligible(
@@ -2590,7 +2635,7 @@ def publish_shadow_outcome(
         item for item in (comparison.selected, comparison.full)
         if item is not None)
     _validate_compound_binding(checkout, result, evidence, C.Mode.SHADOW)
-    if comparison.verdict != _derived_shadow_verdict(
+    if comparison.verdict != derive_shadow_verdict(
             comparison.selected, comparison.full):
         raise ValueError("shadow verdict does not match retained evidence")
     return _publish_compound(
