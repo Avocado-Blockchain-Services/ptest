@@ -23,6 +23,8 @@ from pathlib import Path
 import psutil
 
 from . import contracts as C
+from . import reports
+from .reports import NativeReportBinding
 from .files import (
     create_exclusive,
     ensure_private_dir,
@@ -45,6 +47,8 @@ _CAPACITY_RESERVE_NAME = "history-capacity-reserve.json"
 _PUBLICATION_MARKER_NAME = "history-publication.json"
 _ACTIVE_PUBLICATION_NAME = "history-publication-active.json"
 _WRITER_LOCK_NAME = "history-writer.lock"
+_QUALIFIED_PROFILE_NAME = "qualified-native-profile.json"
+_QUALIFIED_PROFILE_MAX_BYTES = 8192
 _CHECKOUTS_NAME = "checkouts"
 _SCHEMA_VERSION = 1
 _BASE_REQUIRED_TABLES = frozenset({
@@ -1271,6 +1275,131 @@ def read_history(
             connection.close()
 
 
+def _qualified_profile_digest(evidence: C.AttemptEvidence) -> str:
+    """Hash the exact consumed evidence that authorizes a private profile."""
+    return reports.evidence_content_digest(evidence)
+
+
+def publish_qualified_profile(
+    domain: C.DomainPaths,
+    checkout: C.CheckoutIdentity,
+    runner: C.RunnerKind | str,
+    evidence: C.AttemptEvidence,
+    *,
+    binding: NativeReportBinding,
+) -> None:
+    """Persist a profile only from complete, passed native evidence.
+
+    This is private promotion state.  It is deliberately not inferred from a
+    config string or runner kind, and the writer lock makes replacement
+    atomic.  A caller must first obtain ``evidence`` from the strict native
+    report consumer and pass the same consumed binding.  The private consumed
+    file identity is checked here as well, so a hand-shaped dataclass cannot
+    create admission state.
+    """
+    _validate_arguments(domain, checkout)
+    try:
+        kind = runner if isinstance(runner, C.RunnerKind) else C.RunnerKind(runner)
+    except (TypeError, ValueError):
+        raise _problem("unsupported-capability", "native qualification runner is unsupported") from None
+    if kind not in {C.RunnerKind.PYTEST, C.RunnerKind.VITEST}:
+        raise _problem("unsupported-capability", "native qualification runner is unsupported")
+    if (not isinstance(evidence, C.AttemptEvidence)
+            or not isinstance(binding, NativeReportBinding)
+            or binding._created_identity is None
+            or binding._evidence_digest != reports.evidence_content_digest(evidence)
+            or binding.runner != kind.value
+            or binding.effective_profile != C.ExecutionTier.ADVANCED.value
+            or binding.attempt_id != evidence.attempt_id):
+        raise _problem("unsupported-capability", "native qualification lacks a consumed authenticated binding")
+    if not _evidence_passes(evidence):
+        raise _problem("unsupported-capability", "native qualification evidence is incomplete")
+    if evidence.parallel_identity or evidence.runtime_identity is None:
+        raise _problem("unsupported-capability", "native qualification lacks serial runtime identity")
+    if evidence.inventory is None or evidence.inventory.adapter != kind.value:
+        raise _problem("unsupported-capability", "native qualification runner does not match inventory")
+    profile = f"{kind.value}-advanced-v1"
+    payload = {
+        "version": 1,
+        "runner": kind.value,
+        "profile": profile,
+        "attempt_id": evidence.attempt_id,
+        "runtime_identity": evidence.runtime_identity,
+        "inventory_digest": evidence.inventory.digest,
+        "evidence_digest": _qualified_profile_digest(evidence),
+    }
+    raw = _json_bytes(payload).encode("utf-8")
+    if len(raw) > _QUALIFIED_PROFILE_MAX_BYTES:
+        raise _problem("capacity-exceeded", "native qualification evidence exceeds its bound")
+    try:
+        with _writer_lock(domain, checkout) as directory:
+            publish_atomic(directory, _QUALIFIED_PROFILE_NAME, raw)
+    except _HistoryStateError as exc:
+        raise _problem(exc.code, "native qualification state is unavailable") from None
+    except (C.Problem, OSError):
+        raise _problem("coordinator-unavailable", "native qualification state is unavailable") from None
+
+
+def read_qualified_profile(
+    domain: C.DomainPaths,
+    checkout: C.CheckoutIdentity,
+    runner: C.RunnerKind | str,
+) -> dict[str, str] | None:
+    """Read one validated private qualification record without creating state."""
+    _validate_arguments(domain, checkout)
+    try:
+        kind = runner if isinstance(runner, C.RunnerKind) else C.RunnerKind(runner)
+    except (TypeError, ValueError):
+        return None
+    directory = _history_directory(domain, checkout, create=False)
+    if directory is None:
+        return None
+    path = directory / _QUALIFIED_PROFILE_NAME
+    try:
+        validate_private_file(path)
+        value = json.loads(read_regular(directory, _QUALIFIED_PROFILE_NAME,
+                                        _QUALIFIED_PROFILE_MAX_BYTES).decode("utf-8"))
+    except (C.Problem, OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return None
+    required = {"version", "runner", "profile", "attempt_id", "runtime_identity",
+                "inventory_digest", "evidence_digest"}
+    if (not isinstance(value, dict) or set(value) != required
+            or value.get("version") != 1
+            or value.get("runner") != kind.value
+            or value.get("profile") != f"{kind.value}-advanced-v1"
+            or not isinstance(value.get("attempt_id"), str)
+            or not C.ATTEMPT_ID_PATTERN.fullmatch(value["attempt_id"])
+            or not isinstance(value.get("runtime_identity"), str)
+            or _DIGEST_RE.fullmatch(value["runtime_identity"]) is None
+            or not isinstance(value.get("inventory_digest"), str)
+            or _DIGEST_RE.fullmatch(value["inventory_digest"]) is None
+            or not isinstance(value.get("evidence_digest"), str)
+            or _DIGEST_RE.fullmatch(value["evidence_digest"]) is None):
+        return None
+    return {key: value[key] for key in required if key != "version"}
+
+
+def next_sequence(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+) -> int:
+    """Return the next private publication sequence without creating state."""
+    _validate_arguments(domain, checkout)
+    connection = None
+    try:
+        connection = _open_store(domain, checkout, create=False)
+        if connection is None:
+            return 0
+        row = connection.execute(
+            "SELECT MAX(sequence) FROM runs"
+        ).fetchone()
+        return 0 if row is None or row[0] is None else int(row[0]) + 1
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        raise _problem("coordinator-unavailable", "history sequence is unavailable") from None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _snapshots_identity(
     before: C.InputSnapshot | None, after: C.InputSnapshot | None,
     summary: dict | None = None,
@@ -1937,6 +2066,7 @@ def _evidence_passes(evidence: C.AttemptEvidence | None) -> bool:
     return bool(
         result.status is C.Status.PASSED
         and result.raw_exit_code == 0 and result.final_exit_code == 0
+        and result.inventory_complete
         and all(item.outcome not in _FAILURE_OUTCOMES | {C.Outcome.UNKNOWN}
                 for item in evidence.inventory.tests)
     )

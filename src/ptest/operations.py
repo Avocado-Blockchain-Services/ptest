@@ -24,7 +24,8 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import config as config_api, files, platform, render, reports, scheduler, source
+from . import (config as config_api, files, history, platform, render, reports,
+               scheduler, selection, source)
 from .runners import adapter_for
 
 
@@ -85,6 +86,8 @@ def _summary(config: C.Config, plan: C.Plan, request: C.RunRequest,
             args += tuple(config.runner.test_roots)
     elif plan.execution == "scoped":
         args += tuple(request.argv)
+    elif plan.execution == "selected":
+        args += tuple(plan.files)
     return C.summarize_command(config.runner.kind, plan.mode, args,
                                workers=workers,
                                provenance=(("pytest-native-bridge",)
@@ -106,6 +109,32 @@ def _plan(request: C.RunRequest,
                   static_preview=False)
 
 
+def _policy_digest(config: C.Config) -> str:
+    return hashlib.sha256(repr(config.selection).encode()).hexdigest()
+
+
+def _advanced_plan(config: C.Config, request: C.RunRequest,
+                   snapshot: C.InputSnapshot,
+                   history_view: C.HistoryView,
+                   support: C.CompoundSupport) -> C.Plan:
+    """Plan ordinary advanced execution from authenticated static history only."""
+    if request.mode is C.Mode.FULL:
+        return C.Plan(mode=request.mode, execution="full",
+                      input_digest=snapshot.digest,
+                      compatibility=snapshot.compatibility,
+                      static_preview=False)
+    if request.mode is C.Mode.SCOPED:
+        return C.Plan(mode=request.mode, execution="scoped",
+                      input_digest=snapshot.digest,
+                      compatibility=snapshot.compatibility,
+                      static_preview=False)
+    if request.mode is not C.Mode.AUTOMATIC:
+        raise _problem("unsupported-capability", "advanced compound mode is deferred")
+    if not support.selection or support.profile is None or support.limitations:
+        return _plan(request, config.runner.kind)
+    return selection.choose_plan(config, snapshot, history_view, request)
+
+
 def _effective_config(config: C.Config, request: C.RunRequest,
                       plan: C.Plan, grant: C.Grant) -> C.Config:
     runner = replace(config.runner, workers=grant.slots)
@@ -114,6 +143,22 @@ def _effective_config(config: C.Config, request: C.RunRequest,
     # The caller's Config remains the source/policy authority.  This private
     # copy is only for binding the one admitted command argv.
     return replace(config, runner=runner)
+
+
+def _configured_pytest_command_variants(config: C.Config) -> str:
+    """Encode only the configured command variants for native identity.
+
+    Scoped caller arguments are appended to the private effective config for
+    execution, but they are a declared per-attempt scope difference rather
+    than a change to the configured full-gate identity.  Keep the bridge's
+    digest anchored to the committed configuration so a full baseline can
+    authorize a later scoped attempt.
+    """
+    return json.dumps([
+        list(config.runner.launcher) + list(config.runner.args),
+        list(config.runner.launcher) + list(config.runner.full_args)
+        + list(config.runner.test_roots),
+    ], separators=(",", ":"))
 
 
 def _required_paths_issue(config: C.Config,
@@ -381,7 +426,10 @@ def _unknown_snapshot(problem: C.Problem | None = None) -> C.InputSnapshot:
 
 
 def _capture_source(domain: C.DomainPaths, config: C.Config,
-                    request: C.RunRequest, *, ensure_key: bool) -> C.InputSnapshot:
+                    request: C.RunRequest, *, ensure_key: bool,
+                    execution_tier: C.ExecutionTier = C.ExecutionTier.BASIC_SERIAL,
+                    runtime_identity: str | None = None,
+                    baseline: C.Baseline | None = None) -> C.InputSnapshot:
     """Capture typed source evidence without making it an execution blocker."""
     def normalize(snapshot_item: C.InputSnapshot) -> C.InputSnapshot:
         if snapshot_item.limitations:
@@ -394,8 +442,15 @@ def _capture_source(domain: C.DomainPaths, config: C.Config,
         return snapshot_item
 
     snapshot_kwargs = {}
-    if config.runner.kind is C.RunnerKind.PYTEST and request.mode is C.Mode.FULL:
+    if not isinstance(execution_tier, C.ExecutionTier):
+        raise TypeError("execution_tier must be an ExecutionTier")
+    # The execution-only basic_serial tier intentionally uses the historical
+    # full-content digest. Selection policy is not an execution-tier signal.
+    if (config.runner.kind is C.RunnerKind.PYTEST and request.mode is C.Mode.FULL
+            and execution_tier is C.ExecutionTier.BASIC_SERIAL):
         snapshot_kwargs["pytest_full_outputs"] = True
+    if runtime_identity is not None:
+        snapshot_kwargs["runtime_identity"] = runtime_identity
 
     if ensure_key:
         try:
@@ -403,12 +458,12 @@ def _capture_source(domain: C.DomainPaths, config: C.Config,
         except (C.Problem, OSError) as exc:
             problem = exc if isinstance(exc, C.Problem) else None
             try:
-                return normalize(source.snapshot(domain, config, None, request.base,
+                return normalize(source.snapshot(domain, config, baseline, request.base,
                                                  **snapshot_kwargs))
             except (C.Problem, OSError):
                 return _unknown_snapshot(problem)
     try:
-        return normalize(source.snapshot(domain, config, None, request.base,
+        return normalize(source.snapshot(domain, config, baseline, request.base,
                                          **snapshot_kwargs))
     except (C.Problem, OSError):
         return _unknown_snapshot()
@@ -481,6 +536,14 @@ def _source_valid(before: C.InputSnapshot | None,
         and before.compatibility == after.compatibility
         and before.digest == after.digest
         and not before.limitations and not after.limitations
+    )
+
+
+def _source_complete(snapshot: C.InputSnapshot | None) -> bool:
+    """Check one authenticated snapshot without comparing it to itself."""
+    return bool(
+        snapshot is not None and snapshot.digest is not None
+        and snapshot.compatibility is not None and not snapshot.limitations
     )
 
 
@@ -916,8 +979,44 @@ def execute(domain: C.DomainPaths, config: C.Config,
     if not isinstance(request, C.RunRequest):
         raise TypeError("execute requires RunRequest")
     native_pytest = config.runner.kind is C.RunnerKind.PYTEST
+    native_runner = native_pytest
+    adapter = adapter_for(config.runner.kind)
+    checkout = _checkout(config)
+    catalog_profile = (adapter.qualified_profile(config) if native_runner else None)
+    stored_profile = (history.read_qualified_profile(
+        domain, checkout, config.runner.kind) if native_runner else None)
+    history_view = (history.read_history(domain, checkout) if native_runner else
+                    C.HistoryView(baseline=None, limitations=()))
+    # A stored observation can refine, but never create, a closed catalog
+    # declaration.  Configuration changes therefore revoke admission until
+    # the current command matches the registry's static tuple again.
+    qualified_profile = None
+    if catalog_profile is not None:
+        if request.mode is C.Mode.AUTOMATIC and history_view.baseline is not None:
+            # Automatic selection after the first baseline must be refined by
+            # the consumed authenticated profile. A catalog match alone is
+            # enough to establish the first full baseline, but never enough to
+            # authorize a repeat selected plan.
+            qualified_profile = ({} if stored_profile is None else {
+                "source": "stored", **stored_profile})
+        else:
+            qualified_profile = dict(catalog_profile)
+    support = (adapter.compound_support(
+                   config, qualified_profile=qualified_profile) if native_runner else
+               C.CompoundSupport(
+                   selection=False, parallel_identity=False, profile=None,
+                   limitations=(_reason("unsupported-capability",
+                                        "runner has no compound profile"),)))
+    advanced = native_runner and support.profile is not None
     if native_pytest:
-        if request.mode not in {C.Mode.SCOPED, C.Mode.FULL}:
+        allowed = {C.Mode.SCOPED, C.Mode.FULL}
+        if advanced or catalog_profile is not None:
+            # A cataloged project may have a prior baseline whose private
+            # authenticated profile was removed or invalidated.  Permit the
+            # automatic request to fail closed to the configured full gate;
+            # only a consumed profile may enter the advanced path above.
+            allowed.add(C.Mode.AUTOMATIC)
+        if request.mode not in allowed:
             raise _problem("unsupported-capability", "pytest execution requires explicit scope or --full")
         if request.mode is C.Mode.FULL and request.base is not None:
             raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
@@ -927,22 +1026,72 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("unsupported-capability", "pytest shadow and probe are unavailable")
     elif config.runner.kind is not C.RunnerKind.COMMAND:
         raise _problem("unsupported-capability", "native profile execution is deferred")
-    if not native_pytest and (config.setup is not None or request.shadow or request.probe is not None):
+    if not native_runner and (config.setup is not None or request.shadow or request.probe is not None):
         raise _problem("unsupported-capability", "setup, shadow and probe execution are deferred")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
-    adapter = adapter_for(config.runner.kind)
-    if not native_pytest and not adapter.requires_exclusive(config):
+    if not native_runner and not adapter.requires_exclusive(config):
         raise _problem("unsupported-capability", "command execution requires exclusive admission")
-
-    checkout = _checkout(config)
     run_id = secrets.token_hex(16)
-    plan = _plan(request, config.runner.kind)
+    planning_runtime = (
+        history_view.baseline.runtime_identity
+        if advanced and request.mode is C.Mode.AUTOMATIC
+        and history_view.baseline is not None else None)
+    source_baseline = (
+        history_view.baseline
+        if advanced and request.mode is C.Mode.AUTOMATIC else None)
+    planning_snapshot = (_capture_source(
+        domain, config, request, ensure_key=False,
+        execution_tier=C.ExecutionTier.ADVANCED,
+        runtime_identity=planning_runtime, baseline=source_baseline)
+                        if advanced else C.InputSnapshot(
+                            digest=None, compatibility=None, head=None, clean=False))
+    plan = (_advanced_plan(config, request, planning_snapshot,
+                           history_view, support)
+            if advanced else _plan(request, config.runner.kind))
+    if (native_pytest and not advanced and catalog_profile is not None
+            and request.mode is C.Mode.AUTOMATIC and plan.execution == "full"):
+        # An unqualified repeat automatic request is a basic full gate, not
+        # an automatic-mode plan handed to the basic adapter.
+        plan = replace(plan, mode=C.Mode.FULL)
+    if advanced and plan.execution == "none":
+        # A qualified automatic selection may prove that no test is affected.
+        # This is a completed policy decision, not a native attempt: do not
+        # hand an empty argv to a bridge that cannot authenticate collection.
+        started = _iso_now()
+        no_tests_valid = _source_valid(planning_snapshot, planning_snapshot)
+        try:
+            result = _result(
+                run_id=run_id, checkout=checkout, request=request, plan=plan,
+                command=_summary(config, plan, request, 1),
+                status=C.Status.NO_TESTS_NEEDED, phase="complete", started=started,
+                runner_code=0, exit_code=0, origin="ptest",
+                reasons=plan.reasons, limitations=_source_limitations(planning_snapshot),
+                input_before=planning_snapshot, input_after=planning_snapshot,
+                source_valid=no_tests_valid)
+            result = replace(
+                result, sequence=history.next_sequence(domain, checkout),
+                policy_digest=_policy_digest(config),
+            )
+            publication = history.publish_outcome(domain, checkout, result, None)
+            result = replace(
+                result, baseline_published=publication.baseline_published,
+                reasons=_unique_reasons(result.reasons + publication.reasons),
+            )
+            return _export(domain, checkout, request, result)
+        except (C.Problem, OSError):
+            return _export(domain, checkout, request, _incomplete(
+                result,
+                _reason("coordinator-unavailable",
+                        "advanced no-tests-needed history could not be committed"),
+            ))
     # The command summary is redacted and never includes token values.
-    requested_slots = 1 if native_pytest else min(
+    requested_slots = 1 if (native_pytest and not advanced) else min(
         config.runner.workers,
         config.runner.workers if request.workers is None else request.workers,
     )
+    if advanced and not support.parallel_identity:
+        requested_slots = 1
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()
     signals = _Signals()
@@ -961,7 +1110,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         memory = config.resources.memory_mb_per_worker or None
         admission = C.AdmissionRequest(
             run_id=run_id, checkout=checkout, owner=owner,
-            slots=requested_slots, exclusive=not native_pytest,
+            slots=requested_slots, exclusive=not native_runner,
             locks=config.resources.locks, memory_mb=memory,
             deadline=time.monotonic() + request.queue_timeout_s,
             fixture=domain.fixture,
@@ -999,7 +1148,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command,
                     signals.number, time.monotonic() - enqueued_at))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
-        if native_pytest:
+        if native_runner:
             # The queue can outlive edits to the command, resource locks, or
             # project identity. Never launch the previously resolved config
             # under a grant that was obtained for different inputs.
@@ -1014,8 +1163,16 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 raise
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
+        expected_runtime_identity = (
+            history_view.baseline.runtime_identity
+            if (advanced and plan.execution == "selected"
+                and history_view.baseline is not None)
+            else None)
         try:
-            prepared = adapter.prepare(effective, plan, grant, attempt)
+            prepared = (adapter.prepare_advanced(
+                effective, plan, grant, attempt,
+                expected_runtime_identity=expected_runtime_identity)
+                        if advanced else adapter.prepare(effective, plan, grant, attempt))
         except BaseException:
             # No guard exists yet, so an adapter rejection must not leave a
             # never-registered GRANTED lease charging the checkout.
@@ -1029,6 +1186,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
             ("PTEST_WORKER_ID", "w000"),
             ("PTEST_RESOURCE_PREFIX", attempt.resource_prefix),
         ))
+        if advanced and native_pytest:
+            prepared = replace(
+                prepared,
+                env_updates=prepared.env_updates + (
+                    ("PTEST_PYTEST_COMMAND_VARIANTS",
+                     _configured_pytest_command_variants(config)),
+                ),
+            )
         try:
             setup_prepared = _setup_prepared(
                 effective, checkout, request, prepared, domain, grant, attempt)
@@ -1040,30 +1205,29 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # rejection must release the granted lease without a child.
             scheduler.cancel_pending(domain, ticket, owner)
             raise
-        if native_pytest:
+        if native_runner:
             try:
                 report_binding = reports.allocate_report(
                     domain, checkout,
                     run_id=grant.run_id,
                     nonce=grant.nonce,
                     attempt_id=attempt.attempt_id,
-                    runner=C.RunnerKind.PYTEST,
+                    runner=config.runner.kind,
                     execution_mode=plan.execution,
-                    effective_profile=C.ExecutionTier.BASIC_SERIAL.value,
+                    effective_profile=(C.ExecutionTier.ADVANCED.value
+                                       if advanced else C.ExecutionTier.BASIC_SERIAL.value),
                 )
             except BaseException:
                 scheduler.cancel_pending(domain, ticket, owner)
                 raise
-            prepared = replace(
-                prepared,
-                report_path=report_binding.path,
-                env_updates=prepared.env_updates + (
-                    ("PTEST_GRANT_NONCE", grant.nonce),
-                    ("PTEST_PYTEST_ATTEMPT", attempt.attempt_id),
-                    ("PTEST_PYTEST_EXECUTION", plan.execution),
-                    ("PTEST_PYTEST_REPORT_PATH", str(report_binding.path)),
-                ),
+            report_env = (
+                ("PTEST_GRANT_NONCE", grant.nonce),
+                ("PTEST_PYTEST_ATTEMPT", attempt.attempt_id),
+                ("PTEST_PYTEST_EXECUTION", plan.execution),
+                ("PTEST_PYTEST_REPORT_PATH", str(report_binding.path)),
             )
+            prepared = replace(prepared, report_path=report_binding.path,
+                               env_updates=prepared.env_updates + report_env)
         if signals.number is not None:
             if scheduler.cancel_pending(domain, ticket, owner):
                 return _export(domain, checkout, request, _cancel_result(
@@ -1072,7 +1236,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # Capture the initial identity after exclusive admission and queue wait,
         # immediately before launching the admitted command.
         try:
-            input_before = _capture_source(domain, effective, request, ensure_key=True)
+            input_before = _capture_source(
+                domain, effective, request, ensure_key=True,
+                execution_tier=(C.ExecutionTier.ADVANCED if advanced
+                                else C.ExecutionTier.BASIC_SERIAL),
+                runtime_identity=expected_runtime_identity,
+                baseline=source_baseline)
         except BaseException:
             # Capture has the same pre-launch ownership obligation as prepare.
             scheduler.cancel_pending(domain, ticket, owner)
@@ -1114,8 +1283,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         "setup fingerprint state could not be recorded",
                     )
             gate_snapshot = _capture_source(
-                domain, effective, request, ensure_key=False)
-            if (native_pytest and plan.execution == "full"
+                domain, effective, request, ensure_key=False,
+                execution_tier=(C.ExecutionTier.ADVANCED if advanced
+                                else C.ExecutionTier.BASIC_SERIAL),
+                runtime_identity=expected_runtime_identity,
+                baseline=source_baseline)
+            if (native_runner and plan.execution == "full"
                     and (input_before.digest is None
                          or gate_snapshot.digest is None)):
                 return _reason(
@@ -1256,9 +1429,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
             return _export(domain, checkout, request, result)
         # Only authenticated DRAINING plus guard reap permits this proof. Take
         # the post-run snapshot while the lease is held, before finalization.
-        input_after = _capture_source(domain, effective, request, ensure_key=False)
+        input_after = _capture_source(
+            domain, effective, request, ensure_key=False,
+            execution_tier=(C.ExecutionTier.ADVANCED if advanced
+                            else C.ExecutionTier.BASIC_SERIAL),
+            runtime_identity=expected_runtime_identity,
+            baseline=source_baseline)
         source_valid = _source_valid(input_before, input_after)
-        if stopped_at_gate or native_pytest:
+        if stopped_at_gate or (native_pytest and not advanced):
             source_valid = False
         result = replace(
             result,
@@ -1270,7 +1448,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                            for item in result.attempts),
         )
         invalidation = _source_invalidation(input_before, input_after)
-        if (native_pytest and plan.execution == "full"
+        if (native_runner and plan.execution == "full"
                 and (input_before.digest is None or input_after.digest is None)):
             result = _incomplete(result, _reason(
                 "unknown-input", "pytest full content evidence is unavailable"))
@@ -1288,23 +1466,147 @@ def execute(domain: C.DomainPaths, config: C.Config,
         result = replace(result, timings=replace(result.timings, finalization_s=(
             time.monotonic() - finalization_started)))
         consumed_report = False
-        if native_pytest and not setup_failed:
-            report_reason = None
+        native_evidence: C.AttemptEvidence | None = None
+        report_reason: C.Reason | None = None
+        if native_runner and not setup_failed:
             try:
-                native_report = reports.consume_report(report_binding)
-                consumed_report = True
-                if (native_report.bridge_exit_code != raw
-                        or (native_report.terminal_complete and native_report.native_exit_code != raw)):
-                    report_reason = _reason(
-                        "report-invalid",
-                        "native terminal report did not authenticate the native exit",
-                    )
-                elif not native_report.terminal_complete:
-                    report_reason = _reason("unsupported-capability",
-                                            "pytest bridge refused test execution")
-                    # An authenticated bridge refusal is not a native test
-                    # failure. Retain the observed child code for diagnosis.
-                    result = replace(result, exit_origin="ptest")
+                if advanced:
+                    native_evidence = reports.consume_attempt_report(report_binding)
+                    consumed_report = True
+                    observed_runtime = native_evidence.runtime_identity
+                    if expected_runtime_identity is not None and (
+                            observed_runtime != expected_runtime_identity):
+                        report_reason = _reason(
+                            "report-invalid",
+                            "native runtime identity differs from the qualified baseline",
+                        )
+                    elif (native_evidence.result.raw_exit_code != raw
+                          or native_evidence.result.final_exit_code != raw):
+                        report_reason = _reason(
+                            "report-invalid",
+                            "native terminal evidence did not authenticate the native exit",
+                        )
+                    elif native_evidence.inventory is None or not native_evidence.inventory.complete:
+                        report_reason = _reason(
+                            "report-invalid",
+                            "native terminal evidence lacks a complete inventory",
+                        )
+                    else:
+                        # The first snapshots were captured before the bridge
+                        # could disclose its observed runtime facts. Re-read
+                        # both sides with that digest, and require the raw
+                        # source identity to remain unchanged. This is the
+                        # controller-owned source/runtime cross-check; the
+                        # report's source_valid bit is intentionally ignored.
+                        verified_after = _capture_source(
+                            domain, effective, request, ensure_key=False,
+                            execution_tier=C.ExecutionTier.ADVANCED,
+                            runtime_identity=observed_runtime,
+                            baseline=source_baseline)
+                        if (verified_after.digest != input_before.digest
+                                or verified_after.digest != input_after.digest):
+                            report_reason = _reason(
+                                "changed-during-run",
+                                "native source identity changed while runtime evidence was authenticated",
+                            )
+                        elif not _source_complete(verified_after):
+                            report_reason = _reason(
+                                "unknown-input",
+                                "verified native runtime could not produce complete source identity",
+                            )
+                        else:
+                            # The pre-launch snapshot was intentionally taken
+                            # before the child disclosed its runtime facts, so
+                            # it carried no compatibility MAC.  The unchanged
+                            # digest proves that its source inputs are the
+                            # same ones authenticated by the terminal
+                            # snapshot; bind that already-captured snapshot
+                            # to the now-authenticated compatibility instead
+                            # of rescanning the tree a second time.
+                            verified_before = replace(
+                                input_before,
+                                compatibility=verified_after.compatibility,
+                                limitations=verified_after.limitations,
+                            )
+                            advanced_plan = replace(
+                                result.plan,
+                                input_digest=verified_after.digest,
+                                compatibility=verified_after.compatibility,
+                            )
+                            attempts = tuple(
+                                replace(
+                                    item,
+                                    source_valid=True,
+                                    inventory_complete=True,
+                                ) if item.attempt_id == native_evidence.attempt_id else item
+                                for item in result.attempts)
+                            result = replace(
+                                result,
+                                plan=advanced_plan,
+                                input_before=verified_before,
+                                input_after=verified_after,
+                                source_valid=True,
+                                runtime_identity=observed_runtime,
+                                counts=C.Counts(
+                                    collected=len(native_evidence.inventory.tests),
+                                    executed=sum(
+                                        item.outcome in {C.Outcome.PASSED, C.Outcome.FAILED}
+                                        for item in native_evidence.inventory.tests),
+                                    passed=sum(
+                                        item.outcome is C.Outcome.PASSED
+                                        for item in native_evidence.inventory.tests),
+                                    failed=sum(
+                                        item.outcome is C.Outcome.FAILED
+                                        for item in native_evidence.inventory.tests),
+                                    skipped=sum(
+                                        item.outcome is C.Outcome.SKIPPED
+                                        for item in native_evidence.inventory.tests),
+                                    unknown=sum(
+                                        item.outcome is C.Outcome.UNKNOWN
+                                        for item in native_evidence.inventory.tests),
+                                ),
+                                attempts=attempts,
+                                full_gate_eligible=bool(
+                                    plan.execution == "full"
+                                    and result.status is C.Status.PASSED
+                                    and result.runner_exit_code == 0
+                                    and native_evidence.result.inventory_complete
+                                    and native_evidence.terminal_complete),
+                                # Rebuild source limitations from the
+                                # authenticated snapshots.  The initial
+                                # result carries execution-only placeholders;
+                                # once native evidence is verified, retaining
+                                # that generic text would make a valid
+                                # advanced result look unsupported.  Do not
+                                # identify placeholders by their prose.
+                                limitations=_source_limitations(verified_after),
+                            )
+                            if (native_evidence is not None
+                                    and native_evidence.result.status is C.Status.PASSED):
+                                try:
+                                    history.publish_qualified_profile(
+                                        domain, checkout, config.runner.kind,
+                                        native_evidence,
+                                        binding=report_binding)
+                                except (C.Problem, OSError):
+                                    report_reason = _reason(
+                                        "coordinator-unavailable",
+                                        "native qualification evidence could not be persisted")
+                else:
+                    native_report = reports.consume_report(report_binding)
+                    consumed_report = True
+                    if (native_report.bridge_exit_code != raw
+                            or (native_report.terminal_complete and native_report.native_exit_code != raw)):
+                        report_reason = _reason(
+                            "report-invalid",
+                            "native terminal report did not authenticate the native exit",
+                        )
+                    elif not native_report.terminal_complete:
+                        report_reason = _reason("unsupported-capability",
+                                                "pytest bridge refused test execution")
+                        # An authenticated bridge refusal is not a native test
+                        # failure. Retain the observed child code for diagnosis.
+                        result = replace(result, exit_origin="ptest")
             except C.Problem as problem:
                 code = (problem.code if problem.code in {
                     "capacity-exceeded", "report-invalid", "unsafe-path",
@@ -1314,6 +1616,47 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 # Without matching terminal evidence the child code is still
                 # preserved, but cannot certify a completed native test run.
                 result = _incomplete(result, report_reason)
+                if advanced:
+                    # A rejected advanced report is not an observation. Never
+                    # let a bridge-supplied identity or source bit survive as
+                    # controller-owned promotion evidence.
+                    result = replace(
+                        result, source_valid=False, runtime_identity=None,
+                        full_gate_eligible=False,
+                        attempts=tuple(replace(item, source_valid=False,
+                                               inventory_complete=False)
+                                       for item in result.attempts),
+                    )
+
+        # Every real advanced attempt is a private history event, including a
+        # native failure or a refused/malformed report. Promotion is possible
+        # only when the authenticated evidence above made the controller set
+        # full_gate_eligible and runtime/source identity itself.
+        if advanced:
+            try:
+                sequence = history.next_sequence(domain, checkout)
+                result = replace(
+                    result,
+                    sequence=sequence,
+                    policy_digest=_policy_digest(config),
+                    reasons=_unique_reasons(
+                        result.reasons + (() if report_reason is None else (report_reason,))),
+                )
+                publication = history.publish_outcome(
+                    domain, checkout, result,
+                    None if native_evidence is None else native_evidence.inventory,
+                )
+                result = replace(
+                    result,
+                    baseline_published=publication.baseline_published,
+                    reasons=_unique_reasons(result.reasons + publication.reasons),
+                )
+            except (C.Problem, OSError):
+                result = _incomplete(
+                    result,
+                    _reason("coordinator-unavailable",
+                            "advanced attempt history could not be committed"),
+                )
 
         def finalize(exported: C.RunResult) -> None:
             scheduler.finish(domain, grant, proof, C.Finalization(

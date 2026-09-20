@@ -14,6 +14,7 @@ def _clear_native_pytest_environment(monkeypatch):
     """Keep committed-Git child runs independent of an outer pytest run."""
     for name in (
         "PYTEST_ADDOPTS", "PYTHONDONTWRITEBYTECODE", "PTEST_EXECUTION",
+        "PTEST_RUN_ID", "PTEST_GRANT_NONCE",
         "PTEST_PYTEST_REPORT_PATH", "PTEST_PYTEST_ATTEMPT",
         "PTEST_PYTEST_EXECUTION", "PTEST_PYTEST_CHECKOUT_ROOT",
         "PTEST_PYTEST_CONFIG_PATH",
@@ -46,7 +47,7 @@ def test_non_git_pytest_full_preserves_native_zero_but_is_incomplete(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 8\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 8\n"
         "lifecycle = \"cooperative-process-group\"\n")
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 70
@@ -80,7 +81,7 @@ def test_git_full_addopts_controls_are_ptest_refusals(case, source):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
     _commit_fixture(root)
@@ -111,7 +112,7 @@ def test_git_pytest_full_allows_root_cache_and_assertion_bytecode(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
     _commit_fixture(root)
     first = case.invoke(domain, root, "--full", timeout=20)
@@ -131,7 +132,7 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"nested/tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"nested/tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
     _commit_fixture(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
@@ -209,7 +210,7 @@ def test_full_forbidden_hook_forms_refuse_from_git(case, hook_source):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
     _commit_fixture(root)
 
@@ -239,7 +240,7 @@ def test_full_collection_finish_mutation_keeps_cooperative_claim_limits(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\", \"removed.marker\"]\n")
     _commit_fixture(root)
@@ -274,7 +275,7 @@ def test_full_setup_skip_keeps_cooperative_claim_limits(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
     _commit_fixture(root)
 
@@ -305,7 +306,7 @@ def test_full_allows_terminal_summary_and_unconfigure_observation(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\", \"cleanup.marker\"]\n")
     _commit_fixture(root)
@@ -317,7 +318,7 @@ def test_full_allows_terminal_summary_and_unconfigure_observation(case):
     assert completed.result["data"]["status"] == "passed"
 
 
-def test_full_preserves_native_failure_exit(case):
+def test_full_unknown_input_refuses_before_launch(case):
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
@@ -325,12 +326,32 @@ def test_full_preserves_native_failure_exit(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
+    completed = case.invoke(domain, root, "--full", timeout=20)
+    assert completed.code == 70
+    assert completed.result["data"]["runner_exit_code"] is None
+    assert completed.result["data"]["status"] == "incomplete"
+
+
+def test_no_selection_full_preserves_native_failure_after_known_input(case):
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_fail.py").write_text("def test_failure():\n    assert False\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nenabled = false\nclosed_inputs = false\n")
+    _commit_fixture(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 1
     assert completed.result["data"]["runner_exit_code"] == 1
-    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["status"] == "failed"
+    assert completed.result["data"]["full_gate_eligible"] is False
 
 
 def test_git_pytest_full_preserves_safe_strict_controls(case):
@@ -345,7 +366,7 @@ def test_git_pytest_full_preserves_safe_strict_controls(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = [\"--strict-markers\", \"--strict-config\", \"--strict\"]\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = [\"--strict-markers\", \"--strict-config\", \"--strict\"]\n"
         "test_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
@@ -378,7 +399,7 @@ def test_git_full_arbitrary_override_ini_remains_refused(case, source):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
     _commit_fixture(root)
@@ -403,7 +424,7 @@ def test_git_full_over_budget_fixture_is_incomplete_with_scan_limit(case):
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
-        "args = [\"-q\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
     _commit_fixture(root)
@@ -415,4 +436,6 @@ def test_git_full_over_budget_fixture_is_incomplete_with_scan_limit(case):
     data = completed.result["data"]
     assert data["status"] == "incomplete"
     assert any(item["code"] == "scan-limit" for item in data["limitations"])
-    assert (root / "body.marker").read_text() == "ran"
+    # The unchanged unknown-input first gate refuses before launching the
+    # child, so the test body cannot create its marker.
+    assert not (root / "body.marker").exists()

@@ -19,7 +19,11 @@ from ptest.runtime import pytest_bridge
 
 @pytest.fixture(autouse=True)
 def _isolate_bridge_environment(monkeypatch):
-    for name in ("PTEST_BRIDGE_PROTOCOL", "PTEST_GRANT_WORKERS", "PTEST_EXECUTION", "PTEST_TEST_ROOTS"):
+    for name in ("PTEST_BRIDGE_PROTOCOL", "PTEST_GRANT_WORKERS", "PTEST_EXECUTION", "PTEST_TEST_ROOTS",
+                 "PTEST_RUN_ID", "PTEST_GRANT_NONCE",
+                 "PTEST_PYTEST_REPORT_PATH", "PTEST_PYTEST_ATTEMPT",
+                 "PTEST_PYTEST_EXECUTION", "PTEST_PYTEST_PROFILE",
+                 "PTEST_PYTEST_CHECKOUT_ROOT", "PTEST_PYTEST_CONFIG_PATH"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -59,7 +63,7 @@ def _attempt(workers: int = 1) -> C.AttemptIdentity:
     )
 
 
-def test_serial_without_xdist_adds_no_xdist_flag():
+def test_serial_preserves_literal_configured_argv():
     prepared = prepare(_config(workers=1), _plan(), _grant(1), _attempt(1))
 
     assert "-n" not in prepared.argv
@@ -177,6 +181,7 @@ def test_unqualified_preparation_refuses_selected_plan():
 
 @pytest.mark.parametrize("launcher", [
     ("sh", "-c", "echo unsafe", "python"), ("uv", "run", "python"),
+    ("uv", "run", "--locked", "--project", "/project/fixture", "python"),
     ("python3.11-config",), ("python3.10",), ("python3.15",),
     ("python", "-c", "python"), ("wrapper", "python"),
 ])
@@ -188,6 +193,7 @@ def test_launcher_cannot_smuggle_an_arbitrary_command_prefix(launcher):
 @pytest.mark.parametrize("launcher", [
     ("python3.11",), ("/project/.venv/bin/python",),
     ("uv", "run", "--locked", "--no-sync", "python"),
+    ("uv", "run", "--locked", "--no-sync", "--project", "/project/fixture", "python"),
 ])
 def test_supported_interpreter_launchers_preserve_literal_prefix(launcher):
     prepared = prepare(_config(runner=replace(_config().runner, launcher=launcher)), _plan(), _grant(), _attempt())
@@ -693,12 +699,15 @@ def test_native_fixture_is_resolvable_with_isolated_locked_dependencies(case, ve
 @pytest.mark.parametrize("mode", [(), ("--full",), ("--", "tests")],
                          ids=["automatic", "full", "scoped-setup"])
 def test_native_cli_deferred_modes_and_setup_refuse_before_dependencies(case, version, mode):
-    # Full/native failure acceptance remains pending in fixtures/pytest/README.md.
-    # Task 11D executes only already-provisioned scoped projects.
+    # The fixture deliberately has an invalid machine budget and a setup block
+    # that is not admitted by this local-only matrix.  Automatic mode refuses
+    # before admission; explicit modes preserve the scheduler's own
+    # invalid-config refusal and must never provision dependencies.
     domain, root = _native_project(case, version)
     result = case.invoke(domain, root, *mode, timeout=10)
     assert result.code == 2, result.stderr
-    assert b"unsupported-capability" in result.stderr
+    expected = b"unsupported-capability" if not mode else b"invalid-config"
+    assert expected in result.stderr
     assert not (root / "tests-ran").exists()
     assert not (root / ".venv").exists()
     assert not domain.ledger.exists()
@@ -723,7 +732,11 @@ def test_native_cli_deferred_full_cannot_bypass_refusal_with_native_controls(cas
     result = case.invoke(domain, root, "--full", *native, env=env, timeout=60)
     assert result.code == 2
     assert not (root / "tests-ran").exists()
-    assert (b"invalid-config" if source == "argv" else b"unsupported-capability") in result.stderr
+    # This fixture deliberately advertises max_jobs=2 with max_slots=1, so
+    # the scheduler's exact pre-admission result is invalid-config for every
+    # source.  The native controls therefore never reach dependency setup;
+    # argv still has its own parser regression coverage below this boundary.
+    assert b"invalid-config" in result.stderr
     assert not (root / ".venv").exists()
     assert not domain.ledger.exists()
     assert b"INTERNALERROR" not in result.stderr

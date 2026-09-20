@@ -4,6 +4,12 @@ No real Node/Vitest/Vite tuple is qualified in this foundation. The only
 automated bridge coverage uses `stub-node.mjs`, a handwritten deterministic API
 double; it is not a native Vitest qualification and it never installs fixtures.
 
+The closed registry withholds the Vitest catalog unconditionally. The bridge
+keeps one fail-closed refusal for any forged `advanced` profile; there is no
+unreachable advanced execution/report path to mistake for support. Stub-node
+runs are negative boundary evidence only and do not promote Q-VT-SELECT or
+Q-VT-PROBE.
+
 The prepared contract permits only `runner.kind=vitest`, explicit scoped plans,
 one serial slot, and the `basic_serial` label. Its capability remains
 `unavailable`: the executor has not yet allocated and consumed a private report
@@ -29,11 +35,9 @@ retains the recorded Vitest 3.2.x middleware API default, but successful boundar
 tests explicitly use `api: false`. They therefore do not establish that real
 Vitest can reach the successful path under this policy.
 
-Production wiring remains deferred: `selection.choose_plan` and
-`operations._plan` currently create scoped plans with empty `Plan.files`, while
-`operations._effective_config` folds request argv into configured runner args.
-This foundation must not be wired into execution until a later lifecycle task
-supplies the independently bound scoped suffix and executor-owned report flow.
+The executor path remains basic serial only. No local Node/Vitest tuple is
+qualified and no Q-VT-SELECT positive claim is made. Basic serial preparation
+remains execution-only and never carries selection files.
 
 Activation gates from the final foundation audit: Vitest matches filters by
 case-insensitive substring, so planner/lifecycle work must reject suite-root or

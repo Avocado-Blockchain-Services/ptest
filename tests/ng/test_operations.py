@@ -344,6 +344,9 @@ def _pytest_project(case, domain, *, workers=1):
 
 def _git_pytest_project(case, domain):
     root = _pytest_project(case, domain)
+    config_path = root / ".ptest.toml"
+    config_path.write_text(config_path.read_text().replace(
+        'args = ["-q"]', 'args = ["-q", "-p", "no:xdist"]'))
     (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
     env = {name: value for name, value in os.environ.items()
            if not name.startswith("GIT_")}
@@ -385,6 +388,7 @@ def test_pytest_full_equal_execution_only_digests_pass_despite_missing_compatibi
     """Equal full-policy digests carry the native outcome; compatibility alone never blocks."""
     domain = case.domain()
     root = _git_pytest_project(case, domain)
+    assert 'args = ["-q", "-p", "no:xdist"]' in (root / ".ptest.toml").read_text()
 
     result = _execute(root, domain)
 

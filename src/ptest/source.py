@@ -7,7 +7,7 @@ fingerprint source, but cannot claim compatibility or enable selection.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
@@ -36,6 +36,21 @@ _TIMEOUT_S = 10.0
 _IDENTITY_PROTOCOL = "ptest-source-v2"
 _OPERATIONS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
 _CONVERSION_ATTRIBUTES = {"crlf", "eol", "filter", "ident", "text", "working-tree-encoding"}
+
+
+def _compatibility_runner(config: C.Config) -> str:
+    """Bind advanced identity to declared controls, not ptest's worker grant.
+
+    The native advanced bridge currently admits a truthful serial cap even when
+    a repository declares more workers. The grant is ptest-owned execution
+    state, so it must not make a clean baseline incompatible with the next
+    automatic planning snapshot.
+    """
+    runner = config.runner
+    if runner.kind is C.RunnerKind.PYTEST:
+        runner = replace(runner, workers=1)
+        config = replace(config, runner=runner)
+    return repr(config.runner)
 
 
 def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
@@ -497,7 +512,7 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
             limitations = (_reason("unknown-input", "verified native runtime identity is unavailable"),)
         else:
             compatibility = _mac(key, [_IDENTITY_PROTOCOL, runtime_identity, external,
-                repr(config.runner), repr(config.setup), repr(config.selection), sys.version, sys.executable,
+                _compatibility_runner(config), repr(config.setup), repr(config.selection), sys.version, sys.executable,
                 sys.implementation.name, sys.implementation.cache_tag, platform.system(), platform.machine()])
         scan.remaining()
         return C.InputSnapshot(digest=digest, compatibility=compatibility, head=head,

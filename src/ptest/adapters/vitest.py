@@ -6,9 +6,29 @@ from pathlib import Path
 
 from ptest import contracts as C
 
+def _qualified_profile_catalog(config: C.Config) -> dict[str, str] | None:
+    """No Vitest tuple is cataloged until a native tuple is qualified."""
+    return None
+
+
+def qualified_profile(config: C.Config) -> dict[str, str] | None:
+    """Expose the closed catalog lookup to the adapter registry."""
+    return _qualified_profile_catalog(config)
+
 
 def _problem(code: str, message: str) -> C.Problem:
     return C.Problem(code=code, message=message, phase="execution")
+
+
+def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | None = None) -> C.CompoundSupport:
+    """Vitest remains execution-only until a real native tuple is cataloged."""
+    return C.CompoundSupport(
+        selection=False, parallel_identity=False, profile=None,
+        limitations=(C.Reason(
+            code="unsupported-capability",
+            message="Vitest native qualification is unavailable",
+        ),),
+    )
 
 
 def _bridge_path() -> Path:
@@ -36,7 +56,9 @@ def _require_node_launcher(launcher: tuple[str, ...]) -> None:
 def _scoped_files_binding(files: tuple[str, ...]) -> str:
     """Bind scope separately from native options, within the control-frame bound."""
     if not files or len(files) > 256 or any(
-        not isinstance(file, str) or not file or file.startswith("-") or "\x00" in file
+        not isinstance(file, str) or not file or file.startswith(("-", "/", "\\"))
+        or "\x00" in file or any(part in {"", ".", ".."}
+                                  for part in file.replace("\\", "/").split("/"))
         for file in files
     ):
         raise _problem("native-config-invalid", "Vitest scoped files must be nonempty literal paths")
@@ -86,4 +108,14 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
                 "executor-owned report allocation and real native tuple qualification are unavailable.")),)),
         summary=C.summarize_command(C.RunnerKind.VITEST, plan.mode, argv, workers=1,
             generated_options=("vitest.workers=1",), provenance=("vitest-basic-serial-prepared",)),
+    )
+
+
+def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
+                     attempt: C.AttemptIdentity,
+                     *, expected_runtime_identity: str | None = None) -> C.PreparedRun:
+    """Keep the unqualified Vitest advanced path fail-closed before launch."""
+    raise _problem(
+        "unsupported-capability",
+        "Vitest advanced native qualification is unavailable",
     )

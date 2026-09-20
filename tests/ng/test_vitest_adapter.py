@@ -15,7 +15,7 @@ import subprocess
 import pytest
 
 from ptest import contracts as C
-from ptest.adapters.vitest import prepare
+from ptest.adapters.vitest import compound_support, prepare, qualified_profile
 
 RUN_ID = "12" * 16
 NONCE = "34" * 32
@@ -105,6 +105,19 @@ def test_prepare_keeps_literal_configured_args_and_scoped_suffix_once(case):
     assert json.loads(dict(prepared.env_updates)["PTEST_VITEST_SCOPED_FILES"]) == [literal, "tests/one.test.ts"]
 
 
+def test_vitest_coverage_reporter_flags_do_not_admit_unqualified_native_profile(case):
+    """Configuration strings alone must not activate the unqualified bridge."""
+    config = case.config(runner_kind="vitest", config_path=case.base / "ptest.toml")
+    config = replace(config, runner=replace(
+        config.runner, launcher=("node",), args=("--reporter", "verbose"),
+        full_args=("--coverage",)))
+    assert qualified_profile(config) is None
+    support = compound_support(config)
+    assert support.profile is None
+    assert support.selection is False
+    assert any(reason.code == "unsupported-capability" for reason in support.limitations)
+
+
 @pytest.fixture
 def bridge_run(case, tmp_path):
     project = tmp_path / "project"
@@ -156,6 +169,21 @@ def test_bridge_writes_only_native_terminal_shape_for_scoped_serial(bridge_run):
     assert terminal["runner"] == "vitest" and terminal["execution_mode"] == "scoped"
     assert terminal["effective_profile"] == "basic_serial" and terminal["terminal_complete"] is True
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_bridge_refuses_forged_advanced_profile_before_loading_vitest(bridge_run):
+    """An injected advanced profile cannot reach Vitest's execution APIs."""
+    result, events, terminal, _ = bridge_run(
+        env_updates={"PTEST_VITEST_PROFILE": "advanced"})
+    assert result.returncode == 70
+    assert events == []
+    assert terminal is not None
+    assert terminal["effective_profile"] == "advanced"
+    assert terminal["observed_runtime_version"] == "0.0.0"
+    assert terminal["terminal_complete"] is False
+    assert terminal["native_exit_code"] is None
+    assert terminal["bridge_exit_code"] == 70
+    assert terminal["problem"] == "bridge-refused"
 
 
 def _assert_refused(result, events, terminal, *, loaded):

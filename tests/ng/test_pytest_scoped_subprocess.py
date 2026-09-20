@@ -1,8 +1,11 @@
-"""Real scoped guard/bridge/pytest/report acceptance; no fixture installs.
+"""Real scoped guard/bridge/pytest/report acceptance.
 
 The controller interpreter is already provisioned. Other candidate interpreters
 can be supplied explicitly with PTEST_TEST_PYTHON_<version with underscores>.
-Unavailable tuples are skipped and remain unqualified, never installed here.
+Unavailable tuples are skipped and remain unqualified. The one cataloged
+pytest-cov tuple is supplied through the explicit
+PTEST_TEST_PYTHON_9_1_1_COV override; the child launcher is a preprovisioned
+interpreter and never synchronizes dependencies.
 """
 from __future__ import annotations
 
@@ -41,14 +44,35 @@ def _interpreter(version="9.1.1"):
     return supplied
 
 
-def _project(case, domain, *, version="9.1.1", args=(), conftest=""):
+def _coverage_launcher():
+    supplied = os.environ.get("PTEST_TEST_PYTHON_9_1_1_COV")
+    if not supplied:
+        pytest.skip("unqualified: set PTEST_TEST_PYTHON_9_1_1_COV to a preprovisioned frozen coverage tuple")
+    try:
+        checked = subprocess.run(
+            [supplied, "-c", (
+                "import pytest, pytest_cov, coverage; "
+                "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
+            )], capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({exc})")
+    if checked.returncode != 0 or checked.stdout.strip() != "9.1.1 7.1.0 7.15.0":
+        detail = (checked.stderr.strip() or checked.stdout.strip() or "tuple probe failed")[-240:]
+        pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({detail})")
+    return (supplied,)
+
+
+def _project(case, domain, *, version="9.1.1", args=(), conftest="",
+             allow_xdist=False, launcher=None):
     root = case.project(domain, kind="pytest")
     config_path = root / ".ptest.toml"
     project_id = tomllib.loads(config_path.read_text())["project_id"]
+    selected_launcher = (_interpreter(version) if launcher is None else launcher)
     config_path.write_text(
         f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
-        f'launcher = {json.dumps([_interpreter(version)])}\n'
-        f'args = {json.dumps(["-s", *args])}\nfull_args = ["--invalid-full-only"]\n'
+        f'launcher = {json.dumps(list(selected_launcher) if isinstance(selected_launcher, tuple) else [selected_launcher])}\n'
+        f'args = {json.dumps(["-s", *(args if allow_xdist else ("-p", "no:xdist", *args))])}\nfull_args = ["--invalid-full-only"]\n'
         'test_roots = ["tests"]\nworkers = 8\n'
     )
     (root / "tests").mkdir()
@@ -77,6 +101,17 @@ def _released(domain, count=1):
     leases = scheduler.reconcile(domain)
     assert len(leases) == count
     assert all(lease.state is C.LeaseState.RELEASED for lease in leases)
+
+
+def _commit_fixture(root):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
+    for args in (("init",), ("add", "."), ("commit", "-m", "fixture")):
+        subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull,
+                        "-c", "commit.gpgsign=false", *args],
+                       cwd=root, env=env, capture_output=True, check=True, timeout=5)
 
 
 @pytest.mark.parametrize("version", VERSIONS)
@@ -124,6 +159,232 @@ def test_real_blocked_xdist_is_not_an_active_plugin(case):
     assert (root / "tests-ran").exists()
 
 
+def test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed(case):
+    """Catalog admission is reachable; absent pytest-cov is not qualification evidence."""
+    domain = case.domain()
+    root = _project(case, domain, args=("--cov=project_module", "--cov-report=term"))
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text().replace("workers = 8", "workers = 1"))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert result.code == 4
+    assert data["status"] == "incomplete"
+    assert data["source_valid"] is False
+    assert data["baseline_published"] is False
+    assert b"unsupported-capability" in result.stderr
+
+
+def test_real_off_table_coverage_tuple_refuses_before_tests(case):
+    interpreter = os.environ.get("PTEST_TEST_PYTHON_OFFTABLE_COV")
+    if interpreter is None:
+        pytest.skip("unqualified: no preprovisioned off-table coverage interpreter supplied")
+    probe = subprocess.run(
+        [interpreter, "-c", (
+            "import pytest, pytest_cov, coverage; "
+            "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
+        )], check=True, capture_output=True, text=True, timeout=5,
+    )
+    assert probe.stdout.strip() == "9.1.1 7.0.0 7.16.1"
+    domain = case.domain()
+    root = _project(
+        case, domain, launcher=interpreter,
+        args=("--cov=project_module", "--cov-report=term"),
+    )
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text().replace("workers = 8", "workers = 1"))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert result.code == 4
+    assert data["status"] == "incomplete"
+    assert data["source_valid"] is False
+    assert data["baseline_published"] is False
+    assert b"unsupported-capability" in result.stderr
+    assert not (root / "tests-ran").exists()
+
+
+def test_q_py_select_real_coverage_baseline_then_exact_selected_file(case):
+    """Real locked pytest-cov tuple proves baseline inventory and exact SELECT."""
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    # Keep the baseline inventory larger than the selected group so the
+    # planner proves exact-file selection rather than treating one-file
+    # selection as a full run.
+    (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
+    # The helper's native fixture command is replaced by the locked coverage
+    # tuple and an explicitly closed group mapping for exact selection.
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py", "tests/test_extra.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", "tests/__pycache__", "ptest-result-q-py-select.json", "ptest-result-q-py-select-selected.json", "ptest-result-q-py-select-no-profile.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
+    )
+    _commit_fixture(root)
+    result_path = "ptest-result-q-py-select.json"
+    baseline = case.invoke(domain, root, "--result-json", result_path, "--full", timeout=30)
+    baseline_data = _data(baseline)
+    assert baseline.code == 0, baseline.stderr.decode()
+    assert baseline_data["status"] == "passed"
+    assert baseline_data["baseline_published"] is True
+    assert baseline_data["full_gate_eligible"] is True
+    (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
+    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-selected.json", "--changed", timeout=30)
+    selected_data = _data(selected)
+    assert selected.code == 0, selected.stderr.decode()
+    assert selected_data["status"] == "passed"
+    assert selected_data["plan"]["execution"] == "selected"
+    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
+    assert selected_data["counts"]["collected"] == 2
+    assert selected_data["source_valid"] is True
+    profile = next((domain.root / "checkouts").glob("*/qualified-native-profile.json"))
+    profile.unlink()
+    fallback = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-select-no-profile.json", "--changed",
+        timeout=30)
+    fallback_data = _data(fallback)
+    assert fallback.code == 4, fallback.stderr.decode()
+    assert fallback_data["plan"]["execution"] == "full"
+    assert fallback_data["baseline_published"] is False
+
+
+def test_q_py_scoped_after_full_baseline_normalizes_owned_scope_identity(case):
+    """A qualified full baseline must not make an explicit native scope stale."""
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py", "tests/test_extra.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", '
+        '"tests/__pycache__", "ptest-result-q-py-scoped.json", '
+        '"ptest-result-q-py-scoped-selected.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], '
+        'tests = ["tests/test_native.py"] }]\n'
+    )
+    (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
+    _commit_fixture(root)
+    baseline = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-scoped.json", "--full", timeout=30)
+    baseline_data = _data(baseline)
+    assert baseline.code == 0, baseline.stderr.decode()
+    assert baseline_data["full_gate_eligible"] is True
+    scoped = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-scoped-selected.json",
+        "--", "tests/test_native.py", timeout=30)
+    scoped_data = _data(scoped)
+    assert scoped.code == 0, scoped.stderr.decode()
+    assert scoped_data["status"] == "passed"
+    assert scoped_data["plan"]["execution"] == "scoped"
+    assert scoped_data["source_valid"] is True
+    assert scoped_data["granted_workers"] == 1
+
+
+def test_q_py_selected_runtime_drift_refuses_then_full_rebaselines(case):
+    """A child plugin drift refuses SELECT before tests; FULL can rebaseline it."""
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py", "tests/test_extra.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", '
+        '"tests/__pycache__", "conftest.py", "drift_plugin.py", '
+        '"ptest-result-q-py-drift.json", "ptest-result-q-py-drift-selected.json", '
+        '"ptest-result-q-py-drift-full.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], '
+        'tests = ["tests/test_native.py"] }]\n'
+    )
+    (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
+    (root / ".gitignore").write_text(
+        "__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n"
+        "conftest.py\ndrift_plugin.py\n"
+    )
+    _commit_fixture(root)
+    baseline = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-drift.json", "--full", timeout=30)
+    baseline_data = _data(baseline)
+    assert baseline.code == 0, baseline.stderr.decode()
+    assert baseline_data["baseline_published"] is True
+    (root / "tests-ran").unlink()
+
+    (root / "project_module.py").write_text("VALUE = 7\n# selected runtime drift\n")
+    (root / "conftest.py").write_text("pytest_plugins = ['drift_plugin']\n")
+    (root / "drift_plugin.py").write_text("RUNTIME_DRIFT = True\n")
+    selected = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-drift-selected.json",
+        "--changed", timeout=30)
+    selected_data = _data(selected)
+    assert selected.code != 0, (selected_data, selected.stderr.decode())
+    assert selected_data["status"] == "incomplete"
+    assert selected_data["baseline_published"] is False
+    assert not (root / "tests-ran").exists()
+    assert any(reason["code"] in {"report-invalid", "unsupported-capability"}
+               for reason in selected_data["reasons"])
+
+    _commit_fixture(root)
+    full = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-drift-full.json", "--full", timeout=30)
+    full_data = _data(full)
+    assert full.code == 0, full.stderr.decode()
+    assert full_data["status"] == "passed"
+    assert full_data["baseline_published"] is True
+
+
+def test_advanced_full_runtime_change_rebaselines_without_stale_expected_digest(case):
+    """An explicit full gate may observe a changed runtime and publish anew."""
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", '
+        '"tests/__pycache__", "ptest-result-q-py-runtime.json", '
+        '"ptest-result-q-py-runtime-changed.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], '
+        'tests = ["tests/test_native.py"] }]\n'
+    )
+    _commit_fixture(root)
+    first = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-runtime.json", "--full", timeout=30)
+    first_data = _data(first)
+    assert first.code == 0, first.stderr.decode()
+    assert first_data["baseline_published"] is True
+    config.write_text(config.read_text().replace("--cov-report=term", "--cov-report=term-missing"))
+    _commit_fixture(root)
+    second = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-runtime-changed.json", "--full", timeout=30)
+    second_data = _data(second)
+    assert second.code == 0, second.stderr.decode()
+    assert second_data["status"] == "passed"
+    assert second_data["full_gate_eligible"] is True
+    assert second_data["baseline_published"] is True
+
+
 @pytest.mark.parametrize("hook", ["pytest_runtestloop", "pytest_runtest_protocol", "pytest_cmdline_main"])
 def test_real_unowned_execution_hook_is_refused_before_collection(case, hook):
     domain = case.domain()
@@ -142,6 +403,25 @@ def test_real_unowned_execution_hook_is_refused_before_collection(case, hook):
     assert (root / "conftest-loaded").exists()  # Qualification is before collection, not conftest import.
     assert not (root / "collected").exists()
     assert not (root / "unowned-hook-ran").exists()
+    _released(domain)
+
+
+def test_real_pytest_cov_lookalike_hook_is_not_approved(case):
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "pytest_cov_shim.py").write_text(
+        "from pathlib import Path\n"
+        "def pytest_runtest_call(item):\n"
+        "    Path('lookalike-hook-ran').touch()\n"
+    )
+    (root / "conftest.py").write_text("pytest_plugins = ['pytest_cov_shim']\n")
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert result.code == data["runner_exit_code"] == 4
+    assert data["status"] == "incomplete"
+    assert any(reason["code"] == "unsupported-capability" for reason in data["reasons"])
+    assert b"native-config-invalid" in result.stderr
+    assert not (root / "lookalike-hook-ran").exists()
     _released(domain)
 
 
@@ -561,7 +841,8 @@ def test_real_queued_config_change_cancels_without_launch(case, change):
         if change == "removed": path.unlink()
         elif change == "invalid": path.write_text("invalid toml !")
         elif change == "runner": path.write_text(original.replace('kind = "pytest"', 'kind = "command"'))
-        else: path.write_text(original.replace('args = ["-s"]', 'args = ["-q"]'))
+        else: path.write_text(original.replace(
+            'args = ["-s", "-p", "no:xdist"]', 'args = ["-q"]'))
         (root / "first-release").touch()
         # Prevent a buggy stale run from delaying RED for the fixture deadline.
         (root / "second-release").touch()
@@ -647,9 +928,9 @@ def test_real_early_bridge_refusal_is_not_a_native_test_failure(case, monkeypatc
     domain = case.domain()
     root = _project(case, domain)
     launch = operations._launch_guard
-    def invalid_grant(domain, grant, prepared):
+    def invalid_grant(domain, grant, prepared, setup=None):
         prepared = replace(prepared, env_updates=prepared.env_updates + (("PTEST_GRANT_WORKERS", "0"),))
-        return launch(domain, grant, prepared)
+        return launch(domain, grant, prepared, setup)
     monkeypatch.setattr(operations, "_launch_guard", invalid_grant)
     result = operations.execute(domain, config_api.resolve_config(root).config,
                                 C.RunRequest(mode=C.Mode.SCOPED, argv=("tests",)))
@@ -790,13 +1071,63 @@ def test_real_xdist_plugin_is_refused_when_preprovisioned(case):
                            check=True, capture_output=True, text=True, timeout=5)
     assert probe.stdout.strip() in VERSIONS
     domain = case.domain()
-    root = _project(case, domain)
+    root = _project(case, domain, allow_xdist=True)
     path = root / ".ptest.toml"
     path.write_text(path.read_text().replace(json.dumps([_interpreter()]), json.dumps([interpreter])))
     result = case.invoke(domain, root, "--", "tests", timeout=10)
     assert _data(result)["status"] == "incomplete"
     assert _data(result)["exit_origin"] == "ptest"
     assert b"xdist is not owned" in result.stderr
+    assert not (root / "tests-ran").exists()
+    _released(domain)
+
+
+def test_real_renamed_xdist_controller_is_refused(case):
+    """A real xdist module remains owned-bound even under a project alias."""
+    interpreter = os.environ.get("PTEST_TEST_XDIST_PYTHON")
+    if interpreter is None:
+        pytest.skip("unqualified: no preprovisioned xdist interpreter supplied")
+    probe = subprocess.run(
+        [interpreter, "-c", "import pytest, xdist; print(pytest.__version__)"],
+        check=True, capture_output=True, text=True, timeout=5,
+    )
+    assert probe.stdout.strip() in VERSIONS
+    domain = case.domain()
+    root = _project(case, domain, allow_xdist=True, conftest=(
+        "import xdist.plugin as _renamed_xdist\n"
+        "def pytest_configure(config):\n"
+        "    config.pluginmanager.register(_renamed_xdist, 'renamed-xdist-controller')\n"
+    ))
+    path = root / ".ptest.toml"
+    path.write_text(path.read_text().replace(
+        json.dumps([_interpreter()]), json.dumps([interpreter])))
+    result = case.invoke(
+        domain, root, "--", "tests", timeout=10,
+        env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+    )
+    assert _data(result)["status"] == "incomplete"
+    assert _data(result)["exit_origin"] == "ptest"
+    assert b"xdist is not owned" in result.stderr
+    assert not (root / "tests-ran").exists()
+    _released(domain)
+
+
+def test_foreign_object_under_blocked_looponfail_name_is_refused(case):
+    """The blocked loop-on-fail name never authenticates an arbitrary object."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "class ForeignController:\n"
+        "    def pytest_runtest_call(self, item):\n"
+        "        open('foreign-hook-ran', 'w').close()\n"
+        "def pytest_configure(config):\n"
+        "    config.pluginmanager.unregister(name='xdist.looponfail')\n"
+        "    config.pluginmanager.register(ForeignController(), 'xdist.looponfail')\n"
+    ))
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert b"unqualified pytest execution hook" in result.stderr
     assert not (root / "tests-ran").exists()
     _released(domain)
 

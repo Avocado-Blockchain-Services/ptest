@@ -16,6 +16,19 @@ from .adapters import vitest as vitest_adapter
 
 
 Prepare = Callable[[C.Config, C.Plan, C.Grant, C.AttemptIdentity], C.PreparedRun]
+PrepareAdvanced = Callable[..., C.PreparedRun]
+CompoundSupportFn = Callable[..., C.CompoundSupport]
+QualifiedProfileFn = Callable[[C.Config], dict[str, str] | None]
+
+
+def _unsupported_support(config: C.Config, *, qualified_profile=None) -> C.CompoundSupport:
+    return C.CompoundSupport(
+        selection=False, parallel_identity=False, profile=None,
+        limitations=(C.Reason(
+            code="unsupported-capability",
+            message="runner profile has no qualified compound capability",
+        ),),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +39,40 @@ class RunnerAdapter:
     _prepare: Prepare
     _exclusive: bool = False
     automatic_full: bool = False
+    _compound_support: CompoundSupportFn = _unsupported_support
+    _qualified_profile: QualifiedProfileFn | None = None
+    _prepare_advanced: PrepareAdvanced | None = None
 
     def prepare(self, config: C.Config, plan: C.Plan, grant: C.Grant,
                 attempt: C.AttemptIdentity) -> C.PreparedRun:
         return self._prepare(config, plan, grant, attempt)
+
+    def compound_support(self, config: C.Config, *,
+                         qualified_profile: dict[str, str] | None = None) -> C.CompoundSupport:
+        if not isinstance(config, C.Config) or config.runner.kind is not self.kind:
+            raise TypeError("runner adapter requires matching Config")
+        return self._compound_support(config, qualified_profile=qualified_profile)
+
+    def qualified_profile(self, config: C.Config) -> dict[str, str] | None:
+        if not isinstance(config, C.Config) or config.runner.kind is not self.kind:
+            raise TypeError("runner adapter requires matching Config")
+        if self._qualified_profile is None:
+            return None
+        return self._qualified_profile(config)
+
+    def prepare_advanced(self, config: C.Config, plan: C.Plan, grant: C.Grant,
+                         attempt: C.AttemptIdentity,
+                         *, expected_runtime_identity: str | None = None) -> C.PreparedRun:
+        if self._prepare_advanced is None:
+            raise C.Problem(
+                code="unsupported-capability",
+                message="runner profile has no qualified advanced preparation",
+                phase="execution",
+            )
+        return self._prepare_advanced(
+            config, plan, grant, attempt,
+            expected_runtime_identity=expected_runtime_identity,
+        )
 
     def requires_exclusive(self, config: C.Config) -> bool:
         if not isinstance(config, C.Config) or config.runner.kind is not self.kind:
@@ -44,9 +87,15 @@ class RunnerAdapter:
 _REGISTRY: dict[C.RunnerKind, RunnerAdapter] = {
     C.RunnerKind.PYTEST: RunnerAdapter(
         C.RunnerKind.PYTEST, pytest_adapter.prepare,
+        _compound_support=pytest_adapter.compound_support,
+        _qualified_profile=pytest_adapter.qualified_profile,
+        _prepare_advanced=pytest_adapter.prepare_advanced,
     ),
     C.RunnerKind.VITEST: RunnerAdapter(
         C.RunnerKind.VITEST, vitest_adapter.prepare,
+        _compound_support=vitest_adapter.compound_support,
+        _qualified_profile=vitest_adapter.qualified_profile,
+        _prepare_advanced=vitest_adapter.prepare_advanced,
     ),
     C.RunnerKind.GO: RunnerAdapter(
         C.RunnerKind.GO, simple_adapter.prepare, automatic_full=True,

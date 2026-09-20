@@ -15,9 +15,10 @@ function identity() {
   const { PTEST_RUN_ID: run_id, PTEST_GRANT_NONCE: nonce, PTEST_VITEST_ATTEMPT: attempt_id,
     PTEST_VITEST_EXECUTION: execution_mode, PTEST_VITEST_PROFILE: effective_profile } = process.env
   if (!/^[a-f0-9]{32}$/.test(run_id ?? '') || !/^[a-f0-9]{64}$/.test(nonce ?? '')
-      || !/^a00[1-9]$|^a010$/.test(attempt_id ?? '') || execution_mode !== 'scoped'
-      || effective_profile !== 'basic_serial') refused('invalid prepared identity')
-  if (process.env.PTEST_VITEST_WORKERS !== '1' || WORKER_ENV.some(name => process.env[name] !== '1')) {
+      || !/^a00[1-9]$|^a010$/.test(attempt_id ?? '')
+      || !['scoped', 'full', 'selected'].includes(execution_mode)
+      || !['basic_serial', 'advanced'].includes(effective_profile)) refused('invalid prepared identity')
+  if (effective_profile === 'basic_serial' && (process.env.PTEST_VITEST_WORKERS !== '1' || WORKER_ENV.some(name => process.env[name] !== '1'))) {
     refused('serial worker environment is not owned')
   }
   return { protocol: protocol.protocol, run_id, nonce, attempt_id, runner: 'vitest', execution_mode, effective_profile }
@@ -40,7 +41,10 @@ function openReport() {
 
 function writeReport(fd, value) {
   const body = Buffer.from(`${JSON.stringify(value)}\n`)
-  if (body.length > protocol.limits.native_report_max_bytes) refused('report exceeds bound')
+  const tests = value?.inventory?.tests
+  if (body.length > protocol.limits.native_report_max_bytes
+      || (Array.isArray(tests) && (tests.length > protocol.limits.native_report_max_tests
+          || tests.length + 1 > protocol.bridge_event.max_events))) refused('report exceeds bound')
   let offset = 0
   while (offset < body.length) {
     const written = writeSync(fd, body, offset, body.length - offset)
@@ -65,8 +69,12 @@ function scopedFiles(argv) {
   if (!raw || Buffer.byteLength(raw, 'utf8') > protocol.control_frame.max_bytes) refused('invalid scoped files binding')
   const files = JSON.parse(raw)
   if (!Array.isArray(files) || files.length === 0 || files.length > 256
-      || files.some(file => typeof file !== 'string' || !file || file.startsWith('-')
-        || file.includes('\0') || /[\uD800-\uDFFF]/u.test(file))) refused('invalid scoped files binding')
+      || files.some(file => typeof file !== 'string' || !file
+        || file.startsWith('-') || file.startsWith('/') || file.startsWith('\\')
+        || file.includes('\0') || /[\uD800-\uDFFF]/u.test(file)
+        || file.replaceAll('\\', '/').split('/').some(part => ['', '.', '..'].includes(part)))) {
+    refused('invalid scoped files binding')
+  }
   if (!sameFiles(argv.slice(-files.length), files)) refused('scoped files differ from argv suffix')
   return Object.freeze(files)
 }
@@ -118,6 +126,7 @@ async function main() {
   try {
     binding = identity()
     fd = openReport()
+    if (binding.effective_profile === 'advanced') refused('Vitest advanced native qualification is unavailable')
     if (process.env.NODE_OPTIONS || process.env.NODE_PATH) refused('unowned Node environment')
     const argv = argumentsAfterDelimiter()
     const files = scopedFiles(argv)
@@ -127,8 +136,10 @@ async function main() {
     const parsed = native.parseCLI(['vitest', 'run', ...argv])
     if (!parsed || !sameFiles(parsed.filter, files)) refused('parsed Vitest scope differs from prepared files')
     rejectScopeControls(parsed.options)
-    const owned = { ...parsed.options, watch: false, pool: 'forks', maxWorkers: 1, minWorkers: 1,
-      maxConcurrency: 1, fileParallelism: false, poolOptions: { forks: { minForks: 1, maxForks: 1 } } }
+    const workers = Number(process.env.PTEST_VITEST_WORKERS ?? '1')
+    const owned = { ...parsed.options, watch: false, pool: 'forks', maxWorkers: workers, minWorkers: workers,
+      maxConcurrency: workers, fileParallelism: false,
+      poolOptions: { forks: { minForks: workers, maxForks: workers } } }
     const reporter = { onFinished(files, errors) {
       if (!Array.isArray(files) || !Array.isArray(errors)) refused('invalid terminal callback')
       nativeExit = errors.length || files.some(file => file.result?.state === 'fail') ? 1 : Number(process.exitCode ?? 0)
@@ -152,9 +163,9 @@ async function main() {
   } finally {
     if (fd !== undefined && binding) {
       const bridge_exit_code = complete ? nativeExit : 70
-      const report = { ...binding, observed_runtime_version: nativeVersion, terminal_complete: complete,
-        native_exit_code: complete ? nativeExit : null, bridge_exit_code,
-        problem: complete ? (nativeExit === 0 ? null : 'native-failure') : 'bridge-refused' }
+      const report = { ...binding, observed_runtime_version: nativeVersion,
+        terminal_complete: complete, native_exit_code: complete ? nativeExit : null,
+        bridge_exit_code, problem: complete ? (nativeExit === 0 ? null : 'native-failure') : 'bridge-refused' }
       try { writeReport(fd, report) } finally { closeSync(fd) }
       process.exitCode = bridge_exit_code
     } else {

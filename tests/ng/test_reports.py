@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
 from dataclasses import replace
@@ -15,11 +16,23 @@ from ptest.reports import (
     allocate_report,
     cleanup_report,
     consume_report,
+    consume_attempt_report,
 )
 
 
 RUN_ID = "12" * 16
 NONCE = "34" * 32
+
+
+def _runtime_facts():
+    return {
+        "runner": "pytest", "version": "9.1.1", "python": "fixture",
+        "implementation": "cpython", "cache_tag": "cpython-313",
+        "roots": ["tests"], "profile": "advanced", "plugins": [],
+        "dependencies": {}, "hooks": [], "effective_options": {},
+        "command_variants": [["python", "tests"], ["python", "tests"]],
+        "coverage": True, "reporters": True, "platform": {"system": "linux"},
+    }
 
 
 def _checkout(case, domain):
@@ -57,6 +70,33 @@ def _payload(**overrides):
         "bridge_exit_code": 0,
         "problem": None,
     }
+    value.update(overrides)
+    return value
+
+
+def _advanced_payload(**overrides):
+    value = _payload(effective_profile="advanced")
+    runtime_facts = _runtime_facts()
+    runtime_identity = hashlib.sha256(json.dumps(
+        runtime_facts, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    value.update({
+        "runtime_identity": runtime_identity,
+        "runtime_facts": runtime_facts,
+        "inventory": {
+            "adapter": "pytest", "version": "9.1.1", "complete": True,
+            "tests": [{"id": "tests/test_a.py::test_a", "file": "tests/test_a.py",
+                        "outcome": "passed", "setup_s": 0.01, "call_s": 0.02,
+                        "teardown_s": 0.01}],
+            "digest": hashlib.sha256(json.dumps([{
+                "id": "tests/test_a.py::test_a", "file": "tests/test_a.py",
+                "outcome": "passed", "setup_s": 0.01, "call_s": 0.02,
+                "teardown_s": 0.01,
+            }], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        },
+        "workers": [{"worker_id": "w000", "resource_prefix": "run_a001_w000"}],
+        "coverage": {"complete": True}, "reporters": {"complete": True},
+    })
     value.update(overrides)
     return value
 
@@ -353,3 +393,62 @@ def test_consume_rejects_oversized_report_before_decode(case):
     assert error.value.message == "native report could not be read"
     cleanup_report(binding)
     assert binding.path.exists()
+
+
+def test_consume_attempt_report_requires_and_returns_complete_advanced_evidence(case):
+    _, _, binding = _allocate(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    _write(binding, _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}]))
+    evidence = consume_attempt_report(binding)
+    assert isinstance(evidence, C.AttemptEvidence)
+    assert evidence.attempt_id == "a001"
+    assert evidence.inventory is not None and evidence.inventory.complete
+    assert evidence.runtime_identity == hashlib.sha256(json.dumps(
+        _runtime_facts(),
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    assert evidence.result.status is C.Status.PASSED
+    cleanup_report(binding)
+
+
+def test_consume_attempt_report_does_not_trust_bridge_source_validity(case):
+    _, _, binding = _allocate(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    _write(binding, _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}]))
+    evidence = consume_attempt_report(binding)
+    assert evidence.result.source_valid is False
+    cleanup_report(binding)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda value: value.update(terminal_complete=False, native_exit_code=None,
+                               bridge_exit_code=70, problem="bridge-refused"),
+    lambda value: value.pop("inventory"),
+    lambda value: value.update(runtime_identity="not-a-digest"),
+    lambda value: value["runtime_facts"].update(version="9.1.0"),
+    lambda value: value.pop("runtime_facts"),
+    lambda value: value.update(workers=[]),
+    lambda value: value.update(coverage={"complete": False}),
+    lambda value: value.update(reporters={"complete": False}),
+    lambda value: value.update(workers=[{"worker_id": "w064",
+                                        "resource_prefix": "pt_" + RUN_ID + "_a001_w064"}]),
+    lambda value: value.update(workers=[{"worker_id": "w000",
+                                        "resource_prefix": "pt_" + RUN_ID + "_a001_bad"}]),
+    lambda value: value["inventory"].update(adapter="vitest"),
+    lambda value: value["inventory"].update(version="9.1.0"),
+    lambda value: value.pop("coverage"),
+    lambda value: value.pop("reporters"),
+    lambda value: value["inventory"]["tests"].append(value["inventory"]["tests"][0].copy()),
+])
+def test_consume_attempt_report_refuses_incomplete_or_ambiguous_evidence(case, mutation):
+    _, _, binding = _allocate(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    value = _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}])
+    mutation(value)
+    _write(binding, value)
+    with pytest.raises(C.Problem, match="report-invalid"):
+        consume_attempt_report(binding)
+    cleanup_report(binding)

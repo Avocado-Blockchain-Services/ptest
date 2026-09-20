@@ -711,6 +711,22 @@ def test_compatibility_binds_runtime_and_static_identity(case, monkeypatch, infl
     assert before.compatibility and after.compatibility and before.compatibility != after.compatibility
 
 
+def test_pytest_worker_count_is_ptest_owned_compatibility_noise(case):
+    from ptest import source
+
+    domain, _ = _repository(case); source.ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    serial = snapshot(domain, config, None, None)
+    declared_parallel = snapshot(
+        domain, replace(config, runner=replace(config.runner, workers=8)), None, None)
+    changed_runner = snapshot(
+        domain, replace(config, runner=replace(config.runner, args=("--strict-markers",))),
+        None, None)
+
+    assert serial.compatibility == declared_parallel.compatibility
+    assert serial.compatibility != changed_runner.compatibility
+
+
 def test_declared_ignored_input_change_with_docs_forces_full(case):
     from ptest.source import ensure_fingerprint_key
     from ptest.selection import choose_plan
