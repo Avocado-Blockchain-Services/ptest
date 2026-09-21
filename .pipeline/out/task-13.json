@@ -13,6 +13,13 @@
     "line_count": 611,
     "deleted": "reviewed legacy runtime, infrastructure, tests, bootstrap, operational docs, and superseded plan/spec pairs",
     "remaining_historical_references": "pipeline audit artifacts only"
+    ,"mapping": {
+      "legacy_remote_spot_tests": "deleted; NG tests/ng/test_cli.py, test_operations.py, adapter/subprocess suites cover local contracts",
+      "legacy_install_test": "deleted; tests/ng/test_install.py covers manifest, bundle, upgrade, offline and fault behavior",
+      "legacy_smoke_and_entrypoint": "deleted; root ptest launcher and tests/ng CLI subprocess coverage replace them",
+      "terraform_cloudbuild_docker": "deleted; remote/cloud deployment is out of NG scope",
+      "operational_docs_and_superseded_specs": "deleted; docs/legacy-index.md preserves Git recovery pointer only"
+    }
   },
   "security_gates": {
     "command": "uv run --locked python scripts/security-checks.py --root .",

@@ -131,12 +131,12 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
         if path.parent != wheelhouse or not path.is_file():
             if entry["package"] == "psutil" and allow_network:
                 metadata_url = f"https://pypi.org/pypi/psutil/{entry['version']}/json"
-                with urlopen(Request(metadata_url, headers={"Accept": "application/json"}), timeout=30) as response:
+                with urlopen(Request(metadata_url, headers={"Accept": "application/json"}), timeout=30) as response:  # nosec B310 - fixed HTTPS host
                     metadata = json.loads(response.read())
                 candidates = [item for item in metadata.get("urls", []) if item.get("filename") == entry["filename"]]
                 if len(candidates) != 1 or urlparse(candidates[0].get("url", "")).netloc != "files.pythonhosted.org":
                     raise ValueError("official psutil wheel was not uniquely resolved")
-                with urlopen(Request(candidates[0]["url"], headers={"Accept": "application/octet-stream"}), timeout=30) as response:
+                with urlopen(Request(candidates[0]["url"], headers={"Accept": "application/octet-stream"}), timeout=30) as response:  # nosec B310 - verified files.pythonhosted.org host
                     payload = response.read()
                 if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                     raise ValueError("downloaded psutil wheel hash does not match manifest")
@@ -162,8 +162,6 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             bundled_paths.append(bundled)
             if fault == "after-one-wheel":
                 raise RuntimeError("after-one-wheel")
-        if fault == "before-symlink-replace":
-            raise RuntimeError("before-symlink-replace")
         subprocess.run(["uv", "venv", "--python", str(py), str(bundle / "venv")], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
         if fault == "after-venv":
             raise RuntimeError("after-venv")
@@ -192,6 +190,8 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             target = public.resolve(strict=False)
             if bundles not in target.parents:
                 raise ValueError("existing symlink target is outside installer bundles")
+        if fault == "before-symlink-replace":
+            raise RuntimeError("before-symlink-replace")
         os.replace(link, public)
         published = True
         if fault == "after-swap-before-fsync":
