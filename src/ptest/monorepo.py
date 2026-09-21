@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tomllib
 from dataclasses import dataclass
@@ -34,17 +35,15 @@ def _problem(message: str, code: str = "invalid-config") -> C.Problem:
     return C.Problem(code=code, message=message, phase="config", retryable=False)
 
 
-def _safe_segments(value: object, *, allow_empty: bool = False) -> tuple[str, ...]:
+def _safe_segments(value: object) -> tuple[str, ...]:
     if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise _problem("monorepo path is invalid")
     if value.startswith("/") or value.endswith("/") or "//" in value:
         raise _problem("monorepo path is invalid")
     parts = tuple(value.split("/"))
-    if not allow_empty and not parts:
-        raise _problem("monorepo path is invalid")
     if any(not part or part in {".", ".."} for part in parts):
         raise _problem("monorepo path is invalid")
-    if len(parts[0]) == 2 and parts[0][1] == ":":
+    if re.match(r"^[A-Za-z]:", value):
         raise _problem("monorepo path is invalid")
     return parts
 
