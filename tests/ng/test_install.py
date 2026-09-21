@@ -208,6 +208,7 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     probe = subprocess.run([str(python), "-c", "import psutil, ptest; print(psutil.__version__)"], capture_output=True, text=True)
     assert probe.returncode == 0 and "7.2.2" in probe.stdout
     old_target = (dest / "ptest").resolve()
+    old_bundle = old_target.parents[2]
     for fault in ("after-one-wheel", "after-venv", "before-complete", "before-symlink-replace"):
         before = _inventory(dest)
         failed = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env={**offline_env, "PTEST_INSTALL_FAULT": fault}, capture_output=True, text=True, timeout=300)
@@ -222,6 +223,12 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     assert (dest / "ptest").resolve().is_file()
     assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
     after_parent = _inventory(dest)
-    assert len(after_parent[0]) == len(before_parent[0]) + 1
+    new_bundles = set(after_parent[0]) - set(before_parent[0])
+    assert len(new_bundles) == 1
+    new_bundle = next(iter(new_bundles))
+    assert (dest / "ptest").resolve().parents[2].name == new_bundle
+    assert old_bundle.name in before_parent[0]
+    assert (old_bundle / "complete.json").is_file()
+    assert subprocess.run([str(old_target), "--version"], capture_output=True, text=True).returncode == 0
     assert not after_parent[1]
     assert all((dest / ".ptest-bundles" / name / "complete.json").is_file() for name in after_parent[0])

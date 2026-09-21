@@ -30,248 +30,248 @@
     },
     "deleted_paths": {
       ".gcloudignore": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** .gcloudignore . (audited path .gcloudignore): 2 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": ".gcloudignore is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for .gcloudignore: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 2 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For .gcloudignore: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "Dockerfile.pytest": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.pytest . (audited path Dockerfile.pytest): no current matches (exit 1)",
-        "ng_counterpart": "Dockerfile.pytest is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for Dockerfile.pytest: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For Dockerfile.pytest: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "Dockerfile.spot-controller": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.spot-controller . (audited path Dockerfile.spot-controller): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`",
-        "ng_counterpart": "Dockerfile.spot-controller is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for Dockerfile.spot-controller: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`.",
+        "ng_counterpart": "For Dockerfile.spot-controller: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "Dockerfile.spot-worker": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.spot-worker . (audited path Dockerfile.spot-worker): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`",
-        "ng_counterpart": "Dockerfile.spot-worker is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for Dockerfile.spot-worker: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`.",
+        "ng_counterpart": "For Dockerfile.spot-worker: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "Dockerfile.vitest": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.vitest . (audited path Dockerfile.vitest): no current matches (exit 1)",
-        "ng_counterpart": "Dockerfile.vitest is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for Dockerfile.vitest: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For Dockerfile.vitest: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "cloudbuild.pytest.yaml": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.pytest.yaml . (audited path cloudbuild.pytest.yaml): no current matches (exit 1)",
-        "ng_counterpart": "cloudbuild.pytest.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for cloudbuild.pytest.yaml: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For cloudbuild.pytest.yaml: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "cloudbuild.spot-controller.yaml": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.spot-controller.yaml . (audited path cloudbuild.spot-controller.yaml): no current matches (exit 1)",
-        "ng_counterpart": "cloudbuild.spot-controller.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for cloudbuild.spot-controller.yaml: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For cloudbuild.spot-controller.yaml: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "cloudbuild.spot-worker.yaml": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.spot-worker.yaml . (audited path cloudbuild.spot-worker.yaml): no current matches (exit 1)",
-        "ng_counterpart": "cloudbuild.spot-worker.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for cloudbuild.spot-worker.yaml: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For cloudbuild.spot-worker.yaml: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "cloudbuild.vitest.yaml": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.vitest.yaml . (audited path cloudbuild.vitest.yaml): no current matches (exit 1)",
-        "ng_counterpart": "cloudbuild.vitest.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for cloudbuild.vitest.yaml: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For cloudbuild.vitest.yaml: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "config.example.toml": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** config.example.toml . (audited path config.example.toml): 5 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:287:  environment; its generated Spot config stanza and `config.example.toml`",
-        "ng_counterpart": "config.example.toml is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for config.example.toml: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 5 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:287:  environment; its generated Spot config stanza and `config.example.toml`.",
+        "ng_counterpart": "For config.example.toml: Explicitly obsolete global/legacy configuration example; NG uses only project-local .ptest.toml and fixed host limits, with no compatibility reader."
       },
       "docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-07-26-heavy-scoped-remote-routing.md . (audited path docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-03-remote-result-deduplication.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-03-remote-result-deduplication.md . (audited path docs/superpowers/plans/2026-08-03-remote-result-deduplication.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/plans/2026-08-03-remote-result-deduplication.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/plans/2026-08-03-remote-result-deduplication.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/plans/2026-08-03-remote-result-deduplication.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-04-spot-queue.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-queue.md . (audited path docs/superpowers/plans/2026-08-04-spot-queue.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/plans/2026-08-04-spot-queue.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/plans/2026-08-04-spot-queue.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/plans/2026-08-04-spot-queue.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-04-spot-status.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-status.md . (audited path docs/superpowers/plans/2026-08-04-spot-status.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/plans/2026-08-04-spot-status.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/plans/2026-08-04-spot-status.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/plans/2026-08-04-spot-status.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-05-spot-live-progress.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-05-spot-live-progress.md . (audited path docs/superpowers/plans/2026-08-05-spot-live-progress.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/plans/2026-08-05-spot-live-progress.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/plans/2026-08-05-spot-live-progress.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/plans/2026-08-05-spot-live-progress.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-07-26-heavy-scoped-remote-routing-design.md . (audited path docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-03-remote-result-deduplication-design.md . (audited path docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-04-spot-queue-design.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-queue-design.md . (audited path docs/superpowers/specs/2026-08-04-spot-queue-design.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/specs/2026-08-04-spot-queue-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/specs/2026-08-04-spot-queue-design.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/specs/2026-08-04-spot-queue-design.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-04-spot-status-design.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-status-design.md . (audited path docs/superpowers/specs/2026-08-04-spot-status-design.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/specs/2026-08-04-spot-status-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/specs/2026-08-04-spot-status-design.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/specs/2026-08-04-spot-status-design.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-05-spot-live-progress-design.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-05-spot-live-progress-design.md . (audited path docs/superpowers/specs/2026-08-05-spot-live-progress-design.md): no current matches (exit 1)",
-        "ng_counterpart": "docs/superpowers/specs/2026-08-05-spot-live-progress-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
+        "caller_result": "Exact rg basename search for docs/superpowers/specs/2026-08-05-spot-live-progress-design.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For docs/superpowers/specs/2026-08-05-spot-live-progress-design.md: Explicitly obsolete remote/Spot design history; no runtime counterpart exists, and recovery is retained only in Git via docs/legacy-index.md."
       },
       "entrypoint.sh": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** entrypoint.sh . (audited path entrypoint.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "entrypoint.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for entrypoint.sh: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For entrypoint.sh: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "outsource_tests.md": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outsource_tests.md . (audited path outsource_tests.md): 2 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "outsource_tests.md is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for outsource_tests.md: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 2 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For outsource_tests.md: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "provision-vitest.sh": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** provision-vitest.sh . (audited path provision-vitest.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "provision-vitest.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for provision-vitest.sh: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For provision-vitest.sh: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "provision.sh": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** provision.sh . (audited path provision.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "provision.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for provision.sh: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For provision.sh: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "scripts/ptest-bootstrap": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** ptest-bootstrap . (audited path scripts/ptest-bootstrap): 37 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "scripts/ptest-bootstrap is obsolete legacy automation; the supported NG implementation is scripts/install.py or scripts/security-checks.py as applicable."
+        "caller_result": "Exact rg basename search for scripts/ptest-bootstrap: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 37 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For scripts/ptest-bootstrap: Explicitly obsolete bootstrap wrapper; NG uses the root ptest launcher and uv-managed project environment, with no second provisioning scheme."
       },
       "scripts/spot-worker-startup.sh": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot-worker-startup.sh . (audited path scripts/spot-worker-startup.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
-        "ng_counterpart": "scripts/spot-worker-startup.sh is obsolete legacy automation; the supported NG implementation is scripts/install.py or scripts/security-checks.py as applicable."
+        "caller_result": "Exact rg basename search for scripts/spot-worker-startup.sh: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For scripts/spot-worker-startup.sh: Explicitly obsolete Spot worker startup script; Spot/cloud execution is removed and has no local NG counterpart."
       },
       "smoke.sh": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** smoke.sh . (audited path smoke.sh): 2 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:246:  scoped runs; the documented live-smoke shell block passed `bash -n`.",
-        "ng_counterpart": "smoke.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for smoke.sh: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 2 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:246:  scoped runs; the documented live-smoke shell block passed `bash -n`..",
+        "ng_counterpart": "For smoke.sh: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "spot_controller.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_controller.py . (audited path spot_controller.py): 15 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`",
-        "ng_counterpart": "spot_controller.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for spot_controller.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 15 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`.",
+        "ng_counterpart": "For spot_controller.py: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "spot_queue.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_queue.py . (audited path spot_queue.py): 10 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:62:- `install.sh` builds a complete versioned `ptest`/`spot_queue.py` bundle and",
-        "ng_counterpart": "spot_queue.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for spot_queue.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 10 history/plan/report mention(s), e.g. ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh.",
+        "ng_counterpart": "For spot_queue.py: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "spot_worker.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_worker.py . (audited path spot_worker.py): 14 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`",
-        "ng_counterpart": "spot_worker.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
+        "caller_result": "Exact rg basename search for spot_worker.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 14 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`.",
+        "ng_counterpart": "For spot_worker.py: Explicitly obsolete legacy remote/bootstrap runtime artifact; NG uses the root ptest launcher and local src/ptest package, with no compatibility shim."
       },
       "terraform/main.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** main.tf . (audited path terraform/main.tf): no current matches (exit 1)",
-        "ng_counterpart": "terraform/main.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/main.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For terraform/main.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/outputs.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outputs.tf . (audited path terraform/outputs.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
-        "ng_counterpart": "terraform/outputs.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/outputs.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`.",
+        "ng_counterpart": "For terraform/outputs.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/providers.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** providers.tf . (audited path terraform/providers.tf): no current matches (exit 1)",
-        "ng_counterpart": "terraform/providers.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/providers.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For terraform/providers.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot/backend.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** backend.tf . (audited path terraform/spot/backend.tf): no current matches (exit 1)",
-        "ng_counterpart": "terraform/spot/backend.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot/backend.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For terraform/spot/backend.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot/main.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** main.tf . (audited path terraform/spot/main.tf): no current matches (exit 1)",
-        "ng_counterpart": "terraform/spot/main.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot/main.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For terraform/spot/main.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot/outputs.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outputs.tf . (audited path terraform/spot/outputs.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
-        "ng_counterpart": "terraform/spot/outputs.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot/outputs.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`.",
+        "ng_counterpart": "For terraform/spot/outputs.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot/providers.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** providers.tf . (audited path terraform/spot/providers.tf): no current matches (exit 1)",
-        "ng_counterpart": "terraform/spot/providers.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot/providers.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: none.",
+        "ng_counterpart": "For terraform/spot/providers.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot/variables.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** variables.tf . (audited path terraform/spot/variables.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
-        "ng_counterpart": "terraform/spot/variables.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot/variables.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`.",
+        "ng_counterpart": "For terraform/spot/variables.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/spot_queue.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_queue.tf . (audited path terraform/spot_queue.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
-        "ng_counterpart": "terraform/spot_queue.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/spot_queue.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`.",
+        "ng_counterpart": "For terraform/spot_queue.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "terraform/variables.tf": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** variables.tf . (audited path terraform/variables.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
-        "ng_counterpart": "terraform/variables.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
+        "caller_result": "Exact rg basename search for terraform/variables.tf: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`.",
+        "ng_counterpart": "For terraform/variables.tf: Explicitly obsolete remote/cloud infrastructure; NG is local-only and intentionally has no Terraform, container, Cloud Build, or gcloud-ignore counterpart."
       },
       "tests/conftest.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** conftest.py . (audited path tests/conftest.py): 35 current matches; sample ./src/ptest/doctor.py:265:    if any(part in _FIXTURE_DIRS for part in parts) or name in {\"conftest.py\", \"setup.py\"} or name.startswith((\"conftest.\", \"setup.\")):",
-        "ng_counterpart": "Deleted test tests/conftest.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/conftest.py: active import/entrypoint/runtime matches: ./src/ptest/config.py:558:    for name in (\"pytest.ini\", \"tox.ini\", \"setup.cfg\", \"conftest.py\"):; ./src/ptest/doctor.py:265:    if any(part in _FIXTURE_DIRS for part in parts) or name in {\"conftest.py\", \"setup.py\"} or name.startswith((\"conftest.\", \"setup.\")):. Non-active historical/documentation matches: 10 history/plan/report mention(s), e.g. ./docs/designs/2026-09-18-ptest-ng-task12-amendment.md:216:`tests/ng/conftest.py` and `tests/ng/support.py` remain unowned and unchanged. Test-local helpers belong in the five owne.",
+        "ng_counterpart": "For tests/conftest.py: The old SourceFileLoader fixture is obsolete; native NG fixtures remain in tests/ng/conftest.py and tests/ng/support.py."
       },
       "tests/test_cloudrun_lifecycle.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_cloudrun_lifecycle.py . (audited path tests/test_cloudrun_lifecycle.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_cloudrun_lifecycle.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_cloudrun_lifecycle.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_cloudrun_lifecycle.py: Explicitly obsolete: Cloud Run lifecycle is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_entrypoint.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_entrypoint.py . (audited path tests/test_entrypoint.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_entrypoint.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_entrypoint.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_entrypoint.py: NG command entrypoint behavior is covered by tests/ng/test_cli.py and the root ptest launcher; the legacy entrypoint test is not retained."
       },
       "tests/test_gcs_coordination.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_gcs_coordination.py . (audited path tests/test_gcs_coordination.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_gcs_coordination.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_gcs_coordination.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_gcs_coordination.py: Explicitly obsolete: GCS coordination is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_install.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_install.py . (audited path tests/test_install.py): 4 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:420:**Own:** root `ptest`, `install.sh`, README, `scripts/install.py`, `scripts/security-checks.py`, `tests/ng/test_install.py`, `tests/ng/test_",
-        "ng_counterpart": "Deleted test tests/test_install.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_install.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 4 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:420:**Own:** root `ptest`, `install.sh`, README, `scripts/install.py`, `scripts/security-checks.py`, `tests/ng/test_install.py`, `tests/ng/test_.",
+        "ng_counterpart": "For tests/test_install.py: NG installer behavior is covered by tests/ng/test_install.py, including real temporary-destination bundles and rollback faults; no legacy test caller remains."
       },
       "tests/test_main_wiring.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_main_wiring.py . (audited path tests/test_main_wiring.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_main_wiring.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_main_wiring.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_main_wiring.py: NG CLI wiring is covered by tests/ng/test_cli.py and tests/ng/test_operations.py; the old dispatcher wiring has no caller."
       },
       "tests/test_remote_cache_records.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_cache_records.py . (audited path tests/test_remote_cache_records.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_remote_cache_records.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_remote_cache_records.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_remote_cache_records.py: Explicitly obsolete: remote routing/cache/profile behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_remote_dedup.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_dedup.py . (audited path tests/test_remote_dedup.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_remote_dedup.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_remote_dedup.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_remote_dedup.py: Explicitly obsolete: remote routing/cache/profile behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_remote_deduplication.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_deduplication.py . (audited path tests/test_remote_deduplication.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_remote_deduplication.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_remote_deduplication.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_remote_deduplication.py: Explicitly obsolete: remote routing/cache/profile behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_remote_profile.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_profile.py . (audited path tests/test_remote_profile.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_remote_profile.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_remote_profile.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_remote_profile.py: Explicitly obsolete: remote routing/cache/profile behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_routing.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_routing.py . (audited path tests/test_routing.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_routing.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_routing.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_routing.py: Explicitly obsolete: remote routing/cache/profile behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_smoke_script.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_smoke_script.py . (audited path tests/test_smoke_script.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_smoke_script.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_smoke_script.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_smoke_script.py: Explicitly obsolete: the legacy remote smoke script is removed with the cloud path; no local replacement exists."
       },
       "tests/test_source_identity.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_source_identity.py . (audited path tests/test_source_identity.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_source_identity.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_source_identity.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_source_identity.py: NG source/input identity behavior is covered by tests/ng/test_source.py and tests/ng/test_files.py; no legacy test caller remains."
       },
       "tests/test_spot_bootstrap.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_bootstrap.py . (audited path tests/test_spot_bootstrap.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_spot_bootstrap.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_bootstrap.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_spot_bootstrap.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_controller.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_controller.py . (audited path tests/test_spot_controller.py): 11 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`",
-        "ng_counterpart": "Deleted test tests/test_spot_controller.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_controller.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 11 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`.",
+        "ng_counterpart": "For tests/test_spot_controller.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_deployment.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_deployment.py . (audited path tests/test_spot_deployment.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_spot_deployment.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_deployment.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_spot_deployment.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_disabled.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_disabled.py . (audited path tests/test_spot_disabled.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_spot_disabled.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_disabled.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_spot_disabled.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_queue.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_queue.py . (audited path tests/test_spot_queue.py): 6 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:17:  tests/test_spot_queue.py` passed 27 tests in 0.34s.",
-        "ng_counterpart": "Deleted test tests/test_spot_queue.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_queue.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 6 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:17:  tests/test_spot_queue.py` passed 27 tests in 0.34s..",
+        "ng_counterpart": "For tests/test_spot_queue.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_terraform.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_terraform.py . (audited path tests/test_spot_terraform.py): 4 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:21:- RED: `ptest tests/test_spot_terraform.py` failed 1 test because the Scheduler",
-        "ng_counterpart": "Deleted test tests/test_spot_terraform.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_terraform.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 4 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_spot_terraform.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_spot_worker.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_worker.py . (audited path tests/test_spot_worker.py): 10 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`",
-        "ng_counterpart": "Deleted test tests/test_spot_worker.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_spot_worker.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 10 history/plan/report mention(s), e.g. ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`.",
+        "ng_counterpart": "For tests/test_spot_worker.py: Explicitly obsolete: Spot/cloud deployment behavior is removed from the local-only NG product; no local replacement exists."
       },
       "tests/test_status.py": {
-        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_status.py . (audited path tests/test_status.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
-        "ng_counterpart": "Deleted test tests/test_status.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
+        "caller_result": "Exact rg basename search for tests/test_status.py: active import/entrypoint/runtime matches: none in src/, scripts/, tests/ng/, or the active launcher/docs. Non-active historical/documentation matches: 1 history/plan/report mention(s), e.g. ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t.",
+        "ng_counterpart": "For tests/test_status.py: NG status/history behavior is covered by tests/ng/test_cli.py, tests/ng/test_history.py, and tests/ng/test_operations.py; no legacy test caller remains."
       }
     },
     "deleted_path_count": 61
