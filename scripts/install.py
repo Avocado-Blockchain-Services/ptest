@@ -111,6 +111,17 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
     if wheelhouse.is_symlink() or not wheelhouse.is_dir() or manifest_path.is_symlink():
         raise ValueError("wheelhouse must be a real directory")
     manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+    py = Path(sys.executable)
+    if platform.python_implementation() != "CPython" or not (PYTHON_MIN <= sys.version_info[:2] < PYTHON_MAX):
+        raise RuntimeError("installer requires CPython 3.11 through 3.14")
+    bundles = dest / ".ptest-bundles"
+    if bundles.is_symlink() or (bundles.exists() and not bundles.is_dir()):
+        raise ValueError("bundle root is not an owned directory")
+    bundles.mkdir(exist_ok=True)
+    bundle = bundles / f"{manifest['ptest_version']}-{secrets.token_hex(16)}"
+    bundle.mkdir()
+    (bundle / "wheels").mkdir()
+    published = False
     paths = []
     for entry in manifest["wheels"]:
         path = wheelhouse / entry["filename"]
@@ -128,29 +139,25 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
                     payload = response.read()
                 if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                     raise ValueError("downloaded psutil wheel hash does not match manifest")
-                path.write_bytes(payload)
+                staged = bundle / "wheels" / entry["filename"]
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.write(fd, payload)
+                finally:
+                    os.close(fd)
+                path = staged
             else:
                 raise FileNotFoundError(path)
         if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError("wheel hash does not match manifest")
         validate_wheel(path, entry["package"], entry["version"], manifest["python_tag"], manifest["platform_tag"])
         paths.append(path)
-    py = Path(sys.executable)
-    if platform.python_implementation() != "CPython" or not (PYTHON_MIN <= sys.version_info[:2] < PYTHON_MAX):
-        raise RuntimeError("installer requires CPython 3.11 through 3.14")
-    bundles = dest / ".ptest-bundles"
-    if bundles.is_symlink() or (bundles.exists() and not bundles.is_dir()):
-        raise ValueError("bundle root is not an owned directory")
-    bundles.mkdir(exist_ok=True)
-    bundle = bundles / f"{manifest['ptest_version']}-{secrets.token_hex(16)}"
-    bundle.mkdir()
-    (bundle / "wheels").mkdir()
-    published = False
     try:
         bundled_paths = []
         for path in paths:
-            bundled = bundle / "wheels" / path.name
-            shutil.copy2(path, bundled)
+            bundled = path if path.parent == bundle / "wheels" else bundle / "wheels" / path.name
+            if bundled != path:
+                shutil.copy2(path, bundled)
             bundled_paths.append(bundled)
         if fault == "before-symlink-replace":
             raise RuntimeError("before-symlink-replace")
