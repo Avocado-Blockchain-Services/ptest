@@ -430,7 +430,6 @@ def test_invoke_default_export_roundtrip_with_miniature_target(
     stub.mkdir(parents=True)
     (stub / "__init__.py").write_text("")
     (stub / "__main__.py").write_text(MINI_MAIN)
-    monkeypatch.setenv("PTEST_CONFIG", "bogus-override")
     completed = case.invoke(
         domain, project,
         env={"PYTHONPATH": str(stub.parent)}, timeout=20.0,
@@ -832,18 +831,6 @@ def test_invoke_purges_inherited_control_vars(case, tmp_path, monkeypatch):
     )
     assert completed.code == 0
     assert "PTEST_RUN_ID" not in completed.result["leaked_control_vars"]
-def test_invoke_explicit_ptest_config_override_passes_through(case, tmp_path):
-    """Explicit PTEST_CONFIG reaches the child after fixture cleanup."""
-    domain = case.domain()
-    project = case.project(domain)
-    pythonpath = _write_mini_target(tmp_path, MINI_MAIN)
-    completed = case.invoke(
-        domain, project,
-        env={"PYTHONPATH": pythonpath, "PTEST_CONFIG": "explicit-override"},
-        timeout=20.0,
-    )
-    assert completed.code == 0
-    assert completed.result["ptest_config"] == "explicit-override"
 def test_invoke_stream_select_failure_raises_fixture_error(
         case, tmp_path, monkeypatch):
     """A select/read failure must not look like a normal empty result."""

@@ -128,14 +128,12 @@ def test_legacy_targets_are_never_opened_or_parsed(
         "HOME": legacy / "home",
         "XDG_CONFIG_HOME": legacy / "config",
         "XDG_STATE_HOME": legacy / "state",
-        "PTEST_CONFIG": legacy / "explicit.toml",
         "PTEST_STATE_DIR": legacy / "ptest-state",
         "PTEST_HOME": legacy / "ptest-home",
         "PTEST_BACKEND": legacy / "remote",
     }
     files = [redirects["HOME"] / ".config/ptest/config.toml",
              redirects["XDG_CONFIG_HOME"] / "ptest/config.toml",
-             redirects["PTEST_CONFIG"],
              redirects["PTEST_HOME"] / "config.toml",
              redirects["PTEST_STATE_DIR"] / "history.json"]
     if legacy_state != "absent":

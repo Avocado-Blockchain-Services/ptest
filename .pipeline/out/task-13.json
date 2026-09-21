@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "task": "13",
+  "status": "implemented-with-unpassed-external-gate",
+  "tests": {
+    "command": "ptest tests/ng/test_config.py tests/ng/test_files.py tests/ng/test_install.py tests/ng/test_security_gates.py",
+    "exit_code": 0,
+    "result": "209 passed in 3.58s"
+  },
+  "caller_audit": {
+    "command": "rg -n --hidden --glob !docs/designs/** --glob !docs/plans/** --glob !docs/superpowers/** config.example.toml scripts/ptest-bootstrap spot_controller spot_queue spot_worker cloudbuild Dockerfile outsource_tests entrypoint.sh provision.sh smoke.sh .",
+    "status": "captured-and-applied",
+    "line_count": 611,
+    "deleted": "reviewed legacy runtime, infrastructure, tests, bootstrap, operational docs, and superseded plan/spec pairs",
+    "remaining_historical_references": "pipeline audit artifacts only"
+  },
+  "security_gates": {
+    "command": "uv run --locked python scripts/security-checks.py --root .",
+    "exit_code": 1,
+    "result": "Bandit passed; pip-audit passed; Gitleaks unavailable and therefore unpassed",
+    "fail_closed": true
+  },
+  "remaining": [
+    "Gitleaks official checksum-verified binary acquisition and sensitivity run"
+  ]
+}
