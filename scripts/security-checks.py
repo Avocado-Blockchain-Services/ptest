@@ -92,7 +92,9 @@ def run_gate(root: Path, tool: str) -> dict:
             probe = [executable, "detect", "--source", temp, "--no-git", "--config", str(config), "--no-banner"]
             scope = [executable, "detect", "--source", str(root), "--no-git", "--config", str(root / "scripts" / "gitleaks.toml"), "--no-banner"]
         sensitivity = subprocess.run(probe, cwd=root, capture_output=True, text=True)
-        if sensitivity.returncode == 0:
+        evidence = (getattr(sensitivity, "stdout", "") or "") + (getattr(sensitivity, "stderr", "") or "")
+        expected_finding = ("Issue" in evidence if tool == "bandit" else "VULNERABILITY" in evidence or "vulnerabilit" in evidence.lower() if tool == "pip-audit" else "leaks found" in evidence.lower())
+        if sensitivity.returncode == 0 or not expected_finding:
             return {"tool": tool, "status": "unpassed", "reason": "sensitivity-failed"}
         result = subprocess.run(scope, cwd=root, capture_output=True, text=True)
         return {"tool": tool, "status": "passed" if result.returncode == 0 else "unpassed", "returncode": result.returncode}
