@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "task": "14",
+  "status": "implemented-local-harnesses",
+  "owned_files": [
+    "scripts/acceptance.py",
+    "scripts/benchmark.py",
+    "tests/ng/test_acceptance.py",
+    "docs/acceptance/2026-09-17-ng.md",
+    "docs/support-matrix.md",
+    "docs/performance.md",
+    "docs/contributing.md",
+    "docs/changelog.md",
+    ".pipeline/out/task-14.json"
+  ],
+  "verification": {
+    "scoped_command": "ptest tests/ng/test_acceptance.py",
+    "status": "8 passed in 0.52s (exit 0)",
+    "graphify": "graphify update . exit 0; 4073 nodes, 9246 edges"
+  },
+  "claims": {
+    "independent_adoption": "blocked-unverified",
+    "macos": "unverified",
+    "advanced_selection": "unverified",
+    "performance_targets": "not-run"
+  },
+  "limitations": [
+    "This task does not fetch or install external adoption projects.",
+    "This task does not claim release approval or cross-platform support."
+  ]
+}
