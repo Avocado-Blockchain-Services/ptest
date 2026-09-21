@@ -1286,6 +1286,12 @@ def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
         conn.close()
 
 
+def initialize(domain: DomainPaths) -> None:
+    """Create and validate the account coordinator before read-only checks."""
+    conn, _ = _open_state(domain, create=True)
+    conn.close()
+
+
 def effective_limits(domain: DomainPaths) -> EffectiveLimits:
     """Read-only T11 presentation using the shared frozen limits record.
 

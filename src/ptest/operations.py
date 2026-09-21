@@ -1760,6 +1760,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
     native_runner = native_pytest
     adapter = adapter_for(config.runner.kind)
     checkout = _checkout(config)
+    # History qualification is read-only and therefore cannot bootstrap the
+    # normal account coordinator. Initialize it before the first-run read.
+    scheduler.initialize(domain)
     catalog_profile = (adapter.qualified_profile(config) if native_runner else None)
     stored_profile = (history.read_qualified_profile(
         domain, checkout, config.runner.kind) if native_runner else None)

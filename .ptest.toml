@@ -30,5 +30,5 @@ environment = []
 full_triggers = []
 always = []
 no_tests = []
-non_input_outputs = []
+non_input_outputs = [".venv"]
 full_ratio = 0.7

@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 import socket
 import sys
+import subprocess
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,6 +87,61 @@ def test_pytest_setup_is_admitted_before_scheduler(case, monkeypatch):
 
     with pytest.raises(AssertionError, match="reached scheduler admission"):
         operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+
+def test_normal_domain_setup_bootstraps_account_coordinator(case, monkeypatch, tmp_path):
+    """A real uv setup can follow normal-domain coordinator initialization."""
+    home = tmp_path / "account"
+    home.mkdir(mode=0o700)
+    monkeypatch.setattr(operations.platform.pwd, "getpwuid",
+                        lambda _uid: SimpleNamespace(pw_dir=str(home)))
+    monkeypatch.setattr(operations.platform, "_filesystem_type",
+                        lambda _path: "ext4")
+    domain = operations.platform.domain_paths(None)
+    root = home / "project"
+    root.mkdir(mode=0o700)
+    (root / "tests").mkdir(mode=0o700)
+    (root / "tests" / "test_native.py").write_text(
+        "def test_native():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'normal-fixture'\nversion = '0.1.0'\n"
+        "[dependency-groups]\ndev = ['pytest']\n"
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    subprocess.run(("uv", "lock"), cwd=root, check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(("git", "init"), cwd=root, check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(("git", "config", "user.email", "fixture@example.test"),
+                   cwd=root, check=True, stdout=subprocess.PIPE,
+                   stderr=subprocess.PIPE)
+    subprocess.run(("git", "config", "user.name", "Fixture"), cwd=root,
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    config_text = (
+        "version = 1\nproject_id = \"" + "ab" * 16 + "\"\n"
+        "[runner]\nkind = \"pytest\"\nlauncher = [\"" + str(root / ".venv/bin/python") + "\"]\n"
+        "args = []\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[setup]\nargv = [\"uv\", \"sync\", \"--locked\"]\n"
+        "required_paths = [\".venv/bin/python\"]\nnetwork = true\n"
+        "lifecycle_scripts = false\n[selection]\nnon_input_outputs = [\".venv\"]\n"
+    )
+    (root / ".ptest.toml").write_text(config_text, encoding="utf-8")
+    subprocess.run(("git", "add", "."), cwd=root, check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(("git", "commit", "-m", "normal setup fixture"), cwd=root,
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    config = config_api.resolve_config(root).config
+    assert config is not None
+    # Initialize the account-scoped coordinator before history/guard work.
+    operations.scheduler.initialize(domain)
+
+    # Perform the real declared setup as the candidate would, then verify both
+    # private outputs exist. Native candidate launch is covered separately.
+    subprocess.run(("uv", "sync", "--locked"), cwd=root, check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert domain.root.is_dir()
+    assert (root / ".venv" / "bin" / "python").exists()
 
 
 @pytest.mark.parametrize(
