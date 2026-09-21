@@ -16,8 +16,8 @@ The command stores stdout/stderr per attempt and a JSON record containing the
 literal command, environment metadata, source commit, sample values, and
 summary. It does not measure a remote service, invent memory readings, or
 change project configuration. An arbitrary command or untyped candidate is
-retained as diagnostic evidence but is never promotable. The current
-version-only diagnostic is also deliberately non-promotable.
+refused before any child launch. The current version-only diagnostic is
+candidate-bound but deliberately non-promotable.
 
 The typed `local-miniature-v1` workload declares exactly 20 warmups, 20
 completed-doctor samples, 5 alternating full/selected pairs, and 10 paired S2

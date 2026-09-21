@@ -24,7 +24,8 @@ from typing import Sequence
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-from benchmark import _private_artifact_dir, _write_private, run_command, environment_metadata  # noqa: E402
+from benchmark import (_lexical_no_symlinks, _write_private,
+                       run_command, environment_metadata)  # noqa: E402
 
 SCHEMA_VERSION = 1
 MAX_ATTEMPTS = 64
@@ -197,18 +198,9 @@ def _new_evidence_root(requested: Path | None, root: Path) -> Path:
     """Exclusively create a fresh 0700 evidence root outside the checkout."""
     if requested is None:
         return Path(tempfile.mkdtemp(prefix="ptest-acceptance-", dir="/tmp"))
-    requested = requested.absolute()
+    requested = _lexical_no_symlinks(requested)
     if requested.exists() or requested.is_symlink():
         raise ValueError("evidence output must be a new directory")
-    parent = requested.parent
-    while True:
-        if parent.exists() and parent.is_symlink():
-            raise ValueError("evidence output parent may not be a symlink")
-        if parent == parent.parent:
-            break
-        if parent.exists() and parent.is_dir():
-            break
-        parent = parent.parent
     resolved = requested.resolve()
     resolved_root = root.resolve()
     if resolved == resolved_root or resolved_root in resolved.parents:

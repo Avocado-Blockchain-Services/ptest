@@ -15,8 +15,8 @@
   ],
   "verification": {
     "scoped_command": "ptest tests/ng/test_acceptance.py",
-    "status": "13 passed in 2.77s (exit 0)",
-    "graphify": "graphify update . exit 0; 4088 nodes, 9280 edges, 262 communities"
+    "status": "16 passed in 2.82s (exit 0)",
+    "graphify": "graphify update . exit 0; 4095 nodes, 9294 edges, 260 communities"
   },
   "correction": {
     "security": [

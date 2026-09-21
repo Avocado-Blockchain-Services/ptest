@@ -76,7 +76,7 @@ def test_bounded_command_rejects_symlinked_artifact_directory(tmp_path):
     target.mkdir()
     link = tmp_path / "artifacts"
     link.symlink_to(target, target_is_directory=True)
-    with pytest.raises(ValueError, match="directory"):
+    with pytest.raises(ValueError, match="symlink"):
         benchmark.run_command(
             (sys.executable, "-c", "pass"),
             cwd=tmp_path,
@@ -167,9 +167,75 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
     )
     names = [attempt["name"] for attempt in evidence["attempts"]]
     assert names[:2] == ["candidate-version", "init"]
-    assert {"where", "plan", "doctor", "status", "full", "scoped", "automatic", "cancel"} <= set(names)
+    expected_success = {"candidate-version", "init", "where", "plan", "doctor", "status", "full", "scoped", "automatic"}
+    observed = {attempt["name"]: attempt for attempt in evidence["attempts"]}
+    assert expected_success | {"cancel"} <= set(observed)
+    for name in expected_success:
+        assert observed[name]["status"] == "passed"
+        assert observed[name]["exit_code"] == 0
+    assert observed["cancel"]["status"] == "blocked-unverified"
+    assert observed["cancel"]["exit_code"] is None
     assert evidence["candidate_identity"]["version"] == "0.1.0"
     assert evidence["promotable"] is False
+
+
+def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch):
+    candidate = tmp_path / "ptest"
+    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
+    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+    output = tmp_path.parent / f"{tmp_path.name}-raw-rejected"
+
+    def launched(*args, **kwargs):
+        pytest.fail("raw runner was launched before CLI validation")
+
+    monkeypatch.setattr(benchmark, "run_command", launched)
+    result = benchmark.main([
+        "--root", str(tmp_path), "--candidate", str(candidate),
+        "--profile", benchmark.WORKLOAD_NAME, "--output", str(output),
+        "--", "/bin/sh", "--version",
+    ])
+    assert result == 2
+    assert not output.exists()
+
+
+def test_benchmark_cli_rejects_mismatched_candidate_and_profile_before_launch(tmp_path, monkeypatch):
+    candidate = tmp_path / "ptest"
+    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
+    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+    other = tmp_path / "other-ptest"
+    other.write_bytes(candidate.read_bytes())
+    other.chmod(other.stat().st_mode | stat.S_IXUSR)
+    output = tmp_path.parent / f"{tmp_path.name}-mismatch-rejected"
+
+    monkeypatch.setattr(benchmark, "run_command", lambda *a, **k: pytest.fail("launch before validation"))
+    result = benchmark.main([
+        "--root", str(tmp_path), "--candidate", str(candidate),
+        "--profile", "unsupported-profile", "--output", str(output),
+        "--", str(other), "--version",
+    ])
+    assert result == 2
+    assert not output.exists()
+
+
+@pytest.mark.skipif(not (ROOT / ".venv/bin/ptest").is_file(), reason="candidate development environment is unavailable")
+def test_benchmark_cli_records_candidate_bound_nonpromotable_artifacts(tmp_path, capsys):
+    candidate = ROOT / ".venv/bin/ptest"
+    output = tmp_path.parent / f"{tmp_path.name}-benchmark-cli"
+    result = benchmark.main([
+        "--root", str(ROOT), "--candidate", str(candidate),
+        "--profile", benchmark.WORKLOAD_NAME, "--samples", "1",
+        "--output", str(output), "--", str(candidate), "--version",
+    ])
+    assert result == 1
+    payload = json.loads((output / "benchmark.json").read_text())
+    assert payload["candidate_bound"] is True
+    assert payload["summary"]["promotable"] is False
+    assert payload["profile"] == benchmark.WORKLOAD_NAME
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    attempts = output / "attempts" / "sample-1"
+    assert stat.S_IMODE(attempts.stat().st_mode) == 0o700
+    assert stat.S_IMODE((output / "benchmark.json").stat().st_mode) == 0o600
+    assert capsys.readouterr().out
 
 
 def test_evidence_root_rejects_existing_file_directory_and_parent_symlink(tmp_path):
