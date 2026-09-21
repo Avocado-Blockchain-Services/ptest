@@ -40,5 +40,20 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
-exec python3 "$source_dir/scripts/install.py" --dest "$destination" \
+python3 "$source_dir/scripts/install.py" --dest "$destination" \
     --wheelhouse "$wheelhouse" --manifest "$manifest" "${forwarded[@]}"
+
+# The default installation is a user command, so publish its PATH entry only
+# after the immutable bundle itself has installed successfully.
+if [ "$destination" = "${HOME}/.local/ptest" ]; then
+    bin_dir="${HOME}/.local/bin"
+    launcher="$bin_dir/ptest"
+    mkdir -p "$bin_dir"
+    if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
+        echo "install.sh: existing launcher is not a symlink: $launcher" >&2
+        exit 1
+    fi
+    temporary_launcher="$bin_dir/.ptest-link-$$"
+    ln -s ../ptest/ptest "$temporary_launcher"
+    mv -f "$temporary_launcher" "$launcher"
+fi
