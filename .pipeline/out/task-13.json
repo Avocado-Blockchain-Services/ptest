@@ -18,7 +18,15 @@
       "legacy_install_test": "deleted; tests/ng/test_install.py covers manifest, bundle, upgrade, offline and fault behavior",
       "legacy_smoke_and_entrypoint": "deleted; root ptest launcher and tests/ng CLI subprocess coverage replace them",
       "terraform_cloudbuild_docker": "deleted; remote/cloud deployment is out of NG scope",
-      "operational_docs_and_superseded_specs": "deleted; docs/legacy-index.md preserves Git recovery pointer only"
+      "operational_docs_and_superseded_specs": "deleted; docs/legacy-index.md preserves Git recovery pointer only",
+      "deleted_files": {
+        "tests/test_cloudrun_lifecycle.py, tests/test_remote_*.py, tests/test_routing.py": "obsolete remote behavior; covered by local operations/CLI contracts where applicable",
+        "tests/test_spot_*.py, spot_*.py, terraform/**, Dockerfile.*, cloudbuild.*": "obsolete Spot/cloud infrastructure; NG has no remote API or deployment path",
+        "tests/test_install.py, install.sh legacy body, tests/test_smoke_script.py": "replaced by tests/ng/test_install.py and explicit install.sh contract",
+        "tests/test_entrypoint.py, entrypoint.sh, provision*.sh, smoke.sh": "obsolete operational scripts; no NG runtime equivalent",
+        "tests/conftest.py, scripts/ptest-bootstrap, config.example.toml": "bootstrap/config hygiene removed; NG uses package launcher and repository-local config",
+        "outsource_tests.md and five superseded superpowers plan/spec pairs": "historical operational material; recovery tag and index retained"
+      }
     }
   },
   "security_gates": {

@@ -123,8 +123,10 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
     bundle.mkdir()
     (bundle / "wheels").mkdir()
     published = False
+    link = None
     paths = []
-    for entry in manifest["wheels"]:
+    try:
+      for entry in manifest["wheels"]:
         path = wheelhouse / entry["filename"]
         if path.is_symlink():
             raise ValueError("manifest wheel path must not be a symlink")
@@ -153,6 +155,9 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             raise ValueError("wheel hash does not match manifest")
         validate_wheel(path, entry["package"], entry["version"], manifest["python_tag"], manifest["platform_tag"])
         paths.append(path)
+    except Exception:
+        shutil.rmtree(bundle, ignore_errors=True)
+        raise
     try:
         bundled_paths = []
         for path in paths:
@@ -205,6 +210,8 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             os.close(parent_fd)
         return public
     except Exception:
+        if link is not None and link.is_symlink():
+            link.unlink()
         if not published:
             shutil.rmtree(bundle, ignore_errors=True)
         raise
