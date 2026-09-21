@@ -1,0 +1,130 @@
+{
+  "task": "11C",
+  "slice": "private-native-terminal-report-foundation",
+  "status": "foundation-audit-rejected-repair-awaiting-rereview",
+  "repair_source_tests_commit": "e155317a1d6e4b1cc1a79c90c51cddd4d02963c8",
+  "repair_evidence": ".pipeline/out/task-11c-astra-repair.json",
+  "historical_evidence_correction": "The original 496a630 implementation did not reject duplicate JSON keys or repeated consumption, and accepted bool/float protocol values. The original negative-contract claims below were therefore overstated at 79ed227. Opus B1/B2/B3 were reproduced with 22 failing cases before repair e155317. The repair evidence distinguishes those observed failures from additional regressions that already passed; these original foundation run records are retained as history, not proof of the missing controls.",
+  "scope": [
+    "src/ptest/reports.py",
+    "tests/ng/test_reports.py",
+    ".pipeline/out/task-11c.json"
+  ],
+  "source_tests_commit": "496a630",
+  "evidence_commit_pending": true,
+  "implemented": [
+    "Frozen NativeTerminalReport with exact private field allowlist and closed runner, execution/profile, problem and protocol values.",
+    "NativeReportBinding binds run, nonce, attempt, runner, execution mode, profile and a generated single-component basename before launch.",
+    "Allocation uses validated domain/checkouts/<checkout_id>/reports private directories and refuses any pre-existing target without overwriting it.",
+    "Consumption uses validate_private_file plus bounded shared read_regular(limit+1), strict UTF-8/JSON shape/depth/type/identity/exit/completeness checks and fixed typed errors.",
+    "Cleanup records the consumed inode and does not unlink a replacement, symlink, hard link, foreign or otherwise unsafe target.",
+    "No public JSON schema, CLI, scheduler, operations lifecycle, adapter launch, bridge or dependency behavior changed."
+  ],
+  "red_green": [
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_reports.py --tb=short --durations=15",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "stage": "RED before src/ptest/reports.py existed",
+      "exit_code": 2,
+      "output": "collected 0 items / 1 error; ModuleNotFoundError: No module named 'ptest.reports'"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_reports.py --tb=short --durations=15",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "stage": "fresh post-commit focused GREEN",
+      "exit_code": 0,
+      "output": "25 passed in 0.17s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_reports.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_contracts.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_files.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_pytest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_vitest_adapter.py -k 'not native_cli' --tb=short --durations=15",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "stage": "fresh post-commit clean integration subset",
+      "exit_code": 0,
+      "output": "392 passed, 26 deselected in 8.42s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_reports.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_contracts.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_files.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_pytest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports/tests/ng/test_vitest_adapter.py --tb=short --durations=15",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "stage": "full requested contracts/files/adapters scope; native CLI intentionally deferred",
+      "exit_code": 1,
+      "output": "395 passed, 22 failed in 12.31s; all 22 failures are test_pytest_adapter.py native_cli cases receiving the existing unsupported-capability native profile execution is deferred boundary (or expecting native-config-invalid)."
+    }
+  ],
+  "negative_contracts": {
+    "identity": "After repair e155317, duplicate keys (including same-value and contradictory repeats), non-int/wrong protocol values, and sequential replay through the same binding are rejected. Tests also cover missing/unknown fields and wrong run/nonce/attempt/runner/execution mode/profile. The original foundation lacked duplicate, exact-protocol-type, and replay controls; see repair_evidence for observed RED/GREEN.",
+    "input": "Wrong types, malformed/trailing JSON, non-finite JSON constants, oversized bytes, unknown keys, closed-enum violations and out-of-range exits are rejected with fixed report-invalid/capacity-exceeded codes and no report/path echo.",
+    "state": "After repair e155317, duplicate-key contradictions cannot overwrite refusal/failure into a pass; a successfully consumed binding retains its first device/inode for cleanup and rejects subsequent consumes, including after cleanup. Invalid first reads preserve the target and permit later correction. Foreign-owner and concurrent replacement probes remain unverified.",
+    "exposure": "Record fields are an exact allowlist; argv, env, paths, filenames, coverage, test IDs and arbitrary text never enter NativeTerminalReport; error messages are fixed.",
+    "availability": "Report bytes, runtime-version length, exit range, attempts and report basename are finite; read_regular reads at most the single bounded limit+1 path.",
+    "dependencies": "Symlink, FIFO, directory and hard-linked targets are rejected by shared private-file/no-follow validation; parent directories are created only through ensure_private_dir and report writes remain exclusive caller-owned operations."
+  },
+  "checks": [
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "exit_code": 0,
+      "output": "AST extraction rebuilt 4436 nodes, 9645 edges and 299 communities; known seven non-AST JSON files warned absent."
+    },
+    {
+      "command": "python -m py_compile src/ptest/reports.py tests/ng/test_reports.py",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "exit_code": 0,
+      "output": "syntax compilation passed"
+    },
+    {
+      "command": "git diff --cached --check",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "exit_code": 0,
+      "output": "clean before source/tests commit"
+    },
+    {
+      "command": "git status --short --branch",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11c-reports",
+      "exit_code": 0,
+      "output": "source/tests commit is 496a630; evidence and supplied task brief are the only intentional worktree files before this evidence commit"
+    }
+  ],
+  "dan_three_passes": {
+    "pass_1_re_read": "Re-read reports.py and test_reports.py end-to-end after the 496a630 commit. The non-obvious boundary is allocation intentionally reserves an absent pathname because the existing Vitest bridge creates its report with O_CREAT|O_EXCL; cleanup only becomes authorized after consume captures the inode. Re-ran focused and integration commands after the re-read.",
+    "pass_2_source_of_truth": "Re-read task-11c-native-report-foundation.md, design §7 private state and §12 native bridge event boundaries, contracts DomainPaths/CheckoutIdentity, files.py read_regular/create_exclusive/validate_private_file/ensure_private_dir, and current pytest/vitest bridge consumers. Positive fields and all listed abuse classes map to reports.py:79-176,184-241,244-305 and tests/ng/test_reports.py:71-220. Native execution wiring remains deferred as required.",
+    "pass_3_smell_sweep": "Searched report/terminal/refusal symbols across src and tests; existing terminal writing is bridge-owned and no duplicate public codec was added. No new dependency, shell assembly, public schema, config grammar or adapter registration was introduced. No-op sensitivity is nonvacuous: allocation path/permissions, exact typed return, malformed identity assertions, non-regular target failures, bridge/native distinction and replacement-preserving cleanup would all fail with a no-op. Foreign-owner and true concurrent replacement timing remain untested in this fixture run because they require privilege/race orchestration."
+  },
+  "security_gates": {
+    "run": [
+      "focused abuse tests through ptest controller",
+      "contracts/files/adapter regression subset through ptest controller",
+      "graphify AST update",
+      "git diff --check",
+      "py_compile"
+    ],
+    "not_run": "Bandit, Gitleaks, dependency-advisory and fuzz/property scanners are not configured in this slice; no dependency or CI surface changed and no source was sent externally."
+  },
+  "not_verified": [
+    "ptest --full (explicitly owned by root; task brief forbids it)",
+    "native pytest/Vitest execution, bridge report production and operations lifecycle wiring",
+    "actual foreign-owner fixture (requires changing ownership or privilege not available to the deterministic test harness)",
+    "a concurrent adversarial replacement during the narrow read/unlink window",
+    "public result/history conversion of a NativeTerminalReport"
+  ],
+  "deferred": [
+    "No changes to adapters, runtime bridges, operations, scheduler, CLI, public documents, history, selection, source/baseline or setup; later task must explicitly wire the binding into launch and pass bridge exit facts into result finalization.",
+    "No native support claim; the existing pytest native_cli failures are intentionally retained until the native execution task."
+  ],
+  "discovered_but_not_fixed": [
+    "The shared read_regular primitive validates no-follow and regular type at open but cannot atomically compare an unlink against a same-user concurrent replacement; reports.py performs before/after identity checks and cleanup preserves a detected replacement. A stronger kernel CAS unlink would belong in the shared files owner, not this bounded slice."
+  ],
+  "owned_and_touched_files": [
+    "src/ptest/reports.py",
+    "tests/ng/test_reports.py",
+    ".pipeline/out/task-11c.json"
+  ],
+  "untouched_user_agent_files": [
+    ".pipeline/briefs/task-11c-native-report-foundation.md"
+  ],
+  "commits": {
+    "source_tests": "496a630",
+    "evidence": null
+  },
+  "confidence": "medium",
+  "confidence_reason": "The typed foundation and abuse matrix have fresh deterministic controller evidence, but native runner integration, true foreign-owner/race probes and root-owned full verification are intentionally outside Task 11C."
+}

@@ -1,0 +1,13 @@
+{
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "",
+  "test_summary": "RED (tests first): scripts/ptest-bootstrap tests/ng/test_scheduler.py --durations=10 -> exit 1; 97 collected, 91 passed, 6 failed, 2 warnings in 1.19s. The six failures were exactly the >256 short-lived descendant lifecycle case, dead PID reuse cleanup, all three mixed-direction slots/jobs/memory reload cases, and missing non-root cgroup controls. Focused GREEN: scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'missing_nonroot or observation_cap or reused_descendant or busy_reload' --durations=10 -> exit 0; 6 passed, 91 deselected in 0.15s; the descendant-cap case took 0.02s. Required GREEN: scripts/ptest-bootstrap tests/ng/test_scheduler.py --durations=10 -> exit 0; 97 passed in 1.12s, no warnings; slowest calls were 0.03s. git diff --check -> exit 0. graphify update . -> exit 0; AST extraction 5/5, graph rebuilt with 3192 nodes, 5941 edges, 230 communities. Secure-by-spec regression evidence covers absent controls without capacity collapse/warning, malformed or unreadable CPU metadata retaining the conservative diagnostic path, concurrent-live descendant bounding with ESRCH/birth-reuse deletion, persisted observation deletion, successful lease/slot/checkout/lock release, and component-wise busy tightening with deferred loosening and generation advancement.",
+  "report_path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-4/.pipeline/out/task-4-sol-repair2.json",
+  "concerns": [
+    "Per the repair brief, no commit, merge, push, deployment, installed-ptest change, controller/global-ptest change, or full suite was attempted; verification is the required scoped scheduler suite only.",
+    "Scope check before writing this owned report showed changes only in src/ptest/scheduler.py and tests/ng/test_scheduler.py; the pre-existing untracked .pipeline/out/task-4-astra-repair1-response.json and .pipeline/out/task-4-luna-response.json were preserved untouched.",
+    "Native cgroup evidence is Linux cgroup-v2 only; macOS lifecycle behavior remains outside this focused repair.",
+    "Identity, authorization, tenancy, and exposure gates are N/A because this is a local single-account scheduler with no credential or public response boundary. No external scanner, fuzz, dependency, or property gate was run; this repair adds no dependency or new external trust boundary and the brief limits verification to scoped bootstrap tests.",
+    "graphify update succeeded but repeated its existing warning that implementation.json, review.json, and protocol-v1.json produced zero nodes and remain absent from the graph."
+  ]
+}

@@ -1,0 +1,154 @@
+{
+  "task": 3,
+  "status": "implemented",
+  "agent": {
+    "identity": "Codex gpt-5.6-luna",
+    "routing": "user-authorized Luna xhigh fallback",
+    "override": "Muse quota was exhausted; no other model or agent was launched"
+  },
+  "scope": {
+    "owned": [
+      "src/ptest/history.py",
+      "tests/ng/test_history.py",
+      ".pipeline/out/task-3.json"
+    ],
+    "implementation_commit_paths": [
+      "src/ptest/history.py",
+      "tests/ng/test_history.py"
+    ],
+    "other_tracked_paths_modified": [],
+    "partial_muse_work": "No partial Muse work existed in this Task 3 worktree; unrelated work was preserved"
+  },
+  "git": {
+    "base": "60deb4e66bb97bb6e83429c4460877419b137f0c",
+    "head": "eaf06791d0e4f95d52c7266ac5f224521d2b9cc3",
+    "commit": "feat: retain failure obligations and truthful local baselines"
+  },
+  "implementation": [
+    "Added explicit DomainPaths plus CheckoutIdentity validation; history is stored at domain.root/checkouts/<checkout_id>/history.sqlite3 and never resolves platform state, environment variables, argv, or a normal-domain fallback.",
+    "Added transactional immutable run summaries backed by T0 serialize_run_result, with private snapshots, policy/source compatibility, sequence, and inventory evidence kept outside public summaries.",
+    "Added per-test/file/whole-gate failure obligations, monotonic sequence and compatibility checks, skip/unrelated/late/incompatible-pass retention, and complete clean full-inventory deletion reconciliation.",
+    "Added truthful baseline eligibility requiring a complete successful clean full gate with stable source identity, policy, compatibility, exit codes, and inventory; dirty, mixed, incomplete, teardown, coverage/full-gate, unknown, and malformed evidence cannot seed or replace it.",
+    "Added bounded summary/time retention, protected baseline/obligations, SQLite byte quota enforcement, immutable duplicate-run conflict detection, private-store corruption checks, and an external history-disabled uncertainty marker.",
+    "Added T11-facing read_history_payload/read_history_summaries helpers that validate and project history summaries through the shared public descriptor without inventing a HistorySummary record."
+  ],
+  "tests": {
+    "where": {
+      "command": "scripts/ptest-bootstrap where",
+      "dispatcher": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+      "dispatcher_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+      "backend": "local",
+      "workers": 1,
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-3"
+    },
+    "red": {
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k skip_does_not_clear",
+      "exit_code": 1,
+      "assertion": "The deliberate no-op obligation upsert made the load-bearing skip-preserves-failure assertion fail with IndexError; 1 failed, 23 deselected.",
+      "log": ".pipeline/local/task-3-red-sensitivity.log",
+      "exit_log": ".pipeline/local/task-3-red-sensitivity.exit",
+      "classification": "behavioral RED; earlier collection/setup failures were environment setup only and are not claimed as RED"
+    },
+    "green": {
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
+      "exit_code": 0,
+      "collected": 25,
+      "passed": 25,
+      "duration": "0.13s",
+      "log": ".pipeline/local/task-3-final.log",
+      "prior_green_log": ".pipeline/local/task-3-green.log",
+      "dispatcher_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68"
+    },
+    "syntax": {
+      "command": "UV_CACHE_DIR=.pipeline/local/uv-cache uv run --locked --no-sync python -m py_compile src/ptest/history.py tests/ng/test_history.py",
+      "exit_code": 0
+    },
+    "format": {
+      "command": "git diff --cached --check",
+      "exit_code": 0,
+      "scope": "staged owned implementation files"
+    },
+    "full_suite": {
+      "run": false,
+      "owner": "root",
+      "reason": "The wave brief explicitly assigns the integrated ptest --full gate to root"
+    }
+  },
+  "negative_evidence": [
+    "Skip and xfail do not clear obligations; only newer complete conclusively passing applicable tests can clear them.",
+    "Older late passes, unrelated files, and incompatible compatibility identities retain failures.",
+    "Coverage/full-gate failure without an attributable test ID records a whole-gate obligation.",
+    "Dirty, mixed-source, incomplete, unknown, failed-attempt, teardown, and nonzero-exit evidence cannot publish a baseline.",
+    "A complete clean full inventory may reconcile a deliberately deleted test ID and records removed evidence rather than treating deletion as a pass.",
+    "Unknown or incomplete inventory cannot clear obligations or establish a baseline.",
+    "Duplicate run IDs with conflicting private evidence disable history rather than mutating immutable evidence.",
+    "Corrupt private snapshots, forged baseline references, malformed SQLite, and over-quota stores disable selection, preserve the damaged store, and leave an uncertainty marker where possible.",
+    "Absent read_history is read-only: it creates no checkout directory, history database, fingerprint key, ledger, or normal-state sentinel.",
+    "Checkout-root symlink/ownership/id mismatches raise unsafe-path and do not create history state; separate fixture domains remain isolated.",
+    "Static source sweep found no platform import, environment lookup, argv access, scheduler database path, network/subprocess dependency, or normal-root fallback in history.py."
+  ],
+  "self_review": {
+    "pass1_implementation": {
+      "result": "complete",
+      "observation": "Fresh SQLite schema creation initially left an executescript transaction open, which made the later BEGIN IMMEDIATE fail; committing schema metadata before publication fixed it and the scoped suite then passed.",
+      "additional_hardening": "The reread also found that read-side corruption needed the external uncertainty marker and that baseline/obligation/private reconciliation records needed cross-validation; both were added and covered by tests."
+    },
+    "pass2_contract_trace": {
+      "result": "complete",
+      "references": [
+        "Task 3 plan: docs/plans/2026-09-17-ptest-ng.md Task 3 section",
+        "History and baseline semantics: docs/designs/2026-09-17-ptest-ng-design.md:256,324-326,350-363",
+        "Product requirements and acceptance: docs/specs/2026-09-17-ptest-ng-product.md:146-162,287-305",
+        "Explicit path and private storage boundary: src/ptest/history.py:60-207",
+        "Private validation and corruption fail-closed behavior: src/ptest/history.py:383-633",
+        "Baseline eligibility and obligation reconciliation: src/ptest/history.py:674-879",
+        "Immutable publication, retention and quota: src/ptest/history.py:881-1068",
+        "Behavioral coverage: tests/ng/test_history.py:73-486"
+      ],
+      "resulting_judgment": "The implementation uses the frozen T0 public serializer and records no parallel summary shape; it keeps correctness-critical state private and fail-closed."
+    },
+    "pass3_smell_sweep": {
+      "result": "complete",
+      "sweeps": [
+        "Duplicate history store/summary/obligation schemas and stale signatures: no competing production store or public summary type found.",
+        "Security/trust: explicit domain and checkout validation, private ownership/mode checks, SQLite bounds, parameterized SQL, immutable duplicate detection, marker validation, and no raw argv/env persistence reviewed.",
+        "State/retention: baseline and obligations protected; old/over-cap summaries prune only validated inactive rows; quota failure disables selection instead of dropping correctness state.",
+        "Error/UX boundary: stable catalog reason codes and fixed safe messages; corrupt state is visible as disabled uncertainty; no raw exception or stored user input is emitted.",
+        "Dependency/legacy sweep: only T0 contracts/files/storage are consumed; no cloud, platform, scheduler, network, or legacy normal-state behavior is imported."
+      ],
+      "verdict": "self-review approve with root-owned integration and independent Opus review remaining"
+    }
+  },
+  "implemented": [
+    "Durable local outcome history API and private schema",
+    "Failure obligation retention/reconciliation",
+    "Truthful clean full baselines",
+    "Public summary descriptor reuse and private-field exclusion",
+    "Bounded retention/quota and fail-closed corruption handling",
+    "Task 3 behavioral and negative test suite"
+  ],
+  "verified": [
+    "25/25 Task 3 tests through ptest with dispatcher hash recorded",
+    "Behavioral RED/GREEN evidence",
+    "Python syntax compilation",
+    "Owned staged diff check",
+    "AST-only graphify update after final source changes: graphify rebuilt 3030 nodes/5364 edges/226 communities and reported exit 0",
+    "Ownership status after implementation commit contained only the two Task 3 implementation files"
+  ],
+  "unverified": [
+    "Integrated ptest --full suite",
+    "Cross-task T4/T8/T11 runtime integration and native runner evidence",
+    "Root's independent Opus review",
+    "Foreign-uid/macOS filesystem branches and real concurrent process stress beyond bounded retry/transaction logic"
+  ],
+  "deferred": [
+    "Final integrated testing and review remain with root per the wave brief; no push, merge, deployment, live installation, or global configuration change was performed."
+  ],
+  "discovered": [
+    "The existing T0 CaseFactory.result() generates independent random result project/checkout IDs by default, while the exact Task 3 RED contract omits an explicit checkout. History therefore treats the explicit DomainPaths/CheckoutIdentity argument as the state authority and does not reject that fixture result identity; T11 production callers must pass results for the explicit checkout context.",
+    "The graphify incremental run reported pre-existing zero-node review.json and protocol-v1.json warnings; it still completed successfully and no graphify output is part of the Task 3 commit."
+  ],
+  "concerns": [
+    "No blocking Task 3 concern remains; root must complete the integrated suite and independent Opus review before wave integration."
+  ]
+}

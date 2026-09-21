@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "task": "scheduler-research",
+  "status": "complete",
+  "date": "2026-09-17",
+  "base_commit": "1ca3223eac562af1adf54111b54f223ab1a5b1de",
+  "artifact": "docs/research/2026-09-17-scheduler-feasibility.md",
+  "scope": "Design feasibility input only; no source implementation or platform support claim",
+  "recommendations": [
+    "Canonical account-database-derived paths on a supported local filesystem; no HOME, XDG, per-install, or protocol-version domain split",
+    "SQLite BEGIN IMMEDIATE atomically owns strict FIFO admission, slots/jobs, memory/exclusivity, checkout lifetime, and named-resource leases",
+    "One registered session/group-leading guard per admitted job; private inherited control channel; no persistent daemon",
+    "Guard registers durable group ownership before repository execution; failed registration revocation prevents late launch",
+    "Guard records provisional facts then drains/exits; caller proves group absence, finalizes artifacts/baseline while lease remains charged, then releases; dead-caller recovery never promotes provisional success",
+    "Recovery never sends terminating signals to a stored PID or PGID; parent-only SIGKILL leaves live work charged",
+    "Explicit cooperative-process-group capability; daemonizers and unobserved escaped descendants are outside support",
+    "Real candidate CLI subprocesses use explicit private fixture domains inside outer ptest tests"
+  ],
+  "critical_limit": "Portable process groups/psutil cannot prove or terminate every arbitrary escaped descendant. Hard arbitrary containment would require a separate platform/authority decision. Observed ambiguous escape keeps capacity charged.",
+  "proposed_defaults": {
+    "worker_ceiling": "min(4, max(1, floor(observed_usable_cpus / 2)))",
+    "active_jobs": "min(2, worker_ceiling)",
+    "new_repo_workers": 1,
+    "pending_requests": 256,
+    "poll_ms": 250,
+    "contention_timeout_ms": 2000,
+    "queue_deadline_seconds": 1800,
+    "queue_deadline_max_seconds": 86400,
+    "cancellation_grace_seconds": 5,
+    "ledger_database_cap_mib": 16,
+    "unknown_memory_policy": "One-worker exclusive run; estimate remains unknown"
+  },
+  "evidence": {
+    "approved_spec_read_in_full": true,
+    "skills_read": ["secure-by-spec", "graphify"],
+    "graph_present_in_assigned_checkout": false,
+    "local_read_only_inspection": true,
+    "primary_os_python_sqlite_psutil_docs_checked": true,
+    "tests_executed": false,
+    "dependencies_installed": false,
+    "source_modified": false,
+    "macos_execution": false,
+    "benchmarks_executed": false
+  },
+  "remaining_gates": [
+    "Reviewed frozen design and platform/version matrix",
+    "Real Linux and macOS guard, signal, crash, nesting, and fixture-domain evidence",
+    "Filesystem capability validation and corruption/identity checks",
+    "Bounded-memory and overhead benchmarks",
+    "Explicit publication of cooperative lifecycle limitations"
+  ]
+}

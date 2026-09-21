@@ -1,0 +1,13 @@
+{
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "",
+  "test_summary": "RED (test first): scripts/ptest-bootstrap tests/ng/test_scheduler.py -k listed_then_reaped --durations=10 -> exit 1; 98 collected, 1 selected, 1 failed, 97 deselected in 0.21s. The failure was exact: test_listed_then_reaped_descendant_does_not_leak_lease observed UNCERTAIN where RUNNING was required after the listed and identity-observed child raised psutil.NoSuchProcess during its own children walk. Focused GREEN: scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'listed_then_reaped or unknown_descendant_scan or reused_descendant_pid' --durations=10 -> exit 0; 3 passed, 95 deselected in 0.10s, with each selected call at 0.01s. Required GREEN: scripts/ptest-bootstrap tests/ng/test_scheduler.py --durations=10 -> exit 0; 98 passed in 1.05s with no warnings; the slowest normal cases were 0.03s, below 0.5s. git diff --check -> exit 0. graphify update . -> exit 0; AST extraction 5/5, graph rebuilt with 3193 nodes, 5949 edges, and 229 communities. Secure-by-spec evidence covers the previously absent listed-then-reaped state race, exact removal of the vanished node observation and pid=0 sentinel, continued RUNNING state, successful finish/release, ESRCH/birth-reuse cleanup, and retained fail-closed behavior for an inaccessible live tree.",
+  "report_path": "/home/ingmar/worktrees/ptest/cx-ng-product/task-4/.pipeline/out/task-4-sol-repair3.json",
+  "concerns": [
+    "Per the repair brief, no commit, merge, push, deployment, installed/global ptest or controller change, dependency change, raw runner, or full suite was attempted; verification is the required scoped scheduler suite only.",
+    "The deterministic fake kernel now models a process object returned by a parent listing that can vanish before its own children walk. Real guard crash/signal lifecycle evidence remains assigned to Tasks 7 and 11 and is not claimed here.",
+    "Identity and state-transition controls are exercised. Authorization, tenancy, hostile-input parsing, and public-data exposure are N/A because this focused internal scheduler repair adds no credential, tenant, parser, network, or public response boundary. No external scanner, fuzz, dependency, or property gate was run because no dependency/security-infrastructure scope changed.",
+    "The pre-existing untracked task-4-astra-repair1-response.json, task-4-luna-response.json, and task-4-sol-repair2-response.json files were preserved untouched.",
+    "graphify update succeeded but repeated its existing warning that implementation.json, review.json, and protocol-v1.json produced zero nodes and remain absent from the graph."
+  ]
+}

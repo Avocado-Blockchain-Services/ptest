@@ -1,0 +1,9 @@
+[package]
+name = "workspace-member"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "custom"
+path = "custom.rs"
+harness = false

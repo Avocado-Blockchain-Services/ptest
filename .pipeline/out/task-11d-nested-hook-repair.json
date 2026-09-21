@@ -1,0 +1,88 @@
+{
+  "task": "11D Opus R1 nested-conftest repair",
+  "date": "2026-09-18",
+  "status": "historical-repair-rejected-by-followup-audit-superseded-by-task-11d-sol-repair",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra2",
+  "base_commit": "6de5c4c",
+  "source_commit": "bd27646dc94116c46a1d26984767d99a203cfd7f",
+  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11d-astra/9f00c406-8643-4333-9426-98698509ac22.jsonl",
+  "finding": {
+    "id": "R1",
+    "cause": "The final existing validation ran before pytest_collection yielded. A tests/unit/conftest.py reached through the tests directory was imported during collection, after that validation, and could register an unqualified executor.",
+    "change": "Historical change: a tryfirst wrapper on pytest_collection_finish validated before yielding. Followup audit proved that ordinary trylast collection-finish registration and per-item setup registration still bypassed it; task-11d-sol-repair.json records the superseding repair.",
+    "regression": "Three real scoped subprocess cases define pytest_runtestloop, pytest_runtest_protocol or pytest_pyfunc_call in tests/unit/conftest.py. Each asserts incomplete status, ptest exit origin, observed/native exit 4, unsupported-capability reason, private native-config-invalid marker, no executor marker, no root or nested test marker, report cleanup and RELEASED lease. Conftest-import and module-collection markers prove that this is the delayed load path.",
+    "evidence_correction": "The previous repair is marked historical/rejected and its B5/B6 claims are restricted to initial/root/configure-time plugins. The fixture README distinguishes before-collection initial qualification from before-test-execution nested qualification and documents that active pytest-cov --cov runs are refused by the existing wrapper-inclusive gate."
+  },
+  "security_contracts": {
+    "identity": "No identity format or authentication change. Existing real report identity and replay regressions passed in the combined scope.",
+    "authorization": "Collection-loaded critical execution hooks cannot acquire execution authority from the basic-serial grant. All three new cases exercise the real bridge, guard, scheduler and report consumer.",
+    "tenancy": "No tenant model change; existing local checkout/run isolation is retained. Refused nested-hook cases release only their own lease and consume their own report.",
+    "input": "No new input or parser. The new cases vary hook names and nested layout while using literal scoped argv through the existing fixture.",
+    "state": "A nested-hook refusal must become authenticated incomplete evidence, never passed/native-failure evidence, and must leave no active lease or consumed report.",
+    "exposure": "No new public fields or marker payload. The existing fixed refusal message and reason remain in use.",
+    "availability": "Historical claim only. The superseding repair's repeated validation points and measured evidence are recorded in task-11d-sol-repair.json.",
+    "dependencies": "No dependency or runtime-candidate-table changes. Only the existing pytest hook mechanism and existing validation helper are used.",
+    "absent_from_original_spec": "No new domain policy. Collection-time conftest loading is the missing lifecycle case for the already-required executor-ownership contract."
+  },
+  "controller": {
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+    "executable": "scripts/ptest-bootstrap",
+    "environment": {"PYTHONPATH": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra2/src"},
+    "test_path_root": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra2/tests/ng/",
+    "frozen_dispatcher": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "frozen_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "workers": 1,
+    "runtime": "Linux, CPython 3.13.11, pytest 9.1.1, pluggy 1.6.0",
+    "dependency_install": false,
+    "shared_environment": "The already-provisioned controller executes the task source explicitly through PYTHONPATH; no environment was created, shared by symlink or installed into this task worktree."
+  },
+  "test_runs": [
+    {
+      "stage": "RED before production changes",
+      "files": ["test_pytest_scoped_subprocess.py"],
+      "args": ["-k", "nested_execution_hook", "--tb=short", "--durations=5"],
+      "exit_code": 1,
+      "output": "3 failed, 45 deselected in 2.39s",
+      "failure": "All three hook variants returned status passed instead of incomplete."
+    },
+    {
+      "stage": "focused GREEN",
+      "files": ["test_pytest_scoped_subprocess.py"],
+      "args": ["-k", "nested_execution_hook", "--tb=short", "--durations=5"],
+      "exit_code": 0,
+      "output": "3 passed, 45 deselected in 2.25s",
+      "durations": "0.69-0.74s per case; each starts the real local CLI/guard/bridge/native pytest/report path."
+    },
+    {
+      "stage": "combined scoped GREEN",
+      "files": ["test_pytest_scoped_subprocess.py", "test_pytest_adapter.py", "test_operations.py", "test_task_11d_pytest.py", "test_reports.py"],
+      "args": ["--tb=short", "--durations=12"],
+      "exit_code": 0,
+      "output": "347 passed, 8 skipped in 56.10s",
+      "durations": "Slowest case 1.60s; nested-hook cases at most 1.00s. No case exceeded 2s.",
+      "skips": "Unchanged: pytest 8.4.2, 9.0.3 and 9.1.0 pass/fail tuples (6), real installed xdist (1), unsupported pytest runtime (1); no preprovisioned interpreters supplied."
+    }
+  ],
+  "checks": [
+    {
+      "command": "graphify update .",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-astra2",
+      "exit_code": 0,
+      "output": "AST-only refresh: 4491 nodes, 9833 edges, 301 communities. Seven JSON/protocol sources yielded zero nodes and were warned absent. No semantic extraction/provider use; generated graph is ignored. Labels/wiki not used as current semantic evidence."
+    },
+    {"command": "git diff --check", "exit_code": 0},
+    {"command": "jq empty .pipeline/out/task-11d-astra-repair.json .pipeline/out/task-11d-nested-hook-repair.json", "exit_code": 0}
+  ],
+  "gates": {
+    "run": "Focused RED/GREEN and five-file regression scope through the frozen ptest controller, graphify AST update, whitespace and evidence JSON validation.",
+    "missing": "No checked-in applicable secrets/static/dependency security gate script found in this stage; none installed or added for this narrow repair.",
+    "not_run": "No full suite, independent audit, dependency installation, integration, push, deployment, publication or installed CLI replacement."
+  },
+  "limitations": [
+    "Followup audit rejected this historical repair because validation occurred before other collection-finish implementations and did not revalidate after per-item setup; see task-11d-sol-repair.json.",
+    "Only the provisioned CPython 3.13.11 / pytest 9.1.1 runtime was exercised; existing qualification gaps remain unchanged.",
+    "Nested conftest imports and test-module collection can execute before the new gate. This is not a sandbox against arbitrary trusted same-user project code.",
+    "Known execution-control plugin names remain refused even if unused. Unqualified critical hook wrappers, including active pytest-cov, are still refused; plugin compatibility is not broadened.",
+    "Full/automatic/setup/shadow/probe/native-selection and source-valid/baseline/history publication remain outside this scoped tier."
+  ]
+}

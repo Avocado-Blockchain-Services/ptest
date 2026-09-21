@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "status": "NOT_RUN_NATIVE_TASK11",
+  "execution_entrypoint": "candidate ptest inside an explicit private fixture-domain",
+  "runner": {"kind": "cargo", "launcher": ["cargo"], "args": ["--lib"], "test_roots": ["."], "workers": 2},
+  "cases": [
+    {"id": "standard-lib", "project": "project", "prepare_tier": "unavailable", "expected_tier_after_qualification": "bounded_native", "env": {"PTEST_FIXTURE_TRACE": "{run_output}/cargo.trace"}, "expected_exit_code": 0, "expected_signal": null, "expected_trace_starts": 3, "max_concurrent_tests": 2, "counts": null},
+    {"id": "standard-bins", "project": "project", "args": ["--bins"], "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_TRACE": "{run_output}/cargo.trace"}, "expected_exit_code": 0, "expected_signal": null, "expected_trace_starts": 2},
+    {"id": "standard-integration", "project": "project", "args": ["--test", "integration"], "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_TRACE": "{run_output}/cargo.trace"}, "expected_exit_code": 0, "expected_signal": null, "expected_trace_starts": 2},
+    {"id": "existing-libtest-separator", "project": "project", "args": ["--lib", "--", "--nocapture"], "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_TRACE": "{run_output}/cargo.trace"}, "expected_exit_code": 0, "expected_signal": null, "expected_trace_starts": 3, "max_concurrent_tests": 2},
+    {"id": "assertion-failure", "project": "project", "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_MODE": "fail"}, "expected_exit_code": 101, "expected_signal": null},
+    {"id": "inner-exit-is-native-cargo-failure", "project": "project", "prepare_tier": "unavailable", "env": {"PTEST_FIXTURE_MODE": "exit"}, "inner_exit_code": 23, "expected_exit_code": 101, "expected_signal": null},
+    {"id": "missing-executable", "project": "project", "launcher": ["{run_output}/missing-cargo"], "prepare_tier": "unavailable", "expected_exit_code": 127, "expected_signal": null},
+    {"id": "doctest-omission-refused", "project": "project", "args": [], "prepare_error": "unsupported-capability", "expected_exit_code": 2, "expected_signal": null},
+    {"id": "custom-harness-refused", "project": "custom-harness", "args": ["--test", "custom"], "prepare_error": "unsupported-capability", "expected_exit_code": 2, "expected_signal": null},
+    {"id": "workspace-custom-member-refused", "project": "workspace", "args": ["--tests"], "prepare_error": "unsupported-capability", "expected_exit_code": 2, "expected_signal": null}
+  ]
+}

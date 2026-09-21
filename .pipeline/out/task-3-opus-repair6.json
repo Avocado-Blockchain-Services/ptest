@@ -1,0 +1,15 @@
+{
+  "verdict": "approved_with_notes",
+  "auditor": "Claude Opus High",
+  "head": "d8e5705",
+  "raw_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-3/968e4d2a-965c-44ff-9b1e-356a6cd38761.jsonl",
+  "blocking": [],
+  "verified": [
+    "generic uncertainty tracks highest possible lost publication sequence",
+    "late clean full cannot clear a newer loss",
+    "inherited live writer does not mask old uncertainty",
+    "capacity promotion and no-write reader behavior remain intact"
+  ],
+  "root_mechanical_evidence": "85 history tests passed in 2.23s; diff check passed",
+  "notes": ["recovery intentionally requires a clean full newer than every attempt after first loss"]
+}

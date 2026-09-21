@@ -1,0 +1,140 @@
+{
+  "task": "ptest NG doctor hardening",
+  "status": "READY_FOR_FRESH_CLAUDE_OPUS_HIGH_AUDIT",
+  "base_sha": "545dcac15506d526c7af01e910534ff8832915a9",
+  "implementation_head_sha": "61b9174a31de63afcb2f605e6b30cc1900235ca1",
+  "review_range": "545dcac15506d526c7af01e910534ff8832915a9..61b9174a31de63afcb2f605e6b30cc1900235ca1",
+  "repair_base_sha": "2327b4d82f0b90bdbdba4eda73a147fa9d7b5352",
+  "repair_implementation_head_sha": "41b5442d7d3ddc374881bc5e6d3f84e3cdc02291",
+  "repair_review_range": "2327b4d82f0b90bdbdba4eda73a147fa9d7b5352..41b5442d7d3ddc374881bc5e6d3f84e3cdc02291",
+  "owned_files": [
+    "src/ptest/doctor.py",
+    "src/ptest/render.py",
+    "src/ptest/resources/agent-guide.md",
+    "tests/ng/test_doctor.py",
+    "tests/ng/test_render.py",
+    "tests/ng/test_resources.py",
+    ".pipeline/out/doctor-hardening.json"
+  ],
+  "tdd": {
+    "cache_red": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_doctor.py -k cache_hardening --durations=20",
+      "exit_code": 1,
+      "result": "11 failed, 15 passed, 84 deselected in 0.37s; the initially unsupported camel-case flush and cache-clear cases had no finding."
+    },
+    "prompt_red": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_render.py -k 'scan_context or prompt' --durations=20",
+      "exit_code": 1,
+      "result": "3 failed, 2 passed, 3 deselected in 0.16s; no scan-context line, no trusted-context bound failure, and forged metadata could create an apparent delimiter occurrence."
+    },
+    "guide_red": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_resources.py -k agent_guide --durations=20",
+      "exit_code": 1,
+      "result": "1 failed, 14 deselected in 0.05s; the guide lacked the required scoped-command then one final full-gate wording."
+    }
+  },
+  "green": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_doctor.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_render.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_resources.py --durations=20",
+    "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+    "exit_code": 0,
+    "result": "138 passed in 1.50s; slowest: complete report cap 0.97s, high-volume skips 0.11s, static timing/no-state 0.01s. No deterministic test exceeded 3s."
+  },
+  "audit_repair_tdd": {
+    "red": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_render.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_doctor.py -k 'prompt_keeps_constraints or trusted_scan_semantics or valid_python_cache_clear or python_comment_only or python_string_literal or identifier_suffix' --durations=20",
+      "exit_code": 1,
+      "result": "3 failed, 3 passed, 122 deselected in 0.18s; the prompt omitted the required constraints/caveat/scan semantics and the receiver regex restarted inside a 257-character identifier. The Python positive, comment-only negative, and documented string-literal lexical-limit cases already passed."
+    },
+    "focused_green": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_render.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_doctor.py -k 'prompt_keeps_constraints or trusted_scan_semantics or valid_python_cache_clear or python_comment_only or python_string_literal or identifier_suffix' --durations=20",
+      "exit_code": 0,
+      "result": "6 passed, 122 deselected in 0.09s."
+    },
+    "task_suite_green": {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_doctor.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_render.py /home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest/tests/ng/test_resources.py --durations=20",
+      "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+      "exit_code": 0,
+      "result": "Initial pre-commit run: 143 passed in 2.25s; slowest complete report cap 1.39s, high-volume skips 0.19s, static timing/no-state 0.03s. Fresh post-commit run: 143 passed in 1.48s; slowest complete report cap 0.96s, high-volume skips 0.12s, static timing/no-state 0.02s. No test exceeded 3s."
+    }
+  },
+  "other_verification": [
+    {
+      "command": "git diff --check",
+      "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+      "exit_code": 0,
+      "result": "no whitespace errors"
+    },
+    {
+      "command": "graphify update .",
+      "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+      "exit_code": 0,
+      "result": "4551 nodes, 9945 edges, 305 communities; existing zero-node warnings for non-source JSON artifacts"
+    },
+    {
+      "command": "git diff --check",
+      "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+      "exit_code": 0,
+      "result": "audit repair has no whitespace errors"
+    },
+    {
+      "command": "graphify update .",
+      "working_directory": "/home/ingmar/worktrees/ptest/cx-ng-doctor-hardening/ptest",
+      "exit_code": 0,
+      "result": "4560 nodes, 9964 edges, 305 communities; existing zero-node warnings for non-source JSON artifacts"
+    }
+  ],
+  "opus_correction_resolution": {
+    "H1": "RESOLVED: fixed ASCII caveat and full scan-context semantics now follow the bundled guide/context in the required order before the untrusted delimiter; scope, null metadata, readiness ordering/conflicts, and scan-versus-prompt truncation are explained and remain inside the existing complete-prefix byte budget at src/ptest/render.py:10-20 and :189-201, with order/content regression evidence at tests/ng/test_render.py:101-162.",
+    "M1": "RESOLVED: trusted repair constraints now require verifying suspected behavior and callers first and preserving assertions, test inventory, coverage, and test semantics at src/ptest/render.py:177-187; tests/ng/test_render.py:109-116 asserts those instructions before untrusted evidence.",
+    "M2": "RESOLVED: tests/ng/test_doctor.py:173-222 covers valid Python shared_cache.clear_all() in a function, comment-only cache.clear() exclusion, and the documented Python string-literal lexical false-positive limit while retaining the JavaScript matrix. A leading identifier-boundary lookbehind at src/ptest/doctor.py:43-46 prevents suffix matching inside receivers over 256 characters, covered at tests/ng/test_doctor.py:158-170."
+  },
+  "acceptance_mapping": {
+    "task_1_cache_coverage": "MET: bounded clear receiver scan and one existing cache.global-flush catalog row at src/ptest/doctor.py:43-61; exact JavaScript positives/negatives, one-line de-duplication, receiver-bound evidence, and Python syntax-filter/lexical-limit evidence are at tests/ng/test_doctor.py:57-222.",
+    "task_1_unknown_timing_and_no_state": "MET: existing no-state regression rejects history and domain resolution at tests/ng/test_doctor.py:522-552; inspector timing remains explicitly unknown at src/ptest/doctor.py:42 and unmodified readiness construction.",
+    "task_2_trusted_context": "MET: exact scope/readiness/limits/usage projection at src/ptest/render.py:137-160; the fixed caveat, one-line context, complete interpretation semantics, and required prefix order are at :10-20 and :177-195, with exact/order/partial/duplicate regressions at tests/ng/test_render.py:101-207 and :230-250.",
+    "task_2_untrusted_records_and_cap": "MET: complete nine-field findings plus indexed readiness reasons at src/ptest/render.py:163-222; hostile delimiter/control, complete-record, prefix/guide bound, and purity regressions at tests/ng/test_render.py:101-275.",
+    "task_3_guide_workflow": "MET: scoped repair followed by one exact final full gate and timing bands/unknown declaration at src/ptest/resources/agent-guide.md:17-28, asserted at tests/ng/test_resources.py:15-24.",
+    "task_4_independent_gate": "STUBBED: this implementation evidence is ready for the required independent Claude Opus High audit; the orchestrator owns that audit and integration."
+  },
+  "security_contracts": {
+    "identity_tenancy": "MET: domain and normal state remain untouched; history/config failure sentinels prove the static path has no timing-history or domain-resolution read.",
+    "authorization_execution": "MET: static scanner and pure prompt tests reject execution, process, network, configuration, doctor scan, and history entrypoint calls.",
+    "input_exposure": "MET: hostile newline, CR, ESC, NUL, bidi and Unicode separators are ASCII-escaped data; evidence records cannot forge physical delimiters; no source or environment contents are admitted by the renderer.",
+    "availability": "MET: the 256-character receiver bound cannot restart inside a longer identifier and operates inside the existing 4096-character line cap; the complete prompt prefix, including caveat and scan semantics, is reserved with suffix and marker and fails invalid-bound if it cannot fit.",
+    "state": "MET: no history, repository, config, network, process, or cleanup side effect is introduced; no guide export or state write occurs.",
+    "result_truth": "MET: readiness remains unknown, guide calls timing unknown without validated history, and scan usage truncation is preserved independently from prompt evidence truncation.",
+    "dependencies": "MET: no dependency, lockfile, service, schema, configuration, native integration, or legacy path changed."
+  },
+  "security_gates": {
+    "behavioral_regressions": "RUN and PASS: the owned 143-test task suite includes hostile input/exposure, no-execution/no-state, bounded availability, prompt authority, and result-truth contracts.",
+    "secrets_scanning": "MISSING: no configured repository gate was found; not added because security infrastructure is outside this bounded repair.",
+    "static_analysis": "MISSING: no configured SAST/type/lint security gate was found; not added because dependencies and CI are outside scope.",
+    "dependency_scanning": "MISSING: no configured dependency-vulnerability gate was found; no dependency or lockfile changed.",
+    "property_fuzz": "MISSING: no configured property/fuzz gate was found; bounded adversarial fixtures remain covered by deterministic tests."
+  },
+  "smell_sweep": {
+    "bugs_dangerous_mistakes": "Checked bounded receiver, exact prompt budget, delimiter construction, empty/duplicate readiness and no-state sentinels. Pass-1 correction: the new evidence-record test initially attempted JSON decoding of the intentional blank separator line; it now filters that line at tests/ng/test_render.py:124-126.",
+    "duplicate_paths": "Checked cache/global-flush, flush, clear, repair_prompt, scan context and guide references. Existing cache.global-flush catalog row owns the behavior; no new code/schema was introduced.",
+    "wrong_layer": "Scanner retains lexical detection in doctor.py; prompt projection and escaping remain in render.py; detailed workflow remains the bundled guide.",
+    "workarounds_stubs_todos": "No TODO, fallback, compatibility shim, or new dependency added. Independent audit remains pending by workflow, not a runtime stub.",
+    "tests_non_vacuous": "Positive cache tests assert exact finding code/path/line/severity/confidence/evidence type; negative matrix asserts no finding; prompt tests decode context and records, force invalid-bound, and failure-sentinel entrypoints would fail if called.",
+    "contract_drift": "Checked all cache.global-flush producer/consumer references and repair_prompt CLI caller. Prompt evidence is private text, not a public document/schema; contracts.py finding codes and public schema were untouched.",
+    "new_helper": "Checked existing doctor rules and render projection helpers before adding. _cache_clear_call is the required bounded predicate extending the existing catalog row; _scan_context and _finding_record preserve the existing pure render boundary rather than duplicating CLI or doctor behavior.",
+    "money_math_units_timezones": "N/A: no money, rounding, timezone, or unit conversion behavior changed; timing bands are documentation-only guidance and timing remains unknown.",
+    "ux": "APPLIES and MET: invalid-bound avoids an ambiguous partial trusted prefix; guide/prompt use the same scoped-then-final workflow.",
+    "legacy": "N/A: no legacy code path or compatibility consumer is in scope or added.",
+    "dependencies": "N/A beyond inventory: no dependency was added or touched.",
+    "config_centralization": "N/A: no configuration changed; fixed prompt constraints and detailed bundled guidance retain their existing roles.",
+    "edge_paths": "MET: supported/near-match cache calls, bounded long receiver, empty/partial/reordered/duplicate readiness, null limits/usage, hostile/multibyte controls, oversized context/guide, repeated records, prompt truncation distinct from scan truncation, and missing guide are covered. Cancellation/reload are N/A because scanner/renderer are synchronous and stateless."
+  },
+  "deferred": [
+    "No validated per-test timing history is read or created; timing remains unknown.",
+    "Lexical cache detection has no type/import/alias/bracket-property/multiline parser; Python comment-only lines are syntax-filtered, but string literals and non-Python comments/strings may still produce review hypotheses.",
+    "No ptest --full run was performed; it is reserved for final integrated orchestration.",
+    "Claude Opus High final range audit is pending."
+  ],
+  "discovered_but_not_fixed": [
+    "ScanLimits and ScanUsage float validation is outside this slice; the new context deliberately copies typed values rather than reinterpreting them."
+  ],
+  "confidence": "high pending mandatory fresh Claude Opus High audit: the audit repair has meaningful RED/GREEN evidence, all 143 owned deterministic regressions are green, and remaining lexical/static and gate limitations are explicit."
+}

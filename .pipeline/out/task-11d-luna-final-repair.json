@@ -1,0 +1,94 @@
+{
+  "task": "11D final pytest executor-boundary repair",
+  "date": "2026-09-18",
+  "status": "repair-implemented-scoped-verification-passed-awaiting-independent-audit",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2",
+  "branch": "cx-ng-product-task-11d-luna2",
+  "base_commit": "e9f7d2b",
+  "source_commit": "pending",
+  "finding": {
+    "R1": "A nested pytest_collection_finish wrapper marked tryfirst and wrapper=True can be outer to the owned wrapper; its post-yield registration of pytest_runtestloop happened after collection-finish validation and could suppress the entire test loop.",
+    "R2": "A normal executor registered after an item call boundary, including a yield-fixture teardown or setup-skip logreport, could replace pytest_runtest_protocol for a later item. A final-item teardown could also register after the last boundary and leave a zero native exit looking complete.",
+    "control": "The bridge now validates before pytest_runtestloop yield, before every pytest_runtest_protocol yield, retains the pytest_runtest_call check, and validates the retained plugin manager after pytest.main returns before terminal_complete is set. Boundary checks are unconditional. Refusal returns 4 only when the observed native exit is zero; a genuine observed nonzero remains the bridge exit and report bridge_exit_code.",
+    "scope": "Ordinary persistent unowned pytest execution hooks in the basic_serial scoped bridge. This is not a hostile-code sandbox and does not claim to prevent arbitrary same-user project side effects before refusal."
+  },
+  "security_contracts": {
+    "identity": "No report identity, grant nonce, attempt, or public result schema changed; existing authenticated report consumption remains the source of terminal evidence.",
+    "authorization": "An ordinary unowned loop/protocol executor registered through collection-finish wrappers, fixture teardown, setup-skip reporting, or final teardown cannot certify a completed passing scoped run.",
+    "tenancy": "No remote tenant surface changed. Each real subprocess case uses its own fixture domain/checkout and proves release of its own lease.",
+    "input": "No parser or command construction changed. Regressions use literal native argv and generated conftest/plugin source to exercise real pluggy timing.",
+    "state": "Late executor registration yields authenticated incomplete/ptest-origin evidence, no completion/pass claim, no executor marker, consumed-report cleanup, and a RELEASED lease. Native assertion failure observed before final refusal remains nonzero.",
+    "exposure": "No new public fields or plugin identity details are exposed; the existing fixed native-config-invalid stderr marker and unsupported-capability reason remain in use.",
+    "availability": "Validation reuses bounded registered-hook inspection at the loop, protocol, call and terminal boundaries. The final five-file scope remains under the existing local controller timeout budget.",
+    "dependencies": "No dependency, lockfile, installer, runner table, remote service, or configuration change. Only the provisioned controller runtime and pytest hook API are exercised.",
+    "absent_from_original_spec": "The exact outer-wrapper, teardown, setup-skip and final-item registration timings were derived as executable negative cases for the existing unowned-executor contract."
+  },
+  "controller": {
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+    "executable": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap",
+    "environment": {
+      "PYTHONPATH": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/src"
+    },
+    "dispatcher": "/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest",
+    "dispatcher_sha256": "3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68",
+    "workers": 1,
+    "runtime": "Linux x86_64, CPython 3.13.11, pytest 9.1.1, pluggy 1.6.0; xdist absent",
+    "qualification": "Only the provisioned CPython 3.13.11 / pytest 9.1.1 tuple is qualified by these fresh runs.",
+    "unqualified": [
+      "pytest 8.4.2 pass/fail cases: no preprovisioned interpreter supplied",
+      "pytest 9.0.3 pass/fail cases: no preprovisioned interpreter supplied",
+      "pytest 9.1.0 pass/fail cases: no preprovisioned interpreter supplied",
+      "real installed xdist rejection: no preprovisioned xdist interpreter supplied",
+      "unsupported pytest runtime rejection: no preprovisioned interpreter supplied",
+      "other CPython versions, macOS, optional pytest-cov/coverage tuples, and independent-repository adoption"
+    ],
+    "network_or_install": false
+  },
+  "test_runs": [
+    {
+      "stage": "corrected real-subprocess RED against base e9f7d2b",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna-base/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_pytest_scoped_subprocess.py -k 'outer_collection_finish or yield_fixture_teardown or setup_skip_registration or last_item_teardown'",
+      "exit_code": 1,
+      "output": "5 failed, 51 deselected in 3.72s",
+      "observed": "The outer collection wrapper and both later-item timing cases returned passed; the final-item pass case returned passed and final-item native-fail remained failed rather than incomplete. All failures were real controller subprocesses, not mocks."
+    },
+    {
+      "stage": "focused GREEN after bridge repair",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_pytest_scoped_subprocess.py -k 'outer_collection_finish or yield_fixture_teardown or setup_skip_registration or last_item_teardown or real_per_item_setup'",
+      "exit_code": 0,
+      "output": "7 passed, 49 deselected in 5.20s",
+      "coverage": "Collection outer-wrapper, yield-fixture teardown, setup-skip/logreport, final-item teardown pass/fail, and existing setup registration cases."
+    },
+    {
+      "stage": "required Task 11D five-file scope",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_pytest_scoped_subprocess.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_pytest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_task_11d_pytest.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/tests/ng/test_reports.py --tb=short --durations=12",
+      "exit_code": 0,
+      "output": "355 passed, 8 skipped in 59.78s",
+      "durations": "Slowest 1.58s; no case exceeded 2s.",
+      "skips": "Eight explicit unqualified skips: six unavailable candidate-version pass/fail tuples, one unavailable xdist tuple, and one unavailable unsupported-runtime tuple."
+    }
+  ],
+  "checks": [
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "output": "AST-only refresh: 4501 nodes, 9875 edges, 299 communities; seven JSON/protocol fixture files produced zero-node warnings. No semantic provider or model call."
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "output": "clean"
+    }
+  ],
+  "gates": {
+    "run": "Focused real-subprocess RED/GREEN, required five-file Task 11D scope, graphify AST refresh, and whitespace validation through the mandated controller.",
+    "missing": "No checked-in secrets/static/dependency scanner applicable to this narrow bridge repair was identified; none was installed or added.",
+    "not_run": "No ptest --full, raw pytest, dependency installation, integration/cherry-pick, push, deploy, publication, installed-CLI replacement, macOS, or unprovisioned candidate runtime run."
+  },
+  "limitations": [
+    "Only CPython 3.13.11 / pytest 9.1.1 / pluggy 1.6.0 is qualified; all other candidate tuples remain explicitly unqualified skips.",
+    "Project conftest imports, collection, setup hooks, fixtures and test bodies may perform side effects before a refusal. The bridge prevents ordinary unowned execution hooks from certifying a false pass; it is not a sandbox against hostile same-user code.",
+    "Known execution-control names and unqualified critical wrappers remain fail-closed; compatibility was not broadened.",
+    "Full, automatic, setup orchestration, shadow, probe, source identity, native selection/inventory, history, baseline, worker parallelism, API and TUI remain outside this repair."
+  ]
+}

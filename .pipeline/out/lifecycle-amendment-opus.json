@@ -1,0 +1,13 @@
+{
+  "verdict": "approved_with_notes",
+  "reviewer": "Claude Opus High",
+  "scope": "authenticated DRAINING handoff and forced-SIGKILL lifecycle amendment",
+  "blocking": [],
+  "adopted_notes": [
+    "Task 11 success is gated on the matching in-band draining handoff; failed, missing, forced-kill, or unavailable outcome evidence is incomplete.",
+    "mark_draining authenticates the guard rather than requiring owner liveness.",
+    "Task 4 has a ptest/commit evidence step and exports mark_draining.",
+    "Scheduler feasibility research now defers to the design's three-second grace and abnormal forced-death branch."
+  ],
+  "raw_audit": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-ptest/021ecd95-73ec-4146-9fdd-c94e8929dddb.jsonl"
+}

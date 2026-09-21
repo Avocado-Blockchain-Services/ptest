@@ -1,0 +1,19 @@
+{
+  "task": "7",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-7-revive/3ee9c801-c1d9-4208-94e1-64a82c54cad1.jsonl",
+  "reviewed_range": "721a317..a082b1f",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_guard.py tests/ng/test_contracts.py tests/ng/test_scheduler.py --durations=15",
+    "result": "240 passed in 27.53s; 58 guard cases, zero skips",
+    "scope": "Linux fixture-domain guard/scheduler lifecycle evidence; Task 11 owns CLI/finalization/release and the final full suite."
+  },
+  "approved_repair": "T7-01 through T7-12 are covered by the repaired real-process lifecycle and fixture-domain scheduler matrix.",
+  "task11_notes": [
+    "Use typed runner facts, not guard exit status alone, to distinguish execution timeout from requested cancellation.",
+    "After guard reaping, independently prove group/observed-escape absence before finalization or release; a DRAINING frame is provisional.",
+    "Surface lingering cooperative same-group members and high-load group-scan uncertainty as charged/incomplete state; do not signal stored process groups."
+  ]
+}

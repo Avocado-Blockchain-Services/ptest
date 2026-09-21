@@ -1,0 +1,75 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "num_turns": 30,
+  "permission_denials": [],
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 1369,
+      "outputTokens": 15,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.001444,
+      "contextWindow": 200000,
+      "maxOutputTokens": 32000,
+      "thinkingTokens": 0,
+      "canonicalModel": "claude-haiku-4-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    },
+    "claude-opus-5": {
+      "inputTokens": 52,
+      "outputTokens": 37636,
+      "cacheReadInputTokens": 2715176,
+      "cacheCreationInputTokens": 167468,
+      "webSearchRequests": 0,
+      "costUSD": 3.9734279999999997,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "thinkingTokens": 28144,
+      "canonicalModel": "claude-opus-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "structured_output": {
+    "scope": "Focused repair-only re-review (read-only, Claude Opus, no delegation) of the NG design repair commit e1e4a2b: closure of NG-1..NG-9 from .pipeline/out/design-review-findings.json, orchestrator preflight P1/P2 from .pipeline/out/plan-preflight.md, and the actionable notes, as dispositioned in .pipeline/out/design-repair-astra.json and applied by .pipeline/out/design-repair.diff to docs/designs/2026-09-17-ptest-ng-design.md and docs/plans/2026-09-17-ptest-ng.md, judged against the approved product spec, .pipeline/context.md and AGENTS.md. Direct regressions of the changed contracts (typed interfaces, task ownership/dependencies, affected tests) were in scope; a second broad product/architecture audit was not.",
+    "coverage": "Checked: every hunk of the repair diff against the current committed documents; NG-1 state-root/legacy-tolerance text in §7 plus DomainPaths/history/key path derivation and quota text; NG-2 memory policy in §5/§7/§12 and the Grant/LeaseView/run-payload field additions and their consumers (T4/T7/T11/T14); NG-3 the six files.py primitives, storage.open_database, named default constants (DEFAULT_SCAN_LIMITS vs the ScanLimits record and §10 limits, queue/setup/attempt/compound constants) and the ControlFrame/LaunchManifest descriptors against T0/T7/T11 ownership; NG-4 register as the eighth kind (envelope enum, PublicDocument arity, RegisterPreview field/enum types, generated schema, T0/T11 tests); NG-5 the enumerated basic_serial tier against spec section 2 support promises and §8 pytest/Vitest flows, T5/T6/T11/T14 evidence; NG-6 installer grammar/manifest/bundle/offline contract vs T13 ownership and tests; NG-7 queue default 1800 s and the queue-wait/age reporting surfaces; NG-8 the 32-hex example and T1 length tests; NG-9 readiness-by-area assertion against the frozen Readiness enum and the added static-evidence-insufficient reason code; P1 explicit DomainPaths threading through every call site in both documents (no stale un-domained signature remains) and fixture/normal-state isolation tests; P2 prefix-only parsing against §4's mode rules and T11 negatives; all ten actionable notes; wave ordering, ownership disjointness and the A1-A14 matrix rows touched by the repair. NOT checked: no tests, linters, builds, installs or shell commands were executed (Bash is unavailable in this session and the task forbids it); unchanged subsystems (guard lifecycle, selection algorithm internals, probes, privacy/redaction, retention quotas) were not re-audited beyond changed-contract impact; third-party pins, adoption-repo facts (apispec pytest 9.1.1, tailwind-merge 3.1.4/Yarn 1.22.22), Vitest/pytest upstream API behaviour and Gitleaks issue 2170 comments could not be verified offline; macOS paths and filesystem/permission facts were not observed; the legacy dispatcher line references were accepted from the first review and root's independent stat/wc checks rather than re-derived; cx-ng-foundation was not inspected.",
+    "verdict": "approved_with_notes",
+    "blocking": [],
+    "notes": [
+      "NG-1 CLOSED. design §7:255 now freezes `<account>/.local/state/ptest/coordination/` and `<account>/Library/Application Support/ptest/coordination/`, creates only that child at 0700, permits account-owned 0755 shared parents, forbids chmod/reuse/quota-count/prune/reject of legacy `active/*.json` and legacy config.toml, validates machine.toml as a file (§6:195 states file validation does not require private ancestors), and fails visibly rather than silently repairing a wrong-mode NG child. Evidence is assigned (plan T2:151 simulated 0755 parents + 0644 legacy siblings with byte/mode survival, T13:398, A1 row). Existing legacy state remains untouched.",
+      "NG-2 CLOSED, honestly. design §7:259 keeps estimate 0 as truthfully unknown, removes the unconditional one-unknown-job serialization, and makes the whole-budget reservation an opt-in consequence of configuring `machine.memory_mb`, explicitly labelled a conservative reservation and not a measurement; `Grant`/`LeaseView`/run payload now separate memory_estimate_mb from reserved_memory_mb with null for unknown. The S2 benchmark obligation is now real (§12:378 and plan T14:427: 10 paired simultaneous pytest/Vitest trials for each of three policies, RSS reported separately from configured estimates), and plan T0/T4 fixtures now exercise the shipped unknown default instead of injected tiny estimates.",
+      "NG-3 CLOSED with a slightly larger surface than proposed: files.py exports read_regular/validate_private_dir/validate_private_file/ensure_private_dir/create_exclusive/publish_atomic and a new storage.open_database, all owned/tested by T0 (plan T0:89,91,107) and mandated for T1/T3/T4/T8/T11/T13; DEFAULT_SCAN_LIMITS and the other numeric defaults are named immutable constants whose values match the ScanLimits record fields and §10 limits; the guard ControlFrame/LaunchManifest framing is frozen with exact lengths, tags and nonce/run binding, removing the T7/T11 divergence risk.",
+      "NG-4 CLOSED. `register` is the eighth kind in the envelope enum and PublicDocument union, with an exact RegisterPreview payload, a fixed required_actions enum, no raw legacy command strings, a generated docs/schemas/v1/register.json and T0/T11 parse/drift tests.",
+      "NG-5 CLOSED by a defensible alternative rather than the suggested compatible-range policy, and the alternative is the safer one: §3:47-49 qualifies an *enumerated* basic_serial tier (pytest 8.4.2/9.0.3/9.1.0/9.1.1 without xdist; Vitest 3.1.4/3.2.6/3.2.7 with matching coverage-v8) that must pass its own positive/negative subprocess fixtures before being marked supported. No untested version is assumed bounded (\"enumerated versions only, not every patch between them\"; versions outside both tables return unsupported-capability before tests), nothing is silently disabled or upgraded, and degradation reserves exactly one non-exclusive slot rather than escalating to the generic wrapper. The command profile remains an explicit user-chosen exclusive escape hatch (§3 table, §8:303), not a first-class claim. The partial premise dispute about apispec already pinning pytest 9.1.1 is a documentation correction I could not verify offline; it is recorded as unverified in T14 either way.",
+      "NG-6 CLOSED. §12:368-372 freezes installer argv, a strict two-wheel hash/tag manifest, the final-path private venv layout, uv --no-index/--no-deps provisioning with UV_OFFLINE/UV_PYTHON_DOWNLOADS=never as the default, an explicit bounded hash-verified `--allow-network` psutil path, complete.json written last and atomic same-directory symlink cutover; T13:397-398 has the matching offline/absent-cache/wrong-hash/interruption/old-target tests. Live installation remains prohibited.",
+      "NG-7 CLOSED. Default queue deadline is 1800 s with a 1-86,400 s range and a recorded rationale; DEFAULT_QUEUE_TIMEOUT_S/MAX_QUEUE_TIMEOUT_S are frozen constants; status now reports requested/granted slots, age, queue wait and blocking reason, and T4:197 adds the fake-clock two-240 s-predecessor regression plus a still-75 short-deadline case.",
+      "NG-8 CLOSED. The §5 example is now a 32-character literal (cd58ec6cf99748ce9f15dfce137f044d) and T1:131 parses the exact example and rejects 31/33-character IDs with invalid-config.",
+      "NG-9 CLOSED. The vacuous `!= \"certified\"` assertion is replaced by area-keyed selection asserting state == \"unknown\" plus a `static-evidence-insufficient` reason (now in the frozen reason catalog); §10:329 freezes one entry per area, forbids index-based access, blocks scan-limit from upgrading readiness, and T11:453 adds the JSON/human non-certification rendering check.",
+      "P1 CLOSED. DomainPaths is an explicit first parameter on snapshot/read_history/publish_outcome/inspect/execute plus the new ensure_fingerprint_key, with CLI as the only caller of domain_paths; history/source/doctor may not import platform, read fixture env or fall back to the normal root; renderers are pure. I found no stale un-domained call site in either document. Key creation is confined to the execution phase after admission, so static paths create nothing, and the fixture-vs-normal isolation tests (T3/T8/T9/T11, A8 row) assert normal-state sentinels are untouched. Wave-1 independence of T3 from T2 is preserved via T0's case.domain factory.",
+      "P2 CLOSED. §4:76 freezes prefix-only execution parsing with the delimiter removed, no arity inference and no resumption inside the suffix; `ptest -k --workers`, `ptest -k --full`, `ptest tests/a.py --full` are literal runner tails, `ptest --workers 2 -k --full` consumes only the leading request, and `--full -- -k expr` is rejected by native full-gate validation. Runner argument values cannot become wrapper options, and T11:450 carries the negatives. This stays consistent with §4:78's mode rules (--changed still rejects runner arguments; a trailing runner `--full` cannot flip ptest mode).",
+      "Actionable notes: all ten are dispositioned in the documents — .gcloudignore added to the deletion inventory (§12:374, T13:381); T6 authorized to generate its own package-lock metadata with --ignore-scripts and no node_modules; T14 substantial adoption/benchmarks moved outside collected tests and outside any active ptest, resolving the nested-domain contradiction; the pytest project interpreter floor is frozen at CPython 3.11-3.14 with a stdlib-only pre-import probe returning unsupported-capability, and bridges load the generated protocol descriptor instead of importing ptest; doctor's cap is 8 s above a 5 s completed-work p95 target with truncated samples failing completion; T0 exclusively owns all three __init__.py files and package-data declarations with a T13 wheel-contents test; storage.py centralizes the duplicated SQLite opener; case.invoke now requires an explicit watchdog with phase-appropriate guidance; the Change constructor example is keyword-only; pin metadata and the Gitleaks 2170 characterization are corrected to 'inspected, not installed/audited' with a non-allowlisted synthetic positive.",
+      "Residual, non-blocking (most substantive): the repair specifies NG's behaviour for *existing* shared parents but not for absent ones. §7:255 says NG 'creates only its dedicated coordination child', and §6:195 gives create_exclusive 'Parents must already exist; no implicit arbitrary mkdir chain' while ensure_private_dir either creates one 0700 child or 'validates the existing private child'. On a machine that never ran legacy ptest, `~/.local/state/ptest` and `~/.config/ptest` do not exist, so first-create (T4, under bootstrap.lock) and machine.toml persistence need a create-if-absent-else-accept-account-owned-shared step that no single frozen primitive expresses; routing the intermediate through ensure_private_dir would reject a legacy 0755 parent and reproduce NG-1. §7's 'do not recursively validate as private' tells a careful implementer the right branch, so I did not treat this as a failure, but one sentence in §6 (ensure_private_dir's `parent` may be an account-owned shared directory that NG creates at 0700 when absent and otherwise accepts without private validation) would close it before T0 freezes files.py.",
+      "Residual: `Capability(execution: str, ...)` is still an unconstrained string, but the repair gives that field real semantics (basic_serial vs advanced) produced independently by T5, T6 and T10 and surfaced in the `where` payload. Since the generated schema cannot catch a free-string divergence, consider freezing the tier values in the contracts enum catalog. Functional gating is unaffected (T11 can key on Capability.selection and the absence of a published baseline).",
+      "Residual: spec A12 requires 'full baseline' in each adoption smoke, and the basic_serial tier publishes no baseline. T14:425-426 handles this honestly (basic adoption proves basic adoption only; advanced evidence needs a matching 3.2.7 repo or a disclosed derivative; otherwise A12 is unverified, never a silent upgrade), but the A12 traceability row at line 446 still reads as unqualified pytest+Vitest adoption and would be clearer if it named the tier/baseline condition.",
+      "Minor, worth recording rather than fixing: config `memory_mb_per_worker = 0` ('0 means unknown') maps to `AdmissionRequest.memory_mb: int|None`, and the 0-to-None translation point is not stated, so T1/T4/T11 could disagree on which value means unknown; plan T2:151 asks T2 to assert 'NG's dedicated coordination child works at 0700' although §6 makes platform read-only and first-create belongs to T4/T11, so that step reads wider than T2's ownership; and §10's 64 KiB prompt bound is a numeric default that is neither a ScanLimits field nor a named constant in the §6 list.",
+      "Confirmation of the stated constraints: unknown memory stays unknown and unfabricated; no untested runner version is assumed bounded; generic-wrapper exclusivity remains an escape hatch; legacy state is explicitly never chmodded, pruned, quota-counted or rejected; fixture-domain history/keys/timings cannot reach normal state; runner argument values cannot be reinterpreted as ptest options. No tests, installs, scans, shell commands or external writes were performed in this review."
+    ],
+    "reviewed_files": [
+      "AGENTS.md",
+      ".pipeline/context.md",
+      ".pipeline/out/design-review-findings.json",
+      ".pipeline/out/plan-preflight.md",
+      ".pipeline/out/design-repair-astra.json",
+      ".pipeline/out/design-repair.diff",
+      "docs/designs/2026-09-17-ptest-ng-design.md",
+      "docs/plans/2026-09-17-ptest-ng.md",
+      "docs/specs/2026-09-17-ptest-ng-product.md (sections 2-3 support promises/P1-P4, S1-S4, A12)",
+      "docs/research/2026-09-17-scheduler-feasibility.md (domain/storage table only)",
+      "/home/ingmar/.agents/skills/audit-spec/SKILL.md"
+    ]
+  }
+}

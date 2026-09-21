@@ -1,0 +1,12 @@
+{
+  "verdict": "approved_with_notes",
+  "reviewer": "Claude Opus High",
+  "scope": "Task 4 authenticated DRAINING handoff repair",
+  "blocking": [],
+  "resolved": "Stored-guard CAS predicate tests are now independently decisive for another live process, true PID reuse, each stored identity column, and actual repeated calls.",
+  "notes": [
+    "Ignored scheduler fixture __pycache__ is harmless but not source evidence.",
+    "Mutation probe is retained as report evidence rather than a runnable file."
+  ],
+  "raw_audit": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-4-drain/b1fe7528-cce3-442f-9cc9-39460f36b3ad.jsonl"
+}

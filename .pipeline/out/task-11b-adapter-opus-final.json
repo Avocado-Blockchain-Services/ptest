@@ -1,0 +1,18 @@
+{
+  "task": "11B-command-adapter-seam",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-adapter/1cd54f13-e909-49e0-a017-1c9db2e3459b.jsonl",
+  "reviewed_range": "b627e05..f47dba5",
+  "approved_source": "0debf96",
+  "verification": {
+    "worker_note": "Fresh worktree bootstrap environment was unavailable; no raw runner was used.",
+    "controller_follow_up": "Run scripts/ptest-bootstrap tests/ng/test_simple_adapters.py after integration."
+  },
+  "notes": [
+    "Operations must reserve exclusivity before admission and force automatic command mode to full.",
+    "Operations must not construct execution=full with Mode.SCOPED.",
+    "Launch qualification, streams, exit/signal fidelity and identity injection remain Task 11B lifecycle work."
+  ]
+}

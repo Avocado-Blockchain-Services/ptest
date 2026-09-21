@@ -1,0 +1,1096 @@
+diff --git a/.pipeline/out/task-0.json b/.pipeline/out/task-0.json
+index 1a0402a..3cd08c7 100644
+--- a/.pipeline/out/task-0.json
++++ b/.pipeline/out/task-0.json
+@@ -271,11 +271,10 @@
+     "pass3_smells": "Single definitions verified by search; no duplicate sqlite3.connect outside storage.py; support.py imports only contracts+files (no T2 platform); no TODO/stubs; 2 additive codes (already-exists, invalid-bound) documented in REASON_CODES; CORRECTION to the prior claim: private protocol decoders DID interpolate constructor text into Problem.message (Opus T0-6) — now fixed to five constant messages, verified by sentinel tests; files.py messages carry only caller-supplied names/paths, never exception text or argv. Empty/error/repeat paths covered by tests; no new dependencies; no shims."
+   },
+   "contract_notes": [
+-    "encode_public_document validates kind/shape/exclusivity only; decode validates payloads strictly (producer-liberal, consumer-strict split)",
++    "encode_public_document validates then projects through the shared payload validators/projectors (first emitted bytes already allowlisted, additive unknowns including argv/env-like keys dropped); decode validates strictly and projects; private frame/manifest codecs reject unknown fields at every level",
+     "Two additive machine codes beyond the design catalog: already-exists, invalid-bound",
+     "AttemptIdentity attempt_id pattern a001-a010 enforced; resource_prefix max 54 ASCII"
+   ],
+-  "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries"],
+   "implemented": ["bootstrap wrapper + frozen-hash gate", "uv.lock + project env", "7 files.py primitives", "storage.open_database", "all contracts records/enums/codecs/descriptors", "fixture helpers (CaseFactory/invoke/barrier/events)", "export-schemas.py + 9 generated JSON artifacts", "49-test RED/GREEN suite", ".gitignore local entries", "repair round 1: T0-1 structural names, T0-2 success-path FD close, T0-3 result.mode, T0-4 frozen subrecord authority + regenerated schemas, T0-5 RecursionError mapping + iterative nesting, T0-6 fixed decoder messages, T0-7 project-root default export; frame value validation, limitations typing, storage cleanup + URI escaping, errno mapping, egg-info/graph gitignore"],
+   "verified": ["49 passed exit 0 in 0.06s via frozen bootstrap (initial)", "68 passed exit 0 in 0.14s via frozen bootstrap (repair round 1)", "schema --check exit 0 (initial and post-regeneration)", "3 sabotage-sensitivity probes (initial; raw logs unretained, see correction)", "--full refusal exit 2", "hash-tamper refusal exit 1 (raw log unretained, see correction)", "where local/1-worker provenance", "scratch RED probes 5 failed/1 passed pre-fix then 6 passed post-fix", "graphify AST update exit 0 (initial and repair)", "diff --check clean"],
+   "not_verified": ["macOS fullfsync branch (linux host)", "foreign-uid branches (single-user env)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "real T11 CLI integration (invoke exercised against a test-only miniature target only; python -m ptest still exits 1 without __main__)", "requested model identity (root checks independently)"],
+@@ -345,20 +344,128 @@
+       "effective_limits": "MET: nullable fields, bounds, paired slot/job unknowns, max_jobs<=max_slots; shared by where/status validators and schemas",
+       "history_reuse": "MET: summaries validated by _validate_run_payload, schema items are the run payload, fixtures serialize via serialize_run_result; internal fields absent; empty history is an empty array",
+       "projection": "MET: all 8 kinds plus domain/error project to known fields; additive unknowns dropped never re-emitted; bad known values still rejected; private protocols untouched",
++      "projection_boundary": "MET (boundary round): producer first bytes already allowlisted for all 8 kinds plus domain (validate+project inside encode_public_document, no divergent serializer family); consumer tests rebuilt on hostile test-side json.dumps envelopes; argv/env-like additive fields dropped by projection on both sides per the author ruling; private frame/manifest/domain/grant/prepared-run/nested authority records reject unknown keys",
+       "schema_drift": "MET: export --check exit 0; protocol-v1.json byte-identical (private surface unchanged)"
+     },
+     "dan_passes": {
+       "pass1_reread": "Re-read the full contracts diff twice. Observations: _INIT_ACTIONS comment claimed validator proximity it did not have (comment removed, one-liner kept); a probe patch briefly added a bogus run-schema field and was reverted immediately (verified gone); a builder insert duplicated the run body and the stub was deleted (verified gone). No other findings.",
+       "pass2_reanchor": "All 5 addendum contracts MET with file evidence above; prior T0-1..T0-7 behaviors preserved (scoped suite green incl. sibling-owned files/storage tests run read-only). No scope expansion: no scheduler/runner/config/platform/CLI code, no new dependencies, no private-codec changes.",
+-      "pass3_smells": "No TODOs/stubs; new names have no synonyms in the tree (InitAction/ConfigSummary/EffectiveLimits/summarize_config/select_init_action/serialize_init_result/_PROJECTORS are the only owners); validators run before projectors so KeyError paths are unreachable on accepted shapes; None-passthrough preserved for capability/counts/timings/config; argv/env in run.command still rejected (stronger than ignore, consistent with never-trusted); happy/empty/error paths covered, cancellation/repeat N/A for pure codecs (no I/O added)."
++      "pass3_smells": "No TODOs/stubs; new names have no synonyms in the tree (InitAction/ConfigSummary/EffectiveLimits/summarize_config/select_init_action/serialize_init_result/_PROJECTORS are the only owners); validators run before projectors so KeyError paths are unreachable on accepted shapes; None-passthrough preserved for capability/counts/timings/config; argv/env in run.command still rejected (stronger than ignore, consistent with never-trusted); happy/empty/error paths covered, cancellation/repeat N/A for pure codecs (no I/O added). SUPERSEDED by the boundary round: the argv/env special rejection is removed and argv/env-like additive fields are dropped by projection per the author ruling; private strictness is now enforced, not merely untouched."
+     },
+     "implemented": ["InitAction + select_init_action + InitResult relations + serialize_init_result", "ConfigSummary + summarize_config + converter/validator/schema", "EffectiveLimits + converter/validator/schema shared by where/status", "history RunResult payload reuse (validator + schema + serializer fixtures)", "recursive public projection in decode + additive schema properties", "10 addendum regression tests + production-serializer fixtures + empty-history edge"],
+     "verified": ["78 passed exit 0 scoped via frozen bootstrap", "schema --check exit 0", "RED exit 1 with 2 behavioral + 1 shape + 9 missing-symbol failures", "3 sabotage mutations each detected then restored", "graphify AST exit 0", "diff --check clean"],
+     "not_verified": ["macOS branches (linux host)", "consumption by T1/T3/T4/T11 (later waves build on these records)", "requested model identity (root checks independently)"],
+     "deferred": [],
+-    "discovered_not_fixed": ["run.command carrying literal argv/env keys is still a hard rejection rather than a drop; kept deliberately as the stronger never-trusted posture, consistent with the existing redaction contract"],
++    "discovered_not_fixed": [],
+     "failed_attempts_retained": ["probe patch added a bogus run-schema 'note' field to test mechanics; reverted immediately in the next command and verified absent via grep", "builder insert duplicated the _run_data_schema body as _run_payload_schema stub; stub deleted, verified absent; final diff contains each builder once", "one validator patch failed on a mistranscribed context line (findings placement); retried with minimal anchor, no source touched by the failure"],
+     "confidence": "high for the addendum surface: every frozen behavior is implemented, red-then-green with sabotage sensitivity, and the full owned-plus-sibling scoped suite is green",
+     "owned_files_committed": ["src/ptest/contracts.py", "tests/ng/test_contracts.py", "docs/schemas/v1/doctor.json", "docs/schemas/v1/history.json", "docs/schemas/v1/init.json", "docs/schemas/v1/run.json", "docs/schemas/v1/status.json", "docs/schemas/v1/where.json", ".pipeline/out/task-0.json"]
++  },
++  "boundary_round": {
++    "base": "dbac887",
++    "review": ".pipeline/local/public-review-1.json",
++    "verdict_in": "rejected with T0-8/HIGH producer privacy, T0-9/HIGH known-field validation holes, T0-10/MEDIUM unhashable enum crashes, T0-11/MEDIUM private unknown fields accepted; T0-1..T0-6 confirmed fixed",
++    "scope": "Opus public-boundary correction on the task-0 worktree. Owns only src/ptest/contracts.py, tests/ng/test_contracts.py and .pipeline/out/task-0.json (generated schemas/protocol descriptor untouched: no descriptor changed). No shared-file edits, no merge/integration, no production CLI stub. T0-1..T0-6 repairs preserved.",
++    "dispositions": [
++      {
++        "id": "T0-8",
++        "status": "implemented+verified",
++        "change": "src/ptest/contracts.py encode_public_document now runs success payloads through _PAYLOAD_VALIDATORS then _PROJECTORS and domains through the shared _validate_domain, so first emitted bytes carry exactly the descriptor field set; no divergent serializer family. Invalid content raises Problem.",
++        "tests": "tests/ng/test_contracts.py: test_public_producer_emits_allowlisted_fields_first_encode (exact key sets per kind + nested + domain + non-mutation + bad-domain Problem); test_public_decode_drops_additive_unknowns rebuilt on hostile test-side json.dumps envelopes with run.command argv/env drop assertions"
++      },
++      {
++        "id": "T0-9",
++        "status": "implemented+verified",
++        "change": "src/ptest/contracts.py: run_id/project_id/checkout_id now hex32-checked on decode; granted_workers 1-64 and memory_estimate_mb/reserved_memory_mb >= 0 enforced; artifact_id required str-or-null nonempty; where.provenance and doctor.scope string-list checked; register legacy_alias_count >= 0. Full known-field catalog re-audited: all other validators already match record+schema bounds (counts/timings lo=0, lease slots, finding line, obligation digest, effective limits).",
++        "tests": "tests/ng/test_contracts.py: test_known_string_list_fields_reject_nested_objects (provenance/scope/artifact_id object injection, non-hex run_id direct + via history.summaries, bound negatives, valid positive control)"
++      },
++      {
++        "id": "T0-10",
++        "status": "implemented+verified",
++        "change": "src/ptest/contracts.py: new _is_known str-guard used at all 13 frozenset decode sites (command kind/mode, capability tier, attempt phase/status, readiness area/state, finding code, lease state, config runner_kind, init action, register proposed_runner/required_actions, control frame kind, ControlFrame record). No broad catch added.",
++        "tests": "tests/ng/test_contracts.py: test_closed_enums_reject_malformed_values (23 payload paths x dict/list/bool/null/int/bogus) + test_control_frame_kind_rejects_malformed_values"
++      },
++      {
++        "id": "T0-11",
++        "status": "implemented+verified",
++        "change": "src/ptest/contracts.py: decode_control_frame rejects unknown top-level keys; _require_frame_keys rejects unknown per-kind payload keys, guard keys and runner-facts problem keys (parent-closing empty check subsumed); manifest/domain/grant/prepared-run/capability/limitation/summary/top-level unknown keys rejected with fixed protocol-mismatch messages. Version/length/nonce bounds, requiredness and defaults unchanged.",
++        "tests": "tests/ng/test_contracts.py: test_private_frame_rejects_unknown_fields (top + all 6 kinds + guard + problem extras, valid positives) + test_private_manifest_rejects_unknown_fields (6 levels)"
++      }
++    ],
++    "related_notes_closed": [
++      "run.command argv/env special rejection removed; argv/env-like additive unknowns dropped by projection on producer and consumer per the author ruling; drops test extended with argv/env assertions",
++      "decoder messages fixed: _check_closed value echo, register action echo, document kind echo, schema version echo, reason key echo, control kind echo; test_decoder_messages_never_echo_input sentinel negatives incl. rendered error document",
++      "duplicate implemented key deduplicated into one merged list; producer-liberal/private-strict overclaims corrected in contract_notes, acceptance and dan_passes"
++    ],
++    "evidence": [
++      {
++        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k '<7 new boundary tests>'",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 1,
++        "output": "6 failed + 1 failed in 0.31s/0.09s: first-encode sentinel leak bytes, 3x DID NOT RAISE, 2x TypeError unhashable, 1x sentinel echo; all behavioral, no import errors",
++        "raw": ".pipeline/local/red-boundary.log + .pipeline/local/red-boundary.exit + .pipeline/local/red-boundary-kind.log + .pipeline/local/red-boundary-kind.exit"
++      },
++      {
++        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 0,
++        "output": "47 passed in 0.16s",
++        "raw": ".pipeline/local/green-boundary.log + .pipeline/local/green-boundary.exit"
++      },
++      {
++        "command": "sabotage probes via apply_patch then immediate restore",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 1,
++        "output": "sabotage-boundary1 (projection bypassed with dict copy): producer test fails; sabotage-boundary2 (granted_workers lo relaxed 1->0): known-field test fails; both restored, suite green after",
++        "raw": ".pipeline/local/sabotage-boundary1.log + .pipeline/local/sabotage-boundary2.log (+ .exit files)"
++      },
++      {
++        "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_files.py tests/ng/test_storage.py",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 0,
++        "output": "85 passed in 0.18s; test_files/test_storage run read-only as sibling-owned verification",
++        "raw": ".pipeline/local/green-boundary-full.log + .pipeline/local/green-boundary-full.exit"
++      },
++      {
++        "command": "uv run --locked --no-sync python scripts/export-schemas.py && uv run --locked --no-sync python scripts/export-schemas.py --check",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 0,
++        "output": "no descriptor changed: regeneration byte-identical, --check clean, no schema files touched",
++        "raw": ".pipeline/local/schema-export-boundary.log + .pipeline/local/schema-check-boundary.log + .pipeline/local/schema-check-boundary.exit"
++      },
++      {
++        "command": "graphify update .",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 0,
++        "output": "AST-only update, no semantic extraction (no API key configured)",
++        "raw": ".pipeline/local/graphify-update-boundary.log + .pipeline/local/graphify-update-boundary.exit"
++      },
++      {
++        "command": "git diff --check",
++        "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-0",
++        "exit": 0,
++        "output": "clean"
++      }
++    ],
++    "acceptance": {
++      "T0-8": "MET: first-encode bytes pinned to exact descriptor key sets for all 8 kinds + nested + domain; caller payloads never mutated; bad payload content raises Problem",
++      "T0-9": "MET: provenance/scope/artifact_id, hex32 ids, worker/memory bounds, alias bound enforced to typed Problems; known-field catalog audited, no other drift",
++      "T0-10": "MET: every frozenset decode site maps unhashable input to typed Problems; scalar negatives pinned",
++      "T0-11": "MET: frame top/per-kind/guard/problem, manifest top/domain/grant/prepared/capability/limitation/summary unknown keys rejected; bounds and defaults kept",
++      "T0-1..T0-6": "PRESERVED: full scoped suite green incl. sibling-owned files/storage tests run read-only; no schema drift"
++    },
++    "dan_passes": {
++      "pass1_reread": "Re-read the full contracts diff. Observations: one patch hunk duplicated the register proposed_runner condition (stale line removed, syntax verified); the parent-closing empty-payload special case is subsumed by the unknown-field check (equivalent ValueError, kept test green); _check_int_field calls after _need_int are redundant-but-harmless authority reuse; _is_known/_validate_domain are used before their definition lines (runtime resolution, suite proves it).",
++      "pass2_reanchor": "Plan T0 checkboxes for allowlisted serialization and same-major drop/private-reject are now MET with file:line evidence above; design line 248 producer/consumer/private-asymmetry contracts all enforced; no scope expansion (no scheduler/runner/config/platform/CLI, no dependencies, no descriptor changes).",
++      "pass3_smells": "No TODOs/stubs; _is_known/_validate_domain are the only new names with no synonyms; sweep shows no remaining frozenset decode site unguarded and no decoder Problem echoes caller data (remaining interpolations are code constants, validated kinds or programmer-API ValueErrors); validators run before projectors; happy/empty/error/repeat paths covered (re-encode idempotent); history summary count unboundedness is pre-existing T3/T11 scope, unchanged."
++    },
++    "implemented": ["first-encode validate+project for data and domain", "hex32 run identifiers + worker/memory/alias bounds + str-list provenance/scope + str/null artifact_id", "_is_known unhashable-safe enum guards at 13 decode sites", "private frame/manifest unknown-key rejection at every level", "fixed decoder messages + sentinel no-echo tests", "consumer tests on hostile test-side JSON; argv/env special rejection removed", "report dedupe + overclaim corrections"],
++    "verified": ["85 passed exit 0 scoped via frozen bootstrap (47 contracts + 28 files + 10 storage)", "schema regen byte-identical + --check exit 0", "RED exit 1 with 7 behavioral failures, no import errors", "2 sabotage mutations each detected then restored", "graphify AST exit 0", "diff --check clean"],
++    "not_verified": ["macOS branches (linux host)", "consumption by T1/T3/T4/T8/T11/T13 (later waves)", "requested model identity and independent re-review (root owns)"],
++    "deferred": [],
++    "discovered_not_fixed": [],
++    "failed_attempts_retained": ["one register patch hunk duplicated the proposed_runner condition line; stale line removed immediately and syntax verified via ast.parse", "one report patch used a trailing comma mismatching the final dan_passes line; retried against the exact line ending"],
++    "confidence": "high for the boundary surface: RED-then-GREEN with sabotage sensitivity, full scoped suite green, no schema drift; cross-task consumption still later-wave scope",
++    "owned_files_committed": ["src/ptest/contracts.py", "tests/ng/test_contracts.py", ".pipeline/out/task-0.json"]
+   }
+ }
+diff --git a/src/ptest/contracts.py b/src/ptest/contracts.py
+index 38c5d6e..560df13 100644
+--- a/src/ptest/contracts.py
++++ b/src/ptest/contracts.py
+@@ -1758,8 +1758,8 @@ class ControlFrame:
+             raise ValueError("control.protocol must be 1")
+         _check_hex("control.run_id", self.run_id, 32)
+         _check_hex("control.nonce", self.nonce, 64)
+-        if self.kind not in CONTROL_KINDS:
+-            raise ValueError(f"control.kind {self.kind!r} is not a guard kind")
++        if not _is_known(self.kind, CONTROL_KINDS):
++            raise ValueError("control.kind is not a guard kind")
+         if not isinstance(self.payload, dict):
+             raise TypeError("control.payload must be a dict")
+         _require_frame_keys(self.kind, self.payload)
+@@ -1779,10 +1779,12 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
+     for key in required:
+         if key not in payload:
+             raise ValueError(f"control frame {kind!r} requires {key!r}")
++    for key in payload:
++        if key not in required:
++            raise ValueError(
++                f"control frame {kind!r} carries an unknown field")
+     if kind == "cancel" and payload["signal"] not in (2, 15):
+         raise ValueError("cancel signal must be 2 or 15")
+-    if kind == "parent-closing" and payload != {}:
+-        raise ValueError("parent-closing payload must be empty")
+     if kind == "registered":
+         guard = payload["guard"]
+         if not isinstance(guard, dict):
+@@ -1790,6 +1792,10 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
+         for key in ("pid", "birth", "uid", "pgid"):
+             if key not in guard:
+                 raise ValueError(f"registered guard requires {key!r}")
++        for key in guard:
++            if key not in ("pid", "birth", "uid", "pgid"):
++                raise ValueError(
++                    "registered guard carries an unknown field")
+         _check_int("registered.guard.pid", guard["pid"], lo=1)
+         _check_float("registered.guard.birth", guard["birth"], lo=0)
+         _check_int("registered.guard.uid", guard["uid"], lo=0)
+@@ -1815,6 +1821,11 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
+         if payload["problem"] is not None and not isinstance(
+                 payload["problem"], dict):
+             raise TypeError("runner-facts problem must be an object or null")
++        if isinstance(payload["problem"], dict):
++            for key in payload["problem"]:
++                if key not in ("code", "message", "phase", "retryable"):
++                    raise ValueError(
++                        "runner-facts problem carries an unknown field")
+     if kind == "draining" and payload["provisional_artifact_id"] is not None:
+         if not isinstance(payload["provisional_artifact_id"], str):
+             raise TypeError(
+@@ -1889,17 +1900,25 @@ class PublicDocument:
+ def encode_public_document(kind: str, data: dict | None, *,
+                            error: Problem | None = None,
+                            domain: dict | None = None) -> bytes:
+-    """Serialize one public JSON document with explicit allowlisted fields."""
++    """Serialize one public JSON document with explicit allowlisted fields.
++
++    Success payloads run through the same validate-then-project authority
++    the consumer uses, so the first emitted bytes already carry exactly the
++    descriptor field set; additive unknowns (including argv/env-like keys)
++    are dropped, never published. Invalid payload content raises Problem.
++    """
+     if kind not in PUBLIC_KINDS:
+         raise ValueError(f"unknown public kind {kind!r}")
+     if error is not None and not isinstance(error, Problem):
+         raise TypeError("error must be Problem or None")
+     if error is not None and data is not None:
+         raise ValueError("error documents carry a null payload")
+-    if error is None and not isinstance(data, dict):
+-        raise TypeError("data must be a dict for success documents")
+-    if domain is not None and not isinstance(domain, dict):
+-        raise TypeError("domain must be a dict or None")
++    domain = _validate_domain(domain)
++    if error is None:
++        if not isinstance(data, dict):
++            raise TypeError("data must be a dict for success documents")
++        _PAYLOAD_VALIDATORS[kind](data)
++        data = _PROJECTORS[kind](data)
+     envelope = {
+         "schema_version": SCHEMA_VERSION,
+         "kind": kind,
+@@ -1969,7 +1988,8 @@ def _check_reason_dict(item: object) -> None:
+             raise _invalid("report-invalid", f"reason is missing {key!r}")
+     for key in item:
+         if key not in ("code", "message", "paths"):
+-            raise _invalid("report-invalid", f"reason carries unknown field {key!r}")
++            raise _invalid("report-invalid",
++                           "reason carries an unknown field")
+     if not isinstance(item["code"], str) or not item["code"]:
+         raise _invalid("report-invalid", "reason.code must be a nonempty string")
+     if item["code"] not in REASON_CODES:
+@@ -2044,11 +2064,18 @@ _COMMAND_FIELDS = frozenset({
+ })
+ 
+ 
++def _is_known(value: object, allowed: frozenset) -> bool:
++    """Closed-enum membership that maps unhashable input to unknown."""
++    return isinstance(value, str) and value in allowed
++
++
+ def _check_command_dict(item: object, ctx: str = "run.command") -> None:
+     _check_required_keys(item, _COMMAND_FIELDS, ctx)
+-    if item["kind"] not in frozenset(entry.value for entry in RunnerKind):
++    if not _is_known(item["kind"],
++                     frozenset(entry.value for entry in RunnerKind)):
+         raise _invalid("report-invalid", f"{ctx} has an unknown kind")
+-    if item["mode"] not in frozenset(entry.value for entry in Mode):
++    if not _is_known(item["mode"],
++                     frozenset(entry.value for entry in Mode)):
+         raise _invalid("report-invalid", f"{ctx} has an unknown mode")
+     _check_int_field(item, "argument_count", ctx, lo=0)
+     _check_str_list(item["generated_options"], f"{ctx}.generated_options")
+@@ -2065,7 +2092,8 @@ def _check_capability_dict(value: object) -> None:
+     if value is None:
+         return
+     _check_required_keys(value, _CAPABILITY_FIELDS, "where.capability")
+-    if value["execution"] not in frozenset(entry.value for entry in ExecutionTier):
++    if not _is_known(value["execution"],
++                     frozenset(entry.value for entry in ExecutionTier)):
+         raise _invalid("report-invalid", "where.capability has an unknown tier")
+     if not isinstance(value["selection"], bool):
+         raise _invalid("report-invalid", "where.capability.selection must be boolean")
+@@ -2115,9 +2143,10 @@ def _check_attempt_dict(item: object) -> None:
+     _check_str_list([item["attempt_id"]], "run.attempts entry.attempt_id")
+     if not ATTEMPT_ID_PATTERN.fullmatch(item["attempt_id"]):
+         raise _invalid("report-invalid", "run.attempts entry has a bad attempt_id")
+-    if item["phase"] not in RUN_PHASES:
++    if not _is_known(item["phase"], RUN_PHASES):
+         raise _invalid("report-invalid", "run.attempts entry has an unknown phase")
+-    if item["status"] not in frozenset(entry.value for entry in Status):
++    if not _is_known(item["status"],
++                     frozenset(entry.value for entry in Status)):
+         raise _invalid("report-invalid", "run.attempts entry has an unknown status")
+     _check_int_field(item, "raw_exit_code", "run.attempts entry", allow_none=True)
+     _check_int_field(item, "final_exit_code", "run.attempts entry", allow_none=True)
+@@ -2136,9 +2165,9 @@ _READINESS_FIELDS = frozenset({"area", "state", "reasons"})
+ 
+ def _check_readiness_dict(item: object) -> None:
+     _check_required_keys(item, _READINESS_FIELDS, "doctor.readiness entry")
+-    if item["area"] not in READINESS_AREAS:
++    if not _is_known(item["area"], READINESS_AREAS):
+         raise _invalid("report-invalid", "doctor.readiness entry has an unknown area")
+-    if item["state"] not in READINESS_STATES:
++    if not _is_known(item["state"], READINESS_STATES):
+         raise _invalid("report-invalid", "doctor.readiness entry has an unknown state")
+     if not isinstance(item["reasons"], list):
+         raise _invalid("report-invalid", "doctor.readiness entry reasons must be a list")
+@@ -2154,7 +2183,7 @@ _FINDING_FIELDS = frozenset({
+ 
+ def _check_finding_dict(item: object) -> None:
+     _check_required_keys(item, _FINDING_FIELDS, "doctor.findings entry")
+-    if item["code"] not in FINDING_CODES:
++    if not _is_known(item["code"], FINDING_CODES):
+         raise _invalid("report-invalid", "doctor.findings entry has an unknown code")
+     if item["severity"] not in ("low", "medium", "high"):
+         raise _invalid("report-invalid", "doctor.findings entry has a bad severity")
+@@ -2181,7 +2210,8 @@ def _check_lease_dict(item: object, ctx: str) -> None:
+     _check_required_keys(item, _LEASE_FIELDS, ctx)
+     _check_hex_field(item, "run_id", ctx, 32)
+     _check_hex_field(item, "checkout_id", ctx, 32)
+-    if item["state"] not in frozenset(entry.value for entry in LeaseState):
++    if not _is_known(item["state"],
++                     frozenset(entry.value for entry in LeaseState)):
+         raise _invalid("report-invalid", f"{ctx} has an unknown state")
+     _check_int_field(item, "sequence", ctx, lo=0)
+     _check_int_field(item, "requested_slots", ctx, lo=1, hi=64)
+@@ -2265,8 +2295,8 @@ def _check_config_summary_dict(value: object, ctx: str) -> None:
+         return
+     _check_required_keys(value, _CONFIG_SUMMARY_FIELDS, ctx)
+     _check_hex_field(value, "project_id", ctx, 32)
+-    if value["runner_kind"] not in frozenset(
+-            item.value for item in RunnerKind):
++    if not _is_known(value["runner_kind"],
++                     frozenset(item.value for item in RunnerKind)):
+         raise _invalid("report-invalid", f"{ctx} has an unknown runner_kind")
+     _check_int_field(value, "workers", ctx, lo=1, hi=64)
+     commands = value["commands"]
+@@ -2318,14 +2348,16 @@ def _check_closed(data: dict, name: str, allowed: frozenset,
+     if value is None:
+         return None
+     if value not in allowed:
+-        raise _invalid("report-invalid", f"field {name!r} has unknown value {value!r}")
++        raise _invalid("report-invalid",
++                       f"field {name!r} has an unknown value")
+     return value
+ 
+ 
+ def _validate_run_payload(data: dict) -> None:
+-    for name in (
+-        "run_id", "project_id", "checkout_id", "started_at", "finished_at",
+-    ):
++    for name in ("run_id", "project_id", "checkout_id"):
++        _need_str(data, name)
++        _check_hex_field(data, name, "run", 32)
++    for name in ("started_at", "finished_at"):
+         _need_str(data, name)
+     _check_closed(data, "mode", frozenset(item.value for item in Mode))
+     _check_closed(data, "status", frozenset(item.value for item in Status))
+@@ -2336,19 +2368,23 @@ def _validate_run_payload(data: dict) -> None:
+     if "command" not in data or not isinstance(data["command"], dict):
+         raise _invalid("report-invalid", "run.command must be an object")
+     _check_command_dict(data["command"])
+-    command = data["command"]
+-    if "argv" in command or "env" in command:
+-        raise _invalid("report-invalid", "run.command must not carry argv or env")
+     _need_int(data, "exit_code")
+     _check_closed(data, "exit_origin", EXIT_ORIGINS)
+     for name in ("granted_workers", "memory_estimate_mb", "reserved_memory_mb",
+                  "runner_exit_code", "signal"):
+         _need_int(data, name, allow_none=True)
++    _check_int_field(data, "granted_workers", "run", allow_none=True,
++                     lo=1, hi=64)
++    _check_int_field(data, "memory_estimate_mb", "run", allow_none=True,
++                     lo=0)
++    _check_int_field(data, "reserved_memory_mb", "run", allow_none=True,
++                     lo=0)
+     for name in ("source_valid", "full_gate_eligible", "baseline_published"):
+         _need_bool(data, name)
+-    for name in ("counts", "timings", "artifact_id"):
++    for name in ("counts", "timings"):
+         if name not in data:
+             raise _invalid("report-invalid", f"missing required field {name!r}")
++    _need_str(data, "artifact_id", allow_none=True)
+     _check_counts_dict(data["counts"])
+     _check_timings_dict(data["timings"])
+     attempts = _need_list(data, "attempts")
+@@ -2396,7 +2432,7 @@ def _validate_where_payload(data: dict) -> None:
+         raise _invalid("report-invalid", "where.effective_limits must be an object")
+     _check_effective_limits_dict(
+         data["effective_limits"], "where.effective_limits")
+-    _need_list(data, "provenance")
++    _check_str_list(_need_list(data, "provenance"), "where.provenance")
+     for item in _need_list(data, "warnings"):
+         _check_reason_dict(item)
+ 
+@@ -2424,7 +2460,7 @@ def _validate_history_payload(data: dict) -> None:
+ 
+ 
+ def _validate_init_payload(data: dict) -> None:
+-    if data.get("action") not in _INIT_ACTIONS:
++    if not _is_known(data.get("action"), _INIT_ACTIONS):
+         raise _invalid("report-invalid", "init.action is unknown")
+     _need_str(data, "target")
+     _need_bool(data, "exists")
+@@ -2438,7 +2474,7 @@ def _validate_init_payload(data: dict) -> None:
+ 
+ 
+ def _validate_doctor_payload(data: dict) -> None:
+-    _need_list(data, "scope")
++    _check_str_list(_need_list(data, "scope"), "doctor.scope")
+     for entry in _need_list(data, "readiness"):
+         _check_readiness_dict(entry)
+     for entry in _need_list(data, "findings"):
+@@ -2463,16 +2499,19 @@ def _validate_register_payload(data: dict) -> None:
+         raise _invalid("report-invalid", "register.legacy_local must be boolean or null")
+     if "proposed_runner" not in data:
+         raise _invalid("report-invalid", "missing required field 'proposed_runner'")
+-    if data["proposed_runner"] is not None and data["proposed_runner"] not in frozenset(
+-            item.value for item in RunnerKind):
++    if (data["proposed_runner"] is not None
++            and not _is_known(data["proposed_runner"], frozenset(
++                item.value for item in RunnerKind))):
+         raise _invalid("report-invalid", "register.proposed_runner is unknown")
+     for entry in _need_list(data, "commands"):
+         _check_command_dict(entry, "register.commands entry")
+     _need_int(data, "legacy_alias_count")
++    _check_int_field(data, "legacy_alias_count", "register", lo=0)
+     actions = _need_list(data, "required_actions")
+     for action in actions:
+-        if action not in REQUIRED_ACTIONS:
+-            raise _invalid("report-invalid", f"unknown required action {action!r}")
++        if not _is_known(action, REQUIRED_ACTIONS):
++            raise _invalid("report-invalid",
++                           "register.required_actions has an unknown action")
+     for item in _need_list(data, "warnings"):
+         _check_reason_dict(item)
+ 
+@@ -2728,6 +2767,23 @@ def _project_domain(value: object) -> dict | None:
+     return {"id": value["id"], "fixture": value["fixture"]}
+ 
+ 
++def _validate_domain(value: object) -> dict | None:
++    """Validate a public envelope domain and project onto known fields."""
++    if value is None:
++        return None
++    if not isinstance(value, dict):
++        raise _invalid("report-invalid", "domain must be an object or null")
++    if set(("id", "fixture")) - set(value):
++        raise _invalid("report-invalid", "domain requires id and fixture")
++    try:
++        _check_hex("domain.id", value["id"], 32)
++    except (TypeError, ValueError):
++        raise _invalid("report-invalid", "domain.id must be 32 hex") from None
++    if not isinstance(value["fixture"], bool):
++        raise _invalid("report-invalid", "domain.fixture must be boolean")
++    return _project_domain(value)
++
++
+ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
+     """Parse and strictly validate one public JSON document."""
+     if isinstance(raw, (bytes, bytearray)):
+@@ -2749,26 +2805,15 @@ def decode_public_document(raw: bytes | str | bytearray) -> PublicDocument:
+     if not _is_int(version):
+         raise _invalid("report-invalid", "schema_version must be an integer")
+     if version != SCHEMA_VERSION:
+-        raise _invalid("protocol-mismatch", f"unsupported schema major version {version}")
++        raise _invalid("protocol-mismatch",
++                       "unsupported schema major version")
+     kind = envelope.get("kind")
+     if kind not in PUBLIC_KINDS:
+-        raise _invalid("report-invalid", f"unknown document kind {kind!r}")
++        raise _invalid("report-invalid", "unknown document kind")
+     ptest_version = envelope.get("ptest_version")
+     if not isinstance(ptest_version, str) or not ptest_version:
+         raise _invalid("report-invalid", "ptest_version must be a nonempty string")
+-    domain = envelope.get("domain")
+-    if domain is not None:
+-        if not isinstance(domain, dict):
+-            raise _invalid("report-invalid", "domain must be an object or null")
+-        if set(("id", "fixture")) - set(domain):
+-            raise _invalid("report-invalid", "domain requires id and fixture")
+-        try:
+-            _check_hex("domain.id", domain["id"], 32)
+-        except (TypeError, ValueError):
+-            raise _invalid("report-invalid", "domain.id must be 32 hex") from None
+-        if not isinstance(domain["fixture"], bool):
+-            raise _invalid("report-invalid", "domain.fixture must be boolean")
+-        domain = _project_domain(domain)
++    domain = _validate_domain(envelope.get("domain"))
+     error_raw = envelope.get("error")
+     error = None
+     if error_raw is not None:
+@@ -2859,6 +2904,10 @@ def decode_control_frame(data: bytes | bytearray, *,
+         raise _invalid("protocol-mismatch", "control frame is not JSON") from None
+     if not isinstance(obj, dict):
+         raise _invalid("protocol-mismatch", "control frame must be an object")
++    for key in obj:
++        if key not in ("protocol", "run_id", "nonce", "kind", "payload"):
++            raise _invalid("protocol-mismatch",
++                           "control frame carries an unknown field")
+     if obj.get("protocol") != PROTOCOL_VERSION:
+         raise _invalid("protocol-mismatch", "control frame has the wrong protocol")
+     try:
+@@ -2867,8 +2916,8 @@ def decode_control_frame(data: bytes | bytearray, *,
+     except (TypeError, ValueError):
+         raise _invalid("protocol-mismatch", "control frame has a bad run or nonce") from None
+     kind = obj.get("kind")
+-    if kind not in CONTROL_KINDS:
+-        raise _invalid("protocol-mismatch", f"control frame kind {kind!r} is unknown")
++    if not _is_known(kind, CONTROL_KINDS):
++        raise _invalid("protocol-mismatch", "control frame kind is unknown")
+     payload = obj.get("payload")
+     if not isinstance(payload, dict):
+         raise _invalid("protocol-mismatch", "control frame payload must be an object")
+@@ -2948,6 +2997,11 @@ def encode_launch_manifest(manifest: LaunchManifest) -> bytes:
+ def _build_domain(raw: object) -> DomainPaths:
+     if not isinstance(raw, dict):
+         raise _invalid("protocol-mismatch", "manifest domain must be an object")
++    for key in raw:
++        if key not in ("root", "machine_config", "ledger", "marker",
++                       "fixture", "domain_id"):
++            raise _invalid("protocol-mismatch",
++                           "manifest domain carries an unknown field")
+     try:
+         return DomainPaths(
+             root=raw["root"], machine_config=raw["machine_config"],
+@@ -2962,6 +3016,11 @@ def _build_domain(raw: object) -> DomainPaths:
+ def _build_grant(raw: object) -> Grant:
+     if not isinstance(raw, dict):
+         raise _invalid("protocol-mismatch", "manifest grant must be an object")
++    for key in raw:
++        if key not in ("run_id", "nonce", "slots", "memory_estimate_mb",
++                       "reserved_memory_mb", "generation", "domain_id"):
++            raise _invalid("protocol-mismatch",
++                           "manifest grant carries an unknown field")
+     try:
+         return Grant(
+             run_id=raw["run_id"], nonce=raw["nonce"], slots=raw["slots"],
+@@ -2977,22 +3036,55 @@ def _build_grant(raw: object) -> Grant:
+ def _build_prepared(raw: object) -> PreparedRun:
+     if not isinstance(raw, dict):
+         raise _invalid("protocol-mismatch", "manifest attempt must be an object")
++    for key in raw:
++        if key not in ("argv", "cwd", "env_updates", "report_path",
++                       "capability", "summary"):
++            raise _invalid("protocol-mismatch",
++                           "manifest attempt carries an unknown field")
+     try:
+         capability = None
+         if raw.get("capability") is not None:
+             cap = raw["capability"]
++            if not isinstance(cap, dict):
++                raise _invalid("protocol-mismatch",
++                               "manifest capability must be an object")
++            for key in cap:
++                if key not in ("execution", "selection", "lifecycle",
++                               "limitations"):
++                    raise _invalid(
++                        "protocol-mismatch",
++                        "manifest capability carries an unknown field")
++            entries = []
++            for item in cap.get("limitations", []):
++                if not isinstance(item, dict):
++                    raise _invalid("protocol-mismatch",
++                                   "manifest limitation must be an object")
++                for key in item:
++                    if key not in ("code", "message", "paths"):
++                        raise _invalid(
++                            "protocol-mismatch",
++                            "manifest limitation carries an unknown field")
++                entries.append(item)
+             capability = Capability(
+                 execution=cap["execution"], selection=cap["selection"],
+                 lifecycle=cap["lifecycle"],
+                 limitations=tuple(
+                     Reason(code=item["code"], message=item["message"],
+                            paths=tuple(item["paths"]))
+-                    for item in cap.get("limitations", [])
++                    for item in entries
+                 ),
+             )
+         summary = None
+         if raw.get("summary") is not None:
+             node = raw["summary"]
++            if not isinstance(node, dict):
++                raise _invalid("protocol-mismatch",
++                               "manifest summary must be an object")
++            for key in node:
++                if key not in ("kind", "mode", "argument_count",
++                               "generated_options", "workers", "provenance"):
++                    raise _invalid("protocol-mismatch",
++                                   "manifest summary carries an unknown field")
+             summary = CommandSummary(
+                 kind=node["kind"], mode=node["mode"],
+                 argument_count=node["argument_count"],
+@@ -3030,6 +3122,12 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
+         raise _invalid("protocol-mismatch", "manifest is not JSON") from None
+     if not isinstance(obj, dict) or obj.get("protocol") != PROTOCOL_VERSION:
+         raise _invalid("protocol-mismatch", "manifest has the wrong protocol")
++    for key in obj:
++        if key not in ("protocol", "domain", "grant", "setup", "attempts",
++                       "attempt_ids", "setup_timeout_s", "attempt_timeout_s",
++                       "compound_timeout_s"):
++            raise _invalid("protocol-mismatch",
++                           "manifest carries an unknown field")
+     _check_nesting(obj, MANIFEST_MAX_NESTING)
+     try:
+         setup = None
+diff --git a/tests/ng/test_contracts.py b/tests/ng/test_contracts.py
+index f42eec2..688d3f7 100644
+--- a/tests/ng/test_contracts.py
++++ b/tests/ng/test_contracts.py
+@@ -487,8 +487,7 @@ def test_frame_oversize_rejected():
+         C.decode_control_frame(length + b'{"protocol":1}')
+     oversized = C.ControlFrame(
+         protocol=1, run_id=RUN_ID, nonce=NONCE, kind="phase",
+-        payload={"phase": "execution", "attempt_id": "a001",
+-                 "blob": "x" * 70000},
++        payload={"phase": "execution", "attempt_id": "x" * 70000},
+     )
+     with pytest.raises(Problem, match="protocol-mismatch"):
+         C.encode_control_frame(oversized)
+@@ -1000,6 +999,8 @@ def test_public_decode_drops_additive_unknowns():
+     attempt["future_attempt"] = sentinel
+     run["attempts"] = [attempt]
+     run["future_run"] = sentinel
++    run["command"] = dict(run["command"], argv=[sentinel],
++                          env={"K": sentinel})
+     status = payloads["status"]
+     status["queued"][0] = dict(status["queued"][0], future_lease=sentinel)
+     status["effective_limits"] = dict(
+@@ -1026,58 +1027,59 @@ def test_public_decode_drops_additive_unknowns():
+         register["commands"][0], future_command=sentinel)
+     payloads["plan"]["future_plan"] = sentinel
+     for kind, data in payloads.items():
+-        doc = C.decode_public_document(
+-            C.encode_public_document(kind, data))
++        doc = C.decode_public_document(_hostile_envelope(kind, data))
+         assert doc.error is None, kind
+     revived_where = C.decode_public_document(
+-        C.encode_public_document("where", payloads["where"])).data
++        _hostile_envelope("where", payloads["where"])).data
+     assert "future_top" not in revived_where
+     assert "future_note" not in revived_where["capability"]
+     assert "future_count" not in revived_where["commands"][0]
+     assert "future_ceiling" not in revived_where["effective_limits"]
+     assert revived_where["capability"]["execution"] == "advanced"
+     revived_run = C.decode_public_document(
+-        C.encode_public_document("run", payloads["run"])).data
++        _hostile_envelope("run", payloads["run"])).data
+     assert "future_run" not in revived_run
++    assert "argv" not in revived_run["command"]
++    assert "env" not in revived_run["command"]
+     assert "future_total" not in revived_run["counts"]
+     assert "future_attempt" not in revived_run["attempts"][0]
+     assert "future_phase" not in revived_run["attempts"][0]["timings"]
+     assert revived_run["attempts"][0]["timings"]["queue"] == 0.1
+     revived_status = C.decode_public_document(
+-        C.encode_public_document("status", payloads["status"])).data
++        _hostile_envelope("status", payloads["status"])).data
+     assert "future_lease" not in revived_status["queued"][0]
+     assert "future_ceiling" not in revived_status["effective_limits"]
+     revived_history = C.decode_public_document(
+-        C.encode_public_document("history", payloads["history"])).data
++        _hostile_envelope("history", payloads["history"])).data
+     assert "future_summary" not in revived_history["summaries"][0]
+     assert "future_obligation" not in revived_history["obligations"][0]
+     assert revived_history["summaries"][0]["run_id"] == RUN_ID
+     revived_init = C.decode_public_document(
+-        C.encode_public_document("init", payloads["init"])).data
++        _hostile_envelope("init", payloads["init"])).data
+     assert "future_init" not in revived_init
+     assert "future_config" not in revived_init["config"]
+     assert "future_command" not in revived_init["config"]["commands"][0]
+     assert revived_init["config"]["commands"][1]["mode"] == "full"
+     revived_doctor = C.decode_public_document(
+-        C.encode_public_document("doctor", payloads["doctor"])).data
++        _hostile_envelope("doctor", payloads["doctor"])).data
+     assert "future_readiness" not in revived_doctor["readiness"][0]
+     assert "future_finding" not in revived_doctor["findings"][0]
+     assert "future_limit" not in revived_doctor["limits"]
+     assert "future_usage" not in revived_doctor["usage"]
+     revived_register = C.decode_public_document(
+-        C.encode_public_document("register", payloads["register"])).data
++        _hostile_envelope("register", payloads["register"])).data
+     assert "future_command" not in revived_register["commands"][0]
+     revived_plan = C.decode_public_document(
+-        C.encode_public_document("plan", payloads["plan"])).data
++        _hostile_envelope("plan", payloads["plan"])).data
+     assert "future_plan" not in revived_plan
+     assert revived_plan["execution"] == "selected"
+     for kind in ("where", "run", "history", "init"):
+         rendered = C.encode_public_document(
+             kind, C.decode_public_document(
+-                C.encode_public_document(
++                _hostile_envelope(
+                     kind, payloads[kind])).data).decode()
+         assert sentinel not in rendered, kind
+-    raw = json.loads(C.encode_public_document("where", payloads["where"]))
++    raw = json.loads(_hostile_envelope("where", payloads["where"]))
+     raw["future_envelope"] = sentinel
+     raw["domain"] = {"id": "ab" * 16, "fixture": False,
+                      "future_domain": sentinel}
+@@ -1122,3 +1124,401 @@ def test_addendum_schema_shapes():
+     assert "mode" in summaries["required"]
+     assert "sequence" not in summaries["required"]
+     assert "policy_digest" not in summaries.get("properties", {})
++
++
++_BOUNDARY_SENTINEL = "smuggled-boundary-9d3"
++
++_PUBLIC_DATA_KEYS = {
++    "run": {"run_id", "project_id", "checkout_id", "mode", "status",
++            "phase", "started_at", "finished_at", "plan", "command",
++            "granted_workers", "memory_estimate_mb", "reserved_memory_mb",
++            "runner_exit_code", "exit_code", "exit_origin", "signal",
++            "source_valid", "full_gate_eligible", "baseline_published",
++            "counts", "timings", "attempts", "reasons", "limitations",
++            "artifact_id"},
++    "plan": {"mode", "execution", "files", "reasons", "input_digest",
++             "compatibility", "baseline_run_id", "static_preview"},
++    "where": {"root", "config_path", "initialized", "runner_kind",
++              "capability", "commands", "effective_limits", "provenance",
++              "warnings"},
++    "status": {"effective_limits", "queued", "active"},
++    "history": {"summaries", "obligations"},
++    "init": {"action", "target", "exists", "warnings", "config"},
++    "doctor": {"scope", "readiness", "findings", "limits", "usage",
++               "limitations"},
++    "register": {"root", "initialized", "legacy_present", "legacy_local",
++                 "proposed_runner", "commands", "legacy_alias_count",
++                 "required_actions", "warnings"},
++}
++
++
++def _hostile_envelope(kind, data, domain=None):
++    """Build a hostile public document without the producer under test."""
++    return json.dumps({
++        "schema_version": 1,
++        "kind": kind,
++        "ptest_version": "0.1.0",
++        "domain": domain,
++        "data": data,
++        "error": None,
++    }).encode()
++
++
++def _dirty_payloads(sentinel):
++    """Valid payloads carrying argv/env-like additive unknowns everywhere."""
++    payloads = _full_payloads()
++    run = payloads["run"]
++    run["command"] = dict(run["command"], argv=[sentinel],
++                          env={"K": sentinel})
++    run["future_run"] = {"argv": [sentinel]}
++    run["counts"] = dict(run["counts"], future_total=1)
++    run["attempts"] = [dict(run["attempts"][0],
++                            future_attempt=sentinel)]
++    where = payloads["where"]
++    where["future_top"] = {"argv": [sentinel], "env": {"K": sentinel}}
++    where["capability"] = dict(where["capability"],
++                               future_note=sentinel)
++    where["commands"] = [dict(where["commands"][0], future_count=3)]
++    where["provenance"] = list(where["provenance"]) + ["extra-source"]
++    status = payloads["status"]
++    status["queued"] = [dict(status["queued"][0],
++                             future_lease=sentinel)]
++    history = payloads["history"]
++    history["summaries"] = [dict(history["summaries"][0],
++                                 future_summary=sentinel)]
++    history["obligations"] = [dict(history["obligations"][0],
++                                   future_obligation=sentinel)]
++    init = payloads["init"]
++    init["future_init"] = sentinel
++    init["config"] = dict(init["config"], future_config=sentinel)
++    doctor = payloads["doctor"]
++    doctor["scope"] = list(doctor["scope"]) + ["extra-area"]
++    doctor["readiness"] = [dict(doctor["readiness"][0],
++                               future_readiness=sentinel)]
++    doctor["findings"] = [dict(doctor["findings"][0],
++                              future_finding=sentinel)]
++    doctor["limits"] = dict(doctor["limits"], future_limit=sentinel)
++    doctor["usage"] = dict(doctor["usage"], future_usage=sentinel)
++    register = payloads["register"]
++    register["commands"] = [dict(register["commands"][0],
++                                 future_command=sentinel)]
++    payloads["plan"] = dict(payloads["plan"], future_plan=sentinel)
++    return payloads
++
++
++def test_public_producer_emits_allowlisted_fields_first_encode():
++    sentinel = _BOUNDARY_SENTINEL
++    for kind, dirty in _dirty_payloads(sentinel).items():
++        before = json.loads(json.dumps(dirty))
++        raw = C.encode_public_document(kind, dirty)
++        assert sentinel not in raw.decode(), kind
++        parsed = json.loads(raw.decode())
++        assert set(parsed["data"]) == _PUBLIC_DATA_KEYS[kind], kind
++        assert dirty == before, kind
++    parsed_run = json.loads(C.encode_public_document(
++        "run", _dirty_payloads(sentinel)["run"]).decode())["data"]
++    assert set(parsed_run["command"]) == {
++        "kind", "mode", "argument_count", "generated_options", "workers",
++        "provenance"}
++    assert "argv" not in parsed_run["command"]
++    assert "env" not in parsed_run["command"]
++    assert set(parsed_run["plan"]) == _PUBLIC_DATA_KEYS["plan"]
++    assert set(parsed_run["attempts"][0]) == {
++        "attempt_id", "phase", "status", "raw_exit_code",
++        "final_exit_code", "source_valid", "inventory_complete",
++        "timings"}
++    parsed_where = json.loads(C.encode_public_document(
++        "where", _dirty_payloads(sentinel)["where"]).decode())["data"]
++    assert set(parsed_where["capability"]) == {
++        "execution", "selection", "lifecycle", "limitations"}
++    assert set(parsed_where["effective_limits"]) == {
++        "max_slots", "max_jobs", "memory_mb", "repo_workers"}
++    assert "future_top" not in parsed_where
++    parsed_status = json.loads(C.encode_public_document(
++        "status", _dirty_payloads(sentinel)["status"]).decode())["data"]
++    assert set(parsed_status["queued"][0]) == {
++        "run_id", "checkout_id", "state", "sequence", "requested_slots",
++        "slots", "memory_estimate_mb", "reserved_memory_mb", "phase",
++        "age_s", "queue_wait_s", "ownership", "fixture", "reasons"}
++    parsed_init = json.loads(C.encode_public_document(
++        "init", _dirty_payloads(sentinel)["init"]).decode())["data"]
++    assert set(parsed_init["config"]) == {
++        "project_id", "runner_kind", "workers", "commands",
++        "setup_configured", "setup_network", "setup_lifecycle_scripts",
++        "selection_enabled", "closed_inputs"}
++    parsed_doctor = json.loads(C.encode_public_document(
++        "doctor", _dirty_payloads(sentinel)["doctor"]).decode())["data"]
++    assert set(parsed_doctor["readiness"][0]) == {
++        "area", "state", "reasons"}
++    assert set(parsed_doctor["findings"][0]) == {
++        "code", "severity", "confidence", "path", "line",
++        "evidence_type", "consequence", "remediation", "verification"}
++    assert set(parsed_doctor["limits"]) == {
++        "entries", "files", "file_bytes", "total_bytes", "findings",
++        "output_bytes", "elapsed_s", "depth", "ast_nodes"}
++    assert set(parsed_doctor["usage"]) == {
++        "entries", "files", "file_bytes", "total_bytes", "findings",
++        "output_bytes", "elapsed_s", "skipped", "truncated"}
++    where_raw = C.encode_public_document(
++        "where", _full_payloads()["where"],
++        domain={"id": "ab" * 16, "fixture": False,
++                "future_domain": sentinel})
++    assert sentinel not in where_raw.decode()
++    assert json.loads(where_raw.decode())["domain"] == {
++        "id": "ab" * 16, "fixture": False}
++    problem = Problem(code="x", message="y", phase="z")
++    err = json.loads(
++        C.encode_public_document("run", None, error=problem).decode())
++    assert err["data"] is None
++    assert set(err["error"]) == {"code", "message", "phase",
++                                 "retryable"}
++    with pytest.raises(Problem, match="report-invalid"):
++        C.encode_public_document(
++            "where", _full_payloads()["where"],
++            domain={"id": "not-hex", "fixture": False})
++
++
++def test_known_string_list_fields_reject_nested_objects():
++    run = _run_data()
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope(
++            "run", dict(run, artifact_id={"argv": [_BOUNDARY_SENTINEL]})))
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope(
++            "run", dict(run, artifact_id=7)))
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope(
++            "run", dict(run, artifact_id="")))
++    where = _full_payloads()["where"]
++    where["provenance"] = [{"argv": [_BOUNDARY_SENTINEL]}]
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope("where", where))
++    doctor = _full_payloads()["doctor"]
++    doctor["scope"] = [{"env": {"K": _BOUNDARY_SENTINEL}}]
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope("doctor", doctor))
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope(
++            "run", dict(run, run_id="not-a-hex-id")))
++    history = {
++        "summaries": [dict(
++            C.serialize_run_result(_secret_result(["-q"])),
++            run_id="not-a-hex-id")],
++        "obligations": [],
++    }
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(_hostile_envelope("history", history))
++    for name, value in (("granted_workers", 0),
++                        ("granted_workers", 65),
++                        ("memory_estimate_mb", -1),
++                        ("reserved_memory_mb", -5)):
++        with pytest.raises(Problem, match="report-invalid"):
++            C.decode_public_document(_hostile_envelope(
++                "run", dict(run, **{name: value})))
++    register = _full_payloads()["register"]
++    register["legacy_alias_count"] = -1
++    with pytest.raises(Problem, match="report-invalid"):
++        C.decode_public_document(
++            _hostile_envelope("register", register))
++    assert C.decode_public_document(
++        _hostile_envelope("run", run)).error is None
++
++
++def _mutate_path(payload, path, value):
++    node = payload
++    for step in path[:-1]:
++        node = node[step]
++    node[path[-1]] = value
++
++
++def test_closed_enums_reject_malformed_values():
++    scalar_paths = [
++        ("run", ["command", "kind"]),
++        ("run", ["command", "mode"]),
++        ("run", ["mode"]),
++        ("run", ["status"]),
++        ("run", ["phase"]),
++        ("run", ["exit_origin"]),
++        ("run", ["attempts", 0, "phase"]),
++        ("run", ["attempts", 0, "status"]),
++        ("plan", ["mode"]),
++        ("plan", ["execution"]),
++        ("where", ["capability", "execution"]),
++        ("where", ["commands", 0, "kind"]),
++        ("status", ["queued", 0, "state"]),
++        ("status", ["queued", 0, "ownership"]),
++        ("history", ["summaries", 0, "mode"]),
++        ("init", ["action"]),
++        ("init", ["config", "runner_kind"]),
++        ("doctor", ["readiness", 0, "area"]),
++        ("doctor", ["readiness", 0, "state"]),
++        ("doctor", ["findings", 0, "code"]),
++        ("doctor", ["findings", 0, "severity"]),
++        ("doctor", ["findings", 0, "confidence"]),
++        ("register", ["required_actions", 0]),
++    ]
++    nullable_paths = [
++        ("where", ["runner_kind"]),
++        ("register", ["proposed_runner"]),
++    ]
++    for kind, path in scalar_paths:
++        for value in ({}, [], True, None, 7, "bogus-value"):
++            if kind == "run":
++                payload = C.serialize_run_result(
++                    _secret_result(["-q"]))
++            else:
++                payload = _full_payloads()[kind]
++            _mutate_path(payload, path, value)
++            with pytest.raises(Problem, match="report-invalid"):
++                C.decode_public_document(
++                    _hostile_envelope(kind, payload))
++    for kind, path in nullable_paths:
++        for value in ({}, [], True, 7, "bogus-value"):
++            payload = _full_payloads()[kind]
++            _mutate_path(payload, path, value)
++            with pytest.raises(Problem, match="report-invalid"):
++                C.decode_public_document(
++                    _hostile_envelope(kind, payload))
++
++
++def _control_raw(payload_dict, kind="cancel", extra_top=None):
++    obj = {"protocol": 1, "run_id": RUN_ID, "nonce": NONCE,
++           "kind": kind, "payload": payload_dict}
++    if extra_top:
++        obj.update(extra_top)
++    body = json.dumps(obj).encode()
++    return struct.pack(">I", len(body)) + body
++
++
++def test_control_frame_kind_rejects_malformed_values():
++    for value in ({}, [], True, None, 7, "bogus-kind"):
++        with pytest.raises(Problem, match="protocol-mismatch"):
++            C.decode_control_frame(_control_raw({}, value))
++
++
++def _valid_frame_payloads():
++    guard = {"pid": 1, "birth": 0.0, "uid": 0, "pgid": 1}
++    return {
++        "cancel": {"signal": 2},
++        "parent-closing": {},
++        "registered": {"guard": dict(guard)},
++        "phase": {"phase": "execution", "attempt_id": None},
++        "runner-facts": {"attempt_id": "a001", "phase": "execution",
++                         "raw_exit_code": None, "report_name": None,
++                         "problem": None},
++        "draining": {"provisional_artifact_id": None},
++    }
++
++
++def test_private_frame_rejects_unknown_fields():
++    for kind, payload in _valid_frame_payloads().items():
++        assert C.decode_control_frame(
++            _control_raw(payload, kind)).kind == kind
++    with pytest.raises(Problem, match="protocol-mismatch"):
++        C.decode_control_frame(
++            _control_raw({"signal": 2}, "cancel",
++                         extra_top={"future_top": 1}))
++    for kind, payload in _valid_frame_payloads().items():
++        with pytest.raises(Problem, match="protocol-mismatch"):
++            C.decode_control_frame(
++                _control_raw(dict(payload, future_field=1), kind))
++    guard_extra = {"guard": {"pid": 1, "birth": 0.0, "uid": 0,
++                             "pgid": 1, "future_guard": 1}}
++    with pytest.raises(Problem, match="protocol-mismatch"):
++        C.decode_control_frame(
++            _control_raw(guard_extra, "registered"))
++    problem_extra = dict(_valid_frame_payloads()["runner-facts"],
++                         problem={"code": "x", "message": "y",
++                                  "phase": "z", "retryable": False,
++                                  "future_problem": 1})
++    with pytest.raises(Problem, match="protocol-mismatch"):
++        C.decode_control_frame(
++            _control_raw(problem_extra, "runner-facts"))
++
++
++def _valid_manifest(case):
++    domain = case.domain()
++    grant = C.Grant(
++        run_id=RUN_ID, nonce=NONCE, slots=1,
++        memory_estimate_mb=None, reserved_memory_mb=None,
++        generation=1, domain_id="d" * 32,
++    )
++    prepared = C.PreparedRun(
++        argv=("true",), cwd=domain.root, env_updates=(),
++        report_path=None,
++        capability=C.Capability(
++            execution=C.ExecutionTier.ADVANCED, selection=True,
++            lifecycle="cooperative-process-group", limitations=(),
++        ),
++        summary=C.summarize_command(
++            C.RunnerKind.PYTEST, C.Mode.SCOPED, ["-q"],
++            generated_options=("-q",), workers=1,
++            provenance=("adapter",),
++        ),
++    )
++    return C.LaunchManifest(
++        protocol=1, domain=domain, grant=grant, setup=None,
++        attempts=(prepared,), attempt_ids=("a001",),
++        setup_timeout_s=300.0, attempt_timeout_s=30.0,
++        compound_timeout_s=600.0,
++    )
++
++
++def _manifest_raw(case, mutate):
++    body = json.loads(
++        C.encode_launch_manifest(_valid_manifest(case))[4:])
++    mutate(body)
++    tampered = json.dumps(body).encode()
++    return struct.pack(">I", len(tampered)) + tampered
++
++
++def test_private_manifest_rejects_unknown_fields(case):
++    levels = [
++        lambda body: body.update(future_manifest=1),
++        lambda body: body["domain"].update(future_domain=1),
++        lambda body: body["grant"].update(future_grant=1),
++        lambda body: body["attempts"][0].update(future_prepared=1),
++        lambda body: body["attempts"][0]["capability"].update(
++            future_capability=1),
++        lambda body: body["attempts"][0]["summary"].update(
++            future_summary=1),
++    ]
++    for mutate in levels:
++        with pytest.raises(Problem, match="protocol-mismatch"):
++            C.decode_launch_manifest(_manifest_raw(case, mutate))
++
++
++def test_decoder_messages_never_echo_input():
++    sentinel = "SECRET-SENTINEL-4b1"
++    run = _run_data()
++    register = _full_payloads()["register"]
++    raws = [
++        ("public", _hostile_envelope("run-" + sentinel, run)),
++        ("public", _hostile_envelope({"echo": sentinel}, run)),
++        ("public", _hostile_envelope(
++            "run", dict(run, mode=sentinel))),
++        ("public", _hostile_envelope(
++            "register",
++            dict(register, required_actions=[sentinel]))),
++        ("public", _hostile_envelope(
++            "run", dict(run, reasons=[{"code": "scan-limit",
++                                      "message": "m", "paths": [],
++                                      sentinel: 1}]))),
++        ("public", json.dumps({
++            "schema_version": 12345678901234567890,
++            "kind": "run", "ptest_version": "0.1.0", "domain": None,
++            "data": run, "error": None}).encode()),
++        ("control", _control_raw({"signal": 2}, "cancel-" + sentinel)),
++    ]
++    for channel, raw in raws:
++        with pytest.raises(Problem) as caught:
++            if channel == "control":
++                C.decode_control_frame(raw)
++            else:
++                C.decode_public_document(raw)
++        assert sentinel not in str(caught.value)
++        assert "12345678901234567890" not in str(caught.value)
++        rendered = C.encode_public_document(
++            "run", None, error=caught.value).decode()
++        assert sentinel not in rendered
++        assert "12345678901234567890" not in rendered

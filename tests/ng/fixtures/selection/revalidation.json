@@ -1,0 +1,7 @@
+[
+  {"phase": "queue", "mutation": "source", "path": "src/a.py", "identity_changes": true},
+  {"phase": "queue", "mutation": "environment", "path": "docs/readme.md", "identity_changes": true},
+  {"phase": "running", "mutation": "source", "path": "src/a.py", "identity_changes": true},
+  {"phase": "running", "mutation": "mode", "path": "src/a.py", "identity_changes": true},
+  {"phase": "running", "mutation": "output", "path": "reports/result.xml", "identity_changes": false}
+]

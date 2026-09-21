@@ -1,0 +1,77 @@
+{
+  "task": "11D Sol executor-boundary repair",
+  "date": "2026-09-18",
+  "status": "repair-implemented-scoped-verification-passed-awaiting-review",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-sol",
+  "branch": "cx-ng-product-task-11d-sol",
+  "base_commit": "c57410929357cc71aab3b9b3621b11e930a1f7aa",
+  "source_commit": "7e5d86e",
+  "finding": {
+    "cause": "The tryfirst pytest_collection_finish wrapper validated before yielding, so an ordinary trylast finish hook could register pytest_runtestloop afterward. Collection-wide checks also could not see pytest_pyfunc_call executors registered during an item's setup hook or autouse fixture.",
+    "control": "The outer collection-finish wrapper now validates after yield, when all ordinary implementations and wrapper teardowns have completed. A tryfirst pytest_runtest_call wrapper validates before yielding for every item, after its setup and immediately before call implementations can replace its body. Both boundaries reuse the existing owner policy.",
+    "classification": "Collection-finish refusal is authenticated incomplete/ptest with observed runner exit 4. Setup-time and fixture-time refusal is authenticated incomplete/ptest with observed runner exit 1; the latter remains diagnostic Pytest evidence, not a certified native test failure.",
+    "reason_text": "The public unsupported-capability reason now says the bridge refused test execution rather than incorrectly claiming every refusal occurred before collection."
+  },
+  "security_contracts": {
+    "identity": "No identity or report-binding format changed.",
+    "authorization": "An ordinary unowned plugin registered at collection finish or during per-item setup cannot own the test loop or test body while ptest certifies a pass.",
+    "tenancy": "No remote tenant surface changed; real subprocess cases retain checkout-local report cleanup and RELEASED lease proof.",
+    "input": "The regressions use real nested conftests, an ordinary trylast collection-finish hook, a runtest-setup hook and an autouse fixture.",
+    "state": "Each refusal is incomplete with exit_origin ptest, no executor or test-body marker, no residual report and a released lease.",
+    "exposure": "No new public field or detailed plugin identity is exposed.",
+    "availability": "Validation reuses bounded in-process plugin inspection once after collection finish and once per item at call entry; measured subprocess cases remained below one second each.",
+    "dependencies": "No dependency, installer, runner-candidate or external-service change."
+  },
+  "red_green": [
+    {
+      "stage": "strengthened RED against the pre-fix hook ordering",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-sol/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11d-sol/tests/ng/test_pytest_scoped_subprocess.py -k 'collection_finish_cannot_install_the_test_loop or per_item_setup_cannot_replace_the_test_body' --tb=short --durations=5",
+      "exit_code": 1,
+      "output": "3 failed, 48 deselected in 2.24s",
+      "observed": "All cases returned passed with the executor marker present and intended body markers absent. The setup-hook and autouse-fixture cases each had two items, proving the installed executor also had a later body available to replace."
+    },
+    {
+      "stage": "focused GREEN",
+      "command": "same focused controller command",
+      "exit_code": 0,
+      "output": "3 passed, 48 deselected in 2.29s"
+    },
+    {
+      "stage": "real scoped subprocess regression file",
+      "command": "controller bootstrap test_pytest_scoped_subprocess.py --tb=short --durations=12",
+      "exit_code": 0,
+      "output": "43 passed, 8 skipped in 37.35s",
+      "skips": "Unchanged unqualified tuples: pytest 8.4.2, 9.0.3 and 9.1.0 pass/fail cases, real installed xdist, and unsupported pytest runtime."
+    },
+    {
+      "stage": "required Task 11D five-file scope",
+      "command": "controller bootstrap test_pytest_scoped_subprocess.py test_pytest_adapter.py test_operations.py test_task_11d_pytest.py test_reports.py --tb=short --durations=12",
+      "exit_code": 0,
+      "output": "350 passed, 8 skipped in 56.86s",
+      "durations": "Slowest case 1.63s; no case exceeded two seconds."
+    }
+  ],
+  "checks": [
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "output": "AST-only refresh: 4493 nodes, 9846 edges, 297 communities; seven JSON/protocol sources produced zero nodes and were warned absent."
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "gates": {
+    "run": "Focused real-subprocess RED/GREEN, the complete scoped subprocess file, the required five-file scope, Graphify AST refresh, JSON parsing and whitespace checks.",
+    "missing": "No checked-in applicable secrets, static-analysis or dependency-scanning gate was identified for this narrow Python runtime repair; none was installed or added.",
+    "not_run": "No full suite, raw pytest, dependency installation, integration/cherry-pick, push, deployment, publication or installed CLI replacement."
+  },
+  "residual_qualification_limits": [
+    "Only the provisioned CPython 3.13.11 / pytest 9.1.1 tuple was exercised; other candidate tuples remain explicitly unqualified.",
+    "This target repository is executable local code, not a sandbox. Conftest import, collection hooks, test-module import, setup hooks and fixtures can perform side effects before a refusal. The control prevents ordinary unowned executors from certifying a false pass; it does not claim hostile code cannot catch or reforge internal exceptions or reports.",
+    "Known execution-control plugin names and unqualified critical wrappers remain fail-closed, including active pytest-cov; compatibility was not broadened.",
+    "Full, automatic, setup orchestration, shadow, probe, source identity, native selection/inventory, history, baseline, worker parallelism, API and TUI remain outside this repair.",
+    "Direct ptest in the fresh task worktree resolves older development tooling that includes pytest-xdist and refuses this checkout. All evidence therefore used the required frozen controller bootstrap with explicit task PYTHONPATH; installer and product configuration were not changed."
+  ]
+}

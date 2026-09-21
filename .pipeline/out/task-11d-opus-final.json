@@ -1,0 +1,26 @@
+{
+  "task": "11D scoped native Pytest basic-serial execution",
+  "date": "2026-09-18",
+  "verdict": "approved",
+  "auditor": "Claude Opus high, read-only",
+  "audit_session": "f436d7f8-72bd-421b-b089-6fe8a2967d5e",
+  "review_range": "6de5c4c..1fd5da3230958ccafbe8582492536637f3bde943",
+  "raw_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11d-luna2/f436d7f8-72bd-421b-b089-6fe8a2967d5e.jsonl",
+  "independent_controller_verification": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11d-luna2/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap test_pytest_scoped_subprocess.py test_pytest_adapter.py test_operations.py test_task_11d_pytest.py test_reports.py -q --tb=short --durations=20",
+    "result": "355 passed, 8 skipped in 61.99s",
+    "runtime": "Linux x86_64, CPython 3.13.11, pytest 9.1.1, pluggy 1.6.0, xdist absent"
+  },
+  "audit_verification": "125 passed, 8 unqualified skips through the same capped bootstrap controller",
+  "approved_controls": [
+    "collection-finish, runtest-loop, runtest-protocol, runtest-call, and post-main executor validation",
+    "authenticated incomplete report on bridge refusal with raw nonzero preservation",
+    "real subprocess coverage for outer-wrapper, teardown, setup-skip, last-item, replay, cancellation, config mutation, and lease release paths"
+  ],
+  "qualification_limit": "Only CPython 3.13.11 / pytest 9.1.1 / pluggy 1.6.0 is qualified; all other candidate tuples remain explicit skips.",
+  "scope_notes": [
+    "Scoped mode makes no inventory/count/baseline/history/source-validity claim; native collection or selection semantics are not executor-certification evidence.",
+    "A late refusal after an observed native failure is incomplete with ptest origin and retains the nonzero exit for diagnosis.",
+    "A fresh task worktree's legacy default ptest controller includes xdist and is correctly refused; task evidence uses the required controller bootstrap."
+  ]
+}

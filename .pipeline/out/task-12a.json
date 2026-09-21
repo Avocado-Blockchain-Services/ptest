@@ -1,0 +1,296 @@
+{
+  "task": "T12a authenticated launch handoff and quarantine substrate",
+    "status": "repair_complete_and_scoped_green",
+  "scope": "T12a only; no T12b, T12c, native-profile qualification, or product-completion claim",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-12a",
+  "base_commit": "a78c7a238c3f",
+  "implementation_commits": [
+        "f38acc1127f696ee727d996893875c89aafccf01",
+        "463cdd84274b751ce807a5140e3e344c3ef58c7d",
+        "3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd"
+    ],
+    "repair_commit": "3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd",
+  "changed_files": [
+    "src/ptest/contracts.py",
+    "src/ptest/runtime/protocol-v1.json",
+    "src/ptest/guard.py",
+    "src/ptest/operations.py",
+    "src/ptest/history.py",
+    "src/ptest/selection.py",
+    "tests/ng/test_contracts.py",
+    "tests/ng/test_guard.py",
+    "tests/ng/test_operations.py",
+    "tests/ng/test_history.py",
+    "tests/ng/test_selection.py",
+    "tests/ng/fixtures/processes/guard_client.py",
+    "tests/ng/fixtures/processes/guard_driver.py",
+    "tests/ng/fixtures/processes/guard_workload.py",
+    "tests/ng/fixtures/command/guard_faults.py"
+  ],
+    "repair_summary": [
+        "Shadow comparison now requires both attempts to retain the same non-null observed runtime identity before any matched, suspected-miss, or unclassified-divergence verdict. Missing or differing identities are incomplete.",
+    "A valid pre-T12a base store is now read without mutation, nulls runtime identity, and exposes no quarantine; only a locked writer performs the all-or-nothing additive upgrade. Partial compound schemas and malformed base schemas fail closed.",
+    "Shadow verdicts are derived from actual test identities and selected-file attribution: matching outcomes including matching failures are matched, full-only attributable failures are suspected misses, overlap or unattributed disagreement is unclassified, and incomplete evidence is incomplete.",
+    "Incomplete, timed-out, cancelled, and source-invalidated shadow results persist every observed attempt, the failure union, and the whole-gate obligation; eligibility gates only quarantine set or clear.",
+    "Attempt evidence, comparison receipts, and quarantine rows count toward logical quotas. Pruning removes compound children atomically with their run, and orphaned evidence or receipts disable malformed history.",
+    "Runtime identities are strict 64-character lowercase hex digests; protocol fields require actual JSON integers, and qualified CompoundSupport capabilities require a profile.",
+    "A stopped first gate is source-invalid, keeps a001 NOT_RUN with null codes/timing, and emits no synthetic runner facts. Missing required native identity at a001 is zero-launch unknown-input.",
+        "Real-process evidence now covers setup/a001 ordering, 23 followed by 0 or 1, fresh one-use tokens, early/wrong-generation/wrong-direction/stop decisions, waiting SIGINT/SIGTERM, parent-only SIGKILL at a pending gate, adverse unknown/deep pending-gate frames with a live neighbor sentinel, a live descendant after direct-child exit, and bounded-observation exhaustion."
+  ],
+    "security_negative_contracts": [
+        "Missing selected identity, missing full identity, or differing valid runtime identities cannot be classified as a selector divergence and cannot set or clear selection quarantine; publication still retains the incomplete receipt, both observed attempts, and failure obligations.",
+    "Malformed, wrong-protocol, wrong-run, wrong-nonce, wrong-generation, wrong-token, early, duplicate, replayed, wrong-direction, truncated, oversized, and out-of-order private traffic cannot authorize a child.",
+    "EOF, parent closing, cancellation, decision timeout, source invalidation, unknown required identity, live descendants, and exhausted predecessor observation close all later spawn.",
+    "Stopped or unstarted attempts remain NOT_RUN with null raw/final codes and null timing; an expired unopened gate has no synthetic runner-facts frame.",
+    "Incomplete shadows retain observed failures and whole-gate obligations without setting or clearing quarantine.",
+    "Quarantine clear is an in-transaction expected-row compare-and-delete after a newer eligible matched shadow and an intervening clean baseline matching a real policy or compatibility correction.",
+    "Older sequence, stale expected row, unchanged policy and compatibility, timeout, ordinary pass, another checkout, and existing health markers cannot clear quarantine.",
+    "History corruption, capacity, and publication marker bytes are preserved; no quarantine operation performs wider marker cleanup.",
+    "No legacy configuration, migration import, alias, cloud, remote backend, provider API, model, downgrade retry, or compatibility fallback was added."
+  ],
+    "audit_disposition": [
+        {
+            "finding": "shadow verdict ignores AttemptEvidence runtime identity",
+            "disposition": "verified_and_fixed",
+            "evidence": "three derivation and three publication cases cover missing selected identity, missing full identity, and differing valid identities; all persist incomplete evidence without changing the existing quarantine"
+        },
+    {
+      "finding": "pre-T12a store rejected by read path",
+      "disposition": "verified_and_fixed",
+      "evidence": "read validates the base schema, recognizes exactly base-only or complete compound schema, and writer upgrades only the exact base-only form under lock; partial compound writer regression fails closed"
+    },
+    {
+      "finding": "shadow verdict semantics",
+      "disposition": "verified_and_fixed",
+      "evidence": "seven-row identity/inventory table covers matched pass, matched failure, selected failure plus omitted full failure, overlap mismatch, selected pass plus omitted failure, unattributed gate failure, and incomplete terminal evidence"
+    },
+    {
+      "finding": "incomplete shadow publication blocked",
+      "disposition": "verified_and_fixed",
+      "evidence": "timeout, cancellation, and post-attempt invalidation commit observed prefixes, prior failures, and whole-gate obligations without quarantine transition"
+    },
+    {
+      "finding": "compound evidence omitted from quota and prune",
+      "disposition": "verified_and_fixed",
+      "evidence": "logical quota includes evidence and receipts; parent deletion removes both in the same transaction; orphan rows are corruption"
+    },
+    {
+      "finding": "missing G1-G3 and H1-H2 evidence",
+      "disposition": "verified_and_fixed_with_t12c_limit",
+      "evidence": "owned real-process and history tests cover the T12a seams; shadow/probe end-to-end mode-specific first-gate outcomes remain honestly deferred because operations/CLI composition belongs to T12c"
+    },
+    {
+      "finding": "stopped gate source validity, NOT_RUN shape, synthetic facts, and native unknown identity",
+      "disposition": "verified_and_fixed",
+      "evidence": "operations and guard focused regressions assert zero launch, false source validity, null codes/timing, and absence of unstarted facts"
+    },
+    {
+      "finding": "runtime identity, protocol numeric type, and dead stop state",
+      "disposition": "verified_and_fixed",
+      "evidence": "64-lower-hex validation covers baseline/evidence/result, control and manifest reject 2.0, and unused _State.stop_reason was removed after caller search"
+    },
+    {
+      "finding": "CompoundSupport allows capability true with null profile",
+      "disposition": "verified_and_fixed",
+      "evidence": "selection or parallel_identity true now requires a non-null profile"
+    },
+    {
+      "finding": "ShadowPlans may carry a full plan when no genuine selected plan exists",
+      "disposition": "not_changed_by_design",
+      "evidence": "the frozen signature has no unavailable variant and amendment section 4 explicitly requires a structurally valid request without a genuine selected plan to become unsupported-capability in T12c; T12a returns a non-executable full plan carrying that reason and no T12a consumer launches it"
+    },
+    {
+      "finding": "50 ms predecessor scan can fail closed under load",
+      "disposition": "not_a_contract_defect",
+      "evidence": "amendment section 2 requires an exhausted bounded observation to close spawn; the real observation-limit test proves no later launch and retained capacity"
+    },
+    {
+      "finding": "private C._attempt_dict use across module boundary",
+      "disposition": "not_a_behavioral_defect",
+      "evidence": "it remains a bounded internal serializer inside the ptest package; changing that API is outside the frozen T12a repair and no trust-boundary bypass was found"
+    }
+  ],
+  "test_evidence": [
+    {
+      "stage": "red_old_store",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'pre_t12a_store or partial_nonempty_schema'",
+      "outcome": "RED: valid older store was coordinator-corrupt; 1 failed and 1 passed"
+    },
+    {
+      "stage": "green_old_store",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'pre_t12a_store or partial_nonempty_schema'",
+      "outcome": "GREEN: 2 passed, 110 deselected"
+    },
+    {
+      "stage": "red_shadow_verdict",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k shadow_verdict_uses_test_identity_and_inventory",
+      "outcome": "RED: 4 failed, 3 passed"
+    },
+    {
+      "stage": "green_shadow_verdict",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k shadow_verdict_uses_test_identity_and_inventory",
+      "outcome": "GREEN: 7 passed, 112 deselected"
+    },
+    {
+      "stage": "red_incomplete_shadow",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k incomplete_shadow_persists_observations_and_whole_gate_obligation",
+      "outcome": "RED: 3 failed because eligibility rejected incomplete evidence"
+    },
+    {
+      "stage": "green_incomplete_shadow",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k incomplete_shadow_persists_observations_and_whole_gate_obligation",
+      "outcome": "GREEN: 3 passed, 119 deselected"
+    },
+    {
+      "stage": "red_quota_prune",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'pruning_compound_run or compound_evidence_counts'",
+      "outcome": "RED: pruned run left orphan evidence and logical quota ignored compound rows"
+    },
+    {
+      "stage": "green_quota_prune",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'pruning_compound_run or compound_evidence_counts'",
+      "outcome": "GREEN: 2 passed, 122 deselected"
+    },
+    {
+      "stage": "red_first_gate_shape",
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'source_changed_after_admission or unknown_identity_stops' && scripts/ptest-bootstrap tests/ng/test_guard.py -k compound_deadline_emits_no_facts",
+      "outcome": "RED: 2 operations failures and 1 guard failure"
+    },
+    {
+      "stage": "green_first_gate_shape",
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'source_changed_after_admission or unknown_identity_stops' && scripts/ptest-bootstrap tests/ng/test_guard.py -k compound_deadline_emits_no_facts",
+      "outcome": "GREEN: operations 2 passed/69 deselected; guard 1 passed/60 deselected"
+    },
+    {
+      "stage": "red_strict_identity_and_protocol_type",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k 'shadow_and_quarantine_records or private_protocol_version_requires_json_integer'",
+      "outcome": "RED: 2 failed, 56 deselected"
+    },
+    {
+      "stage": "green_strict_identity_and_protocol_type",
+      "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py -k 'shadow_and_quarantine_records or private_protocol_version_requires_json_integer'",
+      "outcome": "GREEN: 2 passed, 56 deselected"
+    },
+    {
+      "stage": "red_live_descendant",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k exited_direct_child_with_live_descendant -x -vv",
+      "outcome": "RED: readiness race timed out at second accept; 1 failed in 45.43s"
+    },
+    {
+      "stage": "green_live_descendant",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k exited_direct_child_with_live_descendant -x -vv",
+      "outcome": "GREEN after pipe barrier: 1 passed, 68 deselected in 3.56s"
+    },
+    {
+      "stage": "green_observation_limit",
+      "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k observation_limit_exhaustion -x -vv",
+      "outcome": "GREEN: 1 passed, 68 deselected in 3.51s"
+    },
+    {
+      "stage": "red_malformed_compound_evidence",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k orphaned_compound_evidence_disables_history_without_clearing_quarantine -x",
+      "outcome": "RED: orphan evidence remained readable; 1 failed, 124 deselected"
+    },
+    {
+      "stage": "green_malformed_compound_evidence",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k orphaned_compound_evidence_disables_history_without_clearing_quarantine",
+      "outcome": "GREEN: 2 passed, 124 deselected"
+    },
+    {
+      "stage": "green_h1_atomic_failures",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k failed_compound_commit_never_acknowledges_partial_publication",
+      "outcome": "GREEN: 2 passed, 126 deselected"
+    },
+    {
+      "stage": "green_h2_matrix",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'ineligible_shadow_cannot_clear or one_real_correction or other_checkout_comparison or health_markers_and_quarantine' -x",
+      "outcome": "GREEN: 8 passed, 128 deselected"
+    },
+    {
+      "stage": "red_partial_compound_writer",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k writer_never_upgrades_a_partial_compound_schema",
+      "outcome": "RED: malformed partial compound schema was silently upgraded; 1 failed, 136 deselected"
+    },
+    {
+      "stage": "green_old_and_partial_writer",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'pre_t12a_store or writer_never_upgrades_a_partial_compound_schema'",
+      "outcome": "GREEN: 2 passed, 135 deselected"
+    },
+    {
+      "stage": "full_history",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
+      "outcome": "GREEN before final partial-schema row: 136 passed in 4.26s"
+    },
+        {
+            "stage": "full_owned_scope",
+            "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+            "outcome": "GREEN before final identity repair: 365 passed in 61.61s"
+        },
+        {
+            "stage": "red_runtime_identity_verdict",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "RED: 6 failed; all three identity cases derived suspected-miss, and publication rejected the required incomplete verdict"
+        },
+        {
+            "stage": "identity_fix_intermediate",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "3 derivation cases passed; 3 publication assertions exposed a test-fixture ID expectation (test_b versus the real test_x), not a product defect"
+        },
+        {
+            "stage": "green_runtime_identity_verdict",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'shadow_verdict_requires_matching_observed_runtime_identities or incomplete_runtime_identity_comparison_persists_without_quarantine_transition'",
+            "outcome": "GREEN: 6 passed, 137 deselected"
+        },
+        {
+            "stage": "green_g3_pending_gate_processes",
+            "command": "scripts/ptest-bootstrap tests/ng/test_guard.py -k 'parent_sigkill_while_attempt_gate_is_pending_never_launches or adverse_frame_at_pending_gate_preserves_neighbor_sentinel'",
+            "outcome": "GREEN on first execution: 3 passed, 73 deselected; characterization evidence for parent-only SIGKILL and real unknown/deep frames with neighbor sentinel preservation"
+        },
+        {
+            "stage": "full_history_after_identity_repair",
+            "command": "scripts/ptest-bootstrap tests/ng/test_history.py",
+            "outcome": "GREEN: 143 passed in 4.23s"
+        },
+        {
+            "stage": "green_identity_and_g3_focus",
+            "command": "scripts/ptest-bootstrap tests/ng/test_guard.py tests/ng/test_contracts.py -k 'runtime_identity or parent_sigkill_while_attempt_gate_is_pending_never_launches or adverse_frame_at_pending_gate_preserves_neighbor_sentinel'",
+            "outcome": "GREEN: 4 passed, 130 deselected; strict 64-lower-hex runtime validation remains green"
+        },
+        {
+            "stage": "full_owned_scope_after_identity_repair",
+            "command": "scripts/ptest-bootstrap tests/ng/test_contracts.py tests/ng/test_guard.py tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py",
+            "outcome": "GREEN: 374 passed in 63.35s"
+        }
+  ],
+  "candidate_ptest_gate": {
+    "command": "./.venv/bin/ptest where",
+    "outcome": "exit 0: root resolved, initialized: False",
+    "scoped_attempt": "./.venv/bin/ptest tests/ng/test_contracts.py -k attempt_decision_requires_authenticated_protocol_v2_gate_fields",
+    "scoped_outcome": "exit 2: unsupported-capability: literal execution requires a configured runner profile",
+    "decision": "The frozen owned set forbids adding project/config files. Scoped tests therefore used the repository-approved pinned local-only ptest bootstrap; no raw runner was invoked."
+  },
+  "generation_and_release_checks": [
+    {
+      "command": "uv run --locked --no-sync python scripts/export-schemas.py",
+      "outcome": "exit 0; regenerated runtime/protocol-v1.json and public schemas with no diff. Protocol-v1 public/native/domain semantics remain unchanged; private control/manifest identities remain version 2."
+    },
+        {
+            "command": "graphify update .",
+            "outcome": "exit 0; final graph has 4762 nodes, 10589 edges, 307 communities"
+    },
+    {
+      "command": "git diff --check",
+      "outcome": "exit 0"
+    },
+        {
+            "command": "git show --name-only 3f6cbf7ee14b546e5ad8b5753694bb713ffda7bd",
+            "outcome": "Only frozen T12a source/test/fixture paths changed"
+    }
+  ],
+  "remaining_limitations": [
+    "Shadow and probe orchestration, CLI grammar, native reports/adapters, qualification gates, and mode-specific end-to-end first-gate outcomes belong to T12b/T12c and were not claimed or simulated.",
+    "The candidate CLI is not self-hosting in this uninitialized checkout and the owned set forbids creating its project config; final scoped evidence used the approved pinned bootstrap and this limitation is explicit.",
+    "The protocol descriptor was regenerated and byte-identical to the committed T12a descriptor, so the repair commit has no descriptor diff.",
+    "No repository-wide full suite, remote backend, cloud/provider credential, live installation, push, merge, publication, or deployment was performed."
+  ]
+}

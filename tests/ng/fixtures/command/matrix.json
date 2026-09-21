@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "status": "NOT_RUN_NATIVE_TASK11",
+  "execution_entrypoint": "candidate ptest inside an explicit private fixture-domain",
+  "runner": {"kind": "command", "launcher": ["{python}"], "args": ["{project}/command.py", "literal", "secret with space", "quote\"token", "$(metacharacter)", ";"], "test_roots": [], "workers": 2},
+  "required_admission": {"exclusive": true, "starts_only_with_zero_active_jobs": true, "inner_parallelism_contained": false},
+  "cases": [
+    {"id": "literal-argv", "project": ".", "prepare_tier": "exclusive_command", "expected_exit_code": 0, "expected_signal": null, "expected_stdout_json": ["secret with space", "quote\"token", "$(metacharacter)", ";"], "counts": null},
+    {"id": "custom-exit", "project": ".", "args": ["{project}/command.py", "exit"], "prepare_tier": "exclusive_command", "expected_exit_code": 23, "expected_signal": null},
+    {"id": "native-signal", "project": ".", "args": ["{project}/command.py", "signal"], "prepare_tier": "exclusive_command", "expected_runner_raw_exit_code": -15, "expected_exit_code": 143, "expected_signal": 15},
+    {"id": "missing-executable", "project": ".", "launcher": ["{run_output}/missing-command"], "args": [], "prepare_tier": "exclusive_command", "expected_exit_code": 127, "expected_signal": null}
+  ]
+}

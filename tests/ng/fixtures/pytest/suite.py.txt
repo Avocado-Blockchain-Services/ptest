@@ -1,0 +1,12 @@
+from pathlib import Path
+import os
+import pytest
+import project_module
+
+
+@pytest.mark.parametrize("value", ["plain", "quoted [x];$HOME"], ids=["plain", "quoted [x];$HOME"])
+def test_native(value):
+    assert project_module.VALUE == 7
+    print("native-output:" + value)
+    Path("tests-ran").write_text("yes")
+    assert os.environ.get("FIXTURE_FAILURE") != "1"

@@ -1,0 +1,8 @@
+title = "ptest NG Gitleaks policy"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed protocol-test sentinel, not a credential"
+paths = ['''tests/ng/test_contracts\.py''']

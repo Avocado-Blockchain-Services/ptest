@@ -1,0 +1,43 @@
+{
+  "task": "11E-vitest-basic-serial-foundation",
+  "status": "prepared-but-unavailable",
+  "scope": [
+    "src/ptest/adapters/vitest.py",
+    "src/ptest/runtime/vitest_bridge.mjs",
+    "tests/ng/test_vitest_adapter.py",
+    "tests/ng/fixtures/vitest/NATIVE_MATRIX.md",
+    ".pipeline/out/task-11e-foundation.json"
+  ],
+  "acceptance": {
+    "scoped_admission": "MET: only Vitest + Mode.SCOPED + nonempty plan.execution=scoped files prepare; all other representable Plan modes/executions refuse before bridge launch.",
+    "single_serial_slot": "MET: grant and attempt must both be one, configured workers are ignored, and all VITEST thread/fork bounds are one.",
+    "literal_launcher_and_args": "MET: direct node or one absolute node executable only; configured args plus the scoped suffix are tuple literals exactly once; full_args are excluded.",
+    "terminal_protocol": "MET for deterministic API double only: bridge emits exactly NativeTerminalReport fields, with private/exclusive/bounded report output and refusal/nonzero semantics.",
+    "native_qualification": "NOT MET / DEFERRED: no preprovisioned real Node/Vitest/Vite subprocess tuple was installed or exercised by this foundation task.",
+    "executor_lifecycle": "NOT MET / DEFERRED: report allocation/consumption and guard lifecycle remain owned by the later operations task. prepare leaves report_path unset and capability unavailable."
+  },
+  "red": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/tests/ng/test_vitest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/tests/ng/test_reports.py -q --tb=short --durations=20",
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation",
+    "exit_code": 1,
+    "output": "29 failed, 73 passed in 1.46s (legacy worker/grant, full/selected behavior, legacy terminal record, and unowned control paths contradicted the new tests)."
+  },
+  "green": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/tests/ng/test_vitest_adapter.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation/tests/ng/test_reports.py -q --tb=short --durations=20",
+    "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-foundation",
+    "exit_code": 0,
+    "output": "108 passed in 1.18s"
+  },
+  "qualification_limit": "stub-node.mjs is a local API double, never a real Vitest qualification. NODE_OPTIONS is acted on by Node before bridge code can allocate a terminal record; it fails closed without project evaluation or bridge report.",
+  "security": {
+    "identity": "Run, nonce, attempt, scoped execution, basic_serial profile, and one-worker environment are checked before project import.",
+    "input_and_dependencies": "No shell or package-manager launcher is accepted; argv stays literal; NODE_OPTIONS/NODE_PATH and unowned Vitest controls reject.",
+    "exposure_and_availability": "Refusals do not echo project arguments, the report uses O_EXCL/O_NOFOLLOW and 0600 mode, its parent is private/external, and output is bounded by the shared report maximum."
+  },
+  "not_verified": [
+    "real Node/Vitest/Vite behavior or public API compatibility",
+    "operations report allocation/consumption and guarded lifecycle",
+    "cancellation, restart/reload, and project hook side effects under a real subprocess",
+    "ptest --full (explicitly out of scope)"
+  ]
+}

@@ -1,0 +1,627 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempts": {
+          "items": {
+            "properties": {
+              "attempt_id": {
+                "pattern": "^a(00[1-9]|010)$",
+                "type": "string"
+              },
+              "final_exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "inventory_complete": {
+                "type": "boolean"
+              },
+              "phase": {
+                "enum": [
+                  "admission",
+                  "complete",
+                  "discovery",
+                  "execution",
+                  "finalization",
+                  "setup"
+                ],
+                "type": "string"
+              },
+              "raw_exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source_valid": {
+                "type": "boolean"
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "cancelled",
+                  "incomplete",
+                  "no-tests-needed",
+                  "not-run"
+                ],
+                "type": "string"
+              },
+              "timings": {
+                "properties": {
+                  "collection": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "execution": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "finalization": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "queue": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "setup": {
+                    "minimum": 0,
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "queue",
+                  "setup",
+                  "collection",
+                  "execution",
+                  "finalization"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "attempt_id",
+              "phase",
+              "status",
+              "raw_exit_code",
+              "final_exit_code",
+              "source_valid",
+              "inventory_complete",
+              "timings"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "baseline_published": {
+          "type": "boolean"
+        },
+        "checkout_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "command": {
+          "properties": {
+            "argument_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "generated_options": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "pytest",
+                "vitest",
+                "go",
+                "cargo",
+                "command"
+              ],
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "automatic",
+                "scoped",
+                "full",
+                "shadow",
+                "probe"
+              ],
+              "type": "string"
+            },
+            "provenance": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workers": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "mode",
+            "argument_count",
+            "generated_options",
+            "workers",
+            "provenance"
+          ],
+          "type": "object"
+        },
+        "counts": {
+          "properties": {
+            "collected": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "executed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "failed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "passed": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "skipped": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unknown": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "collected",
+            "executed",
+            "passed",
+            "failed",
+            "skipped",
+            "unknown"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "exit_origin": {
+          "enum": [
+            "ptest",
+            "runner",
+            "setup",
+            "signal"
+          ],
+          "type": "string"
+        },
+        "finished_at": {
+          "type": "string"
+        },
+        "full_gate_eligible": {
+          "type": "boolean"
+        },
+        "granted_workers": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limitations": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "memory_estimate_mb": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "automatic",
+            "scoped",
+            "full",
+            "shadow",
+            "probe"
+          ],
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "admission",
+            "complete",
+            "discovery",
+            "execution",
+            "finalization",
+            "setup"
+          ],
+          "type": "string"
+        },
+        "plan": {
+          "properties": {
+            "baseline_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "compatibility": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "enum": [
+                "full",
+                "selected",
+                "scoped",
+                "none"
+              ],
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "input_digest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "automatic",
+                "scoped",
+                "full",
+                "shadow",
+                "probe"
+              ],
+              "type": "string"
+            },
+            "reasons": {
+              "items": {
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message",
+                  "paths"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "static_preview": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "execution",
+            "files",
+            "reasons",
+            "input_digest",
+            "compatibility",
+            "baseline_run_id",
+            "static_preview"
+          ],
+          "type": "object"
+        },
+        "project_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "reserved_memory_mb": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "run_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "runner_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source_valid": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "cancelled",
+            "incomplete",
+            "no-tests-needed",
+            "not-run"
+          ],
+          "type": "string"
+        },
+        "timings": {
+          "properties": {
+            "collection": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "execution": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "finalization": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "queue": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "setup": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "queue",
+            "setup",
+            "collection",
+            "execution",
+            "finalization"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "run_id",
+        "project_id",
+        "checkout_id",
+        "mode",
+        "status",
+        "phase",
+        "started_at",
+        "finished_at",
+        "plan",
+        "command",
+        "granted_workers",
+        "memory_estimate_mb",
+        "reserved_memory_mb",
+        "runner_exit_code",
+        "exit_code",
+        "exit_origin",
+        "signal",
+        "source_valid",
+        "full_gate_eligible",
+        "baseline_published",
+        "counts",
+        "timings",
+        "attempts",
+        "reasons",
+        "limitations",
+        "artifact_id"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "run",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: run",
+  "type": "object"
+}

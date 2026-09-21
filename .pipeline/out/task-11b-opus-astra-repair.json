@@ -1,0 +1,122 @@
+{
+  "task": "11B1",
+  "date": "2026-09-18",
+  "status": "implemented-awaiting-independent-opus-high-review",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair",
+  "source_commit": "4c1fb8c6945ef9dc70ea65371d6df8310242cd61",
+  "audit_authority": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-operations/838200d4-cff2-4875-b3bd-2952163e0f77.jsonl",
+  "scope": "Repair B1/B2/B3: authoritative guard problems, native/signal/operational exit precedence, cancellation, safe export before release, and adversarial lifecycle coverage.",
+  "controller_prefix": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap",
+  "test_path_prefix": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/",
+  "test_command_rule": "For each run below, append each listed test filename with test_path_prefix to controller_prefix, then append options verbatim. These are scoped ptest runs, never raw test-runner invocations.",
+  "runs": [
+    {
+      "tests": ["test_operations.py"],
+      "options": "--tb=short --durations=15",
+      "phase": "initial-red",
+      "output": "27 failed, 12 passed in 8.30s",
+      "details": "19 intended failures reproduced ignored problems, export exit 2, probe timeout, cancellation precedence, finalization exceptions, negative signal exit and startup cancellation. Eight additional failures were an incorrect CaseFactory.domain keyword in new tests; these were fixture errors, not claimed implementation RED evidence. Corrected to slots/jobs before the next run."
+    },
+    {
+      "tests": ["test_operations.py"],
+      "options": "-k 'invalid_handoff or export_holds' --tb=short --durations=10",
+      "phase": "focused-red",
+      "output": "2 failed, 6 passed, 31 deselected in 7.84s",
+      "details": "The real finish boundary observed no requested export; an authenticated DRAINING frame with an unexpected artifact incorrectly passed. Other malformed/missing handoff controls already retained leases. Invalid-frame drain paths took approximately 2.20s because of the post-exit busy wait."
+    },
+    {
+      "tests": ["test_operations.py"],
+      "options": "--tb=short --durations=15",
+      "phase": "first-green",
+      "output": "39 passed in 9.35s",
+      "slowest_test_s": 0.39
+    },
+    {
+      "tests": ["test_files.py", "test_operations.py"],
+      "options": "-k 'exclusive_callback or exclusive_io or exclusive_rollback or finalization_failure' --tb=short --durations=10",
+      "phase": "export-rollback-red",
+      "output": "8 failed, 2 passed, 99 deselected in 1.15s",
+      "details": "Six tests required the approved optional after_write seam. Two operation tests proved that finish failure left an optimistic exported result even though the returned result was incomplete."
+    },
+    {
+      "tests": ["test_files.py", "test_operations.py"],
+      "options": "-k 'exclusive_callback or exclusive_io or exclusive_rollback or finalization_failure or export_' --tb=short --durations=10",
+      "phase": "export-rollback-green",
+      "output": "20 passed, 89 deselected in 1.95s",
+      "slowest_test_s": 0.39
+    },
+    {
+      "tests": ["test_operations.py"],
+      "options": "-k 'running_cancellation or missing_raw or wrong_nonce or wrong_run' --tb=short --durations=10",
+      "phase": "additional-regression",
+      "output": "4 passed, 41 deselected in 1.21s",
+      "details": "The underscores in the last two -k terms did not select the hyphenated fault parameters; those wrong-nonce/wrong-run cases were subsequently included in both combined scopes. Actual cooperative runner cancellation returned raw 0/1/2 with final 130/1/2. These additional controls passed on first execution, so no independent RED claim is made for them.",
+      "slowest_test_s": 0.30
+    },
+    {
+      "tests": ["test_operations.py"],
+      "options": "-k 'launch_failure or missing-executable-0' --tb=short --durations=5",
+      "phase": "remaining-guard-failures-red",
+      "output": "3 failed, 45 deselected in 0.40s",
+      "details": "Inconsistent missing-executable plus raw zero still passed; typed and OS guard-launch failures escaped instead of returning incomplete results."
+    },
+    {
+      "tests": ["test_operations.py"],
+      "options": "-k 'launch_failure or missing-executable-0' --tb=short --durations=5",
+      "phase": "remaining-guard-failures-green",
+      "output": "3 passed, 45 deselected in 0.27s",
+      "slowest_test_s": 0.20
+    },
+    {
+      "tests": ["test_operations.py", "test_files.py", "test_cli.py", "test_scheduler.py", "test_guard.py", "test_simple_adapters.py"],
+      "options": "--tb=short --durations=15",
+      "phase": "combined-before-test-alignment",
+      "output": "3 failed, 751 passed in 45.55s",
+      "details": "Unchanged guard tests expected scheduler.poll to move DRAINING to FINALIZING. The accepted scheduler now requires begin_finalization. Failures were test_guard_accepts_launcher_created_session_and_real_draining and test_six_independent_clients_obey_grants_and_recover_only_after_owner_death for budgets 1 and 4. Root approved a test-only alignment; no guard or scheduler source changed."
+    },
+    {
+      "tests": ["test_operations.py", "test_files.py", "test_cli.py", "test_scheduler.py", "test_guard.py", "test_simple_adapters.py"],
+      "options": "--tb=short --durations=15",
+      "phase": "final-combined-green",
+      "output": "754 passed in 43.44s",
+      "details": "All original FINALIZING/recovery assertions remain. Aligned tests additionally assert DRAINING and actual group absence, obtain real begin_finalization proof, then assert FINALIZING and blocked followers. Forced-kill tests are intentional 3-second cancellation-grace integration cases (3.49s/3.44s); bounded-send integration takes 2.18s. All new operation cases were below 0.5s in the final run."
+    }
+  ],
+  "implemented": [
+    "Normal command manifests use attempt_timeout_s=null, retaining the guard's existing bounded compound watchdog. Removed the redundant controller deadline cancellation that could misattribute the guard deadline as a user/child signal.",
+    "Authenticated runner-facts.problem is consumed. Missing executable with absent raw status remains failed/127; operational guard failures are incomplete. A positive native failure wins; a negative status caused by guard failure remains raw evidence and does not masquerade as a child-origin signal.",
+    "One outcome function normalizes native signals and applies native nonzero, actual cancellation, required incomplete, success precedence. Missing or inconsistent raw facts do not invent executable absence or a pass.",
+    "Cancellation after preparation cannot launch a guard. Startup cancellation attempts the scheduler's exact-owner pending CAS; registered or uncertain grants remain retained. Guard launch failures produce typed incomplete outcomes and cancel only unregistered grants.",
+    "Malformed, wrong-run/nonce/attempt, duplicate, out-of-order, truncated, absent and killed DRAINING paths do not obtain release proof. Removed invalid-frame post-exit busy spinning.",
+    "Moved result export from CLI into operations before scheduler.finish. Existing export targets remain byte-identical. Clean-run export failure returns incomplete/70; native failure keeps its exit code. Begin/finish failures remain typed incomplete outcomes with retained claims.",
+    "Root-authorized optional create_exclusive(after_write=...) runs finalization after file and directory fsync while ownership descriptors remain held. Failure invalidates the newly opened inode, unlinks only a matching directory entry, fsyncs the parent and preserves the initiating error. Raced file/symlink replacements are untouched. If unlink fails, invalidated contents cannot remain a parseable success result.",
+    "A finish failure rolls back the owned optimistic export and attempts an exclusive incomplete export without retrying finish. The returned and exported results preserve native precedence and agree on incompleteness."
+  ],
+  "secure_by_spec": {
+    "identity": "Authenticated run/nonce/guard/attempt and DRAINING validation; mismatches retain the lease.",
+    "authorization": "Queued/prepared/startup cancellation cannot authorize a racing runner launch or speculative release.",
+    "tenancy": "Exclusive second-checkout followers stay queued through handoff/proof/export and are admitted only after finish; unrelated export replacements are preserved.",
+    "input": "Malformed/truncated/out-of-order frames, inconsistent facts and existing output paths have explicit negative tests.",
+    "state": "Native/cancel/error precedence, incomplete handoff, export collision, finalization failure and durable rollback are covered.",
+    "exposure": "Existing literal argv/byte-stream privacy assertions remain; new errors use fixed safe messages, never raw exceptions or guard-supplied text.",
+    "availability": "Probe timeout is absent from normal commands; compound guard watchdog remains; invalid-frame spin is removed; new race tests use signals/FIFO readiness or boundary hooks, not arbitrary sleeps.",
+    "dependencies": "No dependency, provider, network-service, shell, native runner or setup capability was added. Shared file writer remains the sole filesystem authority.",
+    "spec_gaps": "The optional owned-file callback is an implementation mechanism needed to satisfy the already-specified export-before-finish and no-false-pass contracts; root explicitly approved the bounded seam. No product exception was requested.",
+    "gates": "Scoped ptest behavioral/security-boundary tests and git diff --check passed. No configured NG secret/SAST/advisory scanner gate was found in pyproject/lock/scripts/CI inspection; no scanner installation or independent audit was performed in this repair scope. Percentage/branch coverage was not collected."
+  },
+  "graphify": {
+    "command": "graphify update .",
+    "result": "Passed twice using AST-only extraction; final graph has 4375 nodes, 9464 edges, 299 communities.",
+    "limitation": "Seven JSON schema/fixture sources yielded zero AST nodes and are absent from the graph. No semantic extraction or external provider was used; graph labels/wiki were not used as authority."
+  },
+  "deferred": [
+    "Full integrated ptest --full and independent Opus audit remain root-owned and were not run.",
+    "Source mutation/revalidation, history/baseline/selection, native runner execution, setup, shadow/probe and remote remain outside this command-only repair. Results retain source_valid=false, full_gate_eligible=false, baseline_published=false and unknown counts.",
+    "Only the current Linux controller environment was exercised; macOS remains unverified. No live-provider or external-service test was performed."
+  ],
+  "residual_concerns": [
+    "The cooperative-process-group lifecycle is not containment for malicious same-user code or arbitrary detached descendants. Existing scheduler/guard escape and recovery tests passed within the combined scope.",
+    "Exclusive export rollback handles recoverable callback failures; abrupt SIGKILL/power-loss durability is governed by the broader finalization/recovery contract and is not newly certified by these callback tests."
+  ],
+  "workspace": "Only explicitly staged source/tests were committed. The preexisting untracked .pipeline/briefs/task-11b-opus-repair.md was preserved. No full-suite run, push, deployment, installed CLI replacement or audit was performed."
+}

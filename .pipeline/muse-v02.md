@@ -1,0 +1,3 @@
+Implement v0.2's explicit monorepo root dispatcher.
+
+Contract: version=2 root `.ptest.toml` has only `[monorepo] children`; safe 1–256 unique nonoverlapping relative non-symlink child dirs with immediate v1 configs. Scoped root paths must route/rebase to exactly one child; reject empty/mixed/undeclared/absolute/traversal/backslash/symlink escapes before launch. Root `--full` preflights all then executes children sequentially, preserves output, returns first nonzero after all. No discovery, no Terraform runner, no nested CLI; call existing operations. Add regression tests, docs, and root agent-rule behavior. Work only in this worktree; do not push/merge/revert others. Use ptest for tests and commit your changes.

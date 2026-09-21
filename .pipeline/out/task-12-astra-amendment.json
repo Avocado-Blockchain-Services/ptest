@@ -1,0 +1,208 @@
+{
+  "task": "task-12-astra-amendment",
+  "status": "design-amendment-review-repair-ready",
+  "author": "architect-agent (Astra)",
+  "created": "2026-09-18",
+  "base": "71fb7399a49f34cd27c5737fe375a461988fc001",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-task12-design/ptest",
+  "branch": "cx-ng-task12-design",
+  "documentation_only": true,
+  "task_12_implementation_complete": false,
+  "review_repair": {
+    "reviewer": "Opus",
+    "reported_high_blockers": 0,
+    "repair_base": "854e6b34e155bcf571494361b619dd8a624cf0a8",
+    "addressed": [
+      "First-gate invalidation stops without replanning under the same grant; exact ordinary, shadow and probe outcomes are frozen",
+      "Native shadow S1 uses complete authenticated test failure exit 1; arbitrary exit 23 remains guard-level only",
+      "Guard observes preceding-phase quiescence/uncertainty before emitting ready",
+      "Setup frames use phase setup and attempt_id a001, separately from execution a001",
+      "Focused reproduction explicitly supersedes design section 9: ordinary caller-requested scoped evidence, no built-in replay/classifier",
+      "Four-file sensitivity/recovery uses full_ratio 0.75; separate equality case at 0.50 widens to full"
+    ]
+  },
+  "focused_review_clarifications": {
+    "reviewer": "Opus",
+    "approved_commit": "e6d71a2d31177bcb6e8097fbcf2af95e56a90567",
+    "remaining_note_severity": "LOW",
+    "addressed": [
+      "Freeze per-mode a001 identity references; probe first content capture cannot prove admission-time content stability",
+      "Enumerate exactly five REASON_CODES additions with exact public/private use and unchanged decision-stop subset"
+    ]
+  },
+  "t12a_repair_ownership": {
+    "blocked_candidate": "7a7c7a0",
+    "scope": "Ownership-only correction to the narrower execution brief; all frozen runtime behavior, G1-G3/H1-H2 and ordered deliverables remain unchanged",
+    "source_and_generated_files": [
+      "src/ptest/contracts.py",
+      "src/ptest/runtime/protocol-v1.json",
+      "src/ptest/guard.py",
+      "src/ptest/operations.py",
+      "src/ptest/history.py",
+      "src/ptest/selection.py"
+    ],
+    "test_modules": [
+      "tests/ng/test_contracts.py",
+      "tests/ng/test_guard.py",
+      "tests/ng/test_operations.py",
+      "tests/ng/test_history.py",
+      "tests/ng/test_selection.py"
+    ],
+    "fixture_files": [
+      {
+        "path": "tests/ng/fixtures/processes/guard_client.py",
+        "why": "Independent admission/controller cancellation must emit guard protocol 2; leave scheduler/domain protocol unchanged"
+      },
+      {
+        "path": "tests/ng/fixtures/processes/guard_driver.py",
+        "why": "Real-guard barriers, fake clock and bounded fault injection for decision, cancellation, deadline and quiescence evidence"
+      },
+      {
+        "path": "tests/ng/fixtures/processes/guard_workload.py",
+        "why": "Local child/descendant markers and IPC barriers for G1-G3, survivor uncertainty, cleanup and neighbor preservation"
+      },
+      {
+        "path": "tests/ng/fixtures/command/guard_faults.py",
+        "why": "Protocol-2 operations fault injection must reach the intended wrong-run/nonce/order/handoff or first-gate boundary, not incidental protocol-1 rejection"
+      }
+    ],
+    "restored_selection_responsibility": "Pure choose_shadow_plans and quarantine-aware ordinary fallback plus test_selection.py stay in T12a; no deferral or record-only completion",
+    "shared_support_excluded": ["tests/ng/conftest.py", "tests/ng/support.py"],
+    "other_boundaries": "File-specific fixtures only; operations limited to shared transport/ordinary-run first gates; no other fixtures, adapters, CLI, source/config/scheduler or dependency/packaging transfer; existing report paths unchanged",
+    "required_evidence": "Real-subprocess G1-G3, H1-H2 marker/evidence preservation and operations first-gate regressions; scoped evidence across all five owned test modules without weakening assertions",
+    "next_action": "Controller corrects the implementation brief to transfer these exact files before repair resumes"
+  },
+  "owned_files": [
+    "docs/designs/2026-09-18-ptest-ng-task12-amendment.md",
+    "docs/plans/2026-09-17-ptest-ng.md",
+    ".pipeline/out/task-12-astra-amendment.json"
+  ],
+  "candidate_evidence_only": [
+    "479e7393ffc60ac0b2ed98fa8a3ec298f02576b9",
+    "5ebcbd962952fa17d9bc35ef81c65b47fb255173",
+    "f699d638c36c6db85c521ecdcb299de0f4a946a6"
+  ],
+  "ordered_deliverables": [
+    {
+      "id": "T12a",
+      "scope": "Shared authenticated guard decision protocol, typed quarantine/history publication and pure diagnostic planning",
+      "gate": "Scoped G1-G3 and H1-H2 evidence, ordinary-run regressions, Opus contract approval"
+    },
+    {
+      "id": "T12b",
+      "scope": "Actual advanced pytest/Vitest selection, verified runtime/baseline handoff and distinct supported parallel identities; ordinary single-attempt integration",
+      "gate": "Q-PY-SELECT, Q-PY-PROBE, Q-VT-SELECT and Q-VT-PROBE real native evidence plus Opus qualification approval"
+    },
+    {
+      "id": "T12c",
+      "scope": "One-lease shadow/probe orchestration, exact grammar and truthful compound outcomes",
+      "gate": "S1-S3, P1-P3, C1-C2; both first-class bad-policy sensitivity cases, positive probes, Opus M3 gate and root-owned final integrated test gate"
+    }
+  ],
+  "frozen_decisions": {
+    "guard_protocol": {
+      "version": 2,
+      "unrelated_protocol_versions_unchanged": true,
+      "ready": "attempt-ready",
+      "decision": "attempt-decision",
+      "authentication": ["run_id", "grant_nonce", "grant_generation", "attempt_id", "one_use_gate_token"],
+      "decision_timeout_s": 30,
+      "frame_transfer_timeout_s": 2,
+      "setup_identity": {"phase": "setup", "attempt_id": "a001", "consumes_execution_entry": false},
+      "before_ready": "Guard reaps direct child and observes no live non-guard group member or live/unknown recorded escape; uncertainty closes spawning",
+      "gates": "Every execution attempt; no ungated fallback; EOF, stop, cancellation, timeout or invalid frames close subsequent spawning"
+    },
+    "first_gate_invalidation": {
+      "same_grant_replan": false,
+      "identity_references": {
+        "automatic_selected_and_shadow": "Admitted plan input_digest or fixed selected/full comparison digest, plus bound config/scope/relevant environment resolution",
+        "automatic_full_explicit_full_and_scoped": "Retained post-admission pre-guard input/config/environment capture; scope matches admitted resolution; no earlier content-delta claim",
+        "probe": "Config/scope/relevant environment drift from admission resolution or unknown required identity; a001 is first content capture for later gates/final verification, not admission-time content-delta detection"
+      },
+      "ordinary_and_probe": "Incomplete 70, ptest origin, changed-during-run for observed change against the mode-specific reference or unknown-input for unknown required identity",
+      "shadow": "Not-run 2, ptest origin, unsupported-capability plus changed-during-run or unknown-input",
+      "execution_attempts_started": 0,
+      "replan": "New caller invocation and fresh admission; automatic readmission is outside Task 12"
+    },
+    "reason_code_additions": [
+      {
+        "code": "execution-timeout",
+        "public": "Run reason for execution or compound expiry; affected attempt status/exit remains in AttemptResult; incomplete ptest-origin 70 absent earlier nonzero; not queue or decision expiry",
+        "private": "Existing guard deadline problem and allowed attempt-decision stop reason for exhausted execution budget"
+      },
+      {
+        "code": "attempt-decision-timeout",
+        "public": "Run reason for pending-gate watchdog expiry; incomplete ptest-origin 70 absent earlier nonzero",
+        "private": "Guard/controller diagnostic only; not an allowed decision-stop reason, new event or synthetic facts for an unstarted attempt"
+      },
+      {
+        "code": "selection-shadow-quarantine",
+        "public": "History/selection limitation and automatic-full planning reason while the dedicated row exists; context for eligible diagnostic shadow",
+        "private": "Exact SelectionQuarantine.code and history-owned row discriminator; not a guard stop reason or generic health marker"
+      },
+      {
+        "code": "probe-no-conflict-observed",
+        "public": "Run reason only for a complete passing probe sample; no safety or full-gate certification",
+        "private": "Controller classification of authenticated complete evidence only; not a guard/bridge verdict or decision-stop reason"
+      },
+      {
+        "code": "probe-conflict-observed",
+        "public": "Run reason for conclusive serial-pass/reproducible-parallel-failure differential; preserve first failing runner outcome",
+        "private": "Controller classification of authenticated differential evidence only; not a guard/bridge verdict or decision-stop reason"
+      }
+    ],
+    "reason_catalog_boundaries": "Exactly five public additions; existing reasons and seven-code decision-stop subset unchanged; internal comparison verdicts and private control-unavailable are not added; preserve safe public projection; no second catalog or public field/schema-version change",
+    "shadow": {
+      "requires": "Qualified advanced first-class profile and genuine nonempty strict selected plan with compatible complete baseline",
+      "ordinary_selected_failure": "Full still executes; first nonzero remains",
+      "native_s1": "Complete authenticated selected native test failure exit 1, then full exit 0 or 1, final exit 1",
+      "attempt_timeout_s": null,
+      "compound_timeout_s": 600,
+      "changed_grammar": "--shadow --changed is valid automatic grammar",
+      "unqualified_exit": 2,
+      "unqualified_reason": "unsupported-capability",
+      "incomplete_full": "Not a confirmed or inferred omitted-test miss; no promotion or quarantine clearing",
+      "baseline_publication": false
+    },
+    "history": {
+      "quarantine_code": "selection-shadow-quarantine",
+      "quarantine_api": "publish_shadow_outcome(domain, checkout, result, comparison) -> PublishResult",
+      "probe_api": "publish_probe_outcome(domain, checkout, result, evidence) -> PublishResult",
+      "storage": "Dedicated typed selector row under the existing history writer lock and transaction",
+      "recovery": "Newer successful explicit eligible comparison, changed policy or compatibility, compatible clean full baseline after correction, exact expected-row match",
+      "unrelated_health_markers": "Never removed or reset by comparison",
+      "compound_failures": "Union of all attempt failures survives later same-compound passes"
+    },
+    "probe": {
+      "qualification_required": "First-class supported parallel worker identity and explicit run-worker-namespaced local isolation",
+      "attempt_timeout_min_s": 1,
+      "attempt_timeout_default_s": 30,
+      "attempt_timeout_max_s": 120,
+      "compound_timeout_s": 600,
+      "repeat_min": 1,
+      "repeat_default": 2,
+      "repeat_max": 5,
+      "attempts_max": 10,
+      "workers_default": 2,
+      "minimum_parallel_grant": 2,
+      "insufficient_workers": "Exit 2/capacity-exceeded; blocked parallel portion, no serial-only success substitute",
+      "unqualified": "Exit 2/unsupported-capability, no launch; rejection alone does not complete probes"
+    },
+    "post_admission_rejection": "Authenticated cancel_pending before registration; owned guard cancellation and proof/finalization after registration; never abandon a grant",
+    "product_scope": "Local-first only; no remote execution, cloud operations, model calls, live installation, deployment or publication"
+  },
+  "qualification_prerequisites": [
+    {"id": "Q-PY-SELECT", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-PY-PROBE", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-VT-SELECT", "required": true, "baseline_status": "unqualified"},
+    {"id": "Q-VT-PROBE", "required": true, "baseline_status": "unqualified"}
+  ],
+  "verification": {
+    "tests_run": false,
+    "reason": "Documentation-only instruction; no tests, dependency installation or runtime edits are authorized",
+    "completed_document_checks": ["Re-read changed documents", "Check contradictions and placeholders", "Parse JSON", "git diff --check"],
+    "commit_scope": "Only the three declared documentation/artifact files; supplied untracked brief remains untouched"
+  },
+  "unresolved_product_ambiguities": [],
+  "next_gate": "Controller verifies the required Opus documentation repairs before implementation consumes the shared contracts"
+}

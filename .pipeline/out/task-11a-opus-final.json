@@ -1,0 +1,19 @@
+{
+  "task": "11A-static-integration",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11/096a039a-5252-485e-98ec-05f28f084174.jsonl",
+  "reviewed_range": "0c2703d..5e39559",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_cli.py tests/ng/test_render.py tests/ng/test_config.py tests/ng/test_doctor.py tests/ng/test_contracts.py --durations=10",
+    "result": "343 passed in 2.32s",
+    "focused_post_commit": "tests/ng/test_cli.py -k repeated_fixture_domain: 2 passed in 0.06s"
+  },
+  "approved_repairs": ["691073f", "42c9b05"],
+  "notes": [
+    "Leading --fixture-domain is intentionally a leading-global-only option; literal runner tails retain mid-tail tokens.",
+    "Task 11B owns execution lifecycle, exit mapping, authenticated guard/report completion, result artifacts, real runner fidelity, doctor probes and exact history filtering.",
+    "Broader grammar notes remain non-blocking follow-ups: init reveal/json grammar, repeated queue timeout, plan base behavior and unexpected exception rendering."
+  ]
+}

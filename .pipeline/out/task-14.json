@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "task": "14",
+  "status": "implemented-local-harnesses-corrected",
+  "owned_files": [
+    "scripts/acceptance.py",
+    "scripts/benchmark.py",
+    "tests/ng/test_acceptance.py",
+    "docs/acceptance/2026-09-17-ng.md",
+    "docs/support-matrix.md",
+    "docs/performance.md",
+    "docs/contributing.md",
+    "docs/changelog.md",
+    ".pipeline/out/task-14.json"
+  ],
+  "verification": {
+    "scoped_command": "ptest tests/ng/test_acceptance.py",
+    "status": "16 passed in 2.82s (exit 0)",
+    "graphify": "graphify update . exit 0; 4095 nodes, 9294 edges, 260 communities"
+  },
+  "correction": {
+    "security": [
+      "fresh 0700 evidence roots only",
+      "exclusive 0600 JSON/stdout/stderr artifacts",
+      "symlinked parents/leaves and reuse rejected",
+      "streaming output cap terminates owned process group"
+    ],
+    "candidate_smoke": "candidate-bound .venv/bin/ptest; 10 lifecycle records; exit 1 because cancel is blocked-unverified",
+    "benchmark_smoke": "candidate-bound version diagnostic; 2 samples; candidate_bound=true; performance promotion blocked"
+  },
+  "claims": {
+    "independent_adoption": "blocked-unverified",
+    "macos": "unverified",
+    "advanced_selection": "unverified",
+    "performance_targets": "not-run"
+  },
+  "limitations": [
+    "This task does not fetch or install external adoption projects.",
+    "This task does not claim release approval or cross-platform support."
+  ]
+}

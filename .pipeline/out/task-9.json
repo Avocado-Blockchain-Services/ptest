@@ -1,0 +1,22 @@
+{
+  "status": "DONE_WITH_CONCERNS",
+  "commit": "b24b4ca6ee53a863ebfbf5a893e7554ef73cfff4",
+  "test_summary": "Committed Task 9 Sol repair 3 source/tests as b24b4ca6ee53a863ebfbf5a893e7554ef73cfff4. TDD RED used scripts/ptest-bootstrap tests/ng/test_doctor.py with the hostile-cap, tiny-bound and existing output/deadline cases. The first run exited 1 with 3 failures; after correcting only the deep-path fixture helper, the focused RED exited 1 with 2 failures: the hostile 3,839-byte scope plus 65+ KiB logical path serialized to 265,838 bytes against the 262,144-byte cap while usage reported 194,910, and the minimum output contract did not exist. GREEN after implementation passed both new regressions; one existing deadline regression then exposed repeated clock sampling in report finalization, which was corrected by capturing elapsed time once. Fresh final scoped verification `scripts/ptest-bootstrap tests/ng/test_doctor.py tests/ng/test_resources.py --durations=10` exited 0 with 99 passed in 1.26s. The hostile complete-document regression took 0.88s and the 3,200-link regression took 0.11s. `git diff --check` exited 0 before the source commit. `graphify update .` exited 0 with 3,629 nodes, 7,238 edges and 251 communities, retaining the existing zero-node warnings for implementation.json, review.json and protocol-v1.json. Committed SHA-256: src/ptest/doctor.py 608ae66941c002238177f5c6ea9c174a67f5047699fb88f19f3968712d38b6e0; tests/ng/test_doctor.py 7ca0daa62431b7d71029a9d425441403da3deec82069a767ed393fb3798fcd0f.",
+  "report_path": ".pipeline/out/task-9.json",
+  "security_contract": {
+    "positive": "Every accepted ScanLimits.output_bytes value bounds the complete compact UTF-8 DoctorReport, including scope, readiness, findings, limits, usage and limitations; usage.output_bytes equals those actual serialized bytes.",
+    "negative": "Untrusted deep paths, JSON-escaped scopes, copied readiness reasons and impossible tiny budgets cannot bypass or weaken the complete-document cap.",
+    "controls": [
+      "A 4,096-byte explicit minimum rejects smaller output budgets with invalid-bound, and a serializer-derived per-scope envelope check rejects larger budgets that still cannot hold their exact scope envelope.",
+      "Every Reason path and Finding path is bounded to 4,096 UTF-8 bytes before record construction; overlong paths are omitted rather than approximated or echoed.",
+      "Readiness uses fixed pathless limitation guidance instead of copying a limitation outside the payload ledger.",
+      "The payload ledger reserves a compact serializer-derived envelope, and finalization measures the real compact document, records that exact byte count, and trims payload with one output-limit reason if needed."
+    ]
+  },
+  "concerns": [
+    "No full-suite run was performed or claimed: this repair brief permits only scoped doctor/resource bootstrap tests, and the orchestrator owns the later integrated full gate.",
+    "Secrets scanning, dependency scanning and fuzz/property infrastructure were inventoried as outside this scoped doctor repair; no dependencies, CI, deployment path or external service boundary changed.",
+    "T11 still owns CLI dispatch and public human/JSON rendering. This repair governs the compact DoctorReport representation exercised by Task 9 without expanding into those consumers.",
+    "The 2,000-file/16 MiB p95/RSS acceptance benchmark, persisted timing interface, real external database/cache services, native runner execution and dynamic probes remain outside this repair scope."
+  ]
+}

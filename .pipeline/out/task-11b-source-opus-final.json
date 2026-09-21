@@ -1,0 +1,25 @@
+{
+  "task": "11B2 source identity at guarded command execution",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-source-astra/eea6ae05-d83c-4f49-9874-f022a76e989f.jsonl",
+  "reviewed_range": "bea3f5e..bc230e7",
+  "supersedes": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-source/1b5fb15d-ac27-4efc-95ba-b09f4ea4f449.jsonl",
+  "repairs_accepted": [
+    "Scoped observations retain the native runner exit while recording changed input identity; only full/automatic raw-zero runs become incomplete/70.",
+    "Known pre-run identity followed by unknown post-run evidence invalidates a full gate rather than being treated as unchanged.",
+    "Real isolated Git fixtures prove tracked, untracked, ignored and unknown-evidence changes, typed nonsecret class evidence, identity ordering, cancellation cleanup, and runner exit precedence.",
+    "Generic command execution remains unqualified for source-valid/full-gate/baseline/selection claims."
+  ],
+  "verification": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-source-astra/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-source-astra/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-source-astra/tests/ng/test_source.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-source-astra/tests/ng/test_scheduler.py -q --tb=short --durations=20",
+    "result": "284 passed in 21.89s"
+  },
+  "nonblocking_notes": [
+    "Generic command executions lack a verified runtime identity and therefore remain source-valid false with no full-gate/baseline claim.",
+    "Runner-written ignored caches remain input changes unless a reviewed policy declares non-input outputs.",
+    "Input snapshots are internal result evidence and are intentionally omitted from the public result serializer.",
+    "Post-run unexpected exceptions retain the lease for scheduler recovery; a later bounded recovery hardening may make that path more explicit."
+  ]
+}
