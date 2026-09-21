@@ -26,6 +26,7 @@ def _wheel(path: Path, name: str, version: str = "0.1.0", tag: str = "py3-none-a
         archive.writestr(f"{dist}/__init__.py", "__version__ = '" + version + "'\n")
         archive.writestr(f"{dist}-{version}.dist-info/METADATA", f"Name: {name}\nVersion: {version}\n")
         archive.writestr(f"{dist}-{version}.dist-info/WHEEL", "Wheel-Version: 1.0\nTag: py3-none-any\n")
+        archive.writestr(f"{dist}-{version}.dist-info/RECORD", "")
     return target
 
 
@@ -76,17 +77,25 @@ def test_manifest_wheel_symlink_is_rejected(tmp_path):
         install_bundle(tmp_path / "dest", wheelhouse, manifest)
 
 
-def test_failed_upgrade_keeps_old_target(tmp_path):
+def test_failed_upgrade_keeps_old_target(tmp_path, monkeypatch):
     wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
     ptest = _wheel(wheelhouse, "ptest-ng")
     psutil = _wheel(wheelhouse, "psutil", "7.2.2")
     manifest = _manifest(wheelhouse, ptest, psutil)
-    old = tmp_path / "old"; old.mkdir()
+    old = tmp_path / ".ptest-bundles" / "old" / "venv" / "bin"; old.mkdir(parents=True)
+    (old / "ptest").write_text("#!/bin/sh\nexit 0\n"); (old / "ptest").chmod(0o755)
     current = tmp_path / "ptest"
-    current.symlink_to(old, target_is_directory=True)
+    current.symlink_to(old / "ptest")
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["uv", "venv"]:
+            venv = Path(argv[-1]) / "bin"; venv.mkdir(parents=True)
+            for name in ("ptest", "python"):
+                target = venv / name; target.write_text("#!/bin/sh\nexit 0\n"); target.chmod(0o755)
+        return type("Result", (), {"returncode": 0})()
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="before-symlink-replace"):
         install_bundle(tmp_path, wheelhouse, manifest, fault="before-symlink-replace")
-    assert current.resolve() == old.resolve()
+    assert current.resolve() == old / "ptest"
 
 
 def test_success_writes_complete_marker_before_public_symlink(tmp_path, monkeypatch):
