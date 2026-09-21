@@ -30,248 +30,248 @@
     },
     "deleted_paths": {
       ".gcloudignore": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** .gcloudignore . (audited path .gcloudignore): 2 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": ".gcloudignore is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "Dockerfile.pytest": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.pytest . (audited path Dockerfile.pytest): no current matches (exit 1)",
+        "ng_counterpart": "Dockerfile.pytest is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "Dockerfile.spot-controller": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.spot-controller . (audited path Dockerfile.spot-controller): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`",
+        "ng_counterpart": "Dockerfile.spot-controller is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "Dockerfile.spot-worker": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.spot-worker . (audited path Dockerfile.spot-worker): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:28:- `Dockerfile.spot-worker`, `Dockerfile.spot-controller`",
+        "ng_counterpart": "Dockerfile.spot-worker is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "Dockerfile.vitest": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** Dockerfile.vitest . (audited path Dockerfile.vitest): no current matches (exit 1)",
+        "ng_counterpart": "Dockerfile.vitest is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "cloudbuild.pytest.yaml": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.pytest.yaml . (audited path cloudbuild.pytest.yaml): no current matches (exit 1)",
+        "ng_counterpart": "cloudbuild.pytest.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "cloudbuild.spot-controller.yaml": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.spot-controller.yaml . (audited path cloudbuild.spot-controller.yaml): no current matches (exit 1)",
+        "ng_counterpart": "cloudbuild.spot-controller.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "cloudbuild.spot-worker.yaml": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.spot-worker.yaml . (audited path cloudbuild.spot-worker.yaml): no current matches (exit 1)",
+        "ng_counterpart": "cloudbuild.spot-worker.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "cloudbuild.vitest.yaml": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** cloudbuild.vitest.yaml . (audited path cloudbuild.vitest.yaml): no current matches (exit 1)",
+        "ng_counterpart": "cloudbuild.vitest.yaml is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "config.example.toml": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** config.example.toml . (audited path config.example.toml): 5 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:287:  environment; its generated Spot config stanza and `config.example.toml`",
+        "ng_counterpart": "config.example.toml is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-07-26-heavy-scoped-remote-routing.md . (audited path docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-03-remote-result-deduplication.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-03-remote-result-deduplication.md . (audited path docs/superpowers/plans/2026-08-03-remote-result-deduplication.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/plans/2026-08-03-remote-result-deduplication.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-04-spot-queue.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-queue.md . (audited path docs/superpowers/plans/2026-08-04-spot-queue.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/plans/2026-08-04-spot-queue.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-04-spot-status.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-status.md . (audited path docs/superpowers/plans/2026-08-04-spot-status.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/plans/2026-08-04-spot-status.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/plans/2026-08-05-spot-live-progress.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-05-spot-live-progress.md . (audited path docs/superpowers/plans/2026-08-05-spot-live-progress.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/plans/2026-08-05-spot-live-progress.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-07-26-heavy-scoped-remote-routing-design.md . (audited path docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-03-remote-result-deduplication-design.md . (audited path docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-04-spot-queue-design.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-queue-design.md . (audited path docs/superpowers/specs/2026-08-04-spot-queue-design.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/specs/2026-08-04-spot-queue-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-04-spot-status-design.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-04-spot-status-design.md . (audited path docs/superpowers/specs/2026-08-04-spot-status-design.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/specs/2026-08-04-spot-status-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "docs/superpowers/specs/2026-08-05-spot-live-progress-design.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** 2026-08-05-spot-live-progress-design.md . (audited path docs/superpowers/specs/2026-08-05-spot-live-progress-design.md): no current matches (exit 1)",
+        "ng_counterpart": "docs/superpowers/specs/2026-08-05-spot-live-progress-design.md is obsolete legacy documentation; the applicable NG contract is documented in README.md and docs/legacy-index.md."
       },
       "entrypoint.sh": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** entrypoint.sh . (audited path entrypoint.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "entrypoint.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "outsource_tests.md": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outsource_tests.md . (audited path outsource_tests.md): 2 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "outsource_tests.md is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "provision-vitest.sh": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** provision-vitest.sh . (audited path provision-vitest.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "provision-vitest.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "provision.sh": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** provision.sh . (audited path provision.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "provision.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "scripts/ptest-bootstrap": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** ptest-bootstrap . (audited path scripts/ptest-bootstrap): 37 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "scripts/ptest-bootstrap is obsolete legacy automation; the supported NG implementation is scripts/install.py or scripts/security-checks.py as applicable."
       },
       "scripts/spot-worker-startup.sh": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot-worker-startup.sh . (audited path scripts/spot-worker-startup.sh): 1 current matches; sample ./docs/designs/2026-09-17-ptest-ng-design.md:386:Exact obsolete-runtime inventory for reviewed removal: root `spot_controller.py`, `spot_queue.py`, `spot_worker.py`, `entrypoint.sh",
+        "ng_counterpart": "scripts/spot-worker-startup.sh is obsolete legacy automation; the supported NG implementation is scripts/install.py or scripts/security-checks.py as applicable."
       },
       "smoke.sh": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** smoke.sh . (audited path smoke.sh): 2 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:246:  scoped runs; the documented live-smoke shell block passed `bash -n`.",
+        "ng_counterpart": "smoke.sh is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "spot_controller.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_controller.py . (audited path spot_controller.py): 15 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`",
+        "ng_counterpart": "spot_controller.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "spot_queue.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_queue.py . (audited path spot_queue.py): 10 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:62:- `install.sh` builds a complete versioned `ptest`/`spot_queue.py` bundle and",
+        "ng_counterpart": "spot_queue.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "spot_worker.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_worker.py . (audited path spot_worker.py): 14 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`",
+        "ng_counterpart": "spot_worker.py is obsolete legacy configuration/runtime code; the local NG replacement is the root ptest launcher and src/ptest package."
       },
       "terraform/main.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** main.tf . (audited path terraform/main.tf): no current matches (exit 1)",
+        "ng_counterpart": "terraform/main.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/outputs.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outputs.tf . (audited path terraform/outputs.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
+        "ng_counterpart": "terraform/outputs.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/providers.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** providers.tf . (audited path terraform/providers.tf): no current matches (exit 1)",
+        "ng_counterpart": "terraform/providers.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot/backend.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** backend.tf . (audited path terraform/spot/backend.tf): no current matches (exit 1)",
+        "ng_counterpart": "terraform/spot/backend.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot/main.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** main.tf . (audited path terraform/spot/main.tf): no current matches (exit 1)",
+        "ng_counterpart": "terraform/spot/main.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot/outputs.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** outputs.tf . (audited path terraform/spot/outputs.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
+        "ng_counterpart": "terraform/spot/outputs.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot/providers.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** providers.tf . (audited path terraform/spot/providers.tf): no current matches (exit 1)",
+        "ng_counterpart": "terraform/spot/providers.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot/variables.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** variables.tf . (audited path terraform/spot/variables.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
+        "ng_counterpart": "terraform/spot/variables.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/spot_queue.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** spot_queue.tf . (audited path terraform/spot_queue.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
+        "ng_counterpart": "terraform/spot_queue.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "terraform/variables.tf": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** variables.tf . (audited path terraform/variables.tf): 1 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:29:- `terraform/spot_queue.tf`, `terraform/variables.tf`, `terraform/outputs.tf`",
+        "ng_counterpart": "terraform/variables.tf is a remote/cloud deployment artifact with no NG local-only counterpart; removal is intentional."
       },
       "tests/conftest.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** conftest.py . (audited path tests/conftest.py): 35 current matches; sample ./src/ptest/doctor.py:265:    if any(part in _FIXTURE_DIRS for part in parts) or name in {\"conftest.py\", \"setup.py\"} or name.startswith((\"conftest.\", \"setup.\")):",
+        "ng_counterpart": "Deleted test tests/conftest.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_cloudrun_lifecycle.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_cloudrun_lifecycle.py . (audited path tests/test_cloudrun_lifecycle.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_cloudrun_lifecycle.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_entrypoint.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_entrypoint.py . (audited path tests/test_entrypoint.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_entrypoint.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_gcs_coordination.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_gcs_coordination.py . (audited path tests/test_gcs_coordination.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_gcs_coordination.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_install.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_install.py . (audited path tests/test_install.py): 4 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:420:**Own:** root `ptest`, `install.sh`, README, `scripts/install.py`, `scripts/security-checks.py`, `tests/ng/test_install.py`, `tests/ng/test_",
+        "ng_counterpart": "Deleted test tests/test_install.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_main_wiring.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_main_wiring.py . (audited path tests/test_main_wiring.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_main_wiring.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_remote_cache_records.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_cache_records.py . (audited path tests/test_remote_cache_records.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_remote_cache_records.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_remote_dedup.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_dedup.py . (audited path tests/test_remote_dedup.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_remote_dedup.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_remote_deduplication.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_deduplication.py . (audited path tests/test_remote_deduplication.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_remote_deduplication.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_remote_profile.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_remote_profile.py . (audited path tests/test_remote_profile.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_remote_profile.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_routing.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_routing.py . (audited path tests/test_routing.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_routing.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_smoke_script.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_smoke_script.py . (audited path tests/test_smoke_script.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_smoke_script.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_source_identity.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_source_identity.py . (audited path tests/test_source_identity.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_source_identity.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_bootstrap.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_bootstrap.py . (audited path tests/test_spot_bootstrap.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_spot_bootstrap.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_controller.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_controller.py . (audited path tests/test_spot_controller.py): 11 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:24:- GREEN: `ptest tests/test_spot_terraform.py tests/test_spot_controller.py`",
+        "ng_counterpart": "Deleted test tests/test_spot_controller.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_deployment.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_deployment.py . (audited path tests/test_spot_deployment.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_spot_deployment.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_disabled.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_disabled.py . (audited path tests/test_spot_disabled.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_spot_disabled.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_queue.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_queue.py . (audited path tests/test_spot_queue.py): 6 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:17:  tests/test_spot_queue.py` passed 27 tests in 0.34s.",
+        "ng_counterpart": "Deleted test tests/test_spot_queue.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_terraform.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_terraform.py . (audited path tests/test_spot_terraform.py): 4 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-4-report.md:21:- RED: `ptest tests/test_spot_terraform.py` failed 1 test because the Scheduler",
+        "ng_counterpart": "Deleted test tests/test_spot_terraform.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_spot_worker.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_spot_worker.py . (audited path tests/test_spot_worker.py): 10 current matches; sample ./.superpowers/sdd/2026-08-04-spot-queue/task-3-report.md:14:- RED: `ptest tests/test_spot_worker.py tests/test_spot_controller.py`",
+        "ng_counterpart": "Deleted test tests/test_spot_worker.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       },
       "tests/test_status.py": {
-        "caller_audit": "rg inventory captured; no active production caller after cutover",
-        "ng_counterpart": "see mapping above or obsolete by design"
+        "caller_result": "rg -n --hidden --glob !.git/** --glob !.pipeline/** test_status.py . (audited path tests/test_status.py): 1 current matches; sample ./docs/plans/2026-09-17-ptest-ng.md:438:- [ ] Inventory callers before deletion using `rg` for every filename/import/entrypoint; map old local behavior tests to NG equivalents in t",
+        "ng_counterpart": "Deleted test tests/test_status.py had no current callers; its local behavior is represented by the NG scoped tests in tests/ng/test_install.py or tests/ng/test_security_gates.py."
       }
     },
     "deleted_path_count": 61

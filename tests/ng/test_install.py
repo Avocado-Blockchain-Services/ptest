@@ -41,6 +41,16 @@ def _manifest(wheelhouse: Path, *wheels: Path) -> Path:
     return manifest
 
 
+def _inventory(dest: Path) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
+    """Return the exact published/temporary names and public target."""
+    bundles = dest / ".ptest-bundles"
+    bundle_names = tuple(sorted(p.name for p in bundles.iterdir())) if bundles.is_dir() else ()
+    link_names = tuple(sorted(p.name for p in dest.glob(".ptest-link-*"))) if dest.is_dir() else ()
+    public = dest / "ptest"
+    target = str(public.resolve(strict=False)) if public.is_symlink() else None
+    return bundle_names, link_names, target
+
+
 def test_manifest_requires_exact_pinned_pair(tmp_path):
     with pytest.raises(ValueError, match="exactly one ptest-ng and one psutil"):
         validate_manifest({"version": 1, "ptest_version": "0.1.0", "python_tag": "py3", "platform_tag": "any", "wheels": []})
@@ -63,10 +73,10 @@ def test_manifest_rejects_extra_wheel_and_wrong_hash(tmp_path):
     manifest["wheels"][0]["sha256"] = "0" * 64
     (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
     dest = tmp_path / "dest"
+    before = _inventory(dest)
     with pytest.raises(ValueError):
         install_bundle(dest, wheelhouse, wheelhouse / "manifest.json")
-    assert not (dest / ".ptest-bundles").exists()
-    assert not list(dest.glob(".ptest-link-*"))
+    assert _inventory(dest) == before
 
 
 def test_manifest_wheel_symlink_is_rejected(tmp_path):
@@ -80,6 +90,24 @@ def test_manifest_wheel_symlink_is_rejected(tmp_path):
         install_bundle(tmp_path / "dest", wheelhouse, manifest)
 
 
+def test_network_failure_does_not_leave_private_bundle_or_temp_link(tmp_path, monkeypatch):
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    psutil.unlink()
+    dest = tmp_path / "dest"
+    before = _inventory(dest)
+
+    def denied(*args, **kwargs):
+        raise OSError("network denied")
+
+    monkeypatch.setattr(install, "urlopen", denied)
+    with pytest.raises(OSError, match="network denied"):
+        install_bundle(dest, wheelhouse, manifest, allow_network=True)
+    assert _inventory(dest) == before
+
+
 def test_failed_upgrade_keeps_old_target(tmp_path, monkeypatch):
     wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
     ptest = _wheel(wheelhouse, "ptest-ng")
@@ -89,6 +117,7 @@ def test_failed_upgrade_keeps_old_target(tmp_path, monkeypatch):
     (old / "ptest").write_text("#!/bin/sh\nexit 0\n"); (old / "ptest").chmod(0o755)
     current = tmp_path / "ptest"
     current.symlink_to(old / "ptest")
+    before = _inventory(tmp_path)
     def fake_run(argv, **kwargs):
         if argv[:2] == ["uv", "venv"]:
             venv = Path(argv[-1]) / "bin"; venv.mkdir(parents=True)
@@ -99,6 +128,7 @@ def test_failed_upgrade_keeps_old_target(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="before-symlink-replace"):
         install_bundle(tmp_path, wheelhouse, manifest, fault="before-symlink-replace")
     assert current.resolve() == old / "ptest"
+    assert _inventory(tmp_path) == before
 
 
 def test_success_writes_complete_marker_before_public_symlink(tmp_path, monkeypatch):
@@ -130,10 +160,13 @@ def test_missing_offline_psutil_never_invokes_uv(tmp_path, monkeypatch):
     manifest = _manifest(wheelhouse, ptest, _wheel(wheelhouse, "psutil", "7.2.2"))
     (wheelhouse / "psutil-7.2.2-py3-none-any.whl").unlink()
     called = []
+    dest = tmp_path / "dest"
+    before = _inventory(dest)
     monkeypatch.setattr(install.subprocess, "run", lambda *args, **kwargs: called.append(args))
     with pytest.raises(FileNotFoundError):
-        install_bundle(tmp_path / "dest", wheelhouse, manifest)
+        install_bundle(dest, wheelhouse, manifest)
     assert called == []
+    assert _inventory(dest) == before
 
 
 def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
@@ -176,11 +209,19 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     assert probe.returncode == 0 and "7.2.2" in probe.stdout
     old_target = (dest / "ptest").resolve()
     for fault in ("after-one-wheel", "after-venv", "before-complete", "before-symlink-replace"):
+        before = _inventory(dest)
         failed = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env={**offline_env, "PTEST_INSTALL_FAULT": fault}, capture_output=True, text=True, timeout=300)
         assert failed.returncode != 0
         assert (dest / "ptest").resolve() == old_target
         assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
+        assert _inventory(dest) == before
+        assert not tuple(dest.glob(".ptest-link-*"))
+    before_parent = _inventory(dest)
     parent_failed = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env={**offline_env, "PTEST_INSTALL_FAULT": "parent-fsync"}, capture_output=True, text=True, timeout=300)
     assert parent_failed.returncode != 0
     assert (dest / "ptest").resolve().is_file()
     assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
+    after_parent = _inventory(dest)
+    assert len(after_parent[0]) == len(before_parent[0]) + 1
+    assert not after_parent[1]
+    assert all((dest / ".ptest-bundles" / name / "complete.json").is_file() for name in after_parent[0])
