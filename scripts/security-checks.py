@@ -79,7 +79,7 @@ def run_gate(root: Path, tool: str) -> dict:
         negative.write_text("T13SYNTH-not-a-match\n")
         if tool == "bandit":
             probe = [executable, "-q", "-r", str(fixture)]
-            scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-ll", "-ii", "--skip", "B608"]
+            scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-ll", "-ii"]
         elif tool == "pip-audit":
             requirements = Path(temp) / "requirements.txt"
             requirements.write_text("jinja2==2.10\n")

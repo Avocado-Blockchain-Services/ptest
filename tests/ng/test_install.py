@@ -139,7 +139,12 @@ def test_missing_offline_psutil_never_invokes_uv(tmp_path, monkeypatch):
 def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     wheelhouse = tmp_path / "wheelhouse"; wheelhouse.mkdir()
     build = tmp_path / "build"; build.mkdir()
-    built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=Path(__file__).parents[2], capture_output=True, text=True)
+    source_copy = tmp_path / "source-copy"; source_copy.mkdir()
+    repo = Path(__file__).parents[2]
+    shutil.copy2(repo / "pyproject.toml", source_copy / "pyproject.toml")
+    shutil.copy2(repo / "uv.lock", source_copy / "uv.lock")
+    shutil.copytree(repo / "src", source_copy / "src")
+    built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=source_copy, capture_output=True, text=True)
     assert built.returncode == 0, built.stderr
     ptest_wheel = next(build.glob("ptest_ng-*.whl"))
     shutil.copy2(ptest_wheel, wheelhouse / ptest_wheel.name)

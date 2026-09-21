@@ -505,7 +505,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
             columns = {item[1] for item in conn.execute(f"PRAGMA table_info({table})")}
             if columns != expected_columns[table]:
                 _fail("protocol-mismatch", "coordinator table schema is unsupported")
-            conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()  # nosec B608 - table is closed constant
         except sqlite3.Error:
             _fail("coordinator-corrupt", "coordinator schema is incomplete")
 
@@ -551,7 +551,7 @@ def _boot_identity() -> str:
 
 
 def _empty_initialization(conn: sqlite3.Connection) -> bool:
-    return all(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    return all(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # nosec B608 - table is closed constant
                for table in ("jobs", "job_resources", "observations"))
 
 
@@ -691,7 +691,7 @@ def _finish_transaction(conn: sqlite3.Connection, success: bool) -> None:
 
 def _active_count(conn: sqlite3.Connection) -> int:
     return int(conn.execute(
-        "SELECT count(*) FROM jobs WHERE state IN (%s)" % ",".join("?" for _ in _ACTIVE),
+        "SELECT count(*) FROM jobs WHERE state IN (%s)" % ",".join("?" for _ in _ACTIVE),  # nosec B608 - placeholders are generated for closed enum values
         tuple(_ACTIVE),
     ).fetchone()[0])
 
@@ -777,7 +777,7 @@ def _resources_available(conn: sqlite3.Connection, request: dict, slots: int,
     if request["exclusive"] and _active_count(conn):
         return False
     active = conn.execute(
-        "SELECT run_id,slots,exclusive,reserved_memory,checkout_id FROM jobs WHERE state IN (%s)"
+        "SELECT run_id,slots,exclusive,reserved_memory,checkout_id FROM jobs WHERE state IN (%s)"  # nosec B608 - placeholders are generated for closed enum values
         % ",".join("?" for _ in _ACTIVE), tuple(_ACTIVE),
     ).fetchall()
     if len(active) >= int(info["config_jobs"]):

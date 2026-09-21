@@ -1170,7 +1170,7 @@ def _read_state(
     runtime_column = ", runtime_identity" if compound_schema else ""
     baseline_row = connection.execute(
         "SELECT run_id, sequence, head, input_digest, compatibility, inventory, "
-        f"policy_digest, created_at{runtime_column}"
+        f"policy_digest, created_at{runtime_column}"  # nosec B608 - runtime_column is closed internal schema text
         " FROM baselines WHERE singleton = 1"
     ).fetchone()
     baseline = None
