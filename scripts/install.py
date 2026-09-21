@@ -157,6 +157,8 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
         paths.append(path)
     except Exception:
         shutil.rmtree(bundle, ignore_errors=True)
+        if bundles.exists() and not any(bundles.iterdir()):
+            bundles.rmdir()
         raise
     try:
         bundled_paths = []

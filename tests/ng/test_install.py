@@ -62,8 +62,11 @@ def test_manifest_rejects_extra_wheel_and_wrong_hash(tmp_path):
     manifest["wheels"] = manifest["wheels"][:2]
     manifest["wheels"][0]["sha256"] = "0" * 64
     (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
+    dest = tmp_path / "dest"
     with pytest.raises(ValueError):
-        install_bundle(tmp_path / "dest", wheelhouse, wheelhouse / "manifest.json")
+        install_bundle(dest, wheelhouse, wheelhouse / "manifest.json")
+    assert not (dest / ".ptest-bundles").exists()
+    assert not list(dest.glob(".ptest-link-*"))
 
 
 def test_manifest_wheel_symlink_is_rejected(tmp_path):
@@ -137,7 +140,6 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     wheelhouse = tmp_path / "wheelhouse"; wheelhouse.mkdir()
     build = tmp_path / "build"; build.mkdir()
     built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=Path(__file__).parents[2], capture_output=True, text=True)
-    shutil.rmtree(Path(__file__).parents[2] / "build", ignore_errors=True)
     assert built.returncode == 0, built.stderr
     ptest_wheel = next(build.glob("ptest_ng-*.whl"))
     shutil.copy2(ptest_wheel, wheelhouse / ptest_wheel.name)

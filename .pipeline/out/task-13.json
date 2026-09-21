@@ -12,8 +12,8 @@
     "status": "captured-and-applied",
     "line_count": 611,
     "deleted": "reviewed legacy runtime, infrastructure, tests, bootstrap, operational docs, and superseded plan/spec pairs",
-    "remaining_historical_references": "pipeline audit artifacts only"
-    ,"mapping": {
+    "remaining_historical_references": "pipeline audit artifacts only",
+    "mapping": {
       "legacy_remote_spot_tests": "deleted; NG tests/ng/test_cli.py, test_operations.py, adapter/subprocess suites cover local contracts",
       "legacy_install_test": "deleted; tests/ng/test_install.py covers manifest, bundle, upgrade, offline and fault behavior",
       "legacy_smoke_and_entrypoint": "deleted; root ptest launcher and tests/ng CLI subprocess coverage replace them",
@@ -27,7 +27,254 @@
         "tests/conftest.py, scripts/ptest-bootstrap, config.example.toml": "bootstrap/config hygiene removed; NG uses package launcher and repository-local config",
         "outsource_tests.md and five superseded superpowers plan/spec pairs": "historical operational material; recovery tag and index retained"
       }
-    }
+    },
+    "deleted_paths": {
+      ".gcloudignore": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "Dockerfile.pytest": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "Dockerfile.spot-controller": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "Dockerfile.spot-worker": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "Dockerfile.vitest": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "cloudbuild.pytest.yaml": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "cloudbuild.spot-controller.yaml": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "cloudbuild.spot-worker.yaml": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "cloudbuild.vitest.yaml": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "config.example.toml": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/plans/2026-07-26-heavy-scoped-remote-routing.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/plans/2026-08-03-remote-result-deduplication.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/plans/2026-08-04-spot-queue.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/plans/2026-08-04-spot-status.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/plans/2026-08-05-spot-live-progress.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/specs/2026-07-26-heavy-scoped-remote-routing-design.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/specs/2026-08-03-remote-result-deduplication-design.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/specs/2026-08-04-spot-queue-design.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/specs/2026-08-04-spot-status-design.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "docs/superpowers/specs/2026-08-05-spot-live-progress-design.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "entrypoint.sh": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "outsource_tests.md": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "provision-vitest.sh": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "provision.sh": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "scripts/ptest-bootstrap": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "scripts/spot-worker-startup.sh": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "smoke.sh": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "spot_controller.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "spot_queue.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "spot_worker.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/main.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/outputs.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/providers.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot/backend.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot/main.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot/outputs.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot/providers.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot/variables.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/spot_queue.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "terraform/variables.tf": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/conftest.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_cloudrun_lifecycle.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_entrypoint.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_gcs_coordination.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_install.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_main_wiring.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_remote_cache_records.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_remote_dedup.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_remote_deduplication.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_remote_profile.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_routing.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_smoke_script.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_source_identity.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_bootstrap.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_controller.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_deployment.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_disabled.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_queue.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_terraform.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_spot_worker.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      },
+      "tests/test_status.py": {
+        "caller_audit": "rg inventory captured; no active production caller after cutover",
+        "ng_counterpart": "see mapping above or obsolete by design"
+      }
+    },
+    "deleted_path_count": 61
   },
   "security_gates": {
     "command": "uv run --locked python scripts/security-checks.py --root .",

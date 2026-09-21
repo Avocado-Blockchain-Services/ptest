@@ -75,7 +75,8 @@ def run_gate(root: Path, tool: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="ptest-security-") as temp:
         fixture = Path(temp) / "sensitivity.py"
         fixture.write_text("password = 'T13SYNTH-ABCDEFGHIJKLMNOPQRSTUVWXYZ'\n")
-        (Path(temp) / "negative.txt").write_text("T13SYNTH-not-a-match\n")
+        negative = Path(temp) / "negative.txt"
+        negative.write_text("T13SYNTH-not-a-match\n")
         if tool == "bandit":
             probe = [executable, "-q", "-r", str(fixture)]
             scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-ll", "-ii", "--skip", "B608"]
@@ -98,6 +99,10 @@ def run_gate(root: Path, tool: str) -> dict:
         expected_finding = ("Issue" in evidence if tool == "bandit" else "VULNERABILITY" in evidence or "vulnerabilit" in evidence.lower() if tool == "pip-audit" else "leaks found" in evidence.lower())
         if sensitivity.returncode == 0 or not expected_finding:
             return {"tool": tool, "status": "unpassed", "reason": "sensitivity-failed"}
+        if tool == "gitleaks":
+            negative_result = subprocess.run([executable, "detect", "--source", str(negative), "--no-git", "--config", str(config), "--no-banner"], cwd=root, capture_output=True, text=True)
+            if negative_result.returncode != 0:
+                return {"tool": tool, "status": "unpassed", "reason": "negative-sensitivity-failed"}
         result = subprocess.run(scope, cwd=root, capture_output=True, text=True)
         if tool == "gitleaks" and result.returncode == 0:
             history = subprocess.run([executable, "git", "--log-opts=--all", "--config", str(root / "scripts" / "gitleaks.toml"), "--no-banner"], cwd=root, capture_output=True, text=True)
