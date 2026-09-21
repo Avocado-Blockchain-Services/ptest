@@ -1,0 +1,80 @@
+{
+  "task": "11B-generic-command-adapter",
+  "status": "implemented-awaiting-opus-high-audit",
+  "scope": [
+    "src/ptest/adapters/simple.py",
+    "tests/ng/test_simple_adapters.py",
+    ".pipeline/out/task-11b-adapter.json"
+  ],
+  "source_tests_commit": "0debf96",
+  "acceptance": {
+    "scoped": "A command scoped plan emits exactly launcher + args; full_args are not inspected or appended.",
+    "full": "A command full plan emits exactly launcher + args + full_args.",
+    "literal_argv": "Spaces, quotes, Unicode, metacharacters, empty/flag-looking values remain tuple tokens; no shell string or reparsing is introduced.",
+    "privacy": "Arbitrary caller argv remains private in PreparedRun; public Plan.files is rejected for command profiles and CommandSummary remains count/provenance only.",
+    "capability": "Command remains EXCLUSIVE_COMMAND with selection=false; requires_exclusive(config) remains true. Automatic execution is represented by a full plan and selection/inventory/baseline claims remain absent.",
+    "bounds": "The shared PreparedRun contract enforces token count, per-token UTF-8 size, aggregate UTF-8 size and NUL bounds; contract construction failures map to native-config-invalid without echoing token values.",
+    "negative_plans": "selected/none/malformed execution, public file payloads, and scoped execution with a non-scoped mode are rejected with stable Problem codes."
+  },
+  "tests": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'command or admission_hook' --tb=short",
+      "exit_code": 1,
+      "stage": "focused bootstrap attempts before and after implementation",
+      "evidence": "Bootstrap reached local uv execution but the worktree environment has no pytest: /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-adapter/.venv/bin/python3: No module named pytest.",
+      "limitation": "No dependency installation was authorized; automated RED/GREEN execution and the final scoped suite remain unverified."
+    },
+    {
+      "command": "PYTHONPATH=src python <stdlib-only literal command contract probe>",
+      "exit_code": 0,
+      "evidence": "Scoped argv equaled launcher+args; full argv equaled launcher+args+full_args; literal spaces/quotes/Unicode/metacharacters/flag-looking values were preserved; selected execution mapped to unsupported-capability."
+    },
+    {
+      "command": "PYTHONPATH=src python <stdlib-only bounds and redaction probe>",
+      "exit_code": 0,
+      "evidence": "Scoped command accepted a contract-valid common argv while full combined argv over the shared 128 KiB bound mapped to native-config-invalid without echoing the oversized token."
+    },
+    {
+      "command": "python -m py_compile src/ptest/adapters/simple.py tests/ng/test_simple_adapters.py",
+      "exit_code": 0,
+      "evidence": "Source and focused test syntax compiled successfully."
+    }
+  ],
+  "checks": [
+    {
+      "command": "graphify update .",
+      "exit_code": 0,
+      "evidence": "AST-only update rebuilt 4272 nodes, 9062 edges and 300 communities; seven non-AST JSON/protocol/matrix files were warned as absent from the graph."
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "evidence": "Clean before source/tests commit and after evidence preparation."
+    },
+    {
+      "command": "git diff --cached --check",
+      "exit_code": 0,
+      "evidence": "Clean before both commits."
+    }
+  ],
+  "dan_three_passes": {
+    "pass_1_full_diff": "Re-read both owned diffs. Command preparation has only tuple concatenation, never shell join/reparse; scoped excludes full_args; full includes it; no CLI/operations/runners/contracts files changed.",
+    "pass_2_contract_callers": "Checked RunnerConfig/Plan/PreparedRun bounds, redacted summarize_command, grant/attempt equality and requires_exclusive(config). Command plans reject public Plan.files; automatic full mode does not add selection/inventory/baseline claims.",
+    "pass_3_security_regression": "Checked literal adversarial token forms, aggregate argv overflow, malformed runner token mapping and error redaction with stdlib probes; ran graphify update and diff checks. Automated suite is explicitly unverified because bootstrap cannot import pytest without an unauthorized install."
+  },
+  "secure_by_spec": {
+    "identity": "Existing grant/run/attempt validation is unchanged; no new identity or authority is introduced.",
+    "authorization": "The adapter only prepares a declared command; exclusive admission remains an explicit requires_exclusive caller obligation.",
+    "input": "Typed contract bounds and literal token preservation prevent shell interpretation, NULs, oversized tokens and aggregate overflow; malformed preparation maps to native-config-invalid.",
+    "exposure": "No token value enters Problem messages or CommandSummary; arbitrary argv is not placed in Plan.files or public records.",
+    "availability": "Combined argv limits are enforced before a prepared run can leave the adapter.",
+    "dependencies": "No subprocess, shell, network, dependency, CLI, scheduler or operation behavior was added."
+  },
+  "not_verified": [
+    "pytest-backed focused test execution and full suite",
+    "candidate ptest subprocess execution, stdout/stderr and exit/signal fidelity",
+    "operations admission wiring and automatic full-plan construction",
+    "Opus High independent audit"
+  ],
+  "evidence_commit_pending": false
+}

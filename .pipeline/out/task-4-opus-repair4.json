@@ -1,0 +1,9 @@
+{
+  "verdict": "approved_with_notes",
+  "auditor": "Claude Opus High",
+  "head": "dea3a9b",
+  "raw_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-4/af9deec4-c460-4dad-9a5f-5ecd3eec4f7e.jsonl",
+  "blocking": [],
+  "verified": ["guard reuse NoSuchProcess path is typed uncertainty, not KeyError", "charge is retained", "descendant reuse and listed-then-reaped paths remain safe"],
+  "root_mechanical_evidence": "99 scheduler tests passed in 1.03s; diff check passed"
+}

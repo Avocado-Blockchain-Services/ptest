@@ -1,0 +1,19 @@
+{
+  "task": "10",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-10/7cdef55d-6159-4b3e-bea4-a703c91610e0.jsonl",
+  "reviewed_range": "721a317..37904b7",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_simple_adapters.py -k 'not native_cli' --tb=short --durations=10",
+    "result": "337 passed in 0.68s",
+    "scope": "Preparation and literal-argv contracts only; Go/Cargo native execution remains unavailable until Task 11."
+  },
+  "approved_repair": "All prior Go/Cargo control, configuration, mapping, separator and exclusivity-contract bypasses now fail closed; Go follows the frozen -p=1 design.",
+  "task11_notes": [
+    "Revalidate persisted Go environment/config and child environment at launch before capability promotion.",
+    "Enforce requires_exclusive(config) before admission for command profiles.",
+    "Validate fixture-native exit, signal, executable, output-ownership and runner identity behavior before promotion."
+  ]
+}

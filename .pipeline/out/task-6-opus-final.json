@@ -1,0 +1,19 @@
+{
+  "task": "6",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-6/d398879d-ff18-44c4-b35c-0e34d9ddf91b.jsonl",
+  "reviewed_range": "df92ec4..d11d69d",
+  "approved_repair": "T6R-1 accepts the genuine Vitest 3.2.6 resolved middleware API default while rejecting any listener or non-middleware shape before execution.",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_vitest_adapter.py --tb=short --durations=10",
+    "result": "100 passed in 3.99s; maximum individual test 0.07s",
+    "scope": "API-double preparation and bridge protocol only; native Vitest remains a Task 11 acceptance gate."
+  },
+  "non_blocking_notes": [
+    "A user ui:true configuration resolves to a listener shape and is rejected by the existing resolved-config validation before Vitest can listen.",
+    "The repair intentionally remains conservative for api.port:0.",
+    "The Task 6 evidence's earlier full-suite invocation is not treated as a final gate; the phase-controlled final suite runs only after integration."
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approved", "approved_with_notes", "rejected"]},
+    "scope": {"type": "string"},
+    "coverage": {"type": "string"},
+    "blocking": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string", "enum": ["BLOCKER", "HIGH", "MEDIUM"]},
+          "confidence": {"type": "string", "enum": ["CONFIRMED", "SUSPECTED"]},
+          "issue": {"type": "string"},
+          "location": {"type": "string"},
+          "evidence": {"type": "string"},
+          "whyItFailsDoD": {"type": "string"},
+          "fix": {"type": "string"}
+        },
+        "required": ["id", "severity", "confidence", "issue", "location", "evidence", "whyItFailsDoD", "fix"],
+        "additionalProperties": false
+      }
+    },
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "reviewed_files": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["verdict", "scope", "coverage", "blocking", "notes", "reviewed_files"],
+  "additionalProperties": false
+}

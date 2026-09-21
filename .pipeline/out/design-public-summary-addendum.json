@@ -1,0 +1,35 @@
+{
+  "status": "author_addendum_complete",
+  "base_commit": "a0011456525a1d9d028e26215d28372cd2994f3b",
+  "scope": "Docs-only completion of confirmed public contract omissions; no new product behavior or runtime changes.",
+  "documents": [
+    "docs/designs/2026-09-17-ptest-ng-design.md",
+    "docs/plans/2026-09-17-ptest-ng.md"
+  ],
+  "contracts": [
+    "InitAction is created|preview|existing; existing target wins even under dry-run, absent dry-run is preview/exists=false, successful creation is created/exists=true, errors use the error envelope.",
+    "ConfigSummary freezes project_id, runner_kind, workers, commands, setup_configured, setup_network, setup_lifecycle_scripts, selection_enabled and closed_inputs. Commands are exactly scoped then full safe summaries; no raw argv/env/config fields.",
+    "EffectiveLimits freezes nullable max_slots, max_jobs, memory_mb and repo_workers with bounds and paired slot/job unknowns. Static reads do not create state to fill unknowns.",
+    "History summaries reuse the public RunResult payload descriptor and serializer, excluding internal fields and nested envelopes; existing limits remain.",
+    "Public producers use explicit allowlists; same-major consumers recursively validate/project known fields and drop unknown fields without re-emission or execution. Private protocols remain strict."
+  ],
+  "task_notes_updated": ["T0", "T1", "T3", "T4", "T11"],
+  "security_axes": {
+    "identity": "No credential or process/domain identity contract changes; existing validation remains.",
+    "authorization": "Imported public fields never become command execution authority; private protocol validation stays strict.",
+    "tenancy": "Explicit domain/checkout routing remains unchanged; public summaries do not expose internal history records.",
+    "input": "Required nested types, enums, bounds and command-summary ordering are validated; same-major additive fields are dropped recursively.",
+    "state": "Repeated/dry-run init precedence is explicit, existing files remain unchanged, and static unknown limits cannot trigger state creation.",
+    "exposure": "Allowlisted summaries exclude raw argv/env and internal RunResult attributes; planned sentinel and round-trip negatives cover accidental disclosure.",
+    "availability": "Existing input/output, history limit and retention bounds remain; no new unbounded collection or parsing path.",
+    "dependencies": "No dependency, filesystem helper, execution path or external service added."
+  },
+  "verification": [
+    "Reviewed the focused design/plan diff against the approved author ruling.",
+    "git diff --check",
+    "jq -e validation of this report"
+  ],
+  "tests_run": [],
+  "runtime_evidence": "Deferred to Muse T0 completion and the existing Opus barrier review; no code, tests, schemas or dependency installations changed here.",
+  "open_decisions": []
+}

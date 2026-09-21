@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "action": {
+          "enum": [
+            "created",
+            "preview",
+            "existing"
+          ],
+          "type": "string"
+        },
+        "config": {
+          "properties": {
+            "closed_inputs": {
+              "type": "boolean"
+            },
+            "commands": {
+              "items": {
+                "properties": {
+                  "argument_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "generated_options": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "enum": [
+                      "pytest",
+                      "vitest",
+                      "go",
+                      "cargo",
+                      "command"
+                    ],
+                    "type": "string"
+                  },
+                  "mode": {
+                    "enum": [
+                      "automatic",
+                      "scoped",
+                      "full",
+                      "shadow",
+                      "probe"
+                    ],
+                    "type": "string"
+                  },
+                  "provenance": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workers": {
+                    "maximum": 64,
+                    "minimum": 1,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "mode",
+                  "argument_count",
+                  "generated_options",
+                  "workers",
+                  "provenance"
+                ],
+                "type": "object"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "project_id": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "runner_kind": {
+              "enum": [
+                "pytest",
+                "vitest",
+                "go",
+                "cargo",
+                "command"
+              ],
+              "type": "string"
+            },
+            "selection_enabled": {
+              "type": "boolean"
+            },
+            "setup_configured": {
+              "type": "boolean"
+            },
+            "setup_lifecycle_scripts": {
+              "type": "boolean"
+            },
+            "setup_network": {
+              "type": "boolean"
+            },
+            "workers": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "project_id",
+            "runner_kind",
+            "workers",
+            "commands",
+            "setup_configured",
+            "setup_network",
+            "setup_lifecycle_scripts",
+            "selection_enabled",
+            "closed_inputs"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "target": {
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "exists",
+        "warnings",
+        "config"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "init",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: init",
+  "type": "object"
+}

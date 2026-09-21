@@ -1,0 +1,121 @@
+{
+  "task": "11B1",
+  "scope": "guarded generic command execution lifecycle",
+  "status": "implemented-awaiting-opus-high-reaudit",
+  "commits": [
+    "d028f73",
+    "493c023",
+    "9e2b48f",
+    "16cf065",
+    "0b36be4",
+    "331b462"
+  ],
+  "red_green": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'command_success or command_failure or native_profiles'",
+      "status": "unavailable",
+      "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_cli.py -k 'runner_registry_is_closed_and_generic_is_exclusive'",
+      "status": "unavailable",
+      "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'command_success_preserves_literal_argv_and_streams or command_preserves_stdout_and_stderr_bytes or command_nonzero_or_signal'",
+      "status": "unavailable",
+      "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_operations.py -k 'command_success_preserves_literal_argv_and_streams or command_preserves_stdout_and_stderr_bytes or command_failure_preserves_native_exit_precedence'",
+      "status": "unavailable",
+      "evidence": "bootstrap reached the worktree but its .venv has no pytest; dependency installation is forbidden by the task"
+    },
+    {
+      "command": "python -m py_compile src/ptest/operations.py src/ptest/cli.py tests/ng/test_operations.py tests/ng/fixtures/command/command.py",
+      "status": "passed",
+      "evidence": "exit 0"
+    },
+    {
+      "command": "graphify update .",
+      "status": "passed",
+      "evidence": "AST graph rebuilt in the assigned checkout"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "7 passed in 2.32s; slowest test 0.36s (final post-repair controller run)"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py -k 'runner_registry_is_closed_and_generic_is_exclusive' --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "1 passed, 66 deselected in 0.13s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py -k 'guard_registration or mark_draining or finalization or proof_before_grant' --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "60 passed, 104 deselected in 1.33s; slowest test 0.03s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py -k 'json_inside_literal_execution_tail_stays_runner_data' --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "3 passed, 64 deselected in 0.06s"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_simple_adapters.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py --tb=short --durations=15 (pre-fix RED)",
+      "status": "failed",
+      "evidence": "3 failed, 582 passed in 6.22s: literal-tail/no-config CLI cases received initialization-required before capability classification; no operation/scheduler/adapter failures"
+    },
+    {
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_scheduler.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_simple_adapters.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-operations/tests/ng/test_cli.py --tb=short --durations=15",
+      "status": "passed",
+      "evidence": "585 passed in 6.17s after final invalid-config precedence refinement; slowest test 0.41s"
+    }
+  ],
+  "implemented": [
+    "Only command profiles enter scheduler admission; native profiles, setup, shadow and probe reject before enqueue.",
+    "Exclusive admission uses the adapter seam before enqueue, caps requested slots by repository/request, and maps resource memory 0 to unknown once.",
+    "Scoped command tails are appended in a private effective runner config; automatic command mode is full and excludes user tails.",
+    "Guard launch uses a socketpair and manifest pipe with close_fds/start_new_session; child stdout/stderr remain inherited and raw child status is read only from authenticated runner-facts.",
+    "Controller validates run/nonce/direction/order/attempt/report facts and requires matching DRAINING, guard reap, begin_finalization proof, and finish before a terminal result.",
+    "Typed command results retain unknown counts and false full-gate/baseline eligibility; CLI resolves config/domain once and delegates a literal RunRequest.",
+    "Guard launch strips inherited ptest control variables, rejects literal tails outside scoped mode, and cancels pre-registration adapter/launch failures without guessing release.",
+    "Terminal result timings separate admission queue wait from execution and include finalization after the scheduler finish proof.",
+    "Unconfigured explicit literal execution is classified as unsupported-capability before any launch; bare/automatic no-config execution retains initialization-required guidance."
+  ],
+  "verified": [
+    "Python syntax compilation",
+    "Git diff whitespace check",
+    "Graph update",
+    "Controller operations proof: 7 passed",
+    "Controller CLI registry boundary: 1 passed",
+    "Controller scheduler registration/draining/finalization boundaries: 60 passed",
+    "Result artifact envelope asserted as kind=run, error=null, payload=data",
+    "Wider controller proof: operations, scheduler, simple adapters and CLI: 585 passed"
+  ],
+  "not_verified": [
+    "No ptest --full was run; the root task owns final integrated verification."
+  ],
+  "deferred": [
+    "Source snapshot/change-during-run revalidation",
+    "History publication and baseline/selection evidence",
+    "Setup, native Pytest/Vitest/Go/Cargo, shadow/probe, and expanded queue/cancellation matrix",
+    "Robust result-export error precedence"
+  ],
+  "discovered_but_not_fixed": [
+    "Final result/history/export breadth requires the next bounded slice; this checkpoint intentionally leaves those authorities out of operations."
+  ],
+  "anchors": {
+    "operations": [
+      "src/ptest/operations.py:142-209",
+      "src/ptest/operations.py:248-340",
+      "src/ptest/operations.py:369-498"
+    ],
+    "cli": [
+      "src/ptest/cli.py:620-652"
+    ],
+    "tests": [
+      "tests/ng/test_operations.py:37-113"
+    ]
+  }
+}

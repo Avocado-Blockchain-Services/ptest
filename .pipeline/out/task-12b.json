@@ -1,0 +1,172 @@
+{
+  "task": "12b",
+  "agent": "luna",
+  "status": "ready-for-opus-audit",
+  "ownership_transfer": "Root transferred Task12b eighth-audit closure ownership for the advanced Pytest/Vitest source, tests, fixtures, and evidence, including the narrow source.py worker-count compatibility normalization and its deterministic test_source.py regression. The temporary generated-result experiment was removed; no legacy, remote, cloud, or API behavior was introduced.",
+  "qualification": {
+    "Q-PY-SELECT": "qualified-native-9.1.1-pytest-cov-7.1.0-coverage-7.15.0",
+    "Q-PY-PROBE": "unsupported-capability",
+    "Q-VT-SELECT": "unsupported-capability",
+    "Q-VT-PROBE": "unsupported-capability"
+  },
+  "end_to_end_wiring": {
+    "advanced_single_attempt": "admitted only by the closed adapter catalog, then reachable after authenticated bridge evidence; unsupported when no cataloged tuple matches",
+    "flow": [
+      "operation",
+      "authenticated private native report",
+      "controller runtime/source re-capture",
+      "history publication",
+      "runtime-bound selection baseline",
+      "closed catalog declaration consumed before admission; private writer-locked qualification record may refine it after authenticated promotion"
+    ],
+    "selection_shadow_probe": "unsupported; owned by Task 12c"
+  },
+  "platform_attempts": [
+    {
+      "platform": "linux",
+      "python": "CPython 3.13.11",
+      "pytest": "9.1.1",
+      "scope": "tests/ng/test_pytest_scoped_subprocess.py",
+      "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -q",
+      "result": "Historical seventh-repair run: 53 passed, 10 skipped, 2 failed in 73.60s",
+      "qualification": "real basic_serial execution plus the qualified frozen Q-PY-SELECT test; retained as historical evidence because the eighth-audit regression added one test"
+    },
+    {
+      "platform": "linux",
+      "python": "CPython 3.13.11",
+      "pytest": "9.1.1",
+      "pytest-cov": "7.1.0",
+      "coverage": "7.15.0",
+      "scope": "tests/ng/test_pytest_scoped_subprocess.py::test_q_py_select_real_coverage_baseline_then_exact_selected_file",
+      "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py::test_q_py_select_real_coverage_baseline_then_exact_selected_file -q",
+      "result": "1 passed in 12.07s; probe reported pytest 9.1.1, pytest-cov 7.1.0, coverage 7.15.0; full baseline published, exact selected tests/test_native.py ran with collected=2, and removal of the persisted profile planned a basic full fallback",
+      "qualification": "qualified native frozen tuple; one-off preprovisioned interpreter override only, no install or sync in the test"
+    },
+    {
+      "platform": "linux",
+      "python": "CPython 3.13.11",
+      "pytest": "9.1.1",
+      "scope": "tests/ng/test_pytest_full_subprocess.py",
+      "command": "ptest tests/ng/test_pytest_full_subprocess.py -q",
+      "result": "27 passed",
+      "qualification": "real basic_serial full execution only; source/full-gate certification remains unavailable"
+    },
+    {
+      "platform": "linux",
+      "node": "not provisioned in the fixture checkout",
+      "vitest": "not provisioned",
+      "scope": "tests/ng/test_vitest_adapter.py",
+      "command": "ptest tests/ng/test_vitest_adapter.py -q",
+      "result": "119 passed using stub-node boundary double",
+      "qualification": "not native evidence; registry withholds Q-VT admission"
+    }
+  ],
+  "negative_evidence": [
+    "advanced reports require complete terminal/inventory/runtime-facts/coverage/reporter/worker evidence",
+    "runtime identity is rejected when its disclosed facts do not hash identically",
+    "duplicate or ambiguous test IDs, unknown outcomes, digest mismatch and checkout-external files are rejected",
+    "missing coverage or reporter evidence is rejected; configuration flags alone cannot qualify",
+    "advanced coverage qualification requires pytest-cov 7.1.0 with coverage 7.15.0; missing/off-table tuples refuse before tests",
+    "worker identities over one refuse; one-worker IDs require checkout/run/attempt-bound prefixes in w000-w063",
+    "descriptor-backed report byte/test/event/ID limits are enforced by writer and controller parser",
+    "pytest compound support requires the closed catalog; Vitest compound support and catalog are unconditionally withheld",
+    "basic serial selected plans, Vitest native profiles, shadow and probe remain unsupported-capability",
+    "canonical blocked xdist is tolerated only when explicitly disabled; an active preprovisioned xdist executor is refused",
+    "basic full source uncertainty preserves the observed native exit while withholding certification",
+    "pytest-cov lookalike hook module is refused; only the exact pytest_cov package namespace is approved"
+  ],
+  "verification": {
+    "unit_contracts": [
+      "ptest tests/ng/test_compound_profiles.py tests/ng/test_reports.py tests/ng/test_pytest_adapter.py tests/ng/test_vitest_adapter.py tests/ng/test_operations.py -q (523 passed, 2 failed; known contention-sensitive control/handoff flakes; isolated rerun of those four tests passed)",
+      "ptest tests/ng/test_source.py tests/ng/test_vitest_adapter.py tests/ng/test_compound_profiles.py tests/ng/test_reports.py -q (293 passed in 22.43s)",
+      "ptest tests/ng/test_contracts.py tests/ng/test_selection.py -q (84 passed)",
+      "ptest tests/ng/test_operations.py -q (71 passed)",
+      "ptest tests/ng/test_selection.py -q (26 passed)",
+      "ptest tests/ng/test_history.py -q (143 passed)"
+    ],
+    "subprocess": [
+      "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -q (53 passed, 10 skipped, 2 failed in 73.60s; known contention-sensitive protocol/admission flakes)",
+      "ptest tests/ng/test_pytest_full_subprocess.py -q (27 passed)",
+      "ptest tests/ng/test_pytest_scoped_subprocess.py -q at cec84dae (40 failed, 8 passed, 8 skipped; clean-base fixture assumed xdist package absence while candidate ptest supplies pytest-xdist)",
+      "ptest tests/ng/test_pytest_scoped_subprocess.py -q (eighth-audit observation: 48 passed, 14 skipped, 3 failed; 65 collected; loaded-box contention signatures)",
+      "ptest tests/ng/test_pytest_full_subprocess.py -q at cec84dae (8 failed, 18 passed; seven active-xdist refusal/cascade failures plus one pre-existing no-selection full native-failure/unknown-input assertion red)",
+      "ptest tests/ng/test_pytest_full_subprocess.py -q current (27 passed)",
+      "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py::test_q_py_select_real_coverage_baseline_then_exact_selected_file -q (1 passed in 12.07s; locked pytest-cov tuple completed real full baseline, exact tests/test_native.py SELECT with collected=2, then missing-profile full fallback planning)",
+      "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -k 'q_py_select or q_py_scoped or q_py_selected_runtime_drift or advanced_full_runtime_change' -q (historical seventh-repair run: 4 passed in 9.11s; eighth regression now extends Q-PY-SELECT with missing-profile fallback)",
+      "ptest tests/ng/test_pytest_scoped_subprocess.py::test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed -q (1 passed; catalog reaches the advanced bridge, but no pytest-cov evidence promotes)",
+      "PTEST_TEST_XDIST_PYTHON=/home/ingmar/worktrees/ptest/cx-ng-product/task-4/.venv/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -k 'xdist or foreign_object_under_blocked_looponfail_name' -q (4 passed in 2.99s; canonical blocked xdist accepted, active xdist refused, renamed controller alias refused, and foreign exact-name controller refused)",
+      "PTEST_TEST_PYTHON_OFFTABLE_COV=/tmp/ptest-qpy-off-table-repair-lAsgZ2/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -k test_real_off_table_coverage_tuple_refuses_before_tests -q (1 passed in 1.62s; pytest 9.1.1/pytest-cov 7.0.0/coverage 7.16.1 refused before tests)"
+    ],
+    "syntax": [
+      "python -m py_compile changed Python sources",
+      "node --check src/ptest/runtime/vitest_bridge.mjs",
+      "git diff --check"
+    ],
+    "graphify": "completed with graphify update .",
+    "full_suite": "not run; root owns final integrated ptest --full",
+    "attempt_failures": [
+      {
+        "command": "ptest tests/ng/test_pytest_scoped_subprocess.py -q at cec84dae",
+        "result": "40 failed, 8 passed, 8 skipped",
+        "reason": "clean-base fixture assumed xdist package absence while candidate ptest supplies pytest-xdist; this is the inherited environment/plugin mismatch, not Q-PY qualification evidence"
+      },
+      {
+        "command": "ptest tests/ng/test_pytest_scoped_subprocess.py -q current",
+        "result": "Historical seventh-repair run: 53 passed, 9 skipped",
+        "reason": "fixture helper explicitly disables canonical xdist; production adapter preserves literal argv and active preprovisioned xdist remains a typed refusal case"
+      },
+      {
+        "command": "ptest tests/ng/test_pytest_scoped_subprocess.py::test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed -q",
+        "result": "1 passed",
+        "reason": "catalog reaches the advanced bridge, but the missing coverage tuple is rejected as unsupported-capability before tests and no promotion occurs"
+      },
+      {
+        "command": "ptest tests/ng/test_pytest_scoped_subprocess.py::test_q_py_select_real_coverage_baseline_then_exact_selected_file -q",
+        "result": "1 skipped with PTEST_TEST_PYTHON_9_1_1_COV set to the existing off-table fixture interpreter",
+        "reason": "the existing interpreter reports pytest-cov 7.0.0/coverage 7.16.1, so the exact frozen tuple gate correctly withholds Q-PY-SELECT without installing or synchronizing"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-xo2eIr/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py::test_q_py_select_real_coverage_baseline_then_exact_selected_file -q",
+        "result": "1 passed in 3.31s; preprovisioned tuple probe reported pytest 9.1.1, pytest-cov 7.1.0, coverage 7.15.0; full baseline published then exact tests/test_native.py SELECT collected=2",
+        "reason": "real native frozen tuple evidence; the temporary interpreter was explicitly provisioned outside the test and no test synchronization/install fallback ran"
+      },
+      {
+        "command": "ptest tests/ng/test_pytest_full_subprocess.py -q at cec84dae",
+        "result": "8 failed, 18 passed",
+        "reason": "seven active-xdist refusal/cascade failures plus one pre-existing no-selection full native-failure/unknown-input assertion red; current branch preserves those native outcomes as incomplete where identity is unavailable"
+      },
+      {
+        "command": "ptest tests/ng/test_operations.py tests/ng/test_history.py tests/ng/test_selection.py tests/ng/test_contracts.py tests/ng/test_source.py tests/ng/test_guard.py -q",
+        "result": "434 passed, 3 failed in 70.84s (437 collected)",
+        "reason": "Current eighth-closure run; three known contention-sensitive failures (ignored-input classification and two guard lifecycle timing cases), so this is not a clean suite claim"
+      },
+      {
+        "command": "ptest tests/ng/test_operations.py tests/ng/test_history.py -q",
+        "result": "first run 213 passed, 1 failed; isolated parametrized test 2 passed; immediate rerun 214 passed",
+        "reason": "one contention-sensitive ignored-input classification flaked under the capped two-worker run; the owned test and product code were unchanged, and the complete rerun passed"
+      },
+      {
+        "command": "ptest tests/ng/test_guard.py -k controller_sigkill_at_lifecycle_barriers -q (repeated twice)",
+        "result": "6 passed each run",
+        "reason": "separate contention-sensitive drain flake isolated successfully; test_guard.py is untouched T12a ownership"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_OFFTABLE_COV=/tmp/ptest-qpy-off-table-repair-lAsgZ2/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -k test_real_off_table_coverage_tuple_refuses_before_tests -q",
+        "result": "1 passed in 1.62s",
+        "reason": "real pytest 9.1.1 + pytest-cov 7.0.0 + coverage 7.16.1 is rejected before tests with typed unsupported-capability evidence"
+      },
+      {
+        "command": "PTEST_TEST_PYTHON_9_1_1_COV=/tmp/ptest-qpy-repair-NIPgF9/bin/python ptest tests/ng/test_pytest_scoped_subprocess.py -q",
+        "result": "53 passed, 10 skipped, 2 failed in 73.60s",
+        "reason": "known contention-sensitive broad-run failures: advanced full runtime-change first launch had an incomplete guard handoff, and same-checkout admission timed out waiting for the fixture marker; targeted Q-PY regressions passed"
+      }
+    ]
+  },
+  "limitations": [
+    "The local pytest 9.1.1 + xdist 3.8.0 tuple is reachable for refusal/control evidence, but Q-PY-PROBE and advanced worker qualification are deliberately deferred to Task 12c; no identity is synthesized.",
+    "No real Node/Vitest/coverage tuple was provisioned; stub-node evidence is negative boundary evidence only.",
+    "No source-only qualification claim is made and no public protocol v1 field was changed.",
+    "Q-PY-PROBE and both Q-VT profiles remain unsupported-capability until their explicit native tuple gates pass; Q-PY-SELECT is qualified only for the frozen tuple above.",
+    "The locked Q-PY fixture is metadata only; tests require an already materialized PTEST_TEST_PYTHON_9_1_1_COV interpreter and never synchronize or install dependencies."
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "task": "5",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-5/7d83c312-9b94-4fb0-958e-374f182decf8.jsonl",
+  "reviewed_range": "df92ec4..8b7ddfa",
+  "approved_repair": "Full-plan test_roots now undergo the same pre-argv literal native-control validation as args, full_args, and plan files; hostile roots cannot trigger pytest early exit or response-file expansion.",
+  "verification": {
+    "command": "scripts/ptest-bootstrap tests/ng/test_pytest_adapter.py -k 'not native_cli' --tb=short --durations=10",
+    "result": "147 passed, 22 deselected in 0.20s",
+    "scope": "Preparation bridge only; native_cli execution remains Task 11."
+  },
+  "non_blocking_note": "Configuration-redirection and plugin-load controls remain a Task 11 qualification concern; this repair correctly applies the existing literal policy equally to configured roots."
+}

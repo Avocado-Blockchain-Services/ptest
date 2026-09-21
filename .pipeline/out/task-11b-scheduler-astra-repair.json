@@ -1,0 +1,153 @@
+{
+  "task": "11B-scheduler-producer-seam-astra-repair-1",
+  "status": "implemented-awaiting-opus-high-reaudit",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+  "base_commit": "f95d3ab",
+  "source_test_commit": "6b42077cee4f6e7b392c97ca6f9227c527bec585",
+  "review_source": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-scheduler/557a2889-8c16-4234-af1d-5f7f5a252237.jsonl",
+  "findings_addressed": {
+    "T11B-S1": {
+      "implementation": "Recovery preserves the exact state and phase of a live authenticated owner after guard/group absence. DRAINING remains the durable authenticated handoff, RUNNING cannot acquire that authority through recovery, and begin_finalization remains the transition into FINALIZING. Owner-absent recovery and all conservative uncertainty checks are unchanged.",
+      "source": "src/ptest/scheduler.py:971",
+      "regressions": [
+        "tests/ng/test_scheduler.py:1691: poll/reconcile between mark_draining and begin_finalization preserves DRAINING, retains capacity, then successful finish releases it",
+        "tests/ng/test_scheduler.py:1720: guard death without handoff remains RUNNING and cannot begin finalization, with no observer, follower poll, or reconcile",
+        "tests/ng/test_scheduler.py:120: an already-authenticated FINALIZING owner retains checkout charge across polls"
+      ]
+    },
+    "T11B-S2": {
+      "regressions": [
+        "tests/ng/test_scheduler.py:1748: run_id, nonce, generation, slots, domain_id, memory_estimate_mb, reserved_memory_mb forgery; byte-identical rejection, retained DRAINING, blocked follower, then valid-grant positive control",
+        "tests/ng/test_scheduler.py:1770: owner absent, PID reused, unknown, changed UID, changed PGID; all quiescence checks otherwise pass, rejection persists UNCERTAIN and reservations",
+        "tests/ng/test_scheduler.py:1807: stale boot rejects without mutation; boot observation restored before distinct recovery/poll checks",
+        "tests/ng/test_scheduler.py:1828: None, string and actual bool grant_time reject with UNCERTAIN and blocked follower; bool injected at SQLite row-read boundary because SQLite stores bound True as REAL 1.0",
+        "tests/ng/test_scheduler.py:1600: ordinary unregistered GRANTED and malformed DRAINING-without-guard both retain charge",
+        "tests/ng/test_scheduler.py:1868: deterministic registration/cancellation interleavings commit the winner after the loser opens the ledger but before BEGIN IMMEDIATE; the loser rechecks durable state and cannot register cancelled or cancel registered work",
+        "tests/ng/test_scheduler.py:1513: queued cancellation negative has a real active blocker so its QUEUED expectation is meaningful",
+        "tests/ng/test_scheduler.py:1637: descendant is first observed in the guard group and escapes after handoff; the test reaches begin_finalization and proves capacity remains charged"
+      ]
+    }
+  },
+  "test_evidence": [
+    {
+      "stage": "local-red-attempt-before-source-change",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'preserves_draining_across_follower_recovery or rejects_guard_death_without_draining_handoff'",
+      "exit_code": 1,
+      "raw_output": "[ptest-bootstrap] dispatcher=/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest sha256=3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68 config=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/.pipeline/local/ptest-bootstrap.toml backend=local workers=1\n[ptest] local: uv run --locked --no-sync python -m pytest -p no:xdist tests/ng/test_scheduler.py -k 'preserves_draining_across_follower_recovery or rejects_guard_death_without_draining_handoff'\n/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/.venv/bin/python3: No module named pytest\n",
+      "interpretation": "Environment failure, not behavioral RED. No dependencies installed and no raw runner used. Source remained unchanged until root supplied behavioral RED."
+    },
+    {
+      "stage": "behavioral-red-before-source-change",
+      "executor": "root agent using its prepared controller environment, reported to repair agent",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/tests/ng/test_scheduler.py -k 'preserves_draining_across_follower_recovery or rejects_guard_death_without_draining_handoff' --tb=short --durations=10",
+      "reported_output_summary": "5 failed, 140 deselected in 0.67s",
+      "observed_failure": "Root confirmed all five failures were S1: follower poll/reconcile changed owner-live DRAINING or RUNNING to FINALIZING.",
+      "raw_log": null,
+      "provenance": "Root did not persist a raw-log file. This is the exact tool-observed summary supplied by root, not a repair-agent local run."
+    },
+    {
+      "stage": "local-green-attempt-after-source-change",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+      "command": "scripts/ptest-bootstrap tests/ng/test_scheduler.py -k 'cancel_pending or begin_finalization or finish or poller_preserves'",
+      "exit_code": 1,
+      "raw_output": "[ptest-bootstrap] dispatcher=/home/ingmar/.local/bin/.ptest-bundles/bundle.U1mnf3/ptest sha256=3cab209115a4f7e62be18996db77448288c1bec32218ba10f6d55bf4842fde68 config=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/.pipeline/local/ptest-bootstrap.toml backend=local workers=1\n[ptest] local: uv run --locked --no-sync python -m pytest -p no:xdist tests/ng/test_scheduler.py -k 'cancel_pending or begin_finalization or finish or poller_preserves'\n/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/.venv/bin/python3: No module named pytest\n"
+    },
+    {
+      "stage": "intermediate-controller-green",
+      "executor": "root agent, reported to repair agent",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/tests/ng/test_scheduler.py --tb=short --durations=15",
+      "exit_code": 0,
+      "reported_output_summary": "161 passed in 2.68s",
+      "reported_slowest_test_s": 0.06,
+      "raw_log": null
+    },
+    {
+      "stage": "final-controller-green-after-negative-test-strengthening",
+      "executor": "root agent, reported to repair agent",
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/ptest",
+      "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler/tests/ng/test_scheduler.py --tb=short --durations=15",
+      "exit_code": 0,
+      "reported_output_summary": "164 passed in 2.65s",
+      "reported_slowest_test_s": 0.05,
+      "raw_log": null,
+      "provenance": "Root confirmed collected 164 and exit 0. No later source/test changes occurred before source commit 6b42077. Full raw output was not persisted; this summary is parent-supplied evidence."
+    }
+  ],
+  "local_checks": [
+    {
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+      "command": "python3 -m py_compile src/ptest/scheduler.py tests/ng/test_scheduler.py",
+      "exit_code": 0,
+      "output": ""
+    },
+    {
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+      "command": "git diff --check",
+      "exit_code": 0,
+      "output": ""
+    },
+    {
+      "cwd": "/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-scheduler",
+      "command": "graphify update .",
+      "exit_code": 0,
+      "output_excerpt": "[graphify watch] Rebuilt: 4294 nodes, 9196 edges, 296 communities",
+      "warning": "7 JSON/schema/fixture source files produced zero AST nodes. No semantic extraction ran; community labels/wiki were not relied on after this AST refresh."
+    }
+  ],
+  "dan_three_passes": {
+    "pass_1_reread_bytes": "Read the complete source/test diff. Found a subtle vacuity while rereading: owner-identity negatives initially left the guard live, allowing guard liveness to mask a removed owner check. Moved guard/group absence before owner corruption, asserted durable UNCERTAIN/retained slots before any recovery, and restored owner observation before checking follower admission. Also noticed SQLite bool coercion and injected a real bool at the row-read boundary rather than claiming a SQL True binding tested it.",
+    "pass_2_source_of_truth": "Re-read repair brief T11B-S1/S2, raw Opus findings, design section 7 lifecycle diagram and handoff contract, and plan Task 4/Task 11. Both repair criteria map to the source/test citations above. Parent reported RED before the one source change and GREEN after final tests. The broader Task 11 execution integration remains deferred to its owner. Plan checkboxes are outside assigned ownership, so this evidence records the scoped mapping without editing them.",
+    "pass_3_core": {
+      "bugs": "scheduler.py:938-980: live owner preserves state only after existing descendant/group/guard safety checks; missing or replaced authority still retains UNCERTAIN, and owner-absent safe recovery remains unchanged.",
+      "duplicate_paths": "Searched begin_finalization, cancel_pending, recovery, reconcile and FINALIZING. Removed the redundant recovery-owned FINALIZING transition; no second coordinator, new abstraction, schema, marker or helper was added.",
+      "layering": "scheduler.py:983,1055,1144,1179,1281: enqueue, poll, registration and read-only status share the corrected recovery function. Production consumers checked: cli.py:545 uses reconcile; guard.py:393 uses mark_draining. There is no operations.py in this checkout and no production caller of the new seam yet.",
+      "workarounds": "No timing workaround, sleep, fallback, TODO or stub added. tests/ng/test_scheduler.py:1868 controls only the pre-transaction schedule; both competing operations and the SQLite lock remain real.",
+      "test_sensitivity": "tests/ng/test_scheduler.py:1705 and 1708 reject premature FINALIZING; 1714-1716 require finish to release and admit a follower. Tests at 1758 and 1789 require forged/missing authority to raise, with otherwise valid quiescence. Tests at 1890 and 1897 require each cancellation/registration loser to return False and preserve the winner's durable result. No mutation-testing tool was run; five S1 cases have actual controller RED/GREEN evidence.",
+      "contract_drift": "No signature, serialized field, enum, DB schema or grant/proof shape changed. Existing finish independent proof/group/guard/owner/descendant checks were not edited. Updated two obsolete recovery expectations: the live-finalizer test now authenticates its handoff, and the real guard-death poller expects RUNNING.",
+      "new_helper": "N/A: no production helper or abstraction added. The boolean row factory is confined to a negative test."
+    },
+    "pass_3_applies_if": {
+      "security": "Applicable: grants, owner identity, boot, handoff and safe release are authority boundaries; focused negative tests cover them.",
+      "time_and_units": "Applicable: malformed/bool grant_time retains charge; monotonic-time and slot/memory grant matching remain unchanged. Money, currency and timezone conversion are N/A.",
+      "ux": "Applicable to read-only status: reconcile preserves DRAINING and phase=draining and does not write the ledger (test at 1702-1707). No UI files changed.",
+      "legacy": "N/A: scheduler remains local-only and has no legacy state path. No compatibility layer introduced.",
+      "dependencies": "N/A: manifests and lockfiles unchanged; no installs.",
+      "configs": "N/A: no configuration changes or new configuration sources.",
+      "edge_paths": "Covered happy handoff, forged/missing/unknown owner and guard, guard death without handoff, repeated rejection with stable retained state, stale boot, malformed timestamps, cancellation/registration ordering, and poll/reconcile interleaving. Cross-process scheduler tests are included in the 164-test file; integrated operations and final product/full-suite verification remain root-owned."
+    }
+  },
+  "secure_by_spec": {
+    "identity": "Absent, replaced, unknown, UID/PGID-changed owners cannot authorize finalization; stale boot is rejected without mutation.",
+    "authorization": "Every Grant field and handoff state is tested with otherwise valid quiescence. Forged attempts cannot poison the legitimate DRAINING lease.",
+    "tenancy": "Domain ID is bound to the grant; tampering cannot release capacity or alter a legitimate run. No cross-domain behavior added.",
+    "input": "None/string/actual-bool grant timestamps fail closed; frozen Grant validation remains the public input contract.",
+    "state": "No polling-induced FINALIZING transition; authenticated DRAINING remains durable. Cancellation and registration serialize at the existing transaction boundary.",
+    "exposure": "N/A to new exposure: no public schema, logging, result contents, credentials or error text changed.",
+    "availability": "No new loops, workers, probes or resource costs; live/unknown/escaped claims remain charged.",
+    "dependencies": "SQLite transaction and platform observation boundaries unchanged. No new dependency or external service.",
+    "gates": "Scoped ptest behavioral gate ran on controller; local py_compile and diff check passed. No secrets/static/dependency/fuzz scanner was added or run. The read pyproject.toml declares test tooling but no such gates; a broader repository security-gate audit is outside this seam repair."
+  },
+  "owned_vs_touched": {
+    "owned": ["src/ptest/scheduler.py", "tests/ng/test_scheduler.py", "repair evidence"],
+    "source_commit_touched": ["src/ptest/scheduler.py", "tests/ng/test_scheduler.py"],
+    "evidence_commit_touched": [".pipeline/out/task-11b-scheduler-astra-repair.json"],
+    "untracked_preserved": [".pipeline/briefs/task-11b-scheduler-astra-repair.md", ".pipeline/briefs/task-11b-scheduler-opus.md"]
+  },
+  "not_verified": [
+    "No local behavioral run: the assigned worktree lacks pytest; controller evidence is explicitly attributed to root.",
+    "No mutation-tool run, macOS execution, integrated operations run or full suite.",
+    "Independent Opus High re-audit is pending; this evidence is not approval."
+  ],
+  "deferred": [
+    "Task 11B operations must still enforce receipt of the matching in-band DRAINING frame and consume begin_finalization before success publication.",
+    "Parent owns integrated and eventual full verification; no full suite, push, installation or deployment ran in this repair."
+  ],
+  "discovered_but_not_fixed": [
+    "Opus nonblocking note: finish can raise raw TypeError for a malformed durable grant_time rather than typed Problem; it rolls back and retains capacity. This repair does not change finish semantics.",
+    "Graphify reports seven JSON/schema/fixture files with zero AST nodes; AST refresh does not supply semantic/wiki coverage for them."
+  ],
+  "confidence": "High for the narrow recovery fix and specified regression cases given five reproduced controller failures and 164 passing scheduler tests; independent gate and integration remain pending."
+}

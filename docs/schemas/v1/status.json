@@ -1,0 +1,366 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "active": {
+          "items": {
+            "properties": {
+              "age_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "checkout_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "fixture": {
+                "type": "boolean"
+              },
+              "memory_estimate_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ownership": {
+                "enum": [
+                  "certain",
+                  "uncertain",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "queue_wait_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "reasons": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "requested_slots": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "reserved_memory_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "run_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "sequence": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "slots": {
+                "maximum": 64,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "enum": [
+                  "QUEUED",
+                  "GRANTED",
+                  "RUNNING",
+                  "DRAINING",
+                  "FINALIZING",
+                  "RELEASED",
+                  "CANCELLED",
+                  "CANCELLING",
+                  "UNCERTAIN"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "checkout_id",
+              "state",
+              "sequence",
+              "requested_slots",
+              "slots",
+              "memory_estimate_mb",
+              "reserved_memory_mb",
+              "phase",
+              "age_s",
+              "queue_wait_s",
+              "ownership",
+              "fixture",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "effective_limits": {
+          "properties": {
+            "max_jobs": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_slots": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "memory_mb": {
+              "maximum": 1048576,
+              "minimum": 64,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "repo_workers": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "max_slots",
+            "max_jobs",
+            "memory_mb",
+            "repo_workers"
+          ],
+          "type": "object"
+        },
+        "queued": {
+          "items": {
+            "properties": {
+              "age_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "checkout_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "fixture": {
+                "type": "boolean"
+              },
+              "memory_estimate_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ownership": {
+                "enum": [
+                  "certain",
+                  "uncertain",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "queue_wait_s": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "reasons": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "requested_slots": {
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "reserved_memory_mb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "run_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "sequence": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "slots": {
+                "maximum": 64,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "enum": [
+                  "QUEUED",
+                  "GRANTED",
+                  "RUNNING",
+                  "DRAINING",
+                  "FINALIZING",
+                  "RELEASED",
+                  "CANCELLED",
+                  "CANCELLING",
+                  "UNCERTAIN"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "checkout_id",
+              "state",
+              "sequence",
+              "requested_slots",
+              "slots",
+              "memory_estimate_mb",
+              "reserved_memory_mb",
+              "phase",
+              "age_s",
+              "queue_wait_s",
+              "ownership",
+              "fixture",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "effective_limits",
+        "queued",
+        "active"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "status",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: status",
+  "type": "object"
+}

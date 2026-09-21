@@ -1,7 +1,0 @@
-# Build the generic Spot worker supervisor image.
-steps:
-  - name: gcr.io/cloud-builders/docker
-    args: ["build", "-f", "Dockerfile.spot-worker", "-t", "${_IMAGE}", "."]
-images:
-  - "${_IMAGE}"
-timeout: 1800s

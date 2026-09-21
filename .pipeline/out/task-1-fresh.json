@@ -1,0 +1,11 @@
+{
+  "status": "BLOCKED",
+  "commit": "",
+  "test_summary": "Implemented fresh local config resolution and exclusive native init in src/ptest/config.py with 25 focused tests. scripts/ptest-bootstrap tests/ng/test_config.py tests/ng/test_init.py: 25 passed in 0.39s. Shared contract/file regression scope: 143 passed in 5.64s. Integrated current tests/ng scope (config, contracts, files, init, platform, storage): 205 passed in 3.23s. graphify update . completed successfully (3,106 nodes, 5,474 edges, 231 communities). Security negatives cover non-overwrite/existing precedence, nearest-root and no-legacy-input invariance, strict bounds/duplicate/unknown/type/control/path/argv validation, malformed UTF-8/TOML, symlink safety, selection-only full fallback, mixed native runner ambiguity, static no-execution init, literal command refusal, and setup side-effect declaration.",
+  "report_path": ".pipeline/out/task-1-fresh.json",
+  "concerns": [
+    "The required final --full invocation was attempted through scripts/ptest-bootstrap and was refused with exit 2 because the pre-cutover wrapper is scoped-only; all six current NG test modules passed when enumerated explicitly through that wrapper.",
+    "Security scanner gates are not run in this task; Bandit, pip-audit, and Gitleaks are release-stage gates outside Task 1 scope.",
+    "Commit is blocked by the read-only Git common directory: Git cannot create /home/ingmar/code/tools/ptest/.git/worktrees/task-1-fresh/index.lock from this sandbox."
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {"type": "string", "enum": ["DONE", "DONE_WITH_CONCERNS", "BLOCKED", "NEEDS_CONTEXT"]},
+    "commit": {"type": "string"},
+    "test_summary": {"type": "string"},
+    "report_path": {"type": "string"},
+    "concerns": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "commit", "test_summary", "report_path", "concerns"]
+}

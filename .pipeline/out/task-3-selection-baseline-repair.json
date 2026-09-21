@@ -1,0 +1,85 @@
+{
+  "status": "IMPLEMENTED_PENDING_REVIEW_AND_TASK8_APPROVAL",
+  "source_commit": "e60339cefd592dd3713a90ec631660349db8ddb0",
+  "dependency_head": "220e4d95168df7c140e6974c2c4fa6a9f7298ee4",
+  "dependency_source_commit": "b87c73bc16f9c594af3e4ed3eb1f68a91dc59b1f",
+  "scope": [
+    "src/ptest/history.py",
+    "tests/ng/test_history.py"
+  ],
+  "behavior": [
+    "A completed successful full outcome can advance the baseline across a committed delta when its before/after snapshots are clean, limitation-free, and have the same non-null current HEAD, input digest, and compatibility, with conclusive inventory and all existing full-gate checks satisfied.",
+    "InputSnapshot.baseline_head is explicitly serialized for both private input snapshots, including null, and is required by the exact-key decoder. Missing, extra, or ill-typed provenance disables selection through the existing corruption path; no compatibility fallback or migration was added.",
+    "The valid new-head publication also clears an existing whole-gate obligation. Dirty inputs on either side, source limitations on either side, changed digest/HEAD/compatibility, untrusted source_valid, incomplete inventory, and unknown outcomes cannot replace the prior valid baseline.",
+    "baseline_head remains private: public summaries retain the exact contracts serializer schema and do not disclose the provenance key or value. Task8 files and shared Task0 fixture factories remain untouched."
+  ],
+  "verification": [
+    {
+      "stage": "environment_setup_attempt",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'committed_delta or baseline_head' --durations=10",
+      "exit_code": 1,
+      "result": "The fresh isolated worktree had no installed pytest. The wrapper created .venv and reported No module named pytest before collection. This is not RED behavioral evidence."
+    },
+    {
+      "stage": "environment_setup",
+      "command": "uv sync --locked",
+      "exit_code": 0,
+      "result": "Installed the locked dependencies into this worktree's independent .venv. No dependency manifests or lockfiles changed."
+    },
+    {
+      "stage": "red",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'committed_delta or baseline_head' --durations=10",
+      "exit_code": 1,
+      "result": "5 failed, 18 passed, 85 deselected in 0.93s. Failures were new-head publication, absent persisted baseline_head for null/non-null values, and acceptance of missing baseline_head in input_before/input_after. Existing rejection controls passed before the change; no RED is claimed for those controls."
+    },
+    {
+      "stage": "focused_green",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py -k 'committed_delta or baseline_head' --durations=10",
+      "exit_code": 0,
+      "result": "23 passed, 85 deselected in 0.40s; slowest test 0.03s."
+    },
+    {
+      "stage": "all_history_green",
+      "command": "scripts/ptest-bootstrap tests/ng/test_history.py --durations=10",
+      "exit_code": 0,
+      "result": "108 passed in 3.32s; slowest test 0.49s (steady-state inventory reuse). No test exceeded 0.5s."
+    },
+    {
+      "stage": "diff_check",
+      "command": "git diff --check",
+      "exit_code": 0,
+      "result": "Passed before the source/test commit."
+    },
+    {
+      "stage": "code_graph",
+      "command": "graphify update .",
+      "exit_code": 0,
+      "result": "AST-only update completed: 3595 nodes, 7394 edges, 229 communities. Four JSON files produced zero nodes (implementation.json, review.json, protocol-v1.json, revalidation.json). No semantic extraction or model call was made; community/wiki metadata was not used after the update."
+    }
+  ],
+  "secure_by_spec": {
+    "negative_contracts_shared_before_implementation": [
+      "Dirty, limited, untrusted, or changed-during-run inputs must not publish a baseline.",
+      "Private JSON must not silently drop, default, or accept malformed baseline provenance.",
+      "Private provenance must not appear in public run summaries."
+    ],
+    "axes": {
+      "identity": "N/A for authentication credentials: this repair changes no credential or account identity interface. Input source identity is covered under state.",
+      "authorization": "No authorization expansion; explicit caller-supplied domain/checkout validation remains intact and its existing history tests passed.",
+      "tenancy": "Fixture-domain SQLite only; existing cross-domain/checkout isolation and normal-account-state sentinel tests passed in the scoped history run.",
+      "input": "Both stored snapshot columns reject missing provenance, unexpected fields, integer/boolean provenance and empty strings. Null and valid strings round-trip.",
+      "state": "Tests start with a published valid baseline; successful committed deltas advance it, while independently invalid before/after evidence preserves it. Missing JSON evidence is not repaired in place.",
+      "exposure": "Public history summary equality and negative key/value checks retain the exact public serializer boundary.",
+      "availability": "No new loop, I/O surface, or unbounded storage added. Existing quota, retention, corruption, and compaction tests passed; all measured history tests were below 0.5s.",
+      "dependencies": "Existing private SQLite and JSON boundaries only; no runtime dependencies, subprocess paths, network, or external services added."
+    },
+    "specification_gaps": "No new policy decision was required; the repair brief explicitly defines the corrected invariant and strict unshipped-state codec.",
+    "gates": "Scoped bootstrap history tests, diff check and graphify only as instructed. No configured CI secret/static/dependency scanning gates were identified in this checkout; none were installed or claimed. No fuzzing or broader security certification is claimed."
+  },
+  "integration_boundaries": [
+    "This branch depends on unintegrated Task8 source/contracts changes and must integrate only after Task8's pending Opus High approval and the applicable repair review gate. No merge, push, deployment, publication or installed CLI replacement was performed.",
+    "Task11 still must supply verified native runtime identity, refresh identity after setup and queue waits, capture final source evidence after process-group quiescence, apply changed-input incomplete outcomes, and validate actual native inventory. These fixture-domain history tests do not establish executor integration or native runner support.",
+    "No full suite, source/selection suite, real Git/provider smoke, or macOS run was performed in this scoped repair. Final integrated verification remains with the orchestrator.",
+    "The orchestrator-created untracked .pipeline/briefs/task-3-selection-baseline-repair.md was preserved and was not included in the source or evidence commit."
+  ]
+}

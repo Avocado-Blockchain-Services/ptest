@@ -1,0 +1,25 @@
+{
+  "task": "11B1 guarded generic-command execution",
+  "reviewer": "Claude Opus",
+  "effort": "high",
+  "verdict": "approved_with_notes",
+  "audit_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-astra-repair/f8b7ee87-6f1c-414a-b331-f64ad22d561f.jsonl",
+  "reviewed_range": "8e05c27..4c1fb8c",
+  "supersedes": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11b-operations/838200d4-cff2-4875-b3bd-2952163e0f77.jsonl",
+  "repairs_accepted": [
+    "Normal command runs no longer inherit the probe-only attempt timeout; runner-facts problems are authoritative and cannot yield a false pass.",
+    "One outcome precedence path preserves native failures, normalizes signals, handles cancellation and incomplete paths, and prevents post-launch conditions becoming CLI usage exit 2.",
+    "Result export occurs before finish through a safe exclusive-write callback; callback failure rolls back only the created inode, then republishes a truthful incomplete result without retrying finalization.",
+    "Adversarial guard, cancellation, follower, finalization, export-collision, and safe-file replacement tests cover the previously missing lifecycle boundaries."
+  ],
+  "verification": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/src scripts/ptest-bootstrap /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_operations.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_files.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_cli.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_scheduler.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_guard.py /home/ingmar/worktrees/ptest/cx-ng-product/task-11b-astra-repair/tests/ng/test_simple_adapters.py -q --tb=short --durations=20",
+    "result": "754 passed in 43.30s"
+  },
+  "nonblocking_notes": [
+    "Align cooperative versus non-cooperative cancellation status labels in a later bounded follow-up; current exit and origin are truthful.",
+    "The guard registration-to-spawn cancellation window safely retains the lease for recovery but does not yet release it orderly.",
+    "A normal command remains truthfully bounded by the 600-second compound watchdog; revisit the product default before native-runner execution.",
+    "A result artifact is briefly visible before finish commits; broader recovery/artifact semantics remain a future bounded capability."
+  ]
+}

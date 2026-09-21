@@ -1,0 +1,83 @@
+{
+  "task": "task-2-repair2",
+  "role": "implementer",
+  "worktree": "/home/ingmar/worktrees/ptest/cx-ng-product/task-2",
+  "owned_files": [
+    "src/ptest/platform.py",
+    "tests/ng/test_platform.py",
+    ".pipeline/out/task-2-repair2.json"
+  ],
+  "preserved_work": [
+    "Retained the preceding native monotonic process-start observation and fresh psutil.Process(pid) PID-reuse comparison.",
+    "Removed only the dead psutil.boot_time monkeypatch from the split-UID test; the unrelated repair1 report remains untouched and unstaged."
+  ],
+  "changed_contracts": [
+    "Linux boot_identity continues to use the validated kernel boot_id.",
+    "Darwin boot_identity now reads only a bounded kern.bootsessionuuid through native sysctlbyname, validates an exact UUID, and returns state-unavailable for syscall, unavailable, malformed, overlong, or unexpected data.",
+    "process_identity continues to use psutil 7.2.2's private native create_time(monotonic=True), which is a kernel start stamp: boot-relative on Linux and a raw start-time stamp on macOS. The value is equality-only within one boot identity; a psutil pin upgrade requires revalidating this private contract.",
+    "Process exit races during the second psutil.Process(pid) observation or os.getpgid(pid) return no identity."
+  ],
+  "negative_contracts": [
+    "Darwin wall-clock changes cannot change a live boot identity and psutil.boot_time is never used.",
+    "Unavailable or invalid native observations fail closed without argv, command-line, environment, domain-state, or signal side effects.",
+    "A reused PID or either specified exit race returns None."
+  ],
+  "evidence": [
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py -k 'darwin_boot_identity or process_birth_matches_psutil_private_linux_identity or second_observation_is_gone or getpgid_races_process_exit'",
+      "exit": 1,
+      "result": "RED before source repair: 4 Darwin tests failed and 3 selected tests passed; 45 were deselected. The old Darwin implementation used psutil.boot_time and did not provide the native sysctl contract."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py -k 'darwin_boot_identity or process_birth_matches_psutil_private_linux_identity or second_observation_is_gone or getpgid_races_process_exit'",
+      "exit": 0,
+      "result": "GREEN after repair: 7 passed, 45 deselected in 0.03s."
+    },
+    {
+      "command": "scripts/ptest-bootstrap tests/ng/test_platform.py",
+      "exit": 0,
+      "result": "Final run after the documentation correction: 52 passed in 0.07s."
+    },
+    {
+      "command": "graphify update .",
+      "exit": 0,
+      "result": "AST-only graph update completed; existing zero-node warning remained for review.json and protocol-v1.json."
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0,
+      "result": "No whitespace errors."
+    }
+  ],
+  "test_contracts": {
+    "darwin": "Deterministic sysctlbyname fakes cover a stable UUID across changed psutil.boot_time values, syscall failure, malformed UUID, and overlong data. Actual Darwin execution was unavailable.",
+    "linux": "A non-vacuous Linux-only test compares _process_birth(current_process) with that process wrapper's private psutil _ident[1]; it skips outside Linux."
+  },
+  "gates": {
+    "run": [
+      "scripts/ptest-bootstrap focused platform tests",
+      "scripts/ptest-bootstrap complete platform test module",
+      "graphify update .",
+      "git diff --check"
+    ],
+    "not_run": [
+      "Actual macOS execution was unavailable in this Linux worktree.",
+      "Broader suite, release scanners, scheduler integration, and downstream lease recovery are outside this repair scope."
+    ]
+  },
+  "limitations": [
+    "Darwin sysctl ABI behavior is covered by deterministic fakes and source-level bounded validation, not a live macOS run.",
+    "The private psutil contract is intentionally tied to the pinned 7.2.2 dependency."
+  ],
+  "delivery": {
+    "status": "pending_external_review_and_controller_commit",
+    "statement": "This is an implementer report, not an independent audit. Delivery remains pending external review/commit by the controller; the local conventional fix commit is the handoff unit.",
+    "commit_message": "fix: harden stable process and boot identity",
+    "local_commit": null,
+    "commit_attempt": {
+      "command": "git add src/ptest/platform.py tests/ng/test_platform.py .pipeline/out/task-2-repair2.json && git commit -m 'fix: harden stable process and boot identity'",
+      "exit": 128,
+      "result": "Blocked by linked-worktree metadata: fatal: Unable to create '/home/ingmar/code/tools/ptest/.git/worktrees/task-2/index.lock': Read-only file system. The three valid repair files remain unstaged; the unrelated task-2-repair1 report was not touched."
+    }
+  }
+}

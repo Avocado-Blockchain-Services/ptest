@@ -1,0 +1,20 @@
+{
+  "task": "11E prepared-but-unavailable Vitest basic-serial foundation",
+  "date": "2026-09-18",
+  "verdict": "approved_with_notes",
+  "auditor": "Claude Opus high, read-only",
+  "audit_session": "67141e51-9875-4ce4-a73b-4b6729912180",
+  "review_range": "f2e4fe0..409aaf5ec25a17d05b99cd5d65a8fd9adb0f1912",
+  "raw_transcript": "/home/ingmar/.claude/projects/-home-ingmar-worktrees-ptest-cx-ng-product-task-11e-astra/67141e51-9875-4ce4-a73b-4b6729912180.jsonl",
+  "independent_verification": {
+    "command": "env PYTHONPATH=/home/ingmar/worktrees/ptest/cx-ng-product/task-11e-astra/src /home/ingmar/worktrees/ptest/cx-ng-product/ptest/scripts/ptest-bootstrap test_vitest_adapter.py test_reports.py -q --tb=short --durations=20",
+    "result": "188 passed in 6.46s"
+  },
+  "approval": "The R1 scoped-to-full parser escape is closed by immutable suffix binding and exact filter equality before create/start.",
+  "activation_notes": [
+    "Reject broad substring filters such as '.' and 'test' in planner/lifecycle work before enabling execution.",
+    "Real Vitest root and middleware API normalization require an explicit policy and real tuple evidence; current bridge remains deliberately unavailable and fail-closed.",
+    "Add real-parser coverage for grouped short flags before qualification."
+  ],
+  "qualification": "No project-local Node/Vitest/Vite tuple is installed or qualified; deterministic stub tests are not native evidence."
+}

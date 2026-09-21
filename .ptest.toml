@@ -1,0 +1,34 @@
+version = 1
+project_id = "51267ba68f5301a17172322e836c3466"
+
+[runner]
+kind = "pytest"
+launcher = ["uv", "run", "--locked", "--no-sync", "python"]
+args = []
+full_args = []
+test_roots = ["tests"]
+workers = 1
+lifecycle = "cooperative-process-group"
+
+[setup]
+argv = ["uv", "sync", "--locked"]
+required_paths = [".venv/bin/python"]
+network = true
+lifecycle_scripts = true
+
+[resources]
+locks = []
+memory_mb_per_worker = 0
+probe_isolation = "undeclared"
+
+[selection]
+enabled = false
+closed_inputs = false
+input_roots = []
+ignored_inputs = []
+environment = []
+full_triggers = []
+always = []
+no_tests = []
+non_input_outputs = [".venv"]
+full_ratio = 0.7

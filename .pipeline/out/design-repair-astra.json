@@ -1,0 +1,120 @@
+{
+  "status": "ready_for_focused_opus_rereview",
+  "author_model": "Astra xhigh",
+  "reviewed_commit": "97b25c91975763aafbaae3ce8d1149ffd68ebffb",
+  "review_source": ".pipeline/out/design-review-findings.json on the orchestrator chain",
+  "preflight_source": ".pipeline/out/plan-preflight.md on the orchestrator chain",
+  "owned_paths": [
+    "docs/designs/2026-09-17-ptest-ng-design.md",
+    "docs/plans/2026-09-17-ptest-ng.md",
+    ".pipeline/out/design-repair-astra.json"
+  ],
+  "summary": "Resolved NG-1 through NG-9, explicit-domain P1 and prefix-parser P2; incorporated actionable review notes without runtime changes or weakening cooperative lifecycle and changed-input gate truth.",
+  "findings": [
+    {
+      "id": "NG-1",
+      "disposition": "accepted",
+      "evidence": "Legacy ptest uses the parent state/config locations; root stat independently observed both parents mode0755. Treating them as exclusive NG roots would reject migration or invite unauthorized chmod.",
+      "change": "Design7 freezes private coordination/ child on both platforms, permits owned non-writable0755 shared parents, validates machine.toml itself, and forbids legacy sibling chmod/reuse/quota/prune. Shared file validation explicitly does not require private ancestors for machine.toml.",
+      "planned_evidence": "T2 simulated0755 account-parent/0644 legacy-sibling fixture plus T11/T13 startup/install evidence preserving parent modes and sibling bytes; A1 trace updated."
+    },
+    {
+      "id": "NG-2",
+      "disposition": "accepted",
+      "evidence": "Default estimate0 plus unconditional one-unknown policy serialized every fresh repository; synthetic known estimates concealed the shipped behavior.",
+      "change": "Design7 allows default unknown/no-memory-budget runs concurrently within slots/jobs. Opt-in memory budget gives unknown a one-worker full-budget reservation explicitly not a measurement. Grant/result/status distinguish estimate from reservation.",
+      "planned_evidence": "T4/T11 actual unknown-default overlap regression; T14/design12 require10 paired simultaneous Python/Node trials for each of unknown-default, known+budget and unknown+budget policies, reporting overlap/queue/RSS/throughput cost."
+    },
+    {
+      "id": "NG-3",
+      "disposition": "accepted",
+      "evidence": "Several independent owners needed unfrozen exclusive writers, publication and SQLite validation; DEFAULT_SCAN_LIMITS and guard frames were not centrally defined.",
+      "change": "Design6/T0 freeze six safe file APIs, one minimal SQLite opener, named immutable defaults, eight public descriptors and exact bounded private ControlFrame/LaunchManifest encoding. All consumers use these APIs; schemas/domain semantics stay with their existing owners.",
+      "planned_evidence": "T0 file race/no-overwrite/wrong-mode/atomic-temp/DB pragma/size/read-only tests, default/schema drift and truncated/oversized/wrong-run/nonce frame tests; T7/T11 consume the same descriptors."
+    },
+    {
+      "id": "NG-4",
+      "disposition": "accepted",
+      "evidence": "register --json existed without a member in the closed seven-kind document union.",
+      "change": "Design6 adds register as the eighth kind, exact RegisterPreview fields/fixed required-action enums and generated register.json schema; no raw legacy commands.",
+      "planned_evidence": "T0/T11 independently parse register success and error envelopes and enforce generated-schema drift."
+    },
+    {
+      "id": "NG-5",
+      "disposition": "accepted_with_bounded_alternative_and_partial_premise_dispute",
+      "evidence": "Exact advanced tuples unnecessarily blocked otherwise guardable basic serial execution. Research addendum inspected earlier native public APIs; none of the candidate runtime tests has run. The review's assertion that neither adoption candidate is unmodified overstates the facts: apispec already pins pytest9.1.1 and needs no dependency upgrade.",
+      "change": "Design3/8 qualifies an enumerated basic_serial tier: pytest8.4.2/9.0.3/9.1.0/9.1.1 without xdist, Vitest3.1.4/3.2.6/3.2.7 standard forks with matching coverage-v8. Each needs actual negative acceptance before support. One nonexclusive slot, automatic full, no selection/baseline; native hooks/pools/env/coverage/terminal evidence remain validated. Unknown versions or unsafe plugins are not broadly trusted, disabled, or silently upgraded.",
+      "planned_evidence": "T5/T6/T11 basic-only tuples run alongside another checkout, preserve coverage failures and argv/output, reject unknown parallel/control plugins and unsafe pools, and cannot clear unknown per-test failures. T14 separates unchanged tailwind3.1.4 basic adoption from advanced3.2.7 derivative/matching-repo selection evidence."
+    },
+    {
+      "id": "NG-6",
+      "disposition": "accepted",
+      "evidence": "A wheel plus symlink did not define psutil provisioning, venv script paths, offline behavior or interruption boundaries.",
+      "change": "Design12/T13 freeze installer grammar, strict two-wheel hash/tag manifest, final-path private venv layout, local uv no-index/no-deps provisioning, no interpreter downloads, complete.json-last and atomic symlink cutover. Offline is default; optional official psutil-wheel retrieval is explicit/bounded/hash-verified. No global/live installation.",
+      "planned_evidence": "T13 cached offline success/network sentinel, missing cache failure, wrong hash/tag/sdist, partial venv/wheel/marker/swap interruption, old-target preservation and packaged bridge/guide data tests."
+    },
+    {
+      "id": "NG-7",
+      "disposition": "accepted",
+      "evidence": "300s lacked a contention rationale and could expire behind ordinary multi-minute predecessors.",
+      "change": "Design6/7 default1800s, finite1-86400s override, visible requested/granted slots/age/queue wait; rationale recorded.",
+      "planned_evidence": "T4 fake-clock two240s predecessor test admits third after480s at default; explicit short timeout still75; T14 publishes real paired queue-wait observations."
+    },
+    {
+      "id": "NG-8",
+      "disposition": "accepted",
+      "evidence": "Root confirmed the previous example contained33 hex characters despite its32-character contract.",
+      "change": "Design5 example now cd58ec6cf99748ce9f15dfce137f044d, exactly32 lowercase hex.",
+      "planned_evidence": "T1 parses the exact example and rejects31/33-character IDs with invalid-config; documentation literal/domain checks run during repair."
+    },
+    {
+      "id": "NG-9",
+      "disposition": "accepted",
+      "evidence": "The old !=certified assertion was outside the valid enum and used an unfrozen tuple index, so it could not detect a false-ready report.",
+      "change": "Design10/T9 select parallel readiness by area and require unknown plus static-evidence-insufficient when there is no observed isolation proof. Scan limits cannot upgrade readiness.",
+      "planned_evidence": "T9 real-contract assertion fails if the state changes to ready; T11 checks JSON uncertainty and human unknown wording instead of certification."
+    },
+    {
+      "id": "P1",
+      "disposition": "accepted",
+      "change": "DomainPaths is explicit in read_history, publish_outcome, snapshot, ensure_fingerprint_key, inspect and execute. Static calls never create roots/keys; renderers are pure consumers. T3 uses T0's explicit fixture value and shared files/storage, with no T2 import/global resolution, so wave1 remains independent.",
+      "planned_evidence": "T3/T8/T9/T11 fixture-history/HMAC/timing isolation and normal-state sentinel tests; absent static state causes no writes; deliberate production PTEST_CONFIG rejects while T0 clears legacy bootstrap env in both direct unit process and child invocations."
+    },
+    {
+      "id": "P2",
+      "disposition": "accepted",
+      "change": "Design4/T11 freeze prefix-only execution parsing: after the first runner token or delimiter, preserve the entire tail and never resume ptest parsing. No universal runner option-arity parser.",
+      "planned_evidence": "ptest -k --workers, -k --full, tests/a.py --full remain scoped literal tails; a leading --workers2 consumes only its prefix; full -- -k expr is rejected by native full-gate validation."
+    }
+  ],
+  "actionable_notes": [
+    "Added .gcloudignore to the reviewed deletion inventory; historical source/tag retention and no infrastructure operations remain unchanged.",
+    "T6 explicitly authorizes reported npm package-lock-only/ignore-scripts metadata generation with no node_modules; actual setup waits for candidate ptest atT11. T5 fixture uv lock metadata generation is similarly explicit.",
+    "Substantial adoption/normal-domain benchmarks run directly under root outside any active ptest; collected acceptance tests contain only harness logic/miniature fixture domains.",
+    "Project pytest interpreter floor is explicitly CPython3.11-3.14 and checked before bridge import; bridges load generated protocol data without installing ptest/psutil in project environments.",
+    "Doctor safety cap8s is above the5s completed-work p95 target; truncated samples fail completion evidence instead of gaming latency.",
+    "T0 exclusively owns root/adapters/runtime __init__.py and package-data declarations; T13 verifies wheel contents. T11 ownership no longer overlaps.",
+    "One minimal T0 SQLite-opening helper centralizes pragmas/quota/private-file checks while scheduler/history retain separate schema/recovery policy.",
+    "case.invoke now requires an explicit watchdog; lifecycle/recovery/probe examples use phase-appropriate limits, fake clocks and barriers.",
+    "Corrected positional Change constructor to keyword-only, propagated new domain signatures through examples, and documented test-helper aliases.",
+    "Pin existence metadata was independently inspected but installations/scans remain unrun. Gitleaks issue2170's closed comments explain the synthetic alphabet-token allowlist; removed implication of a confirmed blanket regression while retaining actual-binary sensitivity gates."
+  ],
+  "preserved_invariants": [
+    "Guard registration CAS before repository execution; no unregistered late launch.",
+    "Provisional facts until guard exit/group absence and live-caller finalization under lease.",
+    "No terminating signal to a stored PID/PGID; ambiguous/live escaped work remains charged.",
+    "Changed relevant inputs/snapshots cannot yield a green automatic/full gate or baseline.",
+    "Unresolved failures survive unknown IDs, skips, stale passes, pruning and another checkout.",
+    "No model/API/cloud/TUI requirement; private fixture domains never seed normal evidence."
+  ],
+  "open_product_questions": [],
+  "verification": {
+    "tests_run": [],
+    "documentation_only": true,
+    "checks": ["JSON parse", "design TOML example parse and32hex validation", "revised signature/default/example drift scan", "owned-file/staged whitespace checks"],
+    "not_run": ["runtime tests", "dependency installs", "scanner sensitivity", "runner qualification", "macOS matrix", "adoption", "performance benchmarks"]
+  },
+  "remaining_gate": "Focused Opus re-review before T0; implementation and release properties remain explicitly unverified.",
+  "commit": null,
+  "commit_note": "Immutable repair SHA is returned in the parent handoff; this disposition is committed with the repaired documents."
+}
