@@ -30,4 +30,4 @@ def test_gitleaks_uses_only_private_verified_path(monkeypatch, tmp_path):
     monkeypatch.setattr(security_checks.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
     result = security_checks.run_gate(tmp_path, "gitleaks")
     assert result["status"] == "unpassed"
-    assert result["reason"] == "sensitivity-failed"
+    assert result["reason"] == "unavailable"

@@ -12,7 +12,6 @@ crash.log
 *.bak.*
 
 # The real config carries account names, project ids and absolute paths.
-# config.example.toml is the sanitised one that belongs in git.
 config.toml
 
 __pycache__/

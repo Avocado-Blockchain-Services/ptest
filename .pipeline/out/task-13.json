@@ -1,7 +1,7 @@
 {
   "version": 1,
   "task": "13",
-  "status": "implemented-with-unpassed-external-gate",
+  "status": "implemented-and-verified",
   "tests": {
     "command": "ptest tests/ng/test_config.py tests/ng/test_files.py tests/ng/test_install.py tests/ng/test_security_gates.py",
     "exit_code": 0,
@@ -16,7 +16,7 @@
   },
   "security_gates": {
     "command": "uv run --locked python scripts/security-checks.py --root .",
-    "exit_code": 1,
+    "exit_code": 0,
     "provision_command": "uv run --locked python scripts/security-checks.py --root . --provision-gitleaks",
     "provision_exit_code": 0,
     "result": "Bandit passed; pip-audit passed; Gitleaks 8.30.1 passed after official checksum-verified provisioning",

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -32,6 +33,8 @@ def validate_manifest(manifest: dict) -> dict:
         raise ValueError("manifest must be exact version 1")
     for key in ("ptest_version", "python_tag", "platform_tag"):
         _plain_string(manifest[key], key)
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}", manifest["ptest_version"]):
+        raise ValueError("ptest_version is unsafe for a bundle id")
     wheels = manifest["wheels"]
     if not isinstance(wheels, list) or len(wheels) != 2:
         raise ValueError("manifest requires exactly one ptest-ng and one psutil")
@@ -49,6 +52,8 @@ def validate_manifest(manifest: dict) -> dict:
         if package not in ("ptest-ng", "psutil"):
             raise ValueError("unsupported wheel package")
         _plain_string(entry["version"], "wheel version")
+        if package == "psutil" and entry["version"] != "7.2.2":
+            raise ValueError("psutil wheel must be exactly version 7.2.2")
         packages.append(package)
     if set(packages) != {"ptest-ng", "psutil"} or len(packages) != 2:
         raise ValueError("manifest requires exactly one ptest-ng and one psutil")
@@ -57,19 +62,24 @@ def validate_manifest(manifest: dict) -> dict:
     return manifest
 
 
-def _wheel_metadata(path: Path) -> tuple[str, str]:
+def _wheel_metadata(path: Path) -> tuple[str, str, set[str]]:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         if any(Path(n).is_absolute() or ".." in Path(n).parts for n in names):
             raise ValueError("wheel contains path escape")
         metadata = [n for n in names if n.endswith(".dist-info/METADATA")]
+        wheel_info = [n for n in names if n.endswith(".dist-info/WHEEL")]
         if len(metadata) != 1:
             raise ValueError("wheel metadata is missing or ambiguous")
         fields = {}
         for line in archive.read(metadata[0]).decode("utf-8").splitlines():
             if ": " in line:
                 key, value = line.split(": ", 1); fields[key] = value
-        return fields.get("Name", ""), fields.get("Version", "")
+        tags = set()
+        for line in archive.read(wheel_info[0]).decode("utf-8").splitlines() if len(wheel_info) == 1 else ():
+            if line.startswith("Tag: "):
+                tags.add(line[5:])
+        return fields.get("Name", ""), fields.get("Version", ""), tags
 
 
 def validate_wheel(path: Path, package: str, version: str, python_tag: str, platform_tag: str) -> None:
@@ -78,9 +88,11 @@ def validate_wheel(path: Path, package: str, version: str, python_tag: str, plat
     parts = path.name[:-4].split("-")
     if len(parts) < 5 or parts[-3] != python_tag or parts[-1] != platform_tag:
         raise ValueError("wheel tags do not match manifest")
-    actual_name, actual_version = _wheel_metadata(path)
+    actual_name, actual_version, wheel_tags = _wheel_metadata(path)
     if actual_name.replace("_", "-").lower() != package or actual_version != version:
         raise ValueError("wheel metadata does not match manifest")
+    if f"{python_tag}-none-{platform_tag}" not in wheel_tags:
+        raise ValueError("WHEEL Tag does not match manifest")
 
 
 def _owned_destination(dest: Path) -> None:
@@ -93,13 +105,15 @@ def _owned_destination(dest: Path) -> None:
 
 def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_network=False, fault=None) -> Path:
     _owned_destination(dest)
-    if wheelhouse.is_symlink() or not wheelhouse.is_dir():
+    if not wheelhouse.is_absolute() or not manifest_path.is_absolute():
+        raise ValueError("wheelhouse and manifest must be absolute paths")
+    if wheelhouse.is_symlink() or not wheelhouse.is_dir() or manifest_path.is_symlink():
         raise ValueError("wheelhouse must be a real directory")
     manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
     paths = []
     for entry in manifest["wheels"]:
         path = wheelhouse / entry["filename"]
-        if path.resolve().parent != wheelhouse.resolve() or not path.is_file():
+        if path.is_symlink() or path.parent != wheelhouse or not path.is_file():
             if entry["package"] == "psutil" and allow_network:
                 metadata_url = f"https://pypi.org/pypi/psutil/{entry['version']}/json"
                 with urlopen(Request(metadata_url, headers={"Accept": "application/json"}), timeout=30) as response:
@@ -128,6 +142,7 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
     bundle = bundles / f"{manifest['ptest_version']}-{secrets.token_hex(16)}"
     bundle.mkdir()
     (bundle / "wheels").mkdir()
+    published = False
     try:
         bundled_paths = []
         for path in paths:
@@ -160,6 +175,9 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             if bundles not in target.parents:
                 raise ValueError("existing symlink target is outside installer bundles")
         os.replace(link, public)
+        published = True
+        if fault == "after-swap-before-fsync":
+            raise RuntimeError("after-swap-before-fsync")
         parent_fd = os.open(dest, os.O_RDONLY)
         try:
             os.fsync(parent_fd)
@@ -167,7 +185,8 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             os.close(parent_fd)
         return public
     except Exception:
-        shutil.rmtree(bundle, ignore_errors=True)
+        if not published:
+            shutil.rmtree(bundle, ignore_errors=True)
         raise
 
 

@@ -49,25 +49,34 @@ def provision_gitleaks(destination: Path) -> Path:
             target = destination / "gitleaks"
             os.replace(staged, target)
             target.chmod(0o755)
+            (destination / "gitleaks.sha256").write_text(expected + "  gitleaks\n", encoding="ascii")
     return destination / "gitleaks"
 
 
 def _gitleaks_binary(root: Path) -> Path | None:
     candidate = root / ".tools" / "gitleaks" / "gitleaks"
-    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    checksum = candidate.with_name("gitleaks.sha256")
+    if not candidate.is_file() or not os.access(candidate, os.X_OK) or not checksum.is_file():
+        return None
+    expected = checksum.read_text(encoding="ascii").split()[0]
+    return candidate if expected == GITLEAKS_ARCHIVE_SHA256 else None
 
 
 def run_gate(root: Path, tool: str) -> dict:
     executable = str(_gitleaks_binary(root)) if tool == "gitleaks" and _gitleaks_binary(root) else shutil.which(tool) if tool != "gitleaks" else None
     if not executable:
         return {"tool": tool, "status": "unpassed", "reason": "unavailable"}
+    if tool == "gitleaks":
+        version = subprocess.run([executable, "version"], cwd=root, capture_output=True, text=True)
+        if version.returncode != 0 or GITLEAKS_VERSION not in version.stdout:
+            return {"tool": tool, "status": "unpassed", "reason": "version-mismatch"}
     with tempfile.TemporaryDirectory(prefix="ptest-security-") as temp:
         fixture = Path(temp) / "sensitivity.py"
         fixture.write_text("password = 'T13SYNTH-ABCDEFGHIJKLMNOPQRSTUVWXYZ'\n")
         (Path(temp) / "negative.txt").write_text("T13SYNTH-not-a-match\n")
         if tool == "bandit":
             probe = [executable, "-q", "-r", str(fixture)]
-            scope = [executable, "-q", "-r", str(root / "src"), "-lll", "-iii"]
+            scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-lll", "-iii"]
         elif tool == "pip-audit":
             requirements = Path(temp) / "requirements.txt"
             requirements.write_text("jinja2==2.10\n")
