@@ -1759,15 +1759,24 @@ def execute(domain: C.DomainPaths, config: C.Config,
     native_pytest = config.runner.kind is C.RunnerKind.PYTEST
     native_runner = native_pytest
     adapter = adapter_for(config.runner.kind)
-    checkout = _checkout(config)
-    # History qualification is read-only and therefore cannot bootstrap the
-    # normal account coordinator. Initialize it before the first-run read.
-    scheduler.initialize(domain)
     catalog_profile = (adapter.qualified_profile(config) if native_runner else None)
-    stored_profile = (history.read_qualified_profile(
-        domain, checkout, config.runner.kind) if native_runner else None)
-    history_view = (history.read_history(domain, checkout) if native_runner else
-                    C.HistoryView(baseline=None, limitations=()))
+    if (native_pytest and request.mode is C.Mode.AUTOMATIC
+            and (catalog_profile is None or config.config_path is None)):
+        raise _problem("unsupported-capability",
+                       "pytest automatic selection requires a qualified profile")
+    checkout = _checkout(config)
+    needs_history = native_runner and (
+        request.mode is C.Mode.AUTOMATIC or catalog_profile is not None)
+    if needs_history:
+        # History qualification is read-only and therefore cannot bootstrap the
+        # normal account coordinator. Initialize it before the first-run read.
+        scheduler.initialize(domain)
+        stored_profile = history.read_qualified_profile(
+            domain, checkout, config.runner.kind)
+        history_view = history.read_history(domain, checkout)
+    else:
+        stored_profile = None
+        history_view = C.HistoryView(baseline=None, limitations=())
     # A stored observation can refine, but never create, a closed catalog
     # declaration.  Configuration changes therefore revoke admission until
     # the current command matches the registry's static tuple again.

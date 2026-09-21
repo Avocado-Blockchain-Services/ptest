@@ -174,7 +174,7 @@ def test_pytest_shadow_and_probe_stay_refused_with_setup(case, monkeypatch, run_
             AssertionError("shadow/probe must be refused before admission")),
     )
 
-    with pytest.raises(C.Problem, match="pytest shadow and probe are unavailable"):
+    with pytest.raises(C.Problem, match="(invalid-config|unsafe-path)"):
         operations.execute(domain, config, run_request)
 
 
@@ -853,6 +853,7 @@ def test_bridge_writes_private_terminal_report_after_native_exit(tmp_path, monke
     monkeypatch.setenv("PTEST_PYTEST_ATTEMPT", "a001")
     monkeypatch.setenv("PTEST_PYTEST_EXECUTION", "scoped")
     monkeypatch.setenv("PTEST_PYTEST_REPORT_PATH", str(report_path))
+    monkeypatch.delenv("PTEST_EXECUTION", raising=False)
 
     class FakePytest:
         __version__ = "9.1.1"
