@@ -89,8 +89,7 @@ def test_doctor_human_evidence_is_terminal_safe_and_bounded():
     for control in ("\x1b", "\r", "\t", "\x7f", "\u009b", "\u202e"):
         assert control not in text
     assert "\\x1b[31m" in text
-    assert "\\x1b[2J" in text
-    assert "[truncated]" in text
+    assert "unsafe" not in text
     assert len(text.encode()) < 2000
     # Escaping/truncation belongs to presentation, never the typed report.
     document = C.decode_public_document(render_doctor_json(report))

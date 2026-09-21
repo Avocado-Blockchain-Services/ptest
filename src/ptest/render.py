@@ -105,21 +105,97 @@ def render_doctor_json(report: C.DoctorReport, *, domain: dict | None = None) ->
 
 
 def render_doctor(report: C.DoctorReport) -> str:
-    """Human output retains unknown/blocked readiness rather than certifying it."""
-    data = _doctor_data(report)
-    lines = ["ptest doctor", ""]
-    for readiness in data["readiness"]:
-        lines.append(f"{terminal_text(readiness['area'])}: {terminal_text(readiness['state'])}")
-        for reason in readiness["reasons"]:
-            lines.append(f"  - {terminal_text(reason['message'])}")
+    """Render a concise, non-executing doctor summary for interactive terminals.
+
+    The complete ungrouped record remains available via ``doctor --json``;
+    ``doctor --prompt`` provides bounded repair guidance and can truncate
+    evidence. Terminal output intentionally groups repeated static hypotheses
+    so a scan cap cannot turn routine diagnosis into an unreadable stream of
+    identical messages.
+    """
+    if not isinstance(report, C.DoctorReport):
+        raise TypeError("doctor renderer requires DoctorReport")
+
+    severity_order = ("high", "medium", "low")
+    severity_counts = {severity: 0 for severity in severity_order}
+    groups: dict[tuple[str, str], list[C.Finding]] = {}
+    for finding in report.findings:
+        severity_counts.setdefault(finding.severity, 0)
+        severity_counts[finding.severity] += 1
+        groups.setdefault((finding.severity, finding.code), []).append(finding)
+
+    usage = report.usage
+    if usage is None:
+        coverage = "Scan coverage: unavailable."
+    elif usage.truncated:
+        coverage = ("Scan coverage: incomplete; "
+                    f"{usage.files} files inspected, {usage.skipped} entries skipped.")
+    else:
+        coverage = f"Scan coverage: complete; {usage.files} files inspected."
+
+    lines = [
+        "ptest doctor",
+        "Static review only: no tests, services, or network calls ran.",
+        coverage,
+    ]
+    if report.readiness:
+        readiness = ", ".join(
+            f"{terminal_text(item.area)}={terminal_text(item.state)}"
+            for item in report.readiness
+        )
+        lines.extend(("", f"Readiness: {readiness}"))
+
     if report.findings:
-        lines.extend(("", "Findings:"))
-        for finding in report.findings:
-            location = "" if finding.path is None else f" ({terminal_text(finding.path)})"
-            lines.append(f"- {terminal_text(finding.code)}{location}: {terminal_text(finding.consequence)}")
-    if report.limitations:
-        lines.extend(("", "Limitations:"))
-        lines.extend(f"- {terminal_text(reason.message)}" for reason in report.limitations)
+        summary = ", ".join(
+            f"{severity_counts[severity]} {severity}"
+            for severity in severity_order if severity_counts.get(severity)
+        )
+        extra_severities = sorted(
+            severity for severity in severity_counts if severity not in severity_order
+            and severity_counts[severity]
+        )
+        summary += "".join(
+            f", {severity_counts[severity]} {terminal_text(severity)}"
+            for severity in extra_severities
+        )
+        lines.extend(("", f"Findings: {len(report.findings)} total ({summary})"))
+        ordered_groups = sorted(
+            groups.items(),
+            key=lambda item: (severity_order.index(item[0][0])
+                              if item[0][0] in severity_order else len(severity_order),
+                              item[0][0], item[0][1]),
+        )
+        for (severity, code), findings in ordered_groups:
+            example = findings[0]
+            location = "unknown location"
+            if example.path is not None:
+                location = terminal_text(example.path)
+                if example.line is not None:
+                    location += f":{example.line}"
+            noun = "finding" if len(findings) == 1 else "findings"
+            lines.append(
+                f"- {terminal_text(severity):<5} {terminal_text(code)}: "
+                f"{len(findings)} {noun} (e.g. {location})"
+            )
+    else:
+        lines.extend(("", "Findings: none found (static review cannot certify parallel safety)."))
+
+    non_scan_limitations: dict[tuple[str, str], int] = {}
+    for reason in report.limitations:
+        if reason.code != "scan-limit":
+            key = (reason.code, reason.message)
+            non_scan_limitations[key] = non_scan_limitations.get(key, 0) + 1
+    if usage is not None and usage.truncated:
+        lines.append("Scan stopped at configured bounds; detailed limit notices suppressed.")
+    if non_scan_limitations:
+        descriptions = []
+        for (_, message), count in non_scan_limitations.items():
+            description = terminal_text(message)
+            if count > 1:
+                description += f" ({count} occurrences)"
+            descriptions.append(description)
+        lines.append("Limitations: " + "; ".join(descriptions))
+    lines.extend(("", "Next: ptest doctor --prompt  |  ptest doctor --json"))
     return "\n".join(lines) + "\n"
 
 

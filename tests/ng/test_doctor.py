@@ -11,6 +11,7 @@ import pytest
 
 from ptest import contracts as C
 from ptest.doctor import inspect
+from ptest.render import render_doctor
 
 
 def _resolution(case, root: Path) -> C.ConfigResolution:
@@ -52,6 +53,44 @@ def test_doctor_finds_global_cache_flush_and_never_certifies_parallel_safety(cas
     assert {reason.code for reason in parallel.reasons} >= {
         "static-evidence-insufficient",
     }
+
+
+def test_human_doctor_output_groups_findings_and_scan_limits():
+    """Removing compact grouping would restore an unusable terminal dump."""
+    finding = lambda code, severity, path, line: C.Finding(
+        code=code, severity=severity, confidence="medium", path=path, line=line,
+        evidence_type="static-pattern", consequence="needs review",
+        remediation="make ownership explicit", verification="run the focused test",
+    )
+    report = C.DoctorReport(
+        readiness=(C.Readiness(area="execution", state="unknown", reasons=()),),
+        findings=(
+            finding("cache.global-flush", "high", "tests/cache_a.py", 10),
+            finding("cache.global-flush", "high", "tests/cache_b.py", 20),
+            finding("db.per-test-initialization", "medium", "tests/db.py", 30),
+            finding("time.blocking-sleep", "low", "tests/time.py", 40),
+        ),
+        usage=C.ScanUsage(entries=200, files=50, file_bytes=4096, total_bytes=8192,
+                          findings=4, output_bytes=1024, elapsed_s=0.2,
+                          skipped=17, truncated=True),
+        limitations=(
+            C.Reason(code="scan-limit", message="Doctor file-byte or file-count limit reached."),
+            C.Reason(code="scan-limit", message="Doctor file-byte or file-count limit reached."),
+            C.Reason(code="unsafe-path", message="Doctor skipped a symbolic link."),
+            C.Reason(code="unsafe-path", message="Doctor skipped a symbolic link."),
+        ),
+    )
+
+    output = render_doctor(report)
+
+    assert "Static review only: no tests, services, or network calls ran." in output
+    assert "Findings: 4 total (2 high, 1 medium, 1 low)" in output
+    assert "high  cache.global-flush: 2 findings (e.g. tests/cache_a.py:10)" in output
+    assert "Scan coverage: incomplete; 50 files inspected, 17 entries skipped." in output
+    assert "Scan stopped at configured bounds; detailed limit notices suppressed." in output
+    assert "Doctor file-byte or file-count limit reached." not in output
+    assert "Doctor skipped a symbolic link. (2 occurrences)" in output
+    assert "Next: ptest doctor --prompt" in output
 
 
 @pytest.mark.parametrize("source", [
