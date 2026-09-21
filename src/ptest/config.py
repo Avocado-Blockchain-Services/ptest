@@ -664,7 +664,16 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         ),
         setup=setup,
         resources=C.ResourceConfig(),
-        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
+        # uv owns this environment and may create interpreter/package-link
+        # symlink graphs under it.  It is a generated tool artifact, not a
+        # project input.  Keep this one fixed, narrowly-scoped exemption in
+        # the generated config; arbitrary ignored paths remain visible and
+        # continue to force a conservative full decision.
+        selection=C.SelectionPolicy(
+            enabled=False, closed_inputs=False,
+            non_input_outputs=(".venv",) if kind is C.RunnerKind.PYTEST
+            and _native_present(root, "uv.lock") else (),
+        ),
         project_id=secrets.token_hex(16), config_path=target,
     )
     return config

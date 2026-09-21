@@ -113,7 +113,11 @@ def test_failed_upgrade_keeps_old_target(tmp_path, monkeypatch):
     ptest = _wheel(wheelhouse, "ptest-ng")
     psutil = _wheel(wheelhouse, "psutil", "7.2.2")
     manifest = _manifest(wheelhouse, ptest, psutil)
-    old = tmp_path / ".ptest-bundles" / "old" / "venv" / "bin"; old.mkdir(parents=True)
+    bundles = tmp_path / ".ptest-bundles"
+    bundles.mkdir(mode=0o700)
+    bundles.chmod(0o700)
+    old = bundles / "old" / "venv" / "bin"; old.mkdir(parents=True)
+    (bundles / "old").chmod(0o700)
     (old / "ptest").write_text("#!/bin/sh\nexit 0\n"); (old / "ptest").chmod(0o755)
     current = tmp_path / "ptest"
     current.symlink_to(old / "ptest")
@@ -169,6 +173,71 @@ def test_missing_offline_psutil_never_invokes_uv(tmp_path, monkeypatch):
     assert _inventory(dest) == before
 
 
+def test_wheel_replacement_race_is_rejected_before_provisioning(tmp_path, monkeypatch):
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    original = psutil.read_bytes()
+    replaced = original + b"replacement"
+    real_open = install.os.open
+    switched = False
+
+    def race_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal switched
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not switched and dir_fd is not None and Path(path).name == psutil.name:
+            switched = True
+            psutil.unlink()
+            psutil.write_bytes(replaced)
+        return fd
+
+    monkeypatch.setattr(install.os, "open", race_open)
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: pytest.fail("uv must not run"))
+    with pytest.raises(ValueError, match="replaced"):
+        install_bundle(tmp_path / "dest", wheelhouse, manifest)
+    assert not (tmp_path / "dest" / "ptest").exists()
+
+
+@pytest.mark.parametrize("mode", [0o702, 0o707])
+def test_installer_rejects_writable_destination(mode, tmp_path):
+    dest = tmp_path / "dest"
+    dest.mkdir(mode=mode)
+    dest.chmod(mode)
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    with pytest.raises(ValueError, match="private"):
+        install_bundle(dest, wheelhouse, manifest)
+
+
+def test_installer_rejects_hostile_bundle_ancestor(tmp_path):
+    dest = tmp_path / "dest"; dest.mkdir()
+    dest.chmod(0o700)
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    bundles = dest / ".ptest-bundles"
+    bundles.symlink_to(tmp_path / "outside", target_is_directory=True)
+    with pytest.raises(ValueError, match="bundle root"):
+        install_bundle(dest, wheelhouse, manifest)
+
+
+def test_installer_rejects_writable_destination_ancestor(tmp_path):
+    parent = tmp_path / "hostile"
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o777)
+    dest = parent / "dest"
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    with pytest.raises(ValueError, match="ancestor"):
+        install_bundle(dest, wheelhouse, manifest)
+
+
 def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     wheelhouse = tmp_path / "wheelhouse"; wheelhouse.mkdir()
     build = tmp_path / "build"; build.mkdir()
@@ -200,6 +269,12 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(dest / "ptest"), "guide"], capture_output=True, text=True).returncode == 0
     seeded_wheel = next((dest / ".ptest-bundles").glob("*/wheels/psutil-*.whl"))
+    bundle = seeded_wheel.parents[1]
+    assert (dest / ".ptest-bundles").stat().st_mode & 0o777 == 0o700
+    assert bundle.stat().st_mode & 0o777 == 0o700
+    assert (bundle / "wheels").stat().st_mode & 0o777 == 0o700
+    assert (bundle / "complete.json").stat().st_mode & 0o777 == 0o600
+    assert seeded_wheel.stat().st_mode & 0o777 == 0o600
     shutil.copy2(seeded_wheel, wheelhouse / seeded_wheel.name)
     offline_env = {**env, "HTTPS_PROXY": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1"}
     offline = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env=offline_env, capture_output=True, text=True, timeout=300)

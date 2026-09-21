@@ -237,6 +237,69 @@ def test_pytest_full_snapshot_excludes_only_root_cache_and_bytecode(case):
     assert "tests/__pycache__/test_a.cpython-313-pytest-9.1.1.pyc" not in {item.path for item in after.files}
 
 
+def test_uv_environment_is_excluded_from_full_snapshot_without_ignored_bypass(case):
+    """A real uv environment must not trigger symlink-loop traversal or hide other ignored input."""
+    from ptest.config import init_project, resolve_config
+    from ptest.contracts import InitOptions, RunnerKind
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\nlocal-secret.txt\n", encoding="utf-8")
+    _git(root, "add", "pyproject.toml", "uv.lock", ".gitignore")
+    _git(root, "commit", "-m", "uv project")
+    created = init_project(root, InitOptions(runner=RunnerKind.PYTEST,
+                                             dry_run=False,
+                                             reveal_command=False))
+    assert created.target.is_file()
+    config = resolve_config(root).config
+    assert config is not None
+    ensure_fingerprint_key(domain)
+    subprocess.run(("uv", "venv", str(root / ".venv")), check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (root / "local-secret.txt").write_text("must remain an input\n", encoding="utf-8")
+    result = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert result.digest is not None
+    paths = {item.path for item in result.files}
+    assert not any(path == ".venv" or path.startswith(".venv/") for path in paths)
+    assert "local-secret.txt" in paths
+
+
+def test_generated_uv_config_full_candidate_launches_with_real_environment(case):
+    """The generated config survives a real uv environment and reaches the native full candidate."""
+    from ptest.config import init_project, resolve_config
+    from ptest.contracts import InitOptions, RunnerKind
+
+    domain, root = _repository(case)
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "dependencies = ['pytest==9.1.1']\n"
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\nlocal-secret.txt\n", encoding="utf-8")
+    (root / "tests" / "test_a.py").write_text(
+        "def test_native_full():\n    assert True\n", encoding="utf-8")
+    locked = subprocess.run(("uv", "lock"), cwd=root, check=False,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert locked.returncode == 0, locked.stderr.decode(errors="replace")
+    _git(root, "add", "pyproject.toml", "uv.lock", ".gitignore", "tests/test_a.py")
+    _git(root, "commit", "-m", "uv candidate")
+    created = init_project(root, InitOptions(runner=RunnerKind.PYTEST,
+                                             dry_run=False,
+                                             reveal_command=False))
+    _git(root, "add", ".ptest.toml")
+    _git(root, "commit", "-m", "generated ptest config")
+    subprocess.run(("uv", "venv", str(root / ".venv")), check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert created.target.is_file()
+    completed = case.invoke(domain, root, "--full", timeout=30)
+    assert completed.code == 0, completed.stderr.decode(errors="replace")
+    assert completed.result is not None
+    assert completed.result["data"]["plan"]["execution"] == "full"
+
+
 def test_pytest_full_snapshot_excludes_root_conftest_and_imported_src_bytecode(case):
     """Full output filtering follows source/module identity, not test roots."""
     from ptest import source as source_module

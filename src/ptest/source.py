@@ -438,7 +438,11 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         untracked = {path for path in untracked
                      if not _matches(path, config.selection.non_input_outputs)}
         ignored_raw = _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
-        ignored_all = {_path(path) for path in _records(ignored_raw)}
+        ignored_all = set()
+        for raw_path in _records(ignored_raw):
+            path = _path(raw_path)
+            if not _matches(path, config.selection.non_input_outputs):
+                ignored_all.add(path)
         declared_ignored = {path for path in ignored_all
                             if _matches(path, config.selection.ignored_inputs)}
         undeclared_ignored = {path for path in ignored_all

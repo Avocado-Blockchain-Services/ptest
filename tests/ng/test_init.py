@@ -132,6 +132,24 @@ def test_native_lock_preview_declares_setup_without_running_it(tmp_path):
     assert not (tmp_path / ".ptest.toml").exists()
 
 
+def test_uv_init_marks_only_dependency_environment_as_non_input(tmp_path):
+    """Generated uv projects ignore their tool environment, not arbitrary ignored files."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "[tool.pytest.ini_options]\n", encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    result = init_project(tmp_path, _options())
+
+    assert result.action is InitAction.CREATED
+    resolved = resolve_config(tmp_path)
+    assert resolved.config is not None
+    assert resolved.config.selection.non_input_outputs == (".venv",)
+    assert resolved.config.selection.ignored_inputs == ()
+    text = result.target.read_text(encoding="utf-8")
+    assert 'non_input_outputs = [".venv"]' in text
+
+
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "create"])
 @pytest.mark.parametrize(("name", "runner", "expected_kind", "expected_launcher",
                           "expected_setup_argv"), [

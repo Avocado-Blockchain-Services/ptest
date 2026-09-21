@@ -94,7 +94,11 @@ def test_pytest_full_is_single_slot_and_has_no_scope(case):
 
 def test_pytest_full_dot_root_refuses_before_queue(case, monkeypatch):
     domain = case.domain()
-    config = case.config(runner_kind="pytest")
+    root = case.project(domain, kind="pytest")
+    config = replace(case.config(runner_kind="pytest"),
+                     checkout=case.checkout(domain),
+                     config_path=root / ".ptest.toml")
+    object.__setattr__(config.checkout, "root", root)
     config = replace(config, runner=replace(config.runner, test_roots=(".",)))
     monkeypatch.setattr(operations.scheduler, "enqueue", lambda *a, **k: pytest.fail("queued"))
     with pytest.raises(C.Problem, match="unsupported-capability"):

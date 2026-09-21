@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import secrets
+import stat
 import shutil
 import subprocess
 import sys
@@ -97,12 +98,167 @@ def validate_wheel(path: Path, package: str, version: str, python_tag: str, plat
         raise ValueError("WHEEL Tag does not match manifest")
 
 
+def _private_directory(path: Path, label: str, *, strict: bool = True) -> None:
+    try:
+        stamp = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if (stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode)
+            or stamp.st_uid != os.getuid()
+            or stamp.st_mode & (0o077 if strict else (stat.S_IWGRP | stat.S_IWOTH))):
+        raise ValueError(f"{label} must be a private owned directory")
+
+
 def _owned_destination(dest: Path) -> None:
     if not dest.is_absolute() or dest.is_symlink():
         raise ValueError("destination must be an absolute non-symlink directory")
-    dest.mkdir(parents=True, exist_ok=True)
-    if dest.stat().st_uid != os.getuid():
-        raise ValueError("destination is not owned by the current account")
+    _validate_ancestor_chain(dest.parent)
+    try:
+        if not dest.exists():
+            dest.mkdir(mode=0o700)
+            os.chmod(dest, 0o700)
+    except OSError as exc:
+        raise ValueError("destination is unavailable") from exc
+    _private_directory(dest, "destination")
+
+
+def _validate_ancestor_chain(path: Path) -> None:
+    """Reject redirectable ancestors while allowing the system temp anchor."""
+    current = path
+    while True:
+        try:
+            stamp = os.lstat(current)
+        except OSError as exc:
+            raise ValueError("destination ancestor is unavailable") from exc
+        if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+            raise ValueError("destination ancestor is unsafe")
+        writable = stamp.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        # A root-owned sticky directory such as /tmp is the explicit safe
+        # handoff point for a private destination; descendants are checked.
+        if writable and not (stamp.st_mode & stat.S_ISVTX and stamp.st_uid == 0):
+            raise ValueError("destination ancestor must be private")
+        if current.parent == current or (writable and stamp.st_mode & stat.S_ISVTX):
+            return
+        current = current.parent
+
+
+def _open_directory(path: Path, label: str, *, private: bool = True) -> int:
+    _private_directory(path, label, strict=private)
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+
+
+def _copy_authenticated_wheel(wheelhouse: Path, filename: str, staged_dir: Path,
+                              expected_hash: str) -> Path:
+    """Copy one source wheel through no-follow descriptors, then authenticate it."""
+    wheel_fd = _open_directory(wheelhouse, "wheelhouse", private=False)
+    staged_fd = _open_directory(staged_dir, "staged wheel directory")
+    source_fd = output_fd = None
+    staged = staged_dir / filename
+    try:
+        source_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW,
+                            dir_fd=wheel_fd)
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("wheel source is not a regular file")
+        output_fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                             os.O_NOFOLLOW, 0o600, dir_fd=staged_fd)
+        digest = hashlib.sha256()
+        while True:
+            piece = os.read(source_fd, 1024 * 1024)
+            if not piece:
+                break
+            digest.update(piece)
+            view = memoryview(piece)
+            while view:
+                written = os.write(output_fd, view)
+                if written <= 0:
+                    raise OSError("wheel copy made no progress")
+                view = view[written:]
+        os.fsync(output_fd)
+        after = os.fstat(source_fd)
+        current = os.stat(filename, dir_fd=wheel_fd, follow_symlinks=False)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns) or \
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                 before.st_ctime_ns) != (current.st_dev, current.st_ino,
+                 current.st_size, current.st_mtime_ns, current.st_ctime_ns):
+            raise ValueError("wheel source was replaced while copying")
+        if digest.hexdigest() != expected_hash:
+            raise ValueError("wheel hash does not match manifest")
+        return staged
+    except Exception:
+        if output_fd is not None:
+            try:
+                os.unlink(filename, dir_fd=staged_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if output_fd is not None:
+            os.close(output_fd)
+        os.close(staged_fd)
+        os.close(wheel_fd)
+
+
+def _write_authenticated_bytes(staged_dir: Path, filename: str, payload: bytes,
+                               expected_hash: str) -> Path:
+    staged_fd = _open_directory(staged_dir, "staged wheel directory")
+    fd = None
+    try:
+        fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                      os.O_NOFOLLOW, 0o600, dir_fd=staged_fd)
+        if hashlib.sha256(payload).hexdigest() != expected_hash:
+            raise ValueError("downloaded wheel hash does not match manifest")
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("wheel write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+        return staged_dir / filename
+    except Exception:
+        try:
+            os.unlink(filename, dir_fd=staged_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(staged_fd)
+
+
+def _write_private_json(path: Path, value: dict) -> None:
+    payload = json.dumps(value, sort_keys=True).encode("utf-8")
+    parent_fd = _open_directory(path.parent, "bundle")
+    fd = None
+    try:
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("marker write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+    except Exception:
+        try:
+            os.unlink(path.name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
 
 
 def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_network=False, fault=None) -> Path:
@@ -116,21 +272,28 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
     if platform.python_implementation() != "CPython" or not (PYTHON_MIN <= sys.version_info[:2] < PYTHON_MAX):
         raise RuntimeError("installer requires CPython 3.11 through 3.14")
     bundles = dest / ".ptest-bundles"
-    if bundles.is_symlink() or (bundles.exists() and not bundles.is_dir()):
-        raise ValueError("bundle root is not an owned directory")
-    bundles.mkdir(exist_ok=True)
+    if bundles.exists() or bundles.is_symlink():
+        _private_directory(bundles, "bundle root")
+    else:
+        bundles.mkdir(mode=0o700)
+        _private_directory(bundles, "bundle root")
     bundle = bundles / f"{manifest['ptest_version']}-{secrets.token_hex(16)}"
-    bundle.mkdir()
-    (bundle / "wheels").mkdir()
+    bundle.mkdir(mode=0o700)
+    _private_directory(bundle, "bundle")
+    wheels_dir = bundle / "wheels"
+    wheels_dir.mkdir(mode=0o700)
+    _private_directory(wheels_dir, "staged wheel directory")
     published = False
     link = None
     paths = []
     try:
       for entry in manifest["wheels"]:
         path = wheelhouse / entry["filename"]
+        if path.parent != wheelhouse:
+            raise ValueError("manifest wheel path must stay in wheelhouse")
         if path.is_symlink():
             raise ValueError("manifest wheel path must not be a symlink")
-        if path.parent != wheelhouse or not path.is_file():
+        if not path.is_file():
             if entry["package"] == "psutil" and allow_network:
                 metadata_url = f"https://pypi.org/pypi/psutil/{entry['version']}/json"
                 with urlopen(Request(metadata_url, headers={"Accept": "application/json"}), timeout=30) as response:  # nosec B310 - fixed HTTPS host
@@ -142,18 +305,15 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
                     payload = response.read()
                 if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                     raise ValueError("downloaded psutil wheel hash does not match manifest")
-                staged = bundle / "wheels" / entry["filename"]
-                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                try:
-                    os.write(fd, payload)
-                finally:
-                    os.close(fd)
-                path = staged
+                path = _write_authenticated_bytes(wheels_dir, entry["filename"],
+                                                   payload, entry["sha256"])
             else:
                 raise FileNotFoundError(path)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
-            raise ValueError("wheel hash does not match manifest")
-        validate_wheel(path, entry["package"], entry["version"], manifest["python_tag"], manifest["platform_tag"])
+        else:
+            path = _copy_authenticated_wheel(
+                wheelhouse, entry["filename"], wheels_dir, entry["sha256"])
+        validate_wheel(path, entry["package"], entry["version"],
+                       manifest["python_tag"], manifest["platform_tag"])
         paths.append(path)
     except Exception:
         shutil.rmtree(bundle, ignore_errors=True)
@@ -161,14 +321,9 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             bundles.rmdir()
         raise
     try:
-        bundled_paths = []
-        for path in paths:
-            bundled = path if path.parent == bundle / "wheels" else bundle / "wheels" / path.name
-            if bundled != path:
-                shutil.copy2(path, bundled)
-            bundled_paths.append(bundled)
-            if fault == "after-one-wheel":
-                raise RuntimeError("after-one-wheel")
+        bundled_paths = list(paths)
+        if fault == "after-one-wheel":
+            raise RuntimeError("after-one-wheel")
         subprocess.run(["uv", "venv", "--python", str(py), str(bundle / "venv")], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
         if fault == "after-venv":
             raise RuntimeError("after-venv")
@@ -180,9 +335,7 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
         marker_path = bundle / "complete.json"
         if fault == "before-complete":
             raise RuntimeError("before-complete")
-        marker_path.write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
-        with marker_path.open("rb") as marker_file:
-            os.fsync(marker_file.fileno())
+        _write_private_json(marker_path, marker)
         directory_fd = os.open(bundle, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
