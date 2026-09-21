@@ -7,23 +7,38 @@ tool for recording measurements and never invokes a shell or a remote service.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import platform
+import re
 import shutil
 import signal
+import selectors
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import Iterable, Sequence
 
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_SAMPLES = 100
+WORKLOAD_NAME = "local-miniature-v1"
+_VERSION_RE = re.compile(r"\A\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z")
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.is_file() or path.is_symlink():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -110,6 +125,115 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
         pass
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """Write one retained artifact exactly once with restrictive permissions."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _private_artifact_dir(path: Path) -> Path:
+    """Create an absent 0700 directory, rejecting all pre-existing targets."""
+    if path.exists() or path.is_symlink():
+        raise ValueError("benchmark artifact directory must be newly created")
+    parent = path.parent
+    while True:
+        if parent.exists() and parent.is_symlink():
+            raise ValueError("benchmark artifact parent may not be a symlink")
+        if parent == parent.parent or not parent.exists():
+            break
+        parent = parent.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir(mode=0o700)
+    stamp = os.stat(path)
+    if path.is_symlink() or stamp.st_uid != os.getuid() or (stamp.st_mode & 0o777) != 0o700:
+        raise ValueError("benchmark artifact directory has unsafe ownership or mode")
+    return path
+
+
+def _stream_process(proc: subprocess.Popen[bytes], timeout: float) -> tuple[bytes, bytes, bool]:
+    """Stream both pipes, terminating on timeout or per-stream output cap."""
+    selector = selectors.DefaultSelector()
+    buffers = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+    streams = dict(buffers)
+    for stream in streams:
+        assert stream is not None
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    capped = False
+    terminated = False
+    while streams:
+        remaining = deadline - time.monotonic()
+        if not terminated and remaining <= 0:
+            capped = True
+            _terminate(proc)
+            terminated = True
+        events = selector.select(0.05 if terminated else min(0.05, remaining))
+        if not events and terminated and proc.poll() is not None:
+            # Pipes can remain registered briefly after the child exits; keep
+            # polling until EOF so retained output is complete up to the cap.
+            events = selector.select(0)
+        for key, _ in events:
+            stream = key.fileobj
+            try:
+                piece = os.read(stream.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if not piece:
+                selector.unregister(stream)
+                streams.pop(stream, None)
+                continue
+            buffer = buffers[stream]
+            room = MAX_OUTPUT_BYTES - len(buffer)
+            if room <= 0:
+                capped = True
+                if not terminated:
+                    _terminate(proc)
+                    terminated = True
+                continue
+            buffer.extend(piece[:room])
+            if len(piece) > room:
+                capped = True
+                if not terminated:
+                    _terminate(proc)
+                    terminated = True
+        if terminated and proc.poll() is not None and not events:
+            # A final zero-time poll above is enough to avoid waiting forever
+            # on a broken descriptor; unregister all remaining streams.
+            for stream in list(streams):
+                try:
+                    selector.unregister(stream)
+                except KeyError:
+                    pass
+                streams.pop(stream, None)
+        elif terminated and time.monotonic() > deadline + 6:
+            for stream in list(streams):
+                try:
+                    selector.unregister(stream)
+                except KeyError:
+                    pass
+                streams.pop(stream, None)
+    selector.close()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _terminate(proc)
+    return bytes(buffers.get(proc.stdout, b"")), bytes(buffers.get(proc.stderr, b"")), capped
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -128,11 +252,7 @@ def run_command(
     cwd = cwd.resolve()
     if not cwd.is_dir():
         raise ValueError("benchmark cwd must be a directory")
-    if artifact_dir.exists() and artifact_dir.is_symlink():
-        raise ValueError("benchmark artifact directory may not be a symlink")
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    if artifact_dir.is_symlink() or not artifact_dir.is_dir():
-        raise ValueError("benchmark artifact directory is not an owned directory")
+    _private_artifact_dir(artifact_dir)
     safe_label = "".join(char if char.isalnum() or char in "-_" else "_" for char in label)
     stdout_path = artifact_dir / f"{safe_label}.stdout"
     stderr_path = artifact_dir / f"{safe_label}.stderr"
@@ -152,15 +272,8 @@ def run_command(
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            exit_code = int(proc.returncode)
-        except subprocess.TimeoutExpired as exc:
-            capped = True
-            _terminate(proc)
-            stdout = exc.output or b""
-            stderr = exc.stderr or b""
-            exit_code = 124
+        stdout, stderr, capped = _stream_process(proc, timeout)
+        exit_code = 124 if capped else int(proc.returncode)
     except (OSError, ValueError) as exc:
         stdout = b""
         stderr = str(exc).encode("utf-8", "replace")
@@ -168,8 +281,8 @@ def run_command(
     stdout, stdout_capped = _bounded_bytes(stdout)
     stderr, stderr_capped = _bounded_bytes(stderr)
     capped = capped or stdout_capped or stderr_capped
-    stdout_path.write_bytes(stdout)
-    stderr_path.write_bytes(stderr)
+    _write_private(stdout_path, stdout)
+    _write_private(stderr_path, stderr)
     return Sample(
         seconds=elapsed,
         exit_code=exit_code,
@@ -209,10 +322,32 @@ def _validate_output(output: Path, root: Path) -> Path:
     """Keep benchmark artifacts outside the source checkout."""
     if output.exists() and output.is_symlink():
         raise ValueError("benchmark output may not be a symlink")
+    lexical_parent = output.absolute().parent
+    while True:
+        if lexical_parent.exists() and lexical_parent.is_symlink():
+            raise ValueError("benchmark evidence parent may not be a symlink")
+        if lexical_parent == lexical_parent.parent:
+            break
+        if lexical_parent.exists() and lexical_parent.is_dir():
+            break
+        lexical_parent = lexical_parent.parent
     resolved = output.resolve()
     if resolved == root or root in resolved.parents:
         raise ValueError("benchmark output must be outside the checkout")
-    resolved.mkdir(parents=True, exist_ok=True)
+    parent = resolved.parent
+    while True:
+        if parent.exists() and parent.is_symlink():
+            raise ValueError("benchmark evidence parent may not be a symlink")
+        if parent == parent.parent or (parent.exists() and parent.is_dir()):
+            break
+        parent = parent.parent
+    if resolved.exists():
+        raise ValueError("benchmark evidence output must be a new directory")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.mkdir(mode=0o700)
+    stamp = os.stat(resolved)
+    if stamp.st_uid != os.getuid() or (stamp.st_mode & 0o777) != 0o700:
+        raise ValueError("benchmark evidence output has unsafe mode")
     return resolved
 
 
@@ -223,6 +358,10 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--label", default="sample")
+    parser.add_argument("--candidate", type=Path,
+                        help="candidate ptest executable; required for candidate binding")
+    parser.add_argument("--profile", default="",
+                        help=f"typed workload profile (must be {WORKLOAD_NAME!r} for promotion)")
     parser.add_argument("--", dest="separator", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     parsed = parser.parse_args(list(argv))
@@ -242,24 +381,59 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"benchmark root is not a directory: {root}", file=sys.stderr)
         return 2
     owned_tmp = args.output is None
-    output = Path(tempfile.mkdtemp(prefix="ptest-benchmark-")) if owned_tmp else args.output
-    output = _validate_output(output, root)
+    if owned_tmp:
+        output = Path(tempfile.mkdtemp(prefix="ptest-benchmark-", dir="/tmp"))
+    else:
+        output = _validate_output(args.output, root)
     samples = [
         run_command(
             args.command,
             cwd=root,
             timeout=args.timeout,
-            artifact_dir=output / "attempts",
+            artifact_dir=output / "attempts" / f"sample-{index + 1}",
             label=f"{args.label}-{index + 1}",
         )
         for index in range(args.samples)
     ]
     summary = summarize_samples(samples)
+    candidate_digest = None
+    candidate_bound = False
+    if args.candidate is not None:
+        candidate = args.candidate.absolute()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            candidate = candidate.resolve()
+            candidate_digest = _sha256(candidate)
+            candidate_bound = bool(
+                candidate_digest
+                and Path(args.command[0]).absolute().resolve() == candidate
+                and tuple(args.command[1:]) == ("--version",)
+            )
+            if candidate_bound:
+                first_output = output / "attempts" / "sample-1" / "sample-1.stdout"
+                try:
+                    candidate_bound = bool(_VERSION_RE.fullmatch(
+                        first_output.read_text(encoding="utf-8", errors="replace").strip()
+                    ))
+                except OSError:
+                    candidate_bound = False
+    # The currently implemented subprocess is a candidate/version smoke, not
+    # the declared performance workload.  Keep its measurements, but never
+    # promote a speed claim until the typed setup/queue/RSS/coverage fields are
+    # actually collected.
+    promotable = False
+    summary = replace(summary, promotable=promotable)
     payload = {
         "schema_version": 1,
         "kind": "benchmark",
         "root": str(root),
         "command": list(args.command),
+        "candidate": str(args.candidate.absolute()) if args.candidate else None,
+        "candidate_sha256": candidate_digest,
+        "candidate_bound": candidate_bound,
+        "profile": args.profile or None,
+        "promotion_blocked_reason": (
+            "version-only diagnostic; typed performance workload is not implemented"
+        ),
         "timeout_seconds": args.timeout,
         "environment": environment_metadata(root),
         "samples": [asdict(sample) for sample in samples],
@@ -267,7 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "artifacts": str(output),
         "temporary_output": owned_tmp,
     }
-    (output / "benchmark.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_private(output / "benchmark.json", json.dumps(payload, indent=2, sort_keys=True).encode() + b"\n")
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if summary.promotable else 1
 

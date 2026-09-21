@@ -10,20 +10,46 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import shutil
+import stat
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+import tomllib
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-from benchmark import run_command, environment_metadata  # noqa: E402
+from benchmark import _private_artifact_dir, _write_private, run_command, environment_metadata  # noqa: E402
 
 SCHEMA_VERSION = 1
 MAX_ATTEMPTS = 64
+VERSION_RE = re.compile(r"\A\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z")
+WORKLOAD = {
+    "schema_version": 1,
+    "name": "local-miniature-v1",
+    "warmup_samples": 20,
+    "doctor_samples": 20,
+    "alternating_pairs": 5,
+    "s2_pairs_default_unknown": 10,
+    "s2_pairs_known_budget": 10,
+    "s2_pairs_unknown_opt_in": 10,
+    "thresholds": {
+        "wrapper_p95_seconds": 0.250,
+        "plan_p95_seconds": 2.0,
+        "doctor_completed_p95_seconds": 5.0,
+        "doctor_safety_cap_seconds": 8.0,
+        "minimum_benefit_ratio": 0.20,
+    },
+    "required_fields": [
+        "setup_seconds", "queue_wait_seconds", "execution_seconds", "rss_bytes",
+        "completed", "exit_code", "coverage_digest", "inventory_digest",
+    ],
+}
 ADOPTION_CANDIDATES = {
     "pytest": {
         "repository": "marshmallow-code/apispec",
@@ -56,6 +82,23 @@ class Attempt:
     notes: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class CandidateIdentity:
+    path: str
+    sha256: str
+    version: str
+
+
+@dataclass(frozen=True)
+class WorkloadSpec:
+    candidate: CandidateIdentity
+    fixture_domain: str
+    project: str
+    lifecycle: tuple[str, ...]
+    sample_counts: dict[str, int]
+    thresholds: dict[str, float]
+
+
 def _sha256(path: Path) -> str | None:
     if not path.is_file() or path.is_symlink():
         return None
@@ -68,53 +111,134 @@ def _sha256(path: Path) -> str | None:
 
 def _fixture_domain(parent: Path) -> Path:
     """Create an owned, explicit domain containing bounded nested children."""
-    parent = parent.resolve()
-    parent.mkdir(parents=True, exist_ok=True)
-    if parent.is_symlink():
+    parent = parent.absolute()
+    if not parent.is_dir() or parent.is_symlink():
         raise ValueError("fixture parent may not be a symlink")
     domain = Path(tempfile.mkdtemp(prefix="ptest-acceptance-domain-", dir=parent))
-    marker = domain / "fixture-domain.json"
-    marker.write_text(
-        json.dumps({"schema_version": 1, "fixture": True, "children": ["child-a", "child-b"]}) + "\n",
-        encoding="utf-8",
+    stamp = os.stat(domain)
+    fixture_id = hashlib.sha256(os.fsencode(str(domain))).hexdigest()[:32]
+    marker = domain / "fixture-domain.toml"
+    marker_text = (
+        "version = 1\nfixture = true\nmax_slots = 2\nmax_jobs = 2\n"
+        f"uid = {os.getuid()}\n"
+        f"directory_device = {stamp.st_dev}\n"
+        f"directory_inode = {stamp.st_ino}\n"
+        f'fixture_id = "{fixture_id}"\nworkload = "synthetic-or-miniature"\n'
     )
+    _write_private(marker, marker_text.encode("utf-8"))
     for child in ("child-a", "child-b"):
         child_root = domain / child
-        (child_root / "tests" / "nested").mkdir(parents=True)
-        (child_root / "tests" / "nested" / "test_smoke.py").write_text(
-            "def test_nested_fixture():\n    assert True\n", encoding="utf-8"
+        child_root.mkdir(mode=0o700)
+        (child_root / "tests").mkdir(mode=0o700)
+        (child_root / "tests" / "nested").mkdir(mode=0o700)
+        _write_private(
+            child_root / "tests" / "nested" / "test_smoke.py",
+            b"def test_nested_fixture():\n    assert True\n",
         )
+        runner = child_root / "tests" / "nested" / "runner.py"
+        _write_private(runner, b"raise SystemExit(0)\n")
+        config = (
+            "version = 1\nproject_id = \"" + hashlib.sha256(os.fsencode(child)).hexdigest()[:32] + "\"\n"
+            "[runner]\nkind = \"command\"\nlauncher = [\"python\"]\n"
+            "args = [\"tests/nested/runner.py\"]\nfull_args = []\n"
+            "test_roots = [\"tests\"]\nworkers = 1\n"
+            "lifecycle = \"cooperative-process-group\"\n"
+        )
+        config_path = child_root / ".ptest.toml"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(config_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(config.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
     return domain
 
 
 def _validate_fixture_domain(domain: Path) -> None:
     """Reject a fixture path unless its owned marker and children are intact."""
+    if domain.is_symlink():
+        raise ValueError("fixture domain may not be a symlink")
     domain = domain.resolve()
-    marker = domain / "fixture-domain.json"
+    marker = domain / "fixture-domain.toml"
     if not domain.is_dir() or domain.is_symlink() or marker.is_symlink() or not marker.is_file():
         raise ValueError("fixture domain must be an owned regular directory with a marker")
+    domain_stamp = os.stat(domain)
+    marker_stamp = os.stat(marker)
+    if (domain_stamp.st_uid != os.getuid() or marker_stamp.st_uid != os.getuid()
+            or stat.S_IMODE(domain_stamp.st_mode) != 0o700
+            or stat.S_IMODE(marker_stamp.st_mode) != 0o600):
+        raise ValueError("fixture domain has unsafe mode")
     try:
-        metadata = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        raw = marker.read_text(encoding="utf-8")
+        metadata = tomllib.loads(raw)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ValueError("fixture domain marker is invalid") from exc
-    if metadata != {"schema_version": 1, "fixture": True, "children": ["child-a", "child-b"]}:
+    expected = {
+        "version", "fixture", "max_slots", "max_jobs", "uid",
+        "directory_device", "directory_inode", "fixture_id", "workload",
+    }
+    if set(metadata) != expected or metadata.get("version") != 1 or metadata.get("fixture") is not True:
         raise ValueError("fixture domain marker has unexpected fields")
-    for child in metadata["children"]:
+    stamp = os.stat(domain)
+    if metadata.get("uid") != os.getuid() or metadata.get("directory_device") != stamp.st_dev or metadata.get("directory_inode") != stamp.st_ino:
+        raise ValueError("fixture domain marker identity is stale or foreign")
+    if metadata.get("workload") != "synthetic-or-miniature":
+        raise ValueError("fixture domain workload is unsupported")
+    for child in ("child-a", "child-b"):
         child_root = domain / child
         test_file = child_root / "tests" / "nested" / "test_smoke.py"
-        if child_root.is_symlink() or not test_file.is_file() or test_file.is_symlink():
+        if child_root.is_symlink() or not test_file.is_file() or test_file.is_symlink() or not (child_root / ".ptest.toml").is_file():
             raise ValueError("fixture domain child is missing or linked")
 
 
-def _validate_output(output: Path, root: Path) -> Path:
-    """Keep evidence outside the checkout and refuse symlink destinations."""
-    if output.exists() and output.is_symlink():
-        raise ValueError("evidence output may not be a symlink")
-    resolved = output.resolve()
-    if resolved == root or root in resolved.parents:
+def _new_evidence_root(requested: Path | None, root: Path) -> Path:
+    """Exclusively create a fresh 0700 evidence root outside the checkout."""
+    if requested is None:
+        return Path(tempfile.mkdtemp(prefix="ptest-acceptance-", dir="/tmp"))
+    requested = requested.absolute()
+    if requested.exists() or requested.is_symlink():
+        raise ValueError("evidence output must be a new directory")
+    parent = requested.parent
+    while True:
+        if parent.exists() and parent.is_symlink():
+            raise ValueError("evidence output parent may not be a symlink")
+        if parent == parent.parent:
+            break
+        if parent.exists() and parent.is_dir():
+            break
+        parent = parent.parent
+    resolved = requested.resolve()
+    resolved_root = root.resolve()
+    if resolved == resolved_root or resolved_root in resolved.parents:
         raise ValueError("evidence output must be outside the checkout")
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved
+    requested.mkdir(mode=0o700)
+    stamp = os.stat(requested)
+    if stamp.st_uid != os.getuid() or (stamp.st_mode & 0o777) != 0o700:
+        raise ValueError("evidence output has unsafe mode")
+    return requested
+
+
+def _candidate_identity(candidate: Path, root: Path, output: Path, timeout: float) -> tuple[CandidateIdentity | None, Attempt]:
+    candidate = candidate.absolute()
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise ValueError("candidate ptest must be an executable regular file")
+    candidate = candidate.resolve()
+    digest = _sha256(candidate)
+    assert digest is not None
+    artifact = output / "attempts" / "candidate-version"
+    sample = run_command((str(candidate), "--version"), cwd=root, timeout=timeout,
+                         artifact_dir=artifact, label="candidate-version")
+    output_path = artifact / "candidate-version.stdout"
+    version = output_path.read_text(encoding="utf-8", errors="replace").strip()
+    identity = CandidateIdentity(str(candidate), digest, version) if sample.exit_code == 0 and VERSION_RE.fullmatch(version) else None
+    note = ("candidate version is not a semantic ptest version",) if identity is None else ()
+    attempt = _attempt_from_sample(
+        "candidate-version", (str(candidate), "--version"), root, sample,
+        setup="candidate-bound version probe", network="none",
+    )
+    return identity, replace(attempt, notes=tuple(attempt.notes) + note)
 
 
 def _attempt_from_sample(name: str, command: Sequence[str], cwd: Path, sample, *, setup: str, network: str) -> Attempt:
@@ -136,47 +260,85 @@ def run_acceptance(
     *,
     root: Path,
     ptest: Path,
-    output: Path,
+    output: Path | None,
     execute: bool = False,
     timeout: float = 30.0,
 ) -> dict[str, object]:
     """Build the Task14 matrix; execute only the local candidate smoke when asked."""
     root = root.resolve()
-    ptest = ptest.resolve()
-    output = output.resolve()
-    if not root.is_dir() or not ptest.is_file():
+    if not root.is_dir() or not ptest.exists():
         raise ValueError("root and candidate ptest must be existing files/directories")
-    output = _validate_output(output, root)
+    output = _new_evidence_root(output, root)
     attempts: list[Attempt] = []
+    workload_spec: WorkloadSpec | None = None
     if execute:
-        with tempfile.TemporaryDirectory(prefix="ptest-acceptance-", dir=str(output)) as temp:
+        candidate, identity_attempt = _candidate_identity(ptest, root, output, timeout)
+        attempts.append(identity_attempt)
+        if candidate is None:
+            return {
+                "schema_version": SCHEMA_VERSION, "kind": "acceptance", "status": "failed",
+                "root": str(root), "candidate": str(ptest.absolute()),
+                "candidate_identity": None, "workload": WORKLOAD,
+                "environment": environment_metadata(root),
+                "source": {"commit": environment_metadata(root).get("commit"), "config_sha256": _sha256(root / ".ptest.toml")},
+                "attempts": [asdict(item) for item in attempts], "adoption": ADOPTION_CANDIDATES,
+                "limitations": ["Candidate identity/version validation failed; no workload was promoted."],
+                "promotable": False, "artifacts": str(output),
+            }
+        with tempfile.TemporaryDirectory(prefix="fixture-", dir=str(output)) as temp:
             domain = _fixture_domain(Path(temp))
             _validate_fixture_domain(domain)
-            command = (str(ptest), "--fixture-domain", str(domain), "--version")
-            sample = run_command(
-                command,
-                cwd=root,
-                timeout=timeout,
-                artifact_dir=output / "attempts",
-                label="local-fixture-version",
+            project = domain / "child-a"
+            lifecycle = (
+                ("init", ("init", "--dry-run", "--runner", "command")),
+                ("where", ("where",)),
+                ("plan", ("plan",)),
+                ("doctor", ("doctor",)),
+                ("status", ("status",)),
+                ("full", ("--full", "--no-setup")),
+                ("scoped", ("--no-setup", "tests/nested/test_smoke.py")),
+                ("automatic", ("--no-setup",)),
             )
-            attempts.append(
-                _attempt_from_sample(
-                    "local-fixture-version", command, root, sample,
-                    setup="temporary validated fixture domain with two nested children",
+            workload_spec = WorkloadSpec(
+                candidate=candidate,
+                fixture_domain=str(domain),
+                project=str(project),
+                lifecycle=tuple(name for name, _ in lifecycle) + ("cancel",),
+                sample_counts={
+                    "warmup": WORKLOAD["warmup_samples"],
+                    "doctor": WORKLOAD["doctor_samples"],
+                    "alternating_pairs": WORKLOAD["alternating_pairs"],
+                    "s2_default_unknown": WORKLOAD["s2_pairs_default_unknown"],
+                    "s2_known_budget": WORKLOAD["s2_pairs_known_budget"],
+                    "s2_unknown_opt_in": WORKLOAD["s2_pairs_unknown_opt_in"],
+                },
+                thresholds=WORKLOAD["thresholds"],
+            )
+            for name, tail in lifecycle:
+                command = (candidate.path, "--fixture-domain", str(domain), *tail)
+                sample = run_command(command, cwd=project, timeout=timeout,
+                                     artifact_dir=output / "attempts" / name, label=name)
+                attempts.append(_attempt_from_sample(
+                    name, command, project, sample,
+                    setup="validated TOML fixture domain and miniature command project",
                     network="none",
-                )
-            )
+                ))
+            attempts.append(Attempt(
+                name="cancel", command=(candidate.path, "--fixture-domain", str(domain), "cancel"),
+                cwd=str(project), status="blocked-unverified", exit_code=None, seconds=None,
+                artifact=None, setup="ptest has no public cancel subcommand in this candidate",
+                network="none", notes=("cancellation requires an externally held run and is not fabricated",),
+            ))
     else:
         attempts.append(Attempt(
-            name="local-fixture-version",
-            command=(str(ptest), "--fixture-domain", "<temporary-domain>", "--version"),
+            name="candidate-workload",
+            command=(str(ptest.absolute()), "--version"),
             cwd=str(root),
             status="not-run",
             exit_code=None,
             seconds=None,
             artifact=None,
-            setup="not run; pass --execute to create temporary fixture domain",
+            setup="not run; pass --execute to validate candidate and create temporary TOML fixture domain",
             network="none",
             notes=("plan-only inventory; no claim of runtime support",),
         ))
@@ -186,6 +348,8 @@ def run_acceptance(
         "status": "observed" if execute else "inventory-only",
         "root": str(root),
         "candidate": str(ptest),
+        "candidate_identity": asdict(candidate) if execute and attempts and candidate is not None else None,
+        "workload": asdict(workload_spec) if workload_spec is not None else WORKLOAD,
         "environment": environment_metadata(root),
         "source": {"commit": environment_metadata(root).get("commit"), "config_sha256": _sha256(root / ".ptest.toml")},
         "attempts": [asdict(item) for item in attempts],
@@ -196,7 +360,8 @@ def run_acceptance(
             "No advanced selection, baseline, or performance claim is promoted.",
             "Substantial suites require direct operator invocation outside ptest collection.",
         ],
-        "promotable": bool(execute and attempts and all(item.status == "passed" for item in attempts)),
+        "promotable": bool(execute and attempts and all(item.status == "passed" for item in attempts)
+                           and any(item.name != "candidate-version" for item in attempts)),
         "artifacts": str(output),
     }
 
@@ -216,7 +381,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    output = args.output.resolve() if args.output else Path(tempfile.mkdtemp(prefix="ptest-acceptance-"))
+    output = args.output
     try:
         evidence = run_acceptance(
             root=args.root,
@@ -228,8 +393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"acceptance refused: {exc}", file=sys.stderr)
         return 2
-    path = output / "acceptance.json"
-    path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path = Path(evidence["artifacts"]) / "acceptance.json"
+    _write_private(path, (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     print(json.dumps(evidence, indent=2, sort_keys=True))
     return 0 if evidence["promotable"] else 1
 

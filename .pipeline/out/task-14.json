@@ -1,7 +1,7 @@
 {
   "version": 1,
   "task": "14",
-  "status": "implemented-local-harnesses",
+  "status": "implemented-local-harnesses-corrected",
   "owned_files": [
     "scripts/acceptance.py",
     "scripts/benchmark.py",
@@ -15,8 +15,18 @@
   ],
   "verification": {
     "scoped_command": "ptest tests/ng/test_acceptance.py",
-    "status": "8 passed in 0.52s (exit 0)",
-    "graphify": "graphify update . exit 0; 4073 nodes, 9246 edges"
+    "status": "13 passed in 2.77s (exit 0)",
+    "graphify": "graphify update . exit 0; 4088 nodes, 9280 edges, 262 communities"
+  },
+  "correction": {
+    "security": [
+      "fresh 0700 evidence roots only",
+      "exclusive 0600 JSON/stdout/stderr artifacts",
+      "symlinked parents/leaves and reuse rejected",
+      "streaming output cap terminates owned process group"
+    ],
+    "candidate_smoke": "candidate-bound .venv/bin/ptest; 10 lifecycle records; exit 1 because cancel is blocked-unverified",
+    "benchmark_smoke": "candidate-bound version diagnostic; 2 samples; candidate_bound=true; performance promotion blocked"
   },
   "claims": {
     "independent_adoption": "blocked-unverified",

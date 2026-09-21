@@ -14,6 +14,11 @@ retain every failed or capped attempt. Do not collect them as tests or launch
 substantial external suites under a fixture domain. Do not add a fallback that
 turns an unavailable capability into a pass.
 
+Evidence roots are created exclusively with mode 0700 and artifacts with mode
+0600; an existing path or symlinked parent is refused. Benchmark promotion
+requires a candidate-bound typed workload profile. Arbitrary commands remain
+diagnostic only.
+
 Changes to runtime behavior need positive and negative regression evidence and
 must preserve exit status, output, coverage, and user files. Run
 `graphify update .` after source changes. Keep platform and runner claims tied

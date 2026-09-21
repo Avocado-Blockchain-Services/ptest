@@ -67,6 +67,8 @@ def test_bounded_command_preserves_failure_and_artifacts(tmp_path):
     assert sample.capped is False
     assert (tmp_path / "artifacts" / "failure.stdout").read_bytes() == b"out"
     assert (tmp_path / "artifacts" / "failure.stderr").read_bytes() == b"err"
+    assert stat.S_IMODE((tmp_path / "artifacts").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "artifacts" / "failure.stdout").stat().st_mode) == 0o600
 
 
 def test_bounded_command_rejects_symlinked_artifact_directory(tmp_path):
@@ -74,7 +76,7 @@ def test_bounded_command_rejects_symlinked_artifact_directory(tmp_path):
     target.mkdir()
     link = tmp_path / "artifacts"
     link.symlink_to(target, target_is_directory=True)
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="directory"):
         benchmark.run_command(
             (sys.executable, "-c", "pass"),
             cwd=tmp_path,
@@ -96,12 +98,28 @@ def test_command_timeout_is_capped_and_owned_child_is_terminated(tmp_path):
     assert sample.capped is True
 
 
+def test_oversized_output_is_stream_capped_and_terminated(tmp_path):
+    sample = benchmark.run_command(
+        (sys.executable, "-c", "import sys; sys.stdout.write('x' * 5000000); sys.stdout.flush(); __import__('time').sleep(10)"),
+        cwd=tmp_path,
+        timeout=5,
+        artifact_dir=tmp_path / "oversized-artifacts",
+        label="oversized",
+    )
+    retained = (tmp_path / "oversized-artifacts" / "oversized.stdout").stat().st_size
+    assert sample.capped is True
+    assert sample.exit_code == 124
+    assert retained <= benchmark.MAX_OUTPUT_BYTES
+
+
 def test_fixture_domain_is_explicit_and_nested(tmp_path):
     domain = acceptance._fixture_domain(tmp_path)
-    marker = json.loads((domain / "fixture-domain.json").read_text())
-    assert marker == {"schema_version": 1, "fixture": True, "children": ["child-a", "child-b"]}
+    marker = (domain / "fixture-domain.toml").read_text()
+    assert "fixture = true" in marker
+    assert "workload = \"synthetic-or-miniature\"" in marker
     assert (domain / "child-a" / "tests" / "nested" / "test_smoke.py").is_file()
     assert (domain / "child-b" / "tests" / "nested" / "test_smoke.py").is_file()
+    assert (domain / "child-a" / ".ptest.toml").is_file()
     assert stat.S_IMODE(domain.stat().st_mode) & stat.S_IWOTH == 0
 
 
@@ -119,3 +137,82 @@ def test_plan_only_acceptance_does_not_execute_or_claim_support(tmp_path):
     assert evidence["promotable"] is False
     assert evidence["attempts"][0]["status"] == "not-run"
     assert evidence["adoption"]["pytest"]["status"] == "blocked-unverified"
+
+
+def test_generic_exit_zero_candidate_cannot_promote_execute_mode(tmp_path):
+    candidate = tmp_path / "generic"
+    candidate.write_text("#!/bin/sh\nexit 0\n")
+    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+    evidence = acceptance.run_acceptance(
+        root=tmp_path,
+        ptest=candidate,
+        output=tmp_path.parent / f"{tmp_path.name}-generic-evidence",
+        execute=True,
+        timeout=2,
+    )
+    assert evidence["promotable"] is False
+    assert evidence["status"] == "failed"
+    assert evidence["attempts"][0]["name"] == "candidate-version"
+
+
+@pytest.mark.skipif(not (ROOT / ".venv/bin/ptest").is_file(), reason="candidate development environment is unavailable")
+def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promotes(tmp_path):
+    candidate = ROOT / ".venv/bin/ptest"
+    evidence = acceptance.run_acceptance(
+        root=ROOT,
+        ptest=candidate,
+        output=tmp_path.parent / f"{tmp_path.name}-candidate-evidence",
+        execute=True,
+        timeout=5,
+    )
+    names = [attempt["name"] for attempt in evidence["attempts"]]
+    assert names[:2] == ["candidate-version", "init"]
+    assert {"where", "plan", "doctor", "status", "full", "scoped", "automatic", "cancel"} <= set(names)
+    assert evidence["candidate_identity"]["version"] == "0.1.0"
+    assert evidence["promotable"] is False
+
+
+def test_evidence_root_rejects_existing_file_directory_and_parent_symlink(tmp_path):
+    existing_file = tmp_path / "existing-file"
+    existing_file.write_text("owned by test")
+    with pytest.raises(ValueError, match="new directory"):
+        acceptance.run_acceptance(root=tmp_path, ptest=existing_file, output=existing_file)
+
+    existing_dir = tmp_path / "existing-dir"
+    existing_dir.mkdir()
+    with pytest.raises(ValueError, match="new directory"):
+        acceptance.run_acceptance(root=tmp_path, ptest=existing_file, output=existing_dir)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="parent"):
+        acceptance.run_acceptance(
+            root=tmp_path, ptest=existing_file,
+            output=linked_parent / "new-evidence",
+        )
+
+
+def test_benchmark_evidence_root_is_exclusive_and_not_reusable(tmp_path):
+    existing = tmp_path.parent / f"{tmp_path.name}-benchmark-existing"
+    existing.mkdir()
+    with pytest.raises(ValueError, match="new directory"):
+        benchmark._validate_output(existing, tmp_path)
+
+    fresh = tmp_path.parent / f"{tmp_path.name}-benchmark-fresh"
+    benchmark._validate_output(fresh, tmp_path)
+    with pytest.raises(ValueError, match="new directory"):
+        benchmark._validate_output(fresh, tmp_path)
+
+    outside = tmp_path.parent / f"{tmp_path.name}-benchmark-outside"
+    outside.mkdir()
+    linked = tmp_path.parent / f"{tmp_path.name}-benchmark-linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        benchmark._validate_output(linked, tmp_path)
+
+    linked_parent = tmp_path.parent / f"{tmp_path.name}-benchmark-parent"
+    linked_parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="parent"):
+        benchmark._validate_output(linked_parent / "new", tmp_path)
