@@ -49,6 +49,32 @@ def test_wheel_rejects_sdist_and_path_escape(tmp_path):
         validate_wheel(Path("../evil.tar.gz"), "ptest-ng", "0.1.0", "py3", "any")
 
 
+def test_manifest_rejects_extra_wheel_and_wrong_hash(tmp_path):
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = json.loads(_manifest(wheelhouse, ptest, psutil).read_text())
+    manifest["wheels"].append(dict(manifest["wheels"][0]))
+    with pytest.raises(ValueError, match="exactly one"):
+        validate_manifest(manifest)
+    manifest["wheels"] = manifest["wheels"][:2]
+    manifest["wheels"][0]["sha256"] = "0" * 64
+    (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        install_bundle(tmp_path / "dest", wheelhouse, wheelhouse / "manifest.json")
+
+
+def test_manifest_wheel_symlink_is_rejected(tmp_path):
+    wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
+    ptest = _wheel(wheelhouse, "ptest-ng")
+    psutil = _wheel(wheelhouse, "psutil", "7.2.2")
+    manifest = _manifest(wheelhouse, ptest, psutil)
+    outside = tmp_path / "outside.whl"; outside.write_bytes(psutil.read_bytes())
+    psutil.unlink(); psutil.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        install_bundle(tmp_path / "dest", wheelhouse, manifest)
+
+
 def test_failed_upgrade_keeps_old_target(tmp_path):
     wheelhouse = tmp_path / "wheels"; wheelhouse.mkdir()
     ptest = _wheel(wheelhouse, "ptest-ng")
@@ -131,3 +157,13 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     python = dest / "ptest"; python = python.resolve().parent / "python"
     probe = subprocess.run([str(python), "-c", "import psutil, ptest; print(psutil.__version__)"], capture_output=True, text=True)
     assert probe.returncode == 0 and "7.2.2" in probe.stdout
+    old_target = (dest / "ptest").resolve()
+    for fault in ("after-one-wheel", "after-venv", "before-complete", "before-symlink-replace"):
+        failed = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env={**offline_env, "PTEST_INSTALL_FAULT": fault}, capture_output=True, text=True, timeout=300)
+        assert failed.returncode != 0
+        assert (dest / "ptest").resolve() == old_target
+        assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
+    parent_failed = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env={**offline_env, "PTEST_INSTALL_FAULT": "parent-fsync"}, capture_output=True, text=True, timeout=300)
+    assert parent_failed.returncode != 0
+    assert (dest / "ptest").resolve().is_file()
+    assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0

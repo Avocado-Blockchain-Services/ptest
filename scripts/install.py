@@ -216,7 +216,7 @@ def main(argv=None) -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--allow-network", action="store_true")
     args = parser.parse_args(argv)
-    install_bundle(args.dest, args.wheelhouse, args.manifest, allow_network=args.allow_network)
+    install_bundle(args.dest, args.wheelhouse, args.manifest, allow_network=args.allow_network, fault=os.environ.get("PTEST_INSTALL_FAULT"))
     return 0
 
 
