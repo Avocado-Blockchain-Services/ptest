@@ -1,5 +1,13 @@
 title = "ptest NG Gitleaks policy"
 
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ptest-synthetic-sensitivity"
+regex = "T13SYNTH-[A-Z]{26}"
+secretGroup = 0
+
 [allowlist]
 description = "Reviewed protocol-test sentinel, not a credential"
 paths = ['''tests/ng/test_contracts\.py''']

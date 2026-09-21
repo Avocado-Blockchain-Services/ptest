@@ -18,6 +18,7 @@ TOOLS = ("bandit", "pip-audit", "gitleaks")
 GITLEAKS_VERSION = "8.30.1"
 GITLEAKS_CHECKSUM_FILE_SHA256 = "061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae"
 GITLEAKS_ARCHIVE_SHA256 = "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+GITLEAKS_BINARY_SHA256 = "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509"
 
 
 def provision_gitleaks(destination: Path) -> Path:
@@ -49,7 +50,7 @@ def provision_gitleaks(destination: Path) -> Path:
             target = destination / "gitleaks"
             os.replace(staged, target)
             target.chmod(0o755)
-            (destination / "gitleaks.sha256").write_text(expected + "  gitleaks\n", encoding="ascii")
+            (destination / "gitleaks.sha256").write_text(GITLEAKS_BINARY_SHA256 + "  gitleaks\n", encoding="ascii")
     return destination / "gitleaks"
 
 
@@ -59,7 +60,8 @@ def _gitleaks_binary(root: Path) -> Path | None:
     if not candidate.is_file() or not os.access(candidate, os.X_OK) or not checksum.is_file():
         return None
     expected = checksum.read_text(encoding="ascii").split()[0]
-    return candidate if expected == GITLEAKS_ARCHIVE_SHA256 else None
+    actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return candidate if expected == GITLEAKS_BINARY_SHA256 and actual == expected else None
 
 
 def run_gate(root: Path, tool: str) -> dict:
@@ -76,7 +78,7 @@ def run_gate(root: Path, tool: str) -> dict:
         (Path(temp) / "negative.txt").write_text("T13SYNTH-not-a-match\n")
         if tool == "bandit":
             probe = [executable, "-q", "-r", str(fixture)]
-            scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-lll", "-iii"]
+            scope = [executable, "-q", "-r", str(root / "src"), str(root / "scripts" / "install.py"), str(root / "scripts" / "security-checks.py"), "-ll", "-ii"]
         elif tool == "pip-audit":
             requirements = Path(temp) / "requirements.txt"
             requirements.write_text("jinja2==2.10\n")
@@ -87,9 +89,7 @@ def run_gate(root: Path, tool: str) -> dict:
                 return {"tool": tool, "status": "unpassed", "reason": "lock-export-failed"}
             scope = [executable, "--requirement", str(locked)]
         else:
-            config = Path(temp) / ".gitleaks.toml"
-            config.write_text('''title = "Task 13 sensitivity fixture"\n[[rules]]\nid = "task13-synthetic"\nregex = ''' + '"T13SYNTH-[A-Z]{26}"' + '''\nsecretGroup = 0\n''')
-            probe = [executable, "detect", "--source", temp, "--no-git", "--config", str(config), "--no-banner"]
+            probe = [executable, "detect", "--source", temp, "--no-git", "--config", str(root / "scripts" / "gitleaks.toml"), "--no-banner"]
             scope = [executable, "detect", "--source", str(root), "--no-git", "--config", str(root / "scripts" / "gitleaks.toml"), "--no-banner"]
         sensitivity = subprocess.run(probe, cwd=root, capture_output=True, text=True)
         evidence = (getattr(sensitivity, "stdout", "") or "") + (getattr(sensitivity, "stderr", "") or "")
@@ -97,6 +97,10 @@ def run_gate(root: Path, tool: str) -> dict:
         if sensitivity.returncode == 0 or not expected_finding:
             return {"tool": tool, "status": "unpassed", "reason": "sensitivity-failed"}
         result = subprocess.run(scope, cwd=root, capture_output=True, text=True)
+        if tool == "gitleaks" and result.returncode == 0:
+            history = subprocess.run([executable, "git", "--log-opts=--all", "--config", str(root / "scripts" / "gitleaks.toml"), "--no-banner"], cwd=root, capture_output=True, text=True)
+            if history.returncode != 0:
+                return {"tool": tool, "status": "unpassed", "reason": "history-finding"}
         return {"tool": tool, "status": "passed" if result.returncode == 0 else "unpassed", "returncode": result.returncode}
 
 

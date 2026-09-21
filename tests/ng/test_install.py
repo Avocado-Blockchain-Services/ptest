@@ -8,6 +8,7 @@ import sys
 import os
 import subprocess
 import urllib.request
+import shutil
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
 
@@ -127,9 +128,9 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     wheelhouse = tmp_path / "wheelhouse"; wheelhouse.mkdir()
     build = tmp_path / "build"; build.mkdir()
     built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=Path(__file__).parents[2], capture_output=True, text=True)
+    shutil.rmtree(Path(__file__).parents[2] / "build", ignore_errors=True)
     assert built.returncode == 0, built.stderr
     ptest_wheel = next(build.glob("ptest_ng-*.whl"))
-    import shutil
     shutil.copy2(ptest_wheel, wheelhouse / ptest_wheel.name)
     import json as _json
     with urllib.request.urlopen("https://pypi.org/pypi/psutil/7.2.2/json", timeout=30) as response:
