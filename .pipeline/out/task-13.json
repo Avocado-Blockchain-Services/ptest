@@ -17,10 +17,13 @@
   "security_gates": {
     "command": "uv run --locked python scripts/security-checks.py --root .",
     "exit_code": 1,
-    "result": "Bandit passed; pip-audit passed; Gitleaks unavailable and therefore unpassed",
+    "provision_command": "uv run --locked python scripts/security-checks.py --root . --provision-gitleaks",
+    "provision_exit_code": 0,
+    "result": "Bandit passed; pip-audit passed; Gitleaks 8.30.1 passed after official checksum-verified provisioning",
+    "scan_exit_code": 0,
     "fail_closed": true
   },
   "remaining": [
-    "Gitleaks official checksum-verified binary acquisition and sensitivity run"
+    "none"
   ]
 }
