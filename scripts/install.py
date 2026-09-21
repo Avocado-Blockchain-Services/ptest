@@ -159,14 +159,20 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             if bundled != path:
                 shutil.copy2(path, bundled)
             bundled_paths.append(bundled)
+            if fault == "after-one-wheel":
+                raise RuntimeError("after-one-wheel")
         if fault == "before-symlink-replace":
             raise RuntimeError("before-symlink-replace")
         subprocess.run(["uv", "venv", "--python", str(py), str(bundle / "venv")], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
+        if fault == "after-venv":
+            raise RuntimeError("after-venv")
         subprocess.run(["uv", "pip", "install", "--python", str(bundle / "venv" / "bin" / "python"), "--no-index", "--no-deps", *(str(p) for p in bundled_paths)], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
         subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "--version"], check=True, timeout=30)
         subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "guide"], check=True, timeout=30)
         marker = {"version": 1, "bundle_id": bundle.name, "ptest_version": manifest["ptest_version"], "python_version": ".".join(map(str, sys.version_info[:3])), "wheel_sha256s": [e["sha256"] for e in manifest["wheels"]], "entrypoint": "venv/bin/ptest"}
         marker_path = bundle / "complete.json"
+        if fault == "before-complete":
+            raise RuntimeError("before-complete")
         marker_path.write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
         with marker_path.open("rb") as marker_file:
             os.fsync(marker_file.fileno())
@@ -190,6 +196,8 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             raise RuntimeError("after-swap-before-fsync")
         parent_fd = os.open(dest, os.O_RDONLY)
         try:
+            if fault == "parent-fsync":
+                raise OSError("parent-fsync")
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
