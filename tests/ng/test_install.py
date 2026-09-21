@@ -9,6 +9,7 @@ import os
 import subprocess
 import urllib.request
 import shutil
+import textwrap
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
 
@@ -54,6 +55,31 @@ def _inventory(dest: Path) -> tuple[tuple[str, ...], tuple[str, ...], str | None
 def test_manifest_requires_exact_pinned_pair(tmp_path):
     with pytest.raises(ValueError, match="exactly one ptest-ng and one psutil"):
         validate_manifest({"version": 1, "ptest_version": "0.1.0", "python_tag": "py3", "platform_tag": "any", "wheels": []})
+
+
+def test_release_install_wrapper_discovers_bundled_wheelhouse(tmp_path):
+    release = tmp_path / "release"
+    (release / "scripts").mkdir(parents=True)
+    (release / "wheelhouse").mkdir()
+    (release / "wheelhouse" / "manifest.json").write_text("{}", encoding="utf-8")
+    marker = tmp_path / "argv.json"
+    (release / "scripts" / "install.py").write_text(textwrap.dedent(f"""\
+        import json
+        import sys
+        from pathlib import Path
+        Path({str(marker)!r}).write_text(json.dumps(sys.argv[1:]))
+    """), encoding="utf-8")
+    wrapper = release / "install.sh"
+    wrapper.write_text((Path(__file__).parents[2] / "install.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    destination = tmp_path / "install"
+    subprocess.run([str(wrapper), "--dest", str(destination)], check=True)
+
+    assert json.loads(marker.read_text()) == [
+        "--dest", str(destination), "--wheelhouse", str(release / "wheelhouse"),
+        "--manifest", str(release / "wheelhouse" / "manifest.json"),
+    ]
 
 
 def test_wheel_rejects_sdist_and_path_escape(tmp_path):

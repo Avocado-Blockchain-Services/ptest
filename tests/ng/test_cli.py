@@ -200,6 +200,18 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
         assert expected[command] in captured.out
 
 
+def test_rules_requires_explicit_apply_before_writing(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("rules",)) == 0
+    assert "create docs/ptest-agent.md" in capsys.readouterr().out
+    assert not (tmp_path / "AGENTS.md").exists()
+
+    assert main(("rules", "--apply")) == 0
+    assert "applied:" in capsys.readouterr().out
+    assert (tmp_path / "AGENTS.md").exists()
+
+
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_where_reveal_is_labelled_stderr_only_and_never_persisted(
         inspection_project, capsys, json_mode):

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
-from . import config as config_api
+from . import agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, files, history, operations, platform, scheduler
 from . import render
@@ -23,7 +23,7 @@ from .runners import adapter_for
 
 _INSPECTION = frozenset({
     "init", "register", "where", "status", "history", "plan",
-    "doctor", "guide",
+    "doctor", "guide", "rules",
 })
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--result-json",
@@ -62,6 +62,7 @@ class ParsedArgs:
     max_files: int | None = None
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
+    apply_rules: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +247,12 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
         return ParsedArgs(command=command, json="--json" in args)
+    if command == "rules":
+        if not args:
+            return ParsedArgs(command=command)
+        if tuple(args) == ("--apply",):
+            return ParsedArgs(command=command, apply_rules=True)
+        raise _problem("invalid-config", "rules accepts only --apply")
     if command in {"where", "status", "plan"}:
         allowed = {"--json", "--reveal-command"} if command == "where" else {"--json"}
         base = None
@@ -533,6 +540,15 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             files.create_exclusive(root, parsed.write, text.encode("utf-8"), private=False)
         sys.stdout.write(text)
         return 0
+    if command == "rules":
+        try:
+            result = (agent_rules.apply(cwd) if parsed.apply_rules
+                      else agent_rules.preview(cwd))
+            label = "applied" if parsed.apply_rules else "preview"
+            print(f"{label}: " + (", ".join(result.actions) or "already configured"))
+            return 0
+        except C.Problem as problem:
+            return _emit_error(problem, kind="rules", json_output=False)
     if command == "init":
         try:
             result = config_api.init_project(cwd, C.InitOptions(
