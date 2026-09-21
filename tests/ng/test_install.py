@@ -282,8 +282,8 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     psutil = next(item for item in metadata["urls"] if "cp36-abi3-manylinux2010_x86_64" in item["filename"])
     manifest = wheelhouse / "manifest.json"
     platform_tag = "manylinux2010_x86_64"
-    manifest.write_text(_json.dumps({"version": 1, "ptest_version": "0.1.0", "python_tag": "cp36", "platform_tag": platform_tag, "wheels": [
-        {"filename": ptest_wheel.name, "sha256": hashlib.sha256(ptest_wheel.read_bytes()).hexdigest(), "package": "ptest-ng", "version": "0.1.0"},
+    manifest.write_text(_json.dumps({"version": 1, "ptest_version": "0.1.2", "python_tag": "cp36", "platform_tag": platform_tag, "wheels": [
+        {"filename": ptest_wheel.name, "sha256": hashlib.sha256(ptest_wheel.read_bytes()).hexdigest(), "package": "ptest-ng", "version": "0.1.2"},
         {"filename": psutil["filename"], "sha256": psutil["digests"]["sha256"], "package": "psutil", "version": "7.2.2"},
     ]}))
     dest = tmp_path / "install"
