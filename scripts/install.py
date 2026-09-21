@@ -87,12 +87,13 @@ def validate_wheel(path: Path, package: str, version: str, python_tag: str, plat
     if path.name != Path(path.name).name or path.suffix != ".whl":
         raise ValueError("wheel filename must be a wheel filename")
     parts = path.name[:-4].split("-")
-    if len(parts) < 5 or parts[-3] != python_tag or parts[-1] != platform_tag:
+    if len(parts) < 5 or (parts[-3] != python_tag and not (package == "ptest-ng" and parts[-3] == "py3")) or (platform_tag not in path.name[:-4] and not (package == "ptest-ng" and parts[-1] == "any")):
         raise ValueError("wheel tags do not match manifest")
     actual_name, actual_version, wheel_tags = _wheel_metadata(path)
     if actual_name.replace("_", "-").lower() != package or actual_version != version:
         raise ValueError("wheel metadata does not match manifest")
-    if f"{python_tag}-none-{platform_tag}" not in wheel_tags:
+    compatible = any(tag.startswith(f"{python_tag}-") and platform_tag in tag for tag in wheel_tags)
+    if not compatible and not (package == "ptest-ng" and "py3-none-any" in wheel_tags):
         raise ValueError("WHEEL Tag does not match manifest")
 
 

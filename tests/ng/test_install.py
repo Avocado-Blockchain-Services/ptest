@@ -5,6 +5,9 @@ import json
 import zipfile
 from pathlib import Path
 import sys
+import os
+import subprocess
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
 
@@ -92,3 +95,39 @@ def test_missing_offline_psutil_never_invokes_uv(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         install_bundle(tmp_path / "dest", wheelhouse, manifest)
     assert called == []
+
+
+def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
+    wheelhouse = tmp_path / "wheelhouse"; wheelhouse.mkdir()
+    build = tmp_path / "build"; build.mkdir()
+    built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=Path(__file__).parents[2], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    ptest_wheel = next(build.glob("ptest_ng-*.whl"))
+    import shutil
+    shutil.copy2(ptest_wheel, wheelhouse / ptest_wheel.name)
+    import json as _json
+    with urllib.request.urlopen("https://pypi.org/pypi/psutil/7.2.2/json", timeout=30) as response:
+        metadata = _json.loads(response.read())
+    psutil = next(item for item in metadata["urls"] if "cp36-abi3-manylinux2010_x86_64" in item["filename"])
+    manifest = wheelhouse / "manifest.json"
+    platform_tag = "manylinux2010_x86_64"
+    manifest.write_text(_json.dumps({"version": 1, "ptest_version": "0.1.0", "python_tag": "cp36", "platform_tag": platform_tag, "wheels": [
+        {"filename": ptest_wheel.name, "sha256": hashlib.sha256(ptest_wheel.read_bytes()).hexdigest(), "package": "ptest-ng", "version": "0.1.0"},
+        {"filename": psutil["filename"], "sha256": psutil["digests"]["sha256"], "package": "psutil", "version": "7.2.2"},
+    ]}))
+    dest = tmp_path / "install"
+    installer = Path(__file__).parents[2] / "install.sh"
+    env = {**os.environ, "PTEST_NETWORK_SENTINEL": "real-network-seed"}
+    seeded = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest), "--allow-network"], cwd=Path(__file__).parents[2], env=env, capture_output=True, text=True, timeout=300)
+    assert seeded.returncode == 0, seeded.stderr
+    assert (dest / "ptest").is_symlink()
+    assert subprocess.run([str(dest / "ptest"), "--version"], capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(dest / "ptest"), "guide"], capture_output=True, text=True).returncode == 0
+    seeded_wheel = next((dest / ".ptest-bundles").glob("*/wheels/psutil-*.whl"))
+    shutil.copy2(seeded_wheel, wheelhouse / seeded_wheel.name)
+    offline_env = {**env, "HTTPS_PROXY": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1"}
+    offline = subprocess.run([str(installer), "--dest", str(dest), "--wheelhouse", str(wheelhouse), "--manifest", str(manifest)], cwd=Path(__file__).parents[2], env=offline_env, capture_output=True, text=True, timeout=300)
+    assert offline.returncode == 0, offline.stderr
+    python = dest / "ptest"; python = python.resolve().parent / "python"
+    probe = subprocess.run([str(python), "-c", "import psutil, ptest; print(psutil.__version__)"], capture_output=True, text=True)
+    assert probe.returncode == 0 and "7.2.2" in probe.stdout
