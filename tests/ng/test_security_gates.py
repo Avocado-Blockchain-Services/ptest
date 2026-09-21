@@ -20,3 +20,14 @@ def test_insensitive_detector_is_unpassed(monkeypatch, tmp_path):
     result = security_checks.run_gate(tmp_path, "bandit")
     assert result["status"] == "unpassed"
     assert result["reason"] == "sensitivity-failed"
+
+
+def test_gitleaks_uses_only_private_verified_path(monkeypatch, tmp_path):
+    binary = tmp_path / ".tools" / "gitleaks" / "gitleaks"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("placeholder")
+    binary.chmod(0o755)
+    monkeypatch.setattr(security_checks.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+    result = security_checks.run_gate(tmp_path, "gitleaks")
+    assert result["status"] == "unpassed"
+    assert result["reason"] == "sensitivity-failed"
