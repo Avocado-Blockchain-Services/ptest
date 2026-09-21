@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-PTEST_VERSION = "0.1.0"
+PTEST_VERSION = "0.1.3"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2

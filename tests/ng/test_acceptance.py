@@ -175,7 +175,7 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
         assert observed[name]["exit_code"] == 0
     assert observed["cancel"]["status"] == "blocked-unverified"
     assert observed["cancel"]["exit_code"] is None
-    assert evidence["candidate_identity"]["version"] == "0.1.0"
+    assert evidence["candidate_identity"]["version"] == "0.1.3"
     assert evidence["promotable"] is False
 
 

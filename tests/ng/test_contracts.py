@@ -17,7 +17,7 @@ WRONG_NONCE = "cd" * 32
 
 
 def test_bootstrap_smoke():
-    assert C.PTEST_VERSION == "0.1.0"
+    assert C.PTEST_VERSION == "0.1.3"
     assert C.SCHEMA_VERSION == 1
     assert C.MAX_PROMPT_BYTES == 65536
     assert C.ExecutionTier("advanced") is C.ExecutionTier.ADVANCED
@@ -322,7 +322,7 @@ def test_eight_public_documents_parse():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
-        assert doc.ptest_version == "0.1.0"
+        assert doc.ptest_version == "0.1.3"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
     full = C.decode_public_document(
@@ -626,7 +626,7 @@ def test_frame_pathological_nesting_is_typed_rejection():
 def test_document_pathological_nesting_is_typed_rejection():
     pad = "[" * 20000 + "]" * 20000
     raw = (
-        '{"schema_version":1,"kind":"run","ptest_version":"0.1.0",'
+        '{"schema_version":1,"kind":"run","ptest_version":"0.1.3",'
         '"domain":null,"data":{"x":' + pad + '},"error":null}'
     ).encode()
     with pytest.raises(Problem, match="report-invalid"):
@@ -1364,7 +1364,7 @@ def _hostile_envelope(kind, data, domain=None):
     return json.dumps({
         "schema_version": 1,
         "kind": kind,
-        "ptest_version": "0.1.0",
+        "ptest_version": "0.1.3",
         "domain": domain,
         "data": data,
         "error": None,
@@ -1741,7 +1741,7 @@ def test_decoder_messages_never_echo_input():
                                       sentinel: 1}]))),
         ("public", json.dumps({
             "schema_version": 12345678901234567890,
-            "kind": "run", "ptest_version": "0.1.0", "domain": None,
+            "kind": "run", "ptest_version": "0.1.3", "domain": None,
             "data": run, "error": None}).encode()),
         ("control", _control_raw({"signal": 2}, "cancel-" + sentinel)),
     ]
