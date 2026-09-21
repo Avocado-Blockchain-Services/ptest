@@ -226,6 +226,7 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     new_bundles = set(after_parent[0]) - set(before_parent[0])
     assert len(new_bundles) == 1
     new_bundle = next(iter(new_bundles))
+    assert set(after_parent[0]) == set(before_parent[0]) | {new_bundle}
     assert (dest / "ptest").resolve().parents[2].name == new_bundle
     assert old_bundle.name in before_parent[0]
     assert (old_bundle / "complete.json").is_file()
