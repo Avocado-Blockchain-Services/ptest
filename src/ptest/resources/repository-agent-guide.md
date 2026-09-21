@@ -6,6 +6,10 @@ as `ptest api/tests/ng/test_x.py`; use root `ptest --full` for the integrated
 gate. Child `.ptest.toml` files remain authoritative and must not be copied,
 merged, rewritten, or bypassed by changing directories.
 
+Run `ptest init` from the repository root when setting up a new checkout. It
+creates the root dispatcher and missing child configs after bounded validation;
+do not hand-edit or duplicate child configuration.
+
 Run every test command through `ptest`; do not call pytest, Vitest, npm test,
 Go test, or Cargo test directly. During iteration run the smallest relevant
 scope. Run `ptest --full` once after the integrated change.

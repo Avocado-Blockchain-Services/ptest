@@ -16,6 +16,13 @@ _MARKER_START = "<!-- ptest-agent-rules:start -->"
 _MARKER_END = "<!-- ptest-agent-rules:end -->"
 _AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 _MAX_FILE_BYTES = 256 * 1024
+_PROVIDER_SKILLS = {
+    "claude": ".claude/skills/ptest/SKILL.md",
+    "codex": ".codex/skills/ptest/SKILL.md",
+    "opencode": ".opencode/skills/ptest/SKILL.md",
+    "gemini": ".gemini/skills/ptest/SKILL.md",
+}
+SUPPORTED_AGENTS = tuple(_PROVIDER_SKILLS)
 
 
 def _problem(code: str, message: str) -> Problem:
@@ -31,6 +38,50 @@ class RulesPlan:
 class RulesResult:
     changed: bool
     actions: tuple[str, ...]
+
+
+def _provider_text(provider: str) -> bytes:
+    return (
+        f"# ptest skill for {provider}\n\n"
+        "Read `docs/ptest-agent.md` before running or changing tests.\n"
+        "Run ptest from the monorepo root; prefix focused scopes with the "
+        "declared child and use `ptest --full` for the integrated gate.\n"
+    ).encode("utf-8")
+
+
+def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None]:
+    if provider not in _PROVIDER_SKILLS:
+        raise _problem("unsupported-capability", "agent provider is not supported")
+    relative = _PROVIDER_SKILLS[provider]
+    parts = relative.split("/")
+    cursor = root
+    for part in parts[:-1]:
+        cursor = cursor / part
+        try:
+            stamp = os.lstat(cursor)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+            raise _problem("unsafe-path", f"agent provider path {relative} is unsafe")
+        if stamp.st_uid != os.getuid() or stat.S_IMODE(stamp.st_mode) & 0o022:
+            raise _problem("unsafe-path", f"agent provider path {relative} is unsafe")
+    target = root / relative
+    try:
+        stamp = os.lstat(target)
+    except FileNotFoundError:
+        return relative, target, None
+    if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISREG(stamp.st_mode):
+        raise _problem("unsafe-path", f"agent provider target {relative} is unsafe")
+    if stamp.st_size > _MAX_FILE_BYTES:
+        raise _problem("invalid-bound", f"agent provider target {relative} exceeds the size limit")
+    try:
+        current = target.read_bytes()
+    except OSError:
+        raise _problem("state-unavailable", f"agent provider target {relative} is unavailable") from None
+    expected = _provider_text(provider)
+    if current != expected:
+        raise _problem("already-exists", f"agent provider target {relative} already exists")
+    return relative, target, expected
 
 
 def _guide() -> bytes:
@@ -144,8 +195,9 @@ def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes]:
     return root, texts, guide
 
 
-def preview(root: Path) -> RulesPlan:
+def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
     root, texts, guide = _validated(root)
+    providers = tuple(dict.fromkeys(agents))
     actions = []
     if _read_regular(root / _GUIDE_PATH) is None:
         actions.append("create docs/ptest-agent.md")
@@ -157,12 +209,17 @@ def preview(root: Path) -> RulesPlan:
             actions.append(f"create {name}")
         elif not _managed_state(text, name):
             actions.append(f"append managed reference to {name}")
+    for provider in providers:
+        relative, _, existing = _provider_target(root, provider)
+        if existing is None:
+            actions.append(f"create {relative}")
     return RulesPlan(actions=tuple(actions))
 
 
-def apply(root: Path) -> RulesResult:
+def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
     root, texts, guide = _validated(root)
-    plan = preview(root)
+    providers = tuple(dict.fromkeys(agents))
+    plan = preview(root, agents=providers)
     if not plan.actions:
         return RulesResult(changed=False, actions=())
     docs = root / "docs"
@@ -179,4 +236,13 @@ def apply(root: Path) -> RulesResult:
             files.create_exclusive(root, name, block.encode("utf-8"), private=False)
         elif not _managed_state(text, name):
             _replace(target, text.rstrip("\n") + "\n\n" + block)
+    for provider in providers:
+        relative, target, existing = _provider_target(root, provider)
+        if existing is None:
+            cursor = root
+            parts = relative.split("/")
+            for name in parts[:-1]:
+                files.ensure_shared_dir(cursor, name)
+                cursor = cursor / name
+            files.create_exclusive(cursor, parts[-1], _provider_text(provider), private=False)
     return RulesResult(changed=True, actions=plan.actions)

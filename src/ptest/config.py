@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
@@ -28,6 +29,7 @@ _MAX_STRING_LENGTH = 4096
 _MAX_ARGV_TOKEN_LENGTH = 16384
 _MAX_ARGV_ENTRIES = 256
 _MAX_ARGV_BYTES = 131072
+_MAX_MONOREPO_CHILDREN = 256
 _ARGV_FIELDS = frozenset({
     ("runner", "launcher"), ("runner", "args"), ("runner", "full_args"),
     ("setup", "argv"),
@@ -117,6 +119,12 @@ def _git_boundary(cwd: Path) -> Path | None:
         if parent == current:
             return None
         current = parent
+
+
+def repository_root(cwd: Path | str) -> Path:
+    """Return the static Git root used by repository bootstrap operations."""
+    physical = _absolute_directory(cwd)
+    return _git_boundary(physical) or physical
 
 
 def _candidate_config(root: Path) -> tuple[Path, bool]:
@@ -623,6 +631,28 @@ def _native_candidates(root: Path) -> tuple[C.RunnerKind, ...]:
     return tuple(found)
 
 
+def _auto_monorepo_children(root: Path) -> tuple[tuple[str, C.RunnerKind], ...]:
+    """Inspect only immediate, real child directories for one native runner."""
+    found: list[tuple[str, C.RunnerKind]] = []
+    try:
+        entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+    except OSError:
+        raise _problem("state-unavailable", "repository contents are unavailable")
+    for entry in entries:
+        try:
+            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                continue
+            child = Path(entry.path)
+            candidates = _native_candidates(child)
+        except OSError:
+            raise _problem("state-unavailable", "repository contents are unavailable")
+        if len(candidates) > 1:
+            raise _problem("invalid-config", "an explicit runner choice is required")
+        if len(candidates) == 1:
+            found.append((entry.name, candidates[0]))
+    return tuple(found)
+
+
 def _directory_exists(root: Path, name: str) -> bool:
     target = root / name
     try:
@@ -746,6 +776,86 @@ def _serialize_fresh(config: C.Config) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def _serialize_monorepo(children: tuple[str, ...]) -> bytes:
+    return (
+        "version = 2\n\n[monorepo]\n"
+        f"children = {_toml_array(children)}\n"
+    ).encode("utf-8")
+
+
+def _validate_init_child(value: str) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+        raise _problem("invalid-config", "monorepo child path is invalid")
+    if value.startswith("/") or re.match(r"^[A-Za-z]:", value):
+        raise _problem("unsafe-path", "monorepo child path is unsafe")
+    parts = tuple(value.split("/"))
+    if any(not part or part in {".", ".."} for part in parts):
+        raise _problem("unsafe-path", "monorepo child path is unsafe")
+    return parts
+
+
+def _safe_init_child(root: Path, declaration: str) -> Path:
+    parts = _validate_init_child(declaration)
+    cursor = root
+    for part in parts:
+        cursor = cursor / part
+        try:
+            stamp = os.lstat(cursor)
+        except FileNotFoundError:
+            raise _problem("state-unavailable", "monorepo child directory is unavailable")
+        except OSError:
+            raise _problem("state-unavailable", "monorepo child directory is unavailable")
+        if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+            raise _problem("unsafe-path", "monorepo child directory is unsafe")
+    return cursor
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildInit:
+    declaration: str
+    root: Path
+    config: C.Config | None
+    data: bytes | None
+
+
+def _plan_monorepo_init(root: Path, options: C.InitOptions) -> tuple[tuple[_ChildInit, ...], bytes]:
+    if not 2 <= len(options.children) <= _MAX_MONOREPO_CHILDREN:
+        raise _problem("invalid-config", "monorepo initialization requires between two and 256 children")
+    declarations = []
+    paths = []
+    for declaration, runner in options.children:
+        parts = _validate_init_child(declaration)
+        if parts in paths:
+            raise _problem("invalid-config", "monorepo child paths must be unique")
+        if any(parts[:len(previous)] == previous or previous[:len(parts)] == parts
+               for previous in paths):
+            raise _problem("invalid-config", "monorepo child paths must not overlap")
+        paths.append(parts)
+        declarations.append(declaration)
+
+    planned: list[_ChildInit] = []
+    for declaration, runner in options.children:
+        child_root = _safe_init_child(root, declaration)
+        target, exists = _candidate_config(child_root)
+        if exists:
+            raw = read_regular(child_root, _CONFIG_NAME, _CONFIG_MAX_BYTES + 1)
+            if len(raw) > _CONFIG_MAX_BYTES:
+                raise _problem("invalid-config", "child project configuration exceeds its bound")
+            try:
+                parsed = tomllib.loads(raw.decode("utf-8"))
+                config, _ = _parse_config(parsed, child_root, target)
+            except C.Problem:
+                raise
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, _ConfigInvalid):
+                raise _problem("invalid-config", "child project configuration is invalid")
+            planned.append(_ChildInit(declaration, child_root, config, None))
+        else:
+            config = _fresh_config(child_root, target, runner)
+            planned.append(_ChildInit(declaration, child_root, config,
+                                      _serialize_fresh(config)))
+    return tuple(planned), _serialize_monorepo(tuple(declarations))
+
+
 def _existing_result(root: Path, target: Path, resolution: C.ConfigResolution) -> C.InitResult:
     warnings: tuple[C.Reason, ...] = resolution.warnings
     if resolution.problem is not None:
@@ -773,9 +883,11 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     if resolution.path is not None:
         return _existing_result(resolution.root, resolution.path, resolution)
 
-    # The Git boundary limits resolution above; it need not be the project.
-    # Uninitialized sibling projects each use their invocation directory.
-    root = physical_cwd
+    # Initialization anchors at the repository boundary even when invoked from
+    # a nested source directory. Runtime resolution remains nearest-config and
+    # does not gain any discovery behavior from this bootstrap convenience.
+    boundary = _git_boundary(physical_cwd)
+    root = boundary if boundary is not None and boundary == physical_cwd else physical_cwd
     target = root / _CONFIG_NAME
     try:
         _, target_exists = _candidate_config(root)
@@ -784,6 +896,33 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             root=root, path=target, config=None, problem=problem))
     if target_exists:
         return _existing_result(root, target, resolve_config(root))
+
+    children = options.children
+    root_candidates = _native_candidates(root) if not children else ()
+    if not children and options.runner is None and len(root_candidates) != 1:
+        auto_children = _auto_monorepo_children(root)
+        if len(auto_children) >= 2:
+            children = auto_children
+
+    if children:
+        child_options = C.InitOptions(
+            runner=options.runner, dry_run=options.dry_run,
+            reveal_command=options.reveal_command, children=children,
+        )
+        planned, root_data = _plan_monorepo_init(root, child_options)
+        if options.dry_run:
+            return C.InitResult(
+                action=C.InitAction.PREVIEW, target=target, exists=False,
+                config=None, warnings=(),
+            )
+        for child in planned:
+            if child.data is not None:
+                create_exclusive(child.root, _CONFIG_NAME, child.data, private=False)
+        create_exclusive(root, _CONFIG_NAME, root_data, private=False)
+        return C.InitResult(
+            action=C.InitAction.CREATED, target=target, exists=True,
+            config=None, warnings=(),
+        )
 
     if options.runner is not None:
         kind = options.runner

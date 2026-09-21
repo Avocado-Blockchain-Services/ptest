@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from ptest.config import init_project, resolve_config
-from ptest.contracts import InitOptions, RunnerKind, SelectionPolicy
+from ptest.contracts import InitOptions, Problem, RunnerKind, SelectionPolicy
 
 
 def test_v2_root_resolution_is_discriminated_from_v1(tmp_path):
@@ -122,6 +122,133 @@ def test_missing_config_is_initialization_required(tmp_path):
     assert resolution.path is None
     assert resolution.problem is not None
     assert resolution.problem.code == "initialization-required"
+
+
+def _git_root(root):
+    marker = root / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+
+def test_explicit_children_create_root_dispatcher_and_child_configs(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    api = root / "api"
+    web = root / "web"
+    api.mkdir()
+    web.mkdir()
+    (api / "pyproject.toml").write_text("[project]\ndependencies = []\n")
+    (web / "package.json").write_text('{"devDependencies":{"vitest":"1"}}')
+
+    result = init_project(root, InitOptions(
+        runner=None, dry_run=False, reveal_command=False,
+        children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.VITEST)),
+    ))
+
+    assert result.target == root / ".ptest.toml"
+    assert result.action.value == "created"
+    assert (root / ".ptest.toml").read_text() == (
+        'version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n'
+    )
+    assert (api / ".ptest.toml").read_text().startswith("version = 1\n")
+    assert (web / ".ptest.toml").read_text().startswith("version = 1\n")
+
+
+def test_init_auto_bootstraps_immediate_runner_children_from_git_root(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "api").mkdir()
+    (root / "web").mkdir()
+    (root / "api" / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n'
+    )
+    (root / "web" / "package.json").write_text('{"devDependencies":{"vitest":"1"}}')
+
+    result = init_project(root, InitOptions(
+        runner=None, dry_run=False, reveal_command=False,
+    ))
+
+    assert result.action.value == "created"
+    assert (root / ".ptest.toml").read_text() == (
+        'version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n'
+    )
+    assert (root / "api" / ".ptest.toml").is_file()
+    assert (root / "web" / ".ptest.toml").is_file()
+
+
+def test_init_preserves_unambiguous_root_runner_over_child_evidence(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n'
+    )
+    (root / "api").mkdir()
+    (root / "web").mkdir()
+    (root / "api" / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n'
+    )
+    (root / "web" / "package.json").write_text('{"devDependencies":{"vitest":"1"}}')
+
+    result = init_project(root, InitOptions(
+        runner=None, dry_run=False, reveal_command=False,
+    ))
+
+    assert result.action.value == "created"
+    assert (root / ".ptest.toml").read_text().startswith("version = 1\n")
+    assert not (root / "api" / ".ptest.toml").exists()
+
+
+@pytest.mark.parametrize("child", ["", ".", "..", "../api", "/api", "api\\web", "api//web"])
+def test_explicit_children_reject_unsafe_paths_before_writes(tmp_path, child):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "valid").mkdir()
+    before = set(root.iterdir())
+
+    with pytest.raises((Problem, ValueError), match="unsafe|invalid|nonempty"):
+        init_project(root, InitOptions(
+            runner=None, dry_run=False, reveal_command=False,
+            children=((child, RunnerKind.PYTEST), ("valid", RunnerKind.PYTEST)),
+        ))
+
+    assert set(root.iterdir()) == before
+
+
+def test_explicit_children_reject_duplicate_and_overlapping_paths_before_writes(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "api" / "nested").mkdir(parents=True)
+    before = set(root.iterdir())
+
+    for children in (
+        (("api", RunnerKind.PYTEST), ("api", RunnerKind.PYTEST)),
+        (("api", RunnerKind.PYTEST), ("api/nested", RunnerKind.PYTEST)),
+    ):
+        with pytest.raises(Problem, match="unique|overlap"):
+            init_project(root, InitOptions(
+                runner=None, dry_run=False, reveal_command=False,
+                children=children,
+            ))
+        assert set(root.iterdir()) == before
+
+
+def test_explicit_children_reject_more_than_runtime_manifest_limit(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    children = tuple((f"child-{index}", RunnerKind.PYTEST) for index in range(257))
+
+    with pytest.raises(Problem, match="between two and 256"):
+        init_project(root, InitOptions(
+            runner=None, dry_run=False, reveal_command=False, children=children,
+        ))
+    assert not (root / ".ptest.toml").exists()
 
 
 def test_nearest_config_wins_for_nested_roots(tmp_path):

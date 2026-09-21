@@ -30,6 +30,40 @@ def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, m
     assert calls[0][2].argv == ("tests/unit",)
 
 
+def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeypatch, capsys):
+    marker = tmp_path / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    api = tmp_path / "api"
+    web = tmp_path / "web"
+    api.mkdir()
+    web.mkdir()
+    (api / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
+    (web / "package.json").write_text('{"devDependencies":{"vitest":"1"}}')
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("init",)) == 0
+    assert "created:" in capsys.readouterr().out
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert (api / ".ptest.toml").is_file()
+    assert (web / ".ptest.toml").is_file()
+
+
+def test_init_explicit_agent_choice_adds_only_repository_local_skill(tmp_path, monkeypatch):
+    marker = tmp_path / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    assert (tmp_path / ".codex/skills/ptest/SKILL.md").is_file()
+    assert (tmp_path / "docs/ptest-agent.md").is_file()
+    assert not (tmp_path.parent / ".codex").exists()
+
+
 def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_failure(
         tmp_path, monkeypatch):
     (tmp_path / ".ptest.toml").write_text(
@@ -69,6 +103,33 @@ def test_execution_parser_stops_at_first_unknown_and_preserves_tail():
     assert parsed.mode is C.Mode.SCOPED
     assert parsed.workers == 2
     assert parsed.runner_argv == ("-k", "--full")
+
+
+def test_init_parser_accepts_explicit_monorepo_child_runner_pairs():
+    parsed = parse_argv((
+        "init", "--child", "api", "--runner", "pytest",
+        "--child", "web", "--runner", "vitest",
+    ))
+
+    assert parsed.children == (("api", C.RunnerKind.PYTEST),
+                               ("web", C.RunnerKind.VITEST))
+
+
+def test_init_parser_accepts_explicit_agent_integrations():
+    parsed = parse_argv(("init", "--agents", "codex,opencode"))
+
+    assert parsed.agents == ("codex", "opencode")
+    assert parsed.agents_explicit is True
+
+
+@pytest.mark.parametrize("argv", [
+    ("init", "--child", "api"),
+    ("init", "--child", "api", "--runner", "pytest", "--child", "web"),
+    ("init", "--child", "api", "--runner", "unknown"),
+])
+def test_init_parser_rejects_incomplete_or_unsupported_child_pairs(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
 
 
 @pytest.mark.parametrize("argv", [

@@ -63,6 +63,9 @@ class ParsedArgs:
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
     apply_rules: bool = False
+    children: tuple = ()
+    agents: tuple[str, ...] = ()
+    agents_explicit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +223,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     if command == "init":
         runner = None
         dry_run = reveal = False
+        children = []
+        agents = ()
+        agents_explicit = False
         index = 0
         while index < len(args):
             token = args[index]
@@ -234,6 +240,29 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 except ValueError:
                     raise _problem("unsupported-capability", "runner profile is not supported") from None
                 continue
+            elif token == "--child":
+                child, index = _value(args, index, token)
+                if index >= len(args) or args[index] != "--runner":
+                    raise _problem("invalid-config", "--child requires a following --runner")
+                value, index = _value(args, index, "--runner")
+                try:
+                    child_runner = C.RunnerKind(value)
+                except ValueError:
+                    raise _problem("unsupported-capability", "runner profile is not supported") from None
+                children.append((child, child_runner))
+                continue
+            elif token == "--agents":
+                value, index = _value(args, index, token)
+                agents_explicit = True
+                if value == "none":
+                    agents = ()
+                else:
+                    names = tuple(part.strip() for part in value.split(","))
+                    if (not names or any(not name for name in names)
+                            or any(name not in agent_rules.SUPPORTED_AGENTS for name in names)):
+                        raise _problem("unsupported-capability", "agent integration is not supported")
+                    agents = tuple(dict.fromkeys(names))
+                continue
             elif token == "--json":
                 # Init's frozen grammar omits --json, but accepting it is
                 # harmless only when it is explicitly requested by automation.
@@ -242,7 +271,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 raise _problem("invalid-config", "unknown inspection option")
             index += 1
         return ParsedArgs(command=command, runner=runner, dry_run=dry_run,
-                          reveal_command=reveal, json="--json" in args)
+                          reveal_command=reveal, json="--json" in args,
+                          children=tuple(children), agents=agents,
+                          agents_explicit=agents_explicit)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -551,10 +582,18 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return _emit_error(problem, kind="rules", json_output=False)
     if command == "init":
         try:
+            agents = _init_agents(parsed)
+            root = config_api.repository_root(cwd)
+            if agents:
+                agent_rules.preview(root, agents=agents)
             result = config_api.init_project(cwd, C.InitOptions(
                 runner=parsed.runner, dry_run=parsed.dry_run,
                 reveal_command=parsed.reveal_command,
+                children=parsed.children,
+                agents=agents,
             ))
+            if agents and not parsed.dry_run:
+                agent_rules.apply(root, agents=agents)
             payload = C.serialize_init_result(result)
             if parsed.json:
                 sys.stdout.buffer.write(_document("init", payload))
@@ -728,6 +767,27 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     except C.Problem as problem:
         return _emit_error(problem, kind=command or "where", json_output=parsed.json)
     raise _problem("invalid-config", "unknown command")
+
+
+def _init_agents(parsed: ParsedArgs) -> tuple[str, ...]:
+    if parsed.agents_explicit or not sys.stdin.isatty():
+        return parsed.agents
+    print("Install repository-local ptest guidance for which agents? "
+          "[none/claude,codex,opencode,gemini/all] (default: none):",
+          file=sys.stderr)
+    try:
+        choice = input().strip().lower()
+    except EOFError:
+        return ()
+    if not choice or choice == "none":
+        return ()
+    if choice == "all":
+        return agent_rules.SUPPORTED_AGENTS
+    names = tuple(part.strip() for part in choice.split(","))
+    if (any(not name for name in names)
+            or any(name not in agent_rules.SUPPORTED_AGENTS for name in names)):
+        raise _problem("unsupported-capability", "agent integration is not supported")
+    return tuple(dict.fromkeys(names))
 
 
 def _lease(item: C.LeaseView) -> dict:

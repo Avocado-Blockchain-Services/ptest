@@ -76,3 +76,44 @@ def test_apply_rejects_malformed_managed_block_without_touching_existing_text(tm
 
     assert target.read_text(encoding="utf-8") == original
     assert not (tmp_path / "docs").exists()
+
+
+def test_provider_skill_preview_and_apply_are_repository_local_and_idempotent(tmp_path):
+    plan = preview(tmp_path, agents=("codex", "opencode"))
+
+    assert "create .codex/skills/ptest/SKILL.md" in plan.actions
+    assert "create .opencode/skills/ptest/SKILL.md" in plan.actions
+    assert not (tmp_path / ".codex").exists()
+
+    result = apply(tmp_path, agents=("codex", "opencode"))
+    repeat = apply(tmp_path, agents=("codex", "opencode"))
+
+    assert result.changed is True
+    assert repeat.changed is False
+    assert "docs/ptest-agent.md" in (
+        tmp_path / ".codex/skills/ptest/SKILL.md").read_text()
+    assert not (tmp_path.parent / ".codex").exists()
+
+
+def test_provider_skill_conflict_is_rejected_before_any_rules_write(tmp_path):
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("user skill\n", encoding="utf-8")
+
+    with pytest.raises(Problem, match="already exists"):
+        apply(tmp_path, agents=("claude",))
+
+    assert not (tmp_path / "docs").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_provider_skill_unsafe_parent_is_rejected_before_any_rules_write(tmp_path):
+    provider = tmp_path / ".codex"
+    provider.mkdir(mode=0o777)
+    provider.chmod(0o777)
+
+    with pytest.raises(Problem, match="unsafe"):
+        apply(tmp_path, agents=("codex",))
+
+    assert not (tmp_path / "docs").exists()
+    assert not (tmp_path / "AGENTS.md").exists()

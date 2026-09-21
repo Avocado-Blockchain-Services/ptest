@@ -367,7 +367,7 @@ def test_clean_break_removes_legacy_register_and_init_surfaces():
     assert not forbidden.intersection(C.REASON_CODES)
     assert not forbidden.intersection(C.REQUIRED_ACTIONS)
     assert set(C.InitOptions.__dataclass_fields__) == {
-        "runner", "dry_run", "reveal_command",
+        "runner", "dry_run", "reveal_command", "children", "agents",
     }
     options = C.InitOptions(runner=None, dry_run=True, reveal_command=False)
     assert options.dry_run is True

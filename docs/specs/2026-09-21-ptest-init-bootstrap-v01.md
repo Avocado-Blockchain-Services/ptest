@@ -19,21 +19,23 @@ execution performs no discovery or glob expansion.
 
 ## User-visible behavior
 
-`ptest init` resolves the Git root of the current directory and operates there.
-It is idempotent: an existing valid root or child configuration is reported as
-existing and is not rewritten. `--dry-run` reports the planned files and
-choices without writing.
+`ptest init` invoked at the repository root operates there. It is idempotent:
+an existing valid root or child configuration is reported as existing and is
+not rewritten. `--dry-run` reports the planned files and choices without
+writing. Existing child-local initialization behavior remains unchanged when
+the command is invoked inside a child rather than at the root.
 
 If the root has exactly one unambiguous native runner and no monorepo children,
 init creates the existing v1 `.ptest.toml` exactly as today.
 
-If root runner evidence is ambiguous, init performs bounded bootstrap
+If root runner evidence is absent or ambiguous, init performs bounded bootstrap
 inspection of immediate, non-symlink child directories only. A directory is a
-candidate only when it contains native evidence already used by ptest's runner
-detection. It never recursively searches, globs, follows symlinks, or treats
-arbitrary descendants as projects. The user selects the child directories and
-their runner kinds; non-interactive callers must provide the equivalent
-explicit `--child PATH --runner KIND` pairs.
+candidate only when it contains exactly one kind of native evidence already
+used by ptest's runner detection. It never recursively searches, globs,
+follows symlinks, or treats arbitrary descendants as projects. All unambiguous
+candidates are selected automatically; if a candidate has ambiguous evidence,
+the user must provide explicit `--child PATH --runner KIND` pairs (or resolve
+the ambiguity interactively).
 
 For a selected set of two or more children, init:
 
@@ -81,7 +83,8 @@ comma-separated explicit set for automation and rejects unknown providers.
 
 ### Positive contracts
 
-- Invocation from any descendant of the Git root initializes at the root.
+- Invocation at the Git root initializes the root; invocation inside an
+  uninitialized child retains the existing child-local behavior.
 - Single-project initialization retains current v1 output and runner behavior.
 - Monorepo initialization creates one v2 dispatcher and only missing child v1
   configs.
@@ -95,8 +98,9 @@ comma-separated explicit set for automation and rejects unknown providers.
 ### Negative contracts
 
 - Never scan outside the Git root or recursively discover projects.
-- Never follow a symlink for a candidate child, child config, agent file, or
-  provider integration target.
+- Never follow a symlink for a candidate child, child config, or provider
+  integration target. The existing in-repository `AGENTS.md -> CLAUDE.md`
+  alias remains the sole documented agent-file exception.
 - Reject absolute, traversal, backslash, empty, duplicate, overlapping, and
   mixed-root child paths before writing.
 - Reject ambiguous runner evidence unless the user selects a runner explicitly.
@@ -120,19 +124,21 @@ Add:
 ptest init [--child PATH --runner KIND]... [--agents LIST|none]
 ```
 
-`--child` and `--runner` occur as pairs, each child appears once, and the
-explicit form is required for non-interactive monorepo initialization. A
-single `--runner` with no children retains single-project behavior. JSON output
-must describe planned/existing actions without including repository file
-contents.
+`--child` and `--runner` occur as pairs, each child appears once. Explicit
+pairs override bounded automatic candidate selection. A single `--runner` with
+no children retains single-project behavior. JSON output must describe the
+root action without including repository file contents.
 
 ## Test-first acceptance criteria
 
 Focused tests must prove:
 
-- root invocation from a nested working directory resolves the Git root;
+- root invocation creates the root dispatcher while child-local initialization
+  remains compatible;
 - an unambiguous single runner creates the current v1 config unchanged;
-- ambiguous root evidence is rejected in non-interactive mode without writes;
+- unambiguous immediate children are selected automatically when root runner
+  evidence is absent or ambiguous; ambiguous child evidence is rejected without
+  writes unless explicit child/runner pairs resolve it;
 - explicit child/runner pairs create a root v2 manifest and missing child v1
   configs;
 - existing child configs remain byte-identical;

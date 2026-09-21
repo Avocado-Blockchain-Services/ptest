@@ -23,6 +23,20 @@ Release maintainers create the archive with
 `scripts/build-release-bundle.py`, passing the built ptest wheel, the pinned
 psutil wheel, compatible wheel tags, and an output `.tar.gz` path.
 
+## First repository setup
+
+From the repository root, run:
+
+```sh
+ptest init
+```
+
+Initialization anchors at the Git root. A single project receives the normal
+v1 `.ptest.toml`; a repository with multiple immediate native projects receives
+a root v2 dispatcher and missing child v1 configs. Existing child configs are
+preserved. Interactive setup can add repository-local guidance for Claude,
+Codex, OpenCode, or Gemini; it never installs global skills or packages.
+
 ## Offline or enterprise installation
 
 The installer is intentionally explicit and local-only. Prepare a wheelhouse and

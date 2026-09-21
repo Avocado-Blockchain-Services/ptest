@@ -1649,12 +1649,27 @@ class InitOptions:
     runner: RunnerKind | None
     dry_run: bool
     reveal_command: bool
+    children: tuple = ()
+    agents: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.runner is not None:
             object.__setattr__(self, "runner", _check_enum("init.runner", self.runner, RunnerKind))
         for field in ("dry_run", "reveal_command"):
             object.__setattr__(self, field, _check_bool(f"init.{field}", getattr(self, field)))
+        children = _check_tuple("init.children", self.children)
+        for item in children:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise TypeError("init.children entries must be path/runner pairs")
+            child, runner = item
+            _check_str("init.child", child)
+            _check_enum("init.child_runner", runner, RunnerKind)
+        object.__setattr__(self, "children", tuple((child, _check_enum(
+            "init.child_runner", runner, RunnerKind)) for child, runner in children))
+        agents = _check_tuple("init.agents", self.agents)
+        for agent in agents:
+            _check_str("init.agent", agent)
+        object.__setattr__(self, "agents", agents)
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -21,7 +21,7 @@
 
 ## Review Focus
 
-- A nested invocation must write at the Git root rather than the current subdirectory; Task 1 tests the root boundary.
+- A root invocation must write at the Git root while child-local initialization remains compatible; Task 1 tests both boundaries.
 - An immediate child containing a symlinked native config must not become a candidate; Task 1 tests non-following candidate inspection.
 - A later invalid child must cause zero writes, including no first child config; Task 2 tests two-phase planning.
 - Existing agent files with conflicting managed delimiters must block all writes; Task 3 tests rules integration preflight.
@@ -59,9 +59,9 @@
 - Preserve existing `ptest init --runner KIND`, `--dry-run`, `--reveal-command`, and JSON behavior.
 - Interactive selection uses injected input/output seams so tests never read a real terminal.
 
-- [ ] Write failing parser and CLI tests for pair validation, unknown agents, explicit single-project compatibility, root monorepo selection, dry-run purity, and JSON action reporting.
+- [ ] Write failing parser and CLI tests for pair validation, unknown agents, explicit single-project compatibility, root monorepo selection, and dry-run purity.
 - [ ] Run the focused CLI tests through `ptest` and confirm expected failures.
-- [ ] Implement the closed grammar and call the config planner/apply seam; make noninteractive monorepo initialization require explicit pairs while interactive mode offers bounded candidates.
+- [ ] Implement the closed grammar and call the config planner/apply seam; use bounded automatic candidates and explicit pairs for ambiguous cases.
 - [ ] Ensure init never calls runner, package-manager, network, or subprocess execution paths.
 - [ ] Run the focused CLI tests through `ptest` and confirm green.
 - [ ] Commit the CLI and tests.
