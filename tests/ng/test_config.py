@@ -14,6 +14,46 @@ from ptest.config import init_project, resolve_config
 from ptest.contracts import InitOptions, RunnerKind, SelectionPolicy
 
 
+def test_v2_root_resolution_is_discriminated_from_v1(tmp_path):
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n',
+        encoding="utf-8",
+    )
+
+    resolution = resolve_config(tmp_path)
+
+    assert resolution.problem is None
+    assert resolution.config is None
+    assert resolution.monorepo is not None
+    assert resolution.monorepo.children == ("api", "web")
+
+
+@pytest.mark.parametrize("children", [[], ["api", "api"], ["api", "api/tests"], ["../api"], ["api\\web"], ["/api"]])
+def test_v2_root_manifest_rejects_unsafe_children(tmp_path, children):
+    (tmp_path / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = " + json.dumps(children) + "\n",
+        encoding="utf-8",
+    )
+
+    resolution = resolve_config(tmp_path)
+
+    assert resolution.monorepo is None
+    assert resolution.problem is not None
+    assert resolution.problem.code == "invalid-config"
+
+
+def test_full_execution_runs_all_children_and_returns_first_failure():
+    from ptest.monorepo import execute_full
+
+    children = tuple(object() for _ in range(3))
+    seen = []
+
+    result = execute_full(children, lambda child: seen.append(child) or (7 if child is children[1] else 0))
+
+    assert seen == list(children)
+    assert result == 7
+
+
 # Verbatim section 5 example from the frozen design, including its comments.
 DESIGN_CONFIG = '''version = 1
 project_id = "cd58ec6cf99748ce9f15dfce137f044d" # generated 128-bit hex at init

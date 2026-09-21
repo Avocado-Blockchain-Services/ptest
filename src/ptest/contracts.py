@@ -1717,6 +1717,7 @@ class ConfigResolution:
     root: Path
     path: Path | None
     config: Config | None
+    monorepo: object | None = None
     provenance: tuple = ()
     warnings: tuple = ()
     problem: Problem | None = None

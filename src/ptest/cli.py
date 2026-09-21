@@ -752,6 +752,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
         resolution = config_api.resolve_config(Path.cwd())
+        if resolution.monorepo is not None:
+            from . import monorepo
+            children = monorepo.preflight_children(resolution.root, resolution.monorepo)
+            domain = platform.domain_paths(parsed.fixture_domain)
+            if parsed.full:
+                def run_full(child):
+                    result = operations.execute(
+                        domain, child.config,
+                        C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
+                                     queue_timeout_s=parsed.queue_timeout_s,
+                                     no_setup=parsed.no_setup,
+                                     result_path=parsed.result_path,
+                                     fixture_domain=parsed.fixture_domain),
+                    )
+                    for reason in result.reasons:
+                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+                    return result.exit_code
+                return monorepo.execute_full(children, run_full)
+            routed = monorepo.route_scopes(parsed.runner_argv, children)
+            result = operations.execute(
+                domain, routed.target.config,
+                C.RunRequest(mode=C.Mode.SCOPED, argv=routed.scopes,
+                             workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
+                             no_setup=parsed.no_setup,
+                             shadow=parsed.shadow, result_path=parsed.result_path,
+                             fixture_domain=parsed.fixture_domain),
+            )
+            for reason in result.reasons:
+                print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+            return result.exit_code
         if resolution.config is None:
             # An explicit runner suffix has already crossed ptest's closed
             # prefix grammar.  Without a configured adapter there is no

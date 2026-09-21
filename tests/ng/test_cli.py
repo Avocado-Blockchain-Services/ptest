@@ -12,6 +12,58 @@ from ptest.cli import main, parse_argv
 from ptest.runners import adapter_for, registered_kinds
 
 
+def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, monkeypatch):
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
+    for child in ("api", "web"):
+        root = tmp_path / child
+        root.mkdir()
+        (root / ".ptest.toml").write_text(
+            'version = 1\nproject_id = "' + ("ab" if child == "api" else "cd") * 16 + '"\n'
+            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr("ptest.operations.execute", lambda domain, config, request: calls.append((domain, config, request)) or type("R", (), {"reasons": (), "exit_code": 0})())
+
+    assert main(("api/tests/unit",)) == 0
+    assert len(calls) == 1
+    assert calls[0][2].argv == ("tests/unit",)
+
+
+def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_failure(
+        tmp_path, monkeypatch):
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
+    for child, project_id in (("api", "ab"), ("web", "cd")):
+        root = tmp_path / child
+        root.mkdir()
+        (root / ".ptest.toml").write_text(
+            'version = 1\nproject_id = "' + project_id * 16 + '"\n'
+            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda domain, config, request: calls.append((config.config_path.parent.name, request.mode))
+        or type("R", (), {"reasons": (), "exit_code": 9 if len(calls) == 1 else 3})(),
+    )
+
+    assert main(("--full",)) == 9
+    assert calls == [("api", C.Mode.FULL), ("web", C.Mode.FULL)]
+
+
+@pytest.mark.parametrize("scope", ["", "api", "web/x", "api/../x", "/api/x", "api\\x", "api/x", "api2/x"])
+def test_root_scope_rejects_invalid_or_undeclared_scope_before_execution(tmp_path, monkeypatch, scope):
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr("ptest.operations.execute", lambda *args: calls.append(args))
+
+    assert main((scope,)) == 2
+    assert calls == []
+
+
 def test_execution_parser_stops_at_first_unknown_and_preserves_tail():
     parsed = parse_argv(("--workers", "2", "-k", "--full"))
     assert parsed.mode is C.Mode.SCOPED

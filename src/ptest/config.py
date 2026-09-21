@@ -504,6 +504,17 @@ def resolve_config(cwd: Path) -> C.ConfigResolution:
                              "project configuration is required"),
         )
     try:
+        try:
+            parsed = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and type(parsed.get("version")) is int \
+                and parsed.get("version") == 2:
+            from .monorepo import parse_monorepo_manifest
+            manifest = parse_monorepo_manifest(raw, path)
+            return C.ConfigResolution(root=root, path=path, config=None,
+                                      monorepo=manifest,
+                                      provenance=("monorepo",), problem=None)
         config, warnings = _parse_config(raw, root, path)
     except C.Problem as parse_problem:
         return C.ConfigResolution(root=root, path=path, config=None,

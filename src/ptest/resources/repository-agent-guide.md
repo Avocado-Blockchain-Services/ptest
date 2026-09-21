@@ -1,5 +1,11 @@
 # ptest rules for coding agents
 
+Run `ptest` from the monorepo root—the directory containing `AGENTS.md` and
+`CLAUDE.md`. For focused work, prefix the scope with its declared child, such
+as `ptest api/tests/ng/test_x.py`; use root `ptest --full` for the integrated
+gate. Child `.ptest.toml` files remain authoritative and must not be copied,
+merged, rewritten, or bypassed by changing directories.
+
 Run every test command through `ptest`; do not call pytest, Vitest, npm test,
 Go test, or Cargo test directly. During iteration run the smallest relevant
 scope. Run `ptest --full` once after the integrated change.

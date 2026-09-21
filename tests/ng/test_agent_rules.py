@@ -31,6 +31,8 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "one database per worker per run" in guide
     assert "Never use global cache flush" in guide
     assert "ptest --full" in guide
+    assert "monorepo root" in guide
+    assert "ptest api/" in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert agents.startswith("# Existing rules\n")
     assert agents.count("ptest-agent-rules:start") == 1
