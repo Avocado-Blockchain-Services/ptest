@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import secrets
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON_MIN, PYTHON_MAX = (3, 11), (3, 14)
+PYTHON_MIN, PYTHON_MAX = (3, 11), (3, 15)
 MANIFEST_KEYS = {"version", "ptest_version", "python_tag", "platform_tag", "wheels"}
 WHEEL_KEYS = {"filename", "sha256", "package", "version"}
 
@@ -113,7 +114,9 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
     paths = []
     for entry in manifest["wheels"]:
         path = wheelhouse / entry["filename"]
-        if path.is_symlink() or path.parent != wheelhouse or not path.is_file():
+        if path.is_symlink():
+            raise ValueError("manifest wheel path must not be a symlink")
+        if path.parent != wheelhouse or not path.is_file():
             if entry["package"] == "psutil" and allow_network:
                 metadata_url = f"https://pypi.org/pypi/psutil/{entry['version']}/json"
                 with urlopen(Request(metadata_url, headers={"Accept": "application/json"}), timeout=30) as response:
@@ -133,7 +136,7 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
         validate_wheel(path, entry["package"], entry["version"], manifest["python_tag"], manifest["platform_tag"])
         paths.append(path)
     py = Path(sys.executable)
-    if not (PYTHON_MIN <= sys.version_info[:2] < PYTHON_MAX):
+    if platform.python_implementation() != "CPython" or not (PYTHON_MIN <= sys.version_info[:2] < PYTHON_MAX):
         raise RuntimeError("installer requires CPython 3.11 through 3.14")
     bundles = dest / ".ptest-bundles"
     if bundles.is_symlink() or (bundles.exists() and not bundles.is_dir()):
