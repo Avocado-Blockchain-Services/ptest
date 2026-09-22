@@ -11,6 +11,13 @@ import pytest
 from ptest.agent_rules import _legacy_provider_text, apply, preview
 from ptest.contracts import Problem
 
+FAST_FORWARD_GATE_RULE = (
+    "If a merge is fast-forward and the exact tip commit already passed the "
+    "required ptest gate, do not rerun ptest solely because of the merge. A "
+    "merge commit, new changes, or an untested tip still requires the "
+    "applicable ptest gate."
+)
+
 
 def test_preview_is_read_only_and_lists_agent_targets(tmp_path):
     plan = preview(tmp_path)
@@ -38,6 +45,7 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "ptest --full" in guide
     assert "monorepo root" in guide
     assert "ptest api/" in guide
+    assert FAST_FORWARD_GATE_RULE in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert agents.startswith("# Existing rules\n")
     assert agents.count("ptest-agent-rules:start") == 1
@@ -120,6 +128,19 @@ def test_repository_guide_states_assessment_only_authority():
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
     assert "assessment authority only" in guide
     assert "separate user instruction" in guide
+    assert FAST_FORWARD_GATE_RULE in guide
+    assert "During iteration run the smallest relevant\nscope." in guide
+    assert "Run `ptest --full` once after the integrated change" in guide
+
+
+def test_local_repair_guide_preserves_gate_and_fast_forward_guidance():
+    from importlib.resources import files
+
+    guide = files("ptest").joinpath(
+        "resources", "agent-guide.md").read_text(encoding="utf-8")
+    assert FAST_FORWARD_GATE_RULE in guide
+    assert "run the scoped `ptest` command" in guide
+    assert "run one `ptest --full` final gate" in guide
 
 
 def test_provider_skill_unsafe_parent_is_rejected_before_any_rules_write(tmp_path):
@@ -165,6 +186,7 @@ def test_every_generated_skill_has_valid_front_matter_and_root_paths(tmp_path):
         assert "docs/ptest-agent.md" in text
         assert "ptest --full" in text
         assert "ptest api/" in text
+        assert FAST_FORWARD_GATE_RULE in text
         seen.add(text)
     assert len(seen) >= 2
 

@@ -14,6 +14,9 @@ Run every test command through `ptest`; do not call pytest, Vitest, npm test,
 Go test, or Cargo test directly. During iteration run the smallest relevant
 scope. Run `ptest --full` once after the integrated change.
 
+If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.
+After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.
+
 Keep ordinary tests fast and deterministic. Prefer factories/builders for test
 records. Inspect frequent tests above 0.5 seconds; optimize ordinary tests that
 reach 2 seconds and investigate anything above 3 seconds unless it is a

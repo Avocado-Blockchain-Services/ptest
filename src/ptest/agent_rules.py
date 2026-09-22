@@ -102,6 +102,9 @@ def _provider_text(provider: str) -> bytes:
         "its declared child, such as `ptest api/tests/<chosen-test>.py`; child\n"
         "`.ptest.toml` files remain authoritative. Run the root full gate\n"
         "`ptest --full` once after the integrated change.\n"
+        "\n"
+        "If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.\n"
+        "After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.\n"
     ).encode("utf-8")
 
 

@@ -19,6 +19,9 @@ run the scoped `ptest` command for the affected behavior. After the repairs are
 integrated, run one `ptest --full` final gate. A text-pattern change alone is not
 proof that isolation works.
 
+If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.
+After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.
+
 When validated test timings are available, under 0.5 seconds is healthy;
 0.5–2 seconds merits inspection, especially for repeated ordinary tests;
 2–3 seconds merits optimization; over 3 seconds needs investigation or an
