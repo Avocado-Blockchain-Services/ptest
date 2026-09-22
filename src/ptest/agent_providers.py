@@ -6,9 +6,17 @@ a separate required gate, so all adapters resolve as unqualified and
 :func:`launch_review` fails closed until each exact profile is proved.
 Synthetic tests exercise the machinery with fake executables only and
 never qualify a real provider.
+
+Containment: on POSIX the child runs as a session leader and group cleanup
+signals descendants only through pidfds pinned to processes that passed
+post-pin session/start-time validation; numeric killpg/kill of members is
+never used, so a recycled PID can never receive our signal. Anything
+unverifiable -- missing pidfd support, unreadable identity -- fails closed
+instead of launching or killing.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
@@ -17,6 +25,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -284,15 +293,6 @@ def _result(adapter: ReviewerAdapter, *, ok: bool, assessment: bytes,
                           argv=adapter.argv, scratch=scratch)
 
 
-def _still_owned(pid: int, pgid: int | None) -> bool:
-    if pgid is None or os.name != "posix":
-        return True
-    try:
-        return os.getpgid(pid) == pgid
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-
-
 def _proc_starttime(pid: int) -> int | None:
     """Boot-relative start time from /proc, or None when unreadable."""
     try:
@@ -333,18 +333,141 @@ def _unverified_group() -> None:
         "refusing to signal possibly reused PGID")
 
 
-def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
-                         leader_start: int | None) -> list[int]:
-    """Live pids verified as still-owned members of `pgid`.
+_PIDFD_SYS_OPEN = 434  # pidfd_open; validated by a self-pin probe at import
+_PIDFD_SYS_SEND = 424  # pidfd_send_signal; validated the same way
 
-    Membership alone is not trusted: with ``start_new_session`` the session
-    ID equals the leader pid, which was freshly allocated at spawn, so a
-    live member carrying both our PGID and our session ID is ours -- an
-    outsider cannot join our session, and a pre-existing holder of a
-    recycled PGID number carries an older session (and an older start
-    time). Anything unverifiable fails closed instead of risking a reused
-    PGID or silently skipping cleanup.
+
+def _pidfd_backend():
+    """Resolve (open_fn, send_fn) for race-free signaling, or (None, None).
+
+    Prefers :func:`os.pidfd_open` / :func:`signal.pidfd_send_signal` and
+    falls back to the Linux syscalls via ctypes (some interpreters do not
+    expose the wrappers). The fallback self-pins once at import, so wrong
+    syscall numbers fail as ENOSYS and report unavailability instead of a
+    broken backend. Anything else -- non-Linux, missing syscalls, a failed
+    probe -- yields (None, None) and the caller must fail closed.
     """
+    native_open = getattr(os, "pidfd_open", None)
+    native_send = getattr(signal, "pidfd_send_signal", None)
+    if callable(native_open) and callable(native_send):
+        def _open(pid: int, flags: int = 0) -> int:
+            return native_open(pid, flags)
+
+        def _send(pidfd: int, sig: int) -> None:
+            native_send(pidfd, sig)
+
+        return _open, _send
+    if os.name != "posix" or not sys.platform.startswith("linux"):
+        return None, None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        libc.syscall.argtypes = [ctypes.c_long] * 7
+
+        def _open(pid: int, flags: int = 0) -> int:
+            fd = libc.syscall(_PIDFD_SYS_OPEN, pid, flags, 0, 0, 0, 0)
+            if fd < 0:
+                code = ctypes.get_errno()
+                if code == errno.ESRCH:
+                    raise ProcessLookupError(code, os.strerror(code))
+                raise OSError(code, os.strerror(code))
+            return int(fd)
+
+        def _send(pidfd: int, sig: int) -> None:
+            ret = libc.syscall(_PIDFD_SYS_SEND, pidfd, sig, 0, 0, 0, 0)
+            if ret != 0:
+                code = ctypes.get_errno()
+                if code == errno.ESRCH:
+                    raise ProcessLookupError(code, os.strerror(code))
+                if code == errno.EPERM:
+                    raise PermissionError(code, os.strerror(code))
+                raise OSError(code, os.strerror(code))
+
+        probe = _open(os.getpid())
+        try:
+            _send(probe, 0)
+        finally:
+            os.close(probe)
+        return _open, _send
+    except Exception:
+        return None, None
+
+
+_PIDFD_OPEN, _PIDFD_SEND = _pidfd_backend()
+_PIDFD_AVAILABLE = _PIDFD_OPEN is not None and _PIDFD_SEND is not None
+
+
+def _pin_process(pid: int) -> int | None:
+    """Open a pidfd pinning `pid`, or None when it already exited."""
+    try:
+        return _PIDFD_OPEN(pid, 0)
+    except (ProcessLookupError, OSError):
+        return None
+
+
+def _pidfd_signal(pidfd: int, sig: int) -> bool:
+    """Signal through a pinned pidfd; False when the pinned process is gone.
+
+    The descriptor refers to one specific process, never to whatever PID
+    number it once held, so a recycled number can never receive this
+    signal: a dead pin reports ESRCH and nothing is sent anywhere.
+    """
+    try:
+        _PIDFD_SEND(pidfd, sig)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return False
+    return True
+
+
+def _proc_state(pid: int) -> str | None:
+    """Single-letter /proc state, or None when unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    try:
+        return raw.decode("latin-1").rsplit(")", 1)[1].split()[0]
+    except IndexError:
+        return None
+
+
+def _close_pinned(owned: list) -> None:
+    for _, pidfd in owned:
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
+
+
+def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
+                         leader_start: int | None) -> list:
+    """Pinned (pid, pidfd) pairs verified as still-owned members of `pgid`.
+
+    Each candidate is pinned with pidfd_open first and validated after the
+    pin: the session ID must equal our private session (with
+    ``start_new_session`` no outsider can carry it) and the start time must
+    be readable and no older than the leader's. Signaling later goes only
+    through the returned descriptors, so a PID that exits and is recycled
+    after validation can never receive our signal -- the descriptor still
+    names the original process, and a dead pin delivers to nothing.
+
+    Residual note: the post-pin numeric reads could observe a recycled
+    replacement if exit-plus-reuse lands exactly between the pin and the
+    read. That replacement can only pass validation by also carrying our
+    private session ID, i.e. by being our own descendant, which is in
+    scope to signal anyway; a mismatch fails closed. Anything unreadable
+    -- our own identity or a member's -- fails closed instead of killing.
+    """
+    if not _PIDFD_AVAILABLE:
+        _unverified_group()
+    if sid is None or leader_start is None:
+        _unverified_group()
+    assert sid is not None and leader_start is not None
     members = _group_member_pids(pgid)
     if members is None:
         try:
@@ -355,38 +478,44 @@ def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
             pass
         _unverified_group()
     assert members is not None
-    owned: list[int] = []
+    owned: list = []
     for mid in members:
         if mid == proc_pid:
             continue
+        pidfd = _pin_process(mid)
+        if pidfd is None:
+            continue  # exited while scanning; nothing pinned, nothing sent
         try:
             member_sid = os.getsid(mid)
         except ProcessLookupError:
+            os.close(pidfd)
             continue  # exited while scanning
         except OSError:
+            os.close(pidfd)
             _unverified_group()
-        if sid is None:
-            _unverified_group()
-        assert sid is not None
         if member_sid != sid:
+            os.close(pidfd)
             _unverified_group()
-        if leader_start is not None:
-            member_start = _proc_starttime(mid)
-            if member_start is not None and member_start < leader_start:
-                _unverified_group()
-        owned.append(mid)
+        member_start = _proc_starttime(mid)
+        if member_start is None or member_start < leader_start:
+            os.close(pidfd)
+            _unverified_group()
+        if _proc_state(mid) == "Z":
+            os.close(pidfd)
+            continue  # zombie: already dead, owned by init; no signal needed
+        owned.append((mid, pidfd))
     return owned
 
 
-def _pid_alive(pid: int) -> bool:
+def _signal_pinned(proc_pid: int, pgid: int, sid: int | None,
+                   leader_start: int | None, sig: int) -> None:
+    """Signal every verified member through its pinned pidfd, then unpin."""
+    owned = _owned_group_members(proc_pid, pgid, sid, leader_start)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    else:
-        return True
+        for _, pidfd in owned:
+            _pidfd_signal(pidfd, sig)
+    finally:
+        _close_pinned(owned)
 
 
 def _stop_owned(proc: subprocess.Popen, pgid: int | None,
@@ -394,60 +523,56 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None,
                 leader_start: int | None = None) -> None:
     """Terminate the owned group, including descendants outliving the child.
 
-    A live owned direct child keeps the fast whole-group signal. When the
-    direct child already exited, remaining members are signaled individually
-    only after session/start-time verification; an unverifiable group fails
-    closed rather than risking a reused PGID. The direct child is reaped.
+    The direct child is signaled through its Popen handle only, which is
+    sound: an unreaped child pins its PID, so no recycled number is at
+    risk. Every other member is signaled exclusively through a pidfd pinned
+    to a process that passed post-pin session/start-time validation; numeric
+    killpg/kill of members is never used, so a recycled PID can never
+    receive our signal. An unverifiable group fails closed rather than
+    risking a reused PGID, and members surviving SIGKILL are reported
+    instead of silently leaked. The direct child is always reaped.
     """
-    if proc.poll() is None and _still_owned(proc.pid, pgid):
-        try:
-            if pgid is not None and os.name == "posix":
-                os.killpg(pgid, signal.SIGTERM)
-            else:
-                proc.terminate()
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    elif (pgid is not None and os.name == "posix"
-          and proc.poll() is not None):
-        for member in _owned_group_members(proc.pid, pgid, sid,
-                                           leader_start):
-            try:
-                os.kill(member, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-    deadline = time.monotonic() + _TERM_GRACE_S
-    while proc.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if proc.poll() is None and _still_owned(proc.pid, pgid):
-        try:
-            if pgid is not None and os.name == "posix":
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    elif (pgid is not None and os.name == "posix"
-          and proc.poll() is not None):
-        deadline = time.monotonic() + _TERM_GRACE_S
-        survivors = _owned_group_members(proc.pid, pgid, sid, leader_start)
-        while survivors and time.monotonic() < deadline:
-            time.sleep(0.05)
-            survivors = _owned_group_members(proc.pid, pgid, sid,
-                                             leader_start)
-        for member in survivors:
-            try:
-                os.kill(member, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-        deadline = time.monotonic() + 5
-        while survivors and time.monotonic() < deadline:
-            time.sleep(0.05)
-            survivors = [member for member in survivors
-                         if _pid_alive(member)]
     try:
-        proc.wait(timeout=5)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        group = pgid is not None and os.name == "posix"
+        if group:
+            _signal_pinned(proc.pid, pgid, sid, leader_start, signal.SIGTERM)
+        deadline = time.monotonic() + _TERM_GRACE_S
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        if group:
+            _signal_pinned(proc.pid, pgid, sid, leader_start, signal.SIGKILL)
+            deadline = time.monotonic() + _TERM_GRACE_S
+            while True:
+                survivors = _owned_group_members(proc.pid, pgid, sid,
+                                                 leader_start)
+                _close_pinned(survivors)
+                if not survivors or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+            if survivors:
+                raise _problem(
+                    "provider-failed",
+                    "owned group member survived SIGKILL; "
+                    "containment incomplete")
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 def _tool_key_present(mapping: Mapping) -> bool:
@@ -566,6 +691,13 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         raise
 
     start_new = os.name == "posix"
+    if start_new and not _PIDFD_AVAILABLE:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise _problem(
+            "provider-failed",
+            f"reviewer {adapter.name} launch refused: pidfd containment "
+            "unavailable on this host, so group cleanup could not be "
+            "proved safe")
     try:
         proc = subprocess.Popen(
             list(adapter.argv), stdin=subprocess.PIPE,
@@ -592,6 +724,20 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         except (ProcessLookupError, PermissionError, OSError):
             sid = None
         leader_start = _proc_starttime(proc.pid)
+        if pgid is None or sid is None or leader_start is None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            raise _problem(
+                "provider-failed",
+                f"reviewer {adapter.name} launch refused: process identity "
+                "unverifiable, so group cleanup could not be proved safe")
 
     def _emit(phase: str) -> None:
         try:

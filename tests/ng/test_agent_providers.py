@@ -9,6 +9,7 @@ import dataclasses
 import inspect
 import json
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -559,3 +560,173 @@ def test_progress_event_validation_bounds():
         ap.ProgressEvent(phase="reviewing", provider="", elapsed_s=0.0)
     with pytest.raises(TypeError):
         ap.ProgressEvent(phase="reviewing", provider="claude", elapsed_s="0")
+
+
+# ---- pidfd containment regressions (provider reaudit 2026-09-22) ------------
+#
+# Audit rejected 7e0c184 for two blockers: (1) a numeric member PID validated
+# in _owned_group_members can exit and be recycled before the later
+# os.kill(SIGTERM/KILL), signaling an unrelated replacement; (2) a missing
+# leader_start or member_start is treated as verified ownership. These tests
+# pin the fail-closed property: member cleanup must never signal by numeric
+# PID, and unreadable identity must raise instead of killing.
+
+
+def _spawn_leader_with_member():
+    """A session leader plus one same-group descendant; caller must reap."""
+    leader = subprocess.Popen(["sh", "-c", "sleep 60 & wait"],
+                              start_new_session=True)
+    pgid = os.getpgid(leader.pid)
+    sid = os.getsid(leader.pid)
+    member = None
+    for _ in range(100):
+        for mid in (ap._group_member_pids(pgid) or []):
+            if mid != leader.pid:
+                member = mid
+                break
+        if member is not None:
+            break
+        time.sleep(0.05)
+    assert member is not None
+    return leader, pgid, sid, member
+
+
+def _reap_leader_with_member(leader, member):
+    try:
+        leader.terminate()
+    except OSError:
+        pass
+    try:
+        leader.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            leader.kill()
+        except OSError:
+            pass
+        try:
+            leader.wait(timeout=5)
+        except OSError:
+            pass
+    try:
+        os.kill(member, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def test_stale_member_pid_never_signaled_numerically(bindir, tmp_path,
+                                                     monkeypatch):
+    """A recycled member PID must never receive a stale numeric signal.
+
+    The descendant exits on its own schedule while a neighbor runs. Any
+    SIGTERM/SIGKILL addressed by numeric PID to anything but the reaped
+    direct child proves the TOCTOU channel is open: after validation that
+    number may already belong to someone else. Signaling must go through a
+    pinned handle instead.
+    """
+    pidfile = tmp_path / "descendant.pid"
+    body = (
+        "#!/bin/sh\ncat >/dev/null\nsleep 30 &\n"
+        f"echo $! > {pidfile}\n"
+        "exit 0\n"
+    )
+    adapter = _synthetic(_resolve(bindir, "claude", body))
+    neighbor = _neighbor()
+    calls: list = []
+    real_kill = os.kill
+    real_killpg = os.killpg
+
+    def _spy_kill(pid, sig):
+        calls.append(("kill", pid, int(sig)))
+        return real_kill(pid, sig)
+
+    def _spy_killpg(pgid, sig):
+        calls.append(("killpg", pgid, int(sig)))
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "kill", _spy_kill)
+    monkeypatch.setattr(os, "killpg", _spy_killpg)
+    try:
+        result = ap.launch_review(adapter, PACKET, SCHEMA, 2,
+                                  _no_progress([]))
+    finally:
+        monkeypatch.undo()
+        neighbor_alive = neighbor.poll() is None
+        neighbor.terminate()
+        neighbor.wait()
+    assert result.ok is False
+    assert result.error == "timeout"
+    forbidden = [
+        call for call in calls
+        if call[2] in (signal.SIGTERM, signal.SIGKILL)
+        and not (call[0] == "kill" and call[1] == result.pid)
+    ]
+    assert forbidden == []
+    _assert_dead(result.pid)
+    assert pidfile.exists()
+    descendant = int(pidfile.read_text(encoding="utf-8").strip())
+    for _ in range(50):
+        try:
+            os.kill(descendant, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            pytest.fail("descendant alive but unowned")
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"descendant {descendant} still alive after cleanup")
+    assert neighbor_alive
+
+
+def test_missing_leader_starttime_is_not_verified():
+    """leader_start=None must fail closed, never count members as owned."""
+    leader, pgid, sid, member = _spawn_leader_with_member()
+    try:
+        with pytest.raises(Problem) as exc:
+            ap._owned_group_members(leader.pid, pgid, sid, None)
+        assert exc.value.code == "provider-failed"
+    finally:
+        _reap_leader_with_member(leader, member)
+
+
+def test_unreadable_member_starttime_is_not_verified(monkeypatch):
+    """member_start=None must fail closed, never be appended as owned."""
+    leader, pgid, sid, member = _spawn_leader_with_member()
+    monkeypatch.setattr(ap, "_proc_starttime", lambda pid: None)
+    try:
+        with pytest.raises(Problem) as exc:
+            ap._owned_group_members(leader.pid, pgid, sid, 12345)
+        assert exc.value.code == "provider-failed"
+    finally:
+        _reap_leader_with_member(leader, member)
+
+
+def test_timeout_with_unreadable_identity_fails_closed(bindir, monkeypatch):
+    """Unreadable /proc identity at runtime must raise, never kill blindly."""
+    monkeypatch.setattr(ap, "_proc_starttime", lambda pid: None)
+    adapter = _synthetic(_resolve(bindir, "claude", HANG))
+    neighbor = _neighbor()
+    try:
+        with pytest.raises(Problem) as exc:
+            ap.launch_review(adapter, PACKET, SCHEMA, 2, _no_progress([]))
+    finally:
+        neighbor_alive = neighbor.poll() is None
+        neighbor.terminate()
+        neighbor.wait()
+    assert exc.value.code == "provider-failed"
+    assert neighbor_alive
+
+
+def test_launch_fails_closed_without_pidfd_containment(bindir, tmp_path,
+                                                       monkeypatch):
+    """Without a pinnable handle there is no sound cleanup: do not launch."""
+    monkeypatch.setattr(ap, "_PIDFD_AVAILABLE", False)
+    canary = tmp_path / "launched"
+    body = (
+        "#!/bin/sh\ntouch \"" + str(canary) + "\"\ncat >/dev/null\n"
+        "printf '{\"result\": \"X\"}'\nexit 0\n"
+    )
+    adapter = _synthetic(_resolve(bindir, "claude", body))
+    with pytest.raises(Problem) as exc:
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert exc.value.code == "provider-failed"
+    assert not canary.exists()
