@@ -1,7 +1,8 @@
 # Agent-backed doctor and init diagnostic
 
-Status: awaiting user written-spec approval. This document is a design and
-implementation specification, not authorization to implement it.
+Status: implementation in progress under the user's prior authorization;
+model review remains disabled pending the all-three provider qualification
+gate. This document is the design and implementation specification.
 
 ## Outcome and boundaries
 
