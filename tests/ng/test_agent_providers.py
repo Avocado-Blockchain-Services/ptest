@@ -730,3 +730,86 @@ def test_launch_fails_closed_without_pidfd_containment(bindir, tmp_path,
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert exc.value.code == "provider-failed"
     assert not canary.exists()
+
+
+# ---- pidfd lifecycle repair (provider pidfd audit 2026-09-22) ---------------
+#
+# The pidfd audit rejected two lifecycle defects: (1) the _stop_owned survivor
+# loop re-enumerates after SIGKILL but only closes pidfds and waits, so a
+# member forked after the SIGKILL enumeration survives; (2)
+# _owned_group_members accumulates open pidfds and raises on a later
+# unverifiable member without closing the earlier pins. These tests pin the
+# repair: survivors must be actively re-signaled through pinned pidfds, and
+# partial validation must release earlier pins.
+
+
+def test_partial_validation_closes_earlier_pins(monkeypatch):
+    """A later unverifiable member must not leak earlier pidfd pins.
+
+    Negative contract: fail-closed validation that raises after one member
+    passed must still release the already-pinned descriptors; otherwise
+    repeated fail-closed cleanups exhaust file descriptors.
+    """
+    closed: list = []
+    monkeypatch.setattr(ap, "_group_member_pids",
+                        lambda pgid: [41111, 42222])
+    monkeypatch.setattr(
+        ap, "_pin_process",
+        lambda pid: {41111: 9011, 42222: 9012}[pid])
+    monkeypatch.setattr(ap, "_proc_starttime", lambda pid: 200)
+    monkeypatch.setattr(ap, "_proc_state", lambda pid: "S")
+
+    def _fake_getsid(pid):
+        if pid == 41111:
+            return 99999
+        raise OSError("injected unreadable sid")
+
+    monkeypatch.setattr(os, "getsid", _fake_getsid)
+    monkeypatch.setattr(os, "close", lambda fd: closed.append(fd))
+    with pytest.raises(Problem) as exc:
+        ap._owned_group_members(40000, 50000, 99999, 100)
+    assert exc.value.code == "provider-failed"
+    assert 9012 in closed  # failing member's own pin released
+    assert 9011 in closed  # earlier validated pin released, not leaked
+
+
+def test_survivor_loop_resignals_late_spawn_through_pidfd(monkeypatch):
+    """A survivor found after SIGKILL must be signaled, not merely closed.
+
+    Negative contract: the survivor loop must re-enumerate AND actively
+    signal every verified survivor through its pinned pidfd until
+    quiescent/deadline; only closing the descriptor lets a late-spawned
+    owned child survive. No numeric kill of any member is used.
+    """
+    signals: list = []
+    sent: list = []
+    monkeypatch.setattr(
+        ap, "_signal_pinned",
+        lambda proc_pid, pgid, sid, leader_start, sig: signals.append(sig))
+    monkeypatch.setattr(
+        ap, "_pidfd_signal",
+        lambda pidfd, sig: sent.append((pidfd, sig)) or True)
+    rounds = [[(77777, 9021)], []]
+    monkeypatch.setattr(
+        ap, "_owned_group_members",
+        lambda *args: rounds.pop(0) if rounds else [])
+    monkeypatch.setattr(ap, "_close_pinned", lambda owned: None)
+
+    class _FakeProc:
+        pid = 66666
+
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError("exited direct child must not be signaled")
+
+        def kill(self):
+            raise AssertionError("exited direct child must not be signaled")
+
+        def wait(self, timeout=None):
+            return 0
+
+    ap._stop_owned(_FakeProc(), 55555, 44444, 100)
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert (9021, signal.SIGKILL) in sent

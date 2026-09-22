@@ -479,31 +479,38 @@ def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
         _unverified_group()
     assert members is not None
     owned: list = []
-    for mid in members:
-        if mid == proc_pid:
-            continue
-        pidfd = _pin_process(mid)
-        if pidfd is None:
-            continue  # exited while scanning; nothing pinned, nothing sent
-        try:
-            member_sid = os.getsid(mid)
-        except ProcessLookupError:
-            os.close(pidfd)
-            continue  # exited while scanning
-        except OSError:
-            os.close(pidfd)
-            _unverified_group()
-        if member_sid != sid:
-            os.close(pidfd)
-            _unverified_group()
-        member_start = _proc_starttime(mid)
-        if member_start is None or member_start < leader_start:
-            os.close(pidfd)
-            _unverified_group()
-        if _proc_state(mid) == "Z":
-            os.close(pidfd)
-            continue  # zombie: already dead, owned by init; no signal needed
-        owned.append((mid, pidfd))
+    try:
+        for mid in members:
+            if mid == proc_pid:
+                continue
+            pidfd = _pin_process(mid)
+            if pidfd is None:
+                continue  # exited while scanning; nothing pinned, nothing sent
+            try:
+                member_sid = os.getsid(mid)
+            except ProcessLookupError:
+                os.close(pidfd)
+                continue  # exited while scanning
+            except OSError:
+                os.close(pidfd)
+                _unverified_group()
+            if member_sid != sid:
+                os.close(pidfd)
+                _unverified_group()
+            member_start = _proc_starttime(mid)
+            if member_start is None or member_start < leader_start:
+                os.close(pidfd)
+                _unverified_group()
+            if _proc_state(mid) == "Z":
+                os.close(pidfd)
+                continue  # zombie: dead, owned by init; no signal needed
+            owned.append((mid, pidfd))
+    except BaseException:
+        # A later unverifiable member fails closed, but the earlier pins
+        # already validated must still be released: the caller never
+        # receives `owned`, so nobody else can close them.
+        _close_pinned(owned)
+        raise
     return owned
 
 
@@ -529,8 +536,10 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None,
     to a process that passed post-pin session/start-time validation; numeric
     killpg/kill of members is never used, so a recycled PID can never
     receive our signal. An unverifiable group fails closed rather than
-    risking a reused PGID, and members surviving SIGKILL are reported
-    instead of silently leaked. The direct child is always reaped.
+    risking a reused PGID; survivors found after SIGKILL are re-signaled
+    through their pinned pidfds until quiescent or the deadline, and members
+    still surviving then are reported instead of silently leaked. The direct
+    child is always reaped.
     """
     try:
         if proc.poll() is None:
@@ -559,7 +568,15 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None,
             while True:
                 survivors = _owned_group_members(proc.pid, pgid, sid,
                                                  leader_start)
-                _close_pinned(survivors)
+                try:
+                    # A TERM-ignoring member may have forked after the
+                    # SIGKILL enumeration; every verified survivor is
+                    # re-signaled through its pinned pidfd -- never by
+                    # numeric PID -- until quiescent or the deadline.
+                    for _, pidfd in survivors:
+                        _pidfd_signal(pidfd, signal.SIGKILL)
+                finally:
+                    _close_pinned(survivors)
                 if not survivors or time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
