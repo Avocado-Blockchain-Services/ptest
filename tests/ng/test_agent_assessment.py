@@ -138,13 +138,8 @@ def _payload_for(packet, rows=None, findings="auto", score="omit"):
     elif score != "omit":
         child["score"] = score
     return {"schema": "ptest.agent-assessment/v1",
-            "provider": {"name": "claude", "cli_version": "1.2.3",
-                         "profile": "stable"},
             "children": [child],
-            "limitations": [],
-            "publication": {"status": "created",
-                            "path": "recommendations.md",
-                            "sha256": "12" * 32}}
+            "limitations": []}
 
 
 def _envelope_bytes(payload: dict) -> bytes:
@@ -357,7 +352,12 @@ def test_parse_assessment_rejects_unjustified_not_applicable(tmp_path):
             _envelope_bytes(_payload_for(packet, rows=rows)), packet)
 
 
-def test_parse_assessment_accepts_affirmative_not_applicable(tmp_path):
+def test_parse_assessment_rejects_any_not_applicable_as_unsupported(tmp_path):
+    """N/A is currently UNSUPPORTED in v1 model input: no trusted typed
+    positive applicability source exists, and repository prose quoted
+    verbatim cannot prove non-applicability. Every ``not-applicable``
+    row fails closed; the caller leaves such rows ``unknown`` instead.
+    """
     from ptest import agent_assessment as AA
 
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
@@ -368,11 +368,9 @@ def test_parse_assessment_accepts_affirmative_not_applicable(tmp_path):
         rationale=(f"Affirmative: {excerpt.path} holds only x = 1, a bare "
                    "constant, so no database ownership rule applies."),
         evidence=[_citation_for(packet)])
-    raw = _envelope_bytes(_payload_for(packet, rows=rows))
-    child = AA.parse_assessment(raw, packet)
-    assert child.rows[3].status == "not-applicable"
-    assert child.score is not None
-    assert (child.score.satisfied, child.score.applicable) == (10, 10)
+    with pytest.raises(C.Problem):
+        AA.parse_assessment(
+            _envelope_bytes(_payload_for(packet, rows=rows)), packet)
 
 
 def test_parse_assessment_rejects_model_supplied_score_and_command(tmp_path):
@@ -450,7 +448,7 @@ def _with_extra(payload: dict, where: str) -> dict:
     if where == "assessment":
         payload["trace_id"] = "smuggled"
     elif where == "provider":
-        payload["provider"]["region"] = "smuggled"
+        payload["provider"] = {"name": "smuggled"}
     elif where == "child":
         child["priority"] = "smuggled"
     elif where == "row":
@@ -467,7 +465,7 @@ def _with_extra(payload: dict, where: str) -> dict:
                                  "paths": [],
                                  "extra": "smuggled"}]
     elif where == "publication":
-        payload["publication"]["uri"] = "smuggled"
+        payload["publication"] = {"status": "smuggled"}
     else:
         raise AssertionError(f"unknown injection site {where!r}")
     return payload
@@ -578,3 +576,68 @@ def test_parse_assessment_accepts_scoreless_payload_with_computed_score(
     assert child.score is not None
     assert (child.score.satisfied, child.score.applicable,
             child.score.percent) == (11, 11, 100)
+
+
+# --- HIGH-blocker repair: fail-closed N/A, model-prose-only raw boundary -----
+
+def test_parse_assessment_rejects_quoted_line_false_not_applicable(tmp_path):
+    """A verbatim quoted line is NOT affirmative non-applicability.
+
+    The rationale reproduces the cited ``DATABASE_URL`` line verbatim
+    while falsely claiming no database applies. Accepting it would
+    remove a real checklist item from the score denominator, so the
+    raw boundary must reject it; the caller leaves the row
+    ``unknown`` instead. Pure ``AA.score`` keeps N/A support for a
+    future authoritative path.
+    """
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "src/db.py": ("DATABASE_URL = 'postgresql://localhost/demo'\n"
+                      "import psycopg2\n"),
+    })
+    excerpt = packet.excerpts[0]
+    quoted = "DATABASE_URL = 'postgresql://localhost/demo'"
+    assert quoted in excerpt.text
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[2] = _row(
+        packet, "DB-001", "not-applicable",
+        rationale=(f"Affirmative: {excerpt.path} line 1 reads {quoted!r}, "
+                   "so no database applies to this project."),
+        evidence=[_citation_for(packet)])
+    with pytest.raises(C.Problem):
+        AA.parse_assessment(
+            _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    na_rows = tuple(
+        AA.AssessmentRow(id=row_id, status="not-applicable",
+                         rationale=f"Row {row_id} out of scope.",
+                         evidence=())
+        for row_id in EXPECTED_IDS)
+    assert AA.score(na_rows) is None
+
+
+def test_parse_assessment_rejects_raw_provider_and_publication(tmp_path):
+    """The raw model response carries prose only: no provider identity
+    (name/cli_version/profile) and no publication result (status/sha).
+    Provider metadata and the report publication result are ptest-owned;
+    the CLI attaches the actual values to the final PublicDocument.
+    """
+    import copy
+
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    clean = _payload_for(packet)
+    assert "provider" not in clean and "publication" not in clean
+    AA.parse_assessment(_envelope_bytes(copy.deepcopy(clean)), packet)
+    with_provider = copy.deepcopy(clean)
+    with_provider["provider"] = {"name": "claude", "cli_version": "1.2.3",
+                                 "profile": "stable"}
+    with pytest.raises(C.Problem):
+        AA.parse_assessment(_envelope_bytes(with_provider), packet)
+    with_publication = copy.deepcopy(clean)
+    with_publication["publication"] = {
+        "status": "created", "path": "recommendations.md",
+        "sha256": "12" * 32}
+    with pytest.raises(C.Problem):
+        AA.parse_assessment(_envelope_bytes(with_publication), packet)

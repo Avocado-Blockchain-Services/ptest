@@ -12,12 +12,15 @@ Three-pass shape (collect, validate, score):
    executed or imported (recorded ``uninspectable``), ptest's own runtime
    environment is never treated as project evidence, and anything
    unprovable stays ``unknown``.
-2. :func:`parse_assessment` validates one normalized provider payload
+2. :func:`parse_assessment` validates one normalized model-prose payload
    strictly against one packet, reusing the frozen ``PublicDocument``
    contract (``ptest.agent-assessment/v1``) instead of a duplicate schema,
    then binds every citation to collected excerpt identity and ranges,
-   rejects stale packets and model-supplied commands/scores, and requires
-   affirmative evidence for ``not-applicable`` rows.
+   and rejects stale packets, model-supplied commands/scores, raw
+   provider/publication fields, and every ``not-applicable`` row.
+   Raw N/A is unsupported in v1 (a quoted line proves nothing about
+   applicability; leave the row ``unknown``). Only pure :func:`score`
+   keeps N/A support for a future authoritative path.
 3. :func:`score` computes ``satisfied / (all - justified N/A)`` with
    integer floor; ``unknown`` stays in the denominator and zero applicable
    rows yield no score.
@@ -108,19 +111,20 @@ _FORBIDDEN_KEYS = frozenset({
     "score_override", "raw_output", "shell", "argv",
 })
 
-# Exact raw model-response shapes, mirrored from the frozen public contract.
-# The raw boundary enforces these BEFORE public projection so an unknown
-# field anywhere is rejected, never projected away. The raw child shape
-# deliberately omits ``score``: the model schema carries no score and ptest
-# computes it after validation, before constructing the validated document.
+# Exact raw model-response shapes: model prose only (rationale, findings,
+# suggested changes, recipe IDs, citations, limitations). The raw boundary
+# enforces these BEFORE public projection so an unknown field anywhere is
+# rejected, never projected away. The raw assessment deliberately omits
+# ``provider`` and ``publication`` (ptest-owned: the CLI attaches the
+# actual selected provider metadata and the actual report publication
+# result to the final PublicDocument) and the raw child omits ``score``
+# (ptest computes it after validation, before constructing the validated
+# document).
 _RAW_ENVELOPE_FIELDS = frozenset({
     "schema_version", "kind", "ptest_version", "domain", "data", "error",
 })
 _RAW_ASSESSMENT_FIELDS = frozenset({
-    "schema", "provider", "children", "limitations", "publication",
-})
-_RAW_PROVIDER_FIELDS = frozenset({
-    "name", "cli_version", "profile",
+    "schema", "children", "limitations",
 })
 _RAW_CHILD_FIELDS = frozenset({
     "project_id", "scope", "packet_sha256", "rows", "findings",
@@ -138,9 +142,21 @@ _RAW_FINDING_FIELDS = frozenset({
 _RAW_LIMITATION_FIELDS = frozenset({
     "code", "message", "paths",
 })
-_RAW_PUBLICATION_FIELDS = frozenset({
-    "status", "path", "sha256",
-})
+
+# ptest-owned placeholders injected ONLY to satisfy the frozen public
+# contract during internal validation. Never taken from model input and
+# never returned: parse_assessment yields ChildAssessment (which carries
+# neither field).
+_ASSESSMENT_PROVIDER = {
+    "name": "claude",
+    "cli_version": "0.0.0-ptest-internal",
+    "profile": "ptest-internal",
+}
+_ASSESSMENT_PUBLICATION = {
+    "status": "created",
+    "path": "recommendations.md",
+    "sha256": "00" * 32,
+}
 
 _LINK_RE = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)")
 _AUTOLINK_RE = re.compile(
@@ -744,8 +760,6 @@ def _reject_extra_raw_keys(envelope: object) -> None:
     _require_exact_keys(envelope, _RAW_ENVELOPE_FIELDS, "assessment")
     data = envelope["data"]
     _require_exact_keys(data, _RAW_ASSESSMENT_FIELDS, "assessment")
-    _require_exact_keys(data["provider"], _RAW_PROVIDER_FIELDS,
-                        "assessment.provider")
     children = data["children"]
     if not isinstance(children, list):
         raise _fail("invalid-assessment",
@@ -800,8 +814,6 @@ def _reject_extra_raw_keys(envelope: object) -> None:
     for index, entry in enumerate(limitations):
         _require_exact_keys(entry, _RAW_LIMITATION_FIELDS,
                             f"assessment.limitations[{index}]")
-    _require_exact_keys(data["publication"], _RAW_PUBLICATION_FIELDS,
-                        "assessment.publication")
 
 
 def _provisional_score(rows: object) -> dict | None:
@@ -867,16 +879,18 @@ def parse_assessment(payload: bytes,
     # away, and any model-supplied score key fails before validation.
     _reject_extra_raw_keys(envelope)
 
-    # ptest computes the score, then the frozen public contract validates
-    # the completed post-computation envelope; it never sees raw input.
-    completed_raw = raw
+    # ptest attaches its own provider/publication placeholders plus the
+    # computed score, then the frozen public contract validates the
+    # completed post-computation envelope; it never sees raw input.
     children = data["children"]
+    completed = json.loads(text)
+    completed["data"]["provider"] = dict(_ASSESSMENT_PROVIDER)
+    completed["data"]["publication"] = dict(_ASSESSMENT_PUBLICATION)
     if (isinstance(children, list) and len(children) == 1
             and isinstance(children[0], dict)):
-        completed = json.loads(text)
         completed["data"]["children"][0]["score"] = _provisional_score(
             children[0].get("rows"))
-        completed_raw = json.dumps(completed).encode("utf-8")
+    completed_raw = json.dumps(completed).encode("utf-8")
     try:
         document = C.decode_public_document(completed_raw)
     except C.Problem:
@@ -933,7 +947,9 @@ def parse_assessment(payload: bytes,
         _reject_untrusted_prose(entry["rationale"],
                                 f"rows[{position}].rationale")
         if entry["status"] == "not-applicable":
-            _require_affirmative_na(entry, citations, packet)
+            raise _fail("invalid-assessment",
+                        "not-applicable is unsupported in v1 model "
+                        "input; leave the row unknown")
         rows.append(AssessmentRow(id=entry["id"], status=entry["status"],
                                   rationale=entry["rationale"],
                                   evidence=citations))
@@ -975,38 +991,6 @@ def parse_assessment(payload: bytes,
         packet_sha256=child["packet_sha256"],
         project_id=child["project_id"], scope=child["scope"],
         rows=tuple(rows), findings=tuple(findings), score=computed)
-
-
-def _require_affirmative_na(entry: dict, citations: tuple[Citation, ...],
-                            packet: EvidencePacket) -> None:
-    """N/A needs a narrow applicability proof: the rationale must name a
-    cited source AND reproduce at least one cited line verbatim, proving
-    the judgment rests on actual excerpt content. A filename mention alone
-    fails closed, as does silence about the cited lines; absence of
-    evidence is ``unknown``, never N/A."""
-    lowered = entry["rationale"].lower()
-    named = any(
-        citation.path.rsplit("/", 1)[-1].lower() in lowered
-        for citation in citations)
-    if packet.scope != "." and packet.scope.lower() in lowered:
-        named = True
-    if not named:
-        raise _fail("invalid-assessment",
-                    "not-applicable needs affirmative cited evidence")
-    index = {excerpt.path: excerpt for excerpt in packet.excerpts}
-    for citation in citations:
-        excerpt = index.get(citation.path)
-        if excerpt is None:
-            continue
-        lines = excerpt.text.splitlines()
-        low = max(citation.start_line - excerpt.start_line, 0)
-        high = citation.end_line - excerpt.start_line
-        for line in lines[low:high + 1]:
-            fragment = line.strip()
-            if len(fragment) >= 4 and fragment.lower() in lowered:
-                return
-    raise _fail("invalid-assessment",
-                "not-applicable needs affirmative cited evidence")
 
 
 __all__ = [
