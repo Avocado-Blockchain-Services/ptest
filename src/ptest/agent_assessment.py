@@ -108,6 +108,40 @@ _FORBIDDEN_KEYS = frozenset({
     "score_override", "raw_output", "shell", "argv",
 })
 
+# Exact raw model-response shapes, mirrored from the frozen public contract.
+# The raw boundary enforces these BEFORE public projection so an unknown
+# field anywhere is rejected, never projected away. The raw child shape
+# deliberately omits ``score``: the model schema carries no score and ptest
+# computes it after validation, before constructing the validated document.
+_RAW_ENVELOPE_FIELDS = frozenset({
+    "schema_version", "kind", "ptest_version", "domain", "data", "error",
+})
+_RAW_ASSESSMENT_FIELDS = frozenset({
+    "schema", "provider", "children", "limitations", "publication",
+})
+_RAW_PROVIDER_FIELDS = frozenset({
+    "name", "cli_version", "profile",
+})
+_RAW_CHILD_FIELDS = frozenset({
+    "project_id", "scope", "packet_sha256", "rows", "findings",
+    "limitations",
+})
+_RAW_ROW_FIELDS = frozenset({
+    "id", "status", "rationale", "evidence",
+})
+_RAW_CITATION_FIELDS = frozenset({
+    "path", "start_line", "end_line", "sha256",
+})
+_RAW_FINDING_FIELDS = frozenset({
+    "id", "summary", "suggested_change", "recipe_id", "evidence",
+})
+_RAW_LIMITATION_FIELDS = frozenset({
+    "code", "message", "paths",
+})
+_RAW_PUBLICATION_FIELDS = frozenset({
+    "status", "path", "sha256",
+})
+
 _LINK_RE = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)")
 _AUTOLINK_RE = re.compile(
     r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>")
@@ -690,6 +724,107 @@ def _reject_forbidden_keys(node: object) -> None:
             _reject_forbidden_keys(value)
 
 
+def _require_exact_keys(item: object, allowed: frozenset,
+                        ctx: str) -> None:
+    """Require exactly the allowed keys: missing and unknown both fail."""
+    if not isinstance(item, dict):
+        raise _fail("invalid-assessment", f"{ctx} must be an object")
+    for key in allowed:
+        if key not in item:
+            raise _fail("invalid-assessment",
+                        f"{ctx} is missing {key!r}")
+    for key in item:
+        if key not in allowed:
+            raise _fail("invalid-assessment",
+                        f"{ctx} carries an unknown field")
+
+
+def _reject_extra_raw_keys(envelope: object) -> None:
+    """Enforce exact raw shapes recursively before public projection."""
+    _require_exact_keys(envelope, _RAW_ENVELOPE_FIELDS, "assessment")
+    data = envelope["data"]
+    _require_exact_keys(data, _RAW_ASSESSMENT_FIELDS, "assessment")
+    _require_exact_keys(data["provider"], _RAW_PROVIDER_FIELDS,
+                        "assessment.provider")
+    children = data["children"]
+    if not isinstance(children, list):
+        raise _fail("invalid-assessment",
+                    "assessment.children must be a list")
+    for position, child in enumerate(children):
+        ctx = f"assessment.children[{position}]"
+        if not isinstance(child, dict):
+            raise _fail("invalid-assessment", f"{ctx} must be an object")
+        if "score" in child:
+            raise _fail("invalid-assessment",
+                        "assessment carries a model-supplied field")
+        _require_exact_keys(child, _RAW_CHILD_FIELDS, ctx)
+        rows = child["rows"]
+        if not isinstance(rows, list):
+            raise _fail("invalid-assessment",
+                        f"{ctx}.rows must be a list")
+        for index, entry in enumerate(rows):
+            row_ctx = f"{ctx}.rows[{index}]"
+            _require_exact_keys(entry, _RAW_ROW_FIELDS, row_ctx)
+            evidence = entry.get("evidence")
+            if not isinstance(evidence, list):
+                raise _fail("invalid-assessment",
+                            f"{row_ctx}.evidence must be a list")
+            for number, citation in enumerate(evidence):
+                _require_exact_keys(citation, _RAW_CITATION_FIELDS,
+                                    f"{row_ctx}.evidence[{number}]")
+        findings = child["findings"]
+        if not isinstance(findings, list):
+            raise _fail("invalid-assessment",
+                        f"{ctx}.findings must be a list")
+        for index, entry in enumerate(findings):
+            finding_ctx = f"{ctx}.findings[{index}]"
+            _require_exact_keys(entry, _RAW_FINDING_FIELDS, finding_ctx)
+            evidence = entry.get("evidence")
+            if not isinstance(evidence, list):
+                raise _fail("invalid-assessment",
+                            f"{finding_ctx}.evidence must be a list")
+            for number, citation in enumerate(evidence):
+                _require_exact_keys(citation, _RAW_CITATION_FIELDS,
+                                    f"{finding_ctx}.evidence[{number}]")
+        limitations = child["limitations"]
+        if not isinstance(limitations, list):
+            raise _fail("invalid-assessment",
+                        f"{ctx}.limitations must be a list")
+        for index, entry in enumerate(limitations):
+            _require_exact_keys(entry, _RAW_LIMITATION_FIELDS,
+                                f"{ctx}.limitations[{index}]")
+    limitations = data["limitations"]
+    if not isinstance(limitations, list):
+        raise _fail("invalid-assessment",
+                    "assessment.limitations must be a list")
+    for index, entry in enumerate(limitations):
+        _require_exact_keys(entry, _RAW_LIMITATION_FIELDS,
+                            f"assessment.limitations[{index}]")
+    _require_exact_keys(data["publication"], _RAW_PUBLICATION_FIELDS,
+                        "assessment.publication")
+
+
+def _provisional_score(rows: object) -> dict | None:
+    """Compute the ptest score from raw row statuses for injection.
+
+    Malformed rows yield a placeholder; the post-computation public
+    validation rejects the shape with its own contract error.
+    """
+    if not isinstance(rows, list):
+        return None
+    na_count = sum(1 for row in rows
+                   if isinstance(row, dict)
+                   and row.get("status") == "not-applicable")
+    satisfied = sum(1 for row in rows
+                   if isinstance(row, dict)
+                   and row.get("status") == "satisfied")
+    applicable = len(rows) - na_count
+    if applicable <= 0:
+        return None
+    return {"satisfied": satisfied, "applicable": applicable,
+            "percent": (100 * satisfied) // applicable}
+
+
 def _reject_untrusted_prose(text: str, ctx: str) -> None:
     if (_LINK_RE.search(text) or _AUTOLINK_RE.search(text)
             or _HTML_RE.search(text) or "|" in text or "`" in text
@@ -728,11 +863,22 @@ def parse_assessment(payload: bytes,
         raise _fail("invalid-assessment",
                     "error documents are not assessments")
     _reject_forbidden_keys(data)
+    # Exact raw shapes first: unknowns are rejected here, never projected
+    # away, and any model-supplied score key fails before validation.
+    _reject_extra_raw_keys(envelope)
 
-    # The frozen public contract owns envelope/schema/shape validation;
-    # this layer adds single-packet binding on top, never a second schema.
+    # ptest computes the score, then the frozen public contract validates
+    # the completed post-computation envelope; it never sees raw input.
+    completed_raw = raw
+    children = data["children"]
+    if (isinstance(children, list) and len(children) == 1
+            and isinstance(children[0], dict)):
+        completed = json.loads(text)
+        completed["data"]["children"][0]["score"] = _provisional_score(
+            children[0].get("rows"))
+        completed_raw = json.dumps(completed).encode("utf-8")
     try:
-        document = C.decode_public_document(raw)
+        document = C.decode_public_document(completed_raw)
     except C.Problem:
         raise
     except (TypeError, ValueError) as exc:
@@ -833,14 +979,32 @@ def parse_assessment(payload: bytes,
 
 def _require_affirmative_na(entry: dict, citations: tuple[Citation, ...],
                             packet: EvidencePacket) -> None:
-    """N/A needs a specific reason grounded in cited excerpt evidence."""
+    """N/A needs a narrow applicability proof: the rationale must name a
+    cited source AND reproduce at least one cited line verbatim, proving
+    the judgment rests on actual excerpt content. A filename mention alone
+    fails closed, as does silence about the cited lines; absence of
+    evidence is ``unknown``, never N/A."""
     lowered = entry["rationale"].lower()
-    for citation in citations:
-        basename = citation.path.rsplit("/", 1)[-1].lower()
-        if basename and basename in lowered:
-            return
+    named = any(
+        citation.path.rsplit("/", 1)[-1].lower() in lowered
+        for citation in citations)
     if packet.scope != "." and packet.scope.lower() in lowered:
-        return
+        named = True
+    if not named:
+        raise _fail("invalid-assessment",
+                    "not-applicable needs affirmative cited evidence")
+    index = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    for citation in citations:
+        excerpt = index.get(citation.path)
+        if excerpt is None:
+            continue
+        lines = excerpt.text.splitlines()
+        low = max(citation.start_line - excerpt.start_line, 0)
+        high = citation.end_line - excerpt.start_line
+        for line in lines[low:high + 1]:
+            fragment = line.strip()
+            if len(fragment) >= 4 and fragment.lower() in lowered:
+                return
     raise _fail("invalid-assessment",
                 "not-applicable needs affirmative cited evidence")
 
