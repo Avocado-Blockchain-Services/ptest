@@ -699,18 +699,133 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
     return 2 if problem.code not in {"coordinator-unavailable", "queue-timeout"} else 75
 
 
-def _review_gate_problem(parsed: ParsedArgs) -> C.Problem:
-    """Fail closed until provider qualification, disclosure, and review land."""
-    if (parsed.reviewer_explicit and parsed.reviewer != "auto"
-            and parsed.allow_model_review):
-        return _problem(
-            "provider-unqualified",
-            "review provider qualification is unavailable in this slice",
-        )
+def _interactive_review() -> bool:
+    """TTY review is interactive only outside CI, even if stdin is a TTY."""
+    return sys.stdin.isatty() and "CI" not in os.environ
+
+
+def _review_consent_problem() -> C.Problem:
     return _problem(
         "consent-required",
-        "review requires an explicit provider and model-review consent",
+        "non-interactive review requires an explicit reviewer and "
+        "--allow-model-review",
     )
+
+
+def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
+    """Resolve one installed adapter, selecting only qualified auto choices."""
+    selected = parsed.reviewer
+    if selected not in (None, "auto"):
+        adapter = agent_providers.resolve_reviewer(selected, os.environ)
+        if not adapter.qualified:
+            raise _problem(
+                "provider-unqualified",
+                f"reviewer {selected} is installed but its profile is not qualified",
+            )
+        return adapter
+
+    if not interactive:
+        # Automation must name a concrete provider; auto selection must never
+        # turn an explicit consent flag into permission to inspect PATH.
+        raise _review_consent_problem()
+
+    saw_unqualified = False
+    for name in agent_providers.SUPPORTED_REVIEWERS:
+        try:
+            adapter = agent_providers.resolve_reviewer(name, os.environ)
+        except C.Problem as problem:
+            if problem.code == "provider-unavailable":
+                continue
+            raise
+        if adapter.qualified:
+            return adapter
+        saw_unqualified = True
+    if saw_unqualified:
+        raise _problem(
+            "provider-unqualified",
+            "installed review providers are not qualified for source review",
+        )
+    raise _problem("provider-unavailable", "no supported review provider is installed")
+
+
+def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
+                              *, ask: bool = True) -> bool:
+    provider = render.terminal_text(adapter.name[:120])
+    project = render.terminal_text(resolution.root.name[:120])
+    disclosure = (
+        f"Model review disclosure: {provider} may receive bounded source text "
+        f"from project {project} using your existing account. Provider or "
+        "account costs may apply. ptest cannot perfectly detect secrets in "
+        "source. Excluded from review: secrets/private files, agent "
+        "instructions/configuration, dependency environments, caches, "
+        "coverage/build outputs, generated/minified files, and .ptest private "
+        "runtime state. Use --offline for the static doctor instead."
+    )
+    if not ask:
+        print(disclosure, file=sys.stderr)
+        return True
+    print(
+        disclosure + "\n"
+        "Run this review once? [y/N]: ",
+        end="", file=sys.stderr, flush=True,
+    )
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                      domain: C.DomainPaths, *, interactive: bool,
+                      preconsented: bool = False) -> bool:
+    """Return true for a declined offline result; all review paths fail closed."""
+    if not interactive and not (
+            parsed.reviewer_explicit and parsed.reviewer not in (None, "auto")
+            and parsed.allow_model_review):
+        raise _review_consent_problem()
+
+    adapter = _resolve_review_adapter(parsed, interactive=interactive)
+    if interactive and not _render_review_disclosure(
+            adapter, resolution, ask=not preconsented):
+        print(
+            "Optimization review is disabled; showing offline static doctor output.",
+            file=sys.stderr,
+        )
+        _doctor_static_output(parsed, resolution, domain)
+        return True
+
+    # Provider use intentionally remains disabled until the shared review core
+    # and the all-provider adversarial qualification gate are complete.
+    raise _problem(
+        "provider-unqualified",
+        "review core remains disabled pending provider qualification and implementation",
+    )
+
+
+def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                          domain: C.DomainPaths) -> None:
+    limits = C.ScanLimits(
+        entries=parsed.max_entries or C.DEFAULT_SCAN_LIMITS.entries,
+        files=parsed.max_files or C.DEFAULT_SCAN_LIMITS.files,
+        file_bytes=parsed.max_file_bytes or C.DEFAULT_SCAN_LIMITS.file_bytes,
+        total_bytes=parsed.max_total_bytes or C.DEFAULT_SCAN_LIMITS.total_bytes,
+        findings=C.DEFAULT_SCAN_LIMITS.findings,
+        output_bytes=C.DEFAULT_SCAN_LIMITS.output_bytes,
+        elapsed_s=C.DEFAULT_SCAN_LIMITS.elapsed_s,
+        depth=C.DEFAULT_SCAN_LIMITS.depth,
+        ast_nodes=C.DEFAULT_SCAN_LIMITS.ast_nodes,
+    )
+    workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
+    if parsed.prompt:
+        sys.stdout.write(render.repair_prompt(
+            workspace.aggregate, workspace=workspace))
+    elif parsed.json:
+        sys.stdout.buffer.write(render.render_doctor_json(
+            workspace.aggregate, domain=_domain_public(domain)))
+    else:
+        sys.stdout.write(render.render_doctor(
+            workspace.aggregate, workspace=workspace))
 
 
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
@@ -770,10 +885,35 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
-            if parsed.doctor_request is True:
-                print("initialization succeeded; review incomplete", file=sys.stderr)
-                return _emit_error(
-                    _review_gate_problem(parsed), kind="init", json_output=False)
+            offer_review = (
+                parsed.doctor_request is True
+                or (parsed.doctor_request is None and not parsed.json
+                    and not parsed.dry_run and _interactive_review())
+            )
+            if offer_review:
+                explicit_request = parsed.doctor_request is True
+                try:
+                    resolution = config_api.resolve_config(cwd)
+                    domain = platform.domain_paths(parsed.fixture_domain)
+                    declined = _run_review_entry(
+                        parsed, resolution, domain,
+                        interactive=_interactive_review(),
+                        preconsented=(explicit_request
+                                      and parsed.allow_model_review),
+                    )
+                    if declined:
+                        return 0
+                except C.Problem as problem:
+                    if not explicit_request:
+                        print(
+                            "review unavailable; initialization succeeded "
+                            f"without review ({render.terminal_text(problem.code)})",
+                            file=sys.stderr,
+                        )
+                        return 0
+                    print("initialization succeeded; review incomplete", file=sys.stderr)
+                    return _emit_error(
+                        problem, kind="init", json_output=False)
             return 0
         except C.Problem as problem:
             return _emit_error(problem, kind="init", json_output=parsed.json)
@@ -918,33 +1058,24 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                           file=sys.stderr)
                 return result.exit_code
             if not (parsed.offline or parsed.json or parsed.prompt):
-                return _emit_error(
-                    _review_gate_problem(parsed), kind="doctor",
-                    json_output=parsed.assessment_json, domain=domain)
-            limits = C.ScanLimits(
-                entries=parsed.max_entries or C.DEFAULT_SCAN_LIMITS.entries,
-                files=parsed.max_files or C.DEFAULT_SCAN_LIMITS.files,
-                file_bytes=parsed.max_file_bytes or C.DEFAULT_SCAN_LIMITS.file_bytes,
-                total_bytes=parsed.max_total_bytes or C.DEFAULT_SCAN_LIMITS.total_bytes,
-                findings=C.DEFAULT_SCAN_LIMITS.findings,
-                output_bytes=C.DEFAULT_SCAN_LIMITS.output_bytes,
-                elapsed_s=C.DEFAULT_SCAN_LIMITS.elapsed_s,
-                depth=C.DEFAULT_SCAN_LIMITS.depth,
-                ast_nodes=C.DEFAULT_SCAN_LIMITS.ast_nodes,
-            )
-            workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
-            if parsed.prompt:
-                sys.stdout.write(render.repair_prompt(
-                    workspace.aggregate, workspace=workspace))
-            elif parsed.json:
-                sys.stdout.buffer.write(render.render_doctor_json(
-                    workspace.aggregate, domain=_domain_public(domain)))
-            else:
-                sys.stdout.write(render.render_doctor(
-                    workspace.aggregate, workspace=workspace))
+                declined = _run_review_entry(
+                    parsed, resolution, domain,
+                    interactive=_interactive_review(),
+                )
+                if declined:
+                    return 0
+                raise _problem(
+                    "provider-unqualified",
+                    "review core remains disabled pending provider qualification and implementation",
+                )
+            _doctor_static_output(parsed, resolution, domain)
             return 0
     except C.Problem as problem:
-        return _emit_error(problem, kind=command or "where", json_output=parsed.json)
+        return _emit_error(
+            problem, kind=command or "where",
+            json_output=(parsed.json or
+                         (command == "doctor" and parsed.assessment_json)),
+        )
     raise _problem("invalid-config", "unknown command")
 
 

@@ -1411,3 +1411,211 @@ def test_init_doctor_on_existing_config_without_consent_keeps_bytes_and_reports_
     captured = capsys.readouterr()
     assert (tmp_path / ".ptest.toml").read_bytes() == before
     assert "consent-required" in captured.err + captured.out
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor",),
+    ("doctor", "--reviewer", "claude"),
+    ("doctor", "--reviewer", "auto", "--allow-model-review"),
+    ("doctor", "--allow-model-review"),
+])
+def test_non_tty_consent_gate_precedes_reviewer_resolution_and_source_scan(
+        tmp_path, monkeypatch, capsys, argv):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer before consent"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source before consent"),
+    )
+
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert "consent-required" in captured.err
+
+
+def test_ci_suppresses_tty_prompt_and_requires_explicit_consent_first(
+        tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted in CI"))
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer before consent"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source before consent"),
+    )
+
+    assert main(("doctor",)) == 2
+    assert "consent-required" in capsys.readouterr().err
+
+
+def _fake_reviewer(name, *, qualified):
+    from ptest.agent_providers import ReviewerAdapter
+
+    return ReviewerAdapter(name, f"/fake/{name}", (f"/fake/{name}",),
+                           qualified=qualified, qualification_note="test")
+
+
+def test_tty_auto_review_uses_stable_order_and_skips_unqualified_adapters(
+        inspection_project, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    resolved = []
+    prompts = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        return _fake_reviewer(name, qualified=(name != "claude"))
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    monkeypatch.setattr("builtins.input", lambda: prompts.append("asked") or "yes")
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("disabled review scanned source after accept"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("reviewer launched in disabled slice"),
+    )
+
+    assert main(("doctor",)) == 2
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert prompts == ["asked"]
+    assert "provider-unqualified" in captured.err
+    assert "consent-required" not in captured.err
+
+
+def test_tty_auto_with_no_qualified_reviewer_never_prompts_or_scans(
+        inspection_project, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    resolved = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        if name == "codex":
+            raise C.Problem(code="provider-unavailable", message="not installed",
+                            phase="provider")
+        return _fake_reviewer(name, qualified=False)
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted without a qualified reviewer"))
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source without a qualified reviewer"),
+    )
+
+    assert main(("doctor",)) == 2
+    assert resolved == ["claude", "codex", "opencode"]
+    assert "provider-unqualified" in capsys.readouterr().err
+
+
+def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offline(
+        inspection_project, monkeypatch, capsys):
+    import sys
+
+    domain, root = inspection_project
+    hostile = root.with_name("project\x1b[31m\nname")
+    root.rename(hostile)
+    monkeypatch.chdir(hostile)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda name, env: _fake_reviewer("claude", qualified=True),
+    )
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "no")
+    scans = []
+    real_inspect = __import__("ptest.doctor", fromlist=["inspect_workspace"]).inspect_workspace
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: scans.append(1) or real_inspect(*a, **k),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("decline launched reviewer"),
+    )
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    disclosure = captured.err
+    assert prompts == [1]
+    assert scans == [1]
+    assert "claude" in disclosure
+    assert r"project\x1b[31m\nname" in disclosure
+    assert "bounded source" in disclosure
+    assert "existing account" in disclosure
+    assert "costs may apply" in disclosure
+    assert "cannot perfectly detect secrets" in disclosure
+    assert "--offline" in disclosure
+    assert "\x1b" not in disclosure
+    assert "optimization review is disabled" in (captured.err + captured.out).lower()
+    assert "review not yet performed" in captured.out
+
+
+def test_tty_review_disclosure_names_excluded_source_classes(
+        inspection_project, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda name, env: _fake_reviewer("claude", qualified=True),
+    )
+    monkeypatch.setattr("builtins.input", lambda: "no")
+
+    assert main(("doctor",)) == 0
+
+    disclosure = capsys.readouterr().err.lower()
+    assert "secrets/private files" in disclosure
+    assert "agent instructions/configuration" in disclosure
+    assert "dependency environments" in disclosure
+    assert "coverage/build outputs" in disclosure
+    assert "generated/minified files" in disclosure
+
+
+def test_tty_affirmative_consent_stops_at_disabled_review_boundary(
+        inspection_project, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda name, env: _fake_reviewer("claude", qualified=True),
+    )
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "yes")
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("disabled review scanned after acceptance"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("accepted review launched provider"),
+    )
+
+    assert main(("doctor",)) == 2
+    assert prompts == [1]
+    assert "provider-unqualified" in capsys.readouterr().err

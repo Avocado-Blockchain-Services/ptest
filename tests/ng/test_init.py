@@ -626,3 +626,152 @@ def test_monorepo_dry_run_marks_preexisting_children_already_present(tmp_path):
     assert by_target["web/.ptest.toml"] == "already present"
     assert not (tmp_path / ".ptest.toml").exists()
     assert not (api / ".ptest.toml").exists()
+
+
+def _make_cli_init_repo(root):
+    marker = root / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n', encoding="utf-8")
+
+
+def test_tty_init_default_offer_runs_after_created_and_existing_init(
+        tmp_path, monkeypatch, capsys):
+    from ptest import cli
+    from ptest.agent_providers import ReviewerAdapter
+
+    _make_cli_init_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    resolved = []
+
+    def unqualified_profile(name, env):
+        assert (tmp_path / ".ptest.toml").is_file()
+        resolved.append(name)
+        return ReviewerAdapter(name, f"/fake/{name}", (f"/fake/{name}",),
+                               qualified=False,
+                               qualification_note="qualification pending")
+
+    monkeypatch.setattr(cli.agent_providers, "resolve_reviewer", unqualified_profile)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted with no qualified reviewer"))
+    monkeypatch.setattr(
+        cli.doctor, "inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source with no qualified reviewer"),
+    )
+
+    args = ("init", "--runner", "pytest", "--agents", "none")
+    assert cli.main(args) == 0
+    created = capsys.readouterr()
+    assert "provider-unqualified" in created.err
+    assert len(resolved) == 3
+
+    resolved.clear()
+    assert cli.main(args) == 0
+    existing = capsys.readouterr()
+    assert "provider-unqualified" in existing.err
+    assert len(resolved) == 3
+
+
+@pytest.mark.parametrize("extra", [
+    ("--no-doctor",),
+    ("--json",),
+    ("--dry-run",),
+])
+def test_tty_init_no_doctor_json_and_dry_run_never_offer_review(
+        tmp_path, monkeypatch, capsys, extra):
+    from ptest import cli
+
+    _make_cli_init_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("unexpected init prompt"))
+    monkeypatch.setattr(
+        cli.agent_providers, "resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer for suppressed init offer"),
+    )
+
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none", *extra)) == 0
+    captured = capsys.readouterr()
+    assert "review" not in captured.err.lower()
+
+
+def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
+        tmp_path, monkeypatch, capsys):
+    from ptest import cli
+    from ptest.agent_providers import ReviewerAdapter
+
+    _make_cli_init_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none")) == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        cli.agent_providers, "resolve_reviewer",
+        lambda name, env: ReviewerAdapter(
+            "claude", "/fake/claude", ("/fake/claude",),
+            qualified=True, qualification_note="test"),
+    )
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "no")
+    inspected = []
+    real_inspect = cli.doctor.inspect_workspace
+    monkeypatch.setattr(
+        cli.doctor, "inspect_workspace",
+        lambda *a, **k: inspected.append(1) or real_inspect(*a, **k),
+    )
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_review",
+        lambda *a, **k: pytest.fail("declined init launched reviewer"),
+    )
+
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none")) == 0
+    captured = capsys.readouterr()
+    assert prompts == [1]
+    assert inspected == [1]
+    assert "ptest doctor" in captured.out
+    assert "review not yet performed" in captured.out
+
+
+def test_tty_init_explicit_consent_discloses_without_second_prompt_and_stays_disabled(
+        tmp_path, monkeypatch, capsys):
+    from ptest import cli
+    from ptest.agent_providers import ReviewerAdapter
+
+    _make_cli_init_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        cli.agent_providers, "resolve_reviewer",
+        lambda name, env: ReviewerAdapter(
+            "claude", "/fake/claude", ("/fake/claude",),
+            qualified=True, qualification_note="test"),
+    )
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "yes")
+    monkeypatch.setattr(
+        cli.doctor, "inspect_workspace",
+        lambda *a, **k: pytest.fail("disabled init review scanned source"),
+    )
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_review",
+        lambda *a, **k: pytest.fail("disabled init review launched provider"),
+    )
+
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none",
+                     "--doctor", "--reviewer", "claude",
+                     "--allow-model-review")) == 2
+
+    captured = capsys.readouterr()
+    assert prompts == []
+    assert "Model review disclosure: claude" in captured.err
+    assert "Run this review once?" not in captured.err
+    assert "review core remains disabled" in captured.err
