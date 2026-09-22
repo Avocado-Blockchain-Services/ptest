@@ -6,10 +6,35 @@ exists and implements the specified banner behavior.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 from ptest import agent_rules, contracts as C
 from ptest.init_render import render_init
+
+_WORDMARK_LINES = (
+    "██████╗ ████████╗███████╗███████╗████████╗",
+    "██╔══██╗╚══██╔══╝██╔════╝██╔════╝╚══██╔══╝",
+    "██████╔╝   ██║   █████╗  ███████╗   ██║",
+    "██╔═══╝    ██║   ██╔══╝  ╚════██║   ██║",
+    "██║        ██║   ███████╗███████║   ██║",
+    "╚═╝        ╚═╝   ╚══════╝╚══════╝   ╚═╝",
+)
+_GITHUB_URL = "https://github.com/Avocado-Blockchain-Services/ptest"
+
+
+def _dwidth(text: str) -> int:
+    total = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        total += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return total
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _result(action=C.InitAction.CREATED, target=Path("/repo/.ptest.toml"),
@@ -116,3 +141,121 @@ def test_codex_hint_names_restart_or_skills_command():
     text = render_init(result, None, agents=("codex",))
 
     assert "/skills" in text or "restart" in text.lower()
+
+
+def test_plain_output_shows_wordmark_version_repo_and_url():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name="my-repo")
+
+    for line in _WORDMARK_LINES:
+        assert line in text
+    assert f"ptest {C.PTEST_VERSION}" in text
+    assert "my-repo" in text
+    assert _GITHUB_URL in text
+    assert "\x1b" not in text
+
+
+def test_wordmark_precedes_version_repo_url_and_box():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name="my-repo")
+
+    wordmark_at = text.index(_WORDMARK_LINES[0])
+    version_at = text.index(f"ptest {C.PTEST_VERSION}")
+    repo_at = text.index("my-repo")
+    url_at = text.index(_GITHUB_URL)
+    box_at = text.index("┌")
+    assert wordmark_at < version_at < repo_at < url_at < box_at
+    assert text.startswith(_WORDMARK_LINES[0])
+
+
+def test_default_output_has_no_ansi_and_omits_empty_repo():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None)
+
+    assert "\x1b" not in text
+    assert f"ptest {C.PTEST_VERSION}" in text
+    assert _GITHUB_URL in text
+    assert "None" not in text
+
+
+def test_no_color_suppresses_explicit_color(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name="my-repo", color=True)
+
+    assert "\x1b" not in text
+    for line in _WORDMARK_LINES:
+        assert line in text
+
+
+def test_explicit_color_keeps_identical_glyphs(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    colored = render_init(result, None, agents=(), repo_name="my-repo", color=True)
+    plain = render_init(result, None, agents=(), repo_name="my-repo", color=False)
+
+    assert "\x1b[" in colored
+    assert "\x1b" not in plain
+    assert _strip_ansi(colored) == plain
+
+
+def test_hostile_repo_name_cannot_alter_terminal():
+    evil = "bad\x1b[2J\r\n\x00\u202e" + "界" * 2000
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name=evil)
+
+    assert "\x1b" not in text
+    assert "\r" not in text
+    assert "\x00" not in text
+    assert "\u202e" not in text
+    repo_lines = [line for line in text.splitlines() if "bad" in line]
+    assert len(repo_lines) == 1
+    assert _dwidth(repo_lines[0]) <= 80
+    assert len(text.encode("utf-8")) < 32768
+
+
+def test_long_repo_name_bounded_to_80_columns():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name="x" * 500)
+
+    candidates = [line for line in text.splitlines() if "x" * 10 in line]
+    assert len(candidates) == 1
+    assert _dwidth(candidates[0]) <= 80
+
+
+def test_no_row_or_box_overflow():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, None, agents=(), repo_name="my-repo")
+
+    for line in text.splitlines():
+        stripped = _strip_ansi(line)
+        if stripped and stripped[0] in "┌├└│":
+            assert _dwidth(stripped) == 64
+    for line in _WORDMARK_LINES:
+        assert _dwidth(line) <= 64
+    for line in text.splitlines():
+        assert _dwidth(_strip_ansi(line)) <= 80
+
+
+def test_preview_and_existing_layout_preserved_with_banner(tmp_path):
+    preview = _result(action=C.InitAction.PREVIEW,
+                      target=Path("/repo/.ptest.toml"), exists=False,
+                      details=(_detail(".ptest.toml", "would create", "config"),))
+    plan = agent_rules.preview(tmp_path)
+    preview_text = render_init(preview, plan, dry_run=True, agents=(),
+                               repo_name="my-repo")
+
+    assert _WORDMARK_LINES[0] in preview_text
+    assert "ptest init preview" in preview_text
+    assert "would create" in preview_text
+    assert "created:" not in preview_text
+
+    agent_rules.apply(tmp_path)
+    unchanged = agent_rules.apply(tmp_path)
+    existing = _result(action=C.InitAction.EXISTING, warnings=())
+    existing_text = render_init(existing, unchanged, agents=(),
+                                repo_name="my-repo")
+
+    assert _WORDMARK_LINES[0] in existing_text
+    assert "ptest already configured" in existing_text
+    assert "already present" in existing_text

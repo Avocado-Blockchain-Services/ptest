@@ -6,7 +6,9 @@ renderer serves human terminals exclusively.
 """
 from __future__ import annotations
 
+import os
 import textwrap
+import unicodedata
 
 from . import contracts as C
 from .render import terminal_text
@@ -28,6 +30,67 @@ _HINTS = {
     "gemini": ("Gemini loads repository skills at startup; restart if ptest "
                "is not visible."),
 }
+
+_WORDMARK = (
+    "██████╗ ████████╗███████╗███████╗████████╗",
+    "██╔══██╗╚══██╔══╝██╔════╝██╔════╝╚══██╔══╝",
+    "██████╔╝   ██║   █████╗  ███████╗   ██║",
+    "██╔═══╝    ██║   ██╔══╝  ╚════██║   ██║",
+    "██║        ██║   ███████╗███████║   ██║",
+    "╚═╝        ╚═╝   ╚══════╝╚══════╝   ╚═╝",
+)
+_GITHUB_URL = "https://github.com/Avocado-Blockchain-Services/ptest"
+_REPO_MAX_COLUMNS = 80
+_COLOR_START = "\x1b[1;36m"
+_COLOR_STOP = "\x1b[0m"
+
+
+def _display_width(text: str) -> int:
+    total = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        total += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return total
+
+
+def _take_columns(text: str, limit: int) -> str:
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        width = 0 if unicodedata.combining(char) else (
+            2 if unicodedata.east_asian_width(char) in ("W", "F") else 1)
+        if used + width > limit:
+            break
+        kept.append(char)
+        used += width
+    return "".join(kept)
+
+
+def _bound_repo_name(repo_name: object) -> str:
+    if not repo_name:
+        return ""
+    clean = terminal_text(repo_name)
+    if _display_width(clean) > _REPO_MAX_COLUMNS:
+        clean = _take_columns(clean, _REPO_MAX_COLUMNS - 1) + "…"
+    return clean
+
+
+def _use_color(color: bool) -> bool:
+    return bool(color) and "NO_COLOR" not in os.environ
+
+
+def _banner_lines(repo_name: object, color: bool) -> list[str]:
+    use_color = _use_color(color)
+    start = _COLOR_START if use_color else ""
+    stop = _COLOR_STOP if use_color else ""
+    lines = [f"{start}{row}{stop}" for row in _WORDMARK]
+    lines.append(f"ptest {C.PTEST_VERSION}")
+    bound = _bound_repo_name(repo_name)
+    if bound:
+        lines.append(bound)
+    lines.append(_GITHUB_URL)
+    return lines
 
 
 def _clean(value: object) -> str:
@@ -141,8 +204,17 @@ def _next_lines(result: C.InitResult, agents: tuple[str, ...]) -> list[str]:
 
 def render_init(result: C.InitResult, rules: object = None, *,
                 dry_run: bool = False,
-                agents: tuple[str, ...] = ()) -> str:
-    """Render one bounded banner for a successful init; never reads files."""
+                agents: tuple[str, ...] = (),
+                repo_name: str = "",
+                color: bool = False) -> str:
+    """Render one bounded banner for a successful init; never reads files.
+
+    The human banner begins with the PTEST wordmark, ``ptest <version>``,
+    the caller-supplied repository display name, and the canonical project
+    URL, followed by the existing configuration box. ANSI color appears on
+    the wordmark only when ``color`` is true and ``NO_COLOR`` is absent;
+    the non-TTY caller passes ``color=False``.
+    """
     if not isinstance(result, C.InitResult):
         raise TypeError("render_init requires InitResult")
     body: list[str] = []
@@ -170,7 +242,8 @@ def render_init(result: C.InitResult, rules: object = None, *,
     def row(text: str) -> str:
         return "│ " + text.ljust(_INNER) + " │"
 
-    lines = [top, row(_clean(_header(result, rules, dry_run))), middle]
+    lines = _banner_lines(repo_name, color)
+    lines += ["", top, row(_clean(_header(result, rules, dry_run))), middle]
     lines.extend(row(line) for line in body)
     lines.append(bottom)
     return "\n".join(lines) + "\n"
