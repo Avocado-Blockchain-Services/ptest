@@ -24,12 +24,19 @@ account/model availability blocker: no successful model response, tool-denial
 proof, or native result normalization was obtained. No alternate paid model
 or authentication was selected. Its adapter remains unqualified.
 
+Read-only `opencode auth list` reports existing Google OAuth and
+`kimi-for-coding` API credentials; `opencode models google` lists possible
+model IDs. Listing is not proof of access or cost. No alternate model request
+was sent, no credential file was opened, and no default model was changed.
+
 Qualification work stopped after the worker attempted an out-of-scope local
 thread-history query. That result is not used as evidence. No historical
 pipeline, git, or agent-memory content is used in this record. The
 synthetic-only canary directory was removed after its contents were checked;
 it contained no repository source or credentials.
 
-Next decision: either restore/choose an already authorized OpenCode model and
-complete all three adversarial profiles, or explicitly revise the all-three
-release gate. Until then, doctor/init model review must not be enabled.
+Next decision: the user can choose and configure an already authorized
+OpenCode model/account (and accept its terms/cost), then all three adversarial
+profiles can be completed; alternatively the user can explicitly revise the
+all-three release gate. Until then, doctor/init model review must not be
+enabled.

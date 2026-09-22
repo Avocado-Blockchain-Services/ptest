@@ -136,6 +136,10 @@ progress, dependency diagnostics, and branded init banner.
   merged after worker stop; graphify updated; combined scoped ptest gate:
   227 passed, exit 0. No final full suite because CLI and all-three release
   gate are incomplete. No push, main merge, or global install.
+- Read-only OpenCode auth listing found Google OAuth and kimi-for-coding API
+  credentials; Google model IDs are listed but not tried. User must choose
+  whether to configure an authorized default/model (possible cost) or revise
+  the all-three gate. No credential contents were opened by controller.
 - CLI/init orchestration, all-three real provider qualification, copied-repo
   smoke, final full ptest, and final audit remain. Child-worker `ptest --full`
   counts are not accepted as the final gate; some shell pipelines masked ptest
