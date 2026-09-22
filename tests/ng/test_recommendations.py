@@ -513,6 +513,7 @@ def _source_file(root: Path, rel="src/a.py", lines=10):
 def _proof_for(target: Path, rel="src/a.py", start=1, end=3):
     raw = target.read_bytes()
     return [{"path": rel, "sha256": hashlib.sha256(raw).hexdigest(),
+             "byte_count": len(raw),
              "start_line": start, "end_line": end}]
 
 
@@ -625,9 +626,11 @@ def test_publish_source_prefix_proof_covers_truncated_input(
     prefix = chunk[:bound]
     prefix_proof = [{"path": "src/big.py",
                      "sha256": hashlib.sha256(prefix).hexdigest(),
+                     "byte_count": bound,
                      "start_line": 1, "end_line": 3}]
     full_proof = [{"path": "src/big.py",
                    "sha256": hashlib.sha256(chunk).hexdigest(),
+                   "byte_count": bound,
                    "start_line": 1, "end_line": 3}]
     first = render_recommendations(_run())
     # Excerpt-chunk sha (what the assessment packet admits) must verify.
@@ -749,3 +752,164 @@ def test_publish_lock_unavailable_fails_closed_without_publication(
             root, render_recommendations(_run()), None, source_proof=[])
     assert not (root / "recommendations.md").exists()
     assert list(root.glob("*.tmp.*")) == []
+
+
+# ---- audited repair: exact admitted byte_count + Markdown-safe command ----
+
+def _proof_with_count(target_bytes: bytes, rel="src/a.py", start=1, end=1,
+                      byte_count=None):
+    import ptest.recommendations as rec
+    if byte_count is None:
+        byte_count = len(target_bytes)
+        assert byte_count <= rec._MAX_SOURCE_BYTES
+    prefix = target_bytes[:byte_count]
+    return [{"path": rel, "sha256": hashlib.sha256(prefix).hexdigest(),
+             "byte_count": byte_count,
+             "start_line": start, "end_line": end}]
+
+
+def test_proof_small_limit_prefix_verifies_without_false_stale(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    chunk = b"x = 1\n" * 4000  # ~24KiB: over 8KiB, under 64KiB
+    assert 8 * 1024 < len(chunk) < 64 * 1024
+    target = root / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(chunk)
+    proof = _proof_with_count(chunk, byte_count=8 * 1024,
+                              start=1, end=3)
+    first = render_recommendations(_run())
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+
+
+def test_proof_utf8_boundary_shorter_prefix_verifies(tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    body = b"a" * 8191 + "é".encode("utf-8") + b"\nline2\nline3\n" + b"z" * 1000
+    assert len(body) > 8192
+    # 8KiB cutoff lands inside the 2-byte é: caller admits UTF-8-safe 8191.
+    assert body[8191:8193] == "é".encode("utf-8")
+    byte_count = 8191
+    body[:byte_count].decode("utf-8")
+    target = root / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(body)
+    proof = _proof_with_count(body, byte_count=byte_count, start=1, end=1)
+    first = render_recommendations(_run())
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+
+
+def test_proof_huge_file_beyond_1mib_still_publishable(tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    prefix = b"x = 1\n" * 1366  # 8196 bytes of valid UTF-8, 1366 lines
+    prefix = prefix[:8192]
+    assert len(prefix) == 8192
+    rest = b"\xff\xfe-binary \x80 invalid utf8 beyond prefix\n" * 4000
+    chunk = prefix + rest + b"z" * (1100 * 1024)
+    assert len(chunk) > 1 << 20
+    target = root / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(chunk)
+    proof = _proof_with_count(chunk, byte_count=8192, start=1, end=3)
+    first = render_recommendations(_run())
+    # Invalid UTF-8 beyond the admitted prefix is irrelevant.
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+
+
+def test_proof_true_prefix_drift_rejected(tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    chunk = b"x = 1\n" * 4000
+    target = root / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(chunk)
+    proof = _proof_with_count(chunk, byte_count=8 * 1024, start=1, end=3)
+    first = render_recommendations(_run())
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+    previous = _identity_of(root)
+    mutated = b"y = 2\n" + chunk[len(b"y = 2\n"):]
+    assert mutated[:8192] != chunk[:8192]
+    target.write_bytes(mutated)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(root, second, previous, source_proof=proof)
+    assert (root / "recommendations.md").read_bytes() == first
+
+
+def test_proof_byte_count_bounds_rejected(tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = _source_file(root)
+    raw = target.read_bytes()
+    good_sha = hashlib.sha256(raw).hexdigest()
+    first = render_recommendations(_run())
+    for bad in (-1, rec._MAX_SOURCE_BYTES + 1, 1 << 20, True, "8192", None,
+                3.5):
+        bad_proof = [{"path": "src/a.py", "sha256": good_sha,
+                      "byte_count": bad, "start_line": 1, "end_line": 3}]
+        with pytest.raises(Problem):
+            publish_recommendations(root, first, None, source_proof=bad_proof)
+    assert not (root / "recommendations.md").exists()
+
+
+def test_proof_line_bound_beyond_admitted_prefix_rejected(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    body = b"line1\nline2\nline3\nline4\nline5\n" + b"z" * 9000
+    target = root / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(body)
+    # Admitted prefix covers only the first line.
+    byte_count = len(b"line1\n")
+    prefix_proof = _proof_with_count(body, byte_count=byte_count,
+                                     start=1, end=5)
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(
+            root, render_recommendations(_run()), None,
+            source_proof=prefix_proof)
+    assert not (root / "recommendations.md").exists()
+
+
+def test_render_backtick_scope_markdown_safe_single_command():
+    import shlex
+    from ptest.recommendations import render_recommendations
+    for scope in ("a`b", "a;b|c$d`e", "a'b\"c", "web app"):
+        argv = f"ptest {shlex.quote(scope)}"
+        out = render_recommendations(
+            _run(children=[_child(scope=scope)])).decode("utf-8")
+        # shlex-quoted argv stays visible as one command ...
+        assert argv in out
+        # ... but never inside a variable backtick span ...
+        assert f"`{argv}`" not in out
+        # ... and appears as its own indented code line.
+        assert any(line.strip() == argv
+                   for line in out.splitlines()), scope

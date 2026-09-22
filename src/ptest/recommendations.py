@@ -28,21 +28,25 @@ identity raises ``Problem(code="stale-evidence")``.
 
 Source-drift guard: ``publish_recommendations`` requires an explicit
 kw-only ``source_proof`` list of collected file identities (root-relative
-path, excerpt-chunk sha256, line interval); omission fails closed with
-``stale-evidence`` and an empty list is the explicit claim for no
-admitted files. Each entry's sha256 is the SHA-256 of the admitted
-(possibly truncated) UTF-8 chunk -- the first ``_MAX_SOURCE_BYTES`` of
-the file, which is the whole file when it fits -- matching the
-assessment ``SourceExcerpt.sha256`` contract, never an impossible
-full-file hash for truncated input. Each entry is rechecked with a
-descriptor-walk no-follow read inside the lock before staging and again
-immediately before rename; any prefix drift, line shrink, or symlink
-(including a symlinked parent component) raises ``stale-evidence`` and
-preserves the prior report. Beyond-prefix drift is unobservable here:
-once a file exceeds the admitted prefix, later bytes are not compared,
-so the CLI caller must recompute evidence packets and compare whole-
-packet/config identity (``packet_sha256``) before publishing; a
-caller-supplied prior-report identity is NOT source identity.
+path, excerpt-chunk sha256, exact admitted ``byte_count`` per entry,
+line interval); omission fails closed with ``stale-evidence`` and an
+empty list is the explicit claim for no admitted files. Each entry's
+sha256 is the SHA-256 of exactly the first ``byte_count`` admitted
+bytes (0..64KiB; ``SourceExcerpt.text.encode('utf-8')`` length at the
+caller, UTF-8-safe shorter on a multibyte boundary) -- the whole file
+when it fits -- matching the assessment ``SourceExcerpt.sha256``
+contract, never an impossible full-file hash for truncated input.
+Only the admitted prefix is read or decoded; the rest of a large file
+is never touched. Each entry is rechecked with a descriptor-walk
+no-follow read inside the lock before staging and again immediately
+before rename; any prefix drift, non-UTF-8 prefix, line bound beyond
+the decoded admitted prefix, or symlink (including a symlinked parent
+component) raises ``stale-evidence`` and preserves the prior report.
+Beyond-prefix drift is unobservable here: once a file exceeds the
+admitted prefix, later bytes are not compared, so the CLI caller must
+recompute evidence packets and compare whole-packet/config identity
+(``packet_sha256``) before publishing; a caller-supplied prior-report
+identity is NOT source identity.
 
 Durability: the temp-write/fchmod/fsync/atomic-replace/parent-sync
 contract is enforced; a parent-directory fsync failure fails closed
@@ -56,10 +60,11 @@ unavailable lock path or lock open fails closed with
 Residuals: ordinary POSIX rename is not a content compare-and-swap, so a
 hostile same-user mutator acting inside the final check/rename window
 can still win; the lock serializes cooperating writers but is not an
-absolute concurrent-editor guarantee. Source files larger than the
-1 MiB target bound cannot serve as proof entries. Lock parent-directory
-ownership is not validated, only the lock file itself (no-follow open,
-regular file, owner match).
+absolute concurrent-editor guarantee. Beyond-prefix drift (any change at
+or after the admitted ``byte_count``) is not compared here, so the CLI
+caller must recompute evidence packets (whole-packet ``packet_sha256``)
+before publishing. Lock parent-directory ownership is not validated,
+only the lock file itself (no-follow open, regular file, owner match).
 """
 from __future__ import annotations
 
@@ -464,14 +469,17 @@ def _score_text(rows: list) -> str:
 def _verify_block(scope: str, root_label: str) -> str:
     # ``scope`` arrives validated via _check_scope; rendering quotes and
     # escapes deterministically so the root-based argv cannot be altered
-    # by model input.
+    # by model input. The argv is shown on its own indented code line
+    # (never inside a backtick span) so doctor-safe scopes carrying
+    # backticks cannot terminate Markdown inline code.
     argv = _shell_scope(scope)
     scope_note = ("repository root scope" if scope == "."
                   else f"scope {_md_scope(scope)}")
     return (
         f"Verify with ptest only (deterministic, root-based; never a "
         f"model-provided shell command):\n"
-        f"- command: `{argv}` ({scope_note})\n"
+        f"- command ({scope_note}):\n"
+        f"      {argv}\n"
         f"- cwd: repository root ({root_label})\n"
         f"- prerequisites: clean checkout; packaged recipe available with the "
         f"ptest installation\n"
@@ -984,10 +992,13 @@ def _check_source_proof(value: object) -> list:
 
     Each entry binds one collected source file: its root-relative
     ``path``, the excerpt-chunk ``sha256`` observed at collection time
-    (SHA-256 of the first ``_MAX_SOURCE_BYTES`` of the file, which is
-    the whole file when it fits, matching ``SourceExcerpt.sha256``),
-    and the cited ``start_line``/``end_line`` interval. Malformed proof
-    is ``report-invalid``; drift detected later is ``stale-evidence``.
+    (SHA-256 of exactly the first ``byte_count`` bytes of the file,
+    which is the whole file when it fits, matching
+    ``SourceExcerpt.sha256`` over ``SourceExcerpt.text.encode()``),
+    the exact admitted ``byte_count`` (0..``_MAX_SOURCE_BYTES``), and
+    the cited ``start_line``/``end_line`` interval. Malformed proof is
+    ``report-invalid`` (``invalid-bound`` for an out-of-range count or
+    oversize list); drift detected later is ``stale-evidence``.
     """
     if not isinstance(value, (list, tuple)):
         raise TypeError("source_proof must be a list of mappings or None")
@@ -1000,6 +1011,15 @@ def _check_source_proof(value: object) -> list:
         path = _check_relpath(item.get("path"), field="source_proof.path")
         sha = _check_hex(item.get("sha256"), field="source_proof.sha256",
                          length=64)
+        count = item.get("byte_count")
+        if isinstance(count, bool) or not isinstance(count, int):
+            _fail("report-invalid",
+                  "source proof byte_count must be an int")
+            raise AssertionError("unreachable")
+        if count < 0 or count > _MAX_SOURCE_BYTES:
+            _fail("invalid-bound",
+                  "source proof byte_count outside 0..64KiB")
+            raise AssertionError("unreachable")
         start = item.get("start_line")
         end = item.get("end_line")
         if (isinstance(start, bool) or not isinstance(start, int)
@@ -1008,6 +1028,7 @@ def _check_source_proof(value: object) -> list:
             _fail("report-invalid",
                   "source proof carries a bad line interval")
         checked.append({"path": path, "sha256": sha,
+                        "byte_count": count,
                         "start_line": start, "end_line": end})
     return checked
 
@@ -1077,18 +1098,24 @@ def _verify_source_proof(root_fd: int, proof: list) -> None:
     """No-follow recheck of collected source identities.
 
     Every entry is opened via a descriptor walk that follows no
-    symlink at any path component, and its admitted prefix (the first
-    ``_MAX_SOURCE_BYTES``) is compared against the collection-time
-    excerpt-chunk sha256 alongside the cited line bound. Any absence,
-    symlink (leaf or parent component), type change, prefix drift, or
-    line shrink raises ``stale-evidence``; the caller preserves the
-    prior report. Beyond-prefix drift is unobservable here and must be
-    covered by whole-packet identity before publishing.
+    symlink at any path component, and exactly its admitted prefix
+    (the first ``byte_count`` bytes, 0..``_MAX_SOURCE_BYTES``) is
+    compared against the collection-time excerpt-chunk sha256
+    alongside the cited line bound over the decoded admitted prefix
+    only. The rest of the file is never read or decoded, so sources
+    larger than 1 MiB stay publishable and invalid UTF-8 beyond the
+    prefix is irrelevant. Any absence, symlink (leaf or parent
+    component), type change, prefix drift, non-UTF-8 prefix, or line
+    bound beyond the admitted prefix raises ``stale-evidence``; the
+    caller preserves the prior report. Beyond-prefix drift is
+    unobservable here and must be covered by whole-packet identity
+    before publishing.
     """
     if not proof:
         return
     for entry in proof:
         path = entry["path"]
+        count = entry["byte_count"]
         fd = _open_source_leaf(root_fd, path)
         try:
             stamp = os.fstat(fd)
@@ -1097,7 +1124,7 @@ def _verify_source_proof(root_fd: int, proof: list) -> None:
                       f"source {path!r} is no longer a regular file; "
                       f"refusing to publish against stale evidence")
             chunks = []
-            remaining = _MAX_TARGET_BYTES + 1
+            remaining = count
             while remaining > 0:
                 try:
                     piece = os.read(fd, min(8192, remaining))
@@ -1110,22 +1137,18 @@ def _verify_source_proof(root_fd: int, proof: list) -> None:
                     break
                 chunks.append(piece)
                 remaining -= len(piece)
-            raw = b"".join(chunks)
-            if len(raw) > _MAX_TARGET_BYTES:
-                _fail("invalid-bound",
-                      f"source {path!r} exceeds its bound")
-            admitted = raw[:_MAX_SOURCE_BYTES]
+            admitted = b"".join(chunks)
             if hashlib.sha256(admitted).hexdigest() != entry["sha256"]:
                 _fail("stale-evidence",
                       f"source {path!r} changed since collection "
                       f"(admitted prefix bytes differ); refusing to "
                       f"publish against stale evidence")
             try:
-                text = raw.decode("utf-8")
+                text = admitted.decode("utf-8")
             except UnicodeDecodeError:
                 _fail("stale-evidence",
-                      f"source {path!r} is not UTF-8; refusing to publish "
-                      f"against stale evidence")
+                      f"source {path!r} admitted prefix is not UTF-8; "
+                      f"refusing to publish against stale evidence")
                 raise AssertionError("unreachable")
             nlines = text.count("\n") + (
                 0 if (not text or text.endswith("\n")) else 1)
