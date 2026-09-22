@@ -39,7 +39,32 @@ One final editorial Muse invocation reached its eight-step cap after editing;
 the controller independently verified the resulting tree with the gates above.
 
 Commit/push, local install, ptest-only clean reinstall in the real unified repo,
-and native Codex smoke are authorized follow-through, recorded separately in:
+and native Codex smoke completed successfully, recorded separately in:
 `/home/ingmar/worktrees/ptest/cx-init-onboarding/help-ux-8dQaWH/README.md`.
 That directory also preserves raw logs, package artifacts, and the original
 unified-repository ptest setup for recovery.
+
+## Real-root follow-through
+
+- Product commit `8cd2b54` was pushed to `origin/cx-init-onboarding`; remote SHA
+  matched. Main and release tags were not changed.
+- Offline installer switched the local command to immutable feature bundle
+  `0.1.5-f15ee6abb73707fb2837e1e713c43757`; installed package matches source.
+  Version remains 0.1.5; no new release was published. Prior bundle retained.
+- In `/home/ingmar/code/persea_content_maker_unified`, backed up and replaced
+  only ptest config/guide/skills and managed instruction references. Fresh init
+  created a root v2 api/web dispatcher and native provider skills. Repeated
+  init changed no file bytes; JSON output retained its existing schema.
+- Root static doctor, JSON and assessment-prompt forms exited 0. The api/web
+  readiness table and review worksheet render correctly. Scan is incomplete
+  (904 files, 199 hypotheses); no repository-readiness certification is claimed.
+- Native Codex catalog changed from missing ptest to one enabled repo skill at
+  `.agents/skills/ptest/SKILL.md`. A fresh explicit-low session loaded that
+  skill and its guide, ran installed help, and correctly explained root-based
+  focused/full commands, JSON doctor, unknown readiness and live-probe limits.
+- Final hashes and full-file comparisons preserve unrelated user edits and
+  both original root instruction files exactly. No repository tests, services,
+  setup, repair, deployment, or unified-repository commit/push occurred.
+- Original ptest setup remains recoverable in the external evidence directory's
+  `unified-backup/`. Intermediate failed hash checks before regenerating managed
+  blocks are documented there; final complete-file comparisons passed.
