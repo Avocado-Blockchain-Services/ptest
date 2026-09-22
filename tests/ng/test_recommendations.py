@@ -495,3 +495,94 @@ def test_publish_sequential_writers_do_not_clobber(tmp_path, monkeypatch):
     assert publish_recommendations(root, first, prev).status == "unchanged"
     lock_files = list(tmp_path.glob("rec-*.lock"))
     assert len(lock_files) == 1
+
+
+# ---- audit blockers (dated report-audit + controller lock) ----
+
+def _source_file(root: Path, rel="src/a.py", lines=10):
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(("x = 1\n" * lines).encode())
+    return target
+
+
+def _proof_for(target: Path, rel="src/a.py", start=1, end=3):
+    raw = target.read_bytes()
+    return [{"path": rel, "sha256": hashlib.sha256(raw).hexdigest(),
+             "start_line": start, "end_line": end}]
+
+
+def test_publish_stale_source_proof_fails_closed_and_preserves(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = _source_file(root)
+    proof = _proof_for(target)
+    first = render_recommendations(_run())
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+    previous = _identity_of(root)
+    target.write_bytes(b"x = 2\n" * 10)  # source drift after collection
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(root, second, previous, source_proof=proof)
+    assert (root / "recommendations.md").read_bytes() == first
+    assert list(root.glob("*.tmp.*")) == []
+
+
+def test_publish_parent_fsync_failure_fails_closed_and_restores(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None)
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    real_fsync = os.fsync
+
+    def _fail_on_dirs(fd):
+        try:
+            is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        except OSError:
+            is_dir = False
+        if is_dir:
+            raise OSError(5, "simulated parent sync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _fail_on_dirs)
+    with pytest.raises(Problem, match="state-unavailable"):
+        publish_recommendations(root, second, previous)
+    assert (root / "recommendations.md").read_bytes() == first
+    assert list(root.glob("*.tmp.*")) == []
+
+
+def test_render_rejects_scope_command_markdown_injection():
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    for hostile in ("a\nptest --full", "a|b", "a`b`", "a;b", "a b"):
+        with pytest.raises(Problem):
+            render_recommendations(_run(children=[_child(scope=hostile)]))
+
+
+def test_publish_lock_unavailable_fails_closed_without_publication(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_bytes(b"occupied")
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(blocker))
+    root = tmp_path / "proj"
+    root.mkdir()
+    with pytest.raises(Problem, match="coordinator-unavailable|report-conflict"):
+        publish_recommendations(root, render_recommendations(_run()), None)
+    assert not (root / "recommendations.md").exists()
+    assert list(root.glob("*.tmp.*")) == []

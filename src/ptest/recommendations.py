@@ -26,16 +26,30 @@ NOT ``contracts.PublishResult`` (whose history-specific
 Conflicts raise ``Problem(code="report-conflict")`` and stale caller
 identity raises ``Problem(code="stale-evidence")``.
 
-Same-user race residual: cooperating ptest writers serialize on an
-account-local root-keyed lock and every replace re-verifies identity and
-bytes after staging. Ordinary POSIX rename is not a content
-compare-and-swap, so a hostile same-user mutator acting inside the final
-check/rename window can still win; the lock detects intervening edits, it
-does not provide an absolute concurrent-editor guarantee. If the lock
-directory itself is unavailable the write still proceeds (the atomic
-replace plus identity recheck keeps a foreign edit from being silently
-clobbered) and the residual is wider: concurrent cooperating writers are
-then only detected, not serialized.
+Source-drift guard: ``publish_recommendations`` accepts an optional
+kw-only ``source_proof`` list of collected file identities (root-relative
+path, full-file sha256, line interval). Each entry is rechecked with a
+no-follow read inside the lock before staging and again immediately
+before rename; any drift raises ``stale-evidence`` and preserves the
+prior report. A caller-supplied prior-report identity is NOT source
+identity: when ``source_proof`` is omitted no source-drift claim is made.
+
+Durability: the temp-write/fchmod/fsync/atomic-replace/parent-sync
+contract is enforced; a parent-directory fsync failure fails closed
+(``state-unavailable``) after a best-effort restore of the prior
+complete report. Scope text is allowlist-validated so the deterministic
+root-based ``ptest <scope>`` template, table cell, and heading cannot be
+altered by model input. Lock acquisition never silently degrades: an
+unavailable lock path or lock open fails closed with
+``coordinator-unavailable``/``report-conflict`` and no publication.
+
+Residuals: ordinary POSIX rename is not a content compare-and-swap, so a
+hostile same-user mutator acting inside the final check/rename window
+can still win; the lock serializes cooperating writers but is not an
+absolute concurrent-editor guarantee. Source files larger than the
+1 MiB target bound cannot serve as proof entries. Lock parent-directory
+ownership is not validated, only the lock file itself (no-follow open,
+regular file, owner match).
 """
 from __future__ import annotations
 
@@ -64,7 +78,11 @@ _MAX_PROSE_CHARS = 2048
 _MAX_EVIDENCE_PER_ITEM = 16
 _MAX_REPORT_BYTES = 1 << 20
 _MAX_TARGET_BYTES = 1 << 20
+_MAX_SOURCE_PROOF_ENTRIES = 256
 _LOCK_TIMEOUT_S = 30.0
+_SCOPE_RE = re.compile(
+    r"(?:\.|[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)*)\Z")
+_ROW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 _BIDI = frozenset({
     0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
@@ -186,8 +204,35 @@ def _check_relpath(value: object, *, field: str) -> str:
     for part in value.split("/"):
         if part in ("", ".", ".."):
             _fail("report-invalid", f"field {field!r} is not normalized")
+    if ("`" in value or "|" in value or "\n" in value or "\r" in value
+            or "\x00" in value):
+        _fail("report-invalid",
+              f"field {field!r} carries Markdown/command control text")
     if len(value.encode("utf-8")) > 4096:
         _fail("invalid-bound", f"field {field!r} exceeds its bound")
+    return value
+
+
+def _check_scope(value: object, *, field: str = "scope") -> str:
+    """Allowlist scope so command/table/heading interpolation is fixed.
+
+    Only ``.`` (repository root) or slash-separated safe segments may
+    pass; anything model-invented with whitespace, shell metacharacters,
+    or Markdown control text is rejected instead of quoted.
+    """
+    if value == ".":
+        return "."
+    path = _check_relpath(value, field=field)
+    if _SCOPE_RE.match(path) is None:
+        _fail("report-invalid",
+              f"field {field!r} is not a safe scope for command rendering")
+    return path
+
+
+def _check_row_id(value: object, *, field: str) -> str:
+    if (not isinstance(value, str) or not value
+            or _ROW_ID_RE.match(value) is None):
+        _fail("report-invalid", f"field {field!r} must be a safe row id")
     return value
 
 
@@ -236,9 +281,7 @@ def _check_rows(rows: object) -> list:
     checked = []
     for entry in rows:
         item = _as_mapping(entry, field="rows[]")
-        row_id = item.get("id")
-        if not isinstance(row_id, str) or not row_id:
-            _fail("report-invalid", "row id must be a nonempty string")
+        row_id = _check_row_id(item.get("id"), field="rows[].id")
         if row_id in seen:
             _fail("report-invalid", "child rows carry duplicate ids")
         seen.add(row_id)
@@ -265,9 +308,7 @@ def _finding_map(findings: object) -> dict:
     result = {}
     for entry in findings:
         item = _as_mapping(entry, field="findings[]")
-        row_id = item.get("id")
-        if not isinstance(row_id, str) or not row_id:
-            _fail("report-invalid", "finding id must be a nonempty string")
+        row_id = _check_row_id(item.get("id"), field="findings[].id")
         if row_id in result:
             _fail("report-invalid", "child findings carry duplicate ids")
         recipe = item.get("recipe_id")
@@ -329,7 +370,7 @@ def _normalize_run(run: object) -> dict:
         normalized_children.append({
             "project_id": _check_hex(entry.get("project_id"),
                                      field="project_id", length=32),
-            "scope": _check_relpath(entry.get("scope"), field="scope"),
+            "scope": _check_scope(entry.get("scope"), field="scope"),
             "packet_sha256": _check_hex(entry.get("packet_sha256"),
                                         field="packet_sha256", length=64),
             "rows": _check_rows(entry.get("rows")),
@@ -373,6 +414,8 @@ def _score_text(rows: list) -> str:
 
 
 def _verify_block(scope: str, root_label: str) -> str:
+    # ``scope`` arrives allowlist-validated via _check_scope, so direct
+    # interpolation keeps the deterministic root-based argv.
     argv = "ptest --full" if scope == "." else f"ptest {scope}"
     scope_note = "repository root scope" if scope == "." else f"scope {scope}"
     return (
@@ -664,21 +707,66 @@ def _lock_path_for(root: Path) -> Path | None:
 
 
 class _CooperativeLock:
-    """Best-effort exclusive lock shared by cooperating ptest writers."""
+    """Fail-closed exclusive lock shared by cooperating ptest writers.
+
+    An unavailable lock path or lock open never degrades to unlocked
+    publication: it raises ``coordinator-unavailable`` (or
+    ``report-conflict`` for a symlinked/foreign-owned lock file) before
+    any report state is touched.
+    """
 
     def __init__(self, path: Path | None) -> None:
         self._path = path
         self._fd: int | None = None
 
+    def _abort(self, code: str, message: str) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        _fail(code, message)
+        raise AssertionError("unreachable")
+
     def __enter__(self) -> "_CooperativeLock":
         if self._path is None:
-            return self
+            _fail("coordinator-unavailable",
+                  "recommendation lock is unavailable; refusing to publish "
+                  "without serialization")
+            raise AssertionError("unreachable")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
         except OSError:
+            self._abort("coordinator-unavailable",
+                        "recommendation lock directory is unavailable; "
+                        "refusing to publish without serialization")
+        try:
+            self._fd = os.open(self._path,
+                               os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
             self._fd = None
-            return self
+            if exc.errno == errno.ELOOP:
+                _fail("report-conflict",
+                      "recommendation lock is a symlink; refusing to "
+                      "follow it")
+                raise AssertionError("unreachable")
+            _fail("coordinator-unavailable",
+                  "recommendation lock cannot be opened; refusing to "
+                  "publish without serialization")
+            raise AssertionError("unreachable")
+        try:
+            stamp = os.fstat(self._fd)
+        except OSError:
+            self._abort("coordinator-unavailable",
+                        "recommendation lock cannot be inspected; refusing "
+                        "to publish without serialization")
+        if not stat.S_ISREG(stamp.st_mode):
+            self._abort("report-conflict",
+                        "recommendation lock is not a regular file")
+        if stamp.st_uid != os.geteuid():
+            self._abort("report-conflict",
+                        "recommendation lock has a foreign owner")
         deadline = time.monotonic() + _LOCK_TIMEOUT_S
         while True:
             try:
@@ -840,23 +928,177 @@ def _stage_temp(root_fd: int, full: bytes) -> str:
     return name
 
 
+def _check_source_proof(value: object) -> list | None:
+    """Validate the optional bounded source-proof list shape.
+
+    Each entry binds one collected source file: its root-relative
+    ``path``, the full-file ``sha256`` observed at collection time, and
+    the cited ``start_line``/``end_line`` interval. Malformed proof is
+    ``report-invalid``; drift detected later is ``stale-evidence``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("source_proof must be a list of mappings or None")
+    if len(value) > _MAX_SOURCE_PROOF_ENTRIES:
+        _fail("invalid-bound", "source proof exceeds its entry bound")
+        raise AssertionError("unreachable")
+    checked = []
+    for entry in value:
+        item = _as_mapping(entry, field="source_proof[]")
+        path = _check_relpath(item.get("path"), field="source_proof.path")
+        sha = _check_hex(item.get("sha256"), field="source_proof.sha256",
+                         length=64)
+        start = item.get("start_line")
+        end = item.get("end_line")
+        if (isinstance(start, bool) or not isinstance(start, int)
+                or start < 1 or isinstance(end, bool)
+                or not isinstance(end, int) or end < start):
+            _fail("report-invalid",
+                  "source proof carries a bad line interval")
+        checked.append({"path": path, "sha256": sha,
+                        "start_line": start, "end_line": end})
+    return checked
+
+
+def _verify_source_proof(root_fd: int, proof: list | None) -> None:
+    """No-follow recheck of collected source identities; None is a skip.
+
+    Every entry is opened without following symlinks and compared
+    against the collection-time bytes and line bound. Any absence,
+    symlink, type change, byte drift, or line shrink raises
+    ``stale-evidence``; the caller preserves the prior report.
+    """
+    if not proof:
+        return
+    for entry in proof:
+        path = entry["path"]
+        try:
+            fd = os.open(path,
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=root_fd)
+        except FileNotFoundError:
+            _fail("stale-evidence",
+                  f"source {path!r} is gone since collection; refusing to "
+                  f"publish against stale evidence")
+            raise AssertionError("unreachable")
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                _fail("stale-evidence",
+                      f"source {path!r} is a symlink; refusing to publish "
+                      f"against stale evidence")
+                raise AssertionError("unreachable")
+            _fail("stale-evidence",
+                  f"source {path!r} cannot be opened safely; refusing to "
+                  f"publish against stale evidence")
+            raise AssertionError("unreachable")
+        try:
+            stamp = os.fstat(fd)
+            if not stat.S_ISREG(stamp.st_mode):
+                _fail("stale-evidence",
+                      f"source {path!r} is no longer a regular file; "
+                      f"refusing to publish against stale evidence")
+            chunks = []
+            remaining = _MAX_TARGET_BYTES + 1
+            while remaining > 0:
+                try:
+                    piece = os.read(fd, min(8192, remaining))
+                except OSError:
+                    _fail("stale-evidence",
+                          f"source {path!r} is unreadable; refusing to "
+                          f"publish against stale evidence")
+                    raise AssertionError("unreachable")
+                if not piece:
+                    break
+                chunks.append(piece)
+                remaining -= len(piece)
+            raw = b"".join(chunks)
+            if len(raw) > _MAX_TARGET_BYTES:
+                _fail("invalid-bound",
+                      f"source {path!r} exceeds its bound")
+            if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+                _fail("stale-evidence",
+                      f"source {path!r} changed since collection (bytes "
+                      f"differ); refusing to publish against stale evidence")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                _fail("stale-evidence",
+                      f"source {path!r} is not UTF-8; refusing to publish "
+                      f"against stale evidence")
+                raise AssertionError("unreachable")
+            nlines = text.count("\n") + (
+                0 if (not text or text.endswith("\n")) else 1)
+            if entry["end_line"] > nlines:
+                _fail("stale-evidence",
+                      f"source {path!r} shrank since collection (line "
+                      f"bound {entry['end_line']} beyond {nlines} lines); "
+                      f"refusing to publish against stale evidence")
+        finally:
+            os.close(fd)
+
+
+def _restore_after_sync_failure(
+        root_fd: int,
+        current: tuple[bytes, int, int, int] | None) -> None:
+    """Best-effort restore of the prior complete report; never raises."""
+    try:
+        if current is None:
+            try:
+                os.unlink(_REPORT_NAME, dir_fd=root_fd)
+            except OSError:
+                pass
+        else:
+            try:
+                name = _stage_temp(root_fd, current[0])
+            except Exception:
+                return
+            try:
+                os.rename(name, _REPORT_NAME,
+                          src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.unlink(name, dir_fd=root_fd)
+                except OSError:
+                    pass
+        try:
+            os.fsync(root_fd)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
 def publish_recommendations(root: object, payload: object,
-                            previous: object) -> PublishResult:
+                            previous: object,
+                            *, source_proof: object = None) -> PublishResult:
     """Publish one marker-headed report with ownership checks.
 
     ``payload`` must be ``render_recommendations`` bytes (marker line plus
     body whose SHA-256 matches the marker). ``previous`` is an optional
     ``PublishedIdentity`` from an earlier read; when given, any drift in
     marker/hash/inode/bytes raises ``stale-evidence`` and the prior report
-    is preserved. Custom, edited, symlinked, non-regular, or unreadable
-    targets raise ``report-conflict`` and are never clobbered. Returns
-    ``created``, ``replaced``, or ``unchanged`` (identical bytes).
+    is preserved. ``source_proof`` is an optional bounded list of
+    collected source identities (``path``/``sha256``/``start_line``/
+    ``end_line``); each entry is rechecked with a no-follow read before
+    staging and again immediately before rename, and any drift raises
+    ``stale-evidence`` with the prior report preserved. A prior-report
+    identity is never treated as source identity: with
+    ``source_proof=None`` no source-drift claim is made. Custom, edited,
+    symlinked, non-regular, or unreadable targets raise
+    ``report-conflict`` and are never clobbered. A parent-directory fsync
+    failure raises ``state-unavailable`` after a best-effort restore of
+    the prior complete report. Returns ``created``, ``replaced``, or
+    ``unchanged`` (identical bytes).
     """
     claimed, body = _split_marker(payload)
     if hashlib.sha256(body).hexdigest() != claimed:
         _fail("report-invalid",
               "payload marker hash does not match its body")
     full = bytes(payload)  # type: ignore[arg-type]
+    proof = _check_source_proof(source_proof)
     with _CooperativeLock(_lock_path_for(Path(root))):  # type: ignore[arg-type]
         root_fd = _open_root(root)
         try:
@@ -866,6 +1108,7 @@ def publish_recommendations(root: object, payload: object,
                     previous, PublishedIdentity):
                 raise TypeError(
                     "previous must be PublishedIdentity or None")
+            _verify_source_proof(root_fd, proof)
             if current is not None and current[0] == full:
                 return PublishResult(
                     status="unchanged", path=_REPORT_NAME,
@@ -886,6 +1129,7 @@ def publish_recommendations(root: object, payload: object,
                         _fail("report-conflict",
                               "recommendations.md changed while staging "
                               "(identity differs); refusing to replace it")
+                _verify_source_proof(root_fd, proof)
                 try:
                     os.rename(temp_name, _REPORT_NAME,
                               src_dir_fd=root_fd, dst_dir_fd=root_fd)
@@ -900,7 +1144,11 @@ def publish_recommendations(root: object, payload: object,
             try:
                 os.fsync(root_fd)
             except OSError:
-                pass
+                _restore_after_sync_failure(root_fd, current)
+                _fail("state-unavailable",
+                      "parent directory sync failed after atomic replace; "
+                      "the prior complete report was restored where "
+                      "practical")
             return PublishResult(
                 status="replaced" if current is not None else "created",
                 path=_REPORT_NAME,
