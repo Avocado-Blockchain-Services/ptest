@@ -8,7 +8,9 @@ progress, dependency diagnostics, and branded init banner.
 - Reuse existing isolated linked worktree; main is out of scope.
 - Previous goal turn only restated requirements: no implementation progress.
 - Current phase: current-source context, then one combined Sol-high specification.
-- Written-spec approval required before implementation. No tests for spec-only work.
+- The user's existing `do this` authorization covers implementation after the
+  written spec; no further consent to begin coding is needed. First-use consent
+  remains part of the product behavior. Spec-only work ran no tests.
 - Implementation/repairs: Muse with imported Dan Jefferies agent profile; controller
   verifies. No reading historical pipelines, git history, or agent memories.
 - No push, release, deployment, main merge, global install, or real-repo cleanup.
@@ -40,5 +42,65 @@ progress, dependency diagnostics, and branded init banner.
   Findings and remaining gates: spec-review.md. No source/test changes.
 - Smoke source directories verified: code/scammeter/persea_scam_meter,
   code/scammeter/persea_scam_meter_ui, code/persea_content_maker_unified.
-- Next action requires user approval of the written combined spec. Product remains
-  unchanged; implementation, qualification and all test/smoke gates are uncompleted.
+- Current goal resumed under the user's existing authorization. Product remains
+  unchanged at this checkpoint; contract, implementation, qualification and all
+  test/smoke gates remain to be completed.
+- Sol-medium bounded contract review dispatched (exec session 86017), read-only.
+- Muse provider boundary task dispatched as sole coding owner for
+  src/ptest/agent_providers.py and tests/ng/test_agent_providers.py. It must
+  capture focused ptest RED/GREEN and cannot label fake-provider tests as actual
+  provider qualification.
+- Isolated `ptest-banner` linked worktree created from b1228f7 on branch
+  `cx-agent-doctor-banner`; `uv sync --locked` created its own .venv (exit 0).
+  Muse owns only init_render.py and test_init_render.py there, independent from
+  provider task. Merge after scoped test and audit.
+- Sol-medium contract result completed exit 0, frozen fields and five drift tests
+  recorded in contract-result.json. Existing public envelope unchanged.
+- Isolated `ptest-contract` linked worktree created from b1228f7 on branch
+  `cx-agent-doctor-contract`; own uv locked environment. Muse owns only
+  contracts.py, schema export/file and two contract test files.
+- Contract task committed 466bbdf then audited five blockers; Muse repaired all
+  five in 778683a. Controller independently ran focused `ptest`: 101 passed
+  (0.19s), schema export `--check` passed, Sol-medium re-audit approved with
+  zero blockers. Contract branch is not merged while provider worker uses chain.
+- Banner task committed c4ac4bf in isolated worktree. Controller focused
+  `ptest tests/ng/test_init_render.py`: 17 passed; scoped audit approved with
+  deferred caller wiring noted. Not yet merged.
+- Provider scaffold committed 87353ef and relative-PATH/scratch repair db939ae;
+  focused provider test 34 passed. Audit rejected one owned-PGID descendant
+  escape after direct child exit; Muse is adding a failing regression and repair
+  in chain. Real provider profiles remain intentionally unqualified.
+- Assessment and recommendations Muse workers are active in their own worktrees
+  (`ptest-assessment`, `ptest-report`) with independent uv environments. Neither
+  is integrated or approved yet. CLI/init orchestration, actual provider
+  qualification, copy smoke, final full suite, and final audit remain.
+- Provider repair 7e0c184 closed the normal descendant-exit regression but
+  audit rejected numeric PID reuse and unreadable identity. Pidfd repair
+  2256ab9 passed 40 focused tests independently; audit rejected late-spawn
+  survivors after SIGKILL enumeration and partial-validation pidfd leaks.
+  Muse is repairing those two in chain. All real adapters still unqualified.
+- Assessment task 6edc977 passed 15 focused tests independently; scoped audit
+  rejected unknown-field projection, filename-only N/A, and model-supplied
+  scores. Muse is repairing in its task worktree; no approval yet.
+- Report task 2d26b1d passed 28 focused tests independently; scoped audit
+  rejected missing source-drift recheck, swallowed parent-sync failure, and
+  scope injection. Controller additionally found fail-open lock acquisition.
+  Muse is repairing in its task worktree; no approval yet.
+- Added .graphifyignore in active worktrees to exclude all historical
+  .pipeline records from future AST refreshes. An initial update after the
+  exclusion needed --force because the graph corpus intentionally shrank;
+  subsequent AST updates no longer enumerate old pipeline files. Existing
+  cached graph may still contain old nodes, so do not query it for context.
+- Integration contract risk: assessment SourceExcerpt.sha256 hashes the admitted
+  (possibly truncated) prefix, while report source_proof currently expects a
+  full-file sha256. CLI must reconcile this explicitly and cover truncated
+  excerpts with a stale-source negative; never claim source drift is checked
+  by passing an incompatible digest. The report worker ran `ptest --full` in
+  its task worktree through a shell pipe that masked ptest's guard errors;
+  that is diagnostic only, not the final integrated gate.
+- Provider task 48c5733 passed one 42-case focused run but controller
+  immediately reproduced a real timing failure: 1 failed/41 passed when a
+  pinned descendant exits before /proc start-time read; code reports
+  unverifiable group rather than recognizing a dead pinned process. Another
+  run returned exit 70 despite 42 pytest passes (guard protocol mismatch).
+  Do not treat provider task as stable or approved; scoped audit/repair needed.

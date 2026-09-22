@@ -43,3 +43,16 @@ The native headless provider protocol and exact isolation overrides must be
 frozen/qualified at the contract barrier before any feature consumer implements
 them. If installed provider cannot satisfy mandatory boundary, report the exact
 limitation and seek a design decision; do not invent flags or downgrade goals.
+
+## Candidate-profile check during implementation
+
+Current `agent_providers.py` task draft has intentionally unqualified candidates,
+but its Claude `--no-slash-commands` is absent from installed `claude --help`
+(the CLI advertises `--disable-slash-commands`), and `--allowedTools ""` is not
+the documented `--tools ""` no-built-in-tools switch. Codex exec help does not
+advertise `--no-browser` or `--no-shell`; it has `--ignore-user-config`,
+`--ignore-rules`, `--ephemeral`, and read-only sandbox. OpenCode's drafted
+`--agent ptest-locked-denied` requires an actual isolated agent definition;
+`--pure` alone only disables external plugins. These are blockers for real
+qualification, not grounds to loosen the boundary. Synthetic fake-executable
+tests do not demonstrate any real CLI profile works.

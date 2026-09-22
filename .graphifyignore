@@ -1,0 +1,7 @@
+# Historical pipeline records are not source context for future changes.
+.pipeline/
+
+# Local environments and generated outputs are not project source.
+.venv/
+graphify-out/
+__pycache__/
