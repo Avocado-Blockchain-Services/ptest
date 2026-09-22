@@ -104,3 +104,39 @@ progress, dependency diagnostics, and branded init banner.
   unverifiable group rather than recognizing a dead pinned process. Another
   run returned exit 70 despite 42 pytest passes (guard protocol mismatch).
   Do not treat provider task as stable or approved; scoped audit/repair needed.
+- Provider exit-race repair d4af53d passed three consecutive controller
+  scoped runs (43 passed, exact exit 0), and its scoped audit approved.
+  Provider qualification remains a separate all-three release gate; Muse is
+  testing only synthetic scratch canaries and has not enabled adapters.
+- Assessment final repair 2d19287 passed 21 controller focused tests and
+  scoped audit approved: raw provider/publication removed, score ptest-owned,
+  model-supplied N/A rejected in v1 (unknown stays in denominator).
+- Contract 778683a, assessment 2d19287, and banner c4ac4bf merged serially
+  into chain after provider task stopped; `graphify update .` completed with
+  .pipeline excluded. Combined scoped `ptest` gate: 182 passed, exit 0.
+- Report task 9a8be6f passed 38 controller focused tests but re-audit rejected
+  fixed 64KiB proof prefix under smaller EvidenceLimits and inline-code
+  backtick escape. Muse is adding explicit admitted-byte-count proofs and safe
+  command display in isolated report worktree. No report merge yet.
+- Report final repair 8a033b7 passed 45 controller focused tests, exit0, and
+  scoped audit approved. Source proof now carries exact admitted byte_count,
+  nofollow-walks parents/leaf, hashes only admitted prefix, and keeps command
+  display outside inline backtick spans. Beyond-prefix drift still requires
+  CLI packet recomputation. Do not merge while provider qualification worker
+  owns chain HEAD.
+- Synthetic OpenCode stdin probe of its currently selected default model
+  returned HTTP 403 AccessDenied.Unpurchased from configured endpoint. This
+  is not a qualification result or permission to pick a different paid model;
+  worker is checking existing authorized profiles without uploading source.
+- Qualification worker was terminated when it attempted to query local
+  pre-today Codex thread history, outside task authority. Those results are
+  unused. Scratch-only Claude and Codex canaries returned refusals but do not
+  prove full containment (Codex tools not disabled); OpenCode repeated HTTP
+  403. All adapters remain unqualified. Approved report branch 8a033b7 was
+  merged after worker stop; graphify updated; combined scoped ptest gate:
+  227 passed, exit 0. No final full suite because CLI and all-three release
+  gate are incomplete. No push, main merge, or global install.
+- CLI/init orchestration, all-three real provider qualification, copied-repo
+  smoke, final full ptest, and final audit remain. Child-worker `ptest --full`
+  counts are not accepted as the final gate; some shell pipelines masked ptest
+  protocol errors.
