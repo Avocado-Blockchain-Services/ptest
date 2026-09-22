@@ -1,0 +1,918 @@
+"""Agent-review recommendations: pure Markdown plus guarded publication.
+
+Assumed ``AssessmentRun`` interface (the assessment worker owns the real
+dataclasses; this module never imports that new module): ``run`` is a
+``PublicDocument`` with ``kind == "agent-assessment"`` (its ``.data`` dict
+is used), a plain mapping, or any duck-typed object exposing ``provider``,
+``children`` and ``limitations``. Shapes::
+
+    provider: {"name", "cli_version", "profile"} (display only)
+    children: [{"project_id" (32 hex), "scope" (root-relative),
+                "packet_sha256" (64 hex), "rows": [...], "findings": [...],
+                "limitations": [{"code", "message", "paths"}]}]
+    rows: [{"id" (canonical checklist ID), "status", "rationale",
+            "evidence": [{"path", "start_line", "end_line", "sha256"}]}]
+    findings: [{"id", "summary", "suggested_change", "recipe_id" | None,
+                "evidence": [...]}]  (one per gap row; a gap row without a
+                finding renders as unresolved/unverified with a next step)
+    limitations: [{"code", "message", "paths"}]
+
+Controller note: scores are always recomputed here as
+``satisfied / applicable`` with integer floor; any model-supplied score is
+ignored. ``publish_recommendations`` returns the task-local
+``PublishResult`` (``status`` in ``created``/``replaced``/``unchanged``),
+NOT ``contracts.PublishResult`` (whose history-specific
+``committed/baseline_published`` fields cannot express report ownership).
+Conflicts raise ``Problem(code="report-conflict")`` and stale caller
+identity raises ``Problem(code="stale-evidence")``.
+
+Same-user race residual: cooperating ptest writers serialize on an
+account-local root-keyed lock and every replace re-verifies identity and
+bytes after staging. Ordinary POSIX rename is not a content
+compare-and-swap, so a hostile same-user mutator acting inside the final
+check/rename window can still win; the lock detects intervening edits, it
+does not provide an absolute concurrent-editor guarantee. If the lock
+directory itself is unavailable the write still proceeds (the atomic
+replace plus identity recheck keeps a foreign edit from being silently
+clobbered) and the residual is wider: concurrent cooperating writers are
+then only detected, not serialized.
+"""
+from __future__ import annotations
+
+import errno
+import fcntl
+import hashlib
+import os
+import pwd
+import re
+import secrets
+import stat
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from .contracts import Problem
+
+_PHASE = "publication"
+_REPORT_NAME = "recommendations.md"
+_MARKER_VERSION = 1
+_MARKER_RE = re.compile(
+    r"\A<!-- ptest-recommendations v(\d+) sha256=([0-9a-f]{64}) -->\n\Z")
+_MAX_CHILDREN = 256
+_MAX_PROSE_CHARS = 2048
+_MAX_EVIDENCE_PER_ITEM = 16
+_MAX_REPORT_BYTES = 1 << 20
+_MAX_TARGET_BYTES = 1 << 20
+_LOCK_TIMEOUT_S = 30.0
+
+_BIDI = frozenset({
+    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2066, 0x2067, 0x2068, 0x2069,
+})
+_LINK_RE = re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)")
+_AUTOLINK_RE = re.compile(
+    r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^<>\n]*>")
+_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?=\s|$)")
+
+STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
+
+FOOTER = (
+    "> Ask your LLM to read this file, verify every cited claim against the current\n"
+    "> source, implement only recommendations you approve, record the actual ptest\n"
+    "> command/cwd/exit/output for each verification, and finish with `ptest --full`.\n"
+)
+
+# Regression sketches keyed by checklist family. Ordinary test code only;
+# never shell. Each must fail before the repair and pass after.
+_REGRESSION_SKETCH = {
+    "FIX": (
+        "Adapt the fixture/factory paths to the cited files. This test must "
+        "fail before the repair and pass after:\n"
+        "```python\n"
+        "def test_factory_records_keep_assertions_owned():\n"
+        "    first = make_record()  # cited factory\n"
+        "    second = make_record()  # must be independent, not shared state\n"
+        "    assert first is not second\n"
+        "    assert first.payload == second.payload\n"
+        "```"
+    ),
+    "DB": (
+        "Adapt the database/schema names to the cited files. This test must "
+        "fail before the repair and pass after:\n"
+        "```python\n"
+        "def test_teardown_preserves_neighbor_sentinel_owned_db():\n"
+        "    mine = create_owned_database()  # run/worker-owned name\n"
+        "    neighbor = create_sentinel_database()  # another owner, must survive\n"
+        "    teardown_owned_database(mine)  # must remove only owned names\n"
+        "    assert sentinel_database_exists(neighbor)\n"
+        "```"
+    ),
+    "CACHE": (
+        "Adapt the key prefix to the cited files. This test must fail before "
+        "the repair and pass after:\n"
+        "```python\n"
+        "def test_cache_cleanup_preserves_neighbor_sentinel_owned():\n"
+        "    write_owned_key(\"run/<run-id>/probe\", b\"1\")\n"
+        "    write_sentinel_key(\"run/neighbor/probe\", b\"1\")  # must survive\n"
+        "    cleanup_owned_keys(\"run/<run-id>/\")  # never a global flush\n"
+        "    assert read_sentinel_key(\"run/neighbor/probe\") == b\"1\"\n"
+        "```"
+    ),
+    "RESOURCE": (
+        "Adapt the temp-root/port allocation to the cited files. This test "
+        "must fail before the repair and pass after:\n"
+        "```python\n"
+        "def test_writable_targets_are_owned_and_released():\n"
+        "    first = allocate_owned_scratch()  # run/worker temp root\n"
+        "    neighbor = allocate_sentinel_scratch()  # must survive release\n"
+        "    release_owned_scratch(first)  # must remove only owned paths\n"
+        "    assert sentinel_scratch_exists(neighbor)\n"
+        "```"
+    ),
+    "OTHER": (
+        "Adapt the cited files. This test must fail before the repair and "
+        "pass after:\n"
+        "```python\n"
+        "def test_reviewed_behavior_holds_owned():\n"
+        "    assert observed_behavior_matches_cited_evidence()\n"
+        "```"
+    ),
+}
+
+_SENTINEL_FAMILIES = ("DB", "CACHE", "RESOURCE")
+
+
+def _fail(code: str, message: str) -> None:
+    raise Problem(code=code, message=message, phase=_PHASE, retryable=False)
+
+
+def _clean(text: object, *, field: str, max_chars: int = _MAX_PROSE_CHARS) -> str:
+    """Sanitize untrusted prose so it cannot alter Markdown structure."""
+    if not isinstance(text, str):
+        _fail("report-invalid", f"field {field!r} must be a string")
+        raise AssertionError("unreachable")
+    value = text.replace("\t", " ").replace("\r", "\n")
+    value = "".join(
+        char for char in value
+        if char == "\n" or not (
+            ord(char) < 0x20 or ord(char) == 0x7F
+            or 0x80 <= ord(char) <= 0x9F or ord(char) in _BIDI))
+    value = _HTML_COMMENT_RE.sub("", value)
+    value = _LINK_RE.sub(r"\1", value)
+    value = _AUTOLINK_RE.sub("", value)
+    value = _HTML_TAG_RE.sub("", value)
+    value = value.replace("<", "&lt;").replace(">", "&gt;")
+    value = value.replace("|", "/").replace("`", "'")
+    value = _HEADLINE_RE.sub("", value)
+    value = re.sub(r"[ \u00a0]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    if len(value) > max_chars:
+        value = value[:max_chars].rstrip() + " [truncated to 2048 characters]"
+    return value
+
+
+def _check_relpath(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        _fail("report-invalid", f"field {field!r} must be a nonempty string")
+        raise AssertionError("unreachable")
+    if (value.startswith(("/", "\\")) or "\\" in value
+            or value.startswith("~")):
+        _fail("report-invalid", f"field {field!r} must be root-relative")
+    if re.match(r"[A-Za-z]:", value):
+        _fail("report-invalid", f"field {field!r} must be root-relative")
+    for part in value.split("/"):
+        if part in ("", ".", ".."):
+            _fail("report-invalid", f"field {field!r} is not normalized")
+    if len(value.encode("utf-8")) > 4096:
+        _fail("invalid-bound", f"field {field!r} exceeds its bound")
+    return value
+
+
+def _check_hex(value: object, *, field: str, length: int) -> str:
+    if (not isinstance(value, str) or len(value) != length
+            or any(c not in "0123456789abcdef" for c in value)):
+        _fail("report-invalid", f"field {field!r} must be {length} hex chars")
+        raise AssertionError("unreachable")
+    return value
+
+
+def _as_mapping(value: object, *, field: str) -> Mapping:
+    if not isinstance(value, Mapping):
+        _fail("report-invalid", f"field {field!r} must be an object")
+        raise AssertionError("unreachable")
+    return value
+
+
+def _citation_text(item: object) -> str:
+    entry = _as_mapping(item, field="evidence[]")
+    path = _check_relpath(entry.get("path"), field="evidence.path")
+    start = entry.get("start_line")
+    end = entry.get("end_line")
+    if (isinstance(start, bool) or not isinstance(start, int) or start < 1
+            or isinstance(end, bool) or not isinstance(end, int)
+            or end < start):
+        _fail("report-invalid", "evidence carries a bad line interval")
+    sha = _check_hex(entry.get("sha256"), field="evidence.sha256", length=64)
+    return f"`{path}` lines {start}-{end} (sha256:{sha})"
+
+
+def _evidence_list(value: object, *, field: str, min_items: int) -> list:
+    if not isinstance(value, list):
+        _fail("report-invalid", f"field {field!r} must be a list")
+        raise AssertionError("unreachable")
+    if len(value) < min_items or len(value) > _MAX_EVIDENCE_PER_ITEM:
+        _fail("report-invalid", f"field {field!r} has an invalid size")
+    return value
+
+
+def _check_rows(rows: object) -> list:
+    if not isinstance(rows, list) or not rows:
+        _fail("report-invalid", "child rows must be a nonempty list")
+        raise AssertionError("unreachable")
+    seen: set[str] = set()
+    checked = []
+    for entry in rows:
+        item = _as_mapping(entry, field="rows[]")
+        row_id = item.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            _fail("report-invalid", "row id must be a nonempty string")
+        if row_id in seen:
+            _fail("report-invalid", "child rows carry duplicate ids")
+        seen.add(row_id)
+        status = item.get("status")
+        if status not in STATUSES:
+            _fail("report-invalid", f"row {row_id!r} has an unknown status")
+        rationale = _clean(item.get("rationale"), field=f"rows.{row_id}")
+        if not rationale:
+            _fail("report-invalid", f"row {row_id!r} needs a rationale")
+        _evidence_list(item.get("evidence"), field=f"rows.{row_id}.evidence",
+                       min_items=0)
+        for citation in item["evidence"]:
+            _citation_text(citation)
+        checked.append({"id": row_id, "status": status,
+                        "rationale": rationale,
+                        "evidence": list(item["evidence"])})
+    return checked
+
+
+def _finding_map(findings: object) -> dict:
+    if not isinstance(findings, list):
+        _fail("report-invalid", "child findings must be a list")
+        raise AssertionError("unreachable")
+    result = {}
+    for entry in findings:
+        item = _as_mapping(entry, field="findings[]")
+        row_id = item.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            _fail("report-invalid", "finding id must be a nonempty string")
+        if row_id in result:
+            _fail("report-invalid", "child findings carry duplicate ids")
+        recipe = item.get("recipe_id")
+        if recipe is not None and (not isinstance(recipe, str) or not recipe):
+            _fail("report-invalid", "finding recipe_id must be a string or null")
+        if recipe is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}",
+                                                   recipe):
+            _fail("report-invalid", "finding recipe_id is not a package name")
+        _evidence_list(item.get("evidence"),
+                       field=f"findings.{row_id}.evidence", min_items=1)
+        for citation in item["evidence"]:
+            _citation_text(citation)
+        result[row_id] = {
+            "summary": _clean(item.get("summary"),
+                              field=f"findings.{row_id}.summary"),
+            "suggested_change": _clean(item.get("suggested_change"),
+                                       field=f"findings.{row_id}.change"),
+            "recipe_id": recipe,
+            "evidence": list(item["evidence"]),
+        }
+    return result
+
+
+def _normalize_run(run: object) -> dict:
+    data: object = run
+    if hasattr(run, "data") and isinstance(getattr(run, "data"), dict):
+        data = getattr(run, "data")
+    elif hasattr(run, "data"):
+        _fail("report-invalid", "run data must be an object or absent")
+    if isinstance(data, Mapping):
+        provider = data.get("provider", {})
+        children = data.get("children", [])
+        limitations = data.get("limitations", [])
+    elif (hasattr(run, "provider") and hasattr(run, "children")):
+        provider = getattr(run, "provider")
+        children = getattr(run, "children")
+        limitations = getattr(run, "limitations", [])
+    else:
+        raise TypeError(
+            "run must be a PublicDocument (kind agent-assessment), a mapping "
+            "with provider/children/limitations, or a duck-typed object "
+            "exposing provider/children/limitations")
+    provider = _as_mapping(provider, field="provider")
+    name = _clean(provider.get("name", "unknown-reviewer"), field="provider")
+    cli_version = _clean(provider.get("cli_version", "unknown"),
+                         field="provider")
+    profile = _clean(provider.get("profile", "unknown"), field="provider")
+    if not isinstance(children, (list, tuple)):
+        _fail("report-invalid", "run children must be a list")
+        raise AssertionError("unreachable")
+    if len(children) > _MAX_CHILDREN:
+        _fail("invalid-bound", "run children exceed the 256-child bound")
+    if not isinstance(limitations, (list, tuple)):
+        _fail("report-invalid", "run limitations must be a list")
+        raise AssertionError("unreachable")
+    normalized_children = []
+    for child in children:
+        entry = _as_mapping(child, field="children[]")
+        normalized_children.append({
+            "project_id": _check_hex(entry.get("project_id"),
+                                     field="project_id", length=32),
+            "scope": _check_relpath(entry.get("scope"), field="scope"),
+            "packet_sha256": _check_hex(entry.get("packet_sha256"),
+                                        field="packet_sha256", length=64),
+            "rows": _check_rows(entry.get("rows")),
+            "findings": _finding_map(entry.get("findings", [])),
+            "limitations": _normalize_limitations(entry.get("limitations", [])),
+        })
+    return {"provider": {"name": name, "cli_version": cli_version,
+                         "profile": profile},
+            "children": normalized_children,
+            "limitations": _normalize_limitations(limitations)}
+
+
+def _normalize_limitations(value: object) -> list:
+    if not isinstance(value, (list, tuple)):
+        _fail("report-invalid", "limitations must be a list")
+        raise AssertionError("unreachable")
+    result = []
+    for entry in value:
+        item = _as_mapping(entry, field="limitations[]")
+        code = item.get("code")
+        if not isinstance(code, str) or not code:
+            _fail("report-invalid", "limitation code must be nonempty")
+        result.append({"code": _clean(code, field="limitation", max_chars=128),
+                       "message": _clean(item.get("message", ""),
+                                         field="limitation"),
+                       "paths": [_check_relpath(p, field="limitation.paths")
+                                 for p in (item.get("paths", [])
+                                           if isinstance(item.get("paths", []),
+                                                         list) else [])]})
+    return result
+
+
+def _score_text(rows: list) -> str:
+    applicable = sum(1 for row in rows
+                     if row["status"] != "not-applicable")
+    if applicable == 0:
+        return "no score (every row is not-applicable)"
+    satisfied = sum(1 for row in rows if row["status"] == "satisfied")
+    percent = (100 * satisfied) // applicable
+    return f"{satisfied}/{applicable} ({percent}%), agent-reviewed"
+
+
+def _verify_block(scope: str, root_label: str) -> str:
+    argv = "ptest --full" if scope == "." else f"ptest {scope}"
+    scope_note = "repository root scope" if scope == "." else f"scope {scope}"
+    return (
+        f"Verify with ptest only (deterministic, root-based; never a "
+        f"model-provided shell command):\n"
+        f"- command: `{argv}` ({scope_note})\n"
+        f"- cwd: repository root ({root_label})\n"
+        f"- prerequisites: clean checkout; packaged recipe available with the "
+        f"ptest installation\n"
+        f"- expected: exit 0; cited assertions unchanged; test inventory "
+        f"identical; coverage behavior preserved; neighbor sentinel preserved "
+        f"where applicable\n"
+        f"- Observed command: (blank)\n"
+        f"- Observed cwd: (blank)\n"
+        f"- Observed exit status: (blank)\n"
+        f"- Observed output: (blank)\n"
+        f"- Status: unverified\n")
+
+
+def _recipe_line(recipe_id: str | None) -> str:
+    if recipe_id is None:
+        return ("Canonical recipe: none (this criterion has no packaged "
+                "recipe; follow the specific change below).")
+    return (f"Canonical recipe: `recipes/{recipe_id}.md` (packaged with "
+            f"ptest; reuse it, do not invent tooling).")
+
+
+def _sketch_for(row_id: str) -> str:
+    family = row_id.split("-", 1)[0] if "-" in row_id else "OTHER"
+    if family in ("DB", "CACHE", "RESOURCE"):
+        return _REGRESSION_SKETCH[family]
+    if family == "FIX":
+        return _REGRESSION_SKETCH["FIX"]
+    return _REGRESSION_SKETCH["OTHER"]
+
+
+def _finding_section(row: dict, finding: dict | None, scope: str,
+                     root_label: str) -> str:
+    row_id = row["id"]
+    lines = [f"## Finding {row_id}", ""]
+    citations = row["evidence"] if finding is None else finding["evidence"]
+    if finding is None:
+        lines.append(f"Reviewer conclusion: gap recorded for `{row_id}` with "
+                     f"no reviewer finding supplied. This item is unresolved.")
+        lines.append("")
+        lines.append("Bounded evidence-gathering next step: re-run the "
+                     "consented review for this scope so the reviewer can "
+                     "supply a finding, or gather the cited excerpts below "
+                     "and propose a change through the normal review flow. "
+                     "Keep this item unverified until then.")
+        lines.append("")
+        why = row["rationale"]
+    else:
+        lines.append(f"Reviewer conclusion (not execution proof): "
+                     f"{finding['summary']}")
+        lines.append("")
+        why = row["rationale"]
+    lines.append("Evidence (exact collected identity and why it matters):")
+    lines.append("")
+    for citation in citations:
+        lines.append(f"- {_citation_text(citation)}")
+    lines.append(f"- Why it matters: {why}")
+    lines.append("")
+    if finding is None:
+        lines.append("Specific change: pending reviewer finding "
+                     "(see next step above).")
+        lines.append("")
+        lines.append(_recipe_line(None))
+    else:
+        lines.append(f"Specific change: {finding['suggested_change']}")
+        lines.append("")
+        lines.append(_recipe_line(finding["recipe_id"]))
+    lines.append("")
+    lines.append("Preserve: every existing assertion, coverage behavior, and "
+                 "the full test inventory. Scoped ptest must show the same "
+                 "test inventory before and after the change.")
+    lines.append("")
+    lines.append(f"Regression (must fail before the repair, pass after):")
+    lines.append("")
+    lines.append(_sketch_for(row_id))
+    lines.append("")
+    lines.append(_verify_block(scope, root_label))
+    return "\n".join(lines)
+
+
+def _sentinel_section(children: list) -> str:
+    wanted = [row_id for child in children for row in child["rows"]
+              for row_id in (row["id"],)
+              if row_id.split("-", 1)[0] in _SENTINEL_FAMILIES
+              and row["status"] == "gap"]
+    lines = ["## Isolation sentinels (worker and run ownership)", ""]
+    if not wanted:
+        lines.append("No database, cache, or writable-file gaps in this "
+                     "review; no sentinel proof required.")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append("A naming convention alone is not proof. For each affected "
+                 "area below, use an executable sentinel design across both "
+                 "workers and concurrent runs:")
+    lines.append("")
+    lines.append("- create one sentinel owned by a neighbor run/worker "
+                 "(database/schema, cache key, or writable file);")
+    lines.append("- attempt cross-owner reads, overwrites, and deletes from "
+                 "the test owner and assert each attempt is refused or "
+                 "scoped to owned names only;")
+    lines.append("- run the owned teardown/cleanup and assert the neighbor "
+                 "sentinel still exists with identical bytes;")
+    lines.append("- run the checks through supported ptest "
+                 "(`ptest <scope>` per finding, then `ptest --full`).")
+    lines.append("")
+    lines.append(f"Affected criteria: {', '.join(sorted(set(wanted)))}.")
+    lines.append("")
+    lines.append("Where evidence or a runnable target is unavailable, say so "
+                 "in the finding, give a bounded evidence-gathering next "
+                 "step, and keep that item unverified rather than inventing "
+                 "a file citation or command.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_recommendations(run: object) -> bytes:
+    """Render the ``recommendations.md`` body (without marker) as bytes."""
+    if run is None or isinstance(run, (bytes, str, int, float, bool)):
+        raise TypeError(
+            "run must be a PublicDocument (kind agent-assessment), a mapping "
+            "with provider/children/limitations, or a duck-typed object "
+            "exposing provider/children/limitations")
+    normalized = _normalize_run(run)
+    provider = normalized["provider"]
+    children = normalized["children"]
+    out: list[str] = []
+    out.append("# Test-quality recommendations (agent-reviewed)")
+    out.append("")
+    out.append(f"Reviewer: {provider['name']} (profile {provider['profile']}, "
+               f"cli {provider['cli_version']}). Execution verification: "
+               f"not run; review conclusions are not execution proof.")
+    out.append("")
+    out.append("Scope / packet / checklist (recomputed; model scores are "
+               "never used):")
+    out.append("")
+    out.append("| Scope | Packet sha256 | Checklist |")
+    out.append("| --- | --- | --- |")
+    for child in children:
+        out.append(f"| {child['scope']} | {child['packet_sha256']} | "
+                   f"{_score_text(child['rows'])} |")
+    out.append("")
+    if normalized["limitations"]:
+        out.append("Review limitations:")
+        out.append("")
+        for limitation in normalized["limitations"]:
+            out.append(f"- {limitation['code']}: {limitation['message']}")
+        out.append("")
+    for child in children:
+        out.append(f"## Scope {child['scope']}")
+        out.append("")
+        out.append(f"Packet: {child['packet_sha256']}. Checklist: "
+                   f"{_score_text(child['rows'])}. Execution capability: "
+                   f"not execution-verified.")
+        out.append("")
+        if child["limitations"]:
+            out.append("Scope limitations:")
+            out.append("")
+            for limitation in child["limitations"]:
+                out.append(f"- {limitation['code']}: {limitation['message']}")
+            out.append("")
+        for row in child["rows"]:
+            if row["status"] != "gap":
+                continue
+            out.append(_finding_section(
+                row, child["findings"].get(row["id"]), child["scope"],
+                root_label="repository root"))
+            out.append("")
+    out.append(_sentinel_section(children))
+    out.append("## Parallel permutations beyond current ptest")
+    out.append("")
+    out.append("Worker parallelism and monorepo-root probe permutations are "
+               "unsupported: current ptest cannot execute those permutations "
+               "today. Do not invent flags for them. Harness regression: "
+               "encode the isolation property as an ordinary test and run it "
+               "through supported ptest (`ptest <scope>` for the affected "
+               "scope), then finish with the final gate below.")
+    out.append("")
+    out.append("## Final gate")
+    out.append("")
+    out.append("Finish with `ptest --full` from the repository root after "
+               "every approved recommendation is implemented and its scoped "
+               "verification recorded above.")
+    out.append("")
+    out.append(FOOTER.strip("\n"))
+    out.append("")
+    body = ("\n".join(out)).encode("utf-8")
+    full = _marker_for(body) + body
+    if len(full) > _MAX_REPORT_BYTES + 256:
+        _fail("invalid-bound", "rendered report exceeds its bound")
+    return full
+
+
+@dataclass(frozen=True, kw_only=True)
+class PublishedIdentity:
+    """Evidence identity of a previously published report."""
+
+    sha256: str
+    st_dev: int
+    st_ino: int
+    size: int
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.sha256, str) or len(self.sha256) != 64
+                or any(c not in "0123456789abcdef"
+                       for c in self.sha256)):
+            raise TypeError("sha256 must be 64 lowercase hex chars")
+        for field in ("st_dev", "st_ino", "size"):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{field} must be an int")
+
+
+@dataclass(frozen=True, kw_only=True)
+class PublishResult:
+    """Outcome of one guarded report publication."""
+
+    status: str
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.status not in ("created", "replaced", "unchanged"):
+            raise TypeError("status must be created, replaced or unchanged")
+        if self.path != _REPORT_NAME:
+            raise TypeError("path must be recommendations.md")
+        if (not isinstance(self.sha256, str) or len(self.sha256) != 64
+                or any(c not in "0123456789abcdef"
+                       for c in self.sha256)):
+            raise TypeError("sha256 must be 64 lowercase hex chars")
+
+
+def _split_marker(payload: bytes) -> tuple[str, bytes]:
+    if not isinstance(payload, (bytes, bytearray)):
+        raise TypeError("payload must be bytes")
+    raw = bytes(payload)
+    if len(raw) > _MAX_REPORT_BYTES + 256:
+        _fail("invalid-bound", "payload exceeds its bound")
+    newline = raw.find(b"\n")
+    if newline < 0:
+        _fail("report-invalid", "payload carries no marker line")
+    first = raw[:newline + 1]
+    try:
+        text = first.decode("utf-8")
+    except UnicodeDecodeError:
+        _fail("report-invalid", "payload marker is not UTF-8")
+        raise AssertionError("unreachable")
+    match = _MARKER_RE.match(text)
+    if match is None:
+        _fail("report-invalid", "payload carries no recognized marker")
+    if match.group(1) != str(_MARKER_VERSION):
+        _fail("report-invalid", "payload marker version is unsupported")
+    return match.group(2), raw[newline + 1:]
+
+
+def _marker_for(body: bytes) -> bytes:
+    digest = hashlib.sha256(body).hexdigest()
+    return (f"<!-- ptest-recommendations v{_MARKER_VERSION} "
+            f"sha256={digest} -->\n").encode("utf-8")
+
+
+def _lock_path_for(root: Path) -> Path | None:
+    """Resolve the account-local root-keyed lock path, if available."""
+    override = os.environ.get("PTEST_RECOMMENDATIONS_LOCK_DIR")
+    if override:
+        candidate = Path(override)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        base = candidate
+    else:
+        try:
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            base = home / ".local" / "state" / "ptest" / "coordination"
+            (base / "recommendation-locks").mkdir(parents=True, exist_ok=True)
+            base = base / "recommendation-locks"
+        except (KeyError, OSError):
+            return None
+    try:
+        stamp = os.lstat(root)
+    except OSError:
+        return None
+    return base / f"rec-{stamp.st_dev:x}-{stamp.st_ino:x}.lock"
+
+
+class _CooperativeLock:
+    """Best-effort exclusive lock shared by cooperating ptest writers."""
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_CooperativeLock":
+        if self._path is None:
+            return self
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            self._fd = None
+            return self
+        deadline = time.monotonic() + _LOCK_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(self._fd)
+                    self._fd = None
+                    _fail("coordinator-unavailable",
+                          "recommendation publishers are busy")
+                    raise AssertionError("unreachable")
+                time.sleep(0.01)
+
+    def __exit__(self, *args: object) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+
+def _open_root(root: object) -> int:
+    if not isinstance(root, (str, Path)):
+        raise TypeError("root must be a path")
+    anchor = Path(root)
+    try:
+        fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        _fail("state-unavailable", "publication root does not exist")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            _fail("report-conflict", "publication root is a symlink")
+        _fail("unsafe-path", "publication root is not a usable directory")
+    stamp = os.fstat(fd)
+    if not stat.S_ISDIR(stamp.st_mode):
+        os.close(fd)
+        _fail("unsafe-path", "publication root is not a directory")
+    return fd
+
+
+def _read_target(root_fd: int) -> tuple[bytes, int, int, int] | None:
+    """No-follow descriptor-relative read; None when the target is absent."""
+    try:
+        fd = os.open(_REPORT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=root_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            _fail("report-conflict",
+                  "existing recommendations.md is a symlink; refusing to "
+                  "follow it")
+        _fail("report-conflict",
+              "existing recommendations.md cannot be opened safely")
+    try:
+        stamp = os.fstat(fd)
+        if not stat.S_ISREG(stamp.st_mode):
+            _fail("report-conflict",
+                  "existing recommendations.md is not a regular file")
+        if stamp.st_uid != os.geteuid():
+            _fail("report-conflict",
+                  "existing recommendations.md has a foreign owner")
+        chunks = []
+        remaining = _MAX_TARGET_BYTES + 1
+        while remaining > 0:
+            try:
+                piece = os.read(fd, min(8192, remaining))
+            except OSError:
+                _fail("report-conflict",
+                      "existing recommendations.md is unreadable")
+            if not piece:
+                break
+            chunks.append(piece)
+            remaining -= len(piece)
+        raw = b"".join(chunks)
+        if len(raw) > _MAX_TARGET_BYTES:
+            _fail("report-conflict",
+                  "existing recommendations.md exceeds its bound")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            _fail("report-conflict",
+                  "existing recommendations.md is not UTF-8")
+        match = _MARKER_RE.match(text.split("\n", 1)[0] + "\n"
+                                 if "\n" in text else "")
+        if match is None:
+            _fail("report-conflict",
+                  "existing recommendations.md is custom (no recognized "
+                  "ptest marker); refusing to clobber it")
+        if match.group(1) != str(_MARKER_VERSION):
+            _fail("report-conflict",
+                  "existing recommendations.md has an unsupported marker "
+                  "version")
+        body = raw[raw.find(b"\n") + 1:]
+        if hashlib.sha256(body).hexdigest() != match.group(2):
+            _fail("report-conflict",
+                  "existing recommendations.md was edited or changed "
+                  "concurrently (marker hash mismatch); refusing to clobber "
+                  "it")
+        return raw, stamp.st_dev, stamp.st_ino, len(raw)
+    finally:
+        os.close(fd)
+
+
+def _check_previous(previous: object,
+                    current: tuple[bytes, int, int, int] | None) -> None:
+    """Fail closed when caller evidence identity no longer matches."""
+    if previous is None:
+        return
+    if not isinstance(previous, PublishedIdentity):
+        raise TypeError("previous must be PublishedIdentity or None")
+    if current is None:
+        _fail("stale-evidence",
+              "the previously published report is gone; refusing to publish "
+              "against stale source identity")
+    raw, dev, ino, size = current
+    if (previous.sha256 != hashlib.sha256(raw).hexdigest()
+            or previous.st_dev != dev or previous.st_ino != ino
+            or previous.size != size):
+        _fail("stale-evidence",
+              "the report changed since the caller read it (marker, hash, "
+              "inode identity, or bytes differ); refusing to publish "
+              "against stale source identity")
+
+
+def _stage_temp(root_fd: int, full: bytes) -> str:
+    name = f"{_REPORT_NAME}.tmp.{os.getpid()}.{secrets.token_hex(8)}"
+    try:
+        fd = os.open(name,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o644, dir_fd=root_fd)
+    except OSError:
+        _fail("state-unavailable", "cannot stage the report temp file")
+        raise AssertionError("unreachable")
+    try:
+        view = memoryview(full)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchmod(fd, 0o644)
+        os.fsync(fd)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(name, dir_fd=root_fd)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    return name
+
+
+def publish_recommendations(root: object, payload: object,
+                            previous: object) -> PublishResult:
+    """Publish one marker-headed report with ownership checks.
+
+    ``payload`` must be ``render_recommendations`` bytes (marker line plus
+    body whose SHA-256 matches the marker). ``previous`` is an optional
+    ``PublishedIdentity`` from an earlier read; when given, any drift in
+    marker/hash/inode/bytes raises ``stale-evidence`` and the prior report
+    is preserved. Custom, edited, symlinked, non-regular, or unreadable
+    targets raise ``report-conflict`` and are never clobbered. Returns
+    ``created``, ``replaced``, or ``unchanged`` (identical bytes).
+    """
+    claimed, body = _split_marker(payload)
+    if hashlib.sha256(body).hexdigest() != claimed:
+        _fail("report-invalid",
+              "payload marker hash does not match its body")
+    full = bytes(payload)  # type: ignore[arg-type]
+    with _CooperativeLock(_lock_path_for(Path(root))):  # type: ignore[arg-type]
+        root_fd = _open_root(root)
+        try:
+            current = _read_target(root_fd)
+            _check_previous(previous, current)
+            if previous is not None and not isinstance(
+                    previous, PublishedIdentity):
+                raise TypeError(
+                    "previous must be PublishedIdentity or None")
+            if current is not None and current[0] == full:
+                return PublishResult(
+                    status="unchanged", path=_REPORT_NAME,
+                    sha256=hashlib.sha256(full).hexdigest())
+            temp_name = _stage_temp(root_fd, full)
+            try:
+                rechecked = _read_target(root_fd)
+                if (current is None) != (rechecked is None):
+                    _fail("report-conflict",
+                          "recommendations.md appeared or vanished while "
+                          "staging; refusing to replace it")
+                if current is not None and rechecked is not None:
+                    if current[0] != rechecked[0]:
+                        _fail("report-conflict",
+                              "recommendations.md changed while staging "
+                              "(bytes differ); refusing to replace it")
+                    if current[1:4] != rechecked[1:4]:
+                        _fail("report-conflict",
+                              "recommendations.md changed while staging "
+                              "(identity differs); refusing to replace it")
+                try:
+                    os.rename(temp_name, _REPORT_NAME,
+                              src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                except OSError:
+                    _fail("state-unavailable",
+                          "atomic replace of recommendations.md failed")
+            finally:
+                try:
+                    os.unlink(temp_name, dir_fd=root_fd)
+                except OSError:
+                    pass
+            try:
+                os.fsync(root_fd)
+            except OSError:
+                pass
+            return PublishResult(
+                status="replaced" if current is not None else "created",
+                path=_REPORT_NAME,
+                sha256=hashlib.sha256(full).hexdigest())
+        finally:
+            os.close(root_fd)
+
+
+__all__ = [
+    "FOOTER",
+    "PublishedIdentity",
+    "PublishResult",
+    "publish_recommendations",
+    "render_recommendations",
+]
