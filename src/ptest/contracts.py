@@ -28,6 +28,7 @@ GUARD_PROTOCOL_VERSION = 2
 PUBLIC_KINDS = (
     "init", "register", "plan", "where",
     "status", "history", "doctor", "run",
+    "agent-assessment",
 )
 
 
@@ -2736,6 +2737,317 @@ def _validate_register_payload(data: dict) -> None:
         _check_reason_dict(item)
 
 
+AGENT_ASSESSMENT_SCHEMA = "ptest.agent-assessment/v1"
+
+# Frozen mirror of checklist.CATALOG order and recipe assignments. contracts.py
+# precedes checklist.py (checklist imports this module), so the canonical IDs
+# cannot be imported here without a cycle; parity with the canonical catalog
+# is enforced by tests/ng/test_agent_assessment_contract.py.
+AGENT_ASSESSMENT_CHECKLIST_IDS = (
+    "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
+    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+    "SELECT-001", "TIMING-001",
+)
+
+AGENT_ASSESSMENT_RECIPES = {
+    "FIX-001": "factories",
+    "FIX-002": "factories",
+    "DB-001": "databases",
+    "DB-002": "databases",
+    "CACHE-001": "cache",
+    "RESOURCE-001": "files-ports",
+    "NETWORK-001": "time-network",
+    "PROCESS-001": "processes",
+    "TIME-001": "time-network",
+    "SELECT-001": None,
+    "TIMING-001": None,
+}
+
+AGENT_ASSESSMENT_PROVIDERS = frozenset({"claude", "codex", "opencode"})
+
+AGENT_ASSESSMENT_STATUSES = frozenset({
+    "satisfied", "gap", "unknown", "not-applicable",
+})
+
+AGENT_ASSESSMENT_LIMITATION_CODES = frozenset({
+    "partial-evidence", "execution-not-run", "timing-unmeasured",
+    "dependency-missing", "dependency-unsupported",
+    "dependency-uninspectable", "capability-unsupported",
+    "same-user-rename-race",
+})
+
+AGENT_ASSESSMENT_PUBLICATION_STATUSES = frozenset({
+    "created", "replaced", "unchanged",
+})
+
+_AGENT_ASSESSMENT_BIDI = frozenset({
+    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2066, 0x2067, 0x2068, 0x2069,
+})
+
+_AA_LINK_RE = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)")
+_AA_AUTOLINK_RE = re.compile(
+    r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>")
+_AA_HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
+_AA_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
+_AA_PERCENT_RE = re.compile(r"\d\s*%")
+_AA_EXEC_CLAIM_RE = re.compile(
+    r"exit\s*code|exit\s*status|test\s*output|observed|\bpytest\b"
+    r"|\bptest\b|\bpassed\b|\bfailed\b|\bexecuted\b|\bverified\b",
+    re.IGNORECASE)
+
+_AGENT_ASSESSMENT_FIELDS = frozenset({
+    "schema", "provider", "children", "limitations", "publication",
+})
+_AGENT_ASSESSMENT_PROVIDER_FIELDS = frozenset({
+    "name", "cli_version", "profile",
+})
+_AGENT_ASSESSMENT_CHILD_FIELDS = frozenset({
+    "project_id", "scope", "packet_sha256", "rows", "score", "findings",
+    "limitations",
+})
+_AGENT_ASSESSMENT_ROW_FIELDS = frozenset({
+    "id", "status", "rationale", "evidence",
+})
+_AGENT_ASSESSMENT_CITATION_FIELDS = frozenset({
+    "path", "start_line", "end_line", "sha256",
+})
+_AGENT_ASSESSMENT_FINDING_FIELDS = frozenset({
+    "id", "summary", "suggested_change", "recipe_id", "evidence",
+})
+_AGENT_ASSESSMENT_SCORE_FIELDS = frozenset({
+    "satisfied", "applicable", "percent",
+})
+_AGENT_ASSESSMENT_LIMITATION_FIELDS = frozenset({
+    "code", "message", "paths",
+})
+_AGENT_ASSESSMENT_PUBLICATION_FIELDS = frozenset({
+    "status", "path", "sha256",
+})
+
+
+def _check_aa_text(name: str, value: object, ctx: str, max_bytes: int, *,
+                   allow_newline: bool = False) -> str:
+    if not isinstance(value, str):
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} must be a string")
+    if not value:
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} must be nonempty")
+    if len(value.encode("utf-8")) > max_bytes:
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} exceeds its bound")
+    for char in value:
+        code = ord(char)
+        if char in ("\n", "\t"):
+            if not allow_newline or char == "\t":
+                pass
+            if char == "\n" and not allow_newline:
+                raise _invalid(
+                    "report-invalid",
+                    f"{ctx} field {name!r} carries controls")
+            continue
+        if (code < 0x20 or code == 0x7F
+                or 0x80 <= code <= 0x9F
+                or code in _AGENT_ASSESSMENT_BIDI):
+            raise _invalid("report-invalid",
+                           f"{ctx} field {name!r} carries controls")
+    return value
+
+
+def _check_aa_relpath(name: str, value: object, ctx: str,
+                      max_bytes: int = 4096) -> str:
+    _check_aa_text(name, value, ctx, max_bytes)
+    if value.startswith(("/", "\\")) or "\\" in value:
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} must be root-relative")
+    if value != ".":
+        for part in value.split("/"):
+            if part in ("", ".", ".."):
+                raise _invalid(
+                    "report-invalid",
+                    f"{ctx} field {name!r} is not normalized")
+    return value
+
+
+def _check_aa_citation(item: object, ctx: str) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_CITATION_FIELDS, ctx)
+    _check_aa_relpath("path", item["path"], ctx)
+    _check_int_field(item, "start_line", ctx, lo=1, hi=2147483647)
+    _check_int_field(item, "end_line", ctx, lo=1, hi=2147483647)
+    if item["start_line"] > item["end_line"]:
+        raise _invalid("report-invalid",
+                       f"{ctx} has an inverted line interval")
+    _check_hex_field(item, "sha256", ctx, 64)
+
+
+def _check_aa_evidence(value: object, ctx: str, *, min_items: int) -> None:
+    if not isinstance(value, list):
+        raise _invalid("report-invalid", f"{ctx} must be a list")
+    if len(value) < min_items or len(value) > 16:
+        raise _invalid("report-invalid", f"{ctx} has an invalid size")
+    seen = set()
+    for index, entry in enumerate(value):
+        _check_aa_citation(entry, f"{ctx}[{index}]")
+        key = (entry["path"], entry["start_line"], entry["end_line"],
+               entry["sha256"])
+        if key in seen:
+            raise _invalid("report-invalid",
+                           f"{ctx} carries duplicate citations")
+        seen.add(key)
+
+
+def _reject_aa_untrusted_content(name: str, text: str, ctx: str) -> None:
+    if (_AA_LINK_RE.search(text) or _AA_AUTOLINK_RE.search(text)
+            or _AA_HTML_RE.search(text) or "|" in text or "`" in text
+            or _AA_HEADLINE_RE.search(text) or _AA_PERCENT_RE.search(text)
+            or _AA_EXEC_CLAIM_RE.search(text)):
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} carries untrusted content")
+
+
+def _check_aa_row(item: object, ctx: str, index: int) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_ROW_FIELDS, ctx)
+    if item["id"] != AGENT_ASSESSMENT_CHECKLIST_IDS[index]:
+        raise _invalid("report-invalid",
+                       f"{ctx} breaks canonical checklist order")
+    if not _is_known(item["status"], AGENT_ASSESSMENT_STATUSES):
+        raise _invalid("report-invalid", f"{ctx} has an unknown status")
+    _check_aa_text("rationale", item["rationale"], ctx, 2048,
+                   allow_newline=True)
+    _check_aa_evidence(item["evidence"], f"{ctx}.evidence",
+                       min_items=0 if item["status"] == "unknown" else 1)
+
+
+def _check_aa_finding(item: object, ctx: str) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_FINDING_FIELDS, ctx)
+    row_id = item["id"]
+    if row_id not in AGENT_ASSESSMENT_RECIPES:
+        raise _invalid("report-invalid",
+                       f"{ctx} names an unknown checklist ID")
+    for name in ("summary", "suggested_change"):
+        text = _check_aa_text(name, item[name], ctx, 2048,
+                              allow_newline=True)
+        _reject_aa_untrusted_content(name, text, ctx)
+    expected = AGENT_ASSESSMENT_RECIPES[row_id]
+    recipe = item["recipe_id"]
+    if expected is None:
+        if recipe is not None:
+            raise _invalid("report-invalid",
+                           f"{ctx} must leave recipe_id null")
+    elif recipe not in (None, expected):
+        raise _invalid("report-invalid",
+                       f"{ctx} has an unexpected recipe_id")
+    _check_aa_evidence(item["evidence"], f"{ctx}.evidence", min_items=1)
+
+
+def _check_aa_score(value: object, rows: list, ctx: str) -> None:
+    na_count = sum(1 for row in rows
+                   if row["status"] == "not-applicable")
+    satisfied = sum(1 for row in rows if row["status"] == "satisfied")
+    if na_count == len(rows):
+        if value is not None:
+            raise _invalid("report-invalid",
+                           f"{ctx} must be null when every row is N/A")
+        return
+    if not isinstance(value, dict):
+        raise _invalid("report-invalid", f"{ctx} must be an object")
+    _check_required_keys(value, _AGENT_ASSESSMENT_SCORE_FIELDS, ctx)
+    applicable = len(rows) - na_count
+    _check_int_field(value, "satisfied", ctx, lo=0, hi=11)
+    _check_int_field(value, "applicable", ctx, lo=1, hi=11)
+    _check_int_field(value, "percent", ctx, lo=0, hi=100)
+    if (value["satisfied"] != satisfied
+            or value["applicable"] != applicable
+            or value["percent"] != (100 * satisfied) // applicable):
+        raise _invalid("report-invalid", f"{ctx} miscomputes the score")
+
+
+def _check_aa_limitation(item: object, ctx: str) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_LIMITATION_FIELDS, ctx)
+    if not _is_known(item["code"], AGENT_ASSESSMENT_LIMITATION_CODES):
+        raise _invalid("report-invalid", f"{ctx} has an unknown code")
+    _check_aa_text("message", item["message"], ctx, 512,
+                   allow_newline=True)
+    paths = item["paths"]
+    if not isinstance(paths, list) or len(paths) > 16:
+        raise _invalid("report-invalid", f"{ctx}.paths has an invalid size")
+    for path in paths:
+        _check_aa_relpath("paths[]", path, ctx)
+
+
+def _check_aa_publication(item: object, ctx: str) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_PUBLICATION_FIELDS, ctx)
+    if item["status"] not in AGENT_ASSESSMENT_PUBLICATION_STATUSES:
+        raise _invalid("report-invalid", f"{ctx} has an unknown status")
+    if item["path"] != "recommendations.md":
+        raise _invalid("report-invalid",
+                       f"{ctx} has an unsupported path")
+    _check_hex_field(item, "sha256", ctx, 64)
+
+
+def _check_aa_child(item: object, ctx: str) -> None:
+    _check_required_keys(item, _AGENT_ASSESSMENT_CHILD_FIELDS, ctx)
+    _check_hex_field(item, "project_id", ctx, 32)
+    _check_aa_relpath("scope", item["scope"], ctx)
+    _check_hex_field(item, "packet_sha256", ctx, 64)
+    rows = item["rows"]
+    if (not isinstance(rows, list)
+            or len(rows) != len(AGENT_ASSESSMENT_CHECKLIST_IDS)):
+        raise _invalid("report-invalid",
+                       f"{ctx}.rows must hold all 11 checklist rows")
+    for index, entry in enumerate(rows):
+        _check_aa_row(entry, f"{ctx}.rows[{index}]", index)
+    _check_aa_score(item["score"], rows, f"{ctx}.score")
+    findings = item["findings"]
+    if not isinstance(findings, list):
+        raise _invalid("report-invalid", f"{ctx}.findings must be a list")
+    gap_ids = [row["id"] for row in rows if row["status"] == "gap"]
+    for index, entry in enumerate(findings):
+        _check_aa_finding(entry, f"{ctx}.findings[{index}]")
+    if [entry["id"] for entry in findings] != gap_ids:
+        raise _invalid("report-invalid",
+                       f"{ctx}.findings must match the gap rows")
+    limitations = item["limitations"]
+    if not isinstance(limitations, list) or len(limitations) > 64:
+        raise _invalid("report-invalid",
+                       f"{ctx}.limitations has an invalid size")
+    for index, entry in enumerate(limitations):
+        _check_aa_limitation(entry, f"{ctx}.limitations[{index}]")
+
+
+def _validate_agent_assessment_payload(data: dict) -> None:
+    _check_required_keys(data, _AGENT_ASSESSMENT_FIELDS, "assessment")
+    if data["schema"] != AGENT_ASSESSMENT_SCHEMA:
+        raise _invalid("report-invalid", "assessment.schema is unknown")
+    provider = data["provider"]
+    _check_required_keys(provider, _AGENT_ASSESSMENT_PROVIDER_FIELDS,
+                         "assessment.provider")
+    if not _is_known(provider["name"], AGENT_ASSESSMENT_PROVIDERS):
+        raise _invalid("report-invalid",
+                       "assessment.provider has an unknown name")
+    _check_aa_text("cli_version", provider["cli_version"],
+                   "assessment.provider", 128)
+    _check_aa_text("profile", provider["profile"], "assessment.provider",
+                   128)
+    children = data["children"]
+    if not isinstance(children, list) or not 1 <= len(children) <= 256:
+        raise _invalid("report-invalid",
+                       "assessment.children has an invalid size")
+    for index, child in enumerate(children):
+        _check_aa_child(child, f"assessment.children[{index}]")
+    limitations = data["limitations"]
+    if not isinstance(limitations, list) or len(limitations) > 64:
+        raise _invalid("report-invalid",
+                       "assessment.limitations has an invalid size")
+    for index, entry in enumerate(limitations):
+        _check_aa_limitation(entry, f"assessment.limitations[{index}]")
+    if not isinstance(data["publication"], dict):
+        raise _invalid("report-invalid",
+                       "assessment.publication must be an object")
+    _check_aa_publication(data["publication"], "assessment.publication")
+
+
 _PAYLOAD_VALIDATORS = {
     "run": _validate_run_payload,
     "plan": _validate_plan_payload,
@@ -2745,6 +3057,7 @@ _PAYLOAD_VALIDATORS = {
     "init": _validate_init_payload,
     "doctor": _validate_doctor_payload,
     "register": _validate_register_payload,
+    "agent-assessment": _validate_agent_assessment_payload,
 }
 
 
@@ -2966,6 +3279,73 @@ def _project_register_payload(data: dict) -> dict:
     }
 
 
+def _project_aa_citation(item: dict) -> dict:
+    return {"path": item["path"], "start_line": item["start_line"],
+            "end_line": item["end_line"], "sha256": item["sha256"]}
+
+
+def _project_aa_evidence(value: list) -> list:
+    return [_project_aa_citation(entry) for entry in value]
+
+
+def _project_aa_row(item: dict) -> dict:
+    return {"id": item["id"], "status": item["status"],
+            "rationale": item["rationale"],
+            "evidence": _project_aa_evidence(item["evidence"])}
+
+
+def _project_aa_finding(item: dict) -> dict:
+    return {"id": item["id"], "summary": item["summary"],
+            "suggested_change": item["suggested_change"],
+            "recipe_id": item["recipe_id"],
+            "evidence": _project_aa_evidence(item["evidence"])}
+
+
+def _project_aa_score(value: object) -> dict | None:
+    if value is None:
+        return None
+    return {"satisfied": value["satisfied"],
+            "applicable": value["applicable"],
+            "percent": value["percent"]}
+
+
+def _project_aa_limitation(item: dict) -> dict:
+    return {"code": item["code"], "message": item["message"],
+            "paths": list(item["paths"])}
+
+
+def _project_aa_publication(item: dict) -> dict:
+    return {"status": item["status"], "path": item["path"],
+            "sha256": item["sha256"]}
+
+
+def _project_aa_child(item: dict) -> dict:
+    return {
+        "project_id": item["project_id"], "scope": item["scope"],
+        "packet_sha256": item["packet_sha256"],
+        "rows": [_project_aa_row(entry) for entry in item["rows"]],
+        "score": _project_aa_score(item["score"]),
+        "findings": [_project_aa_finding(entry)
+                     for entry in item["findings"]],
+        "limitations": [_project_aa_limitation(entry)
+                        for entry in item["limitations"]],
+    }
+
+
+def _project_agent_assessment_payload(data: dict) -> dict:
+    return {
+        "schema": data["schema"],
+        "provider": {"name": data["provider"]["name"],
+                     "cli_version": data["provider"]["cli_version"],
+                     "profile": data["provider"]["profile"]},
+        "children": [_project_aa_child(entry)
+                     for entry in data["children"]],
+        "limitations": [_project_aa_limitation(entry)
+                        for entry in data["limitations"]],
+        "publication": _project_aa_publication(data["publication"]),
+    }
+
+
 _PROJECTORS: dict = {
     "run": _project_run,
     "plan": _project_plan,
@@ -2975,6 +3355,7 @@ _PROJECTORS: dict = {
     "init": _project_init_payload,
     "doctor": _project_doctor_payload,
     "register": _project_register_payload,
+    "agent-assessment": _project_agent_assessment_payload,
 }
 
 
@@ -3740,6 +4121,143 @@ def _effective_limits_schema() -> dict:
     }
 
 
+def _aa_citation_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "start_line": {"type": "integer", "minimum": 1,
+                           "maximum": 2147483647},
+            "end_line": {"type": "integer", "minimum": 1,
+                         "maximum": 2147483647},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        },
+        "required": ["path", "start_line", "end_line", "sha256"],
+    }
+
+
+def _aa_row_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string",
+                   "enum": list(AGENT_ASSESSMENT_CHECKLIST_IDS)},
+            "status": {"type": "string",
+                       "enum": ["satisfied", "gap", "unknown",
+                                "not-applicable"]},
+            "rationale": {"type": "string"},
+            "evidence": {"type": "array", "items": _aa_citation_schema(),
+                         "minItems": 0, "maxItems": 16},
+        },
+        "required": ["id", "status", "rationale", "evidence"],
+    }
+
+
+def _aa_finding_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string",
+                   "enum": list(AGENT_ASSESSMENT_CHECKLIST_IDS)},
+            "summary": {"type": "string"},
+            "suggested_change": {"type": "string"},
+            "recipe_id": {"type": ["string", "null"]},
+            "evidence": {"type": "array", "items": _aa_citation_schema(),
+                         "minItems": 1, "maxItems": 16},
+        },
+        "required": ["id", "summary", "suggested_change", "recipe_id",
+                     "evidence"],
+    }
+
+
+def _aa_score_schema() -> dict:
+    return {
+        "type": ["object", "null"],
+        "properties": {
+            "satisfied": {"type": "integer", "minimum": 0, "maximum": 11},
+            "applicable": {"type": "integer", "minimum": 1, "maximum": 11},
+            "percent": {"type": "integer", "minimum": 0, "maximum": 100},
+        },
+        "required": ["satisfied", "applicable", "percent"],
+    }
+
+
+def _aa_limitation_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string",
+                     "enum": sorted(AGENT_ASSESSMENT_LIMITATION_CODES)},
+            "message": {"type": "string"},
+            "paths": {"type": "array", "items": {"type": "string"},
+                      "maxItems": 16},
+        },
+        "required": ["code", "message", "paths"],
+    }
+
+
+def _aa_child_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "project_id": {"type": "string",
+                           "pattern": "^[0-9a-f]{32}$"},
+            "scope": {"type": "string"},
+            "packet_sha256": {"type": "string",
+                              "pattern": "^[0-9a-f]{64}$"},
+            "rows": {"type": "array", "items": _aa_row_schema(),
+                     "minItems": 11, "maxItems": 11},
+            "score": _aa_score_schema(),
+            "findings": {"type": "array", "items": _aa_finding_schema()},
+            "limitations": {"type": "array",
+                            "items": _aa_limitation_schema(),
+                            "maxItems": 64},
+        },
+        "required": ["project_id", "scope", "packet_sha256", "rows",
+                     "score", "findings", "limitations"],
+    }
+
+
+def _agent_assessment_data_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "schema": {"type": "string",
+                       "const": "ptest.agent-assessment/v1"},
+            "provider": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "enum": ["claude", "codex", "opencode"]},
+                    "cli_version": {"type": "string"},
+                    "profile": {"type": "string"},
+                },
+                "required": ["name", "cli_version", "profile"],
+            },
+            "children": {"type": "array", "items": _aa_child_schema(),
+                         "minItems": 1, "maxItems": 256},
+            "limitations": {"type": "array",
+                            "items": _aa_limitation_schema(),
+                            "maxItems": 64},
+            "publication": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string",
+                               "enum": ["created", "replaced",
+                                        "unchanged"]},
+                    "path": {"type": "string",
+                             "const": "recommendations.md"},
+                    "sha256": {"type": "string",
+                               "pattern": "^[0-9a-f]{64}$"},
+                },
+                "required": ["status", "path", "sha256"],
+            },
+        },
+        "required": ["schema", "provider", "children", "limitations",
+                     "publication"],
+    }
+
+
 PUBLIC_SCHEMAS: dict = {
     "run": _envelope_schema("run", _run_data_schema()),
     "plan": _envelope_schema("plan", _plan_schema()),
@@ -3822,6 +4340,8 @@ PUBLIC_SCHEMAS: dict = {
         "required": ["root", "initialized", "proposed_runner", "commands",
                      "required_actions", "warnings"],
     }),
+    "agent-assessment": _envelope_schema(
+        "agent-assessment", _agent_assessment_data_schema()),
 }
 
 PROTOCOL_V1_DESCRIPTOR: dict = {
