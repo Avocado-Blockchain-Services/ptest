@@ -12,6 +12,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -435,6 +436,48 @@ def test_cancel_reaps_owned_child_and_spares_neighbor(bindir):
     assert result.cancelled is True
     assert result.error == "cancelled"
     _assert_dead(result.pid)
+    assert neighbor_alive
+
+
+def test_timeout_kills_descendant_after_direct_child_exit(bindir, tmp_path):
+    """Direct child exits early; same-group descendant must still die.
+
+    Negative contract: timeout cleanup must not skip the owned group just
+    because the direct Popen child already exited, and must never touch an
+    unrelated neighbor. No provider output is retained.
+    """
+    pidfile = tmp_path / "descendant.pid"
+    body = (
+        "#!/bin/sh\ncat >/dev/null\nsleep 30 &\n"
+        f"echo $! > {pidfile}\n"
+        "exit 0\n"
+    )
+    adapter = _synthetic(_resolve(bindir, "claude", body))
+    neighbor = _neighbor()
+    try:
+        result = ap.launch_review(adapter, PACKET, SCHEMA, 2, _no_progress([]))
+    finally:
+        neighbor_alive = neighbor.poll() is None
+        neighbor.terminate()
+        neighbor.wait()
+    assert result.ok is False
+    assert result.timed_out is True
+    assert result.error == "timeout"
+    assert result.assessment == b""
+    _assert_dead(result.pid)
+    assert pidfile.exists()
+    descendant = int(pidfile.read_text(encoding="utf-8").strip())
+    assert descendant not in (result.pid, neighbor.pid)
+    for _ in range(50):
+        try:
+            os.kill(descendant, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            pytest.fail("descendant alive but unowned")
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"descendant {descendant} still alive after timeout cleanup")
     assert neighbor_alive
 
 

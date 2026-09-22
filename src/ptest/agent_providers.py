@@ -293,7 +293,112 @@ def _still_owned(pid: int, pgid: int | None) -> bool:
         return False
 
 
-def _stop_owned(proc: subprocess.Popen, pgid: int | None) -> None:
+def _proc_starttime(pid: int) -> int | None:
+    """Boot-relative start time from /proc, or None when unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    try:
+        tail = raw.decode("latin-1").rsplit(")", 1)[1].split()
+        return int(tail[19])  # field 22 (starttime) after the comm field
+    except (IndexError, ValueError):
+        return None
+
+
+def _group_member_pids(pgid: int) -> list[int] | None:
+    """Pids currently in `pgid`, or None when the table is not enumerable."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    members: list[int] = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        mid = int(entry)
+        try:
+            if os.getpgid(mid) == pgid:
+                members.append(mid)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+    return members
+
+
+def _unverified_group() -> None:
+    raise _problem(
+        "provider-failed",
+        "process-group ownership unverifiable after child exit; "
+        "refusing to signal possibly reused PGID")
+
+
+def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
+                         leader_start: int | None) -> list[int]:
+    """Live pids verified as still-owned members of `pgid`.
+
+    Membership alone is not trusted: with ``start_new_session`` the session
+    ID equals the leader pid, which was freshly allocated at spawn, so a
+    live member carrying both our PGID and our session ID is ours -- an
+    outsider cannot join our session, and a pre-existing holder of a
+    recycled PGID number carries an older session (and an older start
+    time). Anything unverifiable fails closed instead of risking a reused
+    PGID or silently skipping cleanup.
+    """
+    members = _group_member_pids(pgid)
+    if members is None:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return []
+        except (PermissionError, OSError):
+            pass
+        _unverified_group()
+    assert members is not None
+    owned: list[int] = []
+    for mid in members:
+        if mid == proc_pid:
+            continue
+        try:
+            member_sid = os.getsid(mid)
+        except ProcessLookupError:
+            continue  # exited while scanning
+        except OSError:
+            _unverified_group()
+        if sid is None:
+            _unverified_group()
+        assert sid is not None
+        if member_sid != sid:
+            _unverified_group()
+        if leader_start is not None:
+            member_start = _proc_starttime(mid)
+            if member_start is not None and member_start < leader_start:
+                _unverified_group()
+        owned.append(mid)
+    return owned
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    else:
+        return True
+
+
+def _stop_owned(proc: subprocess.Popen, pgid: int | None,
+                sid: int | None = None,
+                leader_start: int | None = None) -> None:
+    """Terminate the owned group, including descendants outliving the child.
+
+    A live owned direct child keeps the fast whole-group signal. When the
+    direct child already exited, remaining members are signaled individually
+    only after session/start-time verification; an unverifiable group fails
+    closed rather than risking a reused PGID. The direct child is reaped.
+    """
     if proc.poll() is None and _still_owned(proc.pid, pgid):
         try:
             if pgid is not None and os.name == "posix":
@@ -302,6 +407,14 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None) -> None:
                 proc.terminate()
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    elif (pgid is not None and os.name == "posix"
+          and proc.poll() is not None):
+        for member in _owned_group_members(proc.pid, pgid, sid,
+                                           leader_start):
+            try:
+                os.kill(member, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
     deadline = time.monotonic() + _TERM_GRACE_S
     while proc.poll() is None and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -313,6 +426,24 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None) -> None:
                 proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    elif (pgid is not None and os.name == "posix"
+          and proc.poll() is not None):
+        deadline = time.monotonic() + _TERM_GRACE_S
+        survivors = _owned_group_members(proc.pid, pgid, sid, leader_start)
+        while survivors and time.monotonic() < deadline:
+            time.sleep(0.05)
+            survivors = _owned_group_members(proc.pid, pgid, sid,
+                                             leader_start)
+        for member in survivors:
+            try:
+                os.kill(member, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        deadline = time.monotonic() + 5
+        while survivors and time.monotonic() < deadline:
+            time.sleep(0.05)
+            survivors = [member for member in survivors
+                         if _pid_alive(member)]
     try:
         proc.wait(timeout=5)
     except (subprocess.TimeoutExpired, OSError):
@@ -449,11 +580,18 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         shutil.rmtree(scratch, ignore_errors=True)
         raise
     pgid: int | None = None
+    sid: int | None = None
+    leader_start: int | None = None
     if start_new:
         try:
             pgid = os.getpgid(proc.pid)
         except (ProcessLookupError, PermissionError, OSError):
             pgid = None
+        try:
+            sid = os.getsid(proc.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            sid = None
+        leader_start = _proc_starttime(proc.pid)
 
     def _emit(phase: str) -> None:
         try:
@@ -488,7 +626,7 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         _emit("reviewing")
         feeder.start()
         if proc.stdout is None or proc.stderr is None:
-            _stop_owned(proc, pgid)
+            _stop_owned(proc, pgid, sid, leader_start)
             raise _problem("provider-unavailable",
                            f"reviewer {adapter.name} pipes unavailable")
         os.set_blocking(proc.stdout.fileno(), False)
@@ -538,14 +676,14 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
             selector.close()
         feeder.join(timeout=5)
         if timed_out:
-            _stop_owned(proc, pgid)
+            _stop_owned(proc, pgid, sid, leader_start)
             log.info("review timeout provider=%s", adapter.name)
             return _result(adapter, ok=False, assessment=b"",
                            error="timeout", exit_code=proc.poll(),
                            timed_out=True, cancelled=False, truncated=False,
                            pid=proc.pid, scratch=scratch)
         if exhausted:
-            _stop_owned(proc, pgid)
+            _stop_owned(proc, pgid, sid, leader_start)
             log.info("review output-exhausted provider=%s", adapter.name)
             return _result(adapter, ok=False, assessment=b"",
                            error="output-exhausted", exit_code=proc.poll(),
@@ -556,7 +694,7 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                 proc.wait(timeout=max(0.1, timeout_s - (time.monotonic()
                                                        - start)))
             except subprocess.TimeoutExpired:
-                _stop_owned(proc, pgid)
+                _stop_owned(proc, pgid, sid, leader_start)
                 return _result(adapter, ok=False, assessment=b"",
                                error="timeout", exit_code=proc.poll(),
                                timed_out=True, cancelled=False,
@@ -601,13 +739,13 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                        exit_code=exit_code, timed_out=False, cancelled=False,
                        truncated=False, pid=proc.pid, scratch=scratch)
     except KeyboardInterrupt:
-        _stop_owned(proc, pgid)
+        _stop_owned(proc, pgid, sid, leader_start)
         log.info("review cancelled provider=%s", adapter.name)
         return _result(adapter, ok=False, assessment=b"", error="cancelled",
                        exit_code=proc.poll(), timed_out=False, cancelled=True,
                        truncated=False, pid=proc.pid, scratch=scratch)
     except BaseException:
-        _stop_owned(proc, pgid)
+        _stop_owned(proc, pgid, sid, leader_start)
         raise
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
