@@ -219,6 +219,8 @@ def _find_executable(name: str, env: Mapping) -> str:
     for directory in path.split(os.pathsep):
         if not directory:
             continue
+        if not os.path.isabs(directory):
+            continue
         candidate = os.path.join(directory, name)
         try:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -425,8 +427,12 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                        f"reviewer {adapter.name} executable missing")
 
     scratch = tempfile.mkdtemp(prefix="ptest-review-")
-    with open(os.path.join(scratch, "schema.json"), "wb") as handle:
-        handle.write(schema)
+    try:
+        with open(os.path.join(scratch, "schema.json"), "wb") as handle:
+            handle.write(schema)
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
 
     start_new = os.name == "posix"
     try:
@@ -436,8 +442,12 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
             env=sanitized_child_env(os.environ), shell=False,
             start_new_session=start_new)
     except OSError as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
         raise _problem("provider-unavailable",
                        f"reviewer {adapter.name} failed to start") from exc
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
     pgid: int | None = None
     if start_new:
         try:

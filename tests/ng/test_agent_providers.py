@@ -11,6 +11,7 @@ import json
 import os
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -451,6 +452,52 @@ def test_record_validation():
                           cancelled=False, truncated=False,
                           pid=1, argv=("x",), scratch="/tmp/x")
     assert json.dumps({"kinds": list(ap.SUPPORTED_REVIEWERS)})
+
+
+def test_find_executable_ignores_relative_path_components(tmp_path, monkeypatch):
+    """Relative PATH entries must never resolve a cwd-relative binary."""
+    repo = tmp_path / "repo"
+    (repo / "bin").mkdir(parents=True)
+    _write_bin(repo / "bin", "claude", "#!/bin/sh\necho UNTRUSTED\n")
+    trusted = tmp_path / "tools"
+    trusted.mkdir()
+    _write_bin(trusted, "claude", "#!/bin/sh\necho TRUSTED\n")
+    monkeypatch.chdir(repo)
+    env = {"PATH": os.pathsep.join(["bin", ".", "", str(trusted)])}
+    adapter = ap.resolve_reviewer("claude", env)
+    assert adapter.executable == str(trusted / "claude")
+    assert os.path.isabs(adapter.executable)
+    with pytest.raises(Problem) as exc:
+        ap.resolve_reviewer("claude", {"PATH": os.pathsep.join(["bin", "."])})
+    assert exc.value.code == "provider-unavailable"
+
+
+def test_launch_popen_failure_cleans_scratch(bindir, monkeypatch):
+    """Popen failure after mkdtemp must not leak the owned scratch dir."""
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+    created: list[str] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _capture(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(ap.tempfile, "mkdtemp", _capture)
+
+    def _boom(*args, **kwargs):
+        raise OSError("injected popen failure")
+
+    monkeypatch.setattr(ap.subprocess, "Popen", _boom)
+    with pytest.raises(Problem) as exc:
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert exc.value.code == "provider-unavailable"
+    assert len(created) == 1
+    scratch = created[0]
+    assert os.path.basename(scratch).startswith("ptest-review-")
+    assert scratch.startswith(tempfile.gettempdir())
+    assert not Path(scratch).exists()
 
 
 def test_broken_progress_callback_cannot_fail_review(bindir):
