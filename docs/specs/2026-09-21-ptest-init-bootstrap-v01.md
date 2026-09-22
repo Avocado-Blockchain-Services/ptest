@@ -32,7 +32,10 @@ If root runner evidence is absent or ambiguous, init performs bounded bootstrap
 inspection of immediate, non-symlink child directories only. A directory is a
 candidate only when it contains exactly one kind of native evidence already
 used by ptest's runner detection. It never recursively searches, globs,
-follows symlinks, or treats arbitrary descendants as projects. All unambiguous
+follows symlinks, or treats arbitrary descendants as projects. A directory
+containing direct Terraform configuration files (`*.tf` or `*.tf.json`) is not
+auto-selected as an application runner child, even if it also contains pytest
+harness evidence; ptest has no Terraform runner. All remaining unambiguous
 candidates are selected automatically; if a candidate has ambiguous evidence,
 the user must provide explicit `--child PATH --runner KIND` pairs (or resolve
 the ambiguity interactively).
@@ -98,6 +101,7 @@ comma-separated explicit set for automation and rejects unknown providers.
 ### Negative contracts
 
 - Never scan outside the Git root or recursively discover projects.
+- Never infer a runner for a Terraform configuration directory.
 - Never follow a symlink for a candidate child, child config, or provider
   integration target. The existing in-repository `AGENTS.md -> CLAUDE.md`
   alias remains the sole documented agent-file exception.

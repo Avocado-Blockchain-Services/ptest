@@ -179,6 +179,38 @@ def test_init_auto_bootstraps_immediate_runner_children_from_git_root(tmp_path):
     assert (root / "web" / ".ptest.toml").is_file()
 
 
+def test_init_auto_bootstrap_excludes_terraform_subtrees(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    api = root / "api"
+    web = root / "web"
+    terraform = root / "terraform"
+    api.mkdir()
+    web.mkdir()
+    terraform.mkdir()
+    (api / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n'
+    )
+    (web / "package.json").write_text('{"devDependencies":{"vitest":"1"}}')
+    (terraform / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n'
+    )
+    (terraform / "versions.tf").write_text('terraform {}\n')
+
+    result = init_project(root, InitOptions(
+        runner=None, dry_run=False, reveal_command=False,
+    ))
+
+    assert result.action.value == "created"
+    assert (root / ".ptest.toml").read_text() == (
+        'version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n'
+    )
+    assert (api / ".ptest.toml").is_file()
+    assert (web / ".ptest.toml").is_file()
+    assert not (terraform / ".ptest.toml").exists()
+
+
 def test_init_preserves_unambiguous_root_runner_over_child_evidence(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()

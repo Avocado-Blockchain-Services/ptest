@@ -14,6 +14,7 @@
 
 - Existing valid child `.ptest.toml` files remain authoritative and byte-identical.
 - Bootstrap inspection is bounded to the Git root and immediate child directories; runtime execution performs no discovery or glob expansion.
+- Direct Terraform configuration files exclude that directory from automatic application-runner selection; ptest has no Terraform runner.
 - Never follow symlinks, write outside the resolved repository root, execute runners/package managers, use the network, or spawn nested ptest processes during init.
 - Validate all planned targets before the first write; dry-run and `--agents none` remain pure.
 - Existing agent text, guides, provider files, and trust settings are preserved; provider integration is repository-local and opt-in.

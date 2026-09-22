@@ -10,6 +10,7 @@ import subprocess
 import urllib.request
 import shutil
 import textwrap
+import tomllib
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
 
@@ -272,6 +273,9 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     shutil.copy2(repo / "pyproject.toml", source_copy / "pyproject.toml")
     shutil.copy2(repo / "uv.lock", source_copy / "uv.lock")
     shutil.copytree(repo / "src", source_copy / "src")
+    ptest_version = tomllib.loads(
+        (source_copy / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
     built = subprocess.run(["uv", "build", "--wheel", "--out-dir", str(build)], cwd=source_copy, capture_output=True, text=True)
     assert built.returncode == 0, built.stderr
     ptest_wheel = next(build.glob("ptest_ng-*.whl"))
@@ -282,8 +286,8 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     psutil = next(item for item in metadata["urls"] if "cp36-abi3-manylinux2010_x86_64" in item["filename"])
     manifest = wheelhouse / "manifest.json"
     platform_tag = "manylinux2010_x86_64"
-    manifest.write_text(_json.dumps({"version": 1, "ptest_version": "0.1.3", "python_tag": "cp36", "platform_tag": platform_tag, "wheels": [
-        {"filename": ptest_wheel.name, "sha256": hashlib.sha256(ptest_wheel.read_bytes()).hexdigest(), "package": "ptest-ng", "version": "0.1.3"},
+    manifest.write_text(_json.dumps({"version": 1, "ptest_version": ptest_version, "python_tag": "cp36", "platform_tag": platform_tag, "wheels": [
+        {"filename": ptest_wheel.name, "sha256": hashlib.sha256(ptest_wheel.read_bytes()).hexdigest(), "package": "ptest-ng", "version": ptest_version},
         {"filename": psutil["filename"], "sha256": psutil["digests"]["sha256"], "package": "psutil", "version": "7.2.2"},
     ]}))
     dest = tmp_path / "install"

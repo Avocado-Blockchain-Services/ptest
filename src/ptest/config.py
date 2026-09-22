@@ -643,6 +643,16 @@ def _auto_monorepo_children(root: Path) -> tuple[tuple[str, C.RunnerKind], ...]:
             if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
                 continue
             child = Path(entry.path)
+            # Infrastructure trees can contain Python harness tests but are
+            # not application runner children. Never infer pytest from that
+            # harness when the directory itself declares Terraform config.
+            try:
+                with os.scandir(child) as child_entries:
+                    if any(item.name.endswith((".tf", ".tf.json"))
+                           for item in child_entries):
+                        continue
+            except OSError:
+                raise _problem("state-unavailable", "repository contents are unavailable")
             candidates = _native_candidates(child)
         except OSError:
             raise _problem("state-unavailable", "repository contents are unavailable")
