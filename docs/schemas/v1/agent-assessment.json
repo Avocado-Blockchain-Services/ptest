@@ -1,0 +1,422 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "children": {
+          "items": {
+            "properties": {
+              "findings": {
+                "items": {
+                  "properties": {
+                    "evidence": {
+                      "items": {
+                        "properties": {
+                          "end_line": {
+                            "maximum": 2147483647,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "pattern": "^[0-9a-f]{64}$",
+                            "type": "string"
+                          },
+                          "start_line": {
+                            "maximum": 2147483647,
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "start_line",
+                          "end_line",
+                          "sha256"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 16,
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    "id": {
+                      "enum": [
+                        "FIX-001",
+                        "FIX-002",
+                        "DB-001",
+                        "DB-002",
+                        "CACHE-001",
+                        "RESOURCE-001",
+                        "NETWORK-001",
+                        "PROCESS-001",
+                        "TIME-001",
+                        "SELECT-001",
+                        "TIMING-001"
+                      ],
+                      "type": "string"
+                    },
+                    "recipe_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "suggested_change": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "summary",
+                    "suggested_change",
+                    "recipe_id",
+                    "evidence"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "limitations": {
+                "items": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "capability-unsupported",
+                        "dependency-missing",
+                        "dependency-uninspectable",
+                        "dependency-unsupported",
+                        "execution-not-run",
+                        "partial-evidence",
+                        "same-user-rename-race",
+                        "timing-unmeasured"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 16,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "paths"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 64,
+                "type": "array"
+              },
+              "packet_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "project_id": {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              "rows": {
+                "items": {
+                  "properties": {
+                    "evidence": {
+                      "items": {
+                        "properties": {
+                          "end_line": {
+                            "maximum": 2147483647,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "pattern": "^[0-9a-f]{64}$",
+                            "type": "string"
+                          },
+                          "start_line": {
+                            "maximum": 2147483647,
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "start_line",
+                          "end_line",
+                          "sha256"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 16,
+                      "minItems": 0,
+                      "type": "array"
+                    },
+                    "id": {
+                      "enum": [
+                        "FIX-001",
+                        "FIX-002",
+                        "DB-001",
+                        "DB-002",
+                        "CACHE-001",
+                        "RESOURCE-001",
+                        "NETWORK-001",
+                        "PROCESS-001",
+                        "TIME-001",
+                        "SELECT-001",
+                        "TIMING-001"
+                      ],
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "satisfied",
+                        "gap",
+                        "unknown",
+                        "not-applicable"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status",
+                    "rationale",
+                    "evidence"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 11,
+                "minItems": 11,
+                "type": "array"
+              },
+              "scope": {
+                "type": "string"
+              },
+              "score": {
+                "properties": {
+                  "applicable": {
+                    "maximum": 11,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "percent": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "satisfied": {
+                    "maximum": 11,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "satisfied",
+                  "applicable",
+                  "percent"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "project_id",
+              "scope",
+              "packet_sha256",
+              "rows",
+              "score",
+              "findings",
+              "limitations"
+            ],
+            "type": "object"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "capability-unsupported",
+                  "dependency-missing",
+                  "dependency-uninspectable",
+                  "dependency-unsupported",
+                  "execution-not-run",
+                  "partial-evidence",
+                  "same-user-rename-race",
+                  "timing-unmeasured"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "paths"
+            ],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "provider": {
+          "properties": {
+            "cli_version": {
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "claude",
+                "codex",
+                "opencode"
+              ],
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "cli_version",
+            "profile"
+          ],
+          "type": "object"
+        },
+        "publication": {
+          "properties": {
+            "path": {
+              "const": "recommendations.md",
+              "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "created",
+                "replaced",
+                "unchanged"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "path",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "schema": {
+          "const": "ptest.agent-assessment/v1",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "provider",
+        "children",
+        "limitations",
+        "publication"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "agent-assessment",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: agent-assessment",
+  "type": "object"
+}
