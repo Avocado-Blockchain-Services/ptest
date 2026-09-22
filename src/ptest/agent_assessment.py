@@ -622,6 +622,11 @@ def build_packets(workspace, resolution,
         raise _fail("invalid-bound",
                     "workspace declares more than 256 children")
     for repo in workspace.repositories:
+        if repo.declaration != "." and not isinstance(repo.config, C.Config):
+            raise _fail("invalid-config",
+                        "declared child configuration is unavailable; "
+                        "assessment packets cannot be built")
+    for repo in workspace.repositories:
         packets.append(_build_one_packet(root, repo, resolution, limits))
     return tuple(packets)
 
@@ -679,9 +684,14 @@ def _build_one_packet(root: Path, repo, resolution,
         names.add(rel.rsplit("/", 1)[-1])
         byte_count += len(chunk)
 
-    if declaration == "." and resolution.config is not None:
-        runner_kind = resolution.config.runner.kind.value
-        project_id = resolution.config.project_id
+    config = repo.config
+    if declaration == "." and config is None:
+        # Preserve compatibility for standalone WorkspaceInspection values
+        # created by existing callers before RepositoryInspection exposed it.
+        config = resolution.config
+    if config is not None:
+        runner_kind = config.runner.kind.value
+        project_id = config.project_id
     else:
         runner_kind = "unknown"
         project_id = "0" * 32

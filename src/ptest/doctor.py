@@ -693,6 +693,7 @@ class RepositoryInspection:
     local_scope: str | None
     report: C.DoctorReport
     config_problem: C.Problem | None
+    config: C.Config | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,6 +868,7 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
         inspection = RepositoryInspection(
             declaration=declaration, local_scope=requested, report=report,
             config_problem=(resolution.problem if resolution.config is None else None),
+            config=resolution.config,
         )
         workspace_scope = report.scope
         return WorkspaceInspection(scope=workspace_scope, repositories=(inspection,),
@@ -897,7 +899,8 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
             for reason in report.limitations:
                 ledger._add_limitation(reason)
             repositories.append(RepositoryInspection(
-                declaration=declaration, local_scope=local, report=report, config_problem=None))
+                declaration=declaration, local_scope=local, report=report,
+                config_problem=None, config=None))
             continue
         # Allocate config reads before diagnosis so malformed configurations
         # cannot consume unreported workspace bytes or starve later children.
@@ -918,7 +921,8 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
             for reason in report.limitations:
                 ledger._add_limitation(reason)
             repositories.append(RepositoryInspection(
-                declaration=declaration, local_scope=local, report=report, config_problem=None))
+                declaration=declaration, local_scope=local, report=report,
+                config_problem=None, config=None))
             continue
         if diagnosis.kind == "budget":
             report = _config_budget_report(_Scan(root, limits, requested), child_scope, declaration)
@@ -926,7 +930,8 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
             for reason in report.limitations:
                 ledger._add_limitation(reason)
             repositories.append(RepositoryInspection(
-                declaration=declaration, local_scope=local, report=report, config_problem=None))
+                declaration=declaration, local_scope=local, report=report,
+                config_problem=None, config=None))
             continue
         # A reachable child remains useful static evidence even when its
         # native manifest is missing, malformed, or unsafe.  It cannot establish
@@ -956,7 +961,7 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
                 ledger._add_limitation(reason)
             repositories.append(RepositoryInspection(
                 declaration=declaration, local_scope=local, report=report,
-                config_problem=diagnosis.problem))
+                config_problem=diagnosis.problem, config=None))
             continue
         # Remaining scannable slots without extra I/O: every not-yet
         # visited selection is assumed scannable until its own diagnosis.
@@ -1032,7 +1037,8 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
         ledger.truncated = ledger.truncated or child.truncated
         repositories.append(RepositoryInspection(
             declaration=declaration, local_scope=local, report=report,
-            config_problem=None if diagnosis.kind == "ok" else diagnosis.problem))
+            config_problem=None if diagnosis.kind == "ok" else diagnosis.problem,
+            config=diagnosis.config))
     limitation_seed: list[C.Reason] = []
     if requested is None:
         # An ordinary bounded limitation: reason codes stay in the frozen
