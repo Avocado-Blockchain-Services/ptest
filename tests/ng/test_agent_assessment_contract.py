@@ -425,6 +425,94 @@ def test_schema_descriptor_matches_generated_file():
         "type": "string", "const": "ptest.agent-assessment/v1"}
 
 
+def test_reject_tab_and_controls_when_newline_allowed():
+    payload = _payload()
+    payload["provider"] = {"name": "claude", "cli_version": "1\t2",
+                           "profile": "stable"}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(payload))
+    finding = dict(_finding("FIX-002"), summary="Fix it\tnow please")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(findings=[finding])])))
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], rationale="Line one\nline two\twith tab")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], rationale="bad \x1b char here")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0],
+                   rationale="Line one\nline two stays allowed here.")
+    doc = C.decode_public_document(_hostile(_payload(
+        children=[_child(rows=rows)])))
+    assert doc.error is None
+
+
+@pytest.mark.parametrize("path", [
+    "C:/outside", "C:\\outside", "C:outside", "/abs/path.py",
+    "\\abs\\path.py", "src\\evil.py", "../escape.py", "a/../b.py",
+    "./rel.py", "a//b.py",
+])
+def test_reject_non_root_relative_paths(path):
+    rows = _mixed_rows()
+    rows[0] = _row("FIX-001", "satisfied",
+                   evidence=[_citation(path=path)])
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    bad_child = dict(_child(rows=_mixed_rows()), scope=path)
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[bad_child])))
+    payload = _payload(limitations=[
+        {"code": "partial-evidence", "message": "kept", "paths": [path]}])
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(payload))
+
+
+def test_reject_trivial_not_applicable_rationale_with_citation():
+    rows = _mixed_rows()
+    rows[3] = _row("DB-002", "not-applicable", rationale="x",
+                   evidence=[_citation()])
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    rows = _mixed_rows()
+    rows[3] = _row("DB-002", "not-applicable", rationale="x" * 23,
+                   evidence=[_citation()])
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    rows = _mixed_rows()
+    rows[3] = _row("DB-002", "not-applicable", rationale="x" * 24,
+                   evidence=[_citation()])
+    doc = C.decode_public_document(_hostile(_payload(
+        children=[_child(rows=rows)])))
+    assert doc.error is None
+
+
+def test_lone_surrogate_produces_typed_problem():
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], rationale="bad \ud800 char")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(rows=rows)])))
+    finding = dict(_finding("FIX-002"), summary="bad \udc00 here")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(_payload(
+            children=[_child(findings=[finding])])))
+    payload = _payload()
+    payload["provider"] = {"name": "claude", "cli_version": "1\ud800",
+                           "profile": "stable"}
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(payload))
+
+
 def test_doctor_bytes_unchanged_by_registry_extension():
     payload = {
         "scope": ["tests"],

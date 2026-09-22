@@ -9,7 +9,9 @@ from __future__ import annotations
 import importlib.resources
 from dataclasses import dataclass
 
-from . import contracts as C
+# NOTE: ptest.contracts derives its checklist constants from CATALOG below,
+# so this module must not import contracts at top level (import cycle).
+# load_recipe() imports it lazily instead.
 
 _RECIPE_MAX_BYTES = 65536
 _RECIPE_FILES = {
@@ -148,6 +150,8 @@ CATALOG: tuple[ChecklistEntry, ...] = (
 
 def load_recipe(name: str) -> str:
     """Return one bounded packaged recipe; fail closed on unknown/missing data."""
+    from . import contracts as C
+
     relative = _RECIPE_FILES.get(name)
     if relative is None:
         raise C.Problem(code="unsafe-path", message="packaged recipe name is not known",

@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .checklist import CATALOG as _CHECKLIST_CATALOG
+
 PTEST_VERSION = "0.1.5"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
@@ -2739,29 +2741,15 @@ def _validate_register_payload(data: dict) -> None:
 
 AGENT_ASSESSMENT_SCHEMA = "ptest.agent-assessment/v1"
 
-# Frozen mirror of checklist.CATALOG order and recipe assignments. contracts.py
-# precedes checklist.py (checklist imports this module), so the canonical IDs
-# cannot be imported here without a cycle; parity with the canonical catalog
-# is enforced by tests/ng/test_agent_assessment_contract.py.
-AGENT_ASSESSMENT_CHECKLIST_IDS = (
-    "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
-    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-    "SELECT-001", "TIMING-001",
-)
+# Derived from checklist.CATALOG, the sole ordered catalog authority.
+# checklist.py imports this module only lazily (inside load_recipe), so
+# either import order resolves without a cycle. The parity test pins the
+# derived values against the canonical catalog.
+AGENT_ASSESSMENT_CHECKLIST_IDS = tuple(
+    entry.id for entry in _CHECKLIST_CATALOG)
 
 AGENT_ASSESSMENT_RECIPES = {
-    "FIX-001": "factories",
-    "FIX-002": "factories",
-    "DB-001": "databases",
-    "DB-002": "databases",
-    "CACHE-001": "cache",
-    "RESOURCE-001": "files-ports",
-    "NETWORK-001": "time-network",
-    "PROCESS-001": "processes",
-    "TIME-001": "time-network",
-    "SELECT-001": None,
-    "TIMING-001": None,
-}
+    entry.id: entry.recipe for entry in _CHECKLIST_CATALOG}
 
 AGENT_ASSESSMENT_PROVIDERS = frozenset({"claude", "codex", "opencode"})
 
@@ -2834,20 +2822,23 @@ def _check_aa_text(name: str, value: object, ctx: str, max_bytes: int, *,
     if not value:
         raise _invalid("report-invalid",
                        f"{ctx} field {name!r} must be nonempty")
-    if len(value.encode("utf-8")) > max_bytes:
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} is not valid UTF-8") from None
+    if size > max_bytes:
         raise _invalid("report-invalid",
                        f"{ctx} field {name!r} exceeds its bound")
     for char in value:
         code = ord(char)
-        if char in ("\n", "\t"):
-            if not allow_newline or char == "\t":
-                pass
-            if char == "\n" and not allow_newline:
+        if char == "\n":
+            if not allow_newline:
                 raise _invalid(
                     "report-invalid",
                     f"{ctx} field {name!r} carries controls")
             continue
-        if (code < 0x20 or code == 0x7F
+        if (char == "\t" or code < 0x20 or code == 0x7F
                 or 0x80 <= code <= 0x9F
                 or code in _AGENT_ASSESSMENT_BIDI):
             raise _invalid("report-invalid",
@@ -2859,6 +2850,9 @@ def _check_aa_relpath(name: str, value: object, ctx: str,
                       max_bytes: int = 4096) -> str:
     _check_aa_text(name, value, ctx, max_bytes)
     if value.startswith(("/", "\\")) or "\\" in value:
+        raise _invalid("report-invalid",
+                       f"{ctx} field {name!r} must be root-relative")
+    if re.match(r"[A-Za-z]:", value):
         raise _invalid("report-invalid",
                        f"{ctx} field {name!r} must be root-relative")
     if value != ".":
@@ -2917,6 +2911,16 @@ def _check_aa_row(item: object, ctx: str, index: int) -> None:
                    allow_newline=True)
     _check_aa_evidence(item["evidence"], f"{ctx}.evidence",
                        min_items=0 if item["status"] == "unknown" else 1)
+    if item["status"] == "not-applicable":
+        # Structural floor only: JSON syntax cannot prove semantic
+        # applicability, and length alone does not prove non-applicability.
+        # Require a meaningful rationale (>=24 non-whitespace characters)
+        # plus cited evidence; affirmative-evidence checking belongs to the
+        # later packet validator.
+        rationale = item["rationale"]
+        if sum(1 for char in rationale if not char.isspace()) < 24:
+            raise _invalid("report-invalid",
+                           f"{ctx} needs a specific not-applicable rationale")
 
 
 def _check_aa_finding(item: object, ctx: str) -> None:
