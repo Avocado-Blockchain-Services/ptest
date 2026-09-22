@@ -756,13 +756,16 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 depth=C.DEFAULT_SCAN_LIMITS.depth,
                 ast_nodes=C.DEFAULT_SCAN_LIMITS.ast_nodes,
             )
-            report = doctor.inspect(domain, resolution, limits, parsed.scope)
+            workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
             if parsed.prompt:
-                sys.stdout.write(render.repair_prompt(report))
+                sys.stdout.write(render.repair_prompt(
+                    workspace.aggregate, workspace=workspace))
             elif parsed.json:
-                sys.stdout.buffer.write(render.render_doctor_json(report, domain=_domain_public(domain)))
+                sys.stdout.buffer.write(render.render_doctor_json(
+                    workspace.aggregate, domain=_domain_public(domain)))
             else:
-                sys.stdout.write(render.render_doctor(report))
+                sys.stdout.write(render.render_doctor(
+                    workspace.aggregate, workspace=workspace))
             return 0
     except C.Problem as problem:
         return _emit_error(problem, kind=command or "where", json_output=parsed.json)

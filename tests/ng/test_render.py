@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -90,7 +91,9 @@ def test_doctor_human_evidence_is_terminal_safe_and_bounded():
         assert control not in text
     assert "\\x1b[31m" in text
     assert "unsafe" not in text
-    assert len(text.encode()) < 2000
+    # The mandatory worksheet catalog exceeds the old sub-2KB shape; the
+    # operative bound is the shared human/prompt output cap.
+    assert len(text.encode()) <= C.MAX_PROMPT_BYTES
     # Escaping/truncation belongs to presentation, never the typed report.
     document = C.decode_public_document(render_doctor_json(report))
     assert document.data["findings"][0]["path"] == report.findings[0].path
@@ -119,7 +122,8 @@ def test_prompt_keeps_constraints_before_bounded_delimited_untrusted_evidence():
     records = evidence.splitlines()
     # A forged delimiter in a filename/remediation stays within one JSON line.
     assert records.count("END UNTRUSTED DOCTOR EVIDENCE") == 1
-    first = json.loads(records[0])
+    assert json.loads(records[0])["kind"] == "repository"
+    first = next(json.loads(record) for record in records if '"path"' in record)
     assert first["path"] == finding.path
     assert first["remediation"] == finding.remediation
     assert all(json.loads(record) for record in records
@@ -196,8 +200,10 @@ def test_repair_prompt_copies_scan_context_and_readiness_exactly_before_evidence
     ]
     records = [json.loads(line) for line in evidence.splitlines()
                if line and line != "END UNTRUSTED DOCTOR EVIDENCE"]
-    assert set(records[0]) == {"code", "severity", "confidence", "path", "line",
-                               "evidence_type", "consequence", "remediation", "verification"}
+    assert records[0]["kind"] == "repository"
+    first_finding = next(item for item in records if "kind" not in item)
+    assert set(first_finding) == {"code", "severity", "confidence", "path", "line",
+                                  "evidence_type", "consequence", "remediation", "verification"}
     readiness_records = [item for item in records if item.get("kind") == "readiness-reason"]
     assert [(item["readiness_index"], item["area"], item["state"], item["message"])
             for item in readiness_records] == [
@@ -274,6 +280,16 @@ def test_repair_prompt_is_pure_for_hostile_metadata_and_never_reads_state(monkey
     assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
 
 
+def test_doctor_human_output_stays_bounded_with_catalog_and_table():
+    report = _hostile_report()
+    text = render_doctor(report)
+    for control in ("\x1b", "\r", "\t", "\x7f", "\u009b", "\u202e"):
+        assert control not in text
+    assert "FIX-001" in text and "TIMING-001" in text
+    assert "| Execution | Parallelism | Selection | Timing |" in text
+    assert len(text.encode("utf-8")) <= C.MAX_PROMPT_BYTES
+
+
 def test_missing_bundled_guide_fails_loudly_without_substitute(tmp_path, monkeypatch):
     from ptest import render
 
@@ -282,3 +298,197 @@ def test_missing_bundled_guide_fails_loudly_without_substitute(tmp_path, monkeyp
         render.render_guide()
     assert exc.value.code == "state-unavailable"
     assert "bundled" in exc.value.message
+
+
+def _workspace_reports():
+    from ptest.doctor import RepositoryInspection, WorkspaceInspection
+
+    def _report(path_prefix, code=None):
+        findings = ()
+        if code is not None:
+            findings = (C.Finding(
+                code=code, severity="high", confidence="medium",
+                path=f"{path_prefix}/tests/cache_test.py", line=2,
+                evidence_type="static-pattern", consequence="consequence",
+                remediation="remediation", verification="verification"),)
+        return C.DoctorReport(
+            scope=(), readiness=(
+                C.Readiness(area="execution", state="unknown", reasons=(
+                    C.Reason(code="static-evidence-insufficient",
+                             message="Doctor does not execute repository code."),)),
+                C.Readiness(area="parallel", state="unknown", reasons=(
+                    C.Reason(code="static-evidence-insufficient",
+                             message="Static inspection cannot prove run/worker isolation."),)),
+                C.Readiness(area="selection", state="blocked", reasons=(
+                    C.Reason(code="selection-disabled",
+                             message="Automatic selection is disabled.", paths=(path_prefix,)),)),
+                C.Readiness(area="timing", state="unknown", reasons=(
+                    C.Reason(code="static-evidence-insufficient",
+                             message="Timing unavailable."),)),
+            ), findings=findings, limits=C.DEFAULT_SCAN_LIMITS,
+            usage=C.ScanUsage(entries=3, files=1, file_bytes=10, total_bytes=10,
+                              findings=len(findings), output_bytes=10, elapsed_s=0.0,
+                              skipped=0, truncated=False),
+            limitations=(),
+        )
+
+    api, web = _report("api", "cache.global-flush"), _report("web")
+    aggregate = C.DoctorReport(
+        scope=(), readiness=(
+            C.Readiness(area="execution", state="unknown", reasons=(
+                C.Reason(code="static-evidence-insufficient",
+                         message="Doctor does not execute repository code.",
+                         paths=("api", "web")),)),
+            C.Readiness(area="parallel", state="unknown", reasons=()),
+            C.Readiness(area="selection", state="blocked", reasons=(
+                C.Reason(code="selection-disabled",
+                         message="Automatic selection is disabled.",
+                         paths=("api", "web")),)),
+            C.Readiness(area="timing", state="unknown", reasons=()),
+        ), findings=api.findings, limits=C.DEFAULT_SCAN_LIMITS,
+        usage=C.ScanUsage(entries=6, files=2, file_bytes=20, total_bytes=20,
+                          findings=1, output_bytes=20, elapsed_s=0.0,
+                          skipped=0, truncated=False),
+        limitations=(C.Reason(code="static-evidence-insufficient",
+                              message="Only declared children were inspected."),
+        ),
+    )
+    workspace = WorkspaceInspection(
+        scope=(), repositories=(
+            RepositoryInspection(declaration="api", local_scope=None,
+                                 report=api, config_problem=None),
+            RepositoryInspection(declaration="web", local_scope=None,
+                                 report=web, config_problem=None),
+        ), aggregate=aggregate,
+    )
+    return workspace
+
+
+def test_render_doctor_shows_per_repository_table_then_catalog_then_findings():
+    from ptest.render import render_doctor
+
+    workspace = _workspace_reports()
+    text = render_doctor(workspace.aggregate, workspace=workspace)
+
+    assert text.startswith("ptest doctor")
+    table_at = text.index("|")
+    assert "Parallelism" in text[table_at:text.index("\n\n", table_at)]
+    api_row = next(line for line in text.splitlines() if line.startswith("| 1 | api "))
+    web_row = next(line for line in text.splitlines() if line.startswith("| 2 | web "))
+    assert text.index(api_row) < text.index(web_row)
+    assert "not ready" in api_row and "unknown" in api_row
+    catalog_at = text.index("FIX-001")
+    assert table_at < catalog_at
+    assert "Reviewer fills one copy per repository" in text
+    assert text.count("review not yet performed") >= 11
+    findings_at = text.index("Static hypotheses")
+    assert catalog_at < findings_at
+    assert "api/tests/cache_test.py" in text[findings_at:]
+    assert "Static review only: no tests, services, or network calls ran." in text
+    assert "Findings: 1 total (1 high)" in text[findings_at:]
+    assert text.rstrip().endswith("Next: ptest doctor --prompt  |  ptest doctor --json")
+
+
+def test_render_doctor_supports_direct_report_callers_without_workspace():
+    from ptest.render import render_doctor
+
+    workspace = _workspace_reports()
+    text = render_doctor(workspace.aggregate)
+
+    assert text.startswith("ptest doctor")
+    assert "FIX-001" in text
+    assert "TIMING-001" in text
+
+
+def test_assessment_prompt_fills_worksheet_shape_with_cited_evidence_classes():
+    from ptest.render import repair_prompt
+
+    workspace = _workspace_reports()
+    prompt = repair_prompt(workspace.aggregate, workspace=workspace)
+
+    assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
+    before, evidence = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)
+    assert "Assessment request:" in before
+    assert "Reviewer assessment" in before
+    start_at = before.index("Start your completed report")
+    reviewer_at = before.index("Reviewer assessment")
+    worksheet_at = before.index("worksheet fields")
+    assert start_at < reviewer_at < worksheet_at
+    assert "assessment authority only" in before
+    assert "edits require authorization" in before
+    assert "never updates ptest readiness" in before
+    for entry_id in ("FIX-001", "DB-001", "CACHE-001", "SELECT-001", "TIMING-001"):
+        assert entry_id in before
+    assert "static hypothesis" in before
+    assert "runtime evidence" in before
+    assert "reviewer conclusion" in before
+    assert "ptest CHILD/tests/" in before
+    assert "doctor --probe" in before
+    assert prompt.endswith("\nEND UNTRUSTED DOCTOR EVIDENCE\n")
+    records = [json.loads(line) for line in evidence.splitlines()
+               if line and line not in {
+                   "END UNTRUSTED DOCTOR EVIDENCE",
+                   "[doctor prompt truncated at the configured bound]"}]
+    kinds = {record.get("kind", "finding") for record in records}
+    assert "repository" in kinds
+    repo_records = [record for record in records if record.get("kind") == "repository"]
+    assert [(record["index"], record["declaration"]) for record in repo_records] == [
+        (1, "api"), (2, "web")]
+    assert all("\n" not in json.dumps(record, ensure_ascii=True)
+               for record in records)
+
+
+def test_assessment_prompt_keeps_every_legal_declared_repository_row_at_capacity():
+    """Evidence truncation must never silently drop a declared child row."""
+    report = C.DoctorReport(
+        scope=(), readiness=(), findings=(), limits=None, usage=None, limitations=())
+    # 256 is the manifest maximum; the labels are legal but deliberately
+    # expensive enough to consume the prompt if records are not reserved first.
+    workspace = SimpleNamespace(repositories=tuple(
+        SimpleNamespace(declaration=("child-" + "x" * 894 + f"-{index:03d}"),
+                        local_scope=None, report=report, config_problem=None)
+        for index in range(256)))
+
+    prompt = repair_prompt(report, workspace=workspace)
+
+    evidence = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)[1]
+    records = [json.loads(line) for line in evidence.splitlines()
+               if line.startswith("{")]
+    rows = [record for record in records if record.get("kind") == "repository"]
+    assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
+    assert [row["index"] for row in rows] == list(range(1, 257))
+    assert all(row["label_truncated"] is True for row in rows)
+
+
+def test_assessment_prompt_reserves_rows_for_multibyte_declarations():
+    """JSON ASCII escaping must not turn legal labels into dropped child rows."""
+    report = C.DoctorReport(
+        scope=(), readiness=(), findings=(), limits=None, usage=None, limitations=())
+    workspace = SimpleNamespace(repositories=tuple(
+        SimpleNamespace(declaration=("😀" * 60 + f"-{index:03d}"),
+                        local_scope=None, report=report, config_problem=None)
+        for index in range(256)))
+
+    prompt = repair_prompt(report, workspace=workspace)
+
+    evidence = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)[1]
+    rows = [json.loads(line) for line in evidence.splitlines() if line.startswith("{")]
+    rows = [row for row in rows if row.get("kind") == "repository"]
+    assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
+    assert [row["index"] for row in rows] == list(range(1, 257))
+    assert all(row["label_truncated"] is True for row in rows)
+
+
+def test_assessment_prompt_preserves_direct_report_callers_and_copies_readiness():
+    from ptest.render import repair_prompt
+
+    workspace = _workspace_reports()
+    prompt = repair_prompt(workspace.aggregate)
+
+    assert "Assessment request:" in prompt
+    before = prompt.split("BEGIN UNTRUSTED DOCTOR EVIDENCE\n", 1)[0]
+    line = next(item for item in before.splitlines() if item.startswith("Scan context: "))
+    context = json.loads(line.removeprefix("Scan context: "))
+    assert [item["area"] for item in context["readiness"]] == [
+        "execution", "parallel", "selection", "timing"]
+    assert context["readiness"][2]["state"] == "blocked"

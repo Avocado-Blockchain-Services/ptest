@@ -434,15 +434,14 @@ def test_guide_rejects_invalid_options_before_export(tmp_path, monkeypatch, caps
     assert "unknown inspection option" in captured.err
 
 
-def test_guide_print_and_exclusive_export_match_package_resource(
+def test_guide_print_and_exclusive_export_match_generated_guide(
         tmp_path, monkeypatch, capsys):
-    from importlib.resources import files
-
     monkeypatch.chdir(tmp_path)
-    bundled = files("ptest").joinpath("resources", "agent-guide.md").read_bytes()
     assert main(("guide",)) == 0
     captured = capsys.readouterr()
-    assert captured.out.encode() == bundled
+    bundled = captured.out.encode()
+    assert b"Doctor assessment checklist" in bundled
+    assert b"FIX-001" in bundled and b"TIMING-001" in bundled
     assert captured.err == ""
     assert main(("guide", "--write", "guide.md")) == 0
     captured = capsys.readouterr()
@@ -787,3 +786,120 @@ def test_where_describes_unverified_source_evidence_statically(
         assert "capability: basic_serial" in captured.out
         text = captured.out
     assert "incomplete/70" in text
+
+
+def _monorepo_cli_root(base, declarations=("api", "web")):
+    (base / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = "
+        + json.dumps(list(declarations)) + "\n",
+        encoding="utf-8",
+    )
+    for index, child in enumerate(declarations):
+        root = base / child
+        (root / "tests").mkdir(parents=True)
+        (root / ".ptest.toml").write_text(
+            "version = 1\n"
+            f'project_id = "{("ab" if index == 0 else "cd") * 16}"\n'
+            "[runner]\n"
+            'kind = "command"\n'
+            'launcher = ["true"]\n'
+            "args = []\n"
+            "full_args = []\n"
+            'test_roots = ["tests"]\n'
+            "workers = 1\n"
+            'lifecycle = "cooperative-process-group"\n',
+            encoding="utf-8",
+        )
+        (root / "tests" / "cache_test.py").write_text(
+            "def test_cache(client):\n    client.flushall()\n", encoding="utf-8")
+
+
+def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
+        tmp_path, monkeypatch, capsys):
+    """Root content must not leak into child rows; every child stays numbered."""
+    import socket
+    import subprocess
+
+    _monorepo_cli_root(tmp_path)
+    (tmp_path / "root_noise_test.py").write_text("cache.flushall()\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("doctor executed a runner"))
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("doctor made a network request"))
+    assert main(("doctor",)) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    api_row = next(line for line in captured.out.splitlines() if line.startswith("| 1 | api "))
+    web_row = next(line for line in captured.out.splitlines() if line.startswith("| 2 | web "))
+    assert captured.out.index(api_row) < captured.out.index(web_row)
+    assert "root_noise_test.py" not in captured.out
+    assert "api/tests/cache_test.py" in captured.out
+    assert "FIX-001" in captured.out and "TIMING-001" in captured.out
+    assert "review not yet performed" in captured.out
+
+
+def test_doctor_json_from_monorepo_root_keeps_single_aggregate_shape(
+        tmp_path, monkeypatch, capsys):
+    _monorepo_cli_root(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert main(("doctor", "--json")) == 0
+    captured = capsys.readouterr()
+    document = C.decode_public_document(captured.out)
+    assert document.kind == "doctor" and document.error is None
+    assert set(document.data) == {
+        "scope", "readiness", "findings", "limits", "usage", "limitations"}
+    assert document.data["scope"] == []
+    assert [item["area"] for item in document.data["readiness"]] == [
+        "execution", "parallel", "selection", "timing"]
+    assert all(item["path"].startswith(("api/", "web/"))
+               for item in document.data["findings"])
+
+
+def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
+        tmp_path, monkeypatch, capsys):
+    _monorepo_cli_root(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert main(("doctor", "--scope", "api")) == 0
+    captured = capsys.readouterr()
+    assert "| 1 | api |" in captured.out and "| web |" not in captured.out
+    assert main(("doctor", "--scope", "ghost")) == 2
+    assert "invalid-config" in capsys.readouterr().err
+    assert main(("doctor", "--scope", "../api")) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert captured.out == ""
+    assert main(("doctor", "--scope", "api/.ptest.toml")) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert captured.out == ""
+
+
+def test_doctor_prompt_requests_assessment_without_repair_or_execution(
+        tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    _monorepo_cli_root(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("prompt executed a runner"))
+    assert main(("doctor", "--prompt")) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Assessment request:" in captured.out
+    assert "assessment authority only" in captured.out
+    assert "api/tests/cache_test.py" in captured.out
+    assert "FIX-001" in captured.out
+
+
+def test_doctor_probe_still_executes_without_checklist(
+        tmp_path, monkeypatch, capsys):
+    calls = []
+    _monorepo_cli_root(tmp_path, declarations=("api",))
+    monkeypatch.chdir(tmp_path / "api")
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda domain, config, request: calls.append(request) or type(
+            "R", (), {"reasons": (), "exit_code": 0})(),
+    )
+    assert main(("doctor", "--probe", "--scope", "tests/test_probe.py")) == 0
+    captured = capsys.readouterr()
+    assert len(calls) == 1 and calls[0].mode is C.Mode.PROBE
+    assert "FIX-001" not in captured.out

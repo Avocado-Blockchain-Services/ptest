@@ -865,3 +865,31 @@ def test_guard_launch_failure_returns_incomplete_and_revokes_pending_grant(case,
     assert not (root / "launch-marker").exists()
     assert scheduler.reconcile(domain)[0].state is C.LeaseState.CANCELLED
     assert json.loads((root / "result.json").read_text())["data"]["status"] == "incomplete"
+
+
+def test_guard_launch_forwards_only_doctor_smoke_manifest(case, monkeypatch):
+    """The parent-to-guard boundary allowlists the opt-in smoke manifest only.
+
+    The real-repository smoke test reads ``PTEST_DOCTOR_SMOKE_MANIFEST`` from
+    its runner environment, and that runner is a grandchild of the invoking
+    ``ptest`` process via the guard. A hostile ``PTEST_*`` name set alongside
+    it must still be excluded at the same boundary.
+    """
+    domain = case.domain()
+    root = _command_project(case, domain)
+    (root / "command.py").write_text(
+        "import json, os\n"
+        "open('seen-env.json', 'w').write(json.dumps({"
+        "'manifest': os.environ.get('PTEST_DOCTOR_SMOKE_MANIFEST'), "
+        "'hostile': os.environ.get('PTEST_HOSTILE_PROBE')}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PTEST_DOCTOR_SMOKE_MANIFEST", "/tmp/smoke-manifest.json")
+    monkeypatch.setenv("PTEST_HOSTILE_PROBE", "must-not-cross-guard")
+
+    completed = case.invoke(domain, root, timeout=20)
+
+    assert completed.code == 0
+    seen = json.loads((root / "seen-env.json").read_text(encoding="utf-8"))
+    assert seen["manifest"] == "/tmp/smoke-manifest.json"
+    assert seen["hostile"] is None

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 from contextlib import contextmanager
-from dataclasses import asdict, fields
+from dataclasses import fields, replace
 import heapq
 import json
 import math
@@ -17,9 +17,11 @@ import os
 import re
 import stat
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
+from . import render
 from .files import _open_dir, _walk_to_parent, read_regular
 
 _PHASE = "doctor"
@@ -102,7 +104,30 @@ def _safe_scope(scope: str | None) -> str | None:
     return scope
 
 
-def _readiness(has_findings: bool, has_limitations: bool) -> tuple[C.Readiness, ...]:
+def _readiness(has_findings: bool, has_limitations: bool, *, selection_enabled: bool = True,
+               configured: bool = True, declaration: str | None = None) -> tuple[C.Readiness, ...]:
+    """Static readiness: unknown unless configuration evidence blocks an area.
+
+    Static inspection ran nothing, so it never reports ready. Selection is
+    blocked when disabled or invalid; a missing configuration blocks execution
+    and selection. ``declaration`` prefixes repository-relative reason paths.
+    """
+    repo_paths = () if declaration is None else tuple(
+        path for value in (declaration,) if (path := _report_path(value)) is not None)
+    if not configured:
+        return (
+            C.Readiness(area="execution", state="blocked", reasons=(
+                _reason("initialization-required",
+                        "Project configuration is required; doctor cannot assess execution readiness.",
+                        *repo_paths),)),
+            C.Readiness(area="parallel", state="unknown", reasons=(
+                _reason("static-evidence-insufficient", "Static inspection cannot prove run/worker isolation."),)),
+            C.Readiness(area="selection", state="blocked", reasons=(
+                _reason("initialization-required",
+                        "Project configuration is required; doctor cannot assess selection readiness.",
+                        *repo_paths),)),
+            C.Readiness(area="timing", state="unknown", reasons=(_reason("static-evidence-insufficient", _TIMING_MISSING),)),
+        )
     parallel_reasons = [_reason("static-evidence-insufficient", "Static inspection cannot prove run/worker isolation.")]
     if has_findings:
         parallel_reasons.append(_reason("static-evidence-insufficient", "Static findings require repository review before parallel execution."))
@@ -113,10 +138,21 @@ def _readiness(has_findings: bool, has_limitations: bool) -> tuple[C.Readiness, 
             "static-evidence-insufficient",
             "Static inspection has limitations; review report limitations.",
         ))
+    if selection_enabled:
+        selection = C.Readiness(area="selection", state="unknown", reasons=(
+            _reason("unknown-input", "Static scan cannot establish complete selection inputs."),))
+    else:
+        selection = C.Readiness(area="selection", state="blocked", reasons=(
+            _reason("selection-disabled",
+                    "Automatic selection is disabled or its policy is invalid; "
+                    "static inspection cannot establish complete selection inputs.",
+                    *repo_paths),))
     return (
-        C.Readiness(area="execution", state="unknown", reasons=(_reason("static-evidence-insufficient", "Doctor does not execute repository code."),)),
+        C.Readiness(area="execution", state="unknown", reasons=(
+            _reason("static-evidence-insufficient", "Doctor does not execute repository code.",
+                    *repo_paths),)),
         C.Readiness(area="parallel", state="unknown", reasons=tuple(parallel_reasons)),
-        C.Readiness(area="selection", state="unknown", reasons=(_reason("unknown-input", "Static scan cannot establish complete selection inputs."),)),
+        selection,
         C.Readiness(area="timing", state="unknown", reasons=(_reason("static-evidence-insufficient", _TIMING_MISSING),)),
     )
 
@@ -178,12 +214,17 @@ _OUTPUT_LIMIT_BYTES = _reason_bytes(_OUTPUT_LIMIT_REASON)
 
 
 def _compact_report_bytes(report: C.DoctorReport) -> bytes:
-    """Canonical compact bytes governed by ScanLimits.output_bytes."""
-    return json.dumps(
-        asdict(report),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    """Exact public doctor JSON bytes governed by ``output_bytes``.
+
+    The public codec owns escaping and its envelope, so sizing a hand-rolled
+    data object could undercount multi-byte metadata after JSON escaping.
+    """
+    # CLI fixture domains are the largest public domain envelope: a fixed
+    # 32-character identifier plus the fixture flag.  Reserve that exact
+    # shape while collecting evidence so either fixture or normal CLI output
+    # remains within the requested cap; no filesystem path enters public JSON.
+    return render.render_doctor_json(
+        report, domain={"id": "0" * 32, "fixture": True})
 
 
 def _usage_envelope(limits: C.ScanLimits) -> C.ScanUsage:
@@ -272,9 +313,15 @@ def _priority(relative: str, test_roots: tuple[str, ...]) -> tuple[int, str]:
 class _Scan:
     """Mutable accounting for one bounded, read-only scan."""
 
-    def __init__(self, root: Path, limits: C.ScanLimits, scope: str | None):
+    def __init__(self, root: Path, limits: C.ScanLimits, scope: str | None,
+                 deadline: float | None = None, admit_output: bool = True):
         self.root, self.limits = root, limits
         self.payload_limit = max(0, limits.output_bytes - _report_envelope_bytes(limits, scope))
+        self.deadline = deadline
+        # Workspace child scans debit count/byte/time budgets locally while the
+        # global ledger alone admits serialized output; standalone scans keep
+        # local output admission.
+        self.admit_output = admit_output
         self.began = time.monotonic()
         self.entries = self.files = self.total_bytes = self.skipped = self.output_bytes = 0
         self.truncated = False
@@ -288,6 +335,8 @@ class _Scan:
         if self._output_limited:
             return
         self._output_limited = True
+        if not self.admit_output:
+            return
         size = _OUTPUT_LIMIT_BYTES
         # A caller may supply a payload budget smaller than any Reason. In
         # that degenerate case truncated remains the only representable cap
@@ -300,6 +349,10 @@ class _Scan:
     def _add_limitation(self, reason: C.Reason):
         if reason in self._limitation_set or self._output_limited:
             return
+        if not self.admit_output:
+            self.limitations.append(reason)
+            self._limitation_set.add(reason)
+            return
         size = _reason_bytes(reason)
         reserve = _OUTPUT_LIMIT_BYTES
         if self.output_bytes + size + reserve > self.payload_limit:
@@ -311,6 +364,9 @@ class _Scan:
 
     def check_deadline(self):
         if time.monotonic() - self.began >= self.limits.elapsed_s:
+            self.limit("Doctor elapsed-time limit reached.")
+            raise _Deadline
+        if self.deadline is not None and time.monotonic() >= self.deadline:
             self.limit("Doctor elapsed-time limit reached.")
             raise _Deadline
 
@@ -456,21 +512,24 @@ class _Scan:
                     if len(self.findings) >= limits.findings:
                         self.limit("Doctor finding limit reached.")
                         return
-                    if self.output_bytes + size + _OUTPUT_LIMIT_BYTES > self.payload_limit:
+                    if self.admit_output and (
+                            self.output_bytes + size + _OUTPUT_LIMIT_BYTES > self.payload_limit):
                         self._hit_output_limit()
                         return
                     self.findings.append(finding)
                     self.output_bytes += size
 
 
-def _assemble_report(
+def _assemble_direct(
     scan: _Scan,
-    scope: str | None,
+    scope: tuple[str, ...] | str | None,
+    readiness: tuple[C.Readiness, ...],
     findings: tuple[C.Finding, ...],
     limitations: tuple[C.Reason, ...],
     elapsed_s: float,
 ) -> C.DoctorReport:
     """Build a report whose usage byte count equals its compact serialization."""
+    scope_tuple = scope if isinstance(scope, tuple) else _scope_tuple(scope)
     output_bytes = 0
     while True:
         usage = C.ScanUsage(
@@ -485,8 +544,8 @@ def _assemble_report(
             truncated=scan.truncated,
         )
         report = C.DoctorReport(
-            scope=_scope_tuple(scope),
-            readiness=_readiness(bool(findings), bool(limitations)),
+            scope=scope_tuple,
+            readiness=readiness,
             findings=findings,
             limits=scan.limits,
             usage=usage,
@@ -498,19 +557,53 @@ def _assemble_report(
         output_bytes = serialized_bytes
 
 
-def _finalize_report(scan: _Scan, scope: str | None) -> C.DoctorReport:
+def _assemble_report(
+    scan: _Scan,
+    scope: str | None,
+    findings: tuple[C.Finding, ...],
+    limitations: tuple[C.Reason, ...],
+    elapsed_s: float,
+    *,
+    selection_enabled: bool = True,
+    configured: bool = True,
+    declaration: str | None = None,
+) -> C.DoctorReport:
+    """Build a report whose usage byte count equals its compact serialization."""
+    return _assemble_direct(
+        scan,
+        scope,
+        _readiness(bool(findings), bool(limitations),
+                   selection_enabled=selection_enabled, configured=configured,
+                   declaration=declaration),
+        findings,
+        limitations,
+        elapsed_s,
+    )
+
+
+def _evict_to_fit(scan: _Scan, scope: tuple[str, ...],
+                  readiness: tuple[C.Readiness, ...] | None,
+                  selection_enabled: bool = True, configured: bool = True,
+                  declaration: str | None = None) -> C.DoctorReport:
     """Enforce the complete-document cap even if envelope fields evolve."""
     findings = list(scan.findings)
     limitations = list(scan.limitations)
     elapsed_s = time.monotonic() - scan.began
     while True:
-        report = _assemble_report(
-            scan,
-            scope,
-            tuple(findings),
-            tuple(limitations),
-            elapsed_s,
-        )
+        if readiness is None:
+            report = _assemble_report(
+                scan,
+                scope,
+                tuple(findings),
+                tuple(limitations),
+                elapsed_s,
+                selection_enabled=selection_enabled,
+                configured=configured,
+                declaration=declaration,
+            )
+        else:
+            report = _assemble_direct(
+                scan, scope, readiness, tuple(findings), tuple(limitations), elapsed_s)
         if report.usage.output_bytes <= scan.limits.output_bytes:
             return report
         scan.truncated = True
@@ -534,6 +627,33 @@ def _finalize_report(scan: _Scan, scope: str | None) -> C.DoctorReport:
         )
 
 
+def _finalize_report(scan: _Scan, scope: str | None, *, selection_enabled: bool = True,
+                     configured: bool = True, declaration: str | None = None) -> C.DoctorReport:
+    """Enforce the complete-document cap even if envelope fields evolve."""
+    return _evict_to_fit(scan, _scope_tuple(scope), None,
+                         selection_enabled=selection_enabled, configured=configured,
+                         declaration=declaration)
+
+
+def _run_scan(scan: _Scan, start: str, priority: tuple[str, ...]) -> None:
+    """Run bounded discovery and source matching, then append static caveats."""
+    candidates = scan.discover(start, priority)
+    try:
+        for relative, size in candidates:
+            scan.source(relative, size)
+    except _Deadline:
+        pass
+    scan._add_limitation(_reason("static-evidence-insufficient", "Static inspection cannot certify parallel safety."))
+    scan._add_limitation(_reason("static-evidence-insufficient", _TIMING_MISSING))
+
+
+def _check_limits(limits: C.ScanLimits) -> None:
+    if any(getattr(limits, field.name) > getattr(C.MAX_SCAN_LIMITS, field.name) for field in fields(C.ScanLimits)):
+        raise C.Problem(code="invalid-bound", message="doctor scan limit exceeds the finite maximum", phase=_PHASE)
+    if limits.output_bytes < MIN_DOCTOR_OUTPUT_BYTES:
+        raise C.Problem(code="invalid-bound", message="doctor output limit is below the finite minimum", phase=_PHASE)
+
+
 def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLimits,
             scope: str | None) -> C.DoctorReport:
     """Return bounded static hypotheses without executing code or reading state.
@@ -543,10 +663,7 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
     """
     if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.ConfigResolution) or not isinstance(limits, C.ScanLimits):
         raise TypeError("inspect requires DomainPaths, ConfigResolution and ScanLimits")
-    if any(getattr(limits, field.name) > getattr(C.MAX_SCAN_LIMITS, field.name) for field in fields(C.ScanLimits)):
-        raise C.Problem(code="invalid-bound", message="doctor scan limit exceeds the finite maximum", phase=_PHASE)
-    if limits.output_bytes < MIN_DOCTOR_OUTPUT_BYTES:
-        raise C.Problem(code="invalid-bound", message="doctor output limit is below the finite minimum", phase=_PHASE)
+    _check_limits(limits)
     root = Path(config.root)
     display_scope = _safe_scope(scope)
     if limits.output_bytes < _minimum_document_bytes(limits, display_scope):
@@ -561,12 +678,389 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
                 scan.skip("Doctor rejected an unsafe priority root.")
                 continue
             priority.append(item)
-    candidates = scan.discover(display_scope or "", tuple(priority))
-    try:
-        for relative, size in candidates:
-            scan.source(relative, size)
-    except _Deadline:
-        pass
-    scan._add_limitation(_reason("static-evidence-insufficient", "Static inspection cannot certify parallel safety."))
-    scan._add_limitation(_reason("static-evidence-insufficient", _TIMING_MISSING))
-    return _finalize_report(scan, display_scope)
+    _run_scan(scan, display_scope or "", tuple(priority))
+    resolved = config.config
+    return _finalize_report(
+        scan, display_scope,
+        selection_enabled=True if resolved is None else bool(resolved.selection.enabled),
+        configured=resolved is not None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryInspection:
+    declaration: str       # "." or root-relative v2 declaration
+    local_scope: str | None
+    report: C.DoctorReport
+    config_problem: C.Problem | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceInspection:
+    scope: tuple[str, ...]
+    repositories: tuple[RepositoryInspection, ...]
+    aggregate: C.DoctorReport
+
+
+_DRIVE_QUALIFIED = re.compile(r"^[A-Za-z]:")
+
+
+def _workspace_scope_value(scope: str | None) -> str | None:
+    """Validate an explicit scope without echoing hostile input."""
+    if scope is None:
+        return None
+    if (not isinstance(scope, str) or not scope or scope.startswith("/")
+            or "\\" in scope or "\x00" in scope or not _safe_text(scope)
+            or len(scope.encode("utf-8")) > _PATH_BYTES
+            or _DRIVE_QUALIFIED.match(scope)):
+        raise C.Problem(code="unsafe-path", message="doctor scope is not a safe relative path",
+                        phase=_PHASE)
+    parts = scope.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise C.Problem(code="unsafe-path", message="doctor scope is not a safe relative path",
+                        phase=_PHASE)
+    return scope
+
+
+def _match_declaration(declarations: tuple[str, ...], scope: str) -> str | None:
+    """Match an exact declaration or ``declaration + "/"`` prefix."""
+    for declaration in declarations:
+        if scope == declaration or scope.startswith(declaration + "/"):
+            return declaration
+    return None
+
+
+def _rebase_path(declaration: str, value: str | None) -> str | None:
+    """Prefix a child-relative path; omit it when it cannot stay bounded."""
+    if value is None:
+        return None
+    if declaration == ".":
+        return _report_path(value)
+    return _report_path(declaration + "/" + value)
+
+
+def _rebase_reason(declaration: str, reason: C.Reason) -> C.Reason:
+    return C.Reason(
+        code=reason.code,
+        message=reason.message,
+        paths=tuple(path for value in reason.paths
+                    if (path := _rebase_path(declaration, value)) is not None),
+    )
+
+
+def _share(remaining: int, slots: int) -> int:
+    """Fair per-child consumable share: ceil(R / K), capped by R."""
+    if slots <= 0 or remaining <= 0:
+        return 0
+    return min(remaining, -(-remaining // slots))
+
+
+def _admit_finding(ledger: _Scan, finding: C.Finding) -> bool:
+    """Admit one rebased finding to the global output ledger."""
+    size = _finding_bytes(finding)
+    if len(ledger.findings) >= ledger.limits.findings:
+        ledger.limit("Doctor finding limit reached.")
+        return False
+    if ledger.output_bytes + size + _OUTPUT_LIMIT_BYTES > ledger.payload_limit:
+        ledger._hit_output_limit()
+        return False
+    ledger.findings.append(finding)
+    ledger.output_bytes += size
+    return True
+
+
+def _diagnostic_report(scan: _Scan, scope: tuple[str, ...], declaration: str,
+                       code: str, message: str) -> C.DoctorReport:
+    """Visible row for an unscanned child: execution/selection blocked."""
+    paths = tuple(path for value in (declaration,)
+                  if (path := _report_path(value)) is not None)
+    readiness = (
+        C.Readiness(area="execution", state="blocked",
+                    reasons=(_reason(code, message, *paths),)),
+        C.Readiness(area="parallel", state="unknown", reasons=(
+            _reason("static-evidence-insufficient",
+                    "Static inspection cannot prove run/worker isolation."),)),
+        C.Readiness(area="selection", state="blocked",
+                    reasons=(_reason(code, message, *paths),)),
+        C.Readiness(area="timing", state="unknown",
+                    reasons=(_reason("static-evidence-insufficient", _TIMING_MISSING),)),
+    )
+    limitations = (_reason(code, message, *paths),)
+    return _assemble_direct(scan, scope, readiness, (), limitations, 0.0)
+
+
+def _deadline_report(scan: _Scan, scope: tuple[str, ...], declaration: str) -> C.DoctorReport:
+    """Visible, non-conclusive row for a child not inspected before expiry."""
+    reason = _reason("scan-limit", "Declared child was not inspected before the workspace deadline.", declaration)
+    readiness = tuple(C.Readiness(area=area, state="unknown", reasons=(reason,))
+                      for area in ("execution", "parallel", "selection", "timing"))
+    return _assemble_direct(scan, scope, readiness, (), (reason,), 0.0)
+
+
+def _config_budget_report(scan: _Scan, scope: tuple[str, ...], declaration: str) -> C.DoctorReport:
+    """Visible unknown row when no complete config fits its fair byte share."""
+    reason = _reason(
+        "scan-limit",
+        "Declared child configuration was not inspected within the workspace byte budget.",
+        declaration,
+    )
+    readiness = tuple(C.Readiness(area=area, state="unknown", reasons=(reason,))
+                      for area in ("execution", "parallel", "selection", "timing"))
+    return _assemble_direct(scan, scope, readiness, (), (reason,), 0.0)
+
+
+def _aggregate_readiness(
+        repositories: tuple[RepositoryInspection, ...]) -> tuple[C.Readiness, ...]:
+    """Area-wise worst evidenced state in repository declaration order."""
+    areas = ("execution", "parallel", "selection", "timing")
+    aggregated = []
+    for area in areas:
+        states = [next(item.state for item in repo.report.readiness if item.area == area)
+                  for repo in repositories]
+        if states and all(state == "ready-for-declared-capability" for state in states):
+            state = "ready-for-declared-capability"
+        elif any(state == "blocked" for state in states):
+            state = "blocked"
+        else:
+            state = "unknown"
+        reasons: list[C.Reason] = []
+        for repo in repositories:
+            for item in repo.report.readiness:
+                if item.area == area:
+                    for reason in item.reasons:
+                        if reason not in reasons:
+                            reasons.append(reason)
+        aggregated.append(C.Readiness(area=area, state=state, reasons=tuple(reasons)))
+    return tuple(aggregated)
+
+
+def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
+                      limits: C.ScanLimits, scope: str | None) -> WorkspaceInspection:
+    """Inspect one standalone repository or declared v2 children in order.
+
+    Only children explicitly listed by the resolved root v2 manifest are
+    considered; the monorepo root is never scanned as an implicit project.
+    The public JSON stays one aggregate DoctorReport.
+    """
+    from . import monorepo as monorepo_api
+
+    if not isinstance(domain, C.DomainPaths) or not isinstance(resolution, C.ConfigResolution) \
+            or not isinstance(limits, C.ScanLimits):
+        raise TypeError("inspect_workspace requires DomainPaths, ConfigResolution and ScanLimits")
+    _check_limits(limits)
+    requested = _workspace_scope_value(scope)
+    manifest = resolution.monorepo
+    is_monorepo = manifest is not None
+    if resolution.problem is not None:
+        unconfigured = (not is_monorepo and resolution.config is None
+                        and resolution.problem.code == "initialization-required")
+        if not unconfigured:
+            raise resolution.problem
+    root = Path(resolution.root)
+    ledger_scope = requested
+    if limits.output_bytes < _minimum_document_bytes(limits, ledger_scope):
+        raise C.Problem(code="invalid-bound",
+                        message="doctor output limit cannot hold the report envelope", phase=_PHASE)
+    if not is_monorepo:
+        report = inspect(domain, resolution, limits, requested)
+        declaration = "."
+        inspection = RepositoryInspection(
+            declaration=declaration, local_scope=requested, report=report,
+            config_problem=(resolution.problem if resolution.config is None else None),
+        )
+        workspace_scope = report.scope
+        return WorkspaceInspection(scope=workspace_scope, repositories=(inspection,),
+                                   aggregate=report)
+    declarations = tuple(manifest.children)
+    if requested is None:
+        selected = tuple((declaration, None) for declaration in declarations)
+        display: tuple[str, ...] = ()
+    else:
+        hit = _match_declaration(declarations, requested)
+        if hit is None:
+            raise C.Problem(code="invalid-config",
+                            message="doctor scope does not select a declared monorepo child",
+                            phase=_PHASE)
+        local = None if requested == hit else requested[len(hit) + 1:]
+        selected = ((hit, local),)
+        display = (requested,)
+    # Start the global deadline before child diagnostics; every slice below
+    # debits this one workspace-wide budget.
+    ledger = _Scan(root, limits, requested)
+    global_deadline = ledger.began + limits.elapsed_s
+    repositories: list[RepositoryInspection] = []
+    for index, (declaration, local) in enumerate(selected):
+        child_scope = (declaration,) if local is None else (requested or declaration,)
+        if time.monotonic() >= global_deadline:
+            report = _deadline_report(_Scan(root, limits, requested), child_scope, declaration)
+            ledger.truncated = True
+            for reason in report.limitations:
+                ledger._add_limitation(reason)
+            repositories.append(RepositoryInspection(
+                declaration=declaration, local_scope=local, report=report, config_problem=None))
+            continue
+        # Allocate config reads before diagnosis so malformed configurations
+        # cannot consume unreported workspace bytes or starve later children.
+        slots = len(selected) - index
+        config_allowance = _share(max(0, limits.total_bytes - ledger.total_bytes), slots)
+        diagnosis = monorepo_api.diagnose_child(
+            root, declaration, global_deadline, config_allowance)
+        ledger.total_bytes += diagnosis.config_bytes
+        if diagnosis.directory is not None and local is not None:
+            try:
+                monorepo_api.validate_child_scope(diagnosis.directory, local)
+            except C.Problem:
+                raise C.Problem(code="unsafe-path", message="doctor scope selects an unsafe monorepo child",
+                                phase=_PHASE) from None
+        if diagnosis.kind == "deadline":
+            report = _deadline_report(_Scan(root, limits, requested), child_scope, declaration)
+            ledger.truncated = True
+            for reason in report.limitations:
+                ledger._add_limitation(reason)
+            repositories.append(RepositoryInspection(
+                declaration=declaration, local_scope=local, report=report, config_problem=None))
+            continue
+        if diagnosis.kind == "budget":
+            report = _config_budget_report(_Scan(root, limits, requested), child_scope, declaration)
+            ledger.truncated = True
+            for reason in report.limitations:
+                ledger._add_limitation(reason)
+            repositories.append(RepositoryInspection(
+                declaration=declaration, local_scope=local, report=report, config_problem=None))
+            continue
+        # A reachable child remains useful static evidence even when its
+        # native manifest is missing, malformed, or unsafe.  It cannot establish
+        # execution/selection readiness and receives no config priorities,
+        # but doctor must not suppress its source findings.  Unsafe and
+        # unavailable directories remain unscannable.
+        scannable_without_config = (
+            diagnosis.kind in {"missing", "invalid-config", "unsafe"}
+            and diagnosis.directory is not None)
+        if diagnosis.kind != "ok" and not scannable_without_config:
+            if requested is not None and diagnosis.kind == "unsafe":
+                raise C.Problem(code="unsafe-path",
+                                message="doctor scope selects an unsafe monorepo child",
+                                phase=_PHASE)
+            if diagnosis.kind == "unsafe":
+                code, message = "unsafe-path", "Declared child is unsafe; it was not scanned."
+            elif diagnosis.kind == "invalid-config":
+                code, message = "invalid-config", \
+                    "Declared child configuration is invalid; it was not scanned."
+            else:
+                code, message = "state-unavailable", \
+                    "Declared child is unavailable; it was not scanned."
+            fresh = _Scan(root, limits, requested)
+            report = _diagnostic_report(fresh, child_scope, declaration, code, message)
+            ledger.truncated = True
+            for reason in report.limitations:
+                ledger._add_limitation(reason)
+            repositories.append(RepositoryInspection(
+                declaration=declaration, local_scope=local, report=report,
+                config_problem=diagnosis.problem))
+            continue
+        # Remaining scannable slots without extra I/O: every not-yet
+        # visited selection is assumed scannable until its own diagnosis.
+        # Every declaration that has not yet been processed retains a fair
+        # share. A missing/invalid earlier declaration consumed diagnostic
+        # output only, not its later siblings' scan allowance.
+        used_entries = ledger.entries
+        used_files = ledger.files
+        used_bytes = ledger.total_bytes
+        # Child findings are admitted to the public ledger only after paths
+        # are rebased, but their quota is consumed at discovery time.  Count
+        # previously observed child findings here so a later child cannot be
+        # handed allowance that an earlier child already used.
+        used_findings = sum(len(item.report.findings) for item in repositories)
+        child_limits = replace(
+            limits,
+            entries=_share(limits.entries - used_entries, slots),
+            files=_share(limits.files - used_files, slots),
+            total_bytes=_share(limits.total_bytes - used_bytes, slots),
+            findings=_share(limits.findings - used_findings, slots),
+            elapsed_s=max(0.0, min(global_deadline - time.monotonic(),
+                                   (global_deadline - time.monotonic()) / slots if slots else 0.0)),
+        )
+        child = _Scan(diagnosis.directory, child_limits,
+                      requested if local is None else local,
+                      deadline=global_deadline, admit_output=False)
+        priority: tuple[str, ...] = ()
+        if local is None and diagnosis.config is not None:
+            priorities = []
+            for item in diagnosis.config.runner.test_roots:
+                try:
+                    _safe_scope(item)
+                except C.Problem:
+                    child.skip("Doctor rejected an unsafe priority root.")
+                    continue
+                priorities.append(item)
+            priority = tuple(priorities)
+        if diagnosis.kind != "ok":
+            child._add_limitation(_reason(
+                "invalid-config" if diagnosis.kind == "invalid-config" else
+                "unsafe-path" if diagnosis.kind == "unsafe" else "state-unavailable",
+                "Declared child configuration is invalid; execution and selection are blocked."
+                if diagnosis.kind == "invalid-config"
+                else "Declared child configuration is unsafe; execution and selection are blocked."
+                if diagnosis.kind == "unsafe"
+                else "Declared child configuration is unavailable; execution and selection are blocked.",
+            ))
+        _run_scan(child, local or "", priority)
+        rebased_findings = tuple(
+            replace(finding, path=_rebase_path(declaration, finding.path))
+            for finding in child.findings)
+        rebased_limitations = tuple(
+            _rebase_reason(declaration, reason) for reason in child.limitations)
+        if child.truncated:
+            # A capped child stays visible with unknown affected readiness
+            # and a root-relative scan-limit; later children are not omitted.
+            capped = _reason(
+                "scan-limit",
+                "Declared child reached its fair scan share; later children "
+                "continue from the global remainder.", declaration)
+            if capped not in rebased_limitations:
+                rebased_limitations = (*rebased_limitations, capped)
+        readiness = _readiness(
+            bool(rebased_findings), bool(rebased_limitations),
+            selection_enabled=bool(diagnosis.config and diagnosis.config.selection.enabled),
+            configured=diagnosis.kind == "ok", declaration=declaration)
+        report = _assemble_direct(child, child_scope, readiness, rebased_findings,
+                                  rebased_limitations, time.monotonic() - child.began)
+        ledger.entries += child.entries
+        ledger.files += child.files
+        ledger.total_bytes += child.total_bytes
+        ledger.skipped += child.skipped
+        ledger.truncated = ledger.truncated or child.truncated
+        repositories.append(RepositoryInspection(
+            declaration=declaration, local_scope=local, report=report,
+            config_problem=None if diagnosis.kind == "ok" else diagnosis.problem))
+    limitation_seed: list[C.Reason] = []
+    if requested is None:
+        # An ordinary bounded limitation: reason codes stay in the frozen
+        # schema set, so the scope note reuses a static-evidence code.
+        limitation_seed.append(_reason(
+            "static-evidence-insufficient",
+            "Only declared children were inspected; monorepo root content was excluded."))
+    def human_label_truncated(declaration: str) -> bool:
+        shown = render.terminal_text(declaration).replace("|", "\\|")
+        return (len(shown.encode("utf-8")) > 96
+                or shown.endswith("[truncated]"))
+
+    if any(human_label_truncated(repo.declaration) for repo in repositories):
+        limitation_seed.append(_reason(
+            "static-evidence-insufficient",
+            "Repository label was truncated in human output; see report limitations for this condition."))
+    for repo in repositories:
+        for reason in repo.report.limitations:
+            if reason not in limitation_seed:
+                limitation_seed.append(reason)
+    for repo in repositories:
+        for finding in repo.report.findings:
+            if not _admit_finding(ledger, finding):
+                break
+        else:
+            continue
+        break
+    for reason in limitation_seed:
+        ledger._add_limitation(reason)
+    aggregate = _evict_to_fit(ledger, display, _aggregate_readiness(tuple(repositories)))
+    return WorkspaceInspection(scope=display, repositories=tuple(repositories), aggregate=aggregate)

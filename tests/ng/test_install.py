@@ -338,3 +338,23 @@ def test_real_subprocess_bundle_seeds_network_then_runs_offline(tmp_path):
     assert subprocess.run([str(old_target), "--version"], capture_output=True, text=True).returncode == 0
     assert not after_parent[1]
     assert all((dest / ".ptest-bundles" / name / "complete.json").is_file() for name in after_parent[0])
+
+
+def test_installed_ptest_package_exposes_doctor_checklist_resources():
+    """Guide, recipes, and catalog must survive packaging, not just the source tree."""
+    from importlib.resources import files
+
+    package = files("ptest")
+    guide = package.joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
+    assert "assessment authority only" in guide
+    for name in ("factories", "databases", "cache", "files-ports", "processes", "time-network"):
+        content = package.joinpath("resources", "recipes", name + ".md").read_text(encoding="utf-8")
+        assert len(content.encode("utf-8")) > 0
+
+    from ptest import checklist
+
+    assert [entry.id for entry in checklist.CATALOG] == [
+        "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
+        "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+        "SELECT-001", "TIMING-001",
+    ]

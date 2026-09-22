@@ -26,3 +26,12 @@ integration justification. Exactly 2 seconds starts optimization; exactly 3
 seconds remains in that band. These budgets are guidance, never automatic test
 failures. This static doctor currently has no validated per-test history timing
 input and reports timing as unknown; do not infer durations from source.
+
+Requesting `ptest doctor`, `ptest guide`, or a prompt grants assessment authority only:
+inspect and report. Source repair requires a separate user instruction
+granting repair authority. The authoritative review worksheet is the 11-row
+catalog rendered by `ptest doctor` (FIX, DB, CACHE, RESOURCE, NETWORK, PROCESS,
+TIME, SELECT, TIMING rows, every row starting unknown); ptest static patterns
+never fill or upgrade a row, and a filled worksheet never updates ptest
+readiness. A clean or truncated static scan is never a pass and never proves
+parallel, timing, or execution readiness.

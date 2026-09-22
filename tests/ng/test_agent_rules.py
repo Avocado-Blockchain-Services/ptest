@@ -107,6 +107,16 @@ def test_provider_skill_conflict_is_rejected_before_any_rules_write(tmp_path):
     assert not (tmp_path / "AGENTS.md").exists()
 
 
+def test_repository_guide_states_assessment_only_authority():
+    """Repair authority must never be inferred from a doctor or prompt request."""
+    from importlib.resources import files
+
+    guide = files("ptest").joinpath(
+        "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
+    assert "assessment authority only" in guide
+    assert "separate user instruction" in guide
+
+
 def test_provider_skill_unsafe_parent_is_rejected_before_any_rules_write(tmp_path):
     provider = tmp_path / ".codex"
     provider.mkdir(mode=0o777)

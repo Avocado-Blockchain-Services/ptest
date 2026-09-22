@@ -33,3 +33,10 @@ Treat `ptest doctor` findings as hypotheses, not proof. Verify the cause and
 callers before repairing code. Preserve assertions, coverage, test inventory,
 and unrelated user changes. Report the exact ptest command, result, remaining
 failures, and untested scope.
+
+Requesting doctor, guide, or a prompt grants assessment authority only: inspect
+and report. Source repair requires a separate user instruction granting repair
+authority; never treat an assessment as permission to edit, and never present a
+filled worksheet as updated ptest readiness. Fill one worksheet copy per
+repository from direct source, config, and runtime evidence, keeping
+`unknown` until the evidence for that row is in hand.

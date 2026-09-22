@@ -484,6 +484,73 @@ def test_generated_schema_files_match_frozen_shapes():
         C.FINDING_CODES)
 
 
+def test_workspace_aggregate_keeps_exact_v1_doctor_keys_and_enums(case, tmp_path):
+    """A migrated or extended aggregate shape would break the frozen v1 codec."""
+    from ptest import config as config_api
+    from ptest.doctor import inspect_workspace
+
+    (tmp_path / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"api\"]\n", encoding="utf-8")
+    child = tmp_path / "api"
+    (child / "tests").mkdir(parents=True)
+    (child / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + "ab" * 16 + "\"\n"
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+    (child / "tests" / "cache_test.py").write_text(
+        "def test_cache(client):\n    client.flushall()\n", encoding="utf-8")
+    domain = case.domain()
+    resolution = config_api.resolve_config(tmp_path)
+    workspace = inspect_workspace(domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+
+    raw = C.encode_public_document("doctor", {
+        "scope": list(workspace.aggregate.scope),
+        "readiness": [
+            {"area": item.area, "state": item.state,
+             "reasons": [{"code": reason.code, "message": reason.message,
+                          "paths": list(reason.paths)} for reason in item.reasons]}
+            for item in workspace.aggregate.readiness],
+        "findings": [
+            {"code": item.code, "severity": item.severity,
+             "confidence": item.confidence, "path": item.path,
+             "line": item.line, "evidence_type": item.evidence_type,
+             "consequence": item.consequence, "remediation": item.remediation,
+             "verification": item.verification}
+            for item in workspace.aggregate.findings],
+        "limits": {
+            "entries": workspace.aggregate.limits.entries,
+            "files": workspace.aggregate.limits.files,
+            "file_bytes": workspace.aggregate.limits.file_bytes,
+            "total_bytes": workspace.aggregate.limits.total_bytes,
+            "findings": workspace.aggregate.limits.findings,
+            "output_bytes": workspace.aggregate.limits.output_bytes,
+            "elapsed_s": workspace.aggregate.limits.elapsed_s,
+            "depth": workspace.aggregate.limits.depth,
+            "ast_nodes": workspace.aggregate.limits.ast_nodes},
+        "usage": {
+            "entries": workspace.aggregate.usage.entries,
+            "files": workspace.aggregate.usage.files,
+            "file_bytes": workspace.aggregate.usage.file_bytes,
+            "total_bytes": workspace.aggregate.usage.total_bytes,
+            "findings": workspace.aggregate.usage.findings,
+            "output_bytes": workspace.aggregate.usage.output_bytes,
+            "elapsed_s": workspace.aggregate.usage.elapsed_s,
+            "skipped": workspace.aggregate.usage.skipped,
+            "truncated": workspace.aggregate.usage.truncated},
+        "limitations": [
+            {"code": reason.code, "message": reason.message,
+             "paths": list(reason.paths)}
+            for reason in workspace.aggregate.limitations],
+    })
+    document = C.decode_public_document(raw)
+    assert set(document.data) == {
+        "scope", "readiness", "findings", "limits", "usage", "limitations"}
+    assert {item["area"] for item in document.data["readiness"]} <= {
+        "execution", "parallel", "selection", "timing"}
+    assert {item["state"] for item in document.data["readiness"]} <= {
+        "ready-for-declared-capability", "blocked", "unknown"}
+
+
 def test_frozen_subrecord_negatives_rejected():
     where = _full_payloads()["where"]
     where["capability"] = "advanced"
