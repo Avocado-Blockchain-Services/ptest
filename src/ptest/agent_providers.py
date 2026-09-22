@@ -423,6 +423,23 @@ def _pidfd_signal(pidfd: int, sig: int) -> bool:
     return True
 
 
+def _pidfd_exited(pidfd: int) -> bool:
+    """True when the pinned process has exited (pidfd readable).
+
+    A pidfd becomes readable (POLLIN) once its process exits, so a
+    numeric /proc read that fails after a successful pin can be
+    classified: dead pin -> close and skip safely (signaling it delivers
+    to nothing); still-live but unreadable -> caller must fail closed.
+    Poll errors report not-exited so the caller stays fail-closed.
+    """
+    try:
+        import select as _select
+        readable, _, _ = _select.select([pidfd], [], [], 0)
+        return bool(readable)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _proc_state(pid: int) -> str | None:
     """Single-letter /proc state, or None when unreadable."""
     try:
@@ -460,8 +477,12 @@ def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
     replacement if exit-plus-reuse lands exactly between the pin and the
     read. That replacement can only pass validation by also carrying our
     private session ID, i.e. by being our own descendant, which is in
-    scope to signal anyway; a mismatch fails closed. Anything unreadable
-    -- our own identity or a member's -- fails closed instead of killing.
+    scope to signal anyway; a mismatch on a live pin fails closed. A
+    numeric read that fails while the pinned pidfd itself reports exited
+    (readable) is an ordinary exit race: the dead pin is closed and
+    skipped, since signaling it delivers to nothing. Anything unreadable
+    on a live pin -- our own identity or a member's -- fails closed
+    instead of killing.
     """
     if not _PIDFD_AVAILABLE:
         _unverified_group()
@@ -489,21 +510,37 @@ def _owned_group_members(proc_pid: int, pgid: int, sid: int | None,
             try:
                 member_sid = os.getsid(mid)
             except ProcessLookupError:
+                if _pidfd_exited(pidfd):
+                    os.close(pidfd)
+                    continue  # pinned process already dead; nothing to signal
                 os.close(pidfd)
-                continue  # exited while scanning
+                _unverified_group()
             except OSError:
+                if _pidfd_exited(pidfd):
+                    os.close(pidfd)
+                    continue  # dead pin; numeric read raced with exit
                 os.close(pidfd)
                 _unverified_group()
             if member_sid != sid:
+                if _pidfd_exited(pidfd):
+                    os.close(pidfd)
+                    continue  # dead pin; numeric read saw a recycled number
                 os.close(pidfd)
                 _unverified_group()
             member_start = _proc_starttime(mid)
             if member_start is None or member_start < leader_start:
+                if _pidfd_exited(pidfd):
+                    os.close(pidfd)
+                    continue  # exit race between pin and /proc stat
                 os.close(pidfd)
                 _unverified_group()
-            if _proc_state(mid) == "Z":
+            member_state = _proc_state(mid)
+            if member_state == "Z":
                 os.close(pidfd)
                 continue  # zombie: dead, owned by init; no signal needed
+            if member_state is None and _pidfd_exited(pidfd):
+                os.close(pidfd)
+                continue  # dead pin with unreadable state; nothing to signal
             owned.append((mid, pidfd))
     except BaseException:
         # A later unverifiable member fails closed, but the earlier pins

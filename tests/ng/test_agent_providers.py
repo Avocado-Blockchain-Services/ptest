@@ -813,3 +813,26 @@ def test_survivor_loop_resignals_late_spawn_through_pidfd(monkeypatch):
     ap._stop_owned(_FakeProc(), 55555, 44444, 100)
     assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert (9021, signal.SIGKILL) in sent
+
+
+def test_dead_pin_with_unreadable_starttime_is_skipped_safely(monkeypatch):
+    """Exit race: pinned member dies before /proc starttime is readable.
+
+    Positive contract for the fail-closed boundary: a pidfd pin whose
+    process already exited (pidfd readable) must be closed and skipped,
+    never raised as provider-failed. A LIVE unreadable member must still
+    fail closed (see test_unreadable_member_starttime_is_not_verified).
+    No numeric signal is sent; the dead pin delivers to nothing.
+    """
+    closed: list = []
+    monkeypatch.setattr(ap, "_group_member_pids", lambda pgid: [41111])
+    monkeypatch.setattr(ap, "_pin_process", lambda pid: 9011)
+    monkeypatch.setattr(os, "getsid", lambda pid: 99999)
+    # Descendant exits between pidfd_open and /proc stat: identity
+    # unreadable, but the pin itself is dead (pidfd readable).
+    monkeypatch.setattr(ap, "_proc_starttime", lambda pid: None)
+    monkeypatch.setattr(ap, "_pidfd_exited", lambda pidfd: True)
+    monkeypatch.setattr(os, "close", lambda fd: closed.append(fd))
+    owned = ap._owned_group_members(40000, 50000, 99999, 100)
+    assert owned == []
+    assert 9011 in closed
