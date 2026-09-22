@@ -270,7 +270,8 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
 
     monkeypatch.setattr(subprocess, "Popen", no_execution)
     monkeypatch.setattr(socket, "create_connection", no_execution)
-    options = ("--json",) if json_mode else ()
+    options = (("--json",) if json_mode else
+               (("--offline",) if command == "doctor" else ()))
     assert main(("--fixture-domain", str(domain.root), command, *options)) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
@@ -660,7 +661,9 @@ def test_human_root_is_bounded_in_utf8_bytes_without_truncating_json(
         # name stays out of human output entirely.
         assert "[truncated]" not in captured.out
         assert "ptest already configured" in captured.out
-    assert len(captured.out.encode()) < 1100
+    # The fixed UTF-8 wordmark adds roughly 1.4 KiB; repository-name and
+    # hostile-control bounds remain enforced by the assertions above/below.
+    assert len(captured.out.encode()) < 2048
     assert main((*prefix, "--json")) == 0
     captured = capsys.readouterr()
     document = C.decode_public_document(captured.out)
@@ -837,7 +840,7 @@ def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("doctor executed a runner"))
     monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("doctor made a network request"))
-    assert main(("doctor",)) == 0
+    assert main(("doctor", "--offline")) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
     api_row = next(line for line in captured.out.splitlines() if line.startswith("| 1 | api "))
@@ -870,16 +873,16 @@ def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
         tmp_path, monkeypatch, capsys):
     _monorepo_cli_root(tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert main(("doctor", "--scope", "api")) == 0
+    assert main(("doctor", "--offline", "--scope", "api")) == 0
     captured = capsys.readouterr()
     assert "| 1 | api |" in captured.out and "| web |" not in captured.out
-    assert main(("doctor", "--scope", "ghost")) == 2
+    assert main(("doctor", "--offline", "--scope", "ghost")) == 2
     assert "invalid-config" in capsys.readouterr().err
-    assert main(("doctor", "--scope", "../api")) == 2
+    assert main(("doctor", "--offline", "--scope", "../api")) == 2
     captured = capsys.readouterr()
     assert "unsafe-path" in captured.err
     assert captured.out == ""
-    assert main(("doctor", "--scope", "api/.ptest.toml")) == 2
+    assert main(("doctor", "--offline", "--scope", "api/.ptest.toml")) == 2
     captured = capsys.readouterr()
     assert "unsafe-path" in captured.err
     assert captured.out == ""
@@ -1072,3 +1075,339 @@ def test_human_banner_bounds_deep_paths_without_raw_controls(
     assert len(captured.out.encode("utf-8")) < 8192
     for control in ("\x1b", "\r", "\x00", "\x07"):
         assert control not in captured.out
+
+
+# --- Agent-doctor parser/help slice: review grammar, closed modes. ---
+
+def _forbid_launch(monkeypatch):
+    import socket
+    import subprocess
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid invocation crossed an execution/network boundary")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr("ptest.operations.execute", forbidden)
+
+
+def test_doctor_parser_defaults_request_review_without_launch_flags():
+    parsed = parse_argv(("doctor",))
+
+    assert parsed.command == "doctor"
+    assert parsed.reviewer is None
+    assert parsed.reviewer_explicit is False
+    assert parsed.allow_model_review is False
+    assert parsed.assessment_json is False
+    assert parsed.review_timeout_s == 300
+    assert parsed.review_timeout_explicit is False
+    assert parsed.offline is False
+
+
+@pytest.mark.parametrize("reviewer", ["auto", "claude", "codex", "opencode"])
+def test_doctor_parser_accepts_supported_reviewers(reviewer):
+    from ptest.agent_providers import SUPPORTED_REVIEWERS
+
+    assert reviewer == "auto" or reviewer in SUPPORTED_REVIEWERS
+    parsed = parse_argv(("doctor", "--reviewer", reviewer))
+
+    assert parsed.reviewer == reviewer
+    assert parsed.reviewer_explicit is True
+
+
+def test_doctor_parser_accepts_full_review_option_set():
+    parsed = parse_argv(("doctor", "--reviewer", "codex",
+                         "--allow-model-review", "--assessment-json",
+                         "--review-timeout", "60", "--scope", "tests/x.py"))
+
+    assert parsed.reviewer == "codex"
+    assert parsed.allow_model_review is True
+    assert parsed.assessment_json is True
+    assert parsed.review_timeout_s == 60
+    assert parsed.review_timeout_explicit is True
+    assert parsed.scope == "tests/x.py"
+
+
+@pytest.mark.parametrize("reviewer", ["gemini", "CLAUDE", "all", "none"])
+def test_doctor_parser_rejects_unsupported_reviewer(reviewer):
+    with pytest.raises(C.Problem):
+        parse_argv(("doctor", "--reviewer", reviewer))
+
+
+@pytest.mark.parametrize("timeout", ["9", "901", "0", "abc", "30.5", ""])
+def test_doctor_parser_rejects_out_of_bound_review_timeout(timeout):
+    with pytest.raises(C.Problem):
+        parse_argv(("doctor", "--review-timeout", timeout))
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--reviewer", "claude", "--reviewer", "codex"),
+    ("doctor", "--allow-model-review", "--allow-model-review"),
+    ("doctor", "--assessment-json", "--assessment-json"),
+    ("doctor", "--review-timeout", "60", "--review-timeout", "61"),
+    ("doctor", "--offline", "--offline"),
+])
+def test_doctor_parser_rejects_repeated_review_options(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--probe", "--scope", "tests/a.py", "--reviewer", "claude"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--allow-model-review"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--assessment-json"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--review-timeout", "60"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--offline"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--json"),
+    ("doctor", "--offline", "--json"),
+    ("doctor", "--offline", "--prompt"),
+    ("doctor", "--offline", "--assessment-json"),
+    ("doctor", "--offline", "--reviewer", "claude"),
+    ("doctor", "--offline", "--allow-model-review"),
+    ("doctor", "--offline", "--review-timeout", "60"),
+    ("doctor", "--json", "--assessment-json"),
+    ("doctor", "--prompt", "--assessment-json"),
+    ("doctor", "--json", "--reviewer", "claude"),
+    ("doctor", "--prompt", "--reviewer", "codex"),
+    ("doctor", "--json", "--allow-model-review"),
+    ("doctor", "--prompt", "--allow-model-review"),
+    ("doctor", "--json", "--review-timeout", "60"),
+    ("doctor", "--prompt", "--review-timeout", "120"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--assessment-json",
+     "--reviewer", "auto"),
+])
+def test_doctor_parser_rejects_incompatible_modes_before_side_effects(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
+
+
+def test_doctor_parser_keeps_legacy_modes():
+    assert parse_argv(("doctor", "--json")).json is True
+    assert parse_argv(("doctor", "--prompt")).prompt is True
+    assert parse_argv(("doctor", "--offline")).offline is True
+    assert parse_argv(("doctor", "--offline", "--scope", "tests")).scope == "tests"
+    probe = parse_argv(("doctor", "--probe", "--scope", "tests/a.py")).probe
+    assert probe is not None and probe.scope == "tests/a.py"
+
+
+def test_init_parser_defaults_have_no_review_request():
+    parsed = parse_argv(("init",))
+
+    assert parsed.doctor_request is None
+    assert parsed.reviewer is None
+    assert parsed.allow_model_review is False
+    assert parsed.review_timeout_s == 300
+
+
+def test_init_parser_accepts_doctor_offer_and_review_options():
+    parsed = parse_argv(("init", "--doctor", "--reviewer", "opencode",
+                         "--allow-model-review", "--review-timeout", "120"))
+
+    assert parsed.doctor_request is True
+    assert parsed.reviewer == "opencode"
+    assert parsed.allow_model_review is True
+    assert parsed.review_timeout_s == 120
+
+
+def test_init_parser_accepts_no_doctor():
+    assert parse_argv(("init", "--no-doctor")).doctor_request is False
+
+
+@pytest.mark.parametrize("argv", [
+    ("init", "--doctor", "--doctor"),
+    ("init", "--no-doctor", "--no-doctor"),
+    ("init", "--doctor", "--no-doctor"),
+    ("init", "--no-doctor", "--doctor"),
+    ("init", "--doctor", "--reviewer", "claude", "--reviewer", "codex"),
+    ("init", "--doctor", "--allow-model-review", "--allow-model-review"),
+    ("init", "--doctor", "--review-timeout", "60", "--review-timeout", "61"),
+    ("init", "--json", "--doctor"),
+    ("init", "--json", "--reviewer", "claude"),
+    ("init", "--json", "--allow-model-review"),
+    ("init", "--json", "--review-timeout", "60"),
+    ("init", "--dry-run", "--doctor"),
+    ("init", "--dry-run", "--reviewer", "claude"),
+    ("init", "--dry-run", "--allow-model-review"),
+    ("init", "--dry-run", "--review-timeout", "60"),
+    ("init", "--no-doctor", "--reviewer", "claude"),
+    ("init", "--no-doctor", "--allow-model-review"),
+    ("init", "--no-doctor", "--review-timeout", "60"),
+    ("init", "--reviewer", "gemini"),
+    ("init", "--review-timeout", "901"),
+    ("init", "--assessment-json"),
+])
+def test_init_parser_rejects_incompatible_review_modes(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--reviewer", "gemini"),
+    ("doctor", "--review-timeout", "5"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--reviewer", "claude"),
+    ("doctor", "--offline", "--json"),
+    ("doctor", "--json", "--assessment-json"),
+    ("doctor", "--reviewer", "claude", "--prompt"),
+    ("init", "--json", "--doctor"),
+    ("init", "--dry-run", "--reviewer", "claude"),
+    ("init", "--doctor", "--no-doctor"),
+])
+def test_invalid_review_invocations_exit_two_without_launch(
+        tmp_path, monkeypatch, capsys, argv):
+    _forbid_launch(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    before = _tree_bytes(tmp_path)
+
+    assert main(argv) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == "" or "reviewer" not in captured.out
+    assert captured.err.strip() or captured.out.strip()
+    assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor",),
+    ("doctor", "--reviewer", "claude"),
+    ("doctor", "--reviewer", "auto", "--allow-model-review"),
+    ("doctor", "--allow-model-review"),
+    ("doctor", "--assessment-json"),
+])
+def test_doctor_without_full_explicit_consent_requires_consent_before_qualification(
+        tmp_path, monkeypatch, capsys, argv):
+    """Non-TTY review without both explicit provider and consent is consent-required.
+
+    Consent is checked before provider qualification: even an unqualified
+    reviewer selection must still report consent-required here, never
+    provider-unqualified. No provider process may start.
+    """
+    import sys
+
+    _forbid_launch(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    before = _tree_bytes(tmp_path)
+
+    assert main(argv) == 2
+
+    captured = capsys.readouterr()
+    assert _tree_bytes(tmp_path) == before
+    assert "consent-required" in captured.err + captured.out
+    assert "provider-unqualified" not in captured.err + captured.out
+
+
+def test_explicit_provider_and_consent_with_unqualified_provider_never_launches(
+        tmp_path, monkeypatch, capsys):
+    """Explicit reviewer plus consent reaches qualification without assuming PATH.
+
+    PATH is emptied so no real installed provider can satisfy qualification;
+    the result must be provider-unavailable/unqualified, never a launch and
+    never consent-required.
+    """
+    import sys
+
+    _forbid_launch(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    before = _tree_bytes(tmp_path)
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 2
+
+    captured = capsys.readouterr()
+    assert _tree_bytes(tmp_path) == before
+    text = captured.err + captured.out
+    assert "provider-unqualified" in text or "provider-unavailable" in text
+    assert "consent-required" not in text
+
+
+def test_explicit_assessment_json_without_consent_reports_consent_required(
+        tmp_path, monkeypatch, capsys):
+    import sys
+
+    _forbid_launch(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert main(("doctor", "--assessment-json")) == 2
+
+    captured = capsys.readouterr()
+    document = C.decode_public_document(captured.out)
+    assert document.kind == "doctor"
+    assert document.error.code == "consent-required"
+    assert document.data is None
+    assert captured.err == ""
+
+
+def test_offline_doctor_stays_static_without_launch(
+        inspection_project, monkeypatch, capsys):
+    _forbid_launch(monkeypatch)
+    domain, _ = inspection_project
+    before = _tree_bytes(domain.root)
+
+    assert main(("--fixture-domain", str(domain.root),
+                 "doctor", "--offline")) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "cache.global-flush" in captured.out
+    assert _tree_bytes(domain.root) == before
+
+
+def test_init_doctor_without_explicit_consent_keeps_files_and_reports_consent(
+        tmp_path, monkeypatch, capsys):
+    """Non-TTY init --doctor without consent must not launch a reviewer.
+
+    Init files are still written; the review leg reports consent-required
+    and the process returns the review exit code.
+    """
+    import sys
+
+    _forbid_launch(monkeypatch)
+    marker = tmp_path / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert main(("init", "--runner", "pytest", "--doctor",
+                 "--reviewer", "claude")) == 2
+
+    captured = capsys.readouterr()
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert "consent-required" in captured.err + captured.out
+    assert "initialization succeeded; review incomplete" in captured.err + captured.out
+
+
+def test_init_doctor_on_existing_config_without_consent_keeps_bytes_and_reports_consent(
+        tmp_path, monkeypatch, capsys):
+    """Existing config uses a separate setup step, then init --doctor still gates."""
+    import sys
+
+    _forbid_launch(monkeypatch)
+    marker = tmp_path / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    assert main(("init", "--runner", "pytest")) == 0
+    capsys.readouterr()
+    before = (tmp_path / ".ptest.toml").read_bytes()
+
+    assert main(("init", "--runner", "pytest", "--doctor",
+                 "--reviewer", "claude")) == 2
+
+    captured = capsys.readouterr()
+    assert (tmp_path / ".ptest.toml").read_bytes() == before
+    assert "consent-required" in captured.err + captured.out

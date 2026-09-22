@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
-from . import agent_rules, config as config_api
+from . import agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, files, help as help_api, history, init_render
 from . import operations, platform, scheduler
@@ -68,6 +68,14 @@ class ParsedArgs:
     agents: tuple[str, ...] = ()
     agents_explicit: bool = False
     help_topic: str | None = None
+    reviewer: str | None = None
+    reviewer_explicit: bool = False
+    allow_model_review: bool = False
+    assessment_json: bool = False
+    review_timeout_s: int = 300
+    review_timeout_explicit: bool = False
+    offline: bool = False
+    doctor_request: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +236,12 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         children = []
         agents = ()
         agents_explicit = False
+        doctor_request = None
+        doctor_seen = no_doctor_seen = False
+        reviewer = None
+        reviewer_seen = allow_seen = timeout_seen = False
+        allow_model_review = False
+        review_timeout_s = 300
         index = 0
         while index < len(args):
             token = args[index]
@@ -267,6 +281,40 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                         raise _problem("unsupported-capability", "agent integration is not supported")
                     agents = tuple(dict.fromkeys(names))
                 continue
+            elif token == "--doctor":
+                if doctor_seen or no_doctor_seen:
+                    raise _problem("invalid-config", "init doctor modes cannot be combined or repeated")
+                doctor_seen = True
+                doctor_request = True
+            elif token == "--no-doctor":
+                if no_doctor_seen or doctor_seen:
+                    raise _problem("invalid-config", "init doctor modes cannot be combined or repeated")
+                no_doctor_seen = True
+                doctor_request = False
+            elif token == "--reviewer":
+                value, index = _value(args, index, token)
+                if reviewer_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                reviewer_seen = True
+                supported = {"auto", *agent_providers.SUPPORTED_REVIEWERS}
+                if value not in supported:
+                    raise _problem("unsupported-capability", "reviewer is not supported")
+                reviewer = value
+                continue
+            elif token == "--allow-model-review":
+                if allow_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                allow_seen = True
+                allow_model_review = True
+            elif token == "--review-timeout":
+                value, index = _value(args, index, token)
+                if timeout_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                timeout_seen = True
+                review_timeout_s = _integer(value, lo=10, hi=900)
+                continue
+            elif token == "--assessment-json":
+                raise _problem("invalid-config", "assessment output is only available for doctor")
             elif token == "--json":
                 # Init's frozen grammar omits --json, but accepting it is
                 # harmless only when it is explicitly requested by automation.
@@ -274,10 +322,23 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             else:
                 raise _problem("invalid-config", "unknown inspection option")
             index += 1
+        review_options_seen = reviewer_seen or allow_seen or timeout_seen
+        if reviewer_seen or allow_seen or timeout_seen:
+            if doctor_request is not True:
+                raise _problem("invalid-config", "review options require --doctor")
+        if "--json" in args and (doctor_request is True or review_options_seen):
+            raise _problem("invalid-config", "init review cannot be combined with --json")
+        if dry_run and (doctor_request is True or review_options_seen):
+            raise _problem("invalid-config", "init review cannot be combined with --dry-run")
         return ParsedArgs(command=command, runner=runner, dry_run=dry_run,
                           reveal_command=reveal, json="--json" in args,
                           children=tuple(children), agents=agents,
-                          agents_explicit=agents_explicit)
+                          agents_explicit=agents_explicit,
+                          reviewer=reviewer, reviewer_explicit=reviewer_seen,
+                          allow_model_review=allow_model_review,
+                          review_timeout_s=review_timeout_s,
+                          review_timeout_explicit=timeout_seen,
+                          doctor_request=doctor_request)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -325,6 +386,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           scope=target, history_limit=limit)
     if command == "doctor":
         json_output = prompt = False
+        reviewer = None
+        reviewer_seen = allow_seen = assessment_seen = timeout_seen = False
+        allow_model_review = assessment_json = offline = False
+        offline_seen = False
+        review_timeout_s = 300
         scope = None
         limits: dict[str, int] = {}
         probe = False
@@ -350,6 +416,38 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 else:
                     limits[token[2:].replace("-", "_")] = _integer(value, lo=1, hi=10**9)
                 continue
+            elif token == "--reviewer":
+                value, index = _value(args, index, token)
+                if reviewer_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                reviewer_seen = True
+                supported = {"auto", *agent_providers.SUPPORTED_REVIEWERS}
+                if value not in supported:
+                    raise _problem("unsupported-capability", "reviewer is not supported")
+                reviewer = value
+                continue
+            elif token == "--allow-model-review":
+                if allow_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                allow_seen = True
+                allow_model_review = True
+            elif token == "--assessment-json":
+                if assessment_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                assessment_seen = True
+                assessment_json = True
+            elif token == "--review-timeout":
+                value, index = _value(args, index, token)
+                if timeout_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                timeout_seen = True
+                review_timeout_s = _integer(value, lo=10, hi=900)
+                continue
+            elif token == "--offline":
+                if offline_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                offline_seen = True
+                offline = True
             elif token == "--probe":
                 if probe:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -387,6 +485,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 raise _problem("invalid-config", "doctor probe requires --scope")
             if json_output or prompt:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
+            if (reviewer_seen or allow_seen or assessment_seen or timeout_seen
+                    or offline):
+                raise _problem("invalid-config", "doctor probe cannot combine review modes")
             if limits:
                 raise _problem("invalid-config", "doctor probe cannot combine static scan limits")
             return ParsedArgs(
@@ -400,8 +501,20 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             raise _problem("invalid-config", "probe options require --probe")
         if json_output and prompt:
             raise _problem("invalid-config", "doctor output modes cannot be combined")
+        if offline and (json_output or prompt):
+            raise _problem("invalid-config", "doctor output modes cannot be combined")
+        if assessment_seen and (json_output or prompt or offline):
+            raise _problem("invalid-config", "assessment output cannot combine with static modes")
+        if (reviewer_seen or allow_seen or timeout_seen) and (json_output or prompt or offline):
+            raise _problem("invalid-config", "review options cannot combine with static modes")
         return ParsedArgs(command=command, json=json_output, prompt=prompt,
-                          scope=scope, **limits)
+                          scope=scope, reviewer=reviewer,
+                          reviewer_explicit=reviewer_seen,
+                          allow_model_review=allow_model_review,
+                          assessment_json=assessment_json,
+                          review_timeout_s=review_timeout_s,
+                          review_timeout_explicit=timeout_seen,
+                          offline=offline, **limits)
     if command == "guide":
         if not args:
             return ParsedArgs(command=command)
@@ -586,6 +699,20 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
     return 2 if problem.code not in {"coordinator-unavailable", "queue-timeout"} else 75
 
 
+def _review_gate_problem(parsed: ParsedArgs) -> C.Problem:
+    """Fail closed until provider qualification, disclosure, and review land."""
+    if (parsed.reviewer_explicit and parsed.reviewer != "auto"
+            and parsed.allow_model_review):
+        return _problem(
+            "provider-unqualified",
+            "review provider qualification is unavailable in this slice",
+        )
+    return _problem(
+        "consent-required",
+        "review requires an explicit provider and model-review consent",
+    )
+
+
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     command = parsed.command
     if command == "help":
@@ -643,6 +770,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
+            if parsed.doctor_request is True:
+                print("initialization succeeded; review incomplete", file=sys.stderr)
+                return _emit_error(
+                    _review_gate_problem(parsed), kind="init", json_output=False)
             return 0
         except C.Problem as problem:
             return _emit_error(problem, kind="init", json_output=parsed.json)
@@ -786,6 +917,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     print(render.terminal_text(f"{reason.code}: {reason.message}"),
                           file=sys.stderr)
                 return result.exit_code
+            if not (parsed.offline or parsed.json or parsed.prompt):
+                return _emit_error(
+                    _review_gate_problem(parsed), kind="doctor",
+                    json_output=parsed.assessment_json, domain=domain)
             limits = C.ScanLimits(
                 entries=parsed.max_entries or C.DEFAULT_SCAN_LIMITS.entries,
                 files=parsed.max_files or C.DEFAULT_SCAN_LIMITS.files,
