@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.resources
 import itertools
 import json
+import re
 
 from . import checklist as checklist_api
 from . import contracts as C
@@ -40,6 +41,119 @@ def terminal_text(value: object) -> str:
         parts.append(piece)
         used += size
     return "".join(parts)
+
+
+_AGENT_CHECKLIST_TABLE_MAX_BYTES = 32 * 1024
+_AGENT_CHECKLIST_EVIDENCE_MAX_BYTES = 1024
+_AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS = 256
+
+
+def _render_agent_checklist_evidence(evidence) -> str:
+    """Render bounded citation locations without exposing citation metadata."""
+    if not isinstance(evidence, list) or not evidence:
+        return ""
+
+    marker = "[truncated]"
+    parts = []
+    used = 0
+    text_limit = _AGENT_CHECKLIST_EVIDENCE_MAX_BYTES
+    truncated = False
+    for citation in itertools.islice(evidence, _AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS):
+        if not isinstance(citation, dict):
+            continue
+        path = citation.get("path")
+        start_line = citation.get("start_line")
+        end_line = citation.get("end_line")
+        if (not isinstance(path, str)
+                or not isinstance(start_line, int) or isinstance(start_line, bool)
+                or not isinstance(end_line, int) or isinstance(end_line, bool)
+                or start_line < 1 or end_line < start_line):
+            continue
+
+        location = terminal_text(path)
+        if not location:
+            continue
+        location += f":{start_line}"
+        if end_line != start_line:
+            location += f"-{end_line}"
+        chunk = (", " if parts else "") + location
+        chunk_bytes = len(chunk.encode("utf-8"))
+        # Reserve enough space for a truncation marker if more citations remain.
+        if used + chunk_bytes > text_limit - len(marker) - 2:
+            truncated = True
+            break
+        parts.append(chunk)
+        used += chunk_bytes
+    else:
+        truncated = len(evidence) > _AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS
+
+    if truncated:
+        parts.append((", " if parts else "") + marker)
+    return "".join(parts)
+
+
+def _agent_checklist_table_cell(value: object) -> str:
+    """Sanitize untrusted table text for terminal controls and Markdown syntax."""
+    safe = []
+    backslashes = 0
+    text = terminal_text(value)
+    text = re.sub(
+        r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+",
+        "[URL omitted]",
+        text,
+    )
+    for character in text:
+        if character == "\\":
+            safe.append(character)
+            backslashes += 1
+            continue
+        if character == "|":
+            if backslashes % 2 == 0:
+                safe.append("\\")
+            safe.append(character)
+        elif character == "&":
+            safe.append("&amp;")
+        elif character == "<":
+            safe.append("&lt;")
+        elif character == ">":
+            safe.append("&gt;")
+        elif character in "[]()":
+            safe.append(f"&#{ord(character)};")
+        else:
+            safe.append(character)
+        backslashes = 0
+    return "".join(safe)
+
+
+def render_agent_checklist_table(children) -> str:
+    """Render ordered, validated agent-assessment checklist children."""
+    header = "Project | Checklist | Status | Evidence"
+    separator = "------- | --------- | ------ | --------"
+    omitted = "... | ... | ... | [additional rows omitted at output limit]"
+    lines = [header, separator]
+    used = len((header + "\n" + separator).encode("utf-8"))
+    omitted_cost = len(("\n" + omitted).encode("utf-8"))
+    row_limit = _AGENT_CHECKLIST_TABLE_MAX_BYTES - omitted_cost
+
+    for child in children:
+        project = child["scope"]
+        for row in child["rows"]:
+            evidence = _render_agent_checklist_evidence(row["evidence"])
+            cells = (
+                project,
+                row["id"],
+                row["status"],
+                evidence,
+            )
+            line = " | ".join(_agent_checklist_table_cell(cell) for cell in cells)
+            line_cost = len(("\n" + line).encode("utf-8"))
+            if used + line_cost > row_limit:
+                lines.append(omitted)
+                return "\n".join(lines)
+            lines.append(line)
+            used += line_cost
+
+    return "\n".join(lines)
 
 
 def render_json(document: C.PublicDocument) -> bytes:
