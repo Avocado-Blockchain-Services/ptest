@@ -59,9 +59,10 @@ def test_init_explicit_agent_choice_adds_only_repository_local_skill(tmp_path, m
     monkeypatch.chdir(tmp_path)
 
     assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
-    assert (tmp_path / ".codex/skills/ptest/SKILL.md").is_file()
+    assert (tmp_path / ".agents/skills/ptest/SKILL.md").is_file()
     assert (tmp_path / "docs/ptest-agent.md").is_file()
-    assert not (tmp_path.parent / ".codex").exists()
+    assert not (tmp_path / ".codex/skills/ptest/SKILL.md").exists()
+    assert not (tmp_path.parent / ".agents").exists()
 
 
 def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_failure(
@@ -306,7 +307,7 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
     else:
         expected = {
             "where": f"root: {root}", "register": "register: initialized",
-            "init": f"existing: {root / '.ptest.toml'}",
+            "init": "existing: .ptest.toml",
             "plan": "plan: full (static preview)", "status": "queued: 0\nactive: 0",
             "history": "history: 0 runs", "doctor": "cache.global-flush",
         }
@@ -502,7 +503,7 @@ def test_init_preview_creates_nothing_then_creation_preserves_existing_bytes(
             assert document.data["action"] == action
             assert document.data["exists"] is (action != "preview")
         else:
-            assert captured.out == f"{action}: {target}\n"
+            assert f"{action}: .ptest.toml" in captured.out
         if action == "preview":
             assert not target.exists()
         else:
@@ -622,7 +623,12 @@ def test_human_root_controls_are_escaped_while_json_keeps_typed_path(
     assert captured.err == ""
     for control in ("\x1b", "\r", "\t", "\x7f", "\u009b", "\u202e"):
         assert control not in captured.out
-    assert "\\x1b[31m" in captured.out
+    if command == "where":
+        assert "\\x1b[31m" in captured.out
+    else:
+        # The init banner shows repository-relative targets, so a hostile
+        # root name never reaches human output; the banner still renders.
+        assert "ptest already configured" in captured.out
     assert main((*prefix, "--json")) == 0
     captured = capsys.readouterr()
     document = C.decode_public_document(captured.out)
@@ -647,7 +653,13 @@ def test_human_root_is_bounded_in_utf8_bytes_without_truncating_json(
     assert main(prefix) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert "[truncated]" in captured.out
+    if command == "where":
+        assert "[truncated]" in captured.out
+    else:
+        # The init banner shows repository-relative targets, so a long root
+        # name stays out of human output entirely.
+        assert "[truncated]" not in captured.out
+        assert "ptest already configured" in captured.out
     assert len(captured.out.encode()) < 1100
     assert main((*prefix, "--json")) == 0
     captured = capsys.readouterr()
@@ -903,3 +915,160 @@ def test_doctor_probe_still_executes_without_checklist(
     captured = capsys.readouterr()
     assert len(calls) == 1 and calls[0].mode is C.Mode.PROBE
     assert "FIX-001" not in captured.out
+
+
+def test_init_agents_all_uses_the_closed_provider_list(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    parsed = parse_argv(("init", "--agents", "all"))
+    assert parsed.agents == ("claude", "codex", "opencode", "gemini")
+    assert parsed.agents_explicit is True
+
+    assert main(("init", "--runner", "pytest", "--agents", "all")) == 0
+    captured = capsys.readouterr()
+    for relative in (".claude/skills/ptest/SKILL.md",
+                     ".agents/skills/ptest/SKILL.md",
+                     ".opencode/skills/ptest/SKILL.md",
+                     ".gemini/skills/ptest/SKILL.md"):
+        assert (tmp_path / relative).is_file()
+    assert "ptest initialized" in captured.out
+
+
+def test_init_json_is_non_interactive_and_byte_exact(tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input",
+                        lambda *args, **kwargs: pytest.fail("JSON init prompted"))
+    assert main(("init", "--runner", "pytest", "--json")) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    document = C.decode_public_document(captured.out)
+    assert document.kind == "init"
+    assert document.error is None
+    assert document.data["action"] == "created"
+    assert set(document.data) == {"action", "target", "exists", "warnings", "config"}
+    assert "ptest initialized" not in captured.out
+    assert not (tmp_path / "docs").exists()
+
+
+def test_init_json_with_explicit_agents_reports_no_prompt(tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    assert main(("init", "--runner", "pytest", "--agents", "claude",
+                 "--json")) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert C.decode_public_document(captured.out).data["action"] == "created"
+    assert (tmp_path / ".claude/skills/ptest/SKILL.md").is_file()
+
+
+def test_human_init_renders_ordered_banner_matching_real_files(
+        tmp_path, monkeypatch, capsys):
+    import re
+
+    monkeypatch.chdir(tmp_path)
+    assert main(("init", "--runner", "pytest", "--agents", "claude,codex")) == 0
+    captured = capsys.readouterr()
+
+    assert captured.err == ""
+    assert "ptest initialized" in captured.out
+    assert "┌" in captured.out and "┘" in captured.out
+    assert captured.out.index("Configuration") < captured.out.index("Guidance")
+    assert captured.out.index("Guidance") < captured.out.index("Next steps")
+    assert "created: .ptest.toml" in captured.out
+    assert re.search(r"created\s+docs/ptest-agent\.md", captured.out)
+    assert ".claude/skills/ptest/SKILL.md" in captured.out
+    assert ".agents/skills/ptest/SKILL.md" in captured.out
+    assert ".codex/skills/ptest/SKILL.md" not in captured.out
+    assert "ptest --full" in captured.out
+    assert (tmp_path / ".agents/skills/ptest/SKILL.md").is_file()
+    assert (tmp_path / ".claude/skills/ptest/SKILL.md").is_file()
+
+
+def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(("init", "--runner", "pytest", "--agents", "claude")) == 0
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    capsys.readouterr()
+
+    assert main(("init", "--runner", "pytest", "--agents", "claude")) == 0
+    captured = capsys.readouterr()
+
+    assert "ptest already configured" in captured.out
+    assert "ptest initialized" not in captured.out
+    assert "already present" in captured.out
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*")
+            if path.is_file()} == before
+
+
+def test_existing_invalid_config_never_claims_success(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".ptest.toml").write_bytes(b"version = 999\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("init", "--runner", "pytest")) == 0
+    captured = capsys.readouterr()
+
+    assert "attention" in captured.out.lower()
+    assert "ptest initialized" not in captured.out
+    assert "ptest already configured" not in captured.out
+
+
+def test_dry_run_reports_planned_verbs_and_writes_nothing(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(("init", "--runner", "pytest", "--agents", "codex",
+                 "--dry-run")) == 0
+    captured = capsys.readouterr()
+
+    assert "ptest init preview" in captured.out
+    assert "would create" in captured.out
+    assert "created:" not in captured.out
+    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / ".agents").exists()
+
+
+def test_guidance_write_failure_emits_no_banner_and_rolls_back(
+        tmp_path, monkeypatch, capsys):
+    import ptest.agent_rules as rules_module
+
+    real_create = rules_module._create_leaf
+
+    def failing_create(parent_fd, name, data, **kwargs):
+        if name == "SKILL.md":
+            raise C.Problem(code="state-unavailable", message="injected failure",
+                            phase="agent-rules")
+        return real_create(parent_fd, name, data, **kwargs)
+
+    monkeypatch.setattr(rules_module, "_create_leaf", failing_create)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("init", "--runner", "pytest", "--agents", "claude")) == 2
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "state-unavailable" in captured.err
+    assert "ptest initialized" not in captured.err
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert not (tmp_path / "docs").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_human_banner_bounds_deep_paths_without_raw_controls(
+        tmp_path, monkeypatch, capsys):
+    deep = tmp_path
+    for _ in range(12):
+        deep /= "nested-project-directory"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+
+    assert main(("init", "--runner", "pytest")) == 0
+    captured = capsys.readouterr()
+
+    assert captured.err == ""
+    assert len(captured.out.encode("utf-8")) < 8192
+    for control in ("\x1b", "\r", "\x00", "\x07"):
+        assert control not in captured.out

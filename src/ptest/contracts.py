@@ -1672,6 +1672,43 @@ class InitOptions:
         object.__setattr__(self, "agents", agents)
 
 
+@dataclass(frozen=True, slots=True)
+class ActionRecord:
+    """Internal presentation record for one init/config or guidance target.
+
+    Never serialized: ``serialize_init_result`` and the v1 schemas are
+    allowlisted and ignore this type. ``target`` is a repository-relative
+    display path (or a complete note sentence when ``action`` is ``"note"``).
+    """
+
+    target: str
+    action: str
+    source: str
+
+    def __post_init__(self) -> None:
+        _check_str("init.detail.target", self.target)
+        if self.action not in _ACTION_RECORD_ACTIONS:
+            raise ValueError(
+                f"init.detail.action {self.action!r} is not a presentation action")
+        if self.source not in ("config", "guidance"):
+            raise ValueError(
+                f"init.detail.source {self.source!r} must be config or guidance")
+
+
+_ACTION_RECORD_ACTIONS = frozenset({
+    "created", "updated", "already present",
+    "would create", "would update", "note",
+})
+
+
+def _check_action_records(name: str, value: object) -> tuple:
+    items = _check_tuple(name, value)
+    for item in items:
+        if not isinstance(item, ActionRecord):
+            raise TypeError(f"{name} entries must be ActionRecord")
+    return items
+
+
 @dataclass(frozen=True, kw_only=True)
 class InitResult:
     action: InitAction
@@ -1679,6 +1716,7 @@ class InitResult:
     exists: bool
     config: ConfigSummary | None
     warnings: tuple = ()
+    details: tuple = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", _check_enum("init.action", self.action, InitAction))
@@ -1695,6 +1733,8 @@ class InitResult:
             if not isinstance(item, Reason):
                 raise TypeError("init.warnings entries must be Reason")
         object.__setattr__(self, "warnings", items)
+        object.__setattr__(
+            self, "details", _check_action_records("init.details", self.details))
 
 
 def select_init_action(*, target_exists: bool, dry_run: bool,

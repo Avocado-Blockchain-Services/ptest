@@ -36,6 +36,11 @@ v1 `.ptest.toml`; a repository with multiple immediate native projects receives
 a root v2 dispatcher and missing child v1 configs. Existing child configs are
 preserved. Interactive setup can add repository-local guidance for Claude,
 Codex, OpenCode, or Gemini; it never installs global skills or packages.
+Claude skills land in `.claude/skills/ptest/SKILL.md` and Codex skills in
+`.agents/skills/ptest/SKILL.md`, each with valid `name: ptest` front matter.
+A legacy `.codex/skills/ptest/SKILL.md` is never modified or removed. Human
+`ptest init` prints a boxed summary banner; `ptest init --json` emits only the
+frozen v1 document and never prompts.
 
 ## Offline or enterprise installation
 

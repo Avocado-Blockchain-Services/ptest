@@ -852,8 +852,7 @@ def _plan_monorepo_init(root: Path, options: C.InitOptions) -> tuple[tuple[_Chil
             if len(raw) > _CONFIG_MAX_BYTES:
                 raise _problem("invalid-config", "child project configuration exceeds its bound")
             try:
-                parsed = tomllib.loads(raw.decode("utf-8"))
-                config, _ = _parse_config(parsed, child_root, target)
+                config, _ = _parse_config(raw, child_root, target)
             except C.Problem:
                 raise
             except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, _ConfigInvalid):
@@ -864,6 +863,53 @@ def _plan_monorepo_init(root: Path, options: C.InitOptions) -> tuple[tuple[_Chil
             planned.append(_ChildInit(declaration, child_root, config,
                                       _serialize_fresh(config)))
     return tuple(planned), _serialize_monorepo(tuple(declarations))
+
+
+def _config_detail(target: str, action: str) -> C.ActionRecord:
+    return C.ActionRecord(target=target, action=action, source="config")
+
+
+def _child_state(root: Path, declaration: str) -> str:
+    """Probe one declared child config read-only: ``"ok"``, ``"missing"`` or ``"invalid"``.
+
+    Reads are no-follow and bounded and the bytes are parsed but never
+    executed; runners are not run or installed and nothing is written.
+    """
+    try:
+        parts = _validate_init_child(declaration)
+    except C.Problem:
+        return "invalid"
+    cursor = root
+    for part in parts:
+        cursor = cursor / part
+        try:
+            stamp = os.lstat(cursor)
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "invalid"
+        if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+            return "invalid"
+    target = cursor / _CONFIG_NAME
+    try:
+        stamp = os.lstat(target)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "invalid"
+    if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISREG(stamp.st_mode):
+        return "invalid"
+    try:
+        raw = read_regular(cursor, _CONFIG_NAME, _CONFIG_MAX_BYTES + 1)
+    except C.Problem:
+        return "invalid"
+    if len(raw) > _CONFIG_MAX_BYTES:
+        return "invalid"
+    try:
+        _parse_config(raw, cursor, target)
+    except C.Problem:
+        return "invalid"
+    return "ok"
 
 
 def _existing_result(root: Path, target: Path, resolution: C.ConfigResolution) -> C.InitResult:
@@ -877,10 +923,34 @@ def _existing_result(root: Path, target: Path, resolution: C.ConfigResolution) -
             message="existing project configuration could not be used",
             paths=(),
         ),)
+    details: tuple = ()
+    manifest = getattr(resolution, "monorepo", None)
+    if resolution.problem is None and manifest is not None:
+        children = tuple(getattr(manifest, "children", ()) or ())
+        entries: list = [_config_detail(_CONFIG_NAME, "already present")]
+        for child in children:
+            state = _child_state(root, child)
+            if state == "ok":
+                entries.append(_config_detail(f"{child}/{_CONFIG_NAME}", "already present"))
+                continue
+            if state == "missing":
+                note = f"declared child '{child}' has no configuration"
+                message = f"declared child '{child}' configuration is missing"
+            else:
+                note = f"declared child '{child}' configuration is invalid"
+                message = f"declared child '{child}' configuration is invalid"
+            entries.append(_config_detail(note, "note"))
+            warnings = warnings + (C.Reason(
+                code="invalid-config",
+                message=message,
+                paths=(),
+            ),)
+        details = tuple(entries)
     return C.InitResult(
         action=C.InitAction.EXISTING, target=target, exists=True,
         config=_summary(resolution.config) if resolution.config is not None else None,
         warnings=warnings,
+        details=details,
     )
 
 
@@ -920,10 +990,19 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             reveal_command=options.reveal_command, children=children,
         )
         planned, root_data = _plan_monorepo_init(root, child_options)
+        child_details = tuple(
+            _config_detail(
+                f"{child.declaration}/{_CONFIG_NAME}",
+                ("would create" if options.dry_run else "created")
+                if child.data is not None else "already present",
+            )
+            for child in planned
+        )
         if options.dry_run:
             return C.InitResult(
                 action=C.InitAction.PREVIEW, target=target, exists=False,
                 config=None, warnings=(),
+                details=(_config_detail(_CONFIG_NAME, "would create"),) + child_details,
             )
         for child in planned:
             if child.data is not None:
@@ -932,6 +1011,7 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         return C.InitResult(
             action=C.InitAction.CREATED, target=target, exists=True,
             config=None, warnings=(),
+            details=(_config_detail(_CONFIG_NAME, "created"),) + child_details,
         )
 
     if options.runner is not None:
@@ -946,6 +1026,7 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         return C.InitResult(
             action=C.InitAction.PREVIEW, target=target, exists=False,
             config=_summary(config), warnings=(),
+            details=(_config_detail(_CONFIG_NAME, "would create"),),
         )
     try:
         create_exclusive(root, _CONFIG_NAME, _serialize_fresh(config),
@@ -957,4 +1038,5 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     return C.InitResult(
         action=C.InitAction.CREATED, target=target, exists=True,
         config=_summary(config), warnings=(),
+        details=(_config_detail(_CONFIG_NAME, "created"),),
     )

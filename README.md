@@ -4,6 +4,9 @@ ptest is a local-first test coordinator. It requires no cloud account, model
 API, or remote service. Run `ptest init`, then use `ptest <scoped paths>` or
 `ptest --full`.
 
+Run `ptest help` (or `ptest help <topic>`, `ptest <inspection-command> --help`)
+for task-oriented help; agents start at `ptest help agents`.
+
 For normal use, download a verified release archive and run `./install.sh`; see
 [docs/installation.md](docs/installation.md). The installer validates bundled
 wheels before atomically switching the local command. Its explicit

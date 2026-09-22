@@ -116,7 +116,43 @@ cannot report an AGENTS/CLAUDE/docs/skill modification that did not occur.
 
 ## Out of scope
 
-No global/user-level skill is installed. No existing user file is overwritten.
+No global/user-level skill is installed. User-authored content is preserved.
 No automatic migration is performed. No color scheme, terminal capability
 probing, external network call, LLM launch, dependency installation, or tool
 trust-setting change is added to init.
+
+## Review resolutions — 2026-09-22
+
+The current-session Astra review and Terra review clarified these executable
+contracts before implementation:
+
+- `init --json` is non-interactive even on a TTY; absent explicit `--agents`
+  means no agent selection. Explicit `--agents all` uses the same closed list
+  as the interactive all choice. The JSON codec/key sets remain unchanged.
+- `rules` keeps its existing no-argument/`--apply` CLI grammar. It manages base
+  guidance; provider selection stays on `init` and shared Python helpers.
+- Internal per-target outcomes carry config and guidance states to the banner.
+  Record child creation at write sites, unchanged states during validation,
+  and planned states during dry-run. Do not infer writes from final existence.
+- Recognize legacy skill content by exact bytes from the released
+  `_provider_text` template (heading `# ptest skill for PROVIDER`, followed by
+  its two original instruction paragraphs). At canonical Claude/OpenCode/Gemini
+  paths, upgrade only this exact generated template to the valid new format.
+  Edited content conflicts. The old Codex path is always preserved. Inspect
+  it with bounded no-follow reads; reject unsafe or user-edited legacy entries
+  before any init writes when Codex is selected.
+- Preflight all guidance writes and restore owned guidance mutations on an
+  ordinary mid-apply failure. Preserve original bytes and permissions for
+  updated files; remove only files/directories created by this invocation.
+  Never overwrite a concurrent edit during rollback. If safe restoration is
+  impossible, return an explicit failure explaining incomplete restoration.
+  No crash-atomic multi-file transaction or config rollback is promised.
+- Invalid existing config warnings render an attention-needed header rather
+  than an initialized/configured success claim; do not silently hide warnings.
+- Skill bodies identify guide paths relative to the repository root, not the
+  skill directory. Give standalone scopes when the root config is v1; use
+  child-prefixed scopes only with declared monorepo children.
+- Native smoke uses a wheel installed in a fresh venv, isolated initialized
+  Git repositories, and new Claude/Codex low-effort sessions. Retain the host's
+  catalog or actual skill-load tool evidence. A model assertion alone is not
+  sufficient. These model calls are verification only, never part of init.

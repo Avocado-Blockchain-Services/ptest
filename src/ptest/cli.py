@@ -15,7 +15,8 @@ from typing import Sequence
 
 from . import agent_rules, config as config_api
 from . import contracts as C
-from . import doctor, files, history, operations, platform, scheduler
+from . import doctor, files, help as help_api, history, init_render
+from . import operations, platform, scheduler
 from . import render
 from .adapters import pytest as pytest_adapter
 from .runners import adapter_for
@@ -66,6 +67,7 @@ class ParsedArgs:
     children: tuple = ()
     agents: tuple[str, ...] = ()
     agents_explicit: bool = False
+    help_topic: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +258,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 agents_explicit = True
                 if value == "none":
                     agents = ()
+                elif value == "all":
+                    agents = agent_rules.SUPPORTED_AGENTS
                 else:
                     names = tuple(part.strip() for part in value.split(","))
                     if (not names or any(not name for name in names)
@@ -417,10 +421,36 @@ def _parse_args(args: tuple[str, ...], prefix: _CliPrefix) -> ParsedArgs:
         raise prefix.problem
     remaining = args[prefix.remainder_index:]
     if prefix.command is not None:
-        parsed = _parse_inspection(prefix.command, remaining[1:])
+        rest = remaining[1:]
+        if "--help" in rest or "-h" in rest:
+            # A help flag on a recognized inspection command never runs that
+            # command. The flag must stand alone; mixed help+action arguments
+            # are rejected instead of silently showing help or executing.
+            if tuple(rest) not in (("--help",), ("-h",)):
+                raise _problem("invalid-config",
+                               "help cannot be combined with other options")
+            parsed = ParsedArgs(command="help", help_topic=prefix.command)
+        else:
+            parsed = _parse_inspection(prefix.command, rest)
+    elif remaining and remaining[0] == "help":
+        # The topic is never echoed: unknown input stays out of the error so
+        # hostile bytes cannot reach output; the fixed hint names the topics.
+        rest = remaining[1:]
+        if not rest:
+            parsed = ParsedArgs(command="help")
+        elif len(rest) == 1 and rest[0] in help_api.TOPICS:
+            parsed = ParsedArgs(command="help", help_topic=rest[0])
+        elif len(rest) == 1:
+            raise _problem("invalid-config",
+                           f"unknown help topic; {help_api.HINT}")
+        else:
+            raise _problem("invalid-config", "help accepts at most one topic")
     elif remaining and remaining[0] == "changed":
         parsed = _parse_execution(remaining[1:], command="changed")
     elif remaining and remaining[0] in {"--help", "-h"}:
+        if len(remaining) > 1:
+            raise _problem("invalid-config",
+                           "help accepts no additional arguments")
         parsed = ParsedArgs(command="help")
     elif remaining and remaining[0] == "--version":
         parsed = ParsedArgs(command="version")
@@ -559,7 +589,16 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     command = parsed.command
     if command == "help":
-        print("ptest [--changed|--full] [--workers N] [-- RUNNER_ARG ...]")
+        # Static read-only route: no config inspection, no writes, no prompt,
+        # no coordinator, no setup, no tests. Fail closed on unknown topics.
+        text = (help_api.overview() if parsed.help_topic is None
+                else help_api.topic(parsed.help_topic))
+        if text is None:
+            return _emit_error(
+                _problem("invalid-config",
+                         f"unknown help topic; {help_api.HINT}"),
+                kind="help", json_output=False)
+        print(text)
         return 0
     if command == "version":
         print(C.PTEST_VERSION)
@@ -582,23 +621,25 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return _emit_error(problem, kind="rules", json_output=False)
     if command == "init":
         try:
-            agents = _init_agents(parsed)
+            agents = _init_agents(parsed, json_output=parsed.json)
             root = config_api.repository_root(cwd)
-            if agents:
-                agent_rules.preview(root, agents=agents)
+            plan = agent_rules.preview(root, agents=agents) if agents else None
             result = config_api.init_project(cwd, C.InitOptions(
                 runner=parsed.runner, dry_run=parsed.dry_run,
                 reveal_command=parsed.reveal_command,
                 children=parsed.children,
                 agents=agents,
             ))
+            applied = None
             if agents and not parsed.dry_run:
-                agent_rules.apply(root, agents=agents)
+                applied = agent_rules.apply(root, agents=agents)
             payload = C.serialize_init_result(result)
             if parsed.json:
                 sys.stdout.buffer.write(_document("init", payload))
             else:
-                print(f"{result.action.value}: {render.terminal_text(result.target)}")
+                sys.stdout.write(init_render.render_init(
+                    result, applied if applied is not None else plan,
+                    dry_run=parsed.dry_run, agents=agents))
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
@@ -772,8 +813,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     raise _problem("invalid-config", "unknown command")
 
 
-def _init_agents(parsed: ParsedArgs) -> tuple[str, ...]:
-    if parsed.agents_explicit or not sys.stdin.isatty():
+def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str, ...]:
+    if parsed.agents_explicit or json_output or not sys.stdin.isatty():
         return parsed.agents
     print("Install repository-local ptest guidance for which agents? "
           "[none/claude,codex,opencode,gemini/all] (default: none):",

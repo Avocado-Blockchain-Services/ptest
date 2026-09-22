@@ -423,3 +423,206 @@ def test_concurrent_init_exclusively_creates_one_config(tmp_path, monkeypatch):
     assert created.config.project_id == resolved.config.project_id
     assert init_project(tmp_path, _options()).action is InitAction.EXISTING
     assert (tmp_path / ".ptest.toml").read_bytes() == original
+
+
+def _child_root(tmp_path, name, runner_marker):
+    root = tmp_path / name
+    root.mkdir(parents=True)
+    (root / runner_marker).write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    return root
+
+
+def test_monorepo_init_records_per_child_config_actions(tmp_path):
+    api = _child_root(tmp_path, "api", "pyproject.toml")
+    web = _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+
+    result = init_project(tmp_path, options)
+
+    assert result.action is InitAction.CREATED
+    by_target = {item.target: item.action for item in result.details}
+    assert by_target["api/.ptest.toml"] == "created"
+    assert by_target["web/.ptest.toml"] == "created"
+    assert all(item.source == "config" for item in result.details)
+    assert (api / ".ptest.toml").is_file()
+    assert (web / ".ptest.toml").is_file()
+
+
+def test_monorepo_dry_run_reports_would_create_without_writing(tmp_path):
+    _child_root(tmp_path, "api", "pyproject.toml")
+    _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=True, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+
+    result = init_project(tmp_path, options)
+
+    assert result.action is InitAction.PREVIEW
+    assert result.exists is False
+    assert {item.action for item in result.details} == {"would create"}
+    assert [item.target for item in result.details] == [
+        ".ptest.toml", "api/.ptest.toml", "web/.ptest.toml"]
+    assert not (tmp_path / ".ptest.toml").exists()
+    assert not (tmp_path / "api" / ".ptest.toml").exists()
+
+
+def test_monorepo_repeat_init_reports_existing_children_truthfully(tmp_path):
+    _child_root(tmp_path, "api", "pyproject.toml")
+    _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+    init_project(tmp_path, options)
+    before = {path: path.read_bytes() for path in
+              (tmp_path / ".ptest.toml", tmp_path / "api" / ".ptest.toml",
+               tmp_path / "web" / ".ptest.toml")}
+
+    repeat = init_project(tmp_path, options)
+
+    assert repeat.action is InitAction.EXISTING
+    by_target = {item.target: item.action for item in repeat.details}
+    assert by_target[".ptest.toml"] == "already present"
+    assert by_target["api/.ptest.toml"] == "already present"
+    assert by_target["web/.ptest.toml"] == "already present"
+    assert all(item.source == "config" for item in repeat.details)
+    after = {path: path.read_bytes() for path in before}
+    assert after == before
+
+
+def test_monorepo_repeat_with_missing_child_reports_attention(tmp_path):
+    from ptest.init_render import render_init
+
+    _child_root(tmp_path, "api", "pyproject.toml")
+    _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+    init_project(tmp_path, options)
+    (tmp_path / "web" / ".ptest.toml").unlink()
+
+    repeat = init_project(tmp_path, options)
+
+    assert repeat.action is InitAction.EXISTING
+    by_target = {item.target: item.action for item in repeat.details}
+    assert by_target[".ptest.toml"] == "already present"
+    assert by_target["api/.ptest.toml"] == "already present"
+    assert "web/.ptest.toml" not in by_target
+    assert repeat.warnings != ()
+    assert "ptest init needs attention" in render_init(repeat)
+
+
+def test_monorepo_repeat_with_malformed_child_reports_attention(tmp_path):
+    from ptest.init_render import render_init
+
+    _child_root(tmp_path, "api", "pyproject.toml")
+    _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+    init_project(tmp_path, options)
+    (tmp_path / "web" / ".ptest.toml").write_bytes(b"[[[ not toml\n")
+
+    repeat = init_project(tmp_path, options)
+
+    assert repeat.action is InitAction.EXISTING
+    by_target = {item.target: item.action for item in repeat.details}
+    assert by_target[".ptest.toml"] == "already present"
+    assert by_target["api/.ptest.toml"] == "already present"
+    assert "web/.ptest.toml" not in by_target
+    assert repeat.warnings != ()
+    assert "ptest init needs attention" in render_init(repeat)
+
+
+def test_monorepo_repeat_with_unsafe_child_reports_attention(tmp_path):
+    import shutil
+
+    from ptest.init_render import render_init
+
+    _child_root(tmp_path, "api", "pyproject.toml")
+    web = _child_root(tmp_path, "web", "pyproject.toml")
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          children=(("api", RunnerKind.PYTEST), ("web", RunnerKind.PYTEST)))
+    init_project(tmp_path, options)
+    outside = tmp_path.parent / "outside-unsafe-child"
+    outside.mkdir(exist_ok=True)
+    # A byte-identical, otherwise valid config outside the repository must
+    # still report attention: the symlinked child directory is unsafe and
+    # its target must never count as "already present".
+    (outside / ".ptest.toml").write_bytes((web / ".ptest.toml").read_bytes())
+    shutil.rmtree(web)
+    web.symlink_to(outside, target_is_directory=True)
+
+    repeat = init_project(tmp_path, options)
+
+    assert repeat.action is InitAction.EXISTING
+    by_target = {item.target: item.action for item in repeat.details}
+    assert by_target[".ptest.toml"] == "already present"
+    assert by_target["api/.ptest.toml"] == "already present"
+    assert "web/.ptest.toml" not in by_target
+    assert repeat.warnings != ()
+    assert "ptest init needs attention" in render_init(repeat)
+    assert web.is_symlink()
+
+
+def test_child_state_rejects_repository_escape_declarations(tmp_path):
+    from ptest.config import _child_state
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    created = init_project(seed, _options(runner=RunnerKind.PYTEST))
+    assert created.action is InitAction.CREATED
+    sibling = tmp_path.parent / "escape-sibling"
+    sibling.mkdir(exist_ok=True)
+    (sibling / ".ptest.toml").write_bytes((seed / ".ptest.toml").read_bytes())
+
+    assert _child_state(tmp_path, "../escape-sibling") == "invalid"
+    assert _child_state(tmp_path, "/etc") == "invalid"
+    assert _child_state(tmp_path, "") == "invalid"
+
+
+def test_single_init_details_carry_root_config_action(tmp_path):
+    case_created = tmp_path / "case-created"
+    case_created.mkdir()
+    created = init_project(case_created, _options(runner=RunnerKind.PYTEST))
+
+    assert [(item.target, item.action, item.source) for item in created.details] == [
+        (".ptest.toml", "created", "config")]
+    case_preview = tmp_path / "case-preview"
+    case_preview.mkdir()
+    preview = init_project(case_preview,
+                           _options(runner=RunnerKind.PYTEST, dry_run=True))
+    assert [(item.target, item.action, item.source) for item in preview.details] == [
+        (".ptest.toml", "would create", "config")]
+    assert not (case_preview / ".ptest.toml").exists()
+
+
+def test_existing_invalid_config_keeps_warnings_for_attention_header(tmp_path):
+    (tmp_path / ".ptest.toml").write_bytes(b"version = 999\n")
+
+    result = init_project(tmp_path, _options(dry_run=False))
+
+    assert result.action is InitAction.EXISTING
+    assert result.warnings != ()
+    assert result.details == ()
+
+
+def test_monorepo_dry_run_marks_preexisting_children_already_present(tmp_path):
+    api = _child_root(tmp_path, "api", "pyproject.toml")
+    web = _child_root(tmp_path, "web", "pyproject.toml")
+    create_options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                                 children=(("api", RunnerKind.PYTEST),
+                                           ("web", RunnerKind.PYTEST)))
+    init_project(tmp_path, create_options)
+    (tmp_path / ".ptest.toml").unlink()
+    (api / ".ptest.toml").unlink()
+    preview_options = InitOptions(runner=None, dry_run=True, reveal_command=False,
+                                  children=(("api", RunnerKind.PYTEST),
+                                            ("web", RunnerKind.PYTEST)))
+
+    result = init_project(tmp_path, preview_options)
+
+    assert result.action is InitAction.PREVIEW
+    by_target = {item.target: item.action for item in result.details}
+    assert by_target[".ptest.toml"] == "would create"
+    assert by_target["api/.ptest.toml"] == "would create"
+    assert by_target["web/.ptest.toml"] == "already present"
+    assert not (tmp_path / ".ptest.toml").exists()
+    assert not (api / ".ptest.toml").exists()
