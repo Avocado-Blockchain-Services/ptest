@@ -308,7 +308,7 @@ def test_publish_creates_missing_target_with_valid_marker(tmp_path,
     root = tmp_path / "proj"
     root.mkdir()
     payload = render_recommendations(_run())
-    result = publish_recommendations(root, payload, None)
+    result = publish_recommendations(root, payload, None, source_proof=[])
     assert result.status == "created"
     assert result.path == "recommendations.md"
     raw = (root / "recommendations.md").read_bytes()
@@ -325,12 +325,12 @@ def test_publish_replaces_matching_managed_report(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    publish_recommendations(root, first, None)
+    publish_recommendations(root, first, None, source_proof=[])
     previous = _identity_of(root)
     other = _child(scope="child-b")
     second = render_recommendations(_run(children=[other]))
     assert second != first
-    result = publish_recommendations(root, second, previous)
+    result = publish_recommendations(root, second, previous, source_proof=[])
     assert result.status == "replaced"
     assert (root / "recommendations.md").read_bytes() == second
 
@@ -342,9 +342,9 @@ def test_publish_identical_bytes_is_unchanged(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     payload = render_recommendations(_run())
-    publish_recommendations(root, payload, None)
+    publish_recommendations(root, payload, None, source_proof=[])
     previous = _identity_of(root)
-    result = publish_recommendations(root, payload, previous)
+    result = publish_recommendations(root, payload, previous, source_proof=[])
     assert result.status == "unchanged"
     assert (root / "recommendations.md").read_bytes() == payload
 
@@ -358,7 +358,8 @@ def test_publish_conflict_on_custom_report(tmp_path, monkeypatch):
     root.mkdir()
     (root / "recommendations.md").write_bytes(b"# my own notes\n")
     with pytest.raises(Problem, match="report-conflict"):
-        publish_recommendations(root, render_recommendations(_run()), None)
+        publish_recommendations(
+            root, render_recommendations(_run()), None, source_proof=[])
     assert (root / "recommendations.md").read_bytes() == b"# my own notes\n"
 
 
@@ -370,11 +371,11 @@ def test_publish_conflict_on_edited_report(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     payload = render_recommendations(_run())
-    publish_recommendations(root, payload, None)
+    publish_recommendations(root, payload, None, source_proof=[])
     with (root / "recommendations.md").open("ab") as handle:
         handle.write(b"\n<!-- edited by hand -->\n")
     with pytest.raises(Problem, match="report-conflict"):
-        publish_recommendations(root, payload, _identity_of(root))
+        publish_recommendations(root, payload, _identity_of(root), source_proof=[])
     assert b"edited by hand" in (root / "recommendations.md").read_bytes()
 
 
@@ -390,12 +391,12 @@ def test_publish_conflict_on_symlink_and_nonregular(tmp_path, monkeypatch):
     outside.write_bytes(b"external\n")
     (root / "recommendations.md").symlink_to(outside)
     with pytest.raises(Problem, match="report-conflict"):
-        publish_recommendations(root, payload, None)
+        publish_recommendations(root, payload, None, source_proof=[])
     assert outside.read_bytes() == b"external\n"
     (root / "recommendations.md").unlink()
     os.mkfifo(root / "recommendations.md")
     with pytest.raises(Problem, match="report-conflict"):
-        publish_recommendations(root, payload, None)
+        publish_recommendations(root, payload, None, source_proof=[])
 
 
 def test_publish_intervening_edit_returns_conflict_and_preserves(tmp_path,
@@ -408,7 +409,7 @@ def test_publish_intervening_edit_returns_conflict_and_preserves(tmp_path,
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    publish_recommendations(root, first, None)
+    publish_recommendations(root, first, None, source_proof=[])
     previous = _identity_of(root)
     second = render_recommendations(_run(children=[_child(scope="b")]))
     real_fsync = os.fsync
@@ -423,7 +424,7 @@ def test_publish_intervening_edit_returns_conflict_and_preserves(tmp_path,
 
     monkeypatch.setattr(os, "fsync", _rivalrous)
     with pytest.raises(Problem, match="report-conflict"):
-        publish_recommendations(root, second, previous)
+        publish_recommendations(root, second, previous, source_proof=[])
     current = (root / "recommendations.md").read_bytes()
     assert b"## Scope r" in current
     assert current != second
@@ -438,13 +439,13 @@ def test_publish_stale_previous_identity_fails_closed(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    publish_recommendations(root, first, None)
+    publish_recommendations(root, first, None, source_proof=[])
     stale = _identity_of(root)
     rival = render_recommendations(_run(children=[_child(scope="r")]))
     (root / "recommendations.md").write_bytes(rival)
     second = render_recommendations(_run(children=[_child(scope="b")]))
     with pytest.raises(Problem, match="stale-evidence"):
-        publish_recommendations(root, second, stale)
+        publish_recommendations(root, second, stale, source_proof=[])
     assert (root / "recommendations.md").read_bytes() == rival
 
 
@@ -456,7 +457,7 @@ def test_publish_cancel_preserves_old_report_and_cleans_temp(tmp_path,
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    publish_recommendations(root, first, None)
+    publish_recommendations(root, first, None, source_proof=[])
     previous = _identity_of(root)
     second = render_recommendations(_run(children=[_child(scope="b")]))
 
@@ -465,7 +466,7 @@ def test_publish_cancel_preserves_old_report_and_cleans_temp(tmp_path,
 
     monkeypatch.setattr(os, "rename", _boom)
     with pytest.raises(KeyboardInterrupt):
-        publish_recommendations(root, second, previous)
+        publish_recommendations(root, second, previous, source_proof=[])
     assert (root / "recommendations.md").read_bytes() == first
     assert list(root.glob("*.tmp.*")) == []
 
@@ -477,9 +478,10 @@ def test_publish_rejects_payload_with_bad_marker(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     with pytest.raises(Problem):
-        publish_recommendations(root, b"no marker here\n", None)
+        publish_recommendations(root, b"no marker here\n", None, source_proof=[])
     with pytest.raises(TypeError):
-        publish_recommendations(root, "not-bytes", None)  # type: ignore[arg-type]
+        publish_recommendations(  # type: ignore[arg-type]
+            root, "not-bytes", None, source_proof=[])
     assert not (root / "recommendations.md").exists()
 
 
@@ -490,9 +492,11 @@ def test_publish_sequential_writers_do_not_clobber(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    assert publish_recommendations(root, first, None).status == "created"
+    assert publish_recommendations(
+        root, first, None, source_proof=[]).status == "created"
     prev = _identity_of(root)
-    assert publish_recommendations(root, first, prev).status == "unchanged"
+    assert publish_recommendations(
+        root, first, prev, source_proof=[]).status == "unchanged"
     lock_files = list(tmp_path.glob("rec-*.lock"))
     assert len(lock_files) == 1
 
@@ -543,7 +547,7 @@ def test_publish_parent_fsync_failure_fails_closed_and_restores(
     root = tmp_path / "proj"
     root.mkdir()
     first = render_recommendations(_run())
-    publish_recommendations(root, first, None)
+    publish_recommendations(root, first, None, source_proof=[])
     previous = _identity_of(root)
     second = render_recommendations(_run(children=[_child(scope="child-b")]))
     real_fsync = os.fsync
@@ -559,7 +563,7 @@ def test_publish_parent_fsync_failure_fails_closed_and_restores(
 
     monkeypatch.setattr(os, "fsync", _fail_on_dirs)
     with pytest.raises(Problem, match="state-unavailable"):
-        publish_recommendations(root, second, previous)
+        publish_recommendations(root, second, previous, source_proof=[])
     assert (root / "recommendations.md").read_bytes() == first
     assert list(root.glob("*.tmp.*")) == []
 
@@ -567,9 +571,167 @@ def test_publish_parent_fsync_failure_fails_closed_and_restores(
 def test_render_rejects_scope_command_markdown_injection():
     from ptest.recommendations import render_recommendations
     from ptest.contracts import Problem
-    for hostile in ("a\nptest --full", "a|b", "a`b`", "a;b", "a b"):
+    # Doctor-safe scopes render quoted/escaped instead of being rejected.
+    out = render_recommendations(
+        _run(children=[_child(scope="a b")])).decode("utf-8")
+    assert "ptest 'a b'" in out
+    out = render_recommendations(
+        _run(children=[_child(scope="a|b")])).decode("utf-8")
+    assert "a\\|b" in out
+    # Actual controls and traversal are still rejected.
+    for hostile in ("a\nptest --full", "a\x00b", "../up", "/abs", "a\\b"):
         with pytest.raises(Problem):
             render_recommendations(_run(children=[_child(scope=hostile)]))
+
+
+# ---- TDD RED: four audited blockers (must fail before repair) ----
+
+def test_publish_source_proof_omission_fails_closed_and_preserves(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(root, first, None)
+    assert not (root / "recommendations.md").exists()
+    # Omission must also fail when a prior report exists (no silent claim).
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(root, second, previous)
+    assert (root / "recommendations.md").read_bytes() == first
+
+
+def test_publish_source_prefix_proof_covers_truncated_input(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    bound = rec._MAX_SOURCE_BYTES
+    chunk = b"x = 1\n" * (bound // 6 + 10)
+    assert len(chunk) > bound
+    target = root / "src" / "big.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(chunk)
+    prefix = chunk[:bound]
+    prefix_proof = [{"path": "src/big.py",
+                     "sha256": hashlib.sha256(prefix).hexdigest(),
+                     "start_line": 1, "end_line": 3}]
+    full_proof = [{"path": "src/big.py",
+                   "sha256": hashlib.sha256(chunk).hexdigest(),
+                   "start_line": 1, "end_line": 3}]
+    first = render_recommendations(_run())
+    # Excerpt-chunk sha (what the assessment packet admits) must verify.
+    assert publish_recommendations(
+        root, first, None, source_proof=prefix_proof).status == "created"
+    # An impossible full-file sha for truncated input must fail closed.
+    (root / "recommendations.md").unlink()
+    with pytest.raises(Problem, match="stale-evidence"):
+        publish_recommendations(root, first, None, source_proof=full_proof)
+    assert not (root / "recommendations.md").exists()
+
+
+def test_publish_parent_symlink_swap_fails_closed_and_preserves(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = _source_file(root)
+    proof = _proof_for(target)
+    first = render_recommendations(_run())
+    assert publish_recommendations(
+        root, first, None, source_proof=proof).status == "created"
+    previous = _identity_of(root)
+    # Swap the parent component for a symlink to attacker content.
+    outside = tmp_path / "outside"
+    (outside / "src").mkdir(parents=True)
+    (outside / "src" / "a.py").write_bytes(target.read_bytes())
+    (root / "src").rename(root / "src-real")
+    os.symlink(outside / "src", root / "src")
+    try:
+        second = render_recommendations(
+            _run(children=[_child(scope="child-b")]))
+        with pytest.raises(Problem, match="stale-evidence"):
+            publish_recommendations(root, second, previous,
+                                    source_proof=proof)
+        assert (root / "recommendations.md").read_bytes() == first
+    finally:
+        os.unlink(root / "src")
+        (root / "src-real").rename(root / "src")
+
+
+def test_render_accepts_doctor_safe_scope_with_spaces():
+    from ptest.recommendations import render_recommendations
+    out = render_recommendations(
+        _run(children=[_child(scope="web app")])).decode("utf-8")
+    assert "web app" in out
+    assert "ptest 'web app'" in out  # deterministic shell quoting
+    assert "ptest --full" in out  # final gate preserved
+
+
+def test_render_scope_shell_markdown_escaping_and_control_rejection():
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    out = render_recommendations(
+        _run(children=[_child(scope="a;b")])).decode("utf-8")
+    assert "ptest 'a;b'" in out
+    out = render_recommendations(
+        _run(children=[_child(scope="a|b")])).decode("utf-8")
+    assert "a\\|b" in out  # table cell stays one column
+    # Actual controls and traversal are still rejected.
+    for hostile in ("a\nptest --full", "a\x00b", "a\x1bb", "../up",
+                    "/abs", "a\\b", "C:/x", "a/../b", ""):
+        with pytest.raises(Problem):
+            render_recommendations(_run(children=[_child(scope=hostile)]))
+
+
+def test_publish_parent_fsync_failure_preserves_intervening_edit(
+        tmp_path, monkeypatch):
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    rival = render_recommendations(_run(children=[_child(scope="rival")]))
+    real_fsync = os.fsync
+    fired = []
+
+    def _mutate_then_fail(fd):
+        try:
+            is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        except OSError:
+            is_dir = False
+        if is_dir:
+            if not fired:
+                fired.append(True)
+                # Intervening custom/newer report lands after rename,
+                # before the failed parent sync's rollback decision.
+                (root / "recommendations.md").write_bytes(rival)
+            raise OSError(5, "simulated parent sync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _mutate_then_fail)
+    with pytest.raises(Problem, match="state-unavailable"):
+        publish_recommendations(root, second, previous, source_proof=[])
+    assert (root / "recommendations.md").read_bytes() == rival
+    assert list(root.glob("*.tmp.*")) == []
 
 
 def test_publish_lock_unavailable_fails_closed_without_publication(
@@ -583,6 +745,7 @@ def test_publish_lock_unavailable_fails_closed_without_publication(
     root = tmp_path / "proj"
     root.mkdir()
     with pytest.raises(Problem, match="coordinator-unavailable|report-conflict"):
-        publish_recommendations(root, render_recommendations(_run()), None)
+        publish_recommendations(
+            root, render_recommendations(_run()), None, source_proof=[])
     assert not (root / "recommendations.md").exists()
     assert list(root.glob("*.tmp.*")) == []

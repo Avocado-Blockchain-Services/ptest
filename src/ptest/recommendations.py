@@ -26,13 +26,23 @@ NOT ``contracts.PublishResult`` (whose history-specific
 Conflicts raise ``Problem(code="report-conflict")`` and stale caller
 identity raises ``Problem(code="stale-evidence")``.
 
-Source-drift guard: ``publish_recommendations`` accepts an optional
+Source-drift guard: ``publish_recommendations`` requires an explicit
 kw-only ``source_proof`` list of collected file identities (root-relative
-path, full-file sha256, line interval). Each entry is rechecked with a
-no-follow read inside the lock before staging and again immediately
-before rename; any drift raises ``stale-evidence`` and preserves the
-prior report. A caller-supplied prior-report identity is NOT source
-identity: when ``source_proof`` is omitted no source-drift claim is made.
+path, excerpt-chunk sha256, line interval); omission fails closed with
+``stale-evidence`` and an empty list is the explicit claim for no
+admitted files. Each entry's sha256 is the SHA-256 of the admitted
+(possibly truncated) UTF-8 chunk -- the first ``_MAX_SOURCE_BYTES`` of
+the file, which is the whole file when it fits -- matching the
+assessment ``SourceExcerpt.sha256`` contract, never an impossible
+full-file hash for truncated input. Each entry is rechecked with a
+descriptor-walk no-follow read inside the lock before staging and again
+immediately before rename; any prefix drift, line shrink, or symlink
+(including a symlinked parent component) raises ``stale-evidence`` and
+preserves the prior report. Beyond-prefix drift is unobservable here:
+once a file exceeds the admitted prefix, later bytes are not compared,
+so the CLI caller must recompute evidence packets and compare whole-
+packet/config identity (``packet_sha256``) before publishing; a
+caller-supplied prior-report identity is NOT source identity.
 
 Durability: the temp-write/fchmod/fsync/atomic-replace/parent-sync
 contract is enforced; a parent-directory fsync failure fails closed
@@ -60,6 +70,7 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import stat
 import time
 from collections.abc import Mapping
@@ -79,9 +90,11 @@ _MAX_EVIDENCE_PER_ITEM = 16
 _MAX_REPORT_BYTES = 1 << 20
 _MAX_TARGET_BYTES = 1 << 20
 _MAX_SOURCE_PROOF_ENTRIES = 256
+_MAX_SOURCE_BYTES = 64 * 1024
+_PATH_BYTES = 4096
 _LOCK_TIMEOUT_S = 30.0
-_SCOPE_RE = re.compile(
-    r"(?:\.|[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)*)\Z")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_DRIVE_RE = re.compile(r"[A-Za-z]:")
 _ROW_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 _BIDI = frozenset({
@@ -214,19 +227,54 @@ def _check_relpath(value: object, *, field: str) -> str:
 
 
 def _check_scope(value: object, *, field: str = "scope") -> str:
-    """Allowlist scope so command/table/heading interpolation is fixed.
+    """Doctor-safe scope validation; rendering quotes/escapes, never rejects.
 
-    Only ``.`` (repository root) or slash-separated safe segments may
-    pass; anything model-invented with whitespace, shell metacharacters,
-    or Markdown control text is rejected instead of quoted.
+    Accepts ``.`` (repository root) or any doctor-safe root-relative path:
+    spaces and shell metacharacters are allowed and handled at render
+    time by deterministic shell quoting (``shlex.quote``) and Markdown
+    escaping of table cells/headings. Only actual controls (C0/DEL),
+    traversal (empty/dot/dot-dot segments), absolute/Windows/drive
+    forms, backslashes, and overlong values are rejected.
     """
     if value == ".":
         return "."
-    path = _check_relpath(value, field=field)
-    if _SCOPE_RE.match(path) is None:
+    if not isinstance(value, str) or not value:
+        _fail("report-invalid", f"field {field!r} must be a nonempty string")
+        raise AssertionError("unreachable")
+    if (value.startswith(("/", "\\")) or "\\" in value
+            or "\x00" in value or value.startswith("~")):
+        _fail("report-invalid", f"field {field!r} must be root-relative")
+    if _DRIVE_RE.match(value):
+        _fail("report-invalid", f"field {field!r} must be root-relative")
+    if _CONTROL_RE.search(value):
         _fail("report-invalid",
-              f"field {field!r} is not a safe scope for command rendering")
-    return path
+              f"field {field!r} carries control text")
+    for part in value.split("/"):
+        if part in ("", ".", ".."):
+            _fail("report-invalid", f"field {field!r} is not normalized")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        _fail("report-invalid",
+              f"field {field!r} is not encodable text")
+        raise AssertionError("unreachable")
+    if len(encoded) > _PATH_BYTES:
+        _fail("invalid-bound", f"field {field!r} exceeds its bound")
+    return value
+
+
+def _shell_scope(scope: str) -> str:
+    """Deterministic root-based argv display with safe quoting."""
+    if scope == ".":
+        return "ptest --full"
+    return f"ptest {shlex.quote(scope)}"
+
+
+def _md_scope(value: str) -> str:
+    """Escape a validated scope for Markdown table cells and headings."""
+    return (value.replace("\\", "\\\\").replace("|", "\\|")
+            .replace("`", "\\`").replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 def _check_row_id(value: object, *, field: str) -> str:
@@ -414,10 +462,12 @@ def _score_text(rows: list) -> str:
 
 
 def _verify_block(scope: str, root_label: str) -> str:
-    # ``scope`` arrives allowlist-validated via _check_scope, so direct
-    # interpolation keeps the deterministic root-based argv.
-    argv = "ptest --full" if scope == "." else f"ptest {scope}"
-    scope_note = "repository root scope" if scope == "." else f"scope {scope}"
+    # ``scope`` arrives validated via _check_scope; rendering quotes and
+    # escapes deterministically so the root-based argv cannot be altered
+    # by model input.
+    argv = _shell_scope(scope)
+    scope_note = ("repository root scope" if scope == "."
+                  else f"scope {_md_scope(scope)}")
     return (
         f"Verify with ptest only (deterministic, root-based; never a "
         f"model-provided shell command):\n"
@@ -559,7 +609,8 @@ def render_recommendations(run: object) -> bytes:
     out.append("| Scope | Packet sha256 | Checklist |")
     out.append("| --- | --- | --- |")
     for child in children:
-        out.append(f"| {child['scope']} | {child['packet_sha256']} | "
+        out.append(f"| {_md_scope(child['scope'])} | "
+                   f"{child['packet_sha256']} | "
                    f"{_score_text(child['rows'])} |")
     out.append("")
     if normalized["limitations"]:
@@ -569,7 +620,7 @@ def render_recommendations(run: object) -> bytes:
             out.append(f"- {limitation['code']}: {limitation['message']}")
         out.append("")
     for child in children:
-        out.append(f"## Scope {child['scope']}")
+        out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")
         out.append(f"Packet: {child['packet_sha256']}. Checklist: "
                    f"{_score_text(child['rows'])}. Execution capability: "
@@ -928,16 +979,16 @@ def _stage_temp(root_fd: int, full: bytes) -> str:
     return name
 
 
-def _check_source_proof(value: object) -> list | None:
-    """Validate the optional bounded source-proof list shape.
+def _check_source_proof(value: object) -> list:
+    """Validate the required bounded source-proof list shape.
 
     Each entry binds one collected source file: its root-relative
-    ``path``, the full-file ``sha256`` observed at collection time, and
-    the cited ``start_line``/``end_line`` interval. Malformed proof is
-    ``report-invalid``; drift detected later is ``stale-evidence``.
+    ``path``, the excerpt-chunk ``sha256`` observed at collection time
+    (SHA-256 of the first ``_MAX_SOURCE_BYTES`` of the file, which is
+    the whole file when it fits, matching ``SourceExcerpt.sha256``),
+    and the cited ``start_line``/``end_line`` interval. Malformed proof
+    is ``report-invalid``; drift detected later is ``stale-evidence``.
     """
-    if value is None:
-        return None
     if not isinstance(value, (list, tuple)):
         raise TypeError("source_proof must be a list of mappings or None")
     if len(value) > _MAX_SOURCE_PROOF_ENTRIES:
@@ -961,22 +1012,44 @@ def _check_source_proof(value: object) -> list | None:
     return checked
 
 
-def _verify_source_proof(root_fd: int, proof: list | None) -> None:
-    """No-follow recheck of collected source identities; None is a skip.
+def _open_source_leaf(root_fd: int, path: str) -> int:
+    """Open a proof path without following any symlink component.
 
-    Every entry is opened without following symlinks and compared
-    against the collection-time bytes and line bound. Any absence,
-    symlink, type change, byte drift, or line shrink raises
-    ``stale-evidence``; the caller preserves the prior report.
+    Each parent component is walked through a no-follow directory
+    descriptor, so a swapped-in symlinked parent (not just a symlinked
+    leaf) fails closed with ``stale-evidence`` instead of redirecting
+    the recheck into attacker content. Returns the open leaf fd.
     """
-    if not proof:
-        return
-    for entry in proof:
-        path = entry["path"]
+    parts = path.split("/")
+    owned: list[int] = []
+    ancestor_fd = root_fd
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(part,
+                                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=ancestor_fd)
+            except FileNotFoundError:
+                _fail("stale-evidence",
+                      f"source {path!r} is gone since collection; refusing "
+                      f"to publish against stale evidence")
+                raise AssertionError("unreachable")
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    _fail("stale-evidence",
+                          f"source {path!r} passes through a symlink; "
+                          f"refusing to publish against stale evidence")
+                    raise AssertionError("unreachable")
+                _fail("stale-evidence",
+                      f"source {path!r} cannot be opened safely; refusing "
+                      f"to publish against stale evidence")
+                raise AssertionError("unreachable")
+            owned.append(child)
+            ancestor_fd = child
         try:
-            fd = os.open(path,
-                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                         dir_fd=root_fd)
+            return os.open(parts[-1],
+                           os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                           dir_fd=ancestor_fd)
         except FileNotFoundError:
             _fail("stale-evidence",
                   f"source {path!r} is gone since collection; refusing to "
@@ -992,6 +1065,31 @@ def _verify_source_proof(root_fd: int, proof: list | None) -> None:
                   f"source {path!r} cannot be opened safely; refusing to "
                   f"publish against stale evidence")
             raise AssertionError("unreachable")
+    finally:
+        for owned_fd in owned:
+            try:
+                os.close(owned_fd)
+            except OSError:
+                pass
+
+
+def _verify_source_proof(root_fd: int, proof: list) -> None:
+    """No-follow recheck of collected source identities.
+
+    Every entry is opened via a descriptor walk that follows no
+    symlink at any path component, and its admitted prefix (the first
+    ``_MAX_SOURCE_BYTES``) is compared against the collection-time
+    excerpt-chunk sha256 alongside the cited line bound. Any absence,
+    symlink (leaf or parent component), type change, prefix drift, or
+    line shrink raises ``stale-evidence``; the caller preserves the
+    prior report. Beyond-prefix drift is unobservable here and must be
+    covered by whole-packet identity before publishing.
+    """
+    if not proof:
+        return
+    for entry in proof:
+        path = entry["path"]
+        fd = _open_source_leaf(root_fd, path)
         try:
             stamp = os.fstat(fd)
             if not stat.S_ISREG(stamp.st_mode):
@@ -1016,10 +1114,12 @@ def _verify_source_proof(root_fd: int, proof: list | None) -> None:
             if len(raw) > _MAX_TARGET_BYTES:
                 _fail("invalid-bound",
                       f"source {path!r} exceeds its bound")
-            if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+            admitted = raw[:_MAX_SOURCE_BYTES]
+            if hashlib.sha256(admitted).hexdigest() != entry["sha256"]:
                 _fail("stale-evidence",
-                      f"source {path!r} changed since collection (bytes "
-                      f"differ); refusing to publish against stale evidence")
+                      f"source {path!r} changed since collection "
+                      f"(admitted prefix bytes differ); refusing to "
+                      f"publish against stale evidence")
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -1038,11 +1138,63 @@ def _verify_source_proof(root_fd: int, proof: list | None) -> None:
             os.close(fd)
 
 
+def _read_target_raw(root_fd: int) -> bytes | None:
+    """No-follow raw read of the live report; None when unreadable.
+
+    Unlike ``_read_target`` this performs no marker validation: the
+    rollback path must compare against whatever is on disk (including
+    an intervening custom report) rather than fail on it. Never raises.
+    """
+    try:
+        fd = os.open(_REPORT_NAME,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=root_fd)
+    except OSError:
+        return None
+    try:
+        stamp = os.fstat(fd)
+        if not stat.S_ISREG(stamp.st_mode):
+            return None
+        chunks = []
+        remaining = _MAX_TARGET_BYTES + 1
+        while remaining > 0:
+            try:
+                piece = os.read(fd, min(8192, remaining))
+            except OSError:
+                return None
+            if not piece:
+                break
+            chunks.append(piece)
+            remaining -= len(piece)
+        raw = b"".join(chunks)
+        if len(raw) > _MAX_TARGET_BYTES:
+            return None
+        return raw
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _restore_after_sync_failure(
         root_fd: int,
-        current: tuple[bytes, int, int, int] | None) -> None:
-    """Best-effort restore of the prior complete report; never raises."""
+        current: tuple[bytes, int, int, int] | None,
+        written: bytes) -> None:
+    """Best-effort restore of the prior complete report; never raises.
+
+    The live target is reread and compared before any restore: when an
+    intervening edit landed after the atomic rename (custom report,
+    newer publication), it is preserved instead of being clobbered by
+    the rollback. Only when the disk still holds exactly the bytes this
+    call wrote is the prior report restored.
+    """
     try:
+        live = _read_target_raw(root_fd)
+        if live is not None and live != written:
+            return
         if current is None:
             try:
                 os.unlink(_REPORT_NAME, dir_fd=root_fd)
@@ -1098,6 +1250,12 @@ def publish_recommendations(root: object, payload: object,
         _fail("report-invalid",
               "payload marker hash does not match its body")
     full = bytes(payload)  # type: ignore[arg-type]
+    if source_proof is None:
+        _fail("stale-evidence",
+              "source proof is required; omission makes no source-drift "
+              "claim, so publication is refused and the prior report is "
+              "preserved (pass [] to claim no admitted files)")
+        raise AssertionError("unreachable")
     proof = _check_source_proof(source_proof)
     with _CooperativeLock(_lock_path_for(Path(root))):  # type: ignore[arg-type]
         root_fd = _open_root(root)
@@ -1144,7 +1302,7 @@ def publish_recommendations(root: object, payload: object,
             try:
                 os.fsync(root_fd)
             except OSError:
-                _restore_after_sync_failure(root_fd, current)
+                _restore_after_sync_failure(root_fd, current, full)
                 _fail("state-unavailable",
                       "parent directory sync failed after atomic replace; "
                       "the prior complete report was restored where "
