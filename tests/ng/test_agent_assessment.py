@@ -29,10 +29,10 @@ EXPECTED_IDS = (
 )
 
 
-def _config(pid=CHILD_PID):
+def _config(pid=CHILD_PID, runner_kind=C.RunnerKind.PYTEST):
     return C.Config(
         runner=C.RunnerConfig(
-            kind=C.RunnerKind.PYTEST, launcher=("uv",),
+            kind=runner_kind, launcher=("uv",),
             test_roots=("tests",),
         ),
         setup=None,
@@ -63,6 +63,34 @@ def _workspace(root: Path, config=None):
     resolution = _resolution(root, config)
     return doctor.inspect_workspace(
         _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None), resolution
+
+
+def _v1_config_text(project_id: str, runner_kind: str) -> str:
+    return (
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        f'kind = "{runner_kind}"\n'
+        'launcher = ["true"]\n'
+        "args = []\n"
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n'
+    )
+
+
+def _monorepo_root(root: Path, children: dict[str, str]) -> Path:
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = "
+        + json.dumps(list(children)) + "\n",
+        encoding="utf-8",
+    )
+    for declaration, config_text in children.items():
+        child = root / declaration
+        child.mkdir(parents=True)
+        (child / ".ptest.toml").write_text(config_text, encoding="utf-8")
+    return root
 
 
 def _packet_for(root: Path, files: dict[str, str] | None = None):
@@ -240,10 +268,10 @@ def test_build_packets_preserves_child_order_and_authority(tmp_path):
         None).repositories[0].report
     repo_a = doctor.RepositoryInspection(
         declaration="child-a", local_scope=None, report=first,
-        config_problem=None)
+        config_problem=None, config=_config("11" * 16))
     repo_b = doctor.RepositoryInspection(
         declaration="child-b", local_scope=None, report=first,
-        config_problem=None)
+        config_problem=None, config=_config("22" * 16))
     workspace = doctor.WorkspaceInspection(
         scope=(), repositories=(repo_a, repo_b), aggregate=first)
     packets = AA.build_packets(
@@ -251,6 +279,62 @@ def test_build_packets_preserves_child_order_and_authority(tmp_path):
     assert [p.declaration for p in packets] == ["child-a", "child-b"]
     assert packets[0].packet_sha256 != packets[1].packet_sha256
     assert all(p.scope == p.declaration for p in packets)
+
+
+def test_build_packets_use_each_v2_child_config_in_manifest_order(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+
+    root = _monorepo_root(tmp_path, {
+        "child-b": _v1_config_text("22" * 16, "command"),
+        "child-a": _v1_config_text("11" * 16, "pytest"),
+    })
+    for declaration in ("child-b", "child-a"):
+        source = root / declaration / "src" / "module.py"
+        source.parent.mkdir()
+        source.write_text(f"# {declaration}\nx = 1\n", encoding="utf-8")
+
+    resolution = config_api.resolve_config(root)
+    workspace = doctor.inspect_workspace(
+        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
+    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
+
+    assert resolution.config is None  # v2 root has no child identity fallback
+    assert [repo.declaration for repo in workspace.repositories] == [
+        "child-b", "child-a"]
+    assert [(packet.project_id, packet.runner_kind) for packet in packets] == [
+        ("22" * 16, "command"), ("11" * 16, "pytest")]
+    assert all(packet.project_id != "0" * 32 for packet in packets)
+    assert [packet.scope for packet in packets] == ["child-b", "child-a"]
+
+
+@pytest.mark.parametrize("bad_config", [None, "malformed child config"])
+def test_build_packets_reject_child_without_valid_config_before_building_any(
+        tmp_path, monkeypatch, bad_config):
+    from ptest import agent_assessment as AA
+
+    report = _workspace(tmp_path)[0].repositories[0].report
+    workspace = doctor.WorkspaceInspection(
+        scope=(),
+        repositories=(
+            doctor.RepositoryInspection(
+                declaration="child-a", local_scope=None, report=report,
+                config_problem=None, config=_config("11" * 16)),
+            doctor.RepositoryInspection(
+                declaration="child-b", local_scope=None, report=report,
+                config_problem=None, config=bad_config),
+        ),
+        aggregate=report,
+    )
+    built = []
+    monkeypatch.setattr(AA, "_build_one_packet",
+                        lambda *args: built.append(args))
+
+    with pytest.raises(C.Problem) as caught:
+        AA.build_packets(workspace, _resolution(tmp_path), AA.EvidenceLimits())
+
+    assert caught.value.code == "invalid-config"
+    assert built == []
 
 
 def test_build_packets_dependency_provenance_is_static_and_unknown_where_unprovable(  # noqa: E501
