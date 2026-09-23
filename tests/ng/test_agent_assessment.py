@@ -1650,6 +1650,22 @@ def _invalid_reply_cases(packet, review):
                                     "evidence": [good_cite], "finding": None}).encode(),
         "satisfied-no-citation": json.dumps({"status": "satisfied", "rationale": "No citation given at all.",
                                              "evidence": [], "finding": None}).encode(),
+        "unhashable-status-list": json.dumps({"status": ["satisfied"],
+                                            "rationale": "Status arrives as a list.",
+                                            "evidence": [good_cite], "finding": None}).encode(),
+        "unhashable-status-dict": json.dumps({"status": {"name": "satisfied"},
+                                            "rationale": "Status arrives as a dict.",
+                                            "evidence": [good_cite], "finding": None}).encode(),
+        "non-string-status-int": json.dumps({"status": 0,
+                                           "rationale": "Status arrives as a number.",
+                                           "evidence": [good_cite], "finding": None}).encode(),
+        "null-status": json.dumps({"status": None,
+                                 "rationale": "Status arrives as null.",
+                                 "evidence": [good_cite], "finding": None}).encode(),
+        "gap-with-list-finding": json.dumps({"status": "gap", "rationale": "A gap carrying a list finding.",
+                                           "evidence": [good_cite], "finding": ["not", "a", "dict"]}).encode(),
+        "gap-with-string-finding": json.dumps({"status": "gap", "rationale": "A gap carrying a string finding.",
+                                             "evidence": [good_cite], "finding": "fix it"}).encode(),
     }
 
 

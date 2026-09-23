@@ -1782,7 +1782,7 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
         raise _invalid_reply("reply is not JSON") from None
     _require_exact_keys(document, _ONE_ROW_KEYS, "reply")
     status = document["status"]
-    if status not in _VALID_STATUSES:
+    if not isinstance(status, str) or status not in _VALID_STATUSES:
         raise _invalid_reply("reply has an unknown status")
     rationale = _check_one_row_prose(document["rationale"],
                                      "reply.rationale")
@@ -1883,7 +1883,9 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
         subset = {path: known[path] for path in review.excerpt_paths}
         try:
             row, finding = _validate_one_row(bytes(reply), subset, entry)
-        except C.Problem:
+        except (C.Problem, TypeError, ValueError):
+            # Untrusted model shapes must never abort the child assembly:
+            # any validation failure becomes an unknown row.
             row = AssessmentRow(id=entry.id, status="unknown",
                                 rationale=FAILED_PREFIX + "invalid reply",
                                 evidence=(), label=entry.label)
