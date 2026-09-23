@@ -1021,6 +1021,10 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
                               *, ask: bool = True, calls: int | None = None,
                               concurrency: int = 4,
                               model: str | None = None) -> bool:
+    if sys.stderr.isatty():
+        # The collecting spinner line has no trailing newline; terminate
+        # it before the consent text, as the success/error paths do.
+        print(file=sys.stderr)
     provider = render.terminal_text(adapter.name[:120])
     project = render.terminal_text(resolution.root.name[:120])
     disclosure = (

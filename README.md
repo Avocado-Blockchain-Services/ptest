@@ -34,8 +34,10 @@ manages its own workers; declared `[setup]` (such as `npm ci`) runs first
 when its required paths are missing.
 
 `ptest doctor` review sends one cheap-model call per checklist item after
-consent. The model is resolved as `--review-model`, then
-`PTEST_REVIEW_MODEL`, then a cached pick, then the provider default;
+consent. The model is the cheapest adequate one: `--review-model` (or
+`PTEST_REVIEW_MODEL`) wins, otherwise claude uses its haiku alias and
+codex picks from its model list with one extra call that sends only the
+model list; the choice is cached per provider and CLI version.
 `--review-concurrency` (1-8, default 4) bounds parallel calls.
 `ptest doctor --offline` is static and sends nothing. Model citations live
 in `recommendations.md`; the terminal shows only the verdict per item.

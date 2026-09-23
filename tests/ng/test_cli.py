@@ -1694,6 +1694,22 @@ def test_tty_review_disclosure_names_excluded_source_classes(
     assert "generated/minified files" in disclosure
 
 
+def test_review_disclosure_terminates_tty_spinner_line(
+        tmp_path, monkeypatch, capsys):
+    """On a TTY the disclosure starts on a fresh line, not the spinner row."""
+    import sys
+    from types import SimpleNamespace
+
+    from ptest import cli as cli_module
+
+    adapter = _fake_reviewer("claude", qualified=True)
+    resolution = SimpleNamespace(root=tmp_path)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    assert cli_module._render_review_disclosure(
+        adapter, resolution, ask=False) is True
+    assert capsys.readouterr().err.startswith("\nModel review disclosure")
+
+
 def test_tty_auto_skips_unqualified_opencode_without_prompting(
         inspection_project, monkeypatch, capsys):
     """Per-provider gate: unqualified opencode never blocks or prompts auto.
