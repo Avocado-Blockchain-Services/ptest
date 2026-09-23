@@ -126,3 +126,10 @@ covered by vendored real-reply fixtures:
 4. ptest's own `.` root limitation path was rejected by the report renderer.
 The prose filter keeps two documented denylist trade-offs: it over-rejects "a test passes <object>", and it can miss
 paraphrased result claims such as "CI is green". Report text still labels review conclusions as not execution proof.
+
+## Model selection note — 2026-09-23 (doctor and init v2)
+
+The qualified argv gains exactly one model flag: `--model <m>` for Claude, `-m <m>` for Codex. Qualification is
+per (provider profile, model): the tool-denial canary in this record must be re-run by the controller whenever the
+chosen review model changes (new override, new cached pick, or a different Claude alias target). Tasks never run
+real providers.

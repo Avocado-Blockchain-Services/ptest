@@ -492,3 +492,26 @@ capability-first table, report self-verification, assessment JSON, no-provider,
 and cancellation without running real tests/services. An unavailable account is
 recorded `unverified`, never complete; no provider failure is hidden by the
 readiness UI.
+
+## Amendments — doctor and init v2 (2026-09-23)
+
+`docs/superpowers/specs/2026-09-23-doctor-init-v2-requirements.md` amends this document; the gated design is
+`.pipeline/design.md` (section 10). Where they conflict, the amendments win:
+
+- A1: one call per (project, checklist item) with a one-row schema, bounded parallel (default 4,
+  `--review-concurrency 1..8`); a failed item is `unknown (review failed: <reason>)`; all items failed →
+  `provider-failed`, no report.
+- A2: human output is per-project blocks (executability facts first, one icon line per labelled item, finding
+  under its gap line); the capability/checklist Markdown tables are removed; citations only in `recommendations.md`.
+- A3: tiered evidence admission (manifests/locks, test configuration, test files, CI, imported source, rest);
+  `.superpowers`, `*.diff`, `*.patch`, `recommendations.md` excluded; the static scanner skips agent/pipeline trees.
+- A4: the frozen argv gains only `--model`/`-m`; Claude uses the `haiku` alias; Codex picks by exact match from
+  `codex debug models`; override via `--review-model` or `PTEST_REVIEW_MODEL`; cached per provider and CLI version;
+  the tool-denial canary must be re-run whenever the chosen model changes.
+- A5: local collection precedes the disclosure (which states call count and model); no provider executable runs
+  before consent.
+- A6: additive `rows[].label` and `children[].execution` in `ptest.agent-assessment/v1`.
+- A7: pytest xdist projects run serially via generated `-n 0`; loaded-but-inactive xdist and the
+  pytest-asyncio/pytest-timeout hooks are accepted under the serial grant; pytest stays basic-serial.
+- A8: `kind = "vitest"` executes as an exclusive literal command; declared setup runs for command/vitest profiles.
+- A9: init reports per-project executability and only verified next steps.
