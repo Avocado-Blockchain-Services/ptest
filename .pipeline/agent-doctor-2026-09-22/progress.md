@@ -144,3 +144,15 @@ progress, dependency diagnostics, and branded init banner.
   smoke, final full ptest, and final audit remain. Child-worker `ptest --full`
   counts are not accepted as the final gate; some shell pipelines masked ptest
   protocol errors.
+- 2026-09-23T14:38:06Z spec rev2 committed 1a61ce2 on cx-agent-doctor-cgroup-spec (cgroup leaf rejected; PID-namespace boundary proposed; review still disabled). Luna scoped audit launched.
+- 2026-09-23T14:38:34Z host probe (not a qualification record): unshare user+pid ns, pid-1 shell leaks setsid sleeper holding pipe, exits 0 -> parent wait 0.31s, leaked writer EOF at 0.31s, no host survivor.
+- 2026-09-23T14:40:19Z Luna audit of containment rev2 STOPPED on user direction (overcomplicated); no verdict.
+- 2026-09-23T14:40:37Z a669ffd: containment amendment withdrawn per user; provider runs with user's own permissions, process-group cleanup kept, detached-descendant limit documented, not a release blocker.
+- 2026-09-23T14:45:09Z Muse task na-env launched (N/A parsing + env metadata), worktree ptest-na-env, sid e5f081a0-6f6b-421e-bbe7-05a53ba217e2
+- 2026-09-23T14:57:24Z na-env r1 verified: 16e39d8/3e1c3be, test_agent_assessment 67 passed (controller rerun). Pre-existing NO_COLOR-dependent test_cli failure reproduced on a669ffd. Muse round2 launched (schema N/A enum, render fallback, hermetic color test).
+- 2026-09-23T15:00:42Z round2 0b7a54d verified by controller: 565 passed (6 files, NO_COLOR unset). auditor-agent audit launched.
+- 2026-09-23T15:04:37Z auditor-agent audit1: APPROVE WITH CHANGES, 3 MEDIUM + 1 LOW (na-env-audit1.md). Muse round3 fix launched.
+- 2026-09-23T15:10:58Z round3 80985ac verified by controller: 569 passed (6 files, NO_COLOR unset). auditor-agent re-audit launched.
+- 2026-09-23T15:12:25Z auditor-agent re-audit: all 4 findings resolved; 1 new LOW (readdir-order-dependent test). Muse round4 launched.
+- 2026-09-23T15:14:38Z round4 0e49c69 (order-independent bound test, matches auditor fix; mutation-proven). Chain ff to 0e49c69. Full gate starting.
+- 2026-09-23T15:17:40Z chain 0e49c69: ptest --full 2709 passed, 31 skipped, exit 0 (NO_COLOR unset); graphify update done. Blockers N/A-parsing and dependency-env-metadata CLOSED. Remaining: all-three provider qualification (OpenCode 403, user decision). Not pushed, not merged to main.
