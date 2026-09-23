@@ -1824,3 +1824,110 @@ def test_decoder_messages_never_echo_input():
             "run", None, error=caught.value).decode()
         assert sentinel not in rendered
         assert "12345678901234567890" not in rendered
+
+
+# ---- agent-assessment additive fields: rows[].label, child execution (T6) --
+
+_AA_IDS = (
+    "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
+    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+    "SELECT-001", "TIMING-001",
+)
+_AA_CITE = {"path": "src/example.py", "start_line": 3, "end_line": 9,
+            "sha256": "ef" * 32}
+
+
+def _aa_row(row_id, **overrides):
+    row = {"id": row_id, "status": "satisfied",
+           "rationale": f"Row {row_id} judged against packet excerpt.",
+           "evidence": [dict(_AA_CITE)]}
+    row.update(overrides)
+    return row
+
+
+def _aa_child(**overrides):
+    rows = [_aa_row(row_id) for row_id in _AA_IDS]
+    child = {"project_id": "ab" * 16, "scope": "child-a",
+             "packet_sha256": "cd" * 32, "rows": rows,
+             "score": {"satisfied": 11, "applicable": 11, "percent": 100},
+             "findings": [], "limitations": []}
+    child.update(overrides)
+    return child
+
+
+def _aa_payload(children=None):
+    return {"schema": "ptest.agent-assessment/v1",
+            "provider": {"name": "claude", "cli_version": "1.2.3",
+                         "profile": "ptest-item-review-v1 model=haiku"},
+            "children": [_aa_child()] if children is None else children,
+            "limitations": [],
+            "publication": {"status": "created",
+                            "path": "recommendations.md",
+                            "sha256": "12" * 32}}
+
+
+def _aa_doc(payload):
+    return C.decode_public_document(
+        C.encode_public_document("agent-assessment", payload))
+
+
+def test_agent_assessment_legacy_without_new_fields_still_decodes():
+    doc = _aa_doc(_aa_payload())
+    child = doc.data["children"][0]
+    assert "execution" not in child
+    assert all("label" not in row for row in child["rows"])
+
+
+def test_agent_assessment_label_and_execution_decode_and_project():
+    payload = _aa_payload(children=[_aa_child(
+        rows=[_aa_row(row_id,
+                      **({"label": f"Label {row_id}"} if index == 0 else {}))
+              for index, row_id in enumerate(_AA_IDS)],
+        execution={"status": "caveat", "detail": "exclusive command",
+                   "fix": None})])
+    doc = _aa_doc(payload)
+    child = doc.data["children"][0]
+    assert child["rows"][0]["label"] == "Label FIX-001"
+    assert child["execution"] == {"status": "caveat",
+                                  "detail": "exclusive command",
+                                  "fix": None}
+
+
+@pytest.mark.parametrize("execution", [
+    {"status": "ready", "detail": "d", "fix": None},
+    {"status": "caveat", "detail": "d", "fix": None, "extra": 1},
+    {"status": "caveat", "detail": "d"},
+    {"status": "caveat", "detail": "", "fix": None},
+    {"status": "caveat", "detail": "d" * 513, "fix": None},
+    {"status": "caveat", "detail": "d", "fix": ""},
+])
+def test_agent_assessment_bad_execution_rejected(execution):
+    with pytest.raises(Problem):
+        _aa_doc(_aa_payload(children=[_aa_child(execution=execution)]))
+
+
+@pytest.mark.parametrize("label", ["", "x" * 65, "has\nnewline", "has\ttab"])
+def test_agent_assessment_bad_label_rejected(label):
+    rows = [_aa_row(row_id,
+                    **({"label": label} if index == 0 else {}))
+            for index, row_id in enumerate(_AA_IDS)]
+    with pytest.raises(Problem):
+        _aa_doc(_aa_payload(children=[_aa_child(rows=rows)]))
+
+
+def test_agent_assessment_schema_files_cover_new_fields():
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "docs" / "schemas" / "v1"
+                         / "agent-assessment.json").read_text(
+                             encoding="utf-8"))
+    data = schema["properties"]["data"]["properties"]
+    row = data["children"]["items"]["properties"]["rows"]["items"]
+    assert row["properties"]["label"] == {"type": "string",
+                                          "minLength": 1, "maxLength": 64}
+    assert "label" not in row["required"]
+    child = data["children"]["items"]
+    execution = child["properties"]["execution"]
+    assert execution["required"] == ["status", "detail", "fix"]
+    assert execution["properties"]["status"]["enum"] == [
+        "executable", "caveat", "not-executable"]
+    assert "execution" not in child["required"]

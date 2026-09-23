@@ -53,6 +53,7 @@ Syntax:
              [--doctor | --no-doctor]
              [--reviewer auto|claude|codex|opencode]
              [--allow-model-review] [--review-timeout SECONDS]
+             [--review-model MODEL] [--review-concurrency 1..8]
 
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
@@ -64,7 +65,9 @@ Notes:
   configuration. --agents installs guidance only and is separate from
   model-review consent. After successful initialization, --doctor requests
   the review offer and --no-doctor suppresses it. Review flags cannot be
-  combined with --json or --dry-run."""
+  combined with --json or --dry-run. --review-model (or PTEST_REVIEW_MODEL)
+  overrides the cheap-model choice; --review-concurrency 1..8 (default 4)
+  bounds parallel model calls."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 
@@ -109,6 +112,7 @@ Review syntax (default mode):
   ptest doctor [--reviewer auto|claude|codex|opencode]
                [--allow-model-review] [--assessment-json]
                [--review-timeout 10..900] [--scope PATH]
+               [--review-model MODEL] [--review-concurrency 1..8]
 
 Offline static syntax (never launches a provider or writes a report):
   ptest doctor --offline [--scope PATH] [--max-entries N] [--max-files N]
@@ -141,6 +145,15 @@ Notes:
   --assessment-json is the versioned review document; legacy --json and
   --prompt stay static and offline. --prompt grants assessment text only,
   never repair authority.
+
+  Each review makes one model call per checklist item (4 at a time by
+  default; --review-concurrency 1..8 bounds parallelism), skipping items
+  that do not apply without a call. The model is the cheapest adequate
+  one: --review-model (or PTEST_REVIEW_MODEL) wins, otherwise claude uses
+  its haiku alias and codex picks from its model list with one extra call
+  that sends only the model list; the choice is cached per provider and
+  CLI version. The tool-denial qualification must be re-run when the
+  chosen model changes. Citations are in recommendations.md.
 
   --probe requires --scope and a single-project v1 configuration, cannot
   combine output modes or static scan limits, and probe options require

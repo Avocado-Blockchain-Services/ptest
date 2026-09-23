@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -81,6 +82,10 @@ class ParsedArgs:
     assessment_json: bool = False
     review_timeout_s: int = 300
     review_timeout_explicit: bool = False
+    review_model: str | None = None
+    review_model_explicit: bool = False
+    review_concurrency: int = 4
+    review_concurrency_explicit: bool = False
     offline: bool = False
     doctor_request: bool | None = None
 
@@ -247,8 +252,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         doctor_seen = no_doctor_seen = False
         reviewer = None
         reviewer_seen = allow_seen = timeout_seen = False
+        model_seen = concurrency_seen = False
         allow_model_review = False
         review_timeout_s = 300
+        review_model = None
+        review_concurrency = 4
         index = 0
         while index < len(args):
             token = args[index]
@@ -320,6 +328,20 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 timeout_seen = True
                 review_timeout_s = _integer(value, lo=10, hi=900)
                 continue
+            elif token == "--review-model":
+                value, index = _value(args, index, token)
+                if model_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                model_seen = True
+                review_model = value
+                continue
+            elif token == "--review-concurrency":
+                value, index = _value(args, index, token)
+                if concurrency_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                concurrency_seen = True
+                review_concurrency = _integer(value, lo=1, hi=8)
+                continue
             elif token == "--assessment-json":
                 raise _problem("invalid-config", "assessment output is only available for doctor")
             elif token == "--json":
@@ -329,8 +351,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             else:
                 raise _problem("invalid-config", "unknown inspection option")
             index += 1
-        review_options_seen = reviewer_seen or allow_seen or timeout_seen
-        if reviewer_seen or allow_seen or timeout_seen:
+        review_options_seen = (reviewer_seen or allow_seen or timeout_seen
+                               or model_seen or concurrency_seen)
+        if review_options_seen:
             if doctor_request is not True:
                 raise _problem("invalid-config", "review options require --doctor")
         if "--json" in args and (doctor_request is True or review_options_seen):
@@ -345,6 +368,10 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           allow_model_review=allow_model_review,
                           review_timeout_s=review_timeout_s,
                           review_timeout_explicit=timeout_seen,
+                          review_model=review_model,
+                          review_model_explicit=model_seen,
+                          review_concurrency=review_concurrency,
+                          review_concurrency_explicit=concurrency_seen,
                           doctor_request=doctor_request)
     if command == "register":
         if any(token not in {"--json"} for token in args):
@@ -395,9 +422,12 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         json_output = prompt = False
         reviewer = None
         reviewer_seen = allow_seen = assessment_seen = timeout_seen = False
+        model_seen = concurrency_seen = False
         allow_model_review = assessment_json = offline = False
         offline_seen = False
         review_timeout_s = 300
+        review_model = None
+        review_concurrency = 4
         scope = None
         limits: dict[str, int] = {}
         probe = False
@@ -450,6 +480,20 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 timeout_seen = True
                 review_timeout_s = _integer(value, lo=10, hi=900)
                 continue
+            elif token == "--review-model":
+                value, index = _value(args, index, token)
+                if model_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                model_seen = True
+                review_model = value
+                continue
+            elif token == "--review-concurrency":
+                value, index = _value(args, index, token)
+                if concurrency_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                concurrency_seen = True
+                review_concurrency = _integer(value, lo=1, hi=8)
+                continue
             elif token == "--offline":
                 if offline_seen:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -493,7 +537,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             if json_output or prompt:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
             if (reviewer_seen or allow_seen or assessment_seen or timeout_seen
-                    or offline):
+                    or model_seen or concurrency_seen or offline):
                 raise _problem("invalid-config", "doctor probe cannot combine review modes")
             if limits:
                 raise _problem("invalid-config", "doctor probe cannot combine static scan limits")
@@ -512,7 +556,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             raise _problem("invalid-config", "doctor output modes cannot be combined")
         if assessment_seen and (json_output or prompt or offline):
             raise _problem("invalid-config", "assessment output cannot combine with static modes")
-        if (reviewer_seen or allow_seen or timeout_seen) and (json_output or prompt or offline):
+        if (reviewer_seen or allow_seen or timeout_seen or model_seen
+                or concurrency_seen) and (json_output or prompt or offline):
             raise _problem("invalid-config", "review options cannot combine with static modes")
         return ParsedArgs(command=command, json=json_output, prompt=prompt,
                           scope=scope, reviewer=reviewer,
@@ -521,6 +566,10 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           assessment_json=assessment_json,
                           review_timeout_s=review_timeout_s,
                           review_timeout_explicit=timeout_seen,
+                          review_model=review_model,
+                          review_model_explicit=model_seen,
+                          review_concurrency=review_concurrency,
+                          review_concurrency_explicit=concurrency_seen,
                           offline=offline, **limits)
     if command == "guide":
         if not args:
@@ -633,12 +682,14 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
         inspected = pytest_adapter.inspect_capability(config)
     elif config.runner.kind is C.RunnerKind.VITEST:
         inspected = C.Capability(
-            execution=C.ExecutionTier.UNAVAILABLE, selection=False,
+            execution=C.ExecutionTier.EXCLUSIVE_COMMAND, selection=False,
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(
                 code="unsupported-capability",
-                message=("Vitest basic-serial is prepared only; executor integration and "
-                         "real native tuple qualification remain unavailable"),
+                message=("Vitest runs as one exclusive command (node "
+                         "node_modules/vitest/vitest.mjs run); ptest does "
+                         "not own Vitest workers, selection or per-test "
+                         "results"),
             ),),
         )
     else:
@@ -827,8 +878,149 @@ def _require_review_qualification(selected: str | None = None) -> None:
         )
 
 
+_REVIEW_MODEL_CACHE_DIR = "review-models"
+_REVIEW_MODEL_CACHE_MAX_BYTES = 4096
+_MODEL_PICK_TIMEOUT_S = 120
+_MODEL_PICK_SCHEMA = b'{"type":"string","description":"one listed model slug"}'
+
+
+def _declared_review_model(provider: str, override: str | None,
+                           environ: Mapping[str, str]) -> str | None:
+    """Pre-consent, subprocess-free model choice: flag, env, claude alias.
+
+    Returns None when the model is decided after consent (codex discovery
+    plus one pick call in :func:`_resolve_review_model`).
+    """
+    if not isinstance(provider, str):
+        raise TypeError("provider must be str")
+    if override is not None and not isinstance(override, str):
+        raise TypeError("override must be str or None")
+    if not isinstance(environ, Mapping):
+        raise TypeError("environ must be a mapping")
+    if override:
+        return override
+    env_value = environ.get("PTEST_REVIEW_MODEL")
+    if isinstance(env_value, str) and env_value:
+        return env_value
+    if provider == "claude":
+        return "haiku"
+    return None
+
+
+def _read_cached_review_model(cache_root: Path, provider: str,
+                              cli_version: str | None) -> str | None:
+    """Cached pick result, honored only for the same CLI version."""
+    if cli_version is None:
+        return None
+    try:
+        raw = (Path(cache_root) / f"{provider}.json").read_bytes()
+    except OSError:
+        return None
+    if len(raw) > _REVIEW_MODEL_CACHE_MAX_BYTES:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("cli_version") != cli_version:
+        return None
+    model = data.get("model")
+    if not isinstance(model, str) or not model:
+        return None
+    return model
+
+
+def _write_cached_review_model(cache_root: Path, provider: str,
+                               cli_version: str | None, model: str) -> None:
+    """Persist a pick result; cache failures never fail the review."""
+    if cli_version is None:
+        return
+    try:
+        root = Path(cache_root)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{provider}.json").write_text(
+            json.dumps({"cli_version": cli_version, "model": model},
+                       sort_keys=True),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _pick_review_model(adapter, entries: tuple[dict, ...]) -> str | None:
+    """One pick call carrying only the listed models; exact slug or None."""
+    slugs = [entry["slug"] for entry in entries]
+    payload = {
+        "instruction": (
+            "Reply with exactly one listed model slug: the single "
+            "cheapest adequate model for a bounded source-text checklist "
+            "review. Output only the slug, with no other text."),
+        "models": [{"slug": entry["slug"],
+                    "display_name": entry["display_name"],
+                    "description": entry["description"]}
+                   for entry in entries],
+    }
+    try:
+        request = json.dumps(payload, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    try:
+        result = agent_providers.launch_review(
+            adapter, request, _MODEL_PICK_SCHEMA, _MODEL_PICK_TIMEOUT_S,
+            lambda event: None)
+    except C.Problem:
+        return None
+    if not result.ok:
+        return None
+    try:
+        choice = result.assessment.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    return choice if choice in slugs else None
+
+
+def _resolve_review_model(adapter, cache_root: Path,
+                          declared: str | None) -> tuple[str | None,
+                                                         str | None]:
+    """Post-consent model choice: declared, cache, cheap pick, default.
+
+    Returns ``(model, cli_version)``; ``model`` None means the provider
+    default (no model flag). Declared models win and are never cached.
+    """
+    if not isinstance(adapter, agent_providers.ReviewerAdapter):
+        raise TypeError("adapter must be ReviewerAdapter")
+    if declared is not None and not isinstance(declared, str):
+        raise TypeError("declared must be str or None")
+    version = agent_providers.cli_version(adapter)
+    if declared:
+        return (declared, version)
+    if adapter.name == "claude":
+        return ("haiku", version)
+    if adapter.name == "codex":
+        cached = _read_cached_review_model(cache_root, adapter.name,
+                                           version)
+        if cached is not None:
+            return (cached, version)
+        try:
+            entries = agent_providers._discover_model_entries(adapter)
+        except OSError:
+            entries = ()
+        if entries:
+            picked = _pick_review_model(adapter, entries)
+            if picked is not None:
+                _write_cached_review_model(cache_root, adapter.name,
+                                           version, picked)
+                return (picked, version)
+        return (None, version)
+    return (None, version)
+
+
 def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
-                              *, ask: bool = True) -> bool:
+                              *, ask: bool = True, calls: int | None = None,
+                              concurrency: int = 4,
+                              model: str | None = None) -> bool:
     provider = render.terminal_text(adapter.name[:120])
     project = render.terminal_text(resolution.root.name[:120])
     disclosure = (
@@ -840,6 +1032,24 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
         "coverage/build outputs, generated/minified files, and .ptest private "
         "runtime state. Use --offline for the static doctor instead."
     )
+    if calls is not None:
+        if isinstance(calls, bool) or not isinstance(calls, int) \
+                or calls < 0:
+            raise TypeError("calls must be a nonnegative int or None")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+            raise TypeError("concurrency must be int")
+        chosen = (render.terminal_text(str(model)[:128])
+                  if model else "")
+        if chosen:
+            disclosure += (
+                f" This review makes {calls} model calls "
+                f"({concurrency} at a time) with model {chosen}.")
+        else:
+            disclosure += (
+                f" This review makes {calls} model calls "
+                f"({concurrency} at a time) with a model chosen after "
+                "consent from the provider's model list (one extra call "
+                "that sends only the model list).")
     if not ask:
         print(disclosure, file=sys.stderr)
         return True
