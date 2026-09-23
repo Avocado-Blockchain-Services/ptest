@@ -2781,7 +2781,8 @@ _AA_HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
 _AA_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
 _AA_PERCENT_RE = re.compile(r"\d\s*%")
 _AA_COMMAND_RE = re.compile(
-    r"\bp?y?test\s+(?:-|\S*/|\S+\.py\b)|\buv\s+run\b|\bpython3?\s+-m\b",
+    r"\bpy?test\s+(?:--?[A-Za-z]|\S+\.py\b|[\w.-]+/)"
+    r"|\buv\s+run\b|\bpython3?\s+-m\b",
     re.IGNORECASE)
 
 # Execution-claim words the model must never use in prose. This is the
@@ -2789,27 +2790,44 @@ _AA_COMMAND_RE = re.compile(
 # both derive from it, so the rule the model reads and the rule both
 # filters enforce cannot drift apart. Naming a test library (``pytest``,
 # ``ptest``) or config file (``.ptest.toml``) is not an execution claim:
-# only command shapes (flags, paths, ``uv run``, ``python -m``) and claim
-# inflections (passes, passing, succeeded, is green) are.
+# only command shapes (flags, ``.py`` paths, directory paths, ``uv run``,
+# ``python -m``) and result claims are. Bare inflections (passes,
+# passing, succeeded, is green) are NOT banned alone: only a result
+# subject claiming them (``AA_EXEC_CLAIM_SUBJECTS`` plus
+# ``AA_EXEC_CLAIM_VERBS``) is, so ordinary prose such as "the fixture
+# passes tmp_path" or "this green path" stays allowed.
 AA_EXEC_CLAIM_WORDS = (
     "exit code", "exit status", "test output", "observed",
     "passed", "failed", "executed", "verified",
-    "passes", "passing", "succeeded", "is green",
+)
+
+# Result-claim subjects and verbs. A subject stating a verb ("tests
+# pass", "the suite succeeded", "ptest is green") claims execution;
+# either word alone in other prose does not.
+AA_EXEC_CLAIM_SUBJECTS = (
+    "test", "tests", "suite", "pytest", "ptest", "build", "run",
+    "check", "checks",
+)
+AA_EXEC_CLAIM_VERBS = (
+    "pass", "passes", "passed",
+    "succeed", "succeeds", "succeeded",
+    "is green", "are green", "was green", "were green",
 )
 
 
 def _aa_exec_claim_pattern(words: tuple) -> str:
     """Build the execution-claim alternative from ``words``.
 
-    Multi-word phrases match across flexible whitespace; single words
-    match whole words, except ``observed`` which keeps its historical
-    substring match.
+    Multi-word phrases match across flexible whitespace with word
+    boundaries on both ends (so "thesis green" never matches "is
+    green"); single words match whole words, except ``observed``
+    which keeps its historical substring match.
     """
     parts = []
     for phrase in words:
         tokens = phrase.split()
         if len(tokens) > 1:
-            parts.append(r"\s*".join(tokens))
+            parts.append(r"\b" + r"\s*".join(tokens) + r"\b")
         elif phrase == "observed":
             parts.append(phrase)
         else:
@@ -2820,6 +2838,10 @@ def _aa_exec_claim_pattern(words: tuple) -> str:
 _AA_EXEC_CLAIM_RE = re.compile(
     _aa_exec_claim_pattern(AA_EXEC_CLAIM_WORDS),
     re.IGNORECASE)
+_AA_RESULT_CLAIM_RE = re.compile(
+    r"\b(?:" + "|".join(AA_EXEC_CLAIM_SUBJECTS) + r")\s+(?:all\s+)?(?:"
+    + _aa_exec_claim_pattern(AA_EXEC_CLAIM_VERBS) + r")",
+    re.IGNORECASE)
 
 
 def aa_prose_is_untrusted(text: str) -> bool:
@@ -2827,7 +2849,7 @@ def aa_prose_is_untrusted(text: str) -> bool:
 
     Covers Markdown links, autolinks, bare URLs, HTML, headlines,
     percent figures, table pipes, code backticks, execution claims,
-    and observed-command shapes.
+    subject+verb result claims, and observed-command shapes.
     """
     return bool(
         _AA_LINK_RE.search(text)
@@ -2839,6 +2861,7 @@ def aa_prose_is_untrusted(text: str) -> bool:
         or "|" in text
         or "`" in text
         or _AA_EXEC_CLAIM_RE.search(text)
+        or _AA_RESULT_CLAIM_RE.search(text)
         or _AA_COMMAND_RE.search(text)
     )
 

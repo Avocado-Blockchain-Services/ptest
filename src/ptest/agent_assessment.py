@@ -151,7 +151,8 @@ _REVIEW_INSTRUCTION = (
     "(rationales, summaries, suggested changes) are plain text only: no "
     "Markdown, backticks, pipe characters, links, HTML, headings, or "
     "percent figures. Never claim execution: do not use the words "
-    + ", ".join(C.AA_EXEC_CLAIM_WORDS) + "."
+    + ", ".join(C.AA_EXEC_CLAIM_WORDS) + ". Never state that a test, "
+    "suite, build, check, or run passes, succeeds, or is green."
 )
 
 # Raw payload keys the model must never supply. The public codec projects

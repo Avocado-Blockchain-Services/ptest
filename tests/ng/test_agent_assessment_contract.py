@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -374,6 +375,82 @@ def test_accept_library_naming_in_finding_content(value):
 def test_aa_prose_is_untrusted_single_predicate(text, expected):
     """One public predicate owns every prose trust rule."""
     assert C.aa_prose_is_untrusted(text) is expected
+
+
+_AA_PROSE_REJECT = [
+    "ptest --full is green",
+    "Ran ptest --full and all 12 tests pass.",
+    "pytest passes for this module",
+    "The suite succeeded under pytest",
+    "uv run pytest -x tests/test_db.py --maxfail=1",
+    "pytest -k slow",
+    "ptest tests/",
+    "exit code 0",
+    "pytest passed",
+    "tests executed",
+    "see https://evil.example/x",
+    "www.x.com",
+]
+
+
+def _vendored_assessment_prose():
+    """Every filtered prose field of the three vendored real replies.
+
+    Only rationale/summary/suggested_change go through the prose
+    filter; limitation messages never do, so they are excluded here.
+    """
+    base = (Path(__file__).resolve().parent
+            / "fixtures" / "agent_assessment")
+    collected = []
+    for name in ("claude-e2e-raw-assessment-2.json",
+                 "claude-e2e-raw-assessment-3.json",
+                 "codex-e2e-raw-assessment-1.json"):
+        data = json.loads((base / name).read_text(encoding="utf-8"))["data"]
+        for child in data["children"]:
+            for row in child["rows"]:
+                collected.append(row["rationale"])
+            for finding in child.get("findings", []):
+                collected.append(finding["summary"])
+                collected.append(finding["suggested_change"])
+    return collected
+
+
+_AA_PROSE_ACCEPT = [
+    "Add a regression test tests/test_db.py that writes a sentinel row.",
+    "The test tests/test_demo.py covers only the happy path.",
+    "Each test - one per branch - should assert the exact error.",
+    "Add the following test\n- a case for age zero",
+    "The test and/or fixture should own its database.",
+    "A test I/O boundary is not mocked here.",
+    "Keep the test demo.py-style naming consistent.",
+    "The fixture passes tmp_path to the factory",
+    "Passing an explicit seed would make the shuffle deterministic.",
+    "The value passes validation only for positive ages.",
+    "The request succeeded path is not asserted.",
+    "The docstring says this green path is unreachable.",
+    "pytest.raises(ValueError)",
+    "imports only pytest",
+    ".ptest.toml",
+    "ptest configuration",
+] + _vendored_assessment_prose()
+
+
+def _short_id(text):
+    return re.sub(r"\s+", " ", text)[:60]
+
+
+@pytest.mark.parametrize("text", _AA_PROSE_REJECT,
+                         ids=[_short_id(t) for t in _AA_PROSE_REJECT])
+def test_aa_prose_rejects_commands_claims_and_links(text):
+    """Round 6: tool invocations, result claims, and links stay rejected."""
+    assert C.aa_prose_is_untrusted(text) is True
+
+
+@pytest.mark.parametrize("text", _AA_PROSE_ACCEPT,
+                         ids=[_short_id(t) for t in _AA_PROSE_ACCEPT])
+def test_aa_prose_accepts_review_prose(text):
+    """Round 6: normal review prose and the vendored real replies pass."""
+    assert C.aa_prose_is_untrusted(text) is False
 
 
 def test_reject_unsupported_publication():
