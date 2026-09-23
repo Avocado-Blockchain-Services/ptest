@@ -944,6 +944,25 @@ def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
     return limitations[:64]
 
 
+def _initialization_required_limitation(
+        resolution: C.ConfigResolution) -> dict | None:
+    """Describe the deterministic standalone blocker independently of review."""
+    problem = resolution.problem
+    if (resolution.config is None and resolution.monorepo is None
+            and problem is not None
+            and problem.code == "initialization-required"):
+        return {
+            "code": "capability-unsupported",
+            "message": (
+                "initialization-required: standalone ptest configuration is "
+                "missing; ptest is not execution-ready until you run "
+                "`ptest init`. Checklist percentages describe agent review "
+                "only."),
+            "paths": [],
+        }
+    return None
+
+
 def _raw_assessment_schema() -> bytes:
     """Derive the provider response shape from the public contract authority."""
     schema = deepcopy(C.PUBLIC_SCHEMAS["agent-assessment"])
@@ -1139,10 +1158,16 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             raise _problem("stale-evidence", "source or configuration changed during review")
 
         child_data = []
+        initialization_blocker = _initialization_required_limitation(resolution)
         for packet, assessment in zip(packets, assessments):
+            child_limitations = _assessment_limitations((packet,))
+            if initialization_blocker is not None and packet.declaration == ".":
+                child_limitations.insert(0, dict(initialization_blocker))
             child_data.append(_child_assessment_data(
-                packet, assessment, _assessment_limitations((packet,))))
+                packet, assessment, child_limitations))
         limitations = _assessment_limitations(packets, top_level=True)
+        if initialization_blocker is not None:
+            limitations.insert(0, dict(initialization_blocker))
         draft_data = {
             "schema": C.AGENT_ASSESSMENT_SCHEMA,
             "provider": {"name": adapter.name, "cli_version": "unreported",
@@ -1268,7 +1293,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             else:
                 sys.stdout.write(init_render.render_init(
                     result, applied if applied is not None else plan,
-                    dry_run=parsed.dry_run, agents=agents))
+                    dry_run=parsed.dry_run, agents=agents,
+                    repo_name=root.name, color=sys.stdout.isatty()))
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)

@@ -952,6 +952,8 @@ def test_init_json_is_non_interactive_and_byte_exact(tmp_path, monkeypatch, caps
     assert document.data["action"] == "created"
     assert set(document.data) == {"action", "target", "exists", "warnings", "config"}
     assert "ptest initialized" not in captured.out
+    assert "██████" not in captured.out
+    assert "\x1b" not in captured.out
     assert not (tmp_path / "docs").exists()
 
 
@@ -977,6 +979,10 @@ def test_human_init_renders_ordered_banner_matching_real_files(
     captured = capsys.readouterr()
 
     assert captured.err == ""
+    assert f"ptest {C.PTEST_VERSION}" in captured.out
+    assert tmp_path.name in captured.out
+    assert "https://github.com/Avocado-Blockchain-Services/ptest" in captured.out
+    assert "\x1b" not in captured.out
     assert "ptest initialized" in captured.out
     assert "┌" in captured.out and "┘" in captured.out
     assert captured.out.index("Configuration") < captured.out.index("Guidance")
@@ -989,6 +995,45 @@ def test_human_init_renders_ordered_banner_matching_real_files(
     assert "ptest --full" in captured.out
     assert (tmp_path / ".agents/skills/ptest/SKILL.md").is_file()
     assert (tmp_path / ".claude/skills/ptest/SKILL.md").is_file()
+
+
+@pytest.mark.parametrize(("no_color", "has_color"), [(False, True), (True, False)])
+def test_tty_human_init_colors_banner_only_without_no_color(
+        tmp_path, monkeypatch, capsys, no_color, has_color):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "")
+    else:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+    assert main(("init", "--runner", "pytest")) == 0
+    captured = capsys.readouterr()
+
+    assert f"ptest {C.PTEST_VERSION}" in captured.out
+    assert tmp_path.name in captured.out
+    assert ("\x1b[" in captured.out) is has_color
+
+
+def test_hostile_repository_name_cannot_inject_terminal_structure(
+        tmp_path, monkeypatch, capsys):
+    import sys
+
+    root = tmp_path / "project\x1b[2J\r\nforged"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    assert main(("init", "--runner", "pytest")) == 0
+    captured = capsys.readouterr()
+
+    assert "\x1b" not in captured.out
+    assert "\r" not in captured.out
+    assert "\nforged" not in captured.out
+    assert any("project" in line and "forged" in line
+               for line in captured.out.splitlines())
 
 
 def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, capsys):
@@ -1699,6 +1744,71 @@ def _normalized_unknown_assessment(request):
         "data": data,
         "error": None,
     }).encode("utf-8")
+
+
+def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
+        tmp_path, monkeypatch, capsys):
+    import sys
+    from ptest.agent_providers import ProviderResult
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        packet = json.loads(request)["packet"]
+        assessment = json.loads(_normalized_unknown_assessment(request))
+        assert packet["excerpts"]
+        excerpt = packet["excerpts"][0]
+        evidence = [{key: excerpt[key] for key in (
+            "path", "start_line", "end_line", "sha256") }]
+        for row in assessment["data"]["children"][0]["rows"]:
+            row["status"] = "satisfied"
+            row["evidence"] = evidence
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=json.dumps(assessment).encode("utf-8"), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=8003, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
+
+    human = capsys.readouterr()
+    assert "initialization-required" in human.out
+    assert "not execution-ready" in human.out
+    assert human.out.index("initialization-required") < human.out.index(
+        "11/11 &#40;100%&#41;, agent-reviewed")
+    report = (root / "recommendations.md").read_text(encoding="utf-8")
+    assert "initialization-required" in report
+    assert "ptest is not execution-ready" in report
+    assert report.index("initialization-required") < report.index(
+        "100%), agent-reviewed")
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+    document = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert document.kind == "agent-assessment"
+    assert document.data["children"][0]["score"] == {
+        "satisfied": 11, "applicable": 11, "percent": 100,
+    }
+    blocker = next(item for item in document.data["limitations"]
+                   if item["code"] == "capability-unsupported")
+    assert "initialization-required" in blocker["message"]
+
+    assert main(("doctor", "--json")) == 0
+    legacy = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert legacy.kind == "doctor"
+    assert "children" not in legacy.data
+    assert "provider" not in legacy.data
 
 
 def test_all_three_profile_qualification_is_required_before_source_scan(

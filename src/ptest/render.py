@@ -46,6 +46,9 @@ def terminal_text(value: object) -> str:
 _AGENT_CHECKLIST_TABLE_MAX_BYTES = 32 * 1024
 _AGENT_CHECKLIST_EVIDENCE_MAX_BYTES = 1024
 _AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS = 256
+_AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
+_AGENT_ASSESSMENT_CAPABILITY_MAX_BYTES = 48 * 1024
+_AGENT_ASSESSMENT_FINDINGS_MAX_BYTES = 48 * 1024
 
 
 def _render_agent_checklist_evidence(evidence) -> str:
@@ -163,7 +166,7 @@ def _agent_assessment_prose(value: object) -> str:
     text = re.sub(r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>",
                   "[link omitted]", text)
     text = re.sub(r"</?[A-Za-z][^<>\n]*>", "", text)
-    text = re.sub(r"(?i)\b(?:https?://|www\.)\S+", "[URL omitted]", text)
+    text = re.sub(r"(?i)(?:https?://|www\.)\S+", "[URL omitted]", text)
     text = "".join(char for char in text if ord(char) not in {
         0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D,
         0x202E, 0x2066, 0x2067, 0x2068, 0x2069,
@@ -171,26 +174,99 @@ def _agent_assessment_prose(value: object) -> str:
     return text.replace("|", "/").replace("`", "'")
 
 
+def _agent_dependency_detail_lines(children) -> list[str]:
+    statuses = {
+        "dependency-missing": "missing",
+        "dependency-unsupported": "unsupported",
+        "dependency-uninspectable": "uninspectable",
+    }
+    lines = []
+    for child in children:
+        scope = _agent_assessment_prose(child["scope"])
+        for limitation in child["limitations"]:
+            status = statuses.get(limitation["code"])
+            if status is None:
+                continue
+            detail = _agent_assessment_prose(limitation["message"])
+            paths = limitation.get("paths", [])
+            location = ""
+            if paths:
+                safe_paths = ", ".join(_agent_assessment_prose(path)
+                                         for path in paths)
+                location = f" (root-relative paths: {safe_paths})"
+            lines.append(
+                f"- {scope}: {status} prerequisite: {detail}{location}")
+    return lines
+
+
+def _bound_agent_assessment_lines(lines, byte_limit, omission_marker):
+    """Keep whole lines within a section budget and account for omitted rows."""
+    total = sum(len(line.encode("utf-8")) for line in lines) + max(0, len(lines) - 1)
+    if total <= byte_limit:
+        return lines
+
+    output = []
+    used = 0
+    for index, line in enumerate(lines):
+        line_cost = len(line.encode("utf-8"))
+        separator_cost = 1 if output else 0
+        candidate_cost = used + separator_cost + line_cost
+        remaining = len(lines) - index - 1
+        if remaining:
+            marker_cost = len(omission_marker(remaining).encode("utf-8"))
+            if candidate_cost + 1 + marker_cost > byte_limit:
+                output.append(omission_marker(len(lines) - index))
+                break
+        elif candidate_cost > byte_limit:
+            output.append(omission_marker(1))
+            break
+        output.append(line)
+        used = candidate_cost
+    return output
+
+
 def render_agent_assessment(children, workspace, *, report_path: str,
                             publication_status: str) -> str:
     """Render the complete human review in the fixed, evidence-bounded order."""
-    repositories = {item.declaration: item for item in workspace.repositories}
-    lines = [
+    repositories = tuple(workspace.repositories)
+    capability_header = [
         "Project | Execution | Parallel | Selection | Timing | Checklist",
         "------- | --------- | -------- | --------- | ------ | ---------",
     ]
+    capability_rows = []
     for child in children:
-        repository = repositories.get(child["scope"])
+        scope = child["scope"]
+        standalone = [item for item in repositories
+                      if item.declaration == "."]
+        if len(standalone) == 1 and len(repositories) == 1:
+            repository = standalone[0]
+        else:
+            matches = [item for item in repositories
+                       if item.declaration != "."
+                       and (scope == item.declaration
+                            or scope.startswith(item.declaration + "/"))]
+            repository = matches[0] if len(matches) == 1 else None
         config = None if repository is None else repository.config
         runner = "unknown" if config is None else config.runner.kind.value
-        dependency = "uninspectable prerequisites"
         dependency_codes = {item["code"] for item in child["limitations"]}
-        if "dependency-missing" in dependency_codes:
-            dependency = "missing prerequisite evidence"
-        elif "dependency-unsupported" in dependency_codes:
-            dependency = "unsupported prerequisite evidence"
+        dependency_states = [
+            status for code, status in (
+                ("dependency-missing", "missing"),
+                ("dependency-unsupported", "unsupported"),
+                ("dependency-uninspectable", "uninspectable"),
+            ) if code in dependency_codes
+        ]
+        if not dependency_states:
+            dependency_states = ["uninspectable"]
+        dependency = f"{', '.join(dependency_states)} prerequisites"
         execution = (f"{runner} declared; {dependency}; "
                      "not execution-verified")
+        config_problem = (None if repository is None
+                          else repository.config_problem)
+        if (config is None and config_problem is not None
+                and config_problem.code == "initialization-required"):
+            execution = ("initialization-required; ptest is not execution-ready; "
+                         "not execution-verified")
         parallel = ("basic-serial; reviewed isolation unverified"
                     if runner == "pytest"
                     else "supported mode unknown; isolation unverified")
@@ -210,40 +286,72 @@ def render_agent_assessment(children, workspace, *, report_path: str,
             checklist += "; partial evidence"
         cells = (child["scope"], execution, parallel, selection,
                  "unmeasured", checklist)
-        lines.append(" | ".join(_agent_checklist_table_cell(cell)
-                                for cell in cells))
+        capability_rows.append(" | ".join(_agent_checklist_table_cell(cell)
+                                          for cell in cells))
 
-    lines.extend(("", render_agent_checklist_table(children), "", "Findings:"))
+    capability_prefix = "\n".join(capability_header)
+    capability_row_budget = (
+        _AGENT_ASSESSMENT_CAPABILITY_MAX_BYTES
+        - len(capability_prefix.encode("utf-8")) - 1
+    )
+    capability_rows = _bound_agent_assessment_lines(
+        capability_rows, capability_row_budget,
+        lambda count: f"[{count} capability rows omitted at output limit]",
+    )
+    capability_section = capability_prefix
+    if capability_rows:
+        capability_section += "\n" + "\n".join(capability_rows)
+
+    dependency_details = _agent_dependency_detail_lines(children)
+    checklist_section = render_agent_checklist_table(children)
+    finding_lines = []
     for child in children:
         for finding in child["findings"]:
             summary = _agent_assessment_prose(finding["summary"])
             change = _agent_assessment_prose(finding["suggested_change"])
-            lines.append(
+            finding_lines.append(
                 f"- {terminal_text(child['scope'])} {terminal_text(finding['id'])}: "
                 f"{summary} Suggested change: {change}")
     if not any(child["findings"] for child in children):
-        lines.append("- No gap findings were returned.")
-    lines.extend((
-        "",
+        finding_lines.append("- No gap findings were returned.")
+    findings_prefix = "Findings:"
+    finding_lines = _bound_agent_assessment_lines(
+        finding_lines,
+        _AGENT_ASSESSMENT_FINDINGS_MAX_BYTES
+        - len(findings_prefix.encode("utf-8")) - 1,
+        lambda count: f"[{count} findings omitted at output limit]",
+    )
+    findings_section = findings_prefix + "\n" + "\n".join(finding_lines)
+
+    guidance_section = "\n".join((
         "Guidance: recommendations.md contains evidence, scoped changes, "
         "regressions, and later ptest verification steps.",
         f"Report: {terminal_text(report_path)} ({terminal_text(publication_status)}).",
         "Execution verification: not run.",
     ))
 
-    # Keep terminal output finite even for a workspace at the 256-child cap.
-    output = []
-    used = 0
-    limit = 256 * 1024
-    for line in lines:
-        chunk = line + "\n"
-        cost = len(chunk.encode("utf-8"))
-        if used + cost > limit:
-            output.append("[additional assessment output omitted at limit]\n")
-            break
-        output.append(chunk)
-        used += cost
-    return "".join(output)
+    sections = [capability_section]
+    if dependency_details:
+        fixed_sections = (
+            capability_section, checklist_section, findings_section,
+            guidance_section,
+        )
+        fixed_bytes = sum(len(section.encode("utf-8"))
+                          for section in fixed_sections)
+        detail_budget = (
+            _AGENT_ASSESSMENT_MAX_BYTES - fixed_bytes - 2 * 4 - 1
+        )
+        detail_lines = _bound_agent_assessment_lines(
+            dependency_details,
+            detail_budget - len("Dependency details:".encode("utf-8")) - 1,
+            lambda count: (
+                f"[{count} dependency details omitted; see recommendations.md "
+                "for full limitations]"
+            ),
+        )
+        sections.append("\n".join(("Dependency details:", *detail_lines)))
+    sections.extend((checklist_section, findings_section, guidance_section))
+    return "\n\n".join(sections) + "\n"
 
 
 def render_json(document: C.PublicDocument) -> bytes:

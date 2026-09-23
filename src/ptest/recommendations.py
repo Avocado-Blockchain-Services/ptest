@@ -459,6 +459,33 @@ def _normalize_limitations(value: object) -> list:
     return result
 
 
+def _group_limitations(limitations: list) -> list[dict]:
+    """Merge repeated limitation prose while retaining every root path."""
+    grouped = {}
+    for limitation in limitations:
+        key = (limitation["code"], limitation["message"])
+        entry = grouped.setdefault(key, {"paths": [], "unscoped": False})
+        paths = limitation["paths"]
+        if not paths:
+            entry["unscoped"] = True
+        for path in paths:
+            if path not in entry["paths"]:
+                entry["paths"].append(path)
+    return [
+        {"code": code, "message": message, **details}
+        for (code, message), details in grouped.items()
+    ]
+
+
+def _limitation_line(limitation: dict) -> str:
+    line = f"- {limitation['code']}: {limitation['message']}"
+    if limitation["paths"]:
+        paths = ", ".join(f"`{_md_scope(path)}`"
+                           for path in limitation["paths"])
+        line += f" (root-relative paths: {paths})"
+    return line
+
+
 def _score_text(rows: list) -> str:
     applicable = sum(1 for row in rows
                      if row["status"] != "not-applicable")
@@ -617,6 +644,13 @@ def render_recommendations(run: object) -> bytes:
     out.append("Scope / packet / checklist (recomputed; model scores are "
                "never used):")
     out.append("")
+    run_limitations = _group_limitations(normalized["limitations"])
+    if run_limitations:
+        out.append("Review limitations:")
+        out.append("")
+        for limitation in run_limitations:
+            out.append(_limitation_line(limitation))
+        out.append("")
     out.append("| Scope | Packet sha256 | Checklist |")
     out.append("| --- | --- | --- |")
     for child in children:
@@ -624,12 +658,6 @@ def render_recommendations(run: object) -> bytes:
                    f"{child['packet_sha256']} | "
                    f"{_score_text(child['rows'])} |")
     out.append("")
-    if normalized["limitations"]:
-        out.append("Review limitations:")
-        out.append("")
-        for limitation in normalized["limitations"]:
-            out.append(f"- {limitation['code']}: {limitation['message']}")
-        out.append("")
     for child in children:
         out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")
@@ -637,11 +665,24 @@ def render_recommendations(run: object) -> bytes:
                    f"{_score_text(child['rows'])}. Execution capability: "
                    f"not execution-verified.")
         out.append("")
-        if child["limitations"]:
+        scope_limitations = []
+        for limitation in _group_limitations(child["limitations"]):
+            aggregate = next((item for item in run_limitations
+                              if item["code"] == limitation["code"]
+                              and item["message"] == limitation["message"]),
+                             None)
+            if aggregate is None:
+                scope_limitations.append(limitation)
+            elif limitation["paths"]:
+                if not set(limitation["paths"]).issubset(aggregate["paths"]):
+                    scope_limitations.append(limitation)
+            elif not aggregate["unscoped"]:
+                scope_limitations.append(limitation)
+        if scope_limitations:
             out.append("Scope limitations:")
             out.append("")
-            for limitation in child["limitations"]:
-                out.append(f"- {limitation['code']}: {limitation['message']}")
+            for limitation in scope_limitations:
+                out.append(_limitation_line(limitation))
             out.append("")
         for row in child["rows"]:
             if row["status"] != "gap":

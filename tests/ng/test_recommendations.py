@@ -136,6 +136,63 @@ def test_render_recomputes_score_and_ignores_model_score():
     assert '"percent": 0' not in out
 
 
+def test_render_foregrounds_deterministic_initialization_limitation_once():
+    import ptest.recommendations as recommendations
+
+    limitation = {
+        "code": "capability-unsupported",
+        "message": (
+            "initialization-required: standalone ptest configuration is "
+            "missing; ptest is not execution-ready until you run `ptest init`."),
+        "paths": [],
+    }
+    run = _run(limitations=[limitation])
+    run.children[0]["limitations"] = [limitation]
+
+    payload = recommendations.render_recommendations(run)
+    marker_hash, body = recommendations._split_marker(payload)
+    rendered = body.decode("utf-8")
+    blocker = "- capability-unsupported: initialization-required:"
+
+    assert hashlib.sha256(body).hexdigest() == marker_hash
+    assert rendered.index(blocker) < rendered.index(
+        "8/10 (80%), agent-reviewed")
+    assert rendered.count(blocker) == 1
+
+
+def test_render_keeps_multiscope_limitation_paths_distinct_without_repeating_duplicates():
+    import ptest.recommendations as recommendations
+
+    api_limitation = {
+        "code": "partial-evidence",
+        "message": "Bounded evidence was omitted.",
+        "paths": ["api/tests/test_api.py"],
+    }
+    web_limitation = {
+        "code": "partial-evidence",
+        "message": "Bounded evidence was omitted.",
+        "paths": ["web/tests/test_web.py"],
+    }
+    api = _child(scope="api", project_id="aa" * 16)
+    web = _child(scope="web", project_id="bb" * 16)
+    api["limitations"] = [api_limitation, api_limitation]
+    web["limitations"] = [web_limitation]
+    run = _run(
+        children=[api, web],
+        limitations=[api_limitation, api_limitation, web_limitation],
+    )
+
+    payload = recommendations.render_recommendations(run)
+    marker_hash, body = recommendations._split_marker(payload)
+    rendered = body.decode("utf-8")
+
+    assert hashlib.sha256(body).hexdigest() == marker_hash
+    assert "`api/tests/test_api.py`" in rendered
+    assert "`web/tests/test_web.py`" in rendered
+    assert rendered.count("Bounded evidence was omitted.") == 1
+    assert "## Scope api" in rendered and "## Scope web" in rendered
+
+
 def test_render_all_na_child_has_no_score():
     from ptest.recommendations import render_recommendations
     rows = [_row(row_id, "not-applicable",
