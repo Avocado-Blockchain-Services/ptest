@@ -153,11 +153,13 @@ _JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 
 def _admission_tier(path: str, tier4: frozenset = frozenset()) -> int:
-    """Return the admission tier (0..5) for a declaration-prefixed path."""
+    """Return the admission tier (0..5) for a child-relative path."""
     base = path.rsplit("/", 1)[-1]
     if base in _TIER0_BASENAMES or fnmatch.fnmatchcase(
             base, "requirements*.txt"):
-        return 0
+        # Design §3.5 admits only child-root manifests and locks to tier 0;
+        # nested ones rank last so they cannot starve test configuration.
+        return 0 if "/" not in path else 5
     if base in _TIER1_BASENAMES or base.startswith(_TIER1_PREFIXES):
         return 1
     parts = path.split("/")
@@ -1245,7 +1247,7 @@ def _admit_candidate(state: _AdmissionState, child_root: Path, rel: str,
     state.excerpts.append(excerpt)
     state.paths.setdefault(rel.rsplit("/", 1)[-1], excerpt_path)
     state.byte_count += len(chunk)
-    if _admission_tier(excerpt_path) == 2:
+    if _admission_tier(rel) == 2:
         state.tier2_texts[rel] = text
     return True
 
@@ -1286,12 +1288,12 @@ def _build_one_packet(root: Path, repo, resolution,
     # before test files, then CI. Imported source (tier 4) resolves from the
     # admitted test texts between the two phases; everything else trails.
     early = sorted(
-        ((_admission_tier(f"{prefix}{rel}"), rel) for rel, _size in regular)
+        ((_admission_tier(rel), rel) for rel, _size in regular)
     )
     early = [item for item in early if item[0] <= 3]
     later_all = sorted(
         rel for rel, _size in regular
-        if _admission_tier(f"{prefix}{rel}") > 3)
+        if _admission_tier(rel) > 3)
     _review_checkpoint(deadline, progress)
     early_halted = False
     for position, (_tier, rel) in enumerate(early):
@@ -1306,10 +1308,9 @@ def _build_one_packet(root: Path, repo, resolution,
     _review_checkpoint(deadline, progress)
     if not early_halted:
         tier4 = frozenset(
-            f"{prefix}{rel}"
-            for rel in _resolve_tier4(state.tier2_texts, set(later_all)))
+            _resolve_tier4(state.tier2_texts, set(later_all)))
         late = sorted(
-            ((_admission_tier(f"{prefix}{rel}", tier4), rel)
+            ((_admission_tier(rel, tier4), rel)
              for rel in later_all))
     else:
         late = []
@@ -1546,10 +1547,19 @@ def one_row_schema() -> bytes:
                       separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
+def _child_relative(path: str, declaration: str) -> str:
+    """Path relative to the child root (declaration prefix removed)."""
+    if declaration == ".":
+        return path
+    lead = declaration + "/"
+    return path[len(lead):] if path.startswith(lead) else path
+
+
 def _manifest_excerpts(packet: EvidencePacket) -> list[SourceExcerpt]:
     """Admitted tier-0 manifest excerpts, in packet order."""
     return [excerpt for excerpt in packet.excerpts
-            if _admission_tier(excerpt.path) == 0]
+            if _admission_tier(
+                _child_relative(excerpt.path, packet.declaration)) == 0]
 
 
 def _skip_reason(packet: EvidencePacket, entry,

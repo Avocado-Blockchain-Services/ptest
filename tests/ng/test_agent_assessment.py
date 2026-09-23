@@ -340,6 +340,31 @@ def test_rejected_candidates_consume_candidate_file_budget(
     assert packet.excerpts == () and packet.byte_count == 0
 
 
+def test_nested_manifests_do_not_starve_test_configuration(tmp_path):
+    """70 nested package.json files must not push conftest/vitest out.
+
+    Tier 0 admits only child-root manifests and locks; nested ones rank
+    last, so the 64-file cap still admits test configuration first.
+    """
+    from ptest import agent_assessment as AA
+
+    assert AA._admission_tier("package.json") == 0
+    assert AA._admission_tier("web/packages/pkg00/package.json") == 5
+    files = {
+        "package.json": '{"name": "demo"}\n',
+        "vitest.config.ts": "export default {};\n",
+        "tests/conftest.py": "import json\n",
+    }
+    for index in range(70):
+        files[f"web/packages/pkg{index:02d}/package.json"] = (
+            '{"name": "nested"}\n')
+    packet = _packet_for(tmp_path, files)
+    paths = {excerpt.path for excerpt in packet.excerpts}
+    assert "package.json" in paths
+    assert "vitest.config.ts" in paths
+    assert "tests/conftest.py" in paths
+
+
 def test_rejected_candidates_consume_candidate_byte_budget(
         tmp_path, monkeypatch):
     from ptest import agent_assessment as AA
