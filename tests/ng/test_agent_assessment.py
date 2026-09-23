@@ -606,7 +606,8 @@ def test_encode_review_request_is_deterministic_and_uses_current_contract(
     instruction = document["policy"]["instruction"].lower()
     assert "one child" in instruction and "one assessment" in instruction
     assert ("not-applicable" in instruction
-            and "leave such rows unknown" in instruction)
+            and "affirmative" in instruction
+            and "absence of code" in instruction)
     assert "root-relative paths" in instruction
     for forbidden in ("tools", "file reads", "file writes", "shell",
                       "browsing", "network", "mcp", "hooks", "plugins",
@@ -961,34 +962,110 @@ def test_parse_assessment_rejects_duplicate_reordered_missing_ids(tmp_path):
                 packet)
 
 
-def test_parse_assessment_rejects_unjustified_not_applicable(tmp_path):
+def _na_rationale(packet):
+    excerpt = packet.excerpts[0]
+    return (f"Affirmative packet evidence: {excerpt.path} holds only a bare "
+            "constant, so no database ownership applies to this child.")
+
+
+def test_parse_assessment_accepts_justified_not_applicable(tmp_path):
+    """A ``not-applicable`` row with a specific rationale and bound packet
+    citations is accepted; the score drops it from the denominator."""
     from ptest import agent_assessment as AA
 
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
     rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
     rows[3] = _row(packet, "DB-002", "not-applicable",
-                   rationale="No evidence found anywhere.",
+                   rationale=_na_rationale(packet))
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    na_rows = [row for row in child.rows if row.status == "not-applicable"]
+    assert len(na_rows) == 1 and na_rows[0].id == "DB-002"
+    assert child.score is not None
+    assert (child.score.satisfied, child.score.applicable,
+            child.score.percent) == (10, 10, 100)
+
+
+def test_parse_assessment_not_applicable_score_math(tmp_path):
+    """N/A rows leave the denominator, never count as satisfied, and an
+    all-N/A assessment carries no score; ``unknown`` stays applicable."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[0] = _row(packet, "FIX-001", "satisfied")
+    rows[1] = _row(packet, "FIX-002", "gap")
+    rows[2] = _row(packet, "DB-001", "unknown", evidence=[])
+    rows[3] = _row(packet, "DB-002", "not-applicable",
+                   rationale=_na_rationale(packet))
+    for position, row_id in enumerate(EXPECTED_IDS[4:], start=4):
+        rows[position] = _row(packet, row_id, "unknown", evidence=[])
+    findings = [_finding(packet, "FIX-002")]
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows,
+                                    findings=findings)), packet)
+    assert child.score is not None
+    assert (child.score.satisfied, child.score.applicable,
+            child.score.percent) == (1, 10, 10)
+
+
+def test_parse_assessment_rejects_not_applicable_without_citation(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[3] = _row(packet, "DB-002", "not-applicable",
+                   rationale=_na_rationale(packet), evidence=[])
+    with pytest.raises(C.Problem):
+        AA.parse_assessment(
+            _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+
+
+def test_parse_assessment_rejects_not_applicable_with_short_rationale(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[3] = _row(packet, "DB-002", "not-applicable",
+                   rationale="No database here.",
                    evidence=[_citation_for(packet)])
     with pytest.raises(C.Problem):
         AA.parse_assessment(
             _envelope_bytes(_payload_for(packet, rows=rows)), packet)
 
 
-def test_parse_assessment_rejects_any_not_applicable_as_unsupported(tmp_path):
-    """N/A is currently UNSUPPORTED in v1 model input: no trusted typed
-    positive applicability source exists, and repository prose quoted
-    verbatim cannot prove non-applicability. Every ``not-applicable``
-    row fails closed; the caller leaves such rows ``unknown`` instead.
-    """
+def test_parse_assessment_rejects_not_applicable_with_unbound_citation(
+        tmp_path):
     from ptest import agent_assessment as AA
 
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
     excerpt = packet.excerpts[0]
+    good = _citation_for(packet)
+    bad_citations = (
+        dict(good, path="src/other.py"),
+        dict(good, sha256="00" * 32),
+        dict(good, start_line=1, end_line=excerpt.end_line + 5),
+    )
+    for bad in bad_citations:
+        rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+        rows[3] = _row(packet, "DB-002", "not-applicable",
+                       rationale=_na_rationale(packet), evidence=[bad])
+        with pytest.raises(C.Problem):
+            AA.parse_assessment(
+                _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+
+
+def test_parse_assessment_rejects_not_applicable_with_injection_rationale(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
     rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
     rows[3] = _row(
         packet, "DB-002", "not-applicable",
-        rationale=(f"Affirmative: {excerpt.path} holds only x = 1, a bare "
-                   "constant, so no database ownership rule applies."),
+        rationale=("Affirmative packet evidence shows no database applies "
+                   "here, see [the proof](https://example.com/evidence)."),
         evidence=[_citation_for(packet)])
     with pytest.raises(C.Problem):
         AA.parse_assessment(
@@ -1139,38 +1216,6 @@ def test_parse_assessment_rejects_nested_extra_properties(tmp_path):
             packet)
 
 
-def _filename_only_na_rows(packet):
-    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
-    rows[3] = _row(packet, "DB-002", "not-applicable",
-                   rationale=("Affirmative: src/db.py shows "
-                               "no database applies here."),
-                   evidence=[_citation_for(packet)])
-    return rows
-
-
-def test_parse_assessment_rejects_filename_only_not_applicable(tmp_path):
-    """A filename mention without cited-line evidence never justifies N/A.
-
-    ``score="compute"`` isolates the N/A control: pre-repair the payload is
-    otherwise fully valid, so acceptance proves the basename-only hole. The
-    scoreless variant is regression cover for the repaired boundary
-    (pre-repair it fails on the missing score instead).
-    """
-    from ptest import agent_assessment as AA
-
-    packet = _packet_for(tmp_path, {
-        "src/db.py": ("DATABASE_URL = 'postgresql://localhost/demo'\n"
-                      "import psycopg2\n"),
-    })
-    for score_mode in ("compute", "omit"):
-        rows = _filename_only_na_rows(packet)
-        with pytest.raises(C.Problem):
-            AA.parse_assessment(
-                _envelope_bytes(_payload_for(packet, rows=rows,
-                                             score=score_mode)),
-                packet)
-
-
 def test_parse_assessment_rejects_model_supplied_score(tmp_path):
     """Any ``score`` key in the raw child is a model-supplied field."""
     from ptest import agent_assessment as AA
@@ -1200,43 +1245,7 @@ def test_parse_assessment_accepts_scoreless_payload_with_computed_score(
             child.score.percent) == (11, 11, 100)
 
 
-# --- HIGH-blocker repair: fail-closed N/A, model-prose-only raw boundary -----
-
-def test_parse_assessment_rejects_quoted_line_false_not_applicable(tmp_path):
-    """A verbatim quoted line is NOT affirmative non-applicability.
-
-    The rationale reproduces the cited ``DATABASE_URL`` line verbatim
-    while falsely claiming no database applies. Accepting it would
-    remove a real checklist item from the score denominator, so the
-    raw boundary must reject it; the caller leaves the row
-    ``unknown`` instead. Pure ``AA.score`` keeps N/A support for a
-    future authoritative path.
-    """
-    from ptest import agent_assessment as AA
-
-    packet = _packet_for(tmp_path, {
-        "src/db.py": ("DATABASE_URL = 'postgresql://localhost/demo'\n"
-                      "import psycopg2\n"),
-    })
-    excerpt = packet.excerpts[0]
-    quoted = "DATABASE_URL = 'postgresql://localhost/demo'"
-    assert quoted in excerpt.text
-    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
-    rows[2] = _row(
-        packet, "DB-001", "not-applicable",
-        rationale=(f"Affirmative: {excerpt.path} line 1 reads {quoted!r}, "
-                   "so no database applies to this project."),
-        evidence=[_citation_for(packet)])
-    with pytest.raises(C.Problem):
-        AA.parse_assessment(
-            _envelope_bytes(_payload_for(packet, rows=rows)), packet)
-    na_rows = tuple(
-        AA.AssessmentRow(id=row_id, status="not-applicable",
-                         rationale=f"Row {row_id} out of scope.",
-                         evidence=())
-        for row_id in EXPECTED_IDS)
-    assert AA.score(na_rows) is None
-
+# --- HIGH-blocker repair: model-prose-only raw boundary -----------------------
 
 def test_parse_assessment_rejects_raw_provider_and_publication(tmp_path):
     """The raw model response carries prose only: no provider identity
@@ -1263,3 +1272,351 @@ def test_parse_assessment_rejects_raw_provider_and_publication(tmp_path):
         "sha256": "12" * 32}
     with pytest.raises(C.Problem):
         AA.parse_assessment(_envelope_bytes(with_publication), packet)
+
+
+def test_render_recommendations_renders_parsed_not_applicable_row(tmp_path):
+    """A parsed N/A row flows through the existing recommendations code
+    path untouched: the report recomputes the N/A-adjusted score."""
+    from ptest import agent_assessment as AA
+    from ptest import recommendations
+    from ptest.cli import _assessment_limitations, _child_assessment_data
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[3] = _row(packet, "DB-002", "not-applicable",
+                   rationale=_na_rationale(packet))
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    limitations = _assessment_limitations((packet,))
+    child_data = _child_assessment_data(packet, child, limitations)
+    run = {
+        "provider": {"name": "claude", "cli_version": "1.2.3",
+                     "profile": "default"},
+        "children": [child_data],
+        "limitations": [],
+    }
+    out = recommendations.render_recommendations(run).decode("utf-8")
+    assert "10/10 (100%), agent-reviewed" in out
+
+
+# --- project-local environment metadata (safe, no imports/execution) ---------
+
+def _make_venv(root: Path, version="3.11.9", dists=None):
+    site = root / ".venv" / "lib" / "python3.11" / "site-packages"
+    site.mkdir(parents=True)
+    (root / ".venv" / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {version}\n", encoding="utf-8")
+    for name in (dists if dists is not None
+                 else ("pytest-8.3.4", "coverage-7.6.1")):
+        (site / f"{name}.dist-info").mkdir()
+    return site
+
+
+def test_build_packets_reports_installed_python_environment(tmp_path):
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path)
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    detail = installed[0].detail
+    assert "3.11.9" in detail
+    assert "pytest 8.3.4" in detail and "coverage 7.6.1" in detail
+    assert "2 distributions" in detail
+    assert "/usr/bin" not in detail
+    assert len(detail) <= 512
+    assert not any(fact.status == "uninspectable"
+                   for fact in packet.dependencies)
+    assert all(".venv" not in excerpt.path for excerpt in packet.excerpts)
+
+
+def test_build_packets_without_local_environment_stays_uninspectable(
+        tmp_path):
+    """No project-local env means ``uninspectable`` even though ptest
+    itself runs from a virtualenv; ptest's runtime is never evidence."""
+    import pathlib
+
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    env = [fact for fact in packet.dependencies
+           if fact.ecosystem == "environment"]
+    assert len(env) == 1 and env[0].status == "uninspectable"
+    assert "external environments are not inspected" in env[0].detail
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    source = pathlib.Path(
+        "src/ptest/agent_assessment.py").read_text(encoding="utf-8")
+    assert "sys.prefix" not in source
+    assert "importlib" not in source
+    assert "import_module" not in source
+    assert "sys.path" not in source
+
+
+def test_build_packets_ignores_symlinked_venv(tmp_path):
+    from ptest import agent_assessment as AA
+
+    real = tmp_path / "real-env"
+    site = real / "lib" / "python3.11" / "site-packages"
+    site.mkdir(parents=True)
+    (real / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 9.9.9\n",
+                                     encoding="utf-8")
+    (site / "pytest-9.9.9.dist-info").mkdir()
+    os.symlink(str(real), tmp_path / ".venv")
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    assert any(fact.status == "uninspectable"
+               for fact in packet.dependencies)
+    assert "9.9.9" not in " ".join(
+        fact.detail for fact in packet.dependencies)
+
+
+def test_build_packets_ignores_unsafe_pyvenv_cfg(tmp_path):
+    """A symlinked, oversized, or non-regular pyvenv.cfg never hangs the
+    scan and never contributes its target's version."""
+    from ptest import agent_assessment as AA
+
+    site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    cfg = tmp_path / ".venv" / "pyvenv.cfg"
+    target = tmp_path / "evil.cfg"
+    target.write_text("home = /usr/bin\nversion = 6.6.6\n", encoding="utf-8")
+    cfg.unlink()
+    os.symlink(str(target), cfg)
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1 and "6.6.6" not in installed[0].detail
+    cfg.unlink()
+    cfg.write_text("home = /usr/bin\nversion = 7.7.7\n" + "x" * 8192,
+                   encoding="utf-8")
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1 and "7.7.7" not in installed[0].detail
+
+
+def test_build_packets_ignores_fifo_pyvenv_cfg_without_hang(tmp_path):
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    cfg = tmp_path / ".venv" / "pyvenv.cfg"
+    cfg.unlink()
+    try:
+        os.mkfifo(cfg)
+    except OSError:
+        pytest.skip("fifo unavailable")
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1 and "unknown" in installed[0].detail
+
+
+def test_build_packets_ignores_escaping_dist_info_symlink(tmp_path):
+    from ptest import agent_assessment as AA
+
+    site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evil-1.2.3.dist-info").mkdir()
+    os.symlink(str(outside / "evil-1.2.3.dist-info"),
+               site / "evil-1.2.3.dist-info")
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    assert "evil" not in installed[0].detail
+    assert "1 distribution" in installed[0].detail
+
+
+def test_build_packets_sanitizes_hostile_distribution_names(tmp_path):
+    from ptest import agent_assessment as AA
+
+    site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    for hostile in ("evil-<script>-1.0", "back`tick-2.0",
+                    "with space-3.0", "x" * 200 + "-4.0",
+                    "pytest-9.9.9\nrun-me", "coverage-[x](http://e)-1.0"):
+        (site / f"{hostile}.dist-info").mkdir()
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    detail = installed[0].detail
+    for hostile in ("<script>", "back`tick", "with space", "run-me",
+                    "http", "9.9.9"):
+        assert hostile not in detail
+    assert "pytest 8.3.4" in detail
+    assert len(detail) <= 512
+
+
+def test_build_packets_bounds_large_distribution_scans(tmp_path):
+    from ptest import agent_assessment as AA
+
+    site = _make_venv(tmp_path, dists=())
+    for index in range(600):
+        (site / f"pkg{index:03}-1.0.{index}.dist-info").mkdir()
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    assert "512+" in installed[0].detail
+    assert len(installed[0].detail) <= 512
+
+
+def test_build_packets_never_executes_fake_site_packages(tmp_path,
+                                                         monkeypatch):
+    """Planted ``sitecustomize``/``.pth`` payloads stay inert and no
+    subprocess is spawned during environment inspection."""
+    import subprocess
+
+    from ptest import agent_assessment as AA
+
+    site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    sentinel = tmp_path / "PWNED_BY_SITECUSTOMIZE"
+    (site / "sitecustomize.py").write_text(
+        f"import pathlib; pathlib.Path({str(sentinel)!r}).write_text('x')\n",
+        encoding="utf-8")
+    (site / "evil.pth").write_text("import os; os.system('true')\n",
+                                   encoding="utf-8")
+
+    def _no_spawn(*_args, **_kwargs):
+        raise AssertionError("environment inspection must not spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", _no_spawn)
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    assert not sentinel.exists()
+    assert any(fact.status == "installed"
+               for fact in packet.dependencies)
+
+
+def test_build_packets_pyvenv_home_paths_never_enter_packet(tmp_path):
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path)
+    secret_home = f"/secret/home-{tmp_path.name}"
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text(
+        f"home = {secret_home}\ninclude-system-site-packages = false\n"
+        "version = 3.11.9\n",
+        encoding="utf-8")
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    for fact in packet.dependencies:
+        assert secret_home not in fact.detail
+    request = AA.encode_review_request(packet, b"{}")
+    assert secret_home.encode("utf-8") not in request
+
+
+def test_build_packets_reports_installed_node_test_tools(tmp_path):
+    import json as json_lib
+
+    from ptest import agent_assessment as AA
+
+    node_modules = tmp_path / "node_modules"
+    (node_modules / "vitest").mkdir(parents=True)
+    (node_modules / "vitest" / "package.json").write_text(
+        json_lib.dumps({"name": "vitest", "version": "2.1.3"}),
+        encoding="utf-8")
+    (node_modules / "lodash").mkdir()
+    (node_modules / "lodash" / "package.json").write_text(
+        json_lib.dumps({"name": "lodash", "version": "4.17.21"}),
+        encoding="utf-8")
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "package.json": json_lib.dumps({
+            "name": "demo",
+            "devDependencies": {"vitest": "^2.0.0"},
+            "dependencies": {"lodash": "^4.0.0"},
+        }),
+    })
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    assert "vitest 2.1.3" in installed[0].detail
+    assert "lodash" not in installed[0].detail
+    assert len(installed[0].detail) <= 512
+
+
+def test_build_packets_node_symlink_policy(tmp_path):
+    """A pnpm-style symlink staying inside node_modules is followed; an
+    escaping one is ignored."""
+    import json as json_lib
+
+    from ptest import agent_assessment as AA
+
+    node_modules = tmp_path / "node_modules"
+    hidden = node_modules / ".pnpm" / "mocha@9.0.0" / "node_modules" / "mocha"
+    hidden.mkdir(parents=True)
+    (hidden / "package.json").write_text(
+        json_lib.dumps({"name": "mocha", "version": "9.0.0"}),
+        encoding="utf-8")
+    os.symlink(str(hidden), node_modules / "mocha")
+    outside = tmp_path / "outside-store"
+    outside.mkdir()
+    (outside / "package.json").write_text(
+        json_lib.dumps({"name": "jest", "version": "1.2.3-evil"}),
+        encoding="utf-8")
+    os.symlink(str(outside), node_modules / "jest")
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "package.json": json_lib.dumps({
+            "name": "demo",
+            "devDependencies": {"mocha": "^9.0.0", "jest": "^29.0.0"},
+        }),
+    })
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    assert "mocha 9.0.0" in installed[0].detail
+    assert "1.2.3" not in installed[0].detail
+
+
+def test_build_packets_ignores_oversized_or_invalid_node_manifests(
+        tmp_path):
+    import json as json_lib
+
+    from ptest import agent_assessment as AA
+
+    node_modules = tmp_path / "node_modules" / "vitest"
+    node_modules.mkdir(parents=True)
+    (node_modules / "package.json").write_text(
+        json_lib.dumps({"name": "vitest", "version": "2.1.3"}),
+        encoding="utf-8")
+    big = {"name": "demo", "devDependencies": {"vitest": "^2.0.0"},
+           "padding": "x" * (64 * 1024 + 1024)}
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "package.json": json_lib.dumps(big),
+    })
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "package.json": "{not valid json",
+    })
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+
+
+def test_installed_facts_create_no_public_limitation_code(tmp_path):
+    """The additive ``installed`` status is packet-internal: the CLI
+    limitation mapping ignores it, so no public code is created."""
+    from ptest import agent_assessment as AA
+    from ptest.cli import _assessment_limitations
+
+    _make_venv(tmp_path)
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    assert any(fact.status == "installed"
+               for fact in packet.dependencies)
+    codes = {item["code"] for item in _assessment_limitations((packet,))}
+    assert "dependency-installed" not in codes
+    assert not any("installed" in code for code in codes)
+
+
+def test_dependency_env_scan_respects_review_deadline(tmp_path):
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path)
+    with pytest.raises(C.Problem) as caught:
+        AA._dependency_facts({"src/m.py"}, "", None, child_root=tmp_path,
+                             deadline=0.0)
+    assert caught.value.code == "review-timeout"
