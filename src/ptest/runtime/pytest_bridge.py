@@ -205,14 +205,135 @@ def _split_addopts(value: object) -> tuple[str, ...]:
     _fail("pytest addopts has an invalid shape")
 
 
-def _full_addopts(config: Any) -> tuple[str, ...]:
-    """Return controls that native addopts sources supplied to Pytest."""
-    env = _split_addopts(os.environ.get("PYTEST_ADDOPTS"))
+def _checked_in_addopts(config: Any) -> tuple[str, ...]:
+    """Return addopts from the project's checked-in pytest configuration.
+
+    This is only the ini value: ``PYTEST_ADDOPTS`` from the environment is a
+    separate invocation-time source and stays refused in full mode.
+    """
     try:
         configured = config.getini("addopts")
     except (AttributeError, ValueError, TypeError):
         configured = ()
-    return env + _split_addopts(configured)
+    return _split_addopts(configured)
+
+
+def full_redirect_name(tokens: tuple[str, ...], index: int) -> str | None:
+    """Display name when full mode refuses ``tokens[index]`` as a redirect.
+
+    Redirects (``-c``/``--rootdir``/``--confcutdir``/``-o`` family, argfiles,
+    node ids, redirect clusters) can silently replace the project's
+    checked-in configuration, so they stay refused even inside checked-in
+    addopts. Plain narrowing filters, including short-flag clusters (which
+    can only respell narrowing/boolean flags, never redirect
+    configuration), are project-owned in that position and are allowed
+    there instead (recorded in the run label).
+    """
+    token = tokens[index]
+    option = token.split("=", 1)[0]
+    if option in _FULL_REDIRECT_OPTIONS:
+        return option
+    if _short_redirect_cluster(token):
+        return token
+    if token.startswith("@"):
+        return token
+    if _node_id_token(tokens, index):
+        return token
+    return None
+
+
+# Narrowing filters whose expression arrives as the next token, so the run
+# label can record the filter with its value (``-m not slow``).
+_FULL_VALUE_FILTERS = frozenset({
+    "-k", "--keyword", "-m", "--markexpr", "--deselect",
+    "--ignore", "--ignore-glob", "--maxfail",
+})
+
+
+def full_narrowing_text(tokens: tuple[str, ...]) -> str | None:
+    """Render checked-in narrowing filters for the full-mode project label.
+
+    Only tokens the full gate allows from checked-in configuration are
+    rendered; redirects are excluded (they stay refused). Returns None when
+    no narrowing filter is present.
+    """
+    parts: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (full_refusal_name(tokens, index) is None
+                or full_redirect_name(tokens, index) is not None):
+            index += 1
+            continue
+        option = token.split("=", 1)[0]
+        if ("=" not in token
+                and (option in _FULL_VALUE_FILTERS
+                     or (cluster_narrow_name(token) is not None
+                         and token[-1:] in ("k", "m")))
+                and index + 1 < len(tokens)):
+            parts.append(f"{token} {tokens[index + 1]}")
+            index += 2
+            continue
+        parts.append(token)
+        index += 1
+    return "; ".join(parts) if parts else None
+
+
+# Effective pytest option attribute to the CLI spellings that set it, so
+# the full gate can tell checked-in narrowing apart from invocation-time
+# narrowing. ``pyargs`` is intentionally absent: it redirects native
+# configuration and is never project-owned narrowing.
+_NARROWING_ATTR_FLAGS: dict[str, tuple[str, ...]] = {
+    "keyword": ("-k", "--keyword"),
+    "markexpr": ("-m", "--markexpr"),
+    "deselect": ("--deselect",),
+    "lf": ("--lf", "--last-failed"),
+    "failedfirst": ("--ff", "--failed-first"),
+    "stepwise": ("--sw", "--stepwise"),
+    "stepwise_skip": ("--sw-skip", "--stepwise-skip"),
+    "testmon": ("--testmon",),
+    "ignore": ("--ignore",),
+    "ignore_glob": ("--ignore-glob",),
+    "maxfail": ("--maxfail", "--exitfirst", "-x"),
+    "collectonly": ("--collect-only", "--co"),
+    "setuponly": ("--setup-only",),
+    "setupplan": ("--setup-plan",),
+    "showfixtures": ("--fixtures",),
+    "show_fixtures_per_test": ("--fixtures-per-test",),
+    "funcargs": ("--funcargs",),
+    "markers": ("--markers",),
+    "cacheshow": ("--cache-show",),
+    "help": ("-h", "--help"),
+    "version": ("-V", "--version"),
+}
+
+
+def _flag_supplies(tokens: tuple[str, ...], attr: str) -> bool:
+    """True when ``tokens`` spell the narrowing flag behind ``attr``.
+
+    Covers exact flags, ``--flag=value`` forms, attached short values
+    (``-kEXPR``), trailing-``k``/``m`` clusters (``-vk EXPR``), and
+    clusters respelling ``-x`` — the same vocabulary
+    :func:`full_refusal_name` and :func:`full_narrowing_text` classify.
+    """
+    for token in tokens:
+        if not isinstance(token, str):
+            continue
+        option = token.split("=", 1)[0]
+        if option in _NARROWING_ATTR_FLAGS.get(attr, ()):
+            return True
+        if attr in ("keyword", "markexpr"):
+            short = "-k" if attr == "keyword" else "-m"
+            if (token.startswith(short) and len(token) > 2
+                    and not token.startswith("--")):
+                return True
+            if (cluster_narrow_name(token) is not None
+                    and token.endswith(short[1:])):
+                return True
+        if (attr == "maxfail" and cluster_narrow_name(token) is not None
+                and "x" in token):
+            return True
+    return False
 
 
 # Short flags that take a value: a cluster starting with one carries an
@@ -299,6 +420,18 @@ def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
 def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
     for index in range(len(tokens)):
         if full_refusal_name(tokens, index) is not None:
+            _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
+
+
+def _reject_full_ini_addopts(tokens: tuple[str, ...]) -> None:
+    """Refuse checked-in addopts that redirect native configuration.
+
+    Plain narrowing filters (``-k``/``-m``/``--deselect``/``-x``/``--maxfail``
+    and friends) are the project's own suite definition in this position:
+    they are allowed and recorded in the run label instead of refused.
+    """
+    for index in range(len(tokens)):
+        if full_redirect_name(tokens, index) is not None:
             _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
 
 
@@ -513,6 +646,14 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
         os.close(fd)
 
 
+# Full-only collection hooks are the project's own suite definition when
+# they live in a conftest.py under the admitted checkout (section F);
+# reporting hooks and non-conftest plugins stay refused.
+_FULL_COLLECTION_HOOKS = frozenset({
+    "pytest_collection_modifyitems", "pytest_ignore_collect",
+})
+
+
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
 # additive under the basic-serial grant. anyio arrives transitively with
 # FastAPI/httpx/starlette and only wraps test calls (pytest_pyfunc_call),
@@ -552,6 +693,37 @@ class OwnedPlugin:
         self.refused = True
         _refusal_marker("native-config-invalid", message)
         raise UsageError(f"native-config-invalid: {message}")
+
+    def _project_conftest_hook(self, hook: str, implementation: Any) -> bool:
+        """True when a full-only collection hook is project-owned.
+
+        Only ``pytest_collection_modifyitems``/``pytest_ignore_collect``
+        implemented in a ``conftest.py`` under the admitted checkout count
+        as the project's own suite definition. Hooks from installed
+        plugins, conftests outside the checkout, and reporting hooks stay
+        refused. Missing file evidence fails closed.
+        """
+        if self.execution != "full" or hook not in _FULL_COLLECTION_HOOKS:
+            return False
+        plugin = getattr(implementation, "plugin", None)
+        path = getattr(plugin, "__file__", None)
+        if path is None:
+            function = getattr(implementation, "function", None)
+            code = getattr(function, "__code__", None)
+            path = getattr(code, "co_filename", None)
+        if not isinstance(path, str) or not path:
+            return False
+        try:
+            candidate = os.path.realpath(path)
+            expected = os.path.realpath(self.checkout_root) if self.checkout_root else ""
+        except (OSError, ValueError):
+            return False
+        if not expected or os.path.basename(candidate) != "conftest.py":
+            return False
+        try:
+            return os.path.commonpath((expected, candidate)) == expected
+        except ValueError:
+            return False
 
     def _validate(self, config: Any, *, generated: bool) -> None:
         self._config = config
@@ -639,6 +811,8 @@ class OwnedPlugin:
                     if any(str(module) == prefix or str(module).startswith(prefix + ".")
                            for prefix in getattr(self, "_approved_hook_modules", ())):
                         continue
+                    if self._project_conftest_hook(hook, implementation):
+                        continue
                     self._refuse("unqualified pytest execution hook is not owned by the serial grant")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
@@ -667,7 +841,12 @@ class OwnedPlugin:
                 # on the first post-configure gate below.
                 if generated:
                     _validate_native_paths(config, self.checkout_root, self.config_path)
-                _reject_full_addopts(_full_addopts(config))
+                # The environment is invocation-time narrowing and stays
+                # refused wholesale; checked-in addopts narrowing is the
+                # project's own suite definition and is only redirect-gated
+                # here (allowed filters are recorded in the run label).
+                _reject_full_addopts(_split_addopts(os.environ.get("PYTEST_ADDOPTS")))
+                _reject_full_ini_addopts(_checked_in_addopts(config))
             except BridgeRefusal as refusal:
                 self._refuse(refusal.message)
             narrowing = ("keyword", "markexpr", "deselect", "lf", "failedfirst",
@@ -676,7 +855,29 @@ class OwnedPlugin:
                          "setuponly", "setupplan", "showfixtures",
                          "show_fixtures_per_test", "markers", "cacheshow",
                          "help", "version")
-            if any(getattr(option, name, None) for name in narrowing):
+            # Attribute each effective narrowing option to its source:
+            # invocation args and PYTEST_ADDOPTS stay refused, checked-in
+            # addopts narrowing is the project's own suite definition
+            # (allowed, recorded in the run label), and anything else
+            # (programmatic mutation, unowned plugins) fails closed.
+            invocation_args = getattr(
+                getattr(config, "invocation_params", None), "args", ())
+            if not isinstance(invocation_args, (tuple, list)):
+                invocation_args = ()
+            try:
+                invocation_tokens = tuple(
+                    str(token) for token in invocation_args) + _split_addopts(
+                        os.environ.get("PYTEST_ADDOPTS"))
+                ini_tokens = _checked_in_addopts(config)
+            except BridgeRefusal as refusal:
+                self._refuse(refusal.message)
+            for name in narrowing:
+                if not getattr(option, name, None):
+                    continue
+                if _flag_supplies(invocation_tokens, name):
+                    self._refuse("full pytest plans cannot narrow the inventory")
+                if name != "pyargs" and _flag_supplies(ini_tokens, name):
+                    continue
                 self._refuse("full pytest plans cannot narrow the inventory")
             invocation = getattr(getattr(config, "invocation_params", None), "args", ())
             if not isinstance(invocation, (tuple, list)):

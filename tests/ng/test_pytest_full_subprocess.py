@@ -60,7 +60,7 @@ def test_non_git_pytest_full_preserves_native_zero_but_is_incomplete(case):
     assert data["status"] == "incomplete"
 
 
-@pytest.mark.parametrize("source", ["env", "ini", "env-combined", "ini-combined"])
+@pytest.mark.parametrize("source", ["env", "env-combined", "ini-combined"])
 def test_git_full_addopts_controls_are_ptest_refusals(case, source):
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
@@ -74,10 +74,8 @@ def test_git_full_addopts_controls_are_ptest_refusals(case, source):
     if source in {"env", "env-combined"}:
         env = {"PYTEST_ADDOPTS": "-k hidden" if source == "env" else "-qc alt.ini"}
     else:
-        addopts = ("--deselect=tests/test_native.py::test_body"
-                   if source == "ini" else "-qc alt.ini")
         (root / "pytest.ini").write_text(
-            "[pytest]\ncache_dir = .pytest_cache\naddopts = " + addopts + "\n")
+            "[pytest]\ncache_dir = .pytest_cache\naddopts = -qc alt.ini\n")
     (root / ".ptest.toml").write_text(
         "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
@@ -94,6 +92,39 @@ def test_git_full_addopts_controls_are_ptest_refusals(case, source):
     assert completed.result["data"]["status"] == "incomplete"
     assert completed.result["data"]["exit_origin"] == "ptest"
     assert not (root / "body.marker").exists()
+
+
+def test_git_full_checked_in_deselect_is_project_filtered(case):
+    """Section F flips the ini twin: checked-in narrowing runs labelled."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text(
+        "[pytest]\ncache_dir = .pytest_cache\n"
+        "addopts = --deselect=tests/test_native.py::test_body\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = ("full (project-filtered: "
+             "--deselect=tests/test_native.py::test_body)")
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert not (root / "body.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
 
 
 def test_git_pytest_full_allows_root_cache_and_assertion_bytecode(case):
@@ -149,6 +180,39 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
         "def pytest_collection_modifyitems(session, config, items):\n"
         "    yield\n"
     ),
+])
+def test_full_project_conftest_collection_hooks_run_labelled(case, hook_source):
+    """Section F flips these twins: conftest collection hooks run labelled."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(hook_source)
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = "full (project-filtered: conftest collection hook)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert (root / "body.marker").read_text() == "ran"
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
+
+
+@pytest.mark.parametrize("hook_source", [
     "def pytest_runtest_makereport(item, call):\n    pass\n",
     (
         "import pytest\n"

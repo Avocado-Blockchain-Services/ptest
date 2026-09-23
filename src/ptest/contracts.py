@@ -152,7 +152,7 @@ REASON_CODES = frozenset({
     "capacity-exceeded", "ownership-uncertain",
     "unsupported-detached-descendant", "no-baseline", "incompatible-baseline",
     "unknown-input", "policy-invalid", "policy-changed", "prior-failure",
-    "full-gate-obligation", "changed-during-run", "incomplete-inventory",
+    "full-gate-obligation", "project-filtered", "changed-during-run", "incomplete-inventory",
     "report-invalid", "state-unavailable", "no-tests-needed",
     "selection-disabled", "scan-limit", "static-evidence-insufficient",
     "probe-isolation-required", "unredacted-command-disclosure",

@@ -682,16 +682,31 @@ def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monke
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config()))
 
 
-@pytest.mark.parametrize("value", [["-k", "hidden"], ["-x"], ["--deselect=tests/a.py::test_x"],
-                                    ["-c", "alternate.ini"], ["--rootdir=/tmp/other"],
+@pytest.mark.parametrize("value", [["-c", "alternate.ini"], ["--rootdir=/tmp/other"],
                                     ["-qc", "alternate.ini"], ["-vc", "alternate.ini"],
-                                    ["-sc", "alternate.ini"]])
-def test_full_bridge_rejects_addopts_controls_from_ini(bridge_env, value):
+                                    ["-sc", "alternate.ini"], ["@args.txt"],
+                                    ["tests/test_a.py::test_one"]])
+def test_full_bridge_rejects_redirect_controls_from_ini(bridge_env, value):
     config = _native_config()
     config.getini = lambda name: value if name == "addopts" else []
 
     with pytest.raises(pytest.UsageError, match="full pytest plans"):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
+
+
+@pytest.mark.parametrize("value", [["-k", "hidden"], ["-x"], ["--deselect=tests/a.py::test_x"],
+                                    ["-m", "not slow"], ["--maxfail=3"],
+                                    ["--maxfail", "0"]])
+def test_full_bridge_accepts_narrowing_filters_from_checked_in_ini(bridge_env, value):
+    """Section F: checked-in addopts narrowing is allowed in full mode.
+
+    The filter is recorded in the run label; the bridge only refuses
+    invocation-time narrowing (argv, environment) and config redirects.
+    """
+    config = _native_config()
+    config.getini = lambda name: value if name == "addopts" else []
+
+    next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
 
 
 @pytest.mark.parametrize("value", ["-W error::DeprecationWarning",
@@ -785,6 +800,70 @@ def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
                                              "pytest_report_teststatus", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+def _conftest_plugin(path):
+    """A conftest module object as pytest loads it: file-backed."""
+    plugin = _module("conftest")
+    plugin.__file__ = str(path)
+    return plugin
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect"])
+def test_full_bridge_accepts_collection_hooks_from_project_conftest(
+        bridge_env, tmp_path, monkeypatch, hook):
+    """Section F: conftest.py collection hooks are allowed in full mode."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "tests" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    conftest.write_text("def %s(items):\n    return None\n" % hook)
+    plugin = _conftest_plugin(conftest)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl(hook, "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+def test_full_bridge_refuses_collection_hook_from_conftest_outside_root(
+        bridge_env, tmp_path, monkeypatch):
+    """Section F: only conftests under the admitted checkout are allowed."""
+    checkout = tmp_path / "proj"
+    checkout.mkdir()
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(checkout))
+    outside = tmp_path / "other" / "conftest.py"
+    outside.parent.mkdir()
+    outside.write_text("def pytest_collection_modifyitems(items):\n    return None\n")
+    plugin = _conftest_plugin(outside)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl("pytest_collection_modifyitems", "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_sessionfinish"])
+def test_full_bridge_refuses_reporting_hooks_even_from_project_conftest(
+        bridge_env, tmp_path, monkeypatch, hook):
+    """Section F flips collection hooks only; reporting hooks stay refused."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "conftest.py"
+    conftest.write_text("def %s(*args):\n    return None\n" % hook)
+    plugin = _conftest_plugin(conftest)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl(hook, "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
     with pytest.raises(pytest.UsageError, match="execution hook"):
         pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 

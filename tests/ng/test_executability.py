@@ -161,15 +161,17 @@ def test_report_char_clusters_are_not_narrowing(tokens):
     assert E._narrowing_tokens(tokens) == ()
 
 
-def test_clustered_x_addopts_withhold_full_run_command(tmp_path):
+def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
+    """Section F flips this twin: checked-in clusters are allowed and labelled."""
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-vx"\n')
     _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.full is False
-    assert "ptest --full" not in E.commands((result,))
+    assert result.full is True
+    assert result.caveats == ("full (project-filtered: -vx)",)
+    assert "ptest --full" in E.commands((result,))
 
 
 def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
@@ -196,7 +198,8 @@ def test_dot_test_root_is_caveat_without_full(tmp_path):
     assert result.full is False
 
 
-def test_narrowing_addopts_are_caveat_without_full(tmp_path):
+def test_narrowing_addopts_are_project_filtered_full(tmp_path):
+    """Section F flips this twin: checked-in -m is allowed and labelled."""
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = \'-m "not slow"\'\n')
     (tmp_path / "tests").mkdir()
@@ -205,11 +208,12 @@ def test_narrowing_addopts_are_caveat_without_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "ptest --full unavailable: pytest addopts narrow the inventory (-m)",)
-    assert result.full is False
+        "full (project-filtered: -m not slow)",)
+    assert result.full is True
 
 
-def test_maxfail_nonzero_narrows_without_full(tmp_path):
+def test_maxfail_nonzero_is_project_filtered_full(tmp_path):
+    """Section F flips this twin: checked-in --maxfail is allowed and labelled."""
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "--maxfail=3"\n')
     (tmp_path / "tests").mkdir()
@@ -218,8 +222,50 @@ def test_maxfail_nonzero_narrows_without_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "ptest --full unavailable: pytest addopts narrow the inventory (--maxfail)",)
+        "full (project-filtered: --maxfail=3)",)
+    assert result.full is True
+
+
+def test_redirect_addopts_stay_unavailable(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-c other.ini"\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "ptest --full unavailable: pytest addopts redirect native configuration (-c)",)
     assert result.full is False
+
+
+def test_collection_hook_is_project_filtered_full(tmp_path):
+    """Section F: a conftest collection hook is allowed and labelled."""
+    _write(tmp_path / "tests" / "conftest.py",
+           "def pytest_collection_modifyitems(items):\n    return None\n")
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "full (project-filtered: conftest collection hook)",)
+    assert result.full is True
+
+
+def test_persea_shaped_addopts_are_project_filtered_full_with_serial_caveat(tmp_path):
+    """Persea api shape: xdist addopts plus a -m filter stay executable."""
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\n'
+           'addopts = \'-p xdist.plugin -n 2 --dist=loadgroup -m "not slow"\'\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path, args=("-n", "0")), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "serial: xdist disabled under ptest (-n 0)",
+        "full (project-filtered: -m not slow)")
+    assert result.full is True
 
 
 def test_maxfail_zero_is_not_narrowing():

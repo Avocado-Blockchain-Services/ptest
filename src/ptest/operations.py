@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import (config as config_api, files, history, platform, render, reports,
+from . import (config as config_api, executability, files, history, platform, render, reports,
                scheduler, selection, source)
 from .runners import adapter_for
 
@@ -1899,6 +1899,16 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # An unqualified repeat automatic request is a basic full gate, not
         # an automatic-mode plan handed to the basic adapter.
         plan = replace(plan, mode=C.Mode.FULL)
+    # Section F: a full gate runs the project's own checked-in suite. When
+    # checked-in configuration narrows it, the run result and the human
+    # output carry the project-filtered label instead of refusing.
+    project_filter_label = None
+    if native_pytest and plan.execution == "full":
+        project_filter_label = executability.full_project_filter_label(
+            checkout.root, config.runner.test_roots)
+        if project_filter_label is not None:
+            note = _reason("project-filtered", project_filter_label)
+            plan = replace(plan, reasons=plan.reasons + (note,))
     if advanced and plan.execution == "none":
         # A qualified automatic selection may prove that no test is affected.
         # This is a completed policy decision, not a native attempt: do not
@@ -2173,7 +2183,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             and (continued_handoff or stopped_handoff or cancelled_handoff
                  or setup_handoff)
             and frames.draining and frames.eof)
-        reasons = ()
+        reasons = (() if project_filter_label is None
+                   else (_reason("project-filtered", project_filter_label),))
         incomplete = not protocol_valid or stopped_at_gate or cancelled_handoff
         if incomplete:
             if not protocol_valid:

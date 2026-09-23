@@ -18,7 +18,9 @@ from . import contracts as C
 from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
-from .runtime.pytest_bridge import full_refusal_name
+from .runtime.pytest_bridge import (
+    full_narrowing_text, full_redirect_name, full_refusal_name,
+)
 
 STATUS_EXECUTABLE = "executable"
 STATUS_CAVEAT = "caveat"
@@ -37,6 +39,12 @@ _FULL_REFUSED_HOOKS = frozenset({
     "pytest_collection_modifyitems", "pytest_ignore_collect",
     "pytest_runtest_makereport", "pytest_report_teststatus",
     "pytest_sessionfinish",
+})
+# Section F: conftest.py collection hooks are the project's own suite
+# definition, so they are allowed in full mode and recorded in the run
+# label; the remaining full-only hooks stay refused.
+_FULL_COLLECTION_HOOKS = frozenset({
+    "pytest_collection_modifyitems", "pytest_ignore_collect",
 })
 _HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
 _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
@@ -362,6 +370,40 @@ def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
         if refusal is not None and refusal not in found:
             found.append(refusal)
     return tuple(found)
+
+
+def _redirect_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """Full-mode redirect names, derived from the bridge.
+
+    Redirects stay refused even from checked-in configuration; plain
+    narrowing filters are project-owned there and join the run label.
+    """
+    found: list[str] = []
+    for index in range(len(tokens)):
+        refusal = full_redirect_name(tokens, index)
+        if refusal is not None and refusal not in found:
+            found.append(refusal)
+    return tuple(found)
+
+
+def full_project_filter_label(root: Path, test_roots: tuple[str, ...]) -> str | None:
+    """Label a project-filtered full gate, or None when unfiltered.
+
+    The label records narrowing from the project's checked-in pytest
+    configuration (addopts marker/keyword filters) and its ``conftest.py``
+    collection hooks, for example
+    ``full (project-filtered: -m not slow; conftest collection hook)``.
+    """
+    parts: list[str] = []
+    narrowing = full_narrowing_text(_pytest_addopts(root))
+    if narrowing:
+        parts.append(narrowing)
+    pairs = _scan_conftest_hooks(root, test_roots)
+    if any(hook in _FULL_COLLECTION_HOOKS for _, hook in pairs):
+        parts.append("conftest collection hook")
+    if not parts:
+        return None
+    return "full (project-filtered: " + "; ".join(parts) + ")"
 
 
 # Stock vitest ``configDefaults.exclude``: a config that spreads it (the
@@ -757,14 +799,17 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
         if "." in roots:
             caveats.append('ptest --full unavailable: test_roots is "."')
             full = False
-        narrowing = _narrowing_tokens(addopts)
-        if narrowing:
+        redirects = _redirect_tokens(addopts)
+        if redirects:
             caveats.append(
-                "ptest --full unavailable: pytest addopts narrow the inventory ("
-                + " ".join(narrowing) + ")")
+                "ptest --full unavailable: pytest addopts redirect native configuration ("
+                + " ".join(redirects) + ")")
             full = False
+        label = full_project_filter_label(root, roots)
+        if label is not None:
+            caveats.append(label)
         for rel, hook in pairs:
-            if hook in _FULL_REFUSED_HOOKS:
+            if hook in _FULL_REFUSED_HOOKS and hook not in _FULL_COLLECTION_HOOKS:
                 caveats.append(f"ptest --full unavailable: {rel} defines {hook}")
                 full = False
                 break
