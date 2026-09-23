@@ -28,6 +28,8 @@ _PHASE = "doctor"
 _SKIP_DIRS = frozenset({".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
                         "build", "dist", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
                         "coverage", ".coverage", ".next", "target", "generated", "graphify-out",
+                        ".pipeline", ".superpowers",
+                        ".claude", ".agents", ".codex", ".opencode", ".gemini",
                         ".ssh", ".aws", ".gnupg"})
 _PRIVATE_FILES = frozenset({".npmrc", ".netrc", ".pypirc"})
 _GENERATED_NAME = re.compile(r"\.(?:min|generated)\.")
@@ -295,7 +297,26 @@ def _directory(root: Path, relative: str):
 
 def _excluded(relative: str) -> bool:
     return any(part in _SKIP_DIRS or part in _PRIVATE_FILES or _PRIVATE_NAME.search(part)
-               or _GENERATED_NAME.search(part) for part in relative.split("/"))
+               or _GENERATED_NAME.search(part) or part.endswith((".diff", ".patch"))
+               or part == "recommendations.md" for part in relative.split("/"))
+
+
+def match_rules(text: str) -> frozenset[str]:
+    """Return the static rule codes matching ``text``, line by line.
+
+    Pure: no filesystem, no imports, no subprocess. Each line is bounded to
+    ``_LINE_CHARS`` before matching, mirroring the scan work bound.
+    """
+    if not isinstance(text, str):
+        raise TypeError("match_rules requires str")
+    matched: set[str] = set()
+    for line in _PHYSICAL_NEWLINE.split(text):
+        bounded = line[:_LINE_CHARS]
+        for code, pattern, _severity, _consequence, _remediation, _verification in _RULES:
+            if pattern.search(bounded) or (
+                    code == "cache.global-flush" and _cache_clear_call(bounded)):
+                matched.add(code)
+    return frozenset(matched)
 
 
 def _priority(relative: str, test_roots: tuple[str, ...]) -> tuple[int, str]:

@@ -35,6 +35,7 @@ exactly one payload to exactly one packet.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -70,13 +71,18 @@ MAX_WALK_ENTRIES = 20000
 # Directories never descended into (doctor admission classes plus agent
 # instruction/configuration locations and ptest private runtime state).
 _EXCLUDED_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".pipeline", "graphify-out", ".ptest",
+    ".git", ".hg", ".svn", ".pipeline", ".superpowers", "graphify-out",
+    ".ptest",
     ".claude", ".agents", ".codex", ".opencode", ".gemini",
     ".venv", "venv", "node_modules", "__pycache__",
     "build", "dist", "target", "coverage", ".coverage",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".next",
     ".ssh", ".aws", ".gnupg",
 })
+# Agent/pipeline artifacts that are never admitted even outside excluded
+# directories: patch files and ptest's own published report.
+_EXCLUDED_SUFFIXES = (".diff", ".patch")
+_EXCLUDED_BASENAMES = frozenset({"recommendations.md"})
 # Files never admitted at any level: agent instructions plus the private
 # credential names doctor already recognizes.
 _EXCLUDED_FILES = frozenset({
@@ -114,6 +120,113 @@ _UNSUPPORTED_MARKERS = frozenset({
     "Gemfile", "CMakeLists.txt", "meson.build", "build.gradle",
     "setup.py", "setup.cfg",
 })
+
+# Evidence admission tiers: manifests and locks first so the file cap can
+# never starve test configuration, then test configuration before test
+# files, then CI, then imported source, then everything else.
+_TIER0_BASENAMES = frozenset({
+    "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "setup.py",
+    "requirements.txt", "uv.lock", "poetry.lock", "pdm.lock",
+    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
+    "go.sum",
+})
+_TIER1_BASENAMES = frozenset({
+    "conftest.py", "pytest.ini", "tox.ini", "setup.cfg",
+})
+_TIER1_PREFIXES = (
+    "vitest.config.", "vite.config.", "jest.config.", "vitest.setup.",
+    "vitest.workspace.", "setupTests.",
+)
+_TIER2_DIRS = frozenset({"tests", "test", "__tests__"})
+_TIER2_FILE_PATTERNS = ("test_*.py", "*_test.py", "*.test.*", "*.spec.*")
+_TIER3_BASENAMES = frozenset({
+    ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile",
+})
+
+_PY_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][\w.]*)")
+_PY_FROM_RE = re.compile(r"^[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import[ \t]+")
+_JS_REQUIRE_RE = re.compile(
+    r"(?:import\s+(?:[^'\"]*?\s+from\s+)?|require\s*\(\s*|import\s*\(\s*)"
+    r"['\"](\.[^'\"]*)['\"]")
+_JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _admission_tier(path: str, tier4: frozenset = frozenset()) -> int:
+    """Return the admission tier (0..5) for a declaration-prefixed path."""
+    base = path.rsplit("/", 1)[-1]
+    if base in _TIER0_BASENAMES or fnmatch.fnmatchcase(
+            base, "requirements*.txt"):
+        return 0
+    if base in _TIER1_BASENAMES or base.startswith(_TIER1_PREFIXES):
+        return 1
+    parts = path.split("/")
+    if any(part in _TIER2_DIRS for part in parts):
+        return 2
+    for pattern in _TIER2_FILE_PATTERNS:
+        if fnmatch.fnmatchcase(base, pattern):
+            return 2
+    for index, part in enumerate(parts[:-1]):
+        if part == ".github" and parts[index + 1] == "workflows":
+            return 3
+        if part in (".circleci", ".buildkite"):
+            return 3
+    if base in _TIER3_BASENAMES or (
+            base.startswith("cloudbuild")
+            and base.endswith((".yaml", ".yml"))):
+        return 3
+    if path in tier4:
+        return 4
+    return 5
+
+
+def _python_import_targets(module: str) -> list[str]:
+    """Resolve ``import a.b`` / ``from a.b import`` to candidate rel paths."""
+    relative = module.replace(".", "/")
+    return [f"{relative}.py", f"{relative}/__init__.py",
+            f"src/{relative}.py", f"src/{relative}/__init__.py"]
+
+
+def _js_import_targets(from_path: str, specifier: str) -> list[str]:
+    """Resolve a relative JS/TS import to candidate rel paths."""
+    if "/" in from_path:
+        anchor = from_path.rsplit("/", 1)[0]
+    else:
+        anchor = ""
+    joined = f"{anchor}/{specifier}" if anchor else specifier
+    normalized: list[str] = []
+    for part in joined.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if normalized:
+                normalized.pop()
+            else:
+                return []
+        else:
+            normalized.append(part)
+    base = "/".join(normalized)
+    targets = [f"{base}{ext}" for ext in _JS_EXTENSIONS]
+    targets.extend(f"{base}/index{ext}" for ext in _JS_EXTENSIONS)
+    return targets
+
+
+def _resolve_tier4(request_texts: dict[str, str],
+                   candidates: set[str]) -> frozenset:
+    """Find imported-source candidates referenced by admitted test texts."""
+    resolved: set[str] = set()
+    for from_path, text in request_texts.items():
+        for line in text.splitlines():
+            match = _PY_IMPORT_RE.match(line) or _PY_FROM_RE.match(line)
+            if match is not None:
+                for target in _python_import_targets(match.group(1)):
+                    if target in candidates:
+                        resolved.add(target)
+                continue
+            for specifier in _JS_REQUIRE_RE.findall(line):
+                for target in _js_import_targets(from_path, specifier):
+                    if target in candidates:
+                        resolved.add(target)
+    return frozenset(resolved)
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
 
@@ -404,6 +517,7 @@ class AssessmentRow:
     status: str
     rationale: str
     evidence: tuple
+    label: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -419,6 +533,8 @@ class AssessmentRow:
             if not isinstance(citation, Citation):
                 raise TypeError("row.evidence entries must be Citation")
         object.__setattr__(self, "evidence", tuple(evidence))
+        if not isinstance(self.label, str) or not self.label:
+            raise TypeError("row.label must be nonempty str")
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,6 +623,8 @@ class ChildAssessment:
 
 def _excluded_name(name: str) -> bool:
     return (name in _EXCLUDED_DIRS or name in _EXCLUDED_FILES
+            or name in _EXCLUDED_BASENAMES
+            or name.endswith(_EXCLUDED_SUFFIXES)
             or bool(_PRIVATE_NAME.search(name))
             or bool(_GENERATED_NAME.search(name)))
 
@@ -1013,6 +1131,17 @@ def _inspect_node_env(child_root: Path, package_json_text: str | None, *,
                           detail=detail[:_ENV_DETAIL_MAX_CHARS])
 
 
+def _present_on_disk(child_root: Path | None, name: str) -> bool:
+    """Disk presence of a child-root file, without following symlinks."""
+    if child_root is None:
+        return False
+    try:
+        stamp = os.lstat(child_root / name)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode)
+
+
 def _dependency_facts(names: set[str], prefix: str,
                       scoped_paths: dict[str, str] | None = None, *,
                       child_root: Path | None = None,
@@ -1053,11 +1182,20 @@ def _dependency_facts(names: set[str], prefix: str,
                 ref_path=ref_path(hit[0]),
                 detail=f"Authoritative lock {hit[0]}; provenance lockfile, "
                        "content unexecuted."))
-        else:
-            facts.append(DependencyFact(
-                ecosystem=want, status="missing", ref_path=None,
-                detail=f"No authoritative {ecosystem} lockfile admitted; "
-                       "lock provenance unknown."))
+            continue
+        # Lock admission is not disk presence: a lock on disk but outside
+        # the packet is uninspectable, and only an absent lock is missing.
+        for lock in sorted(name for name, kind in _LOCKS.items()
+                           if kind == want):
+            if _present_on_disk(child_root, lock):
+                facts.append(DependencyFact(
+                    ecosystem=want, status="uninspectable", ref_path=None,
+                    detail=f"{lock} is present but was not admitted to "
+                           "the review packet."))
+            else:
+                facts.append(DependencyFact(
+                    ecosystem=want, status="missing", ref_path=None,
+                    detail=f"{lock} is missing."))
     if not seen_ecosystems:
         facts.append(DependencyFact(
             ecosystem="project", status="missing", ref_path=None,
@@ -1205,6 +1343,96 @@ def build_packets(workspace, resolution,
     return tuple(packets)
 
 
+class _AdmissionState:
+    """Mutable per-child admission caps shared across tier phases."""
+
+    def __init__(self) -> None:
+        self.excerpts: list[SourceExcerpt] = []
+        self.paths: dict[str, str] = {}
+        self.byte_count = 0
+        self.truncated = 0
+        self.skipped = 0
+        self.candidate_files_read = 0
+        self.candidate_bytes_read = 0
+        self.tier2_texts: dict[str, str] = {}
+
+
+def _admit_candidate(state: _AdmissionState, child_root: Path, rel: str,
+                     prefix: str, limits: EvidenceLimits,
+                     max_candidate_read: int, remaining_after: int, *,
+                     deadline: float | None = None,
+                     progress: Callable[[], None] | None = None) -> bool:
+    """Admit one candidate file into the packet state.
+
+    ``remaining_after`` counts the unprocessed candidates after this one and
+    accounts bulk truncation when a budget is exhausted. Returns False when
+    intake must stop entirely.
+    """
+    if len(state.excerpts) >= limits.max_files_per_child:
+        state.truncated += 1
+        return True
+    if (state.candidate_files_read >= limits.max_candidate_files_per_child
+            or state.candidate_bytes_read >= limits.max_candidate_bytes_per_child):
+        state.truncated += remaining_after + 1
+        return False
+    read_limit = min(
+        max_candidate_read,
+        limits.max_candidate_bytes_per_child - state.candidate_bytes_read)
+    if read_limit <= 0:
+        state.truncated += remaining_after + 1
+        return False
+    state.candidate_files_read += 1
+    # Reserve the maximum this bounded read could consume. If the read
+    # raises after a partial OS read, the reservation remains conservative.
+    state.candidate_bytes_read += read_limit
+    try:
+        # The shared no-follow reader is byte-bounded to one excerpt plus
+        # one sentinel byte. Check immediately around its bounded read;
+        # individual OS read calls cannot be interrupted by this layer.
+        raw = read_regular(child_root, rel, read_limit)
+    except C.Problem:
+        _review_checkpoint(deadline, progress)
+        state.skipped += 1
+        return True
+    state.candidate_bytes_read -= read_limit - len(raw)
+    _review_checkpoint(deadline, progress)
+    # A candidate-budget-limited read may be a valid prefix. Do not admit
+    # it as a complete excerpt; mark this file and the unread tail partial.
+    if read_limit < max_candidate_read and len(raw) == read_limit:
+        state.truncated += remaining_after + 1
+        return False
+    chunk, was_cut = _truncate_to_valid_utf8(
+        raw, limits.max_bytes_per_file)
+    if was_cut and raw and not chunk:
+        state.truncated += 1
+        return True
+    if state.byte_count + len(chunk) > limits.max_bytes_per_child:
+        state.truncated += 1
+        return True
+    if b"\x00" in chunk:
+        state.skipped += 1
+        return True
+    try:
+        text = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        state.skipped += 1
+        return True
+    if was_cut:
+        state.truncated += 1
+    lines = text.splitlines() or [""]
+    excerpt_path = f"{prefix}{rel}"
+    excerpt = SourceExcerpt(
+        path=excerpt_path, start_line=1,
+        end_line=len(lines),
+        sha256=hashlib.sha256(chunk).hexdigest(), text=text)
+    state.excerpts.append(excerpt)
+    state.paths.setdefault(rel.rsplit("/", 1)[-1], excerpt_path)
+    state.byte_count += len(chunk)
+    if _admission_tier(excerpt_path) == 2:
+        state.tier2_texts[rel] = text
+    return True
+
+
 def _build_one_packet(root: Path, repo, resolution,
                       limits: EvidenceLimits,
                       scope_context: tuple, *,
@@ -1233,76 +1461,54 @@ def _build_one_packet(root: Path, repo, resolution,
     _review_checkpoint(deadline, progress)
     prefix = "" if declaration == "." else declaration + "/"
 
-    excerpts: list[SourceExcerpt] = []
-    paths: dict[str, str] = {}
-    byte_count = 0
-    truncated = 0
-    candidate_files_read = 0
-    candidate_bytes_read = 0
+    state = _AdmissionState()
     max_candidate_read = min(limits.max_bytes_per_file,
                              limits.max_bytes_per_child) + 1
-    for index, (rel, _size) in enumerate(regular):
+    # Admission order is (tier, path): manifests and locks first so the file
+    # cap can never starve test configuration, then test configuration
+    # before test files, then CI. Imported source (tier 4) resolves from the
+    # admitted test texts between the two phases; everything else trails.
+    early = sorted(
+        ((_admission_tier(f"{prefix}{rel}"), rel) for rel, _size in regular)
+    )
+    early = [item for item in early if item[0] <= 3]
+    later_all = sorted(
+        rel for rel, _size in regular
+        if _admission_tier(f"{prefix}{rel}") > 3)
+    _review_checkpoint(deadline, progress)
+    early_halted = False
+    for position, (_tier, rel) in enumerate(early):
         _review_checkpoint(deadline, progress)
-        if len(excerpts) >= limits.max_files_per_child:
-            truncated += 1
-            continue
-        if (candidate_files_read >= limits.max_candidate_files_per_child
-                or candidate_bytes_read >= limits.max_candidate_bytes_per_child):
-            truncated += len(regular) - index
+        if not _admit_candidate(
+                state, child_root, rel, prefix, limits, max_candidate_read,
+                len(early) - 1 - position + len(later_all),
+                deadline=deadline, progress=progress):
+            early_halted = True
+            later_all = []
             break
-        read_limit = min(
-            max_candidate_read,
-            limits.max_candidate_bytes_per_child - candidate_bytes_read)
-        if read_limit <= 0:
-            truncated += len(regular) - index
-            break
-        candidate_files_read += 1
-        # Reserve the maximum this bounded read could consume. If the read
-        # raises after a partial OS read, the reservation remains conservative.
-        candidate_bytes_read += read_limit
-        try:
-            # The shared no-follow reader is byte-bounded to one excerpt plus
-            # one sentinel byte. Check immediately around its bounded read;
-            # individual OS read calls cannot be interrupted by this layer.
-            raw = read_regular(child_root, rel, read_limit)
-        except C.Problem:
-            _review_checkpoint(deadline, progress)
-            skipped += 1
-            continue
-        candidate_bytes_read -= read_limit - len(raw)
+    _review_checkpoint(deadline, progress)
+    if not early_halted:
+        tier4 = frozenset(
+            f"{prefix}{rel}"
+            for rel in _resolve_tier4(state.tier2_texts, set(later_all)))
+        late = sorted(
+            ((_admission_tier(f"{prefix}{rel}", tier4), rel)
+             for rel in later_all))
+    else:
+        late = []
+    for position, (_tier, rel) in enumerate(late):
         _review_checkpoint(deadline, progress)
-        # A candidate-budget-limited read may be a valid prefix. Do not admit
-        # it as a complete excerpt; mark this file and the unread tail partial.
-        if read_limit < max_candidate_read and len(raw) == read_limit:
-            truncated += len(regular) - index
+        if not _admit_candidate(
+                state, child_root, rel, prefix, limits, max_candidate_read,
+                len(late) - 1 - position,
+                deadline=deadline, progress=progress):
             break
-        chunk, was_cut = _truncate_to_valid_utf8(
-            raw, limits.max_bytes_per_file)
-        if was_cut and raw and not chunk:
-            truncated += 1
-            continue
-        if byte_count + len(chunk) > limits.max_bytes_per_child:
-            truncated += 1
-            continue
-        if b"\x00" in chunk:
-            skipped += 1
-            continue
-        try:
-            text = chunk.decode("utf-8")
-        except UnicodeDecodeError:
-            skipped += 1
-            continue
-        if was_cut:
-            truncated += 1
-        lines = text.splitlines() or [""]
-        excerpt_path = f"{prefix}{rel}"
-        excerpt = SourceExcerpt(
-            path=excerpt_path, start_line=1,
-            end_line=len(lines),
-            sha256=hashlib.sha256(chunk).hexdigest(), text=text)
-        excerpts.append(excerpt)
-        paths.setdefault(rel.rsplit("/", 1)[-1], excerpt_path)
-        byte_count += len(chunk)
+    _review_checkpoint(deadline, progress)
+    excerpts = state.excerpts
+    paths = state.paths
+    byte_count = state.byte_count
+    truncated = state.truncated
+    skipped += state.skipped
 
     config = repo.config
     if declaration == "." and config is None:
@@ -1375,6 +1581,460 @@ def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
     satisfied = sum(1 for row in rows if row.status == "satisfied")
     return Score(satisfied=satisfied, applicable=applicable,
                  percent=(100 * satisfied) // applicable)
+
+
+# --- Per-item review (one focused model call per checklist item) ---------------
+
+ITEM_MAX_FILES = 24
+ITEM_MAX_BYTES = 256 * 1024
+SKIP_PREFIX = "Skipped without a model call: "
+FAILED_PREFIX = "Review failed: "
+
+_ONE_ROW_PROSE_MAX_BYTES = 2048
+_ONE_ROW_EVIDENCE_MAX = 16
+_SKIP_RATIONALE_MIN_NONSPACE = 24
+
+_CATALOG_BY_ID = {entry.id: entry for entry in _CHECKLIST_CATALOG}
+
+# Conservative dependency signals. Any hit means the item is reviewed;
+# only total absence across manifests, evidence, and scanner hits skips.
+_DB_LIBRARY_RE = re.compile(
+    r"sqlalchemy|sqlmodel|django|alembic|psycopg|asyncpg|aiosqlite|"
+    r"\bsqlite3?\b|peewee|tortoise|prisma|sequelize|typeorm|knex|mongoose|"
+    r"pymongo|\bmotor\b|oracledb|cx_oracle|pyodbc|pymysql|asyncmy",
+    re.IGNORECASE)
+_DB_USAGE_RE = re.compile(
+    r"connect\s*\(|create_all|drop_database|drop_all|truncate|DATABASE_URL|"
+    r"database_url|postgres(?:ql)?://|mysql://|sqlite:/|Column\s*\(|"
+    r"create_engine|sessionmaker|\.query\s*\(|\.execute\s*\(", re.IGNORECASE)
+_CACHE_LIBRARY_RE = re.compile(
+    r"redis|valkey|memcach|pylibmc|pymemcache|aiocache|cachetools",
+    re.IGNORECASE)
+_CACHE_USAGE_RE = re.compile(
+    r"flushall|flushdb|clear_all|invalidate_all|invalidate\s*\(|CACHE_URL|"
+    r"cache_url|redis://|valkey://|\.clear\s*\(|\.delete\s*\(", re.IGNORECASE)
+
+_ONE_ROW_CITATION_SCHEMA = {
+    "type": "object",
+    "required": ["path", "start_line", "end_line", "sha256"],
+    "properties": {
+        "path": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    },
+    "additionalProperties": False,
+}
+_ONE_ROW_SCHEMA_OBJECT = {
+    "type": "object",
+    "required": ["status", "rationale", "evidence", "finding"],
+    "properties": {
+        "status": {"type": "string", "enum": sorted(_VALID_STATUSES)},
+        "rationale": {"type": "string", "maxBytes": _ONE_ROW_PROSE_MAX_BYTES},
+        "evidence": {"type": "array", "maxItems": _ONE_ROW_EVIDENCE_MAX,
+                     "items": _ONE_ROW_CITATION_SCHEMA},
+        "finding": {
+            "type": ["object", "null"],
+            "required": ["summary", "suggested_change", "evidence"],
+            "properties": {
+                "summary": {"type": "string",
+                            "maxBytes": _ONE_ROW_PROSE_MAX_BYTES},
+                "suggested_change": {"type": "string",
+                                     "maxBytes": _ONE_ROW_PROSE_MAX_BYTES},
+                "evidence": {"type": "array", "minItems": 1,
+                             "maxItems": _ONE_ROW_EVIDENCE_MAX,
+                             "items": _ONE_ROW_CITATION_SCHEMA},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
+}
+
+_ITEM_INSTRUCTION = (
+    "Answer exactly one checklist item with one JSON object matching "
+    "response_schema; return JSON only, with no markdown fence or "
+    "surrounding prose. Judge the single item in this request against its "
+    "criterion using only the listed excerpts; cite excerpts with their "
+    "root-relative paths, line ranges, and content identities. Use "
+    "satisfied only with cited evidence that the criterion holds, gap only "
+    "with cited evidence plus a finding, not-applicable only with a "
+    "specific rationale citing affirmative excerpt evidence that the item "
+    "cannot apply, and unknown otherwise. A gap requires a finding object; "
+    "any other status requires finding null. A not-applicable rationale "
+    "needs at least 24 non-whitespace characters. Prose fields are plain "
+    "text only: no Markdown, backticks, pipe characters, links, HTML, "
+    "headings, percent figures, execution claims, or test-run claims. Never "
+    "start the rationale with 'Skipped without a model call: ' or 'Review "
+    "failed: '; those prefixes are ptest-owned."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ItemReview:
+    """One planned per-item review: a skip or one provider request."""
+
+    item_id: str
+    label: str
+    scope: str
+    request: bytes | None
+    schema: bytes
+    excerpt_paths: tuple[str, ...]
+    skip_reason: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id:
+            raise TypeError("review.item_id must be nonempty str")
+        if not isinstance(self.label, str) or not self.label:
+            raise TypeError("review.label must be nonempty str")
+        object.__setattr__(self, "scope",
+                           _check_relpath(self.scope, "review.scope"))
+        if self.request is not None and not isinstance(
+                self.request, (bytes, bytearray)):
+            raise TypeError("review.request must be bytes or None")
+        if self.request is not None:
+            object.__setattr__(self, "request", bytes(self.request))
+        if not isinstance(self.schema, (bytes, bytearray)) or not self.schema:
+            raise TypeError("review.schema must be nonempty bytes")
+        object.__setattr__(self, "schema", bytes(self.schema))
+        excerpt_paths = self.excerpt_paths
+        if not isinstance(excerpt_paths, (tuple, list)):
+            raise TypeError("review.excerpt_paths must be a tuple")
+        for path in tuple(excerpt_paths):
+            if not isinstance(path, str) or not path:
+                raise TypeError("review.excerpt_paths entries must be str")
+        object.__setattr__(self, "excerpt_paths", tuple(excerpt_paths))
+        if self.skip_reason is not None and (
+                not isinstance(self.skip_reason, str)
+                or not self.skip_reason):
+            raise TypeError("review.skip_reason must be str or None")
+        if (self.request is None) != (self.skip_reason is not None):
+            raise ValueError("review must be either skipped or requested")
+
+
+def one_row_schema() -> bytes:
+    """Return the one-row response schema bytes, identical for every item."""
+    return json.dumps(_ONE_ROW_SCHEMA_OBJECT, sort_keys=True,
+                      separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def _manifest_excerpts(packet: EvidencePacket) -> list[SourceExcerpt]:
+    """Admitted tier-0 manifest excerpts, in packet order."""
+    return [excerpt for excerpt in packet.excerpts
+            if _admission_tier(excerpt.path) == 0]
+
+
+def _skip_reason(packet: EvidencePacket, entry,
+                 code_index: dict[str, frozenset]) -> str | None:
+    """Deterministic N/A rationale, or None when the item needs a call."""
+    kind = entry.skip
+    if kind is None:
+        return None
+    manifests = _manifest_excerpts(packet)
+    if not manifests:
+        return None
+    if kind == "no-database":
+        library_re, usage_re = _DB_LIBRARY_RE, _DB_USAGE_RE
+        prefix, noun = "db.", "database"
+    elif kind == "no-cache":
+        library_re, usage_re = _CACHE_LIBRARY_RE, _CACHE_USAGE_RE
+        prefix, noun = "cache.", "cache"
+    else:  # pragma: no cover - catalog skip values are closed
+        raise ValueError(f"checklist {entry.id} has an unknown skip rule")
+    if any(library_re.search(manifest.text) for manifest in manifests):
+        return None
+    if any(usage_re.search(excerpt.text) for excerpt in packet.excerpts):
+        return None
+    for excerpt in packet.excerpts:
+        if any(code.startswith(prefix)
+               for code in code_index.get(excerpt.path, ())):
+            return None
+    names = ", ".join(sorted({manifest.path.rsplit("/", 1)[-1]
+                              for manifest in manifests}))
+    return (SKIP_PREFIX + f"no {noun} library in {names} and no {noun} "
+            "configuration or usage in the admitted evidence.")
+
+
+def _route_excerpts(packet: EvidencePacket, entry,
+                    code_index: dict[str, frozenset]) -> list[SourceExcerpt]:
+    """Route the item's evidence subset, in packet order, within item caps."""
+    path_res = [re.compile(pattern) for pattern in entry.path_patterns]
+    text_res = [re.compile(pattern) for pattern in entry.text_patterns]
+    wanted = set(entry.scanner_codes)
+    routed: list[SourceExcerpt] = []
+    total = 0
+    for excerpt in packet.excerpts:
+        if len(routed) >= ITEM_MAX_FILES:
+            break
+        if not (any(pattern.search(excerpt.path) for pattern in path_res)
+                or any(pattern.search(excerpt.text) for pattern in text_res)
+                or (wanted & set(code_index.get(excerpt.path, ())))):
+            continue
+        size = len(excerpt.text.encode("utf-8"))
+        if total + size > ITEM_MAX_BYTES:
+            continue
+        routed.append(excerpt)
+        total += size
+    return routed
+
+
+def _encode_item_request(packet: EvidencePacket, entry, routed,
+                         schema_bytes: bytes) -> tuple[bytes, list]:
+    """Encode one item request; shrink excerpts until it fits its bound."""
+    from .agent_providers import PROMPT_INPUT_MAX_BYTES
+
+    schema_object = json.loads(schema_bytes.decode("utf-8"))
+    chosen = list(routed)
+    while True:
+        payload = {
+            "policy": {
+                "instruction": _ITEM_INSTRUCTION,
+                "item": {"id": entry.id, "label": entry.label,
+                         "criterion": entry.criterion,
+                         "evidence": entry.evidence,
+                         "recommendation": entry.recommendation,
+                         "prompt": entry.prompt},
+                "response_schema": schema_object,
+                "statuses": sorted(_VALID_STATUSES),
+            },
+            "packet": {"packet_sha256": packet.packet_sha256,
+                       "scope": packet.scope,
+                       "project_id": packet.project_id,
+                       "declaration": packet.declaration},
+            "excerpts": [{"path": excerpt.path,
+                          "start_line": excerpt.start_line,
+                          "end_line": excerpt.end_line,
+                          "sha256": excerpt.sha256,
+                          "text": excerpt.text} for excerpt in chosen],
+        }
+        request = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=True).encode("utf-8")
+        if len(request) <= PROMPT_INPUT_MAX_BYTES - len(schema_bytes):
+            return request, chosen
+        if not chosen:
+            return request, chosen
+        chosen.pop()
+
+
+def _plan_one(packet: EvidencePacket, entry,
+              code_index: dict[str, frozenset],
+              schema_bytes: bytes) -> ItemReview:
+    routed = _route_excerpts(packet, entry, code_index)
+    reason = _skip_reason(packet, entry, code_index)
+    if reason is not None:
+        return ItemReview(item_id=entry.id, label=entry.label,
+                          scope=packet.scope, request=None,
+                          schema=schema_bytes,
+                          excerpt_paths=tuple(e.path for e in routed),
+                          skip_reason=reason)
+    request, chosen = _encode_item_request(packet, entry, routed,
+                                           schema_bytes)
+    return ItemReview(item_id=entry.id, label=entry.label,
+                      scope=packet.scope, request=request,
+                      schema=schema_bytes,
+                      excerpt_paths=tuple(e.path for e in chosen),
+                      skip_reason=None)
+
+
+def plan_item_reviews(packet: EvidencePacket) -> tuple[ItemReview, ...]:
+    """Plan one review per catalog item, in catalog order.
+
+    Pure: no filesystem, no subprocess, no model. Each review is either a
+    deterministic skip (no model call) or one bounded provider request
+    carrying only that item's routed evidence subset.
+    """
+    if not isinstance(packet, EvidencePacket):
+        raise TypeError("packet must be EvidencePacket")
+    from . import doctor as doctor_api
+
+    code_index = {excerpt.path: doctor_api.match_rules(excerpt.text)
+                  for excerpt in packet.excerpts}
+    schema_bytes = one_row_schema()
+    return tuple(_plan_one(packet, entry, code_index, schema_bytes)
+                 for entry in _CHECKLIST_CATALOG)
+
+
+_ONE_ROW_KEYS = frozenset({"status", "rationale", "evidence", "finding"})
+_ONE_ROW_FINDING_KEYS = frozenset(
+    {"summary", "suggested_change", "evidence"})
+
+
+def _invalid_reply(message: str) -> C.Problem:
+    return C.Problem(code="invalid-assessment", message=message,
+                     phase=_PHASE, retryable=False)
+
+
+def _check_one_row_prose(text: object, ctx: str) -> str:
+    if not isinstance(text, str) or not text:
+        raise _invalid_reply(f"{ctx} must be nonempty prose")
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _invalid_reply(f"{ctx} is not valid UTF-8") from None
+    if size > _ONE_ROW_PROSE_MAX_BYTES:
+        raise _invalid_reply(f"{ctx} exceeds its bound")
+    if C.aa_prose_is_untrusted(text):
+        raise _invalid_reply(f"{ctx} carries untrusted model content")
+    return text
+
+
+def _bind_one_row_citations(items: object, subset: dict, ctx: str) -> tuple:
+    if not isinstance(items, list) or len(items) > _ONE_ROW_EVIDENCE_MAX:
+        raise _invalid_reply(f"{ctx} must be a list of at most 16 citations")
+    citations: list[Citation] = []
+    for position, item in enumerate(items):
+        entry_ctx = f"{ctx}[{position}]"
+        _require_exact_keys(item, _RAW_CITATION_FIELDS, entry_ctx)
+        try:
+            citation = Citation(path=item["path"],
+                                start_line=item["start_line"],
+                                end_line=item["end_line"],
+                                sha256=item["sha256"])
+        except (TypeError, ValueError):
+            raise _invalid_reply(
+                f"{entry_ctx} is not a valid citation") from None
+        excerpt = subset.get(citation.path)
+        if excerpt is None:
+            raise _invalid_reply(
+                f"{entry_ctx} cites evidence outside the item subset")
+        if citation.sha256 != excerpt.sha256:
+            raise _invalid_reply(f"{entry_ctx} citation identity is stale")
+        if not (excerpt.start_line <= citation.start_line
+                <= citation.end_line <= excerpt.end_line):
+            raise _invalid_reply(
+                f"{entry_ctx} citation escapes its excerpt")
+        citations.append(citation)
+    return tuple(citations)
+
+
+def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
+    """Validate one one-row reply; return (AssessmentRow, Finding | None)."""
+    if len(reply) > MAX_PAYLOAD_BYTES:
+        raise _invalid_reply("reply exceeds its bound")
+    try:
+        text = reply.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _invalid_reply("reply is not valid UTF-8") from None
+    try:
+        document = json.loads(text)
+    except (RecursionError, ValueError):
+        raise _invalid_reply("reply is not JSON") from None
+    _require_exact_keys(document, _ONE_ROW_KEYS, "reply")
+    status = document["status"]
+    if status not in _VALID_STATUSES:
+        raise _invalid_reply("reply has an unknown status")
+    rationale = _check_one_row_prose(document["rationale"],
+                                     "reply.rationale")
+    if rationale.startswith((SKIP_PREFIX, FAILED_PREFIX)):
+        raise _invalid_reply("reply carries a ptest-owned prefix")
+    evidence = _bind_one_row_citations(document["evidence"], subset,
+                                       "reply.evidence")
+    if status in ("satisfied", "gap", "not-applicable") and not evidence:
+        raise _invalid_reply("reply needs at least one citation")
+    if status == "not-applicable" and sum(
+            1 for char in rationale if not char.isspace()) < (
+                _SKIP_RATIONALE_MIN_NONSPACE):
+        raise _invalid_reply("reply needs a specific not-applicable rationale")
+    raw_finding = document["finding"]
+    finding = None
+    if status == "gap":
+        if not isinstance(raw_finding, dict):
+            raise _invalid_reply("gap reply needs a finding")
+        _require_exact_keys(raw_finding, _ONE_ROW_FINDING_KEYS,
+                            "reply.finding")
+        summary = _check_one_row_prose(raw_finding["summary"],
+                                       "reply.finding.summary")
+        change = _check_one_row_prose(raw_finding["suggested_change"],
+                                      "reply.finding.suggested_change")
+        finding_evidence = _bind_one_row_citations(
+            raw_finding["evidence"], subset, "reply.finding.evidence")
+        if not finding_evidence:
+            raise _invalid_reply("finding needs at least one citation")
+        finding = Finding(id=entry.id, summary=summary,
+                          suggested_change=change, recipe_id=entry.recipe,
+                          evidence=finding_evidence)
+    elif raw_finding is not None:
+        raise _invalid_reply("non-gap reply must carry finding null")
+    row = AssessmentRow(id=entry.id, status=status, rationale=rationale,
+                        evidence=evidence, label=entry.label)
+    return row, finding
+
+
+def _skip_child_row(packet: EvidencePacket, entry,
+                    review: ItemReview) -> AssessmentRow:
+    """Build the deterministic N/A row for a skipped review."""
+    assert review.skip_reason is not None
+    citations = tuple(
+        Citation(path=manifest.path, start_line=manifest.start_line,
+                 end_line=manifest.end_line, sha256=manifest.sha256)
+        for manifest in _manifest_excerpts(packet))
+    return AssessmentRow(id=entry.id, status="not-applicable",
+                         rationale=review.skip_reason, evidence=citations,
+                         label=entry.label)
+
+
+def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
+                   replies: tuple[bytes | str | None, ...]) -> ChildAssessment:
+    """Assemble one child assessment from per-item replies.
+
+    ``replies`` align with ``reviews``: bytes hold a normalized provider
+    payload, str holds a failure reason, and None marks a skipped review.
+    A failing reply becomes an ``unknown`` row; only misaligned inputs
+    raise, plus stale-evidence when the reviews belong to another packet.
+    """
+    if not isinstance(packet, EvidencePacket):
+        raise TypeError("packet must be EvidencePacket")
+    if not isinstance(reviews, tuple) or not all(
+            isinstance(review, ItemReview) for review in reviews):
+        raise TypeError("reviews must be a tuple of ItemReview")
+    if not isinstance(replies, tuple):
+        raise TypeError("replies must be a tuple")
+    if len(reviews) != len(replies):
+        raise ValueError("reviews and replies must align")
+    known = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    for review in reviews:
+        if review.item_id not in _CATALOG_BY_ID:
+            raise ValueError(f"review {review.item_id!r} is not a catalog item")
+        if review.scope != packet.scope or any(
+                path not in known for path in review.excerpt_paths):
+            raise C.Problem(code="stale-evidence",
+                            message="item reviews belong to another packet",
+                            phase=_PHASE, retryable=False)
+    rows: list[AssessmentRow] = []
+    findings: list[Finding] = []
+    for review, reply in zip(reviews, replies):
+        entry = _CATALOG_BY_ID[review.item_id]
+        if review.request is None:
+            if reply is not None:
+                raise ValueError("skipped reviews take no reply")
+            rows.append(_skip_child_row(packet, entry, review))
+            continue
+        if reply is None:
+            raise ValueError("planned requests take a reply")
+        if isinstance(reply, str):
+            rows.append(AssessmentRow(
+                id=entry.id, status="unknown",
+                rationale=FAILED_PREFIX + reply, evidence=(),
+                label=entry.label))
+            continue
+        if not isinstance(reply, (bytes, bytearray)):
+            raise TypeError("replies must be bytes, str, or None")
+        subset = {path: known[path] for path in review.excerpt_paths}
+        try:
+            row, finding = _validate_one_row(bytes(reply), subset, entry)
+        except C.Problem:
+            row = AssessmentRow(id=entry.id, status="unknown",
+                                rationale=FAILED_PREFIX + "invalid reply",
+                                evidence=(), label=entry.label)
+            finding = None
+        rows.append(row)
+        if finding is not None:
+            findings.append(finding)
+    computed = score(tuple(rows))
+    return ChildAssessment(
+        packet_sha256=packet.packet_sha256,
+        project_id=packet.project_id, scope=packet.scope,
+        rows=tuple(rows), findings=tuple(findings), score=computed)
 
 
 def _reject_forbidden_keys(node: object) -> None:
@@ -1605,7 +2265,8 @@ def parse_assessment(payload: bytes,
         # accepted here; absence of code remains `unknown` by instruction.
         rows.append(AssessmentRow(id=entry["id"], status=entry["status"],
                                   rationale=entry["rationale"],
-                                  evidence=citations))
+                                  evidence=citations,
+                                  label=_CATALOG_BY_ID[entry["id"]].label))
 
     findings: list[Finding] = []
     for position, entry in enumerate(child["findings"]):
@@ -1649,7 +2310,10 @@ def parse_assessment(payload: bytes,
 __all__ = [
     "EvidenceLimits", "SourceExcerpt", "DependencyFact", "EvidencePacket",
     "Citation", "AssessmentRow", "Finding", "Score", "ChildAssessment",
+    "ItemReview",
     "build_packets", "encode_review_request", "parse_assessment", "score",
+    "plan_item_reviews", "assemble_child", "one_row_schema",
     "MAX_FILES_PER_CHILD", "MAX_BYTES_PER_CHILD", "MAX_BYTES_PER_FILE",
     "MAX_PROMPT_BYTES",
+    "ITEM_MAX_FILES", "ITEM_MAX_BYTES", "SKIP_PREFIX", "FAILED_PREFIX",
 ]
