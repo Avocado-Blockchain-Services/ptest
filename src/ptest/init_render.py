@@ -145,18 +145,110 @@ def _header(result: C.InitResult, rules: object, dry_run: bool) -> str:
     return "ptest already configured"
 
 
-def _config_lines(result: C.InitResult) -> list[str]:
-    # The configuration result keeps the historical one-line shape
-    # (``created: .ptest.toml``), shown relative to the repository root;
-    # the absolute typed target stays in the frozen JSON document.
-    lines = [f"{_human_action(result.action.value)}: {_CONFIG_NAME}"]
-    lines = [item for line in lines for item in _wrapped(line)]
+_NOTE_SEP = " · "
+_RUN_PREFIX = "run: "
+_NOT_RUNNABLE_PREFIX = "not runnable: "
+_FIX_SEP = " — fix: "
+
+
+def _synthesized_root_action(result: C.InitResult) -> str:
+    if result.action is C.InitAction.CREATED:
+        return "created"
+    if result.action is C.InitAction.PREVIEW:
+        return "would create"
+    return "unchanged"
+
+
+def _config_records(result: C.InitResult) -> list:
+    """Non-note config records in detail order (already sanitized)."""
+    records = []
     for item in result.details:
         if item.source != "config":
             continue
-        lines.extend(_entry(_human_action(_clean(item.action)),
-                             _clean(item.target)))
+        if _clean(item.action) == "note":
+            continue
+        records.append((_human_action(_clean(item.action)), _clean(item.target)))
+    return records
+
+
+def _config_lines(result: C.InitResult) -> list[str]:
+    # Each config record renders once as ``<action> <path>`` relative to
+    # the repository root; the absolute typed target stays in the frozen
+    # JSON document. The root line is synthesized from the result action
+    # only when no detail record names it, so it always appears exactly
+    # once and never in the historical ``created: .ptest.toml`` shape.
+    records = _config_records(result)
+    lines: list[str] = []
+    if not any(target == _CONFIG_NAME for _, target in records):
+        lines.extend(_entry(_synthesized_root_action(result), _CONFIG_NAME))
+    for action, target in records:
+        lines.extend(_entry(action, target))
+    for target in _split_notes(result)[2]:
+        lines.extend(_entry("note", target))
     return lines
+
+
+def _split_notes(result: C.InitResult) -> tuple[list, list, list]:
+    """Split executability notes into project, run, and other notes.
+
+    Returns ``(projects, runs, others)`` where projects holds
+    ``(project, runner, verdict)`` triples, runs holds verified command
+    strings, and others holds sanitized free-form note targets.
+    """
+    projects: list = []
+    runs: list = []
+    others: list = []
+    for item in result.details:
+        if item.source != "config" or _clean(item.action) != "note":
+            continue
+        target = _clean(item.target)
+        if target.startswith(_RUN_PREFIX):
+            runs.append(target[len(_RUN_PREFIX):])
+            continue
+        parts = target.split(_NOTE_SEP, 2)
+        if len(parts) == 3 and all(part for part in parts):
+            projects.append((parts[0], parts[1], parts[2]))
+        else:
+            others.append(target)
+    return projects, runs, others
+
+
+def _project_config_lines(records: list, project: str) -> list[str]:
+    """Config action lines belonging to a named project, if any.
+
+    The root project ``.`` owns the root line already shown under
+    Configuration, so it is never repeated and the root still appears
+    exactly once.
+    """
+    if project == ".":
+        return []
+    lines: list[str] = []
+    for action, target in records:
+        if target == f"{project}/{_CONFIG_NAME}":
+            lines.extend(_entry(action, target))
+    return lines
+
+
+def _project_lines(result: C.InitResult) -> list[str]:
+    projects, _, _ = _split_notes(result)
+    if not projects:
+        return []
+    records = _config_records(result)
+    lines: list[str] = []
+    for project, runner, verdict in projects:
+        lines.extend(_wrapped(f"{project}  {runner}  {verdict}",
+                              indent=_ENTRY_INDENT))
+        lines.extend(_project_config_lines(records, project))
+    return lines
+
+
+def _fix_for_verdict(verdict: str) -> str | None:
+    if not verdict.startswith(_NOT_RUNNABLE_PREFIX):
+        return None
+    rest = verdict[len(_NOT_RUNNABLE_PREFIX):]
+    if _FIX_SEP not in rest:
+        return None
+    return rest.split(_FIX_SEP, 1)[1] or None
 
 
 def _guidance_lines(rules: object) -> list[str]:
@@ -187,26 +279,21 @@ def _warning_lines(result: C.InitResult) -> list[str]:
 
 
 def _next_lines(result: C.InitResult, agents: tuple[str, ...]) -> list[str]:
-    lines = [
-        "ptest --full  run the integrated gate once the change is integrated",
-    ]
-    children = [
-        item.target[: -len("/" + _CONFIG_NAME)]
-        for item in result.details
-        if item.source == "config"
-        and item.target != _CONFIG_NAME
-        and item.target.endswith("/" + _CONFIG_NAME)
-    ]
-    if children:
-        lines.insert(
-            0,
-            f"ptest {children[0]}/tests/<scope>.py  run one focused child scope",
-        )
+    # Next steps list only verified commands: the ``run: `` notes from the
+    # executability check, then the exact fix for each project that is not
+    # runnable, then the unchanged agent restart hints. Nothing is invented:
+    # ``ptest --full`` appears only when a run note verifies it.
+    projects, runs, _ = _split_notes(result)
+    steps: list[str] = list(runs)
+    for project, _, verdict in projects:
+        fix = _fix_for_verdict(verdict)
+        if fix is not None:
+            steps.append(f"fix {project}: {fix}")
     for agent in dict.fromkeys(agents):
         hint = _HINTS.get(agent)
         if hint is not None:
-            lines.append(hint)
-    return [item for line in lines for item in _wrapped(line)]
+            steps.append(hint)
+    return [item for line in steps for item in _wrapped(line)]
 
 
 def render_init(result: C.InitResult, rules: object = None, *,
@@ -227,6 +314,10 @@ def render_init(result: C.InitResult, rules: object = None, *,
     body: list[str] = []
     body.append("Configuration")
     body.extend(_config_lines(result))
+    projects = _project_lines(result)
+    if projects:
+        body.append("Projects")
+        body.extend(projects)
     if rules is not None:
         guidance = _guidance_lines(rules)
         if guidance:

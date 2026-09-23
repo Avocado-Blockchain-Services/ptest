@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.resources
 import errno
+import hashlib
 import os
 import secrets
 import stat
@@ -78,8 +79,13 @@ def _legacy_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
-def _provider_text(provider: str) -> bytes:
-    """Current generated skill: valid front matter plus repository-root guidance."""
+def _previous_provider_text(provider: str) -> bytes:
+    """Exact base-commit skill bytes, recognized as previous managed content.
+
+    The longer pre-shortening template upgrades in place; anything else
+    that is not current still raises ``already-exists`` so user edits are
+    never clobbered.
+    """
     description = _PROVIDER_DESCRIPTIONS[provider]
     return (
         "---\n"
@@ -108,11 +114,33 @@ def _provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _provider_text(provider: str) -> bytes:
+    """Current generated skill: front matter plus a short guide pointer.
+
+    Shared guidance (merge gate, graph refresh, scopes) lives only in
+    `docs/ptest-agent.md`; the skill just points at it so the two can
+    never duplicate or drift.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to\n"
+        "the repository root). Run tests only through `ptest` from the repository root.\n"
+    ).encode("utf-8")
+
+
 def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None, str]:
     """Validate one canonical skill target without writing.
 
     Returns ``(relative, target, existing, kind)`` where ``kind`` is
-    ``"missing"``, ``"legacy"`` (exact released template, safe to upgrade) or
+    ``"missing"``, ``"legacy"`` (exact released template, safe to upgrade),
+    ``"previous"`` (exact base-commit template, safe to upgrade) or
     ``"current"`` (already in the generated format). Anything else raises
     before any write.
     """
@@ -148,6 +176,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
         return relative, target, current, "current"
     if current == _legacy_provider_text(provider):
         return relative, target, current, "legacy"
+    if current == _previous_provider_text(provider):
+        return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
 
@@ -544,7 +574,25 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
         _close_quietly(root_fd)
 
 
-def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes]:
+# sha256 of the base-commit ``docs/ptest-agent.md`` bytes. Repositories
+# holding exactly these bytes get an in-place guide upgrade; any other
+# differing guide is a user edit and still raises ``already-exists``.
+_BASE_GUIDE_SHA256 = "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68"
+
+
+def _guide_kind(existing: str | None, guide: bytes) -> str:
+    """Classify an installed guide: missing, current, or previous managed."""
+    if existing is None:
+        return "missing"
+    raw = existing.encode("utf-8")
+    if raw == guide:
+        return "current"
+    if hashlib.sha256(raw).hexdigest() == _BASE_GUIDE_SHA256:
+        return "previous"
+    raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
+
+
+def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes, str]:
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
         raise _problem("unsafe-path", "agent rules root is not a directory")
@@ -554,8 +602,7 @@ def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes]:
         if docs.is_symlink() or not docs.is_dir():
             raise _problem("unsafe-path", "agent rules docs directory is unsafe")
     existing_guide = _read_regular(root / _GUIDE_PATH) if docs.exists() else None
-    if existing_guide is not None and existing_guide.encode("utf-8") != guide:
-        raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
+    kind = _guide_kind(existing_guide, guide)
     agents = root / "AGENTS.md"
     try:
         agent_stamp = os.lstat(agents)
@@ -578,11 +625,11 @@ def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes]:
     for name, text in texts.items():
         if text is not None:
             _managed_state(text, name)
-    return root, texts, guide
+    return root, texts, guide, kind
 
 
 def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
-    root, texts, guide = _validated(root)
+    root, texts, guide, guide_kind = _validated(root)
     providers = tuple(dict.fromkeys(agents))
     for provider in providers:
         if provider not in _PROVIDER_SKILLS:
@@ -590,9 +637,12 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
     note = _legacy_codex_note(root) if "codex" in providers else None
     actions: list[str] = []
     details: list[C.ActionRecord] = []
-    if _read_regular(root / _GUIDE_PATH) is None:
+    if guide_kind == "missing":
         actions.append("create docs/ptest-agent.md")
         details.append(_detail(_GUIDE_PATH, "would create"))
+    elif guide_kind == "previous":
+        actions.append("update docs/ptest-agent.md")
+        details.append(_detail(_GUIDE_PATH, "would update"))
     else:
         actions.append(f"already present {_GUIDE_PATH}")
         details.append(_detail(_GUIDE_PATH, "already present"))
@@ -614,7 +664,7 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
         if kind == "missing":
             actions.append(f"create {relative}")
             details.append(_detail(relative, "would create"))
-        elif kind == "legacy":
+        elif kind in ("legacy", "previous"):
             actions.append(f"update {relative}")
             details.append(_detail(relative, "would update"))
         else:
@@ -792,7 +842,7 @@ def _rollback(root: Path,
 
 
 def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
-    root, texts, guide = _validated(root)
+    root, texts, guide, guide_kind = _validated(root)
     providers = tuple(dict.fromkeys(agents))
     plan = preview(root, agents=providers)
     pending = [item for item in plan.details if item.action in ("would create", "would update")]
@@ -826,9 +876,19 @@ def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
     observed: list[C.ActionRecord] = []
     try:
         guide_path = root / _GUIDE_PATH
-        if not guide_path.exists():
+        if guide_kind == "missing":
             create_file(_GUIDE_PATH, guide)
             observed.append(_detail(_GUIDE_PATH, "created"))
+        elif guide_kind == "previous":
+            original_guide = _read_regular(guide_path)
+            if original_guide is None:
+                raise _problem("state-unavailable",
+                               f"agent rules target {_GUIDE_PATH} is unavailable")
+            stamp = os.lstat(guide_path)
+            update_file(guide_path, original_guide,
+                        stat.S_IMODE(stamp.st_mode),
+                        guide.decode("utf-8"))
+            observed.append(_detail(_GUIDE_PATH, "updated"))
         else:
             observed.append(_detail(_GUIDE_PATH, "already present"))
         existing = [name for name, text in texts.items() if text is not None]
@@ -850,7 +910,7 @@ def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
             if kind == "current":
                 observed.append(_detail(relative, "already present"))
                 continue
-            if kind == "legacy":
+            if kind in ("legacy", "previous"):
                 if existing is None:
                     raise _problem("state-unavailable",
                                    f"agent provider target {relative} is unavailable")

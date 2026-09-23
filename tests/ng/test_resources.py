@@ -22,6 +22,30 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
     assert "under 0.5 seconds is healthy" in guide
     assert "Exactly 2 seconds starts optimization" in guide
     assert "exactly 3\nseconds remains in that band" in guide
+    assert "assessment authority only" in guide
+
+
+def test_agent_guide_describes_doctor_v2_first():
+    guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
+    first = " ".join(guide.split("\n\n")[1].split())
+    assert "one cheap-model call per checklist item" in first
+    assert "--offline" in first and "static" in first
+
+
+def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
+    guide = files("ptest").joinpath(
+        "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
+    assert len(guide.splitlines()) <= 45
+    assert "repository root" in guide
+    assert "ptest api/" in guide
+    assert "Run `ptest --full` once after the integrated change" in guide
+    assert "-n 0" in guide
+    assert "vitest run" in guide
+    assert "one cheap-model call per checklist item" in guide
+    assert "one database per worker per run" in guide
+    assert "assessment authority only" in guide
+    # The merge gate and graph refresh live only in the guide, not in skills.
+    assert "graphify update ." in guide
 
 
 @pytest.mark.parametrize("name, required", [
