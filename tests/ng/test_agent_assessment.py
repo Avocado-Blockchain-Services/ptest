@@ -1692,16 +1692,17 @@ def test_dependency_env_scan_counts_interpreter_entries_against_bound(
     checkpointed lazily, so a small bound stops lower-bound early."""
     from ptest import agent_assessment as AA
 
-    _make_venv(tmp_path, dists=tuple(f"pkg{i:02}-1.0" for i in range(10)))
     lib = tmp_path / ".venv" / "lib"
-    for extra in ("pypy3.10", "junk-a", "junk-b"):
+    lib.mkdir(parents=True)
+    for extra in ("pypy3.10", "junk-a", "junk-b", "junk-c", "junk-d",
+                  "junk-e"):
         (lib / extra).mkdir()
     monkeypatch.setattr(AA, "_MAX_ENV_SCAN_ENTRIES", 5)
-    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
-    installed = [fact for fact in packet.dependencies
-                 if fact.status == "installed"]
-    assert len(installed) == 1
-    assert "1+" in installed[0].detail
+    count, lower_bound, _tools, listed = AA._scan_dist_info(
+        tmp_path, ".venv", deadline=None, progress=None)
+    assert lower_bound is True
+    assert listed is False
+    assert count == 0
 
 
 def test_dependency_env_scan_checkpoint_trips_mid_site_packages_loop(
