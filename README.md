@@ -1,11 +1,18 @@
 # ptest NG
 
-ptest is a local-first test coordinator. It requires no cloud account, model
-API, or remote service. Run `ptest init`, then use `ptest <scoped paths>` or
+ptest is a local-first test coordinator. Normal test execution is local and
+model-independent; no cloud account, model API, or remote service is required
+to run tests. Run `ptest init`, then use `ptest <scoped paths>` or
 `ptest --full`.
 
-Run `ptest help` (or `ptest help <topic>`, `ptest <inspection-command> --help`)
-for task-oriented help; agents start at `ptest help agents`.
+Doctor has explicit offline static modes (`--offline`, `--json`, and `--prompt`)
+and a separately consented CLI review design. Provider-backed review is
+currently disabled because the Claude, Codex, and OpenCode profiles are
+unqualified. All three must pass qualification before review is enabled. If
+enabled, review sends bounded source text to the selected provider using your
+existing account; provider or account costs may apply. Choosing agents with
+`ptest init --agents` installs guidance only and does not authorize model
+review. See `ptest help doctor` for details; agents start at `ptest help agents`.
 
 For normal use, download a verified release archive and run `./install.sh`; see
 [docs/installation.md](docs/installation.md). The installer validates bundled
