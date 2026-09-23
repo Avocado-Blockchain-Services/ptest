@@ -253,7 +253,7 @@ def _unowned_token(argv: tuple[str, ...]) -> str | None:
     return None
 
 
-def _iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
+def iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
     """Yield project-relative files, sorted, bounded, skipping owned dirs."""
     try:
         entries = sorted(os.scandir(start), key=lambda entry: entry.name)
@@ -277,7 +277,7 @@ def _iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
             continue
         if is_dir:
             if depth > 0:
-                yield from _iter_files(root, Path(entry.path), depth - 1, budget)
+                yield from iter_files(root, Path(entry.path), depth - 1, budget)
         else:
             try:
                 rel = Path(entry.path).relative_to(root)
@@ -315,7 +315,7 @@ def _conftest_paths(root: Path, test_roots: tuple[str, ...]) -> list[str]:
         if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
             continue
         budget = [_MAX_WALK_ENTRIES]
-        for rel in _iter_files(root, base, depth, budget):
+        for rel in iter_files(root, base, depth, budget):
             if Path(rel).name != "conftest.py" or rel in found:
                 continue
             found.append(rel)
@@ -373,7 +373,7 @@ def _example_test(root: Path, test_root: str, kind: C.RunnerKind) -> str | None:
     if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
         return None
     budget = [_MAX_WALK_ENTRIES]
-    for rel in _iter_files(root, base, 6, budget):
+    for rel in iter_files(root, base, 6, budget):
         name = Path(rel).name
         if kind is C.RunnerKind.PYTEST:
             if name.startswith("test_") and name.endswith(".py") \

@@ -2486,4 +2486,50 @@ def execute(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
-__all__ = ["execute"]
+def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
+                   queue_timeout_s: float,
+                   fixture_domain: Path | None = None) -> C.RunResult | None:
+    """Run the declared setup once, without running any tests.
+
+    The setup executes as a literal exclusive command through
+    :func:`execute`: the same argv, checkout root, and identity
+    environment :func:`_setup_prepared` declares for setup phases of
+    normal runs.  On a passing setup the fingerprint is recorded with
+    the same required-paths check and before/after revalidation the
+    execution gate performs, so a later ``no_setup`` run proceeds.
+    Returns None when no setup run is owed; otherwise returns the setup
+    attempt result (a non-passing result leaves the blocker in place).
+    Raises ``C.Problem`` for admission or infrastructure failures.
+    """
+    if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.Config):
+        raise TypeError("run_setup_only requires DomainPaths and Config")
+    if config.setup is None:
+        return None
+    checkout = _checkout(config)
+    if _required_setup_state(config, checkout, domain) is None:
+        return None
+    before = _setup_fingerprint(config, checkout)
+    setup_config = replace(
+        config,
+        runner=replace(
+            config.runner, kind=C.RunnerKind.COMMAND,
+            launcher=tuple(config.setup.argv), args=(), full_args=()),
+        setup=None)
+    result = execute(
+        domain, setup_config,
+        C.RunRequest(mode=C.Mode.SCOPED, argv=(),
+                     queue_timeout_s=queue_timeout_s,
+                     fixture_domain=fixture_domain))
+    if result.status is C.Status.PASSED:
+        if _required_paths_issue(config, checkout) is None:
+            after = _setup_fingerprint(config, checkout)
+            if after != before:
+                raise _problem(
+                    "changed-during-run",
+                    "setup tool/lock inputs changed during setup",
+                    phase="setup")
+            _record_setup_fingerprint(domain, checkout, after)
+    return result
+
+
+__all__ = ["execute", "run_setup_only"]

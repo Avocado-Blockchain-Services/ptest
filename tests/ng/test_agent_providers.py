@@ -1587,3 +1587,31 @@ def test_discover_models_drops_slugs_failing_model_re(bindir):
         {"slug": "gpt-5.6-luna", "display_name": "Luna",
          "description": "fast"},
     )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owned launch is posix-only")
+def test_owned_spawn_refusals_name_the_reviewer(bindir, monkeypatch):
+    """_launch_one restores the reviewer prefix on _spawn_owned refusals."""
+    adapter = _synthetic(_resolve(bindir, "claude", "#!/bin/sh\nexit 0\n"))
+    monkeypatch.setattr(ap, "_PIDFD_AVAILABLE", False)
+    with pytest.raises(Problem) as refused:
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert refused.value.code == "provider-failed"
+    assert refused.value.message.startswith("reviewer claude launch refused: ")
+    assert "pidfd containment unavailable" in refused.value.message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owned launch is posix-only")
+def test_unverifiable_identity_refusal_names_the_reviewer(bindir, monkeypatch):
+    """An unverifiable process identity names its reviewer, then fails closed."""
+    adapter = _synthetic(_resolve(bindir, "codex", "#!/bin/sh\nsleep 30\n"))
+
+    def _no_pgid(pid):
+        raise ProcessLookupError("synthetic unreadable pgid")
+
+    monkeypatch.setattr(os, "getpgid", _no_pgid)
+    with pytest.raises(Problem) as refused:
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert refused.value.code == "provider-failed"
+    assert refused.value.message.startswith("reviewer codex launch refused: ")
+    assert "identity unverifiable" in refused.value.message

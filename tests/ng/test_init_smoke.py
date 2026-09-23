@@ -518,6 +518,71 @@ def test_tty_setup_yes_runs_setup_through_ptest_then_passes(
     assert (root / ".setup-done").is_file()
 
 
+def test_consented_setup_runs_smoke_exactly_once_per_init(
+        tmp_path, monkeypatch, capsys, case):
+    """Consented setup runs the smoke candidate exactly once per init.
+
+    The candidate appends to a counter file; after "y, y" the counter
+    holds one line (setup alone must not execute tests). A second init
+    asks no setup question and appends exactly one more line.
+    """
+    import sys as _sys
+
+    from ptest import cli
+
+    domain = case.domain()
+    root = domain.root / "smoke-setup-once"
+    root.mkdir()
+    _pytest_repo(root, {
+        "test_counted.py": (
+            "def test_counted():\n"
+            "    from pathlib import Path\n"
+            "    marker = Path(__file__).resolve().parent.parent / 'counter.txt'\n"
+            "    with marker.open('a', encoding='utf-8') as handle:\n"
+            "        handle.write('x\\n')\n"),
+    })
+    (root / "uv.lock").write_text("# fake uv lock\n", encoding="utf-8")
+    (root / "setup.py").write_text(
+        "from pathlib import Path\nPath('.setup-done').touch()\n",
+        encoding="utf-8")
+    (root / ".ptest.toml").write_text(
+        _pytest_toml_with_setup(
+            setup_argv=[_sys.executable, "setup.py"],
+            required_paths=[".setup-done"]),
+        encoding="utf-8")
+    _fake_python_on_path(monkeypatch, root / "bin")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+
+    def _answers(words):
+        owned = iter(words)
+
+        def fake_input(*args, **kwargs):
+            try:
+                return next(owned)
+            except StopIteration:
+                return pytest.fail("unexpected extra init prompt")
+
+        return fake_input
+
+    monkeypatch.setattr("builtins.input", _answers(["y", "y"]))
+    assert cli.main((
+        "--fixture-domain", str(domain.root),
+        "init", "--agents", "none", "--no-doctor")) == 0
+    assert capsys.readouterr().out.count("passed: ptest tests/test_counted.py") == 1
+    assert (root / "counter.txt").read_text(encoding="utf-8") == "x\n"
+
+    monkeypatch.setattr("builtins.input", _answers(["y"]))
+    assert cli.main((
+        "--fixture-domain", str(domain.root),
+        "init", "--agents", "none", "--no-doctor")) == 0
+    captured = capsys.readouterr()
+    assert "run it?" not in captured.err
+    assert captured.out.count("passed: ptest tests/test_counted.py") == 1
+    assert (root / "counter.txt").read_text(encoding="utf-8") == "x\nx\n"
+
+
 def _vitest_toml_with_setup(*, launcher=("node",)):
     import json as _json
 
@@ -898,7 +963,7 @@ def test_candidate_scan_uses_shared_walker_and_bounded_reader(
 
     _pytest_repo(tmp_path, {"test_a.py": "def test_a():\n    assert True\n"})
     walker_calls = []
-    real_iter = exec_check._iter_files
+    real_iter = exec_check.iter_files
 
     def spy_iter(root, start, depth, budget):
         walker_calls.append((str(start), depth))
@@ -911,7 +976,7 @@ def test_candidate_scan_uses_shared_walker_and_bounded_reader(
         reader_calls.append(relative)
         return real_read(root, relative, limit)
 
-    monkeypatch.setattr(exec_check, "_iter_files", spy_iter)
+    monkeypatch.setattr(exec_check, "iter_files", spy_iter)
     monkeypatch.setattr(files_module, "read_regular", spy_read)
 
     assert init_smoke.choose_candidate(

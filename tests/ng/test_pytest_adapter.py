@@ -927,3 +927,28 @@ def test_full_preparation_rejects_boolean_x_and_value_k_clusters(args):
     """Full mode refuses any boolean cluster with x, or one ending in k/m."""
     with pytest.raises(C.Problem, match="native-config-invalid"):
         prepare(_config(args=args), _plan(), _grant(), _attempt())
+
+
+@pytest.mark.parametrize("token", ["-rxXs", "-rsx", "-vrx", "-ra", "-rA"])
+def test_report_char_cluster_is_not_narrow(token):
+    """-r takes report chars, so only letters before r can hide -x."""
+    assert pytest_bridge.cluster_narrow_name(token) is None
+
+
+@pytest.mark.parametrize("token", ["-x", "-vx", "-xvs", "-lx", "-xl", "-vk"])
+def test_boolean_x_cluster_is_narrow(token):
+    assert pytest_bridge.cluster_narrow_name(token) == token
+
+
+@pytest.mark.parametrize("value", ["-rxXs", "-rsx", "-vrx", "-ra", "-rA"])
+def test_full_bridge_accepts_report_char_addopts(bridge_env, monkeypatch, value):
+    """Report-char clusters must not withhold the full run."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", value)
+    hook = pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config())
+    next(hook)
+
+
+@pytest.mark.parametrize("args", [("-rxXs",), ("-rsx",), ("-vrx",), ("-ra",), ("-rA",)])
+def test_full_preparation_accepts_report_char_clusters(args):
+    """Static admission agrees with the bridge on report-char clusters."""
+    prepare(_config(args=args), _plan(), _grant(), _attempt())

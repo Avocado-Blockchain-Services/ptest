@@ -154,6 +154,13 @@ def test_narrowing_tokens_match_bridge_full_refusals(tokens, expected):
     assert E._narrowing_tokens(tokens) == expected
 
 
+@pytest.mark.parametrize("tokens", [
+    ("-rxXs",), ("-rsx",), ("-vrx",), ("-ra",), ("-rA",),
+])
+def test_report_char_clusters_are_not_narrowing(tokens):
+    assert E._narrowing_tokens(tokens) == ()
+
+
 def test_clustered_x_addopts_withhold_full_run_command(tmp_path):
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-vx"\n')

@@ -888,6 +888,12 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         shutil.rmtree(scratch, ignore_errors=True)
         raise _problem("provider-unavailable",
                        f"reviewer {adapter.name} failed to start") from exc
+    except Problem as refusal:
+        # _spawn_owned refuses without the adapter name; restore the
+        # reviewer prefix so the refusal names its provider.
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise _problem(refusal.code,
+                       f"reviewer {adapter.name} {refusal.message}") from refusal
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise

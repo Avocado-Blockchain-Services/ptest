@@ -119,7 +119,7 @@ def _collect(root: Path, test_roots: tuple[str, ...],
             continue
         if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
             continue
-        for rel in _exec_check._iter_files(root, base, _MAX_DEPTH, budget):
+        for rel in _exec_check.iter_files(root, base, _MAX_DEPTH, budget):
             if not _name_ok(Path(rel).name, kind):
                 continue
             try:
@@ -272,29 +272,28 @@ def skip_result(plan: SmokePlan, reason: str) -> SmokeResult:
 
 def run_setup(domain: C.DomainPaths, plan: SmokePlan, *,
               fixture_domain: Path | None = None) -> str | None:
-    """Run declared setup through ptest's own setup path; None when ready.
+    """Run declared setup once through the setup-only path; None when ready.
 
-    The setup executes inside one scoped ``operations.execute`` call, which
-    records the setup fingerprint on success. Any later smoke run then uses
-    ``no_setup=True``. A Problem or infrastructure error becomes a skip
-    reason; so does a setup run that leaves the baseline unrecorded.
+    Setup executes without running any tests, and records the setup
+    fingerprint on success. The later smoke run then uses
+    ``no_setup=True`` and executes the candidate exactly once.
+    A Problem or infrastructure error becomes a skip reason; so does a
+    setup run that leaves the baseline unrecorded.
     """
     if plan.config is None or plan.candidate is None \
             or plan.setup_argv is None:
         return "smoke unavailable"
     _announce(" ".join(plan.setup_argv))
     try:
-        operations.execute(
-            domain, plan.config,
-            C.RunRequest(
-                mode=C.Mode.SCOPED, argv=(plan.candidate,),
-                queue_timeout_s=SMOKE_QUEUE_TIMEOUT_S,
-                fixture_domain=fixture_domain))
+        result = operations.run_setup_only(
+            domain, plan.config, queue_timeout_s=SMOKE_QUEUE_TIMEOUT_S,
+            fixture_domain=fixture_domain)
     except C.Problem as problem:
         return problem.message
     except Exception as error:  # never break init on smoke infrastructure
         return f"smoke error: {type(error).__name__}"
-    if operations.setup_blocker(domain, plan.config) is not None:
+    if ((result is not None and result.status is not C.Status.PASSED)
+            or operations.setup_blocker(domain, plan.config) is not None):
         return setup_advice(plan)
     return None
 

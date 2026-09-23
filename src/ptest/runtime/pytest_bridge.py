@@ -217,19 +217,23 @@ def _full_addopts(config: Any) -> tuple[str, ...]:
 
 # Short flags that take a value: a cluster starting with one carries an
 # attached value (``-kEXPR``, ``-n2``, ``-Werror``), so the cluster rule
-# below leaves it to the attached-expression classifiers.
-_VALUE_FLAG_LEADS = frozenset({"W", "p", "o", "c", "m", "k", "n"})
+# below leaves it to the attached-expression classifiers.  The set is
+# pytest's own short-option table (``pytest --help``: -c FILE, -k
+# EXPRESSION, -m MARKEXPR, -n (xdist), -o OVERRIDE_INI, -p name, -r chars,
+# -W PYTHONWARNINGS); every other short flag is boolean or a counter.
+_VALUE_FLAG_LEADS = frozenset({"W", "c", "k", "m", "n", "o", "p", "r"})
 
 
 def cluster_narrow_name(token: str) -> str | None:
     """Display name when a short-option cluster narrows full mode, else None.
 
     The single cluster rule shared by the bridge and ``adapters/pytest``:
-    any all-alpha cluster containing the boolean ``x`` flag (``-lx``,
-    ``-xl``, ``-vx``), or ending in the value-taking ``k``/``m`` flags
-    whose expression arrives as the next token (``-vk foo``), narrows the
-    inventory. Attached values (``-kEXPR``, ``-n2``) are classified
-    elsewhere, as are ``-W``/``-p``/``-o``/``-c`` clusters.
+    only the letters before the first value-taking flag can hide the
+    boolean ``x`` flag (``-vrx`` is ``-v`` plus ``-r x``, but ``-xvr``
+    still narrows), and a cluster ending in the value-taking ``k``/``m``
+    flags whose expression arrives as the next token (``-vk foo``)
+    narrows the inventory. Attached values (``-kEXPR``, ``-n2``) are
+    classified elsewhere, as are clusters led by a value-taking flag.
     """
     if not token.startswith("-") or token.startswith("--"):
         return None
@@ -240,7 +244,12 @@ def cluster_narrow_name(token: str) -> str | None:
         return token if body == "x" else None
     if body[0] in _VALUE_FLAG_LEADS:
         return None
-    if "x" in body or body[-1] in ("k", "m"):
+    prefix = body
+    for index, letter in enumerate(body):
+        if letter in _VALUE_FLAG_LEADS:
+            prefix = body[:index]
+            break
+    if "x" in prefix or body[-1] in ("k", "m"):
         return token
     return None
 
