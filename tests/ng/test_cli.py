@@ -1548,7 +1548,7 @@ def test_tty_auto_review_uses_stable_order_skipping_unavailable(
         if name == "claude":
             raise C.Problem(code="provider-unavailable", message="not installed",
                             phase="provider")
-        return _fake_reviewer(name, qualified=False)
+        return _fake_reviewer(name, qualified=True)
 
     monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
     monkeypatch.setattr("builtins.input", lambda: prompts.append("asked") or "yes")

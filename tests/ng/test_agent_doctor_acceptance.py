@@ -86,7 +86,7 @@ def _patch_qualification(monkeypatch, *, unavailable: bool = False):
             )
         return ReviewerAdapter(
             name=name, executable=f"/synthetic/{name}",
-            argv=(f"/synthetic/{name}",), qualified=False,
+            argv=(f"/synthetic/{name}",), qualified=True,
             qualification_note="synthetic acceptance adapter",
         )
 

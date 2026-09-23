@@ -811,9 +811,13 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
         raise _review_consent_problem()
 
     _require_review_qualification(parsed.reviewer)
-    # Qualification comes only from the resolver (which reads the shared
-    # status records); no override here.
     adapter = _resolve_review_adapter(parsed, interactive=interactive)
+    if not adapter.qualified:
+        raise _problem(
+            "provider-unqualified",
+            f"reviewer {adapter.name} is unqualified: "
+            f"{adapter.qualification_note}",
+        )
     if interactive and not _render_review_disclosure(
             adapter, resolution, ask=not preconsented):
         print(

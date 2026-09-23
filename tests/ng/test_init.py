@@ -667,13 +667,13 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
     assert cli.main(args) == 0
     created = capsys.readouterr()
     assert "provider-unqualified" in created.err
-    assert resolved == []
+    assert resolved == ["claude"]
 
     resolved.clear()
     assert cli.main(args) == 0
     existing = capsys.readouterr()
     assert "provider-unqualified" in existing.err
-    assert resolved == []
+    assert resolved == ["claude"]
 
 
 @pytest.mark.parametrize("extra", [
@@ -796,5 +796,5 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     assert "provider-failed" in captured.err
     assert (tmp_path / ".ptest.toml").is_file()
     assert not (tmp_path / "recommendations.md").exists()
-    assert statuses == ["claude", "codex", "opencode"]
+    assert statuses == ["claude", "claude"]
     assert launched == ["claude"]
