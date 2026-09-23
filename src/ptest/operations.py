@@ -325,6 +325,42 @@ def _record_setup_fingerprint(domain: C.DomainPaths,
     files.publish_atomic(directory, _SETUP_MARKER_NAME, payload)
 
 
+def _finish_setup(domain: C.DomainPaths, config: C.Config,
+                  checkout: C.CheckoutIdentity, before: str) -> C.Reason | None:
+    """Validate a completed setup: required paths, fingerprint, record.
+
+    Shared by the execution gate and :func:`run_setup_only` so both map
+    fingerprint and record failures to ``state-unavailable`` (or
+    ``changed-during-run``) instead of propagating them.
+    """
+    issue = _required_paths_issue(config, checkout)
+    if issue is not None:
+        return _reason(
+            "state-unavailable",
+            f"declared setup completed but {issue}",
+        )
+    try:
+        after = _setup_fingerprint(config, checkout)
+    except (C.Problem, OSError):
+        return _reason(
+            "state-unavailable",
+            "setup tool/lock fingerprint could not be revalidated",
+        )
+    if after != before:
+        return _reason(
+            "changed-during-run",
+            "setup tool/lock inputs changed during setup",
+        )
+    try:
+        _record_setup_fingerprint(domain, checkout, after)
+    except (C.Problem, OSError):
+        return _reason(
+            "state-unavailable",
+            "setup fingerprint state could not be recorded",
+        )
+    return None
+
+
 def _required_setup_state(config: C.Config,
                           checkout: C.CheckoutIdentity,
                           domain: C.DomainPaths) -> str | None:
@@ -2065,32 +2101,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
         def decide_attempt() -> C.Reason | None:
             nonlocal gate_snapshot
             if setup_prepared is not None:
-                setup_issue = _required_paths_issue(effective, checkout)
-                if setup_issue is not None:
-                    return _reason(
-                        "state-unavailable",
-                        f"declared setup completed but {setup_issue}",
-                    )
-                try:
-                    setup_fingerprint_after = _setup_fingerprint(effective, checkout)
-                except (C.Problem, OSError):
-                    return _reason(
-                        "state-unavailable",
-                        "setup tool/lock fingerprint could not be revalidated",
-                    )
-                if setup_fingerprint_after != setup_fingerprint_before:
-                    return _reason(
-                        "changed-during-run",
-                        "setup tool/lock inputs changed during setup",
-                    )
-                try:
-                    _record_setup_fingerprint(
-                        domain, checkout, setup_fingerprint_after)
-                except (C.Problem, OSError):
-                    return _reason(
-                        "state-unavailable",
-                        "setup fingerprint state could not be recorded",
-                    )
+                setup_reason = _finish_setup(
+                    domain, effective, checkout, setup_fingerprint_before)
+                if setup_reason is not None:
+                    return setup_reason
             gate_snapshot = _capture_source(
                 domain, effective, request, ensure_key=False,
                 execution_tier=(C.ExecutionTier.ADVANCED if advanced
@@ -2521,14 +2535,10 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
                      queue_timeout_s=queue_timeout_s,
                      fixture_domain=fixture_domain))
     if result.status is C.Status.PASSED:
-        if _required_paths_issue(config, checkout) is None:
-            after = _setup_fingerprint(config, checkout)
-            if after != before:
-                raise _problem(
-                    "changed-during-run",
-                    "setup tool/lock inputs changed during setup",
-                    phase="setup")
-            _record_setup_fingerprint(domain, checkout, after)
+        setup_reason = _finish_setup(domain, config, checkout, before)
+        if setup_reason is not None:
+            raise _problem(setup_reason.code, setup_reason.message,
+                           phase="setup")
     return result
 
 

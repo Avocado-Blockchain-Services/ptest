@@ -1092,3 +1092,84 @@ def test_monorepo_scope_routes_to_vitest_child(case):
     record = _node_record(web)
     assert record["argv"][1:] == ["node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
     assert record["cwd"] == str(web)
+
+
+# --- run_setup_only honest skip/failure (shared _finish_setup) ----------------
+
+
+def _setup_only_config(case, root):
+    return case.config(
+        setup=C.SetupConfig(
+            argv=("true",), required_paths=("made.txt",),
+            network=False, lifecycle_scripts=False),
+        checkout=C.CheckoutIdentity(
+            project_id="ab" * 16, checkout_id="cd" * 16, root=root),
+    )
+
+
+def _stored_setup_fingerprint(domain, config):
+    return operations._stored_setup_fingerprint(
+        domain, operations._checkout(config))
+
+
+def test_setup_only_missing_paths_raise_problem(case, tmp_path, monkeypatch):
+    """A passing setup that leaves required paths missing is not PASSED."""
+    domain = case.domain()
+    config = _setup_only_config(case, tmp_path)
+    monkeypatch.setattr(
+        operations, "execute",
+        lambda *args, **kwargs: case.result(status="passed"))
+    with pytest.raises(C.Problem, match="required setup path is missing"):
+        operations.run_setup_only(domain, config, queue_timeout_s=5)
+    assert _stored_setup_fingerprint(domain, config) is None
+
+
+def test_setup_only_failed_command_records_no_fingerprint(
+        case, tmp_path, monkeypatch):
+    """A failed setup command returns its result and records no fingerprint."""
+    (tmp_path / "made.txt").write_text("x", encoding="utf-8")
+    domain = case.domain()
+    config = _setup_only_config(case, tmp_path)
+    monkeypatch.setattr(
+        operations, "execute",
+        lambda *args, **kwargs: case.result(status="failed"))
+    result = operations.run_setup_only(domain, config, queue_timeout_s=5)
+    assert result.status is C.Status.FAILED
+    assert _stored_setup_fingerprint(domain, config) is None
+
+
+def test_setup_only_changed_inputs_raise_problem(case, tmp_path, monkeypatch):
+    """Tool/lock inputs changing during setup surface as a Problem."""
+    (tmp_path / "made.txt").write_text("x", encoding="utf-8")
+    domain = case.domain()
+    config = _setup_only_config(case, tmp_path)
+    monkeypatch.setattr(
+        operations, "execute",
+        lambda *args, **kwargs: case.result(status="passed"))
+    digests = iter(["a" * 64, "a" * 64, "b" * 64])
+    monkeypatch.setattr(
+        operations, "_setup_fingerprint",
+        lambda *args, **kwargs: next(digests))
+    with pytest.raises(C.Problem) as excinfo:
+        operations.run_setup_only(domain, config, queue_timeout_s=5)
+    assert excinfo.value.code == "changed-during-run"
+    assert _stored_setup_fingerprint(domain, config) is None
+
+
+def test_setup_only_record_failure_raises_problem(case, tmp_path, monkeypatch):
+    """An unrecordable fingerprint is a Problem, never a raw OSError."""
+    (tmp_path / "made.txt").write_text("x", encoding="utf-8")
+    domain = case.domain()
+    config = _setup_only_config(case, tmp_path)
+    monkeypatch.setattr(
+        operations, "execute",
+        lambda *args, **kwargs: case.result(status="passed"))
+
+    def _unwritable(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(operations, "_record_setup_fingerprint", _unwritable)
+    with pytest.raises(C.Problem) as excinfo:
+        operations.run_setup_only(domain, config, queue_timeout_s=5)
+    assert excinfo.value.code == "state-unavailable"
+    assert _stored_setup_fingerprint(domain, config) is None

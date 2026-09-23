@@ -940,6 +940,16 @@ def test_boolean_x_cluster_is_narrow(token):
     assert pytest_bridge.cluster_narrow_name(token) == token
 
 
+def test_value_led_cluster_trailing_k_is_not_narrow():
+    """-vrk is -v plus -r with report char k, not a -k expression."""
+    assert pytest_bridge.cluster_narrow_name("-vrk") is None
+
+
+def test_full_preparation_accepts_value_led_cluster():
+    """Static admission agrees: -vrk carries no inventory expression."""
+    prepare(_config(args=("-vrk",)), _plan(), _grant(), _attempt())
+
+
 @pytest.mark.parametrize("value", ["-rxXs", "-rsx", "-vrx", "-ra", "-rA"])
 def test_full_bridge_accepts_report_char_addopts(bridge_env, monkeypatch, value):
     """Report-char clusters must not withhold the full run."""

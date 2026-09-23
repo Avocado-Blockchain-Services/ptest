@@ -230,10 +230,11 @@ def cluster_narrow_name(token: str) -> str | None:
     The single cluster rule shared by the bridge and ``adapters/pytest``:
     only the letters before the first value-taking flag can hide the
     boolean ``x`` flag (``-vrx`` is ``-v`` plus ``-r x``, but ``-xvr``
-    still narrows), and a cluster ending in the value-taking ``k``/``m``
-    flags whose expression arrives as the next token (``-vk foo``)
-    narrows the inventory. Attached values (``-kEXPR``, ``-n2``) are
-    classified elsewhere, as are clusters led by a value-taking flag.
+    still narrows), and a cluster whose first value-taking letter is a
+    trailing ``k``/``m`` whose expression arrives as the next token
+    (``-vk foo`` narrows, but ``-vrk`` is ``-v`` plus ``-r`` with char
+    ``k``) narrows the inventory. Attached values (``-kEXPR``, ``-n2``)
+    are classified elsewhere, as are clusters led by a value-taking flag.
     """
     if not token.startswith("-") or token.startswith("--"):
         return None
@@ -245,11 +246,15 @@ def cluster_narrow_name(token: str) -> str | None:
     if body[0] in _VALUE_FLAG_LEADS:
         return None
     prefix = body
+    first_value_index = None
     for index, letter in enumerate(body):
         if letter in _VALUE_FLAG_LEADS:
             prefix = body[:index]
+            first_value_index = index
             break
-    if "x" in prefix or body[-1] in ("k", "m"):
+    if "x" in prefix:
+        return token
+    if first_value_index == len(body) - 1 and body[-1] in ("k", "m"):
         return token
     return None
 
