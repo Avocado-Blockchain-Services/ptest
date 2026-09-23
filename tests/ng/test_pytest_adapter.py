@@ -355,6 +355,38 @@ def test_xdist_prefix_lookalike_hook_is_still_refused():
         pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
 
 
+def test_plugin_registered_as_xdist_from_foreign_module_is_refused():
+    """An arbitrary plugin registered as 'xdist' is refused when inactive.
+
+    Exemption is by module (top-level package ``xdist``) only, never by
+    registered name, so a conftest alias cannot smuggle an execution
+    hook past the serial grant.
+    """
+    impostor = _module("conftest")
+    manager = _loaded_manager(
+        (("xdist", impostor),),
+        [_hookimpl("pytest_runtestloop", "conftest", impostor)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="not owned by the serial grant"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
+def test_xdist_module_plugin_under_foreign_name_stays_exempt_when_inactive():
+    """A real xdist-module plugin keeps its exemption under another name."""
+    xdist = _module("xdist.plugin")
+    manager = _loaded_manager(
+        (("site-plugin", xdist),),
+        [_hookimpl("pytest_runtestloop", "xdist.plugin", xdist)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
 @pytest.mark.parametrize("options", [
     {"numprocesses": 2},
     {"numprocesses": 2, "tx": ["popen", "popen"]},
