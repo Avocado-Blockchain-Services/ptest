@@ -2255,6 +2255,138 @@ def test_plan_item_reviews_skip_absent_when_cache_library_declared(tmp_path):
     assert reviews["CACHE-001"].request is not None
 
 
+def test_route_excerpts_ranks_scanner_hit_above_generic_files(tmp_path):
+    """A scanner-hit file sorted after 24 generic files still routes."""
+    from ptest import agent_assessment as AA
+
+    files = {
+        "pyproject.toml":
+            "[project]\nname = 'demo'\ndependencies = ['sqlalchemy']\n",
+    }
+    for index in range(40):
+        files[f"tests/test_a{index:02d}.py"] = (
+            f"def test_a{index:02d}():\n    assert True\n")
+    files["tests/test_zz_db.py"] = "def teardown():\n    drop_database(url)\n"
+    packet = _packet_for(tmp_path, files)
+    assert len(packet.excerpts) == 42
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    db_isolation = reviews["DB-002"]
+    assert db_isolation.request is not None
+    assert len(db_isolation.excerpt_paths) <= AA.ITEM_MAX_FILES
+    assert "tests/test_zz_db.py" in db_isolation.excerpt_paths
+    assert db_isolation.excerpt_paths[0] == "tests/test_zz_db.py"
+
+
+@pytest.mark.parametrize(("manifest", "dependency", "items"), [
+    ("pyproject.toml", "pymssql", ("DB-001", "DB-002")),
+    ("pyproject.toml", "duckdb", ("DB-001", "DB-002")),
+    ("package.json", '"pg": "^8.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"mysql2": "^3.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"mongodb": "^6.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"drizzle-orm": "^0.30.0"', ("DB-001", "DB-002")),
+    ("package.json", '"kysely": "^0.27.0"', ("DB-001", "DB-002")),
+    ("package.json", '"@supabase/supabase-js": "^2.0.0"',
+     ("DB-001", "DB-002")),
+    ("go.mod", "gorm.io/gorm", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/jackc/pgx/v5", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/lib/pq", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/jmoiron/sqlx", ("DB-001", "DB-002")),
+    ("Cargo.toml", 'diesel = "2"', ("DB-001", "DB-002")),
+    ("Cargo.toml", 'rusqlite = "0.31"', ("DB-001", "DB-002")),
+    ("Cargo.toml", 'sqlx = "0.7"', ("DB-001", "DB-002")),
+    ("package.json", '"keyv": "^4.0.0"', ("CACHE-001",)),
+    ("package.json", '"lru-cache": "^10.0.0"', ("CACHE-001",)),
+    ("package.json", '"node-cache": "^5.0.0"', ("CACHE-001",)),
+    ("package.json", '"diskcache": "^5.0.0"', ("CACHE-001",)),
+])
+def test_plan_item_reviews_skip_absent_for_declared_driver_per_ecosystem(
+        tmp_path, manifest, dependency, items):
+    """Declaring any known DB/cache driver per ecosystem forces a review."""
+    from ptest import agent_assessment as AA
+
+    if manifest == "package.json":
+        manifest_text = ('{"name": "demo", "dependencies": {'
+                         + dependency + "}}\n")
+    elif manifest == "go.mod":
+        manifest_text = "module demo\n\ngo 1.21\n\nrequire " + dependency + " v0.0.0\n"
+    elif manifest == "Cargo.toml":
+        manifest_text = ('[package]\nname = "demo"\nversion = "0.1.0"\n'
+                         "[dependencies]\n" + dependency + "\n")
+    else:
+        manifest_text = ("[project]\nname = 'demo'\ndependencies = ['"
+                         + dependency + "']\n")
+    packet = _packet_for(tmp_path, {
+        manifest: manifest_text,
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    for item_id in items:
+        assert reviews[item_id].request is not None
+
+
+@pytest.mark.parametrize("token", [
+    "pg", "postgres", "mysql2", "mongodb", "mssql", "pymssql", "duckdb",
+    "drizzle-orm", "kysely", "@supabase/supabase-js", "gorm", "pgx",
+    "lib/pq", "sqlx", "diesel", "rusqlite", "jdbc", "hibernate", "jpa",
+    "jooq", "mybatis",
+])
+def test_db_library_regex_covers_listed_drivers(token):
+    """Every probed driver token (incl. JVM) matches the DB library regex."""
+    from ptest import agent_assessment as AA
+
+    assert AA._DB_LIBRARY_RE.search(token)
+
+
+@pytest.mark.parametrize("token", [
+    "keyv", "lru-cache", "node-cache", "diskcache",
+])
+def test_cache_library_regex_covers_listed_caches(token):
+    """Every probed cache token matches the cache library regex."""
+    from ptest import agent_assessment as AA
+
+    assert AA._CACHE_LIBRARY_RE.search(token)
+
+
+@pytest.mark.parametrize("usage", [
+    "url = 'mongodb://localhost:27017'\n",
+    "url = 'mssql://user@host/db'\n",
+    "import duckdb\nduckdb.sql('select 1')\n",
+])
+def test_plan_item_reviews_skip_absent_for_db_usage_variants(
+        tmp_path, usage):
+    """URL schemes and driver call styles in evidence force a DB review."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_db.py": "def test_q():\n    " + usage.replace("\n", "\n    "),
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_for_declared_duckdb_end_to_end(
+        tmp_path):
+    """Finding repro: pymssql+duckdb declared and used must not skip."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": ("[project]\nname = 'demo'\n"
+                           "dependencies = ['pymssql', 'duckdb']\n"),
+        "tests/test_duck.py": ("import duckdb\ndef test_q():\n"
+                               "    duckdb.sql('select 1')\n"
+                               "    assert True\n"),
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
 def test_plan_item_reviews_is_pure_without_filesystem(tmp_path, monkeypatch):
     from ptest import agent_assessment as AA
 

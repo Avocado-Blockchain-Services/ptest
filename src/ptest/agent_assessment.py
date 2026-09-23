@@ -48,6 +48,9 @@ from pathlib import Path
 
 from . import contracts as C
 from .checklist import CATALOG as _CHECKLIST_CATALOG
+from .checklist import _SRC_DIR as _GENERIC_SRC_DIR_PATTERN
+from .checklist import _TEST_DIR as _GENERIC_TEST_DIR_PATTERN
+from .checklist import _TEST_FILE as _GENERIC_TEST_FILE_PATTERN
 from .files import read_regular
 
 _PHASE = "validation"
@@ -1598,21 +1601,32 @@ _CATALOG_BY_ID = {entry.id: entry for entry in _CHECKLIST_CATALOG}
 
 # Conservative dependency signals. Any hit means the item is reviewed;
 # only total absence across manifests, evidence, and scanner hits skips.
+# The library lists deliberately cover Python, Node, Go, Rust, and JVM
+# drivers, ORMs, and caches by substring so new clients fail open to review.
 _DB_LIBRARY_RE = re.compile(
     r"sqlalchemy|sqlmodel|django|alembic|psycopg|asyncpg|aiosqlite|"
-    r"\bsqlite3?\b|peewee|tortoise|prisma|sequelize|typeorm|knex|mongoose|"
-    r"pymongo|\bmotor\b|oracledb|cx_oracle|pyodbc|pymysql|asyncmy",
+    r"\bsqlite3?\b|sqlite|duckdb|peewee|tortoise|prisma|sequelize|typeorm|"
+    r"knex|mongoose|mongo|pymongo|\bmotor\b|mongoengine|beanie|odmantic|"
+    r"piccolo|postgres|\bpg\b|pgx|lib/pq|mysql2?|mssql|pymssql|oracledb|"
+    r"cx_oracle|oracle|pyodbc|pymysql|asyncmy|drizzle|kysely|supabase|"
+    r"mikro-orm|gorm|sqlx|diesel|rusqlite|cassandra|dynamo|firestore|"
+    r"cockroach|jdbc|hibernate|\bjpa\b|jooq|mybatis",
     re.IGNORECASE)
 _DB_USAGE_RE = re.compile(
     r"connect\s*\(|create_all|drop_database|drop_all|truncate|DATABASE_URL|"
-    r"database_url|postgres(?:ql)?://|mysql://|sqlite:/|Column\s*\(|"
-    r"create_engine|sessionmaker|\.query\s*\(|\.execute\s*\(", re.IGNORECASE)
+    r"database_url|postgres(?:ql)?://|mysql://|mariadb://|mongodb://|"
+    r"mssql://|sqlite:/|Column\s*\(|"
+    r"create_engine|sessionmaker|\.query\s*\(|\.execute\s*\(|\.sql\s*\(",
+    re.IGNORECASE)
 _CACHE_LIBRARY_RE = re.compile(
-    r"redis|valkey|memcach|pylibmc|pymemcache|aiocache|cachetools",
+    r"redis|valkey|memcach|pylibmc|pymemcache|aiocache|cachetools|"
+    r"keyv|lru|node-cache|diskcache|go-cache|ehcache|caffeine|hazelcast|"
+    r"cacheops",
     re.IGNORECASE)
 _CACHE_USAGE_RE = re.compile(
     r"flushall|flushdb|clear_all|invalidate_all|invalidate\s*\(|CACHE_URL|"
-    r"cache_url|redis://|valkey://|\.clear\s*\(|\.delete\s*\(", re.IGNORECASE)
+    r"cache_url|redis://|valkey://|memcached://|\.clear\s*\(|\.delete\s*\(",
+    re.IGNORECASE)
 
 _ONE_ROW_CITATION_SCHEMA = {
     "type": "object",
@@ -1755,21 +1769,51 @@ def _skip_reason(packet: EvidencePacket, entry,
             "configuration or usage in the admitted evidence.")
 
 
+# Broad directory patterns that admit almost every test/src file. Ranked
+# last so an excerpt matching only these never pushes out key evidence.
+_GENERIC_PATH_PATTERN_STRINGS = frozenset({
+    _GENERIC_TEST_DIR_PATTERN, _GENERIC_TEST_FILE_PATTERN,
+    _GENERIC_SRC_DIR_PATTERN})
+
+
 def _route_excerpts(packet: EvidencePacket, entry,
                     code_index: dict[str, frozenset]) -> list[SourceExcerpt]:
-    """Route the item's evidence subset, in packet order, within item caps."""
-    path_res = [re.compile(pattern) for pattern in entry.path_patterns]
+    """Route the item's evidence subset, ranked before capping.
+
+    Eligibility is unchanged: a path-pattern, text-pattern, or scanner-code
+    hit admits the excerpt. Rank order is scanner-code hits first, then
+    text-pattern hits, then item-specific path matches (conftest,
+    fixture/factory, db/migration/cache names, manifests, .ptest.toml),
+    then generic test/src directory matches. Packet order is kept within
+    each rank, and the ITEM_MAX_FILES / ITEM_MAX_BYTES caps apply to the
+    ranked order so key evidence cannot be starved by generic matches.
+    """
+    specific_res = [re.compile(pattern) for pattern in entry.path_patterns
+                    if pattern not in _GENERIC_PATH_PATTERN_STRINGS]
+    generic_res = [re.compile(pattern) for pattern in entry.path_patterns
+                   if pattern in _GENERIC_PATH_PATTERN_STRINGS]
     text_res = [re.compile(pattern) for pattern in entry.text_patterns]
     wanted = set(entry.scanner_codes)
+    ranked: list[tuple[tuple[bool, bool, bool], SourceExcerpt]] = []
+    for excerpt in packet.excerpts:
+        codes = set(code_index.get(excerpt.path, ()))
+        scanner_hit = bool(wanted & codes)
+        text_hit = any(pattern.search(excerpt.text) for pattern in text_res)
+        specific_hit = any(pattern.search(excerpt.path)
+                           for pattern in specific_res)
+        generic_hit = any(pattern.search(excerpt.path)
+                          for pattern in generic_res)
+        if not (scanner_hit or text_hit or specific_hit or generic_hit):
+            continue
+        ranked.append(((not scanner_hit, not text_hit, not specific_hit),
+                       excerpt))
+    # Stable sort: packet order is kept within each rank.
+    ranked.sort(key=lambda item: item[0])
     routed: list[SourceExcerpt] = []
     total = 0
-    for excerpt in packet.excerpts:
+    for _, excerpt in ranked:
         if len(routed) >= ITEM_MAX_FILES:
             break
-        if not (any(pattern.search(excerpt.path) for pattern in path_res)
-                or any(pattern.search(excerpt.text) for pattern in text_res)
-                or (wanted & set(code_index.get(excerpt.path, ())))):
-            continue
         size = len(excerpt.text.encode("utf-8"))
         if total + size > ITEM_MAX_BYTES:
             continue
