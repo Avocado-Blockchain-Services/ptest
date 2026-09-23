@@ -71,7 +71,9 @@ Notes:
   bounds parallel model calls. After init, --smoke runs one small real
   test per project through the scoped runner, --no-smoke skips it, and a
   TTY asks once naming the files. --dry-run and --json never run smoke;
-  a smoke failure keeps the written config and the exit status."""
+  a smoke failure keeps the written config and the exit status. Declared
+  setup never runs silently: a TTY is asked once per project before its
+  smoke test, and non-interactive smoke skips with the setup command."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 

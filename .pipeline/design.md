@@ -496,10 +496,13 @@ def launch_review(adapter, packet: bytes, schema: bytes, timeout_s: int, progres
     # existing contract; when cancel is set, stop the owned group and return error="cancelled", cancelled=True
 def launch_reviews(adapter: ReviewerAdapter, requests: Sequence[tuple[bytes, bytes]], timeout_s: int, *,
                    concurrency: int = 4,
-                   on_done: Callable[[int, ProviderResult], None] | None = None) -> tuple[ProviderResult, ...]
+                   on_done: Callable[[int, ProviderResult], None] | None = None,
+                   progress: Callable[[ProgressEvent], None] | None = None) -> tuple[ProviderResult, ...]
     # results aligned with requests; ThreadPoolExecutor(max_workers=concurrency), concurrency in 1..8;
     # KeyboardInterrupt in the waiting thread sets the shared cancel event, joins every worker, then raises
     # C.Problem("review-cancelled")
+    # Round 3 (fix1 finding): new keyword-only progress, shared thread-safely by every worker for each
+    # item's reviewing heartbeat; cli passes progress=lambda _e: heartbeat() (already throttled).
 def with_model(adapter: ReviewerAdapter, model: str) -> ReviewerAdapter
     # claude: argv + ("--model", model); codex: argv + ("-m", model); other providers raise provider-unqualified.
     # model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$
