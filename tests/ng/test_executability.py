@@ -140,6 +140,9 @@ def test_xdist_activation_is_value_aware(tokens, active):
 @pytest.mark.parametrize("tokens,expected", [
     (("-vx",), ("-vx",)),
     (("-xvs",), ("-xvs",)),
+    (("-lx",), ("-lx",)),
+    (("-xl",), ("-xl",)),
+    (("-vk", "foo"), ("-vk",)),
     (("-kfoo",), ("-kfoo",)),
     (("-c", "other.ini"), ("-c",)),
     (("tests/test_a.py::test_x",), ("tests/test_a.py::test_x",)),
@@ -292,6 +295,21 @@ def test_native_go_and_cargo_are_not_executable(tmp_path, kind):
     assert result.fix == (
         'configure kind = "command" with an explicit launcher in .ptest.toml')
     assert result.full is False
+
+
+def test_declared_setup_is_caveat_even_when_paths_present(tmp_path):
+    setup = C.SetupConfig(argv=("uv", "sync", "--locked"),
+                          required_paths=("tests",),
+                          network=False, lifecycle_scripts=False)
+    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+
+    result = E.check_config(_config(tmp_path, setup=setup), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "setup runs when required paths or its fingerprint are missing: "
+        "uv sync --locked",)
+    assert result.full is True
 
 
 def test_missing_setup_path_is_trailing_caveat(tmp_path):

@@ -1816,7 +1816,8 @@ def _ok_item_launches(launches, hook=None, *, pid=1000, status="unknown"):
     from ptest.agent_providers import ProviderResult
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -1854,7 +1855,8 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     argv_log = []
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -2046,7 +2048,8 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
         assert adapter.argv[-2:] == ("--model", "haiku")
 
     def launch_many(adapter, requests_arg, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         assert concurrency == 4
         return _ok_item_launches(launches, hook, pid=1000)(
             adapter, requests_arg, timeout_s, concurrency=concurrency,
@@ -2125,7 +2128,8 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
     launches = []
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -2299,7 +2303,8 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
     _fake_qualified_profiles(monkeypatch)
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         results = []
         for _request, _schema in requests:
             timed_out = case_name == "timeout"
@@ -3217,7 +3222,7 @@ def test_resolve_review_model_codex_pick_caches_exact_slug(
     ])
     calls = _pick_provider(monkeypatch, b"gpt-5.6-luna")
     adapter = _fake_reviewer("codex", qualified=True)
-    cache = tmp_path / "cache"
+    cache = cli.files.ensure_private_dir(tmp_path, "cache")
     model, version = cli._resolve_review_model(adapter, cache, None)
     assert model == "gpt-5.6-luna"
     assert version == "codex-cli 0.155.1"
@@ -3268,7 +3273,8 @@ def test_write_cached_review_model_is_private_and_atomic(tmp_path):
 
     from ptest import cli
 
-    cache = tmp_path / "cache"
+    # The caller owns the private cache dir; _write only publishes into it.
+    cache = cli.files.ensure_private_dir(tmp_path, "cache")
     cli._write_cached_review_model(cache, "codex", "v1", "gpt-5.6-luna")
     assert stat.S_IMODE(cache.stat().st_mode) == 0o700
     assert stat.S_IMODE((cache / "codex.json").stat().st_mode) == 0o600

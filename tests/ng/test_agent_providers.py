@@ -1548,3 +1548,42 @@ def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
             "grandchild survived the owned capture"
     finally:
         os.close(reader)
+
+
+def test_cli_version_early_stops_on_over_bound_output(bindir):
+    """cli_version returns None well before its timeout on huge output."""
+    _write_bin(
+        bindir, "codex",
+        "#!/bin/sh\nhead -c 1200000 /dev/zero | tr '\\0' 'v'\nsleep 30\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+
+    started = time.monotonic()
+    try:
+        assert ap.cli_version(adapter) is None
+    finally:
+        elapsed = time.monotonic() - started
+    assert elapsed < ap._VERSION_TIMEOUT_S - 1
+
+
+def test_discover_models_drops_slugs_failing_model_re(bindir):
+    """Discovered codex slugs are validated at discovery, not at pick."""
+    payload = json.dumps({
+        "models": [
+            {"slug": "gpt-5.6-luna", "display_name": "Luna",
+             "description": "fast", "visibility": "list"},
+            {"slug": "../evil", "display_name": "Evil",
+             "description": "path escape", "visibility": "list"},
+            {"slug": "has space", "display_name": "Space",
+             "description": "blank", "visibility": "list"},
+            {"slug": "x" * 129, "display_name": "Long",
+             "description": "over bound", "visibility": "list"},
+        ],
+    }).encode("utf-8")
+    _debug_models_bin(bindir, payload)
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+
+    assert ap.discover_models(adapter) == ("gpt-5.6-luna",)
+    assert ap.discover_model_entries(adapter) == (
+        {"slug": "gpt-5.6-luna", "display_name": "Luna",
+         "description": "fast"},
+    )

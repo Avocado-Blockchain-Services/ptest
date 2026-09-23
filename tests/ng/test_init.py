@@ -754,8 +754,17 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
         lambda *a, **k: pytest.fail("resolved reviewer for unqualified offer"),
     )
     # The smoke prompt fires before the review offer; declining it keeps
-    # this test's no-qualified-reviewer path intact with no run.
-    monkeypatch.setattr("builtins.input", lambda: "n")
+    # this test's no-qualified-reviewer path intact with no run. Each init
+    # asks at most once: a second prompt within one init is a regression.
+    answers = iter(["n", "n"])
+
+    def fake_input(*args, **kwargs):
+        try:
+            return next(answers)
+        except StopIteration:
+            return pytest.fail("unexpected second init prompt")
+
+    monkeypatch.setattr("builtins.input", fake_input)
     monkeypatch.setattr(
         cli.doctor, "inspect_workspace",
         lambda *a, **k: pytest.fail("scanned source with no qualified reviewer"),
@@ -938,7 +947,7 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     launched = []
 
     def fail_launches(adapter, requests, timeout_s, *, concurrency=4,
-                      on_done=None):
+                      on_done=None, progress=None):
         for _request, _schema in requests:
             launched.append(adapter.name)
         return tuple(

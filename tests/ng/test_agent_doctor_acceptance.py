@@ -141,7 +141,8 @@ def _install_fake_review(monkeypatch, *, cancelled: bool = False):
     launches = []
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None):
+                    on_done=None,
+                    progress=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -336,7 +337,8 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
     from ptest.agent_providers import ProviderResult
 
     def cancelled_launches(adapter, requests, timeout_s, *, concurrency=4,
-                           on_done=None):
+                           on_done=None,
+                    progress=None):
         launch_calls.append((adapter.name,))
         return tuple(
             ProviderResult(
@@ -486,3 +488,36 @@ def test_review_unavailable_or_cancelled_preserves_existing_report(
         assert scopes == []
     else:
         assert scopes and all(scope == "." for scope in scopes)
+
+
+def test_review_passes_heartbeat_progress_to_launch_reviews(
+        tmp_path, monkeypatch, capsys):
+    """cli wires its throttled heartbeat into launch_reviews progress."""
+    from ptest import cli as cli_module
+
+    root = tmp_path / "review-heartbeat"
+    _write_v2(root, runner="pytest")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv(
+        "PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "hb-locks"))
+    _patch_qualification(monkeypatch)
+    _install_fake_review(monkeypatch)
+    seen = []
+    fake = cli_module.agent_providers.launch_reviews
+
+    def spy(adapter, requests, timeout_s, **kwargs):
+        seen.append(kwargs.get("progress"))
+        return fake(adapter, requests, timeout_s, **kwargs)
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_reviews", spy)
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda *args, **kwargs: pytest.fail(
+            "doctor review executed project tests"),
+    )
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
+    assert seen, "review launched no items"
+    assert all(callable(progress) for progress in seen)

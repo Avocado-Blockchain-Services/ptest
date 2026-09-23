@@ -920,3 +920,10 @@ def test_full_preparation_preserves_safe_strict_controls():
     """Static admission already allows the --strict* flag forms for full."""
     config = _config(args=("--strict-markers", "--strict-config", "--strict"))
     prepare(config, _plan(), _grant(), _attempt())
+
+
+@pytest.mark.parametrize("args", [("-lx",), ("-xl",), ("-vk", "foo")])
+def test_full_preparation_rejects_boolean_x_and_value_k_clusters(args):
+    """Full mode refuses any boolean cluster with x, or one ending in k/m."""
+    with pytest.raises(C.Problem, match="native-config-invalid"):
+        prepare(_config(args=args), _plan(), _grant(), _attempt())
