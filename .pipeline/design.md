@@ -1,6 +1,7 @@
 # Design — doctor and init v2
 
-Author: architect (Claude Opus 5.5), 2026-09-23
+Author: architect (Claude Opus 5.5), 2026-09-23. Revision 2: barrier B1 plus integration task T7 (§1, §4 T7);
+cross-file deletions and pinned tests assigned to their owners (T1, T2, T4, T5); new-file list §7.1.
 Chain worktree: `/home/ingmar/worktrees/ptest/cc-doctor-init-v2/ptest`, branch `feature/doctor-init-v2`, base `193346e`.
 Authoritative spec: `docs/superpowers/specs/2026-09-23-doctor-init-v2-requirements.md`. This design amends
 `docs/superpowers/specs/2026-09-22-agent-doctor-design.md`; section 10 lists every amendment, and a pointer section
@@ -34,39 +35,50 @@ and has no listing. `codex exec` accepts `-m, --model <MODEL>`.
 ## 1. Architecture and seams
 
 ```
+ WAVE 1 (parallel, disjoint files)                                   WAVE 2 (after barrier B1)
             config.py ──uses──► executability.py (T1, NEW)            vitest adapter (T2)
                  │ InitResult.details notes (grammar §3.2)              operations/runners (T2)
                  ▼
- cli.py (T6) ──► init_render.render_init (T3)   [no signature change; reads notes]
+ cli.py ──► init_render.render_init (T3)   [no signature change; reads notes]
     │
-    ├─ doctor review: build_packets ─► plan_item_reviews ─► launch_reviews ─► assemble_child   (T4 / T6 / T4)
-    │                                  (agent_assessment, T4)  (agent_providers, T6)
-    ├─ _execution_facts(resolution) ─lazy import─► executability.check_resolution (T1)
+    ├─ doctor review (T7): build_packets ─► plan_item_reviews ─► launch_reviews ─► assemble_child
+    │                      (agent_assessment, T4)                (agent_providers, T6)   (T4)
+    ├─ _execution_facts(resolution) (T7) ─top-level import─► executability.check_resolution (T1)
     └─► render.render_agent_assessment / recommendations.render_recommendations (T5)
         [signatures unchanged; new data rides in the public child dicts, §3.6]
 ```
 
-**No shared-file transcription task exists in this run** because triage flagged none. `sharedFileContent` is
-therefore empty, and no task imports code that another task creates. Every cross-task dependency is one of these
-four kinds:
+**Two waves and one barrier.** Wave 1 runs T1–T6 in parallel on disjoint files. **Barrier B1**: the controller
+merges T1, T2, T3, T4, T5, T6 into the chain branch (in that order), and only then cuts the T7 worktree from the
+chain HEAD. Wave 2 is T7 alone: it wires the new T1/T4/T6 functions into `cli.py` and owns the post-merge
+integration tests. Because T7 runs alone and after every wave-1 merge, T7 may edit files that a wave-1 task owned;
+that overlap is sequential, not parallel.
 
-1. **Data riding existing types.** T1 → T3 uses `C.ActionRecord` notes. T6 → T5 uses plain dicts in the public
-   assessment document.
+**No shared-file transcription task exists in this run.** `sharedFileContent` is empty. **No wave-1 task imports,
+calls, or monkeypatches a file or function that another wave-1 task creates.** In particular, T6 in wave 1 does not
+reference `executability`, `plan_item_reviews`, `assemble_child`, or `ItemReview` in any form (no lazy import, no
+`monkeypatch.setattr(..., raising=False)`). Every cross-task dependency is one of these five kinds:
+
+1. **Data riding existing types.** T1 → T3 uses `C.ActionRecord` notes. T5 renders plain dicts in the public
+   assessment document; T7 produces them.
 2. **Frozen literals.** Each side writes the literal from this document: vitest entry path, messages, labels, and
    rationale prefixes.
-3. **Frozen function signatures consumed by T6 (the integrator) through late binding.** cli calls
-   `agent_assessment.plan_item_reviews(...)` and `agent_assessment.assemble_child(...)` as attributes on the
-   already-imported module. It reaches `executability` only through the private seam `cli._execution_facts`, which
-   imports lazily inside the function. In its worktree, T6 tests replace these functions with
-   `monkeypatch.setattr(..., raising=False)`. After merge, the real functions are used.
+3. **Barrier B1.** Everything that consumes a function or file created by another task lives in T7 (wave 2):
+   the top-level `from . import executability` in cli, `cli._execution_facts`, the per-item doctor flow calling
+   `agent_assessment.plan_item_reviews` / `assemble_child` and `agent_providers.launch_reviews` / `with_model` /
+   `cli_version` / `discover_models`, and the integration test through `cli.main` with the real functions (§4 T7).
 4. **Unchanged signatures.** `render_agent_assessment(children, workspace, *, report_path, publication_status)`,
    `render_recommendations(document)`, `render_init(result, rules=None, *, dry_run, agents, repo_name, color)`, and
    `launch_review(adapter, packet, schema, timeout_s, progress)` keep their call shapes. T6 adds only a
    keyword-only `cancel=None` to `launch_review`.
+5. **Deletions whose consumers live in another task's file are assigned to the consumer's owner** (§4 T2
+   criterion 6, T4 criterion 9, T5 criterion 4). Deletions whose consumers are in cli wait for T7: T4 keeps
+   `encode_review_request` / `parse_assessment` working in wave 1, and T7 deletes them (§3.5).
 
 Post-merge integration evidence: T4's chain test (real `launch_review` plus a fake provider executable through
-plan → assemble), `ptest --full` run by the controller, and the controller's real-provider canaries plus persea
-validation.
+plan → assemble); **T7's `tests/ng/test_doctor_init_integration.py`, which drives `cli.main` with the real T1, T3,
+T4, T5, and T6 code and only fake provider executables**; `ptest --full` run by the controller after T7; and the
+controller's real-provider canaries plus persea validation.
 
 ## 2. Decisions
 
@@ -124,6 +136,11 @@ full:   launcher + ("node_modules/vitest/vitest.mjs", "run") + runner.args + run
   execution is deferred for command profiles"` is **deleted**. The existing generic `_setup_prepared` path runs the
   declared setup (for example `npm ci`) for command and vitest profiles. `_setup_prepared` summarizes with
   `config.runner.kind` instead of the hard-coded `C.RunnerKind.PYTEST`.
+* The deleted functions have consumers outside T2's source files in exactly one test file,
+  `tests/ng/test_compound_profiles.py` (L15 import, L119–124 `compound_support`, L342–352 `prepare_advanced`).
+  T2 owns that file and updates it (T2 criterion 6). Its parametrized
+  `test_compound_support_is_not_inferred_from_runner_kind[VITEST]` keeps passing through the registry default
+  `runners._unsupported_support`.
 * `src/ptest/runtime/vitest_bridge.mjs` is **left unchanged**. `scripts/install.py` (owned by no task) asserts the
   file exists. Deleting both is a recorded follow-up.
 * Vitest keeps its own worker pool. Exclusive admission accounts for the whole command. ptest claims no worker
@@ -139,7 +156,12 @@ in manifest order. The rule table is frozen in §3.3.
   created, preview (dry-run: checks the planned in-memory config), and existing results (§3.2). Init output
   therefore always shows the check. Re-running `ptest init` in persea reports `api` as not runnable, with the exact
   `-n 0` fix, until the user applies it; existing configs are never rewritten.
-* Doctor calls `executability.check_resolution(resolution)` through `cli._execution_facts` and puts
+  `_existing_result` appends notes **only when `resolution.problem is None`**. An existing root config that is
+  invalid or unresolvable keeps its warnings and gets no notes, so `details == ()` stays true for that case
+  (`tests/ng/test_init.py:604`).
+* The notes change exact `details` tuples that existing tests pin in `tests/ng/test_init.py` (L462–463,
+  L586–593). T1 owns `test_init.py` in wave 1 and updates those assertions (T1 criterion 6).
+* Doctor (T7, wave 2) calls `executability.check_resolution(resolution)` through `cli._execution_facts` and puts
   `Executability.to_public()` into each child dict as `execution` (§3.6).
 
 ### 2.4 Init output and guidance (T3)
@@ -161,7 +183,7 @@ in manifest order. The rule table is frozen in §3.3.
   for all four providers count as *previous managed* content and are updated in place (action `updated`). Anything
   else still raises `already-exists` (user edits are never clobbered).
 
-### 2.5 Doctor v2: evidence, per-item review, display (T4, T5, T6)
+### 2.5 Doctor v2: evidence, per-item review, display (T4, T5, T6; wired by T7)
 
 * **Admission priority** (T4, `_build_one_packet`): the candidate order is `(tier, path)` with the frozen tiers in
   §3.5 instead of the path alone. Test configuration is ranked **before** test files (amendment A3), so the 64-file
@@ -178,7 +200,8 @@ in manifest order. The rule table is frozen in §3.3.
 
   `assemble_child(packet, reviews, replies)` validates each one-row reply against its item subset. It turns each
   failure into an `unknown` row with `Review failed: <reason>`, and computes the score with the existing `score()`.
-* **Fan-out** (T6): `agent_providers.launch_reviews` runs the non-skipped requests with bounded concurrency. The
+* **Fan-out** (T6 builds `launch_reviews`; T7 wires it into the doctor flow): `agent_providers.launch_reviews` runs
+  the non-skipped requests with bounded concurrency. The
   default is 4; `--review-concurrency 1..8`. The review targets one model and uses one disclosure. If every
   reviewed item fails, the review fails with `provider-failed` (exit 2) and no report is published. Otherwise
   failed items become `unknown` rows and the report is published.
@@ -190,7 +213,7 @@ in manifest order. The rule table is frozen in §3.3.
 
 ## 3. Frozen interfaces (exact; do not invent alternatives)
 
-### 3.1 `src/ptest/executability.py` (T1 creates; T6 consumes through `cli._execution_facts`)
+### 3.1 `src/ptest/executability.py` (T1 creates in wave 1; T7 consumes through `cli._execution_facts` after B1)
 
 ```python
 STATUS_EXECUTABLE = "executable"
@@ -231,10 +254,11 @@ def commands(items: tuple[Executability, ...]) -> tuple[str, ...]
     #   nonempty and every item.full is True. Deduplicated, max 8.
 ```
 
-### 3.2 Init executability notes in `InitResult.details` (T1 writes; T3 renders; T6 tests read rendered text)
+### 3.2 Init executability notes in `InitResult.details` (T1 writes and updates the pinned `test_init.py` tuples; T3 renders; T6/T7 tests read rendered text)
 
 These are appended after all existing config detail records, as `C.ActionRecord(target=…, action="note",
-source="config")`:
+source="config")`. They are appended for created and preview results always, and for existing results only when
+`resolution.problem is None` (§2.3):
 
 1. One **project note** per project, in project order: `target = f"{project} · {runner} · {verdict}"`. The
    separator is exactly `" · "` (space, U+00B7, space); `verdict` is `Executability.verdict()`.
@@ -297,7 +321,7 @@ becomes `Capability(execution=C.ExecutionTier.EXCLUSIVE_COMMAND, selection=False
 lifecycle="cooperative-process-group", limitations=(C.Reason(code="unsupported-capability",
 message=VITEST_EXCLUSIVE_NOTE),))`, with the literal inlined in cli.py.
 
-### 3.5 Checklist catalog, evidence admission, per-item API (T4 creates; T6 consumes)
+### 3.5 Checklist catalog, evidence admission, per-item API (T4 creates in wave 1; T7 consumes after B1)
 
 `checklist.ChecklistEntry` gains fields. The final field order is frozen, and all construction is by keyword:
 
@@ -388,8 +412,10 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
 order. This satisfies the existing contract rule that findings match the gap rows.
 
 `encode_review_request`, `parse_assessment`, the `_RAW_*` whole-assessment shapes, `_raw_output_shape`, and
-`_REVIEW_INSTRUCTION` are deleted. cli must not reference them, nor its own `_raw_assessment_schema` (T6 deletes
-it).
+`_REVIEW_INSTRUCTION` are deleted **by T7 after B1**, together with cli's `_raw_assessment_schema` and every test
+that references them (`tests/ng/test_agent_assessment.py`, `tests/ng/test_cli.py`). In wave 1, T4 keeps them
+working because the base cli still calls them: `parse_assessment` fills the new `AssessmentRow.label` from the
+catalog. After T7, cli must not reference any of them.
 
 **One-row reply** (model output, exact keys): `{"status", "rationale", "evidence": [citation…≤16],
 "finding": null | {"summary", "suggested_change", "evidence": [citation…1..16]}}`, where citation is
@@ -418,7 +444,7 @@ it).
 `doctor.match_rules(text: str) -> frozenset[str]` (T4 adds it to doctor.py) is pure. It applies `_RULES` line by
 line, with each line bounded to `_LINE_CHARS`, and returns the matched rule codes.
 
-### 3.6 Public assessment child dict (T6 builds and validates; T5 renders; T4 unaffected)
+### 3.6 Public assessment child dict (T6 validates in contracts; T7 builds in cli; T5 renders; T4 unaffected)
 
 Additive to `ptest.agent-assessment/v1`. Both fields are optional in the validator and JSON schema, and projection
 keeps them when present:
@@ -433,7 +459,7 @@ child["execution"]    # {"status": "executable"|"caveat"|"not-executable",
 bytes; for a longer model id, fall back to `"ptest-item-review-v1"`. `provider.cli_version` is the discovered CLI
 version when known, else `"unreported"`.
 
-### 3.7 Failure reasons (T6 maps `ProviderResult` → str; T4 formats; T5 displays)
+### 3.7 Failure reasons (T7 maps `ProviderResult` → str in cli; T4 formats; T5 displays)
 
 | ProviderResult | reply str |
 |---|---|
@@ -447,7 +473,7 @@ version when known, else `"unreported"`.
 The row rationale is `FAILED_PREFIX + reason`, so the terminal shows `unknown (review failed: <reason>)`.
 `cancelled` is never per-item: Ctrl-C cancels the whole review (`review-cancelled`, exit 130).
 
-### 3.8 Renderer signatures stay unchanged (T5 keeps; T6 calls)
+### 3.8 Renderer signatures stay unchanged (T5 keeps; cli calls, T7 wires the new data)
 
 ```python
 render.render_agent_assessment(children, workspace, *, report_path: str, publication_status: str) -> str
@@ -461,7 +487,7 @@ When the `NO_COLOR` environment variable is set, they become `[ok]`, `[gap]`, `[
 `render_doctor`, `repair_prompt`, and `render_guide` outputs are unchanged, including the "review not yet
 performed" worksheet and "Findings: N total".
 
-### 3.9 Provider runtime (T6; public names frozen for help, README, and tests)
+### 3.9 Provider runtime (T6 builds in wave 1; T7 wires into the doctor flow; public names frozen for help, README, and tests)
 
 ```python
 # agent_providers.py
@@ -483,6 +509,18 @@ def discover_models(adapter: ReviewerAdapter) -> tuple[str, ...]
     # catalog order. Any failure returns ().
 def cli_version(adapter: ReviewerAdapter) -> str | None
     # [executable, "--version"], 10 s, first stdout line stripped, ≤128 chars; None on failure
+```
+
+Model resolution helpers (T6 adds them to `cli.py` in wave 1 and unit-tests them; T7 calls them from the flow):
+
+```python
+# cli.py (T6)
+def _declared_review_model(provider: str, override: str | None,
+                           environ: Mapping[str, str]) -> str | None
+    # pre-consent and subprocess-free: steps 1, 2 and 4 below; None means "decide after consent"
+def _resolve_review_model(adapter: ReviewerAdapter, cache_root: Path,
+                          declared: str | None) -> tuple[str | None, str | None]
+    # post-consent: returns (model, cli_version); declared wins and is not cached; otherwise steps 3, 5 and 6
 ```
 
 Model resolution order (cli):
@@ -519,7 +557,7 @@ Commands: every task runs only `ptest tests/ng/<its test files>` (never pytest d
 `uv sync --locked` in its own worktree. After changing source, run `graphify update .`. Commit in the task
 worktree. Report integration seams in the task report.
 
-### T1: xdist serial and executability (owns `config.py`, `adapters/pytest.py`, `runtime/pytest_bridge.py`, `executability.py`, `test_config.py`, `test_pytest_adapter.py`, `test_executability.py`, `fixtures/pytest/xdist_addopts/`)
+### T1: xdist serial and executability (owns `config.py`, `adapters/pytest.py`, `runtime/pytest_bridge.py`, `executability.py`, `test_config.py`, `test_pytest_adapter.py`, `test_executability.py`, `test_pytest_xdist_serial_subprocess.py`, `test_init.py`, `fixtures/pytest/xdist_addopts/`)
 
 1. `_reject_unowned_controls` accepts the four serial spellings from §2.1 and rejects all other parallel/remote
    controls (parametrized tests, including `-n 2`, `-nauto`, `--numprocesses=2`, `--dist=load`, `-n` followed by
@@ -546,16 +584,41 @@ worktree. Report integration seams in the task report.
    - `api · pytest · not runnable: pytest addopts enable xdist, which ptest runs serially — fix: add "-n", "0" to [runner] args in api/.ptest.toml`
    - `web · vitest · ready with caveats: exclusive: Vitest runs as one command and manages its own workers; first run executes setup: npm ci`
    - one run note `run: ptest web/<example>`, and no `run: ptest --full`.
-7. Fixture `tests/ng/fixtures/pytest/xdist_addopts/` (files in the filesToCreate list, all non-collectable `.txt`
-   except `pyproject.toml`). A subprocess test (same harness style as `test_pytest_scoped_subprocess.py`, launcher
-   = the ptest venv interpreter) materializes a tmp project with a fake `xdist/plugin.py` (addoption
-   `-n/--numprocesses/--dist/--tx/--maxprocesses`, `pytest_addhooks` registering `pytest_configure_node`, a tryfirst
-   `pytest_cmdline_main` mirroring real xdist's `numprocesses==0 → dist="no", tx=[]`), the conftest defining
-   `pytest_configure_node`, and addopts `-p xdist.plugin -n 2 --dist=loadgroup -m "not slow"`. It runs
-   `ptest init --no-doctor --agents none`, then a scoped ptest run. The generated args are `["-n", "0"]`, the run
-   exits 0, and 1 test is deselected by `-m`.
 
-### T2: vitest executes (owns `operations.py`, `runners.py`, `adapters/vitest.py`, `adapters/simple.py`, `runtime/vitest_bridge.mjs`, `test_vitest_adapter.py`, `test_operations.py`, `test_simple_adapters.py`, `fixtures/vitest/`)
+   `_existing_result` for an invalid or unresolvable root config appends no notes.
+   **Pinned tests in `tests/ng/test_init.py` (T1 owns this file in wave 1).** T1 runs `ptest tests/ng/test_init.py`
+   and updates exactly the assertions that the notes change, keeping their original intent:
+   - `test_monorepo_dry_run_reports_would_create_without_writing` (L462–463): the two assertions apply to the
+     records with `action != "note"` and keep their current expected values. A new assertion pins the exact note
+     records that follow them (§3.2 grammar: one project note each for `api` and `web`, then the run notes that
+     `executability.commands` yields for that tree).
+   - `test_single_init_details_carry_root_config_action` (L586–593): the expected lists become the existing config
+     tuple followed by the exact note tuples for that project (`(".", "pytest", <verdict>)` project note, then its
+     run notes), for both the created and the preview case.
+   - `test_existing_invalid_config_keeps_warnings_for_attention_header` (L604): unchanged; it must still pass
+     (`details == ()`).
+   - Assertions that look up targets by key or check `source == "config"` stay unchanged. Notes use
+     `source="config"`, so they keep passing.
+
+   T1 changes nothing else in `test_init.py`.
+7. **Fixture `tests/ng/fixtures/pytest/xdist_addopts/`.** It holds exactly the five files below. All are
+   non-collectable `.txt` files, which the test copies into a tmp project under the listed target name:
+
+   | Fixture file | Materialized as | Content |
+   |---|---|---|
+   | `pyproject.toml.txt` | `pyproject.toml` | `[tool.pytest.ini_options]` with `addopts = '-p xdist.plugin -n 2 --dist=loadgroup -m "not slow"'`, `markers = ["slow: slow test"]`, `testpaths = ["tests"]` |
+   | `xdist_init.py.txt` | `xdist/__init__.py` | a one-line docstring naming it a test double of pytest-xdist |
+   | `xdist_plugin.py.txt` | `xdist/plugin.py` | `pytest_addoption` registering `-n/--numprocesses`, `--dist`, `--tx`, and `--maxprocesses`; `pytest_addhooks` registering a hookspec for `pytest_configure_node`; a `tryfirst` `pytest_cmdline_main` that mirrors real xdist (`numprocesses == 0` → `dist = "no"`, `tx = []`) and otherwise fails the session with "fake xdist would distribute" |
+   | `conftest.py.txt` | `tests/conftest.py` | defines `pytest_configure_node(node)` as a no-op |
+   | `test_sample.py.txt` | `tests/test_sample.py` | one passing test and one `@pytest.mark.slow` test |
+
+   The subprocess test lives in the new file `tests/ng/test_pytest_xdist_serial_subprocess.py`. It uses the same
+   harness style as `test_pytest_scoped_subprocess.py`, with the ptest venv interpreter as launcher, and the tmp
+   project root must be importable so that `-p xdist.plugin` resolves to the fake. The test runs
+   `ptest init --no-doctor --agents none`, then a scoped ptest run of `tests/test_sample.py`. Expected: the
+   generated args are `["-n", "0"]`, the run exits 0, and 1 test is deselected by `-m`.
+
+### T2: vitest executes (owns `operations.py`, `runners.py`, `adapters/vitest.py`, `adapters/simple.py`, `runtime/vitest_bridge.mjs`, `test_vitest_adapter.py`, `test_operations.py`, `test_simple_adapters.py`, `test_compound_profiles.py`, `fixtures/vitest/`)
 
 1. `vitest_adapter.prepare` returns the §2.2 argv for scoped (with caller argv already in effective args) and full,
    with `ExecutionTier.EXCLUSIVE_COMMAND` and the `VITEST_EXCLUSIVE_NOTE` limitation. It rejects `selected`,
@@ -574,7 +637,16 @@ worktree. Report integration seams in the task report.
 5. Go and Cargo still raise `native profile execution is deferred`. Pytest paths are untouched: existing
    `test_operations` pytest tests pass.
 6. `vitest_bridge.mjs` is untouched. Tests that exercised the bridge preparation are deleted or rewritten for the
-   command route.
+   command route. This includes `tests/ng/test_compound_profiles.py`, which T2 owns:
+   - delete `test_vitest_compound_support_requires_an_exact_local_profile` (L119–124) and
+     `test_vitest_advanced_prepare_refuses_before_node_launch` (L342–352). Criterion 2 covers the second one's
+     intent through `adapter_for(VITEST).prepare_advanced`;
+   - delete the `from ptest.adapters import vitest as vitest_adapter` import (L15) once it has no users;
+   - keep `test_compound_support_is_not_inferred_from_runner_kind[VITEST]` passing unchanged.
+
+   `ptest tests/ng/test_compound_profiles.py` passes in T2's worktree. A repo-wide
+   `grep -rn "vitest_adapter\.\(compound_support\|prepare_advanced\|qualified_profile\)" src tests` returns
+   nothing.
 
 ### T3: init output and guidance (owns `init_render.py`, `agent_rules.py`, `resources/agent-guide.md`, `resources/repository-agent-guide.md`, `README.md`, `test_init_render.py`, `test_agent_rules.py`, `test_resources.py`)
 
@@ -654,9 +726,20 @@ worktree. Report integration seams in the task report.
    `assemble_child` then yields a valid child. There are no real providers and no network.
 8. Dependency facts: a lock present on disk but not admitted yields `…is present but was not admitted to the review
    packet`, and a lock absent on disk yields `…is missing`.
-9. `test_doctor.py` no longer asserts agent-assessment terminal layout: delete the two `render_agent_assessment`
-   tests around L1440–1520, since layout is T5's. Old whole-assessment tests for `encode_review_request` and
-   `parse_assessment` are deleted with those functions.
+9. `test_doctor.py` no longer asserts agent-assessment terminal layout, since layout is T5's and T5 deletes
+   `render_agent_checklist_table` (T5 criterion 4). T4 deletes all seven layout tests in L1305–1520:
+   - `test_agent_checklist_table_orders_rows_sanitizes_cells_and_bounds_output` (L1305)
+   - `test_agent_checklist_table_escapes_html_and_markdown_in_every_cell` (L1357)
+   - `test_agent_checklist_table_does_not_render_any_rationale` (L1380)
+   - `test_agent_checklist_table_does_not_render_model_rationale` (L1397)
+   - `test_agent_checklist_table_neutralizes_bare_urls_in_every_untrusted_cell` (L1419)
+   - `test_agent_assessment_human_output_keeps_capability_claims_separate` (L1442, parametrized)
+   - `test_agent_assessment_capability_line_without_dependency_codes` (L1484)
+
+   After this, `grep -n "render_agent_checklist_table\|render_agent_assessment" tests/ng/test_doctor.py` returns
+   nothing. T5 criterion 3 ports the safety intent of these tests to `test_render.py`.
+   `encode_review_request`, `parse_assessment`, and their tests stay in wave 1. `parse_assessment` fills
+   `AssessmentRow.label` from the catalog, and the existing tests keep passing. T7 deletes them after B1 (§3.5).
 
 ### T5: terminal display and report wording (owns `render.py`, `recommendations.py`, `test_render.py`, `test_recommendations.py`)
 
@@ -680,8 +763,11 @@ worktree. Report integration seams in the task report.
    `&lt;`, `&gt;`, or `&amp;` in the output. A hostile summary with `<script>`, a Markdown link, a URL, `|`, or
    bidi controls is rendered inert, porting the safety assertions from the deleted T4 tests. The output is bounded
    (existing byte caps), and "pytest passed"-style claims never appear.
-4. `render_agent_checklist_table`, `_agent_checklist_table_cell`, and the capability table are deleted if unused
-   after the change; the markdown table cell escaping moves to report-only code or is deleted.
+4. `render_agent_checklist_table`, `_agent_checklist_table_cell`, and the capability table are deleted; the
+   markdown table cell escaping moves to report-only code or is deleted. Outside `render.py`, their only consumers
+   are the five `test_agent_checklist_table_*` tests in `tests/ng/test_doctor.py` (L1305–1440). T4 owns that file
+   and deletes those tests (T4 criterion 9), so T5 does not edit `test_doctor.py`. After the merge,
+   `grep -rn "render_agent_checklist_table\|_agent_checklist_table_cell" src tests` returns nothing.
 5. `recommendations.md`:
    - each item heading shows `<ID> <label>`;
    - each project section starts with the execution fact;
@@ -695,7 +781,10 @@ worktree. Report integration seams in the task report.
 6. The offline `render_doctor`, `repair_prompt`, and `render_guide` outputs are byte-identical to the base for the
    existing tests.
 
-### T6: review runtime, CLI wiring, LOW fixes (owns `agent_providers.py`, `cli.py`, `help.py`, `contracts.py`, `docs/schemas/v1/`, `test_agent_providers.py`, `test_cli.py`, `test_init.py`, `test_help.py`, `test_contracts.py`, `test_agent_doctor_acceptance.py`, `test_doctor_smoke.py`, `fixtures/agent_providers/`)
+### T6: review runtime, contracts, flags, LOW fixes (wave 1; owns `agent_providers.py`, `cli.py`, `help.py`, `contracts.py`, `docs/schemas/v1/`, `test_agent_providers.py`, `test_cli.py`, `test_help.py`, `test_contracts.py`, `test_agent_doctor_acceptance.py`, `test_doctor_smoke.py`, `fixtures/agent_providers/`)
+
+In wave 1, T6 does not change the doctor review flow in `cli.py` and does not reference `executability`,
+`plan_item_reviews`, `assemble_child`, or `ItemReview` in any form. That wiring is T7's (§1).
 
 1. **Contracts.** The additive §3.6 fields are validated when present, kept by projection, and appear in
    `docs/schemas/v1/agent-assessment.json`, regenerated with `scripts/export-schemas.py`. Legacy documents without
@@ -713,37 +802,23 @@ worktree. Report integration seams in the task report.
    - `discover_models` parses `fixtures/agent_providers/codex-debug-models.json` (trimmed real output, §6) to
      exactly the 5 `list` slugs `gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5`, and returns `()`
      for a nonzero exit, a timeout, malformed JSON, or over-bound output.
-4. **Model resolution** follows the §3.9 order:
+4. **Model resolution helpers** (`cli._declared_review_model`, `cli._resolve_review_model`, §3.9), unit-tested
+   directly with fake provider executables:
    - the override flag beats the env var, which beats the cache;
-   - a Claude review uses `haiku` with no discovery or pick call;
+   - `_declared_review_model("claude", None, {})` is `"haiku"`, and resolving it runs no discovery or pick call;
+   - `_declared_review_model` never starts a subprocess (monkeypatched `subprocess.Popen`/`run` must not be
+     called);
    - a codex pick reply that is not an exact listed slug (for example `"gpt-5.6-luna."` or a hidden slug) falls back
-     to the default with no `-m`;
-   - the cache hits only for the same CLI version;
-   - no provider subprocess runs before consent (a fake that records launches shows zero launches when the
-     disclosure is declined).
-5. **Doctor flow order:**
-   - consent check (non-TTY);
-   - menu;
-   - local collection and `plan_item_reviews`;
-   - disclosure with call count, concurrency, and model text (§3.9);
-   - post-consent model resolution;
-   - `launch_reviews` for the non-skipped requests only;
-   - `assemble_child`;
-   - all-failed → `provider-failed` (exit 2, no report written);
-   - stale-evidence revalidation (unchanged);
-   - child dicts with `label` and `execution` (from `_execution_facts`);
-   - publish and render.
+     to `None` (no `-m`);
+   - the cache hits only for the same CLI version.
 
-   If there are zero planned calls, there is no disclosure and no launch, and the report is still produced. T4's and
-   T1's functions are faked with `monkeypatch.setattr(..., raising=False)`. Assertions target the dicts passed to
-   `render.render_agent_assessment` and `recommendations.render_recommendations`, never their text.
-6. **Seams.** `cli._execution_facts(resolution) -> dict[str, dict]` imports `executability` lazily inside the
-   function and maps `project → Executability.to_public()`. cli references `agent_assessment.plan_item_reviews` and
-   `assemble_child` only as module attributes at call time. cli contains no reference to `encode_review_request`,
-   `parse_assessment`, or `_raw_assessment_schema`.
+   The flow-level "no provider subprocess before consent" test is T7's.
+5. *(moved to T7 criterion 2: doctor flow order)*
+6. *(moved to T7 criterion 1: seams)*
 7. **Flags** `--review-model`, `--review-concurrency`, and env `PTEST_REVIEW_MODEL`:
    - they parse with the same validity matrix as `--reviewer`, and invalid combinations exit 2 before any
-     scan/launch;
+     scan/launch. In wave 1 the parsed values are validated and kept on the parsed arguments. T7 passes them into
+     the flow;
    - `help.py` doctor/init topics document them plus per-item review, cheap model selection, the canary note ("the
      tool-denial qualification must be re-run when the chosen model changes"), and "citations are in
      recommendations.md";
@@ -753,15 +828,77 @@ worktree. Report integration seams in the task report.
    - (a) new test: TTY `init --doctor --allow-model-review`, no concrete reviewer, two fake qualified reviewers →
      the menu is shown, answering `2` launches codex, and no `[y/N]` prompt appears. Also add
      `("doctor", "--reviewer", "auto")` as a case of one existing menu test.
-   - (b) `test_init.py` ~L652–676: the `.ptest.toml` existence assertion moves into the fake
-     `qualification_status`, and the unreachable `resolve_reviewer` fake is deleted.
+   - (b) *(moved to T7 criterion 5, because `test_init.py` is T1's in wave 1)*
    - (c) delete the duplicate `test_non_tty_auto_never_shows_menu`, folding its `input` ban into the existing
      parametrized non-TTY test.
-10. **Render-tolerant assertions** (these must pass against both the base renderers and T3/T5's):
+10. **Render-tolerant assertions** in `test_cli.py` and `test_agent_doctor_acceptance.py` (these must pass against
+    both the base renderers and T3/T5's):
     - init text checks use `re.search(r"created:?\s+\.ptest\.toml", out)` and
       `re.search(r"unchanged:?\s+\.ptest\.toml", out)`;
     - tests expecting `ptest --full` in init output create `tests/` before `init`;
     - review-output checks assert scope names and `recommendations.md`, never `Project | Execution`.
+
+    `test_init.py` needs no render-tolerance change: it asserts only the header strings, which are unchanged.
+
+### T7: doctor v2 wiring and post-merge integration (wave 2, after barrier B1; owns `cli.py`, `agent_assessment.py` (deletions only), `test_cli.py`, `test_init.py`, `test_agent_assessment.py` (deletions only), `test_agent_doctor_acceptance.py`, `test_doctor_smoke.py`, `test_doctor_init_integration.py`)
+
+**Precondition (barrier B1).** The T7 worktree is cut from the chain HEAD after the controller has merged T1–T6.
+Before editing, T7 checks that the chain contains `src/ptest/executability.py`,
+`agent_assessment.plan_item_reviews`, `agent_assessment.assemble_child`, `agent_providers.launch_reviews`, and
+`cli._declared_review_model`. If any is missing, T7 stops and reports instead of stubbing.
+
+1. **Seams.** cli imports `executability` at module top level (`from . import executability`), with no lazy
+   import. `cli._execution_facts(resolution) -> dict[str, dict]` maps `project → Executability.to_public()` from
+   `executability.check_resolution(resolution)`. cli calls `agent_assessment.plan_item_reviews` / `assemble_child`
+   and `agent_providers.launch_reviews` / `with_model` directly. It maps `ProviderResult` to the §3.7 reason
+   strings, and builds `provider.profile` / `provider.cli_version` per §3.6.
+2. **Doctor flow order:**
+   - consent check (non-TTY);
+   - menu;
+   - local collection and `plan_item_reviews`;
+   - disclosure with call count, concurrency, and model text (§3.9, from `_declared_review_model`);
+   - post-consent `_resolve_review_model` and `with_model`;
+   - `launch_reviews` for the non-skipped requests only, with `--review-concurrency`;
+   - `assemble_child`;
+   - all-failed → `provider-failed` (exit 2, no report written);
+   - stale-evidence revalidation (unchanged);
+   - child dicts with `label` and `execution` (from `_execution_facts`);
+   - publish and render.
+
+   If there are zero planned calls, there is no disclosure and no launch, and the report is still produced.
+3. **Deletions (§3.5).** Delete `encode_review_request`, `parse_assessment`, the `_RAW_*` shapes,
+   `_raw_output_shape`, `_REVIEW_INSTRUCTION`, cli's `_raw_assessment_schema`, and every test that references
+   them in `test_agent_assessment.py` and `test_cli.py`. After the deletions,
+   `grep -rn "encode_review_request\|parse_assessment\|_raw_assessment_schema\|_raw_output_shape\|_REVIEW_INSTRUCTION" src tests`
+   returns nothing.
+4. **Integration test `tests/ng/test_doctor_init_integration.py` (new).** It drives `cli.main` with the real
+   `config`, `executability`, `init_render`, `agent_assessment`, `render`, `recommendations`, `contracts`, and
+   `agent_providers` code. It does **not** monkeypatch any of those modules' functions. Its only fakes are provider
+   executables on a tmp `PATH` (a `claude`-shaped fake that reads the item id from its stdin request, echoes a
+   canned one-row reply in Claude's result envelope, appends its argv to a log file, and exits nonzero for one
+   item id selected by env), plus `stdin.isatty`/`input` where a TTY is needed. It uses no network and no real
+   provider, and each fake finishes in well under a second. Cases:
+   - (a) **init, persea-shaped monorepo**: `api` pytest child with addopts `-n 4 --dist=loadgroup -m "not slow"`,
+     `args=[]`, and a `tests/conftest.py` defining `pytest_sessionfinish`; `web` vitest child with setup
+     `npm ci`. Running `ptest init --no-doctor --agents none` on the existing configs prints a Projects line for
+     `api` with the exact §3.2 `not runnable … — fix: add "-n", "0" to [runner] args in api/.ptest.toml` verdict,
+     a `fix api:` next step, and no `ptest --full` line.
+   - (b) **doctor review through the real per-item path**: `ptest doctor --reviewer claude --allow-model-review`
+     on a tmp standalone pytest repo with a DB-using conftest. The fake's argv log shows exactly as many launches
+     as there are non-skipped `ItemReview`s, and each launch has `--model haiku`. The terminal output has the
+     scope header, a `ptest: …` execution line from the real `_execution_facts`, 11 labelled item lines, and no
+     `|`-table header. The published `recommendations.md` has `<ID> <label>` headings. The public assessment JSON
+     written by the flow passes `C` validation and contains `rows[].label` and `children[].execution`.
+   - (c) **per-item failure**: with the fake failing one item, that row renders
+     `unknown (review failed: provider exited with an error)` and the report is published. With the fake failing
+     every item, the exit code is 2 (`provider-failed`) and no `recommendations.md` is written.
+   - (d) **no launch before consent**: when the TTY disclosure is declined, the fake's argv log is empty
+     (no `--version`, no discovery, no review launch).
+5. **LOW fix (b)** in `test_init.py` ~L652–676: the `.ptest.toml` existence assertion moves into the fake
+   `qualification_status`, and the unreachable `resolve_reviewer` fake is deleted.
+6. `ptest tests/ng/test_cli.py tests/ng/test_init.py tests/ng/test_agent_assessment.py
+   tests/ng/test_agent_doctor_acceptance.py tests/ng/test_doctor_smoke.py tests/ng/test_doctor_init_integration.py`
+   passes. Any post-merge failure in those files is T7's to fix, preserving each test's intent.
 
 ## 5. Test approach
 
@@ -769,7 +906,8 @@ worktree. Report integration seams in the task report.
 * There are no real providers, no network, and no persea access in tasks. Use fake executables in tmp PATH, the
   vendored fixtures, and tmp repos. Fixtures that look like tests use `.txt` names so ptest's own suite never
   collects them.
-* Post-merge (controller):
+* Barrier B1 (controller): merge T1–T6 into the chain branch, then launch T7 from the chain HEAD.
+* Post-merge (controller, after T7 is merged):
   - run `ptest --full` once;
   - run real canaries: tool-denial qualification for `claude --model haiku` and for the codex model chosen by the
     pick. This must be re-run whenever the chosen model changes;
@@ -782,7 +920,7 @@ worktree. Report integration seams in the task report.
     - `ptest doctor --reviewer claude --allow-model-review` produces per-project blocks with no DB-002 false
       finding sourced from `.superpowers`.
 
-## 6. Fixture content frozen for T6 (`tests/ng/fixtures/agent_providers/codex-debug-models.json`)
+## 6. Fixture content frozen for T6 (new file `tests/ng/fixtures/agent_providers/codex-debug-models.json`, created by T6)
 
 This is a trimmed capture of the real `codex debug models --bundled` output from codex-cli 0.155.1, taken on
 2026-09-23:
@@ -803,25 +941,49 @@ This is a trimmed capture of the real `codex debug models --bundled` output from
 }
 ```
 
-## 7. File ownership (disjoint; from triage) and new files
+## 7. File ownership and new files
 
-| Task | Owns |
-|---|---|
-| T1 | src/ptest/config.py, src/ptest/adapters/pytest.py, src/ptest/runtime/pytest_bridge.py, src/ptest/executability.py (new), tests/ng/test_config.py, tests/ng/test_pytest_adapter.py, tests/ng/test_executability.py (new), tests/ng/fixtures/pytest/xdist_addopts/ (new) |
-| T2 | src/ptest/operations.py, src/ptest/runners.py, src/ptest/adapters/vitest.py, src/ptest/adapters/simple.py, src/ptest/runtime/vitest_bridge.mjs (unchanged), tests/ng/test_vitest_adapter.py, tests/ng/test_operations.py, tests/ng/test_simple_adapters.py, tests/ng/fixtures/vitest/ |
-| T3 | src/ptest/init_render.py, src/ptest/agent_rules.py, src/ptest/resources/agent-guide.md, src/ptest/resources/repository-agent-guide.md, README.md, tests/ng/test_init_render.py, tests/ng/test_agent_rules.py, tests/ng/test_resources.py |
-| T4 | src/ptest/agent_assessment.py, src/ptest/checklist.py, src/ptest/doctor.py, src/ptest/resources/recipes/, tests/ng/test_agent_assessment.py, tests/ng/test_agent_assessment_contract.py, tests/ng/test_doctor.py, tests/ng/test_checklist.py (new), tests/ng/fixtures/agent_assessment/, tests/ng/fixtures/doctor/ |
-| T5 | src/ptest/render.py, src/ptest/recommendations.py, tests/ng/test_render.py, tests/ng/test_recommendations.py |
-| T6 | src/ptest/agent_providers.py, src/ptest/cli.py, src/ptest/help.py, src/ptest/contracts.py, docs/schemas/v1/, tests/ng/test_agent_providers.py, tests/ng/test_cli.py, tests/ng/test_init.py, tests/ng/test_help.py, tests/ng/test_contracts.py, tests/ng/test_agent_doctor_acceptance.py, tests/ng/test_doctor_smoke.py, tests/ng/fixtures/agent_providers/ |
+Wave 1 (T1–T6) ownership is disjoint. Wave 2 (T7) runs alone after barrier B1, so its overlap with wave-1 owners is
+sequential.
+
+| Task | Wave | Owns |
+|---|---|---|
+| T1 | 1 | src/ptest/config.py, src/ptest/adapters/pytest.py, src/ptest/runtime/pytest_bridge.py, src/ptest/executability.py (new), tests/ng/test_config.py, tests/ng/test_pytest_adapter.py, tests/ng/test_executability.py (new), tests/ng/test_pytest_xdist_serial_subprocess.py (new), tests/ng/test_init.py, tests/ng/fixtures/pytest/xdist_addopts/ (new directory; files listed in §7.1) |
+| T2 | 1 | src/ptest/operations.py, src/ptest/runners.py, src/ptest/adapters/vitest.py, src/ptest/adapters/simple.py, src/ptest/runtime/vitest_bridge.mjs (unchanged), tests/ng/test_vitest_adapter.py, tests/ng/test_operations.py, tests/ng/test_simple_adapters.py, tests/ng/test_compound_profiles.py, tests/ng/fixtures/vitest/ |
+| T3 | 1 | src/ptest/init_render.py, src/ptest/agent_rules.py, src/ptest/resources/agent-guide.md, src/ptest/resources/repository-agent-guide.md, README.md, tests/ng/test_init_render.py, tests/ng/test_agent_rules.py, tests/ng/test_resources.py |
+| T4 | 1 | src/ptest/agent_assessment.py, src/ptest/checklist.py, src/ptest/doctor.py, src/ptest/resources/recipes/, tests/ng/test_agent_assessment.py, tests/ng/test_agent_assessment_contract.py, tests/ng/test_doctor.py, tests/ng/test_checklist.py (new), tests/ng/fixtures/agent_assessment/, tests/ng/fixtures/doctor/ |
+| T5 | 1 | src/ptest/render.py, src/ptest/recommendations.py, tests/ng/test_render.py, tests/ng/test_recommendations.py |
+| T6 | 1 | src/ptest/agent_providers.py, src/ptest/cli.py, src/ptest/help.py, src/ptest/contracts.py, docs/schemas/v1/, tests/ng/test_agent_providers.py, tests/ng/test_cli.py, tests/ng/test_help.py, tests/ng/test_contracts.py, tests/ng/test_agent_doctor_acceptance.py, tests/ng/test_doctor_smoke.py, tests/ng/fixtures/agent_providers/ (including the new codex-debug-models.json) |
+| T7 | 2 | src/ptest/cli.py, src/ptest/agent_assessment.py (deletions only), tests/ng/test_cli.py, tests/ng/test_init.py, tests/ng/test_agent_assessment.py (deletions only), tests/ng/test_agent_doctor_acceptance.py, tests/ng/test_doctor_smoke.py, tests/ng/test_doctor_init_integration.py (new) |
 
 Nobody touches `scripts/install.py`, `tests/ng/test_install.py`, or `pyproject.toml`/`uv.lock` (no new
 dependencies).
+
+### 7.1 Brand-new files (exhaustive; each created by exactly one task)
+
+| Path | Task | Needed by |
+|---|---|---|
+| src/ptest/executability.py | T1 | config init notes (T1), cli `_execution_facts` (T7) |
+| tests/ng/test_executability.py | T1 | T1 criterion 5 |
+| tests/ng/test_pytest_xdist_serial_subprocess.py | T1 | T1 criterion 7 |
+| tests/ng/fixtures/pytest/xdist_addopts/pyproject.toml.txt | T1 | T1 criterion 7 |
+| tests/ng/fixtures/pytest/xdist_addopts/xdist_init.py.txt | T1 | T1 criterion 7 |
+| tests/ng/fixtures/pytest/xdist_addopts/xdist_plugin.py.txt | T1 | T1 criterion 7 |
+| tests/ng/fixtures/pytest/xdist_addopts/conftest.py.txt | T1 | T1 criterion 7 |
+| tests/ng/fixtures/pytest/xdist_addopts/test_sample.py.txt | T1 | T1 criterion 7 |
+| tests/ng/test_checklist.py | T4 | T4 criterion 1 |
+| tests/ng/fixtures/agent_providers/codex-debug-models.json | T6 | T6 criterion 3 (content frozen in §6) |
+| tests/ng/test_doctor_init_integration.py | T7 | T7 criterion 4 |
+
+No other new files. T2, T3, and T5 create none: T2's fake `node` and setup scripts are written into `tmp_path` at
+test time.
 
 ## 8. Risks
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Integrator (T6) tests use fakes for T1/T4 seams | Integration bug only visible after merge | Signatures frozen here; T4 chain test uses the real `launch_review`; controller `ptest --full` and real persea validation |
+| Cross-task seams (T1/T4/T6 functions consumed by cli) | Integration bug only visible after merge | Removed structurally: all consumers live in T7 after barrier B1; T7's integration test drives `cli.main` with the real code; T4 chain test; controller `ptest --full` and real persea validation |
+| Chain between B1 and T7 still runs the old single-call doctor flow | Doctor v2 behaviour absent at that point | Expected; T4 keeps the old functions working until T7 deletes them, so the chain stays green at B1 |
 | `haiku` alias unavailable in the installed Claude CLI | Every item fails → `provider-failed` | `--review-model`/`PTEST_REVIEW_MODEL` override; controller canary confirms the alias |
 | Cheap model emits prose the untrusted-prose filter rejects | More `unknown (review failed: invalid reply)` rows | Per-item failure is contained; the prompt repeats the prose rules |
 | Allowing pytest-timeout/asyncio hooks in basic-serial | Policy relaxation | Neither distributes or reruns; thread-timeout `_exit` loses the report → incomplete (fail closed) |
