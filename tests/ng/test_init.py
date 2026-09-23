@@ -459,9 +459,17 @@ def test_monorepo_dry_run_reports_would_create_without_writing(tmp_path):
 
     assert result.action is InitAction.PREVIEW
     assert result.exists is False
-    assert {item.action for item in result.details} == {"would create"}
-    assert [item.target for item in result.details] == [
+    records = [item for item in result.details if item.action != "note"]
+    assert {item.action for item in records} == {"would create"}
+    assert [item.target for item in records] == [
         ".ptest.toml", "api/.ptest.toml", "web/.ptest.toml"]
+    notes = [item for item in result.details if item.action == "note"]
+    assert [(item.target, item.action, item.source) for item in notes] == [
+        ("api · pytest · ready with caveats: "
+         'ptest --full unavailable: test_roots is "."', "note", "config"),
+        ("web · pytest · ready with caveats: "
+         'ptest --full unavailable: test_roots is "."', "note", "config"),
+    ]
     assert not (tmp_path / ".ptest.toml").exists()
     assert not (tmp_path / "api" / ".ptest.toml").exists()
 
@@ -584,13 +592,19 @@ def test_single_init_details_carry_root_config_action(tmp_path):
     created = init_project(case_created, _options(runner=RunnerKind.PYTEST))
 
     assert [(item.target, item.action, item.source) for item in created.details] == [
-        (".ptest.toml", "created", "config")]
+        (".ptest.toml", "created", "config"),
+        (". · pytest · ready with caveats: "
+         'ptest --full unavailable: test_roots is "."', "note", "config"),
+    ]
     case_preview = tmp_path / "case-preview"
     case_preview.mkdir()
     preview = init_project(case_preview,
                            _options(runner=RunnerKind.PYTEST, dry_run=True))
     assert [(item.target, item.action, item.source) for item in preview.details] == [
-        (".ptest.toml", "would create", "config")]
+        (".ptest.toml", "would create", "config"),
+        (". · pytest · ready with caveats: "
+         'ptest --full unavailable: test_roots is "."', "note", "config"),
+    ]
     assert not (case_preview / ".ptest.toml").exists()
 
 
@@ -602,6 +616,85 @@ def test_existing_invalid_config_keeps_warnings_for_attention_header(tmp_path):
     assert result.action is InitAction.EXISTING
     assert result.warnings != ()
     assert result.details == ()
+
+
+def test_standalone_xdist_init_reports_serial_caveat_and_run_notes(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "-n 4"\n', encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_a.py").write_text("def test_a():\n    assert True\n")
+
+    result = init_project(tmp_path, _options(runner=RunnerKind.PYTEST))
+
+    assert result.action is InitAction.CREATED
+    assert [(item.target, item.action, item.source) for item in result.details] == [
+        (".ptest.toml", "created", "config"),
+        (". · pytest · ready with caveats: "
+         "serial: xdist disabled under ptest (-n 0)", "note", "config"),
+        ("run: ptest tests/test_a.py", "note", "config"),
+        ("run: ptest --full", "note", "config"),
+    ]
+
+
+def _write_child_config(path, kind, launcher, extra=""):
+    (path / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "abababababababababababababababab"\n'
+        "[runner]\n"
+        f'kind = "{kind}"\n'
+        f"launcher = {launcher}\n"
+        'args = []\n'
+        'full_args = []\n'
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n' + extra,
+        encoding="utf-8",
+    )
+
+
+def test_existing_persea_shaped_monorepo_reports_per_project_notes(tmp_path):
+    api = tmp_path / "api"
+    web = tmp_path / "web"
+    (api / "tests").mkdir(parents=True)
+    (web / "tests").mkdir(parents=True)
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n',
+        encoding="utf-8",
+    )
+    (api / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\n'
+        'addopts = \'-n 4 --dist=loadgroup -m "not slow"\'\n',
+        encoding="utf-8",
+    )
+    (api / "tests" / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
+        encoding="utf-8",
+    )
+    _write_child_config(api, "pytest", '["python"]')
+    (web / "tests" / "a.test.ts").write_text(
+        "export {};\n", encoding="utf-8")
+    _write_child_config(
+        web, "vitest", '["node"]',
+        extra='[setup]\nargv = ["npm", "ci"]\nrequired_paths = ["node_modules"]\n'
+              "network = true\nlifecycle_scripts = true\n",
+    )
+
+    result = init_project(tmp_path, _options(dry_run=False))
+
+    assert result.action is InitAction.EXISTING
+    assert [(item.target, item.action, item.source) for item in result.details] == [
+        (".ptest.toml", "already present", "config"),
+        ("api/.ptest.toml", "already present", "config"),
+        ("web/.ptest.toml", "already present", "config"),
+        ("api · pytest · not runnable: "
+         "pytest addopts enable xdist, which ptest runs serially"
+         ' — fix: add "-n", "0" to [runner] args in api/.ptest.toml',
+         "note", "config"),
+        ("web · vitest · ready with caveats: "
+         "exclusive: Vitest runs as one command and manages its own workers; "
+         "first run executes setup: npm ci", "note", "config"),
+        ("run: ptest web/tests/a.test.ts", "note", "config"),
+    ]
 
 
 def test_monorepo_dry_run_marks_preexisting_children_already_present(tmp_path):

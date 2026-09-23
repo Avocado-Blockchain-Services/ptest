@@ -342,6 +342,19 @@ def test_loaded_but_inactive_xdist_is_accepted_under_serial_grant():
     pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 
+def test_xdist_prefix_lookalike_hook_is_still_refused():
+    evil = _module("xdistevil")
+    manager = _loaded_manager(
+        (("xdistevil", evil),),
+        [_hookimpl("pytest_runtestloop", "xdistevil", evil)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="not owned by the serial grant"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
 @pytest.mark.parametrize("options", [
     {"numprocesses": 2},
     {"numprocesses": 2, "tx": ["popen", "popen"]},

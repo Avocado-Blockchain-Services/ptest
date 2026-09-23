@@ -154,6 +154,27 @@ def test_narrowing_addopts_are_caveat_without_full(tmp_path):
     assert result.full is False
 
 
+def test_maxfail_nonzero_narrows_without_full(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "--maxfail=3"\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "ptest --full unavailable: pytest addopts narrow the inventory (--maxfail)",)
+    assert result.full is False
+
+
+def test_maxfail_zero_is_not_narrowing():
+    assert E._narrowing_tokens(("--maxfail=0",)) == ()
+    assert E._narrowing_tokens(("--maxfail", "0")) == ()
+    assert E._narrowing_tokens(("--maxfail=3",)) == ("--maxfail",)
+    assert E._narrowing_tokens(("--maxfail", "3")) == ("--maxfail",)
+    assert E._narrowing_tokens(("--maxfail=0", "-m", "not slow")) == ("-m",)
+
+
 def test_full_refused_conftest_hook_is_caveat_without_full(tmp_path):
     _write(tmp_path / "tests" / "conftest.py",
            "def pytest_sessionfinish(session, exitstatus):\n    return None\n")

@@ -523,7 +523,8 @@ class OwnedPlugin:
                     candidate_module = str(getattr(candidate, "__name__", "") or
                                            getattr(type(candidate), "__module__", ""))
                     if (candidate_name in {"xdist", "pytest-xdist"}
-                            or candidate_module.startswith("xdist")):
+                            or candidate_module == "xdist"
+                            or candidate_module.startswith("xdist.")):
                         exempt_ids.add(id(candidate))
             for name, plugin in loaded:
                 if plugin is None:  # pluggy records blocked names with a None value.
@@ -531,7 +532,8 @@ class OwnedPlugin:
                 module = str(getattr(plugin, "__name__", "") or
                              getattr(type(plugin), "__module__", ""))
                 if ((name in {"xdist", "pytest-xdist"} and id(plugin) not in exempt_ids)
-                        or (str(module).startswith("xdist") and id(plugin) not in exempt_ids)):
+                        or ((str(module) == "xdist" or str(module).startswith("xdist."))
+                            and id(plugin) not in exempt_ids)):
                     self._refuse("pytest xdist is not owned by the serial grant")
                 executors = {"forked", "parallel", "rerunfailures", "repeat", "loop"}
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")

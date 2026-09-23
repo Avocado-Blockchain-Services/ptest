@@ -45,7 +45,7 @@ _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
 _VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
 
 _NARROWING_OPTIONS = frozenset({
-    "-k", "-m", "-x", "--exitfirst", "--deselect", "--lf", "--last-failed",
+    "-k", "-m", "-x", "--exitfirst", "--maxfail", "--deselect", "--lf", "--last-failed",
     "--ff", "--failed-first", "--sw", "--stepwise", "--ignore",
     "--ignore-glob",
 })
@@ -348,8 +348,7 @@ def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
                 value = token.partition("=")[2] if "=" in token else (
                     tokens[index + 1] if index + 1 < len(tokens) else "")
                 if value.strip() == "0":
-                    index += 1
-                    index += 1
+                    index += 2 if "=" not in token else 1
                     continue
             found.append(name)
         index += 1
