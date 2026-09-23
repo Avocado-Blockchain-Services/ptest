@@ -441,8 +441,15 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
         os.close(fd)
 
 
+# Hook-only modules that neither distribute, reorder, nor re-run tests stay
+# additive under the basic-serial grant.
+_BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout")
+
+
 class OwnedPlugin:
     """Additive profile gate; it neither replaces reporters nor parses addopts."""
+
+    _approved_hook_modules = _BASIC_APPROVED_HOOK_MODULES
 
     def __init__(self, workers: int, execution: str | None = None,
                  roots: tuple[str, ...] | None = None,
@@ -495,15 +502,38 @@ class OwnedPlugin:
                 and callable(is_blocked)
                 and is_blocked("xdist")
             }
+            configured = getattr(option, "numprocesses", None)
+            explicit_tx = list(getattr(option, "tx", None) or [])
+            # Loaded but inactive xdist is allowed under the one-slot grant:
+            # "-n 0" keeps the plugin (and its hookspecs, which conftests may
+            # implement) while xdist itself serializes. Any active state below
+            # still refuses with the existing messages.
+            xdist_inactive = (
+                self.workers == 1
+                and configured in (None, 0, "0")
+                and not explicit_tx
+                and not any(getattr(option, name, None)
+                            for name in ("px", "rsyncdir", "looponfail"))
+            )
+            exempt_ids = set(blocked_plugin_ids)
+            if xdist_inactive:
+                for candidate_name, candidate in loaded:
+                    if candidate is None:
+                        continue
+                    candidate_module = str(getattr(candidate, "__name__", "") or
+                                           getattr(type(candidate), "__module__", ""))
+                    if (candidate_name in {"xdist", "pytest-xdist"}
+                            or candidate_module.startswith("xdist")):
+                        exempt_ids.add(id(candidate))
             for name, plugin in loaded:
                 if plugin is None:  # pluggy records blocked names with a None value.
                     continue
                 module = str(getattr(plugin, "__name__", "") or
                              getattr(type(plugin), "__module__", ""))
-                if ((name in {"xdist", "pytest-xdist"} and id(plugin) not in blocked_plugin_ids)
-                        or (str(module).startswith("xdist") and id(plugin) not in blocked_plugin_ids)):
+                if ((name in {"xdist", "pytest-xdist"} and id(plugin) not in exempt_ids)
+                        or (str(module).startswith("xdist") and id(plugin) not in exempt_ids)):
                     self._refuse("pytest xdist is not owned by the serial grant")
-                executors = {"forked", "parallel", "rerunfailures", "repeat", "timeout", "loop"}
+                executors = {"forked", "parallel", "rerunfailures", "repeat", "loop"}
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")
                 package = str(module).split(".", 1)[0].removeprefix("pytest_")
                 if normalized in executors or package in executors:
@@ -522,7 +552,7 @@ class OwnedPlugin:
                 for implementation in getattr(manager.hook, hook).get_hookimpls():
                     if implementation.plugin is self:
                         continue
-                    if id(implementation.plugin) in blocked_plugin_ids:
+                    if id(implementation.plugin) in exempt_ids:
                         continue
                     module = getattr(implementation.function, "__module__", "")
                     if str(module).startswith("_pytest."):
@@ -678,7 +708,7 @@ class AdvancedPlugin(OwnedPlugin):
         self._initial_runtime_facts: dict[str, object] | None = None
         self._terminal_runtime_identity: str | None = None
         self._terminal_runtime_facts: dict[str, object] | None = None
-        self._approved_hook_modules = ("pytest_cov",)
+        self._approved_hook_modules = ("pytest_cov",) + _BASIC_APPROVED_HOOK_MODULES
 
     @staticmethod
     def _dependency_facts() -> tuple[tuple[str, str], ...]:

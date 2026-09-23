@@ -1,0 +1,1 @@
+"""Test double of the pytest-xdist package for the serial-grant regression."""

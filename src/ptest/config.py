@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
+from . import executability as _executability
 from .files import create_exclusive, read_regular
 
 _PHASE = "config"
@@ -679,11 +680,17 @@ def _directory_exists(root: Path, name: str) -> bool:
 def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
     if kind is C.RunnerKind.COMMAND:
         raise _problem("command-required", "an explicit command configuration is required")
+    args: tuple[str, ...] = ()
     if kind is C.RunnerKind.PYTEST:
         roots = ("tests",) if _directory_exists(root, "tests") else (".",)
         locked = _native_present(root, "uv.lock")
         launcher = ("uv", "run", "--locked", "--no-sync", "python") \
             if locked else ("python",)
+        # Static pytest config that activates xdist runs serially under
+        # ptest: neutralize it with "-n 0", preserving every other addopts
+        # element natively. Projects without xdist keep empty args.
+        if _executability.pytest_xdist_active(root):
+            args = ("-n", "0")
         setup = None
         if locked:
             setup = C.SetupConfig(
@@ -710,7 +717,7 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         setup = None
     config = C.Config(
         runner=C.RunnerConfig(
-            kind=kind, launcher=launcher, args=(), full_args=(),
+            kind=kind, launcher=launcher, args=args, full_args=(),
             test_roots=roots, workers=1,
         ),
         setup=setup,
@@ -869,6 +876,24 @@ def _config_detail(target: str, action: str) -> C.ActionRecord:
     return C.ActionRecord(target=target, action=action, source="config")
 
 
+def _executability_notes(
+        items: tuple[_executability.Executability, ...],
+) -> tuple[C.ActionRecord, ...]:
+    """Project notes plus verified run notes in the frozen §3.2 grammar."""
+    notes: list[C.ActionRecord] = [
+        C.ActionRecord(
+            target=f"{item.project} · {item.runner} · {item.verdict()}",
+            action="note", source="config",
+        )
+        for item in items
+    ]
+    notes.extend(
+        C.ActionRecord(target=f"run: {command}", action="note", source="config")
+        for command in _executability.commands(items)
+    )
+    return tuple(notes)
+
+
 def _child_state(root: Path, declaration: str) -> str:
     """Probe one declared child config read-only: ``"ok"``, ``"missing"`` or ``"invalid"``.
 
@@ -945,7 +970,11 @@ def _existing_result(root: Path, target: Path, resolution: C.ConfigResolution) -
                 message=message,
                 paths=(),
             ),)
-        details = tuple(entries)
+        details = tuple(entries) + _executability_notes(
+            _executability.check_resolution(resolution))
+    elif resolution.problem is None:
+        details = details + _executability_notes(
+            _executability.check_resolution(resolution))
     return C.InitResult(
         action=C.InitAction.EXISTING, target=target, exists=True,
         config=_summary(resolution.config) if resolution.config is not None else None,
@@ -998,11 +1027,16 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             )
             for child in planned
         )
+        planned_items = tuple(
+            _executability.check_config(child.config, project=child.declaration)
+            for child in planned
+        )
         if options.dry_run:
             return C.InitResult(
                 action=C.InitAction.PREVIEW, target=target, exists=False,
                 config=None, warnings=(),
-                details=(_config_detail(_CONFIG_NAME, "would create"),) + child_details,
+                details=(_config_detail(_CONFIG_NAME, "would create"),) + child_details
+                + _executability_notes(planned_items),
             )
         for child in planned:
             if child.data is not None:
@@ -1011,7 +1045,8 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         return C.InitResult(
             action=C.InitAction.CREATED, target=target, exists=True,
             config=None, warnings=(),
-            details=(_config_detail(_CONFIG_NAME, "created"),) + child_details,
+            details=(_config_detail(_CONFIG_NAME, "created"),) + child_details
+            + _executability_notes(planned_items),
         )
 
     if options.runner is not None:
@@ -1022,11 +1057,13 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             raise _problem("invalid-config", "an explicit runner choice is required")
         kind = candidates[0]
     config = _fresh_config(root, target, kind)
+    fresh_notes = _executability_notes(
+        (_executability.check_config(config, project="."),))
     if options.dry_run:
         return C.InitResult(
             action=C.InitAction.PREVIEW, target=target, exists=False,
             config=_summary(config), warnings=(),
-            details=(_config_detail(_CONFIG_NAME, "would create"),),
+            details=(_config_detail(_CONFIG_NAME, "would create"),) + fresh_notes,
         )
     try:
         create_exclusive(root, _CONFIG_NAME, _serialize_fresh(config),
@@ -1038,5 +1075,5 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     return C.InitResult(
         action=C.InitAction.CREATED, target=target, exists=True,
         config=_summary(config), warnings=(),
-        details=(_config_detail(_CONFIG_NAME, "created"),),
+        details=(_config_detail(_CONFIG_NAME, "created"),) + fresh_notes,
     )

@@ -127,7 +127,19 @@ def _node_id_token(argv: tuple[str, ...], index: int) -> bool:
 
 def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
     """Reject controls that would bypass the admission grant before import."""
-    for index, token in enumerate(argv):
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        # Generated serial spellings neutralize xdist without removing it
+        # (blocking xdist breaks conftests that implement xdist hooks).
+        # These four spellings are the only accepted parallel-family controls.
+        if token in ("-n", "--numprocesses") \
+                and index + 1 < len(argv) and argv[index + 1] == "0":
+            index += 2
+            continue
+        if token in ("-n0", "--numprocesses=0"):
+            index += 1
+            continue
         option = token.split("=", 1)[0]
         if option in _REMOTE_OPTIONS or option in _PARALLEL_OPTIONS:
             raise _problem("native-config-invalid",
@@ -148,6 +160,7 @@ def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> No
                      or (short and short[1] in {"k", "m"})
                      or re.fullmatch(r"-[qvs]*x[qvs]*", token)) and not maxfail_zero:
             raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")
+        index += 1
 
 
 def _validate_full_roots(roots: tuple[str, ...]) -> None:

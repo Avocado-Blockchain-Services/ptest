@@ -764,3 +764,50 @@ def test_selection_symlink_disables_selection(tmp_path):
     assert result.problem is None
     assert result.config.selection == SelectionPolicy(enabled=False, closed_inputs=False)
     assert [warning.code for warning in result.warnings] == ["policy-invalid"]
+
+
+def _fresh_pytest_args(root, target_name=".ptest.toml"):
+    from ptest.config import _fresh_config
+    config = _fresh_config(root, root / target_name, RunnerKind.PYTEST)
+    return config.runner.args
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("pyproject.toml",
+     '[tool.pytest.ini_options]\naddopts = \'-n 4 --dist=loadgroup -m "not slow"\'\n'),
+    ("pyproject.toml",
+     '[tool.pytest.ini_options]\naddopts = ["-n", "4", "--dist=loadgroup"]\n'),
+    ("pytest.ini", "[pytest]\naddopts = -n 4\n"),
+    ("tox.ini", "[pytest]\naddopts = --numprocesses=auto\n"),
+    ("setup.cfg", "[tool:pytest]\naddopts = -p xdist\n"),
+    ("pyproject.toml", '[tool.pytest]\naddopts = "--dist=load"\n'),
+    ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "--maxprocesses=4"\n'),
+])
+def test_fresh_pytest_config_disables_xdist_serially(tmp_path, filename, content):
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+
+    assert _fresh_pytest_args(tmp_path) == ("-n", "0")
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = \'-m "not slow"\'\n'),
+    ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-n 4 -p no:xdist"\n'),
+    ("pytest.ini", "[pytest]\naddopts = -q\n"),
+    ("pyproject.toml", "[project]\ndependencies = []\n"),
+])
+def test_fresh_pytest_config_without_xdist_keeps_empty_args(tmp_path, filename, content):
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+
+    assert _fresh_pytest_args(tmp_path) == ()
+
+
+def test_fresh_pytest_serial_config_serializes_only_args_line(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "-n 4"\n', encoding="utf-8")
+    result = init_project(tmp_path, InitOptions(
+        runner=RunnerKind.PYTEST, dry_run=False, reveal_command=False))
+
+    assert result.action.value == "created"
+    body = (tmp_path / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'args = ["-n", "0"]' in body
+    assert "full_args = []" in body

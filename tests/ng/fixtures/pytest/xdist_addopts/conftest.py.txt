@@ -1,0 +1,5 @@
+"""Persea-shaped conftest: implements an xdist hook without optionalhook."""
+
+
+def pytest_configure_node(node):
+    return None

@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+addopts = '-p xdist.plugin -n 2 --dist=loadgroup -m "not slow"'
+markers = ["slow: slow test"]
+testpaths = ["tests"]
