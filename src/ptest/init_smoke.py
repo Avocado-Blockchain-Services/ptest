@@ -16,13 +16,15 @@ from __future__ import annotations
 import os
 import re
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config as config_api
 from . import contracts as C
 from . import executability as _exec_check
+from . import files as _files
+from . import monorepo as _monorepo
 from . import operations
 from .doctor import match_rules
 from .render import terminal_text
@@ -32,13 +34,17 @@ STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 
 SMOKE_QUESTION = "Run a quick smoke test to confirm ptest works? [Y/n]"
+SETUP_QUESTION = ("ptest needs to run setup ({argv}) once before the smoke "
+                  "test; run it? [Y/n]")
+
+# Smoke never waits on a busy admission queue: a queue timeout is a skip.
+SMOKE_QUEUE_TIMEOUT_S = 60
 
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_ENTRIES = 2000
 _MAX_DEPTH = 6
 _MAX_SCAN = 32
 _MAX_LINES = 5
-_SKIP_DIRS = frozenset({"node_modules", ".venv", "venv", "__pycache__"})
 _VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
 # Database, network, or service library names, any language. Conservative:
 # a hit only disqualifies one file, never the project.
@@ -68,6 +74,7 @@ class SmokePlan:
     config: C.Config | None
     candidate: str | None  # project-relative test path, or None
     skip_reason: str | None  # set iff the project will not execute
+    setup_argv: tuple[str, ...] | None = None  # setup owed before smoke
 
 
 def parse_consent(answer: str) -> bool:
@@ -95,45 +102,13 @@ def _safe_root(test_root: str) -> bool:
 
 def _collect(root: Path, test_roots: tuple[str, ...],
              kind: C.RunnerKind) -> list[tuple[int, str]]:
-    """(size, project-relative path) of candidate test files, bounded."""
+    """(size, project-relative path) of candidate test files, bounded.
+
+    Walks with the executability walker so the two static scans share one
+    traversal; only name-matching candidates pay for a size stat.
+    """
     found: list[tuple[int, str]] = []
     budget = [_MAX_ENTRIES]
-
-    def walk(start: Path, depth: int) -> None:
-        try:
-            entries = sorted(os.scandir(start), key=lambda entry: entry.name)
-        except OSError:
-            return
-        for entry in entries:
-            name = entry.name
-            try:
-                if entry.is_symlink():
-                    continue
-            except OSError:
-                continue
-            if name in _SKIP_DIRS or name.startswith("."):
-                continue
-            budget[0] -= 1
-            if budget[0] < 0:
-                return
-            try:
-                is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                continue
-            path = Path(entry.path)
-            if is_dir:
-                if depth > 0:
-                    walk(path, depth - 1)
-                continue
-            if not _name_ok(name, kind):
-                continue
-            try:
-                rel = path.relative_to(root).as_posix()
-                size = entry.stat(follow_symlinks=False).st_size
-            except (ValueError, OSError):
-                continue
-            found.append((size, rel))
-
     for test_root in test_roots:
         if not _safe_root(test_root):
             continue
@@ -144,7 +119,14 @@ def _collect(root: Path, test_roots: tuple[str, ...],
             continue
         if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
             continue
-        walk(base, _MAX_DEPTH)
+        for rel in _exec_check._iter_files(root, base, _MAX_DEPTH, budget):
+            if not _name_ok(Path(rel).name, kind):
+                continue
+            try:
+                size = os.lstat(root / rel).st_size
+            except OSError:
+                continue
+            found.append((size, rel))
     return found
 
 
@@ -167,20 +149,12 @@ def _tainted(text: str) -> bool:
 
 
 def _read_text(root: Path, rel: str) -> str | None:
+    """Bounded no-follow read shared with the rest of ptest's static scans."""
     try:
-        stamp = os.lstat(root / rel)
-    except OSError:
+        raw = _files.read_regular(root, rel, _MAX_FILE_BYTES + 1)
+    except C.Problem:
         return None
-    if not stat.S_ISREG(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
-        return None
-    if stamp.st_size > _MAX_FILE_BYTES or stamp.st_size == 0:
-        return None
-    try:
-        with open(root / rel, "rb") as handle:
-            raw = handle.read(_MAX_FILE_BYTES + 1)
-    except OSError:
-        return None
-    if len(raw) > _MAX_FILE_BYTES:
+    if len(raw) > _MAX_FILE_BYTES or len(raw) == 0:
         return None
     try:
         return raw.decode("utf-8")
@@ -232,22 +206,26 @@ def plan_resolution(resolution: C.ConfigResolution,
     """One smoke plan per configured project, in manifest order.
 
     Read-only: resolves configs and inspects files, never executes.
+    Monorepo children resolve through ``preflight_children``, the same
+    path ``ptest <path>`` uses; a preflight Problem skips every child.
     """
     manifest = getattr(resolution, "monorepo", None)
     children = tuple(getattr(manifest, "children", ()) or ()) \
         if manifest is not None else ()
     if children:
-        plans: list[SmokePlan] = []
-        for declaration in children:
-            child = config_api.resolve_config(resolution.root / declaration)
-            if child.config is None or child.problem is not None:
-                plans.append(SmokePlan(
-                    project=declaration, config=None, candidate=None,
-                    skip_reason="child configuration is missing or invalid"))
-                continue
-            plans.append(_plan_for_config(
-                declaration, child.config, child.root, domain))
-        return tuple(plans)
+        try:
+            targets = _monorepo.preflight_children(
+                resolution.root, manifest)
+        except C.Problem as problem:
+            return tuple(
+                SmokePlan(project=declaration, config=None, candidate=None,
+                          skip_reason=problem.message)
+                for declaration in children)
+        return tuple(
+            _plan_for_config(
+                target.declaration, target.config, target.directory,
+                domain)
+            for target in targets)
     if resolution.config is None:
         return ()
     return (_plan_for_config(".", resolution.config, resolution.root, domain),)
@@ -259,12 +237,12 @@ def _plan_for_config(project: str, config: C.Config, root: Path,
     if item.status == _exec_check.STATUS_NOT_EXECUTABLE:
         return SmokePlan(project=project, config=config, candidate=None,
                          skip_reason=item.reason or "not runnable")
-    blocker = operations.setup_blocker(domain, config)
-    if blocker is not None:
-        argv = " ".join(config.setup.argv) if config.setup is not None else ""
-        return SmokePlan(
-            project=project, config=config, candidate=None,
-            skip_reason=f"setup not done; run: {argv}".rstrip())
+    setup_argv = None
+    if operations.setup_blocker(domain, config) is not None \
+            and config.setup is not None:
+        # Setup would run (missing paths or no recorded fingerprint): the
+        # plan stays runnable so TTY init can offer to run setup first.
+        setup_argv = tuple(config.setup.argv)
     candidate = choose_candidate(
         root, config.runner.kind, config.runner.test_roots)
     if candidate is None:
@@ -273,14 +251,67 @@ def _plan_for_config(project: str, config: C.Config, root: Path,
             project=project, config=config, candidate=None,
             skip_reason=f"no fixture-free smoke candidate under {roots}")
     return SmokePlan(project=project, config=config, candidate=candidate,
-                     skip_reason=None)
+                     skip_reason=None, setup_argv=setup_argv)
 
 
-def _useful_lines(result: C.RunResult, exit_code: int) -> tuple[str, ...]:
+def setup_advice(plan: SmokePlan) -> str:
+    """Working advice for a setup-owed plan that will not run setup."""
+    argv = " ".join(plan.setup_argv or ())
+    return (f"setup baseline not recorded; run: "
+            f"{display_command(plan.project, plan.candidate)} "
+            f"(runs {argv} first)")
+
+
+def skip_result(plan: SmokePlan, reason: str) -> SmokeResult:
+    """One skipped row for a plan that never executes."""
+    return SmokeResult(
+        project=plan.project, status=STATUS_SKIPPED,
+        command=display_command(plan.project, plan.candidate),
+        duration_s=None, exit_code=None, lines=(), reason=reason)
+
+
+def run_setup(domain: C.DomainPaths, plan: SmokePlan, *,
+              fixture_domain: Path | None = None) -> str | None:
+    """Run declared setup through ptest's own setup path; None when ready.
+
+    The setup executes inside one scoped ``operations.execute`` call, which
+    records the setup fingerprint on success. Any later smoke run then uses
+    ``no_setup=True``. A Problem or infrastructure error becomes a skip
+    reason; so does a setup run that leaves the baseline unrecorded.
+    """
+    if plan.config is None or plan.candidate is None \
+            or plan.setup_argv is None:
+        return "smoke unavailable"
+    _announce(" ".join(plan.setup_argv))
+    try:
+        operations.execute(
+            domain, plan.config,
+            C.RunRequest(
+                mode=C.Mode.SCOPED, argv=(plan.candidate,),
+                queue_timeout_s=SMOKE_QUEUE_TIMEOUT_S,
+                fixture_domain=fixture_domain))
+    except C.Problem as problem:
+        return problem.message
+    except Exception as error:  # never break init on smoke infrastructure
+        return f"smoke error: {type(error).__name__}"
+    if operations.setup_blocker(domain, plan.config) is not None:
+        return setup_advice(plan)
+    return None
+
+
+def _announce(command: str) -> None:
+    """Print the running line before executing, so TTY output stays ordered."""
+    sys.stdout.write(f"Smoke: running {terminal_text(command)}\n")
+    sys.stdout.flush()
+
+
+def _useful_lines(result: C.RunResult) -> tuple[str, ...]:
     lines = [f"{reason.code}: {reason.message}" for reason in result.reasons
              if getattr(reason, "message", None)]
     if not lines:
-        lines = [f"no detail (exit {exit_code})"]
+        # The runner streams test output above this line; there is no
+        # further machine detail to repeat.
+        lines = ["see runner output above"]
     return tuple(lines[:_MAX_LINES])
 
 
@@ -289,33 +320,28 @@ def run_plan(domain: C.DomainPaths, plan: SmokePlan, *,
     """Execute one plan in-process through the scoped runner.
 
     Never raises for runner outcomes: provider/test failures become
-    ``failed``, infrastructure problems become ``skipped``. The written
-    configuration is never touched and init's exit status stays
-    configuration-based upstream.
+    ``failed``, infrastructure problems become ``skipped``. The smoke
+    request always opts out of setup (``no_setup=True``): owed setup runs
+    first through :func:`run_setup`, and anything still owed here refuses
+    and becomes a skip. The written configuration is never touched and
+    init's exit status stays configuration-based upstream.
     """
     command = display_command(plan.project, plan.candidate)
     if plan.skip_reason is not None or plan.config is None \
             or plan.candidate is None:
-        return SmokeResult(
-            project=plan.project, status=STATUS_SKIPPED, command=command,
-            duration_s=None, exit_code=None, lines=(),
-            reason=plan.skip_reason or "smoke unavailable")
+        return skip_result(plan, plan.skip_reason or "smoke unavailable")
+    _announce(command)
     started = time.monotonic()
     try:
         result = operations.execute(
             domain, plan.config,
             C.RunRequest(mode=C.Mode.SCOPED, argv=(plan.candidate,),
-                         fixture_domain=fixture_domain))
+                         queue_timeout_s=SMOKE_QUEUE_TIMEOUT_S,
+                         no_setup=True, fixture_domain=fixture_domain))
     except C.Problem as problem:
-        return SmokeResult(
-            project=plan.project, status=STATUS_SKIPPED, command=command,
-            duration_s=None, exit_code=None, lines=(),
-            reason=problem.message)
+        return skip_result(plan, problem.message)
     except Exception as error:  # never break init on smoke infrastructure
-        return SmokeResult(
-            project=plan.project, status=STATUS_SKIPPED, command=command,
-            duration_s=None, exit_code=None, lines=(),
-            reason=f"smoke error: {type(error).__name__}")
+        return skip_result(plan, f"smoke error: {type(error).__name__}")
     duration = time.monotonic() - started
     if result.status is C.Status.PASSED:
         return SmokeResult(
@@ -325,7 +351,7 @@ def run_plan(domain: C.DomainPaths, plan: SmokePlan, *,
     return SmokeResult(
         project=plan.project, status=STATUS_FAILED, command=command,
         duration_s=None, exit_code=exit_code,
-        lines=_useful_lines(result, exit_code), reason=None)
+        lines=_useful_lines(result), reason=None)
 
 
 def format_smoke(results: tuple[SmokeResult, ...]) -> str:
