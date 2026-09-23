@@ -5,10 +5,11 @@ Three-pass shape (collect, validate, score):
 1. :func:`build_packets` collects one bounded packet per declared selected
    child in manifest order. It reads regular files only, never follows
    symlinks, excludes instruction/secret/private/dependency/generated
-   content, enforces 64 files / 512 KiB per child / 64 KiB per file, reserves
-   request overhead under the 1 MiB provider input cap, and records explicit
-   coverage counts plus SHA-256 excerpt identities. Dependency provenance is
-   static text only: declarations and
+   content, enforces 64 files / 512 KiB per child / 64 KiB per file plus
+   separate 256-candidate / 2 MiB read budgets, reserves request overhead
+   under the 1 MiB provider input cap, and records explicit coverage counts
+   plus SHA-256 excerpt identities. Dependency provenance is static text
+   only: declarations and
    authoritative locks are distinguished, the local environment is never
    executed or imported (recorded ``uninspectable``), ptest's own runtime
    environment is never treated as project evidence, and anything
@@ -37,6 +38,8 @@ import json
 import os
 import re
 import stat
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +51,10 @@ _PHASE = "validation"
 MAX_FILES_PER_CHILD = 64
 MAX_BYTES_PER_CHILD = 512 * 1024
 MAX_BYTES_PER_FILE = 64 * 1024
+# Candidate reads include files later rejected for encoding or binary content.
+# Keep their independent work budget finite even when no excerpt is admitted.
+MAX_CANDIDATE_FILES_PER_CHILD = 256
+MAX_CANDIDATE_BYTES_PER_CHILD = 2 * 1024 * 1024
 MAX_PROMPT_BYTES = 1024 * 1024
 # The collected packet leaves room for the fixed policy, response contract,
 # and ordinary provider schema before the shared 1 MiB stdin budget.
@@ -233,16 +240,20 @@ def _check_hex(value: object, name: str, length: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceLimits:
-    """Per-child admission caps (spec defaults, all strictly positive)."""
+    """Per-child admission and candidate-read caps (all strictly positive)."""
 
     max_files_per_child: int = MAX_FILES_PER_CHILD
     max_bytes_per_child: int = MAX_BYTES_PER_CHILD
     max_bytes_per_file: int = MAX_BYTES_PER_FILE
     max_prompt_bytes: int = _DEFAULT_PACKET_PROMPT_BYTES
+    max_candidate_files_per_child: int = MAX_CANDIDATE_FILES_PER_CHILD
+    max_candidate_bytes_per_child: int = MAX_CANDIDATE_BYTES_PER_CHILD
 
     def __post_init__(self) -> None:
         for field in ("max_files_per_child", "max_bytes_per_child",
-                      "max_bytes_per_file", "max_prompt_bytes"):
+                      "max_bytes_per_file", "max_prompt_bytes",
+                      "max_candidate_files_per_child",
+                      "max_candidate_bytes_per_child"):
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"limits.{field} must be int")
@@ -490,7 +501,26 @@ def _excluded_name(name: str) -> bool:
             or bool(_GENERATED_NAME.search(name)))
 
 
-def _iter_regular_files(root: Path, rel: str, entries: list) -> None:
+def _review_checkpoint(deadline: float | None,
+                       progress: Callable[[], None] | None) -> None:
+    """Check the review budget around one bounded unit of packet work."""
+    if deadline is None and progress is None:
+        return
+    if deadline is not None and time.monotonic() >= deadline:
+        raise C.Problem(code="review-timeout",
+                        message="total review deadline expired",
+                        phase="evidence", retryable=False)
+    if progress is not None:
+        progress()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise C.Problem(code="review-timeout",
+                        message="total review deadline expired",
+                        phase="evidence", retryable=False)
+
+
+def _iter_regular_files(root: Path, rel: str, entries: list,
+                        *, deadline: float | None = None,
+                        progress: Callable[[], None] | None = None) -> None:
     """Collect ``(relative, size)`` regular files without following links.
 
     Symlinks, sockets, devices, FIFOs, and excluded names are recorded in
@@ -499,18 +529,32 @@ def _iter_regular_files(root: Path, rel: str, entries: list) -> None:
     stack = [rel]
     seen = 0
     while stack:
+        _review_checkpoint(deadline, progress)
         current = stack.pop()
         try:
             with os.scandir(root / current if current else root) as it:
-                names = sorted((entry.name, entry) for entry in it)
+                names = []
+                while True:
+                    _review_checkpoint(deadline, progress)
+                    try:
+                        entry = next(it)
+                    except StopIteration:
+                        break
+                    _review_checkpoint(deadline, progress)
+                    if seen >= MAX_WALK_ENTRIES:
+                        entries.append(("skip", current))
+                        return
+                    seen += 1
+                    names.append(entry)
         except OSError:
+            _review_checkpoint(deadline, progress)
             entries.append(("skip", current))
             continue
-        for name, entry in names:
-            seen += 1
-            if seen > MAX_WALK_ENTRIES:
-                entries.append(("skip", current))
-                return
+        names.sort(key=lambda entry: entry.name)
+        _review_checkpoint(deadline, progress)
+        for entry in names:
+            _review_checkpoint(deadline, progress)
+            name = entry.name
             child = f"{current}/{name}" if current else name
             if _excluded_name(name):
                 entries.append(("skip", child))
@@ -518,24 +562,30 @@ def _iter_regular_files(root: Path, rel: str, entries: list) -> None:
             try:
                 is_link = entry.is_symlink()
             except OSError:
+                _review_checkpoint(deadline, progress)
                 entries.append(("skip", child))
                 continue
+            _review_checkpoint(deadline, progress)
             if is_link:
                 entries.append(("skip", child))
                 continue
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
+                _review_checkpoint(deadline, progress)
                 entries.append(("skip", child))
                 continue
+            _review_checkpoint(deadline, progress)
             if is_dir:
                 stack.append(child)
                 continue
             try:
                 stamp = entry.stat(follow_symlinks=False)
             except OSError:
+                _review_checkpoint(deadline, progress)
                 entries.append(("skip", child))
                 continue
+            _review_checkpoint(deadline, progress)
             if not stat.S_ISREG(stamp.st_mode):
                 entries.append(("skip", child))
                 continue
@@ -785,7 +835,9 @@ def _packet_scope_context(root: Path, workspace, repo) -> tuple:
 
 
 def build_packets(workspace, resolution,
-                  limits: EvidenceLimits = EvidenceLimits()
+                  limits: EvidenceLimits = EvidenceLimits(), *,
+                  deadline: float | None = None,
+                  progress: Callable[[], None] | None = None,
                   ) -> tuple[EvidencePacket, ...]:
     """Collect one bounded packet per declared selected child, in order."""
     from . import doctor as doctor_api
@@ -796,6 +848,7 @@ def build_packets(workspace, resolution,
         raise TypeError("resolution must be ConfigResolution")
     if not isinstance(limits, EvidenceLimits):
         raise TypeError("limits must be EvidenceLimits")
+    _review_checkpoint(deadline, progress)
     root = Path(resolution.root)
     packets: list[EvidencePacket] = []
     if len(workspace.repositories) > 256:
@@ -806,19 +859,25 @@ def build_packets(workspace, resolution,
             raise _fail("invalid-config",
                         "declared child configuration is unavailable; "
                         "assessment packets cannot be built")
-    contexts = [
-        _packet_scope_context(root, workspace, repo)
-        for repo in workspace.repositories
-    ]
+    contexts = []
+    for repo in workspace.repositories:
+        _review_checkpoint(deadline, progress)
+        contexts.append(_packet_scope_context(root, workspace, repo))
+        _review_checkpoint(deadline, progress)
     for repo, scope_context in zip(workspace.repositories, contexts):
+        _review_checkpoint(deadline, progress)
         packets.append(_build_one_packet(
-            root, repo, resolution, limits, scope_context))
+            root, repo, resolution, limits, scope_context,
+            deadline=deadline, progress=progress))
     return tuple(packets)
 
 
 def _build_one_packet(root: Path, repo, resolution,
                       limits: EvidenceLimits,
-                      scope_context: tuple) -> EvidencePacket:
+                      scope_context: tuple, *,
+                      deadline: float | None = None,
+                      progress: Callable[[], None] | None = None
+                      ) -> EvidencePacket:
     declaration = repo.declaration
     child_root, scan_start, scope = scope_context
     entries: list = []
@@ -827,31 +886,68 @@ def _build_one_packet(root: Path, repo, resolution,
            for part in path.split("/")):
         entries.append(("skip", scan_start or declaration))
     else:
-        _iter_regular_files(child_root, scan_start, entries)
-    regular = [(rel, size) for kind, *rest in entries
-               if kind == "file" for rel, size in [tuple(rest)]]
-    skipped = sum(1 for entry in entries if entry[0] == "skip")
+        _iter_regular_files(child_root, scan_start, entries,
+                            deadline=deadline, progress=progress)
+    regular = []
+    skipped = 0
+    for entry in entries:
+        _review_checkpoint(deadline, progress)
+        if entry[0] == "file":
+            regular.append((entry[1], entry[2]))
+        else:
+            skipped += 1
     regular.sort(key=lambda item: item[0])
+    _review_checkpoint(deadline, progress)
     prefix = "" if declaration == "." else declaration + "/"
 
     excerpts: list[SourceExcerpt] = []
     paths: dict[str, str] = {}
     byte_count = 0
     truncated = 0
-    for rel, _size in regular:
+    candidate_files_read = 0
+    candidate_bytes_read = 0
+    max_candidate_read = min(limits.max_bytes_per_file,
+                             limits.max_bytes_per_child) + 1
+    for index, (rel, _size) in enumerate(regular):
+        _review_checkpoint(deadline, progress)
         if len(excerpts) >= limits.max_files_per_child:
             truncated += 1
             continue
+        if (candidate_files_read >= limits.max_candidate_files_per_child
+                or candidate_bytes_read >= limits.max_candidate_bytes_per_child):
+            truncated += len(regular) - index
+            break
+        read_limit = min(
+            max_candidate_read,
+            limits.max_candidate_bytes_per_child - candidate_bytes_read)
+        if read_limit <= 0:
+            truncated += len(regular) - index
+            break
+        candidate_files_read += 1
+        # Reserve the maximum this bounded read could consume. If the read
+        # raises after a partial OS read, the reservation remains conservative.
+        candidate_bytes_read += read_limit
         try:
-            raw = read_regular(
-                child_root, rel,
-                min(limits.max_bytes_per_file,
-                    limits.max_bytes_per_child) + 1)
+            # The shared no-follow reader is byte-bounded to one excerpt plus
+            # one sentinel byte. Check immediately around its bounded read;
+            # individual OS read calls cannot be interrupted by this layer.
+            raw = read_regular(child_root, rel, read_limit)
         except C.Problem:
+            _review_checkpoint(deadline, progress)
             skipped += 1
             continue
+        candidate_bytes_read -= read_limit - len(raw)
+        _review_checkpoint(deadline, progress)
+        # A candidate-budget-limited read may be a valid prefix. Do not admit
+        # it as a complete excerpt; mark this file and the unread tail partial.
+        if read_limit < max_candidate_read and len(raw) == read_limit:
+            truncated += len(regular) - index
+            break
         chunk, was_cut = _truncate_to_valid_utf8(
             raw, limits.max_bytes_per_file)
+        if was_cut and raw and not chunk:
+            truncated += 1
+            continue
         if byte_count + len(chunk) > limits.max_bytes_per_child:
             truncated += 1
             continue
@@ -888,22 +984,31 @@ def _build_one_packet(root: Path, repo, resolution,
         project_id = "0" * 32
     dependencies = _dependency_facts(
         set(paths), prefix, paths if scan_start else None)
+    _review_checkpoint(deadline, progress)
 
     # Enforce the prompt cap by dropping trailing excerpts; coverage counts
     # stay explicit so partial evidence is visible, not silent.
     body = _packet_body(declaration, project_id, scope, excerpts,
                         dependencies, runner_kind, skipped, truncated,
                         byte_count)
-    while (len(json.dumps(body, sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=True).encode("utf-8"))
-            > limits.max_prompt_bytes and excerpts):
+    while excerpts:
+        _review_checkpoint(deadline, progress)
+        body_bytes = json.dumps(
+            body, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True).encode("utf-8")
+        _review_checkpoint(deadline, progress)
+        if len(body_bytes) <= limits.max_prompt_bytes:
+            break
         dropped = excerpts.pop()
         byte_count -= len(dropped.text.encode("utf-8"))
         truncated += 1
         body = _packet_body(declaration, project_id, scope,
                             excerpts, dependencies, runner_kind, skipped,
                             truncated, byte_count)
+        _review_checkpoint(deadline, progress)
+    _review_checkpoint(deadline, progress)
     digest = _packet_identity(body)
+    _review_checkpoint(deadline, progress)
     return EvidencePacket(
         declaration=declaration, project_id=project_id, scope=scope,
         packet_sha256=digest, excerpts=tuple(excerpts),

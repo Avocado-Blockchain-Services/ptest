@@ -2099,6 +2099,113 @@ def test_total_review_deadline_prevents_late_provider_launch(
     assert not (root / "recommendations.md").exists()
 
 
+@pytest.mark.parametrize(("timeout_phase", "expected_launches"), [
+    ("collecting", 0),
+    ("revalidating", 1),
+])
+def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
+        inspection_project, tmp_path, monkeypatch, capsys, timeout_phase,
+        expected_launches):
+    import sys
+    from ptest import cli
+    from ptest.agent_providers import ProviderResult
+
+    _, root = inspection_project
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    original_report = b"keep the last complete report exactly\n"
+    report = root / "recommendations.md"
+    report.write_bytes(original_report)
+
+    clock = [100.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_REVIEW_TOTAL_TIMEOUT_S", 10)
+    real_build_packets = cli.agent_assessment.build_packets
+    build_count = 0
+    review_deadline = []
+    launches = []
+
+    def build_packets(*args, **kwargs):
+        nonlocal build_count
+        build_count += 1
+        review_deadline.append(kwargs["deadline"])
+        if ((timeout_phase == "collecting" and build_count == 1)
+                or (timeout_phase == "revalidating" and build_count == 2)):
+            clock[0] = kwargs["deadline"]
+        return real_build_packets(*args, **kwargs)
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        launches.append(clock[0])
+        assert review_deadline and clock[0] < review_deadline[0]
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=8001, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr(cli.agent_assessment, "build_packets", build_packets)
+    monkeypatch.setattr(cli.agent_providers, "launch_review", launch)
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 124
+
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.data is None
+    assert document.error.code == "review-timeout"
+    assert len(launches) == expected_launches
+    assert report.read_bytes() == original_report
+
+
+def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    import sys
+    from ptest import cli
+    from ptest.agent_providers import ProviderResult
+
+    _, root = inspection_project
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli, "_REVIEW_TOTAL_TIMEOUT_S", 100)
+    real_build_packets = cli.agent_assessment.build_packets
+
+    def build_packets(*args, **kwargs):
+        pulse = kwargs["progress"]
+        pulse()
+        clock[0] += 15
+        pulse()
+        return real_build_packets(*args, **kwargs)
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=8002, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr(cli.agent_assessment, "build_packets", build_packets)
+    monkeypatch.setattr(cli.agent_providers, "launch_review", launch)
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+
+    stderr = capsys.readouterr().err
+    assert sum("collecting |" in line for line in stderr.splitlines()) >= 2
+    assert sum("validating |" in line for line in stderr.splitlines()) >= 2
+    assert "elapsed=15s" in stderr
+    assert "%" not in stderr
+
+
 def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
         case, tmp_path, monkeypatch, capsys):
     import sys

@@ -1008,8 +1008,15 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
     deadline = started + _REVIEW_TOTAL_TIMEOUT_S
     limits = _doctor_limits(parsed)
     previous = _previous_report_identity(resolution.root)
+    active_progress = ["collecting", adapter.name, resolution.root.name]
+    last_progress_at = [started]
 
-    def progress(phase: str, provider: str, project: str, elapsed_s: float):
+    def ensure_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise _problem("review-timeout", "total review deadline expired")
+
+    def emit_progress(phase: str, provider: str, project: str,
+                      elapsed_s: float, emitted_at: float | None = None):
         detail = " | ".join((
             render.terminal_text(phase),
             "provider=" + render.terminal_text(provider),
@@ -1021,13 +1028,30 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             print(f"\r{spinner} doctor review: {detail}",
                   end="", file=sys.stderr, flush=True)
         else:
-            print("doctor review: " + detail, file=sys.stderr)
+            print("doctor review: " + detail, file=sys.stderr, flush=True)
+        last_progress_at[0] = (time.monotonic() if emitted_at is None
+                               else emitted_at)
+
+    def progress(phase: str, provider: str, project: str, elapsed_s: float):
+        active_progress[:] = [phase, provider, project]
+        emit_progress(phase, provider, project, elapsed_s)
+
+    def heartbeat() -> None:
+        now = time.monotonic()
+        if now - last_progress_at[0] >= 15:
+            phase, provider, project = active_progress
+            emit_progress(phase, provider, project, now - started,
+                          emitted_at=now)
 
     try:
+        ensure_deadline()
         progress("collecting", adapter.name, resolution.root.name,
                  time.monotonic() - started)
         workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
-        packets = agent_assessment.build_packets(workspace, resolution)
+        ensure_deadline()
+        packets = agent_assessment.build_packets(
+            workspace, resolution, deadline=deadline, progress=heartbeat)
+        ensure_deadline()
         if not packets:
             raise _problem("invalid-config", "no selected project evidence is available")
         if sum(len(packet.excerpts) for packet in packets) > _REVIEW_SOURCE_PROOF_MAX:
@@ -1040,9 +1064,10 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         schema = _raw_assessment_schema()
         assessments = []
         for packet in packets:
+            ensure_deadline()
             request = agent_assessment.encode_review_request(packet, schema)
-            elapsed = time.monotonic() - started
-            remaining = _REVIEW_TOTAL_TIMEOUT_S - elapsed
+            ensure_deadline()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _problem("review-timeout", "total review deadline expired")
             timeout_s = min(parsed.review_timeout_s, int(remaining))
@@ -1053,10 +1078,12 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             progress("reviewing", adapter.name, packet.scope,
                      time.monotonic() - started)
             try:
+                ensure_deadline()
                 result = agent_providers.launch_review(
                     adapter, request, schema, timeout_s, child_progress)
             except KeyboardInterrupt:
                 raise _problem("review-cancelled", "review was cancelled") from None
+            ensure_deadline()
             if result.timed_out:
                 raise _problem("review-timeout", "review provider timed out")
             if result.cancelled:
@@ -1072,8 +1099,11 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 raise _problem(code, "review provider did not return a valid assessment")
             progress("validating", adapter.name, packet.scope,
                      time.monotonic() - started)
-            assessments.append(agent_assessment.parse_assessment(
-                result.assessment, packet))
+            ensure_deadline()
+            assessment = agent_assessment.parse_assessment(
+                result.assessment, packet)
+            ensure_deadline()
+            assessments.append(assessment)
 
         if len(assessments) != len(packets):
             raise _problem("invalid-assessment", "review did not validate every selected project")
@@ -1081,17 +1111,23 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         # Re-resolve config and source packets immediately before publication.
         progress("validating", adapter.name, resolution.root.name,
                  time.monotonic() - started)
+        ensure_deadline()
         try:
             fresh_resolution = config_api.resolve_config(resolution.root)
             fresh_workspace = doctor.inspect_workspace(
                 domain, fresh_resolution, limits, parsed.scope)
+            ensure_deadline()
             fresh_packets = agent_assessment.build_packets(
-                fresh_workspace, fresh_resolution)
+                fresh_workspace, fresh_resolution, deadline=deadline,
+                progress=heartbeat)
             fresh_declarations = tuple(
                 repo.declaration for repo in fresh_workspace.repositories)
             fresh_identity = _review_config_identity(
                 fresh_resolution, fresh_workspace)
-        except C.Problem:
+            ensure_deadline()
+        except C.Problem as problem:
+            if problem.code == "review-timeout":
+                raise
             raise _problem(
                 "stale-evidence",
                 "source or configuration could not be revalidated after review",
@@ -1132,10 +1168,10 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             "sha256": excerpt.sha256,
             "byte_count": len(excerpt.text.encode("utf-8")),
         } for packet in packets for excerpt in packet.excerpts]
-        if time.monotonic() >= deadline:
-            raise _problem("review-timeout", "total review deadline expired")
+        ensure_deadline()
         progress("publishing", adapter.name, resolution.root.name,
                  time.monotonic() - started)
+        ensure_deadline()
         publication = recommendations.publish_recommendations(
             resolution.root, report_payload, previous,
             source_proof=source_proof, deadline=deadline)

@@ -364,6 +364,211 @@ def test_build_packets_admits_bounded_evidence_with_counts_and_identity(
     assert len(packet.packet_sha256) == 64 and body
 
 
+def test_rejected_candidates_consume_candidate_file_budget(
+        tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    candidate_count = 300
+    for index in range(candidate_count):
+        rejected = b"\x00" if index % 2 == 0 else b"\xff"
+        (tmp_path / f"candidate-{index:03}.py").write_bytes(rejected)
+    workspace, resolution = _workspace(tmp_path)
+    real_read = AA.read_regular
+    reads = []
+
+    def counted_read(root, relative, limit):
+        raw = real_read(root, relative, limit)
+        reads.append((relative, len(raw)))
+        return raw
+
+    monkeypatch.setattr(AA, "read_regular", counted_read)
+    packet = AA.build_packets(
+        workspace, resolution, AA.EvidenceLimits())[0]
+
+    assert len(reads) <= 256
+    assert sum(size for _, size in reads) <= 2 * 1024 * 1024
+    assert packet.excluded_count == len(reads)
+    assert packet.truncated_count == candidate_count - len(reads)
+    assert packet.excerpts == () and packet.byte_count == 0
+
+
+def test_rejected_candidates_consume_candidate_byte_budget(
+        tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    candidate_count = 40
+    for index in range(candidate_count):
+        (tmp_path / f"candidate-{index:03}.py").write_bytes(
+            b"\x00" + b"x" * (65_537 - 1))
+    workspace, resolution = _workspace(tmp_path)
+    real_read = AA.read_regular
+    reads = []
+
+    def counted_read(root, relative, limit):
+        raw = real_read(root, relative, limit)
+        reads.append((relative, len(raw)))
+        return raw
+
+    monkeypatch.setattr(AA, "read_regular", counted_read)
+    packet = AA.build_packets(
+        workspace, resolution, AA.EvidenceLimits())[0]
+
+    read_bytes = sum(size for _, size in reads)
+    assert len(reads) <= 256
+    assert read_bytes <= 2 * 1024 * 1024
+    assert 0 < packet.excluded_count < candidate_count
+    assert packet.excluded_count + packet.truncated_count == candidate_count
+    assert packet.excerpts == () and packet.byte_count == 0
+
+
+def test_candidate_read_budgets_are_configurable_in_evidence_limits(
+        tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    candidate_count = 4
+    for index in range(candidate_count):
+        (tmp_path / f"candidate-{index:03}.py").write_bytes(b"\x00")
+    workspace, resolution = _workspace(tmp_path)
+    real_read = AA.read_regular
+    reads = []
+
+    def counted_read(root, relative, limit):
+        raw = real_read(root, relative, limit)
+        reads.append((relative, len(raw)))
+        return raw
+
+    monkeypatch.setattr(AA, "read_regular", counted_read)
+    limits = AA.EvidenceLimits(max_candidate_files_per_child=2,
+                               max_candidate_bytes_per_child=128)
+    packet = AA.build_packets(workspace, resolution, limits)[0]
+
+    assert [path for path, _ in reads] == [
+        "candidate-000.py", "candidate-001.py"]
+    assert packet.excluded_count == 2
+    assert packet.truncated_count == 2
+
+
+def test_packet_walk_checks_total_deadline_and_reports_progress(
+        tmp_path, monkeypatch):
+    import time
+    from ptest import agent_assessment as AA
+
+    (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b = 2\n", encoding="utf-8")
+    workspace, resolution = _workspace(tmp_path)
+    now = [0.0]
+    checkpoints = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    def progress():
+        checkpoints.append(now[0])
+        now[0] += 1
+
+    with pytest.raises(C.Problem) as caught:
+        AA.build_packets(workspace, resolution, deadline=8.0,
+                         progress=progress)
+
+    assert caught.value.code == "review-timeout"
+    assert len(checkpoints) >= 8
+
+
+def test_packet_walk_does_not_materialize_a_large_directory_past_its_cap(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import stat
+    from ptest import agent_assessment as AA
+
+    class Entry:
+        def __init__(self, index):
+            self.name = f"file-{index:05}.py"
+
+        def is_symlink(self):
+            return False
+
+        def is_dir(self, *, follow_symlinks):
+            return False
+
+        def stat(self, *, follow_symlinks):
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_size=1)
+
+    class HugeDirectory:
+        def __init__(self):
+            self.visited = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.visited == AA.MAX_WALK_ENTRIES + 50_000:
+                raise StopIteration
+            self.visited += 1
+            return Entry(self.visited)
+
+    directory = HugeDirectory()
+    monkeypatch.setattr(AA.os, "scandir", lambda _path: directory)
+    entries = []
+
+    AA._iter_regular_files(tmp_path, "", entries)
+
+    assert directory.visited <= AA.MAX_WALK_ENTRIES + 1
+    assert len([entry for entry in entries if entry[0] == "file"]) <= (
+        AA.MAX_WALK_ENTRIES)
+    assert entries[-1][0] == "skip"
+
+
+def test_packet_source_read_is_checked_against_total_deadline(
+        tmp_path, monkeypatch):
+    import time
+    from ptest import agent_assessment as AA
+
+    (tmp_path / "source.py").write_text("value = 1\n", encoding="utf-8")
+    workspace, resolution = _workspace(tmp_path)
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    def read_then_expire(*_args):
+        now[0] = 1.0
+        return b"value = 1\n"
+
+    monkeypatch.setattr(AA, "read_regular", read_then_expire)
+    with pytest.raises(C.Problem) as caught:
+        AA.build_packets(workspace, resolution, deadline=1.0)
+
+    assert caught.value.code == "review-timeout"
+
+
+def test_packet_prompt_trimming_checks_total_deadline(
+        tmp_path, monkeypatch):
+    import time
+    from ptest import agent_assessment as AA
+
+    (tmp_path / "source.py").write_text("value = 1\n", encoding="utf-8")
+    workspace, resolution = _workspace(tmp_path)
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    real_dumps = AA.json.dumps
+
+    def dump_then_expire(value, *args, **kwargs):
+        result = real_dumps(value, *args, **kwargs)
+        if isinstance(value, dict) and "excerpts" in value:
+            now[0] = 1.0
+        return result
+
+    monkeypatch.setattr(AA.json, "dumps", dump_then_expire)
+    with pytest.raises(C.Problem) as caught:
+        AA.build_packets(
+            workspace, resolution, AA.EvidenceLimits(max_prompt_bytes=1),
+            deadline=1.0)
+
+    assert caught.value.code == "review-timeout"
+
+
 # --- encode_review_request: bounded, injection-separated provider input -----
 
 def test_encode_review_request_is_deterministic_and_uses_current_contract(
@@ -541,6 +746,38 @@ def test_build_packets_skips_nonregular_and_invalid_utf8(tmp_path):
     assert "src/bad.py" not in paths
     assert "src/pipe.py" not in paths
     assert packets[0].excluded_count >= 2
+
+
+def test_build_packets_rejects_invalid_utf8_cut_to_empty_and_keeps_empty_file(
+        tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    (tmp_path / "empty.py").write_bytes(b"")
+    # The one-byte cap cuts this nonempty declaration at its invalid lead byte.
+    (tmp_path / "pyproject.toml").write_bytes(b"\xffx")
+    workspace, resolution = _workspace(tmp_path)
+    real_read = AA.read_regular
+    reads = []
+
+    def counted_read(root, relative, limit):
+        raw = real_read(root, relative, limit)
+        reads.append((relative, len(raw), limit))
+        return raw
+
+    monkeypatch.setattr(AA, "read_regular", counted_read)
+    packet = AA.build_packets(
+        workspace, resolution, AA.EvidenceLimits(max_bytes_per_file=1))[0]
+
+    assert [excerpt.path for excerpt in packet.excerpts] == ["empty.py"]
+    assert packet.excerpts[0].text == ""
+    assert not any(fact.ref_path == "pyproject.toml"
+                   for fact in packet.dependencies)
+    assert packet.file_count == 1 and packet.byte_count == 0
+    assert packet.excluded_count == 0
+    assert packet.truncated_count == 1
+    assert len(reads) == 2
+    assert sum(size for _, size, _ in reads) <= 2 * len(reads)
+    assert all(size <= limit for _, size, limit in reads)
 
 
 def test_build_packets_enforces_per_file_and_total_caps(tmp_path):
