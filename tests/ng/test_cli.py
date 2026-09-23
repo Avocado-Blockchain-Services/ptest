@@ -3237,6 +3237,46 @@ def test_resolve_review_model_codex_pick_caches_exact_slug(
     assert again == "gpt-5.6-luna"
 
 
+def test_cached_review_model_symlink_is_refused(tmp_path):
+    """A symlinked cache entry is never followed; the pick falls back."""
+    from ptest import cli
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        json.dumps({"cli_version": "v1", "model": "haiku"}),
+        encoding="utf-8")
+    (cache / "codex.json").symlink_to(outside)
+    assert cli._read_cached_review_model(cache, "codex", "v1") is None
+
+
+def test_cached_review_model_invalid_shape_falls_back(tmp_path):
+    """A corrupted cache entry falls back instead of failing reviews."""
+    from ptest import cli
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "codex.json").write_text(
+        json.dumps({"cli_version": "v1", "model": "not a model!!"}),
+        encoding="utf-8")
+    assert cli._read_cached_review_model(cache, "codex", "v1") is None
+
+
+def test_write_cached_review_model_is_private_and_atomic(tmp_path):
+    import stat
+
+    from ptest import cli
+
+    cache = tmp_path / "cache"
+    cli._write_cached_review_model(cache, "codex", "v1", "gpt-5.6-luna")
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    assert stat.S_IMODE((cache / "codex.json").stat().st_mode) == 0o600
+    assert list(cache.iterdir()) == [cache / "codex.json"]
+    assert cli._read_cached_review_model(
+        cache, "codex", "v1") == "gpt-5.6-luna"
+
+
 @pytest.mark.parametrize("reply", [b"gpt-5.6-luna.", b"gpt-5.4",
                                    b"  gpt-5.6-luna  extra  ", b""])
 def test_resolve_review_model_codex_pick_requires_exact_slug(

@@ -913,8 +913,9 @@ def _read_cached_review_model(cache_root: Path, provider: str,
     if cli_version is None:
         return None
     try:
-        raw = (Path(cache_root) / f"{provider}.json").read_bytes()
-    except OSError:
+        raw = files.read_regular(Path(cache_root), f"{provider}.json",
+                                 _REVIEW_MODEL_CACHE_MAX_BYTES + 1)
+    except (OSError, C.Problem):
         return None
     if len(raw) > _REVIEW_MODEL_CACHE_MAX_BYTES:
         return None
@@ -929,6 +930,10 @@ def _read_cached_review_model(cache_root: Path, provider: str,
     model = data.get("model")
     if not isinstance(model, str) or not model:
         return None
+    if agent_providers._MODEL_RE.fullmatch(model) is None:
+        # Corrupted entry: fall back instead of failing every review with
+        # invalid-bound until the CLI version changes.
+        return None
     return model
 
 
@@ -939,12 +944,12 @@ def _write_cached_review_model(cache_root: Path, provider: str,
         return
     try:
         root = Path(cache_root)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / f"{provider}.json").write_text(
+        directory = files.ensure_private_dir(root.parent, root.name)
+        files.publish_atomic(
+            directory, f"{provider}.json",
             json.dumps({"cli_version": cli_version, "model": model},
-                       sort_keys=True),
-            encoding="utf-8")
-    except OSError:
+                       sort_keys=True).encode("utf-8"))
+    except (OSError, C.Problem):
         pass
 
 
