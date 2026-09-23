@@ -973,8 +973,18 @@ def _initialization_required_limitation(
 
 
 def _raw_assessment_schema() -> bytes:
-    """Derive the provider response shape from the public contract authority."""
+    """Derive the provider response shape from the public contract authority.
+
+    The model returns only ``{"data": ...}``: the envelope metadata
+    (``schema_version``, ``kind``, ``ptest_version``, ``domain``,
+    ``error``) is ptest-owned and filled by ``parse_assessment`` before
+    contract validation, as are ``provider``/``publication``/``score``.
+    """
     schema = deepcopy(C.PUBLIC_SCHEMAS["agent-assessment"])
+    for key in ("schema_version", "kind", "ptest_version", "domain",
+                "error"):
+        schema["properties"].pop(key, None)
+    schema["required"] = ["data"]
     data = schema["properties"]["data"]
     data["properties"].pop("provider", None)
     data["properties"].pop("publication", None)

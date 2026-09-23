@@ -128,7 +128,8 @@ _REVIEW_INSTRUCTION = (
     "requests, or use MCP, hooks, plugins, skills, repository "
     "instructions, or custom models. Return JSON only, with no markdown "
     "fence or surrounding prose. Match the supplied schema and the exact raw "
-    "output field sets below. The envelope has the listed envelope fields; "
+    "output field sets below. The envelope has exactly one field, `data` "
+    "(ptest fills the remaining envelope metadata itself); "
     "its data, child, row, citation, finding, and limitation objects have "
     "the respective listed fields. Use exactly one child and exactly one "
     "row for each checklist ID, in the supplied order. Do not add, omit, "
@@ -151,17 +152,20 @@ _FORBIDDEN_KEYS = frozenset({
     "score_override", "raw_output", "shell", "argv",
 })
 
-# Exact raw model-response shapes: model prose only (rationale, findings,
-# suggested changes, recipe IDs, citations, limitations). The raw boundary
-# enforces these BEFORE public projection so an unknown field anywhere is
-# rejected, never projected away. The raw assessment deliberately omits
-# ``provider`` and ``publication`` (ptest-owned: the CLI attaches the
-# actual selected provider metadata and the actual report publication
-# result to the final PublicDocument) and the raw child omits ``score``
+# Exact raw model-response shapes: model prose only (``data`` with
+# rationale, findings, suggested changes, recipe IDs, citations,
+# limitations). The raw boundary enforces these BEFORE public projection
+# so an unknown field anywhere is rejected, never projected away. The raw
+# envelope carries only ``data``: ``schema_version``, ``kind``,
+# ``ptest_version``, ``domain``, and ``error`` are ptest-owned
+# (``parse_assessment`` fills ptest's own values before contract
+# validation), as are ``provider`` and ``publication`` (the CLI attaches
+# the actual selected provider metadata and the actual report publication
+# result to the final PublicDocument). The raw child omits ``score``
 # (ptest computes it after validation, before constructing the validated
 # document).
 _RAW_ENVELOPE_FIELDS = frozenset({
-    "schema_version", "kind", "ptest_version", "domain", "data", "error",
+    "data",
 })
 _RAW_ASSESSMENT_FIELDS = frozenset({
     "schema", "children", "limitations",
@@ -1500,11 +1504,19 @@ def parse_assessment(payload: bytes,
     # away, and any model-supplied score key fails before validation.
     _reject_extra_raw_keys(envelope)
 
-    # ptest attaches its own provider/publication placeholders plus the
-    # computed score, then the frozen public contract validates the
-    # completed post-computation envelope; it never sees raw input.
+    # ptest fills its own envelope metadata (schema_version, kind,
+    # ptest_version, domain, error) plus provider/publication placeholders
+    # and the computed score, then the frozen public contract validates
+    # the completed post-computation envelope; it never sees raw input.
     children = data["children"]
-    completed = json.loads(text)
+    completed = {
+        "schema_version": C.SCHEMA_VERSION,
+        "kind": "agent-assessment",
+        "ptest_version": C.PTEST_VERSION,
+        "domain": None,
+        "data": data,
+        "error": None,
+    }
     completed["data"]["provider"] = dict(_ASSESSMENT_PROVIDER)
     completed["data"]["publication"] = dict(_ASSESSMENT_PUBLICATION)
     if (isinstance(children, list) and len(children) == 1

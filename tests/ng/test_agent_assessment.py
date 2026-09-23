@@ -333,9 +333,8 @@ def _payload_for(packet, rows=None, findings="auto", score="omit"):
 
 
 def _envelope_bytes(payload: dict) -> bytes:
-    return (json.dumps({"schema_version": 1, "kind": "agent-assessment",
-                        "ptest_version": "0.1.5", "domain": None,
-                        "data": payload, "error": None}) + "\n").encode()
+    """Raw model reply: exactly ``{"data": ...}`` (ptest owns the envelope)."""
+    return (json.dumps({"data": payload}) + "\n").encode()
 
 
 # --- build_packets: bounded admission ---------------------------------------
@@ -1726,3 +1725,125 @@ def test_dependency_env_scan_checkpoint_trips_mid_site_packages_loop(
                              deadline=None, progress=_progress)
     assert caught.value.code == "review-timeout"
     assert len(calls) > 4
+
+
+# --- ptest-owned envelope metadata (raw boundary is data-only) ---------------
+
+def _data_only_bytes(payload: dict) -> bytes:
+    """Raw model reply: exactly ``{"data": ...}``, no envelope metadata."""
+    return (json.dumps({"data": payload}) + "\n").encode("utf-8")
+
+
+def test_parse_assessment_accepts_data_only_envelope_with_ptest_metadata(
+        tmp_path, monkeypatch):
+    """The model returns only ``{"data": ...}``; ptest fills the envelope.
+
+    The completed document validated against the public contract carries
+    ptest's own ``schema_version``/``kind``/``ptest_version``/``domain``/
+    ``error``, never model-supplied values.
+    """
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    raw = _data_only_bytes(_payload_for(packet))
+
+    seen: dict = {}
+    real_decode = C.decode_public_document
+
+    def spy_decode(blob):
+        seen["envelope"] = json.loads(blob.decode("utf-8"))
+        return real_decode(blob)
+
+    monkeypatch.setattr(C, "decode_public_document", spy_decode)
+    child = AA.parse_assessment(raw, packet)
+
+    assert child.score is not None
+    envelope = seen["envelope"]
+    assert envelope["schema_version"] == C.SCHEMA_VERSION
+    assert envelope["kind"] == "agent-assessment"
+    assert envelope["ptest_version"] == C.PTEST_VERSION
+    assert envelope["domain"] is None
+    assert envelope["error"] is None
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("schema_version", 1),
+    ("kind", "agent-assessment"),
+    ("ptest_version", "0.1.5"),
+    ("domain", None),
+    ("error", None),
+])
+def test_parse_assessment_rejects_model_supplied_envelope_metadata(
+        tmp_path, key, value):
+    """Any model-supplied envelope key beside ``data`` is an extra key."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    envelope = {"data": _payload_for(packet), key: value}
+    with pytest.raises(C.Problem) as caught:
+        AA.parse_assessment((json.dumps(envelope) + "\n").encode(), packet)
+    assert caught.value.code == "invalid-assessment"
+    assert "unknown field" in caught.value.message
+
+
+_NATIVE_EVIDENCE_DIR = Path(
+    "/home/ingmar/worktrees/ptest/cx-init-onboarding/ptest/.pipeline"
+    "/agent-doctor-2026-09-23/native")
+
+
+def _packet_from_request_dict(body: dict):
+    """Rebuild one EvidencePacket from a recorded provider request packet."""
+    from ptest import agent_assessment as AA
+
+    return AA.EvidencePacket(
+        declaration=body["declaration"],
+        project_id=body["project_id"],
+        scope=body["scope"],
+        packet_sha256=body["packet_sha256"],
+        excerpts=tuple(
+            AA.SourceExcerpt(path=item["path"],
+                             start_line=item["start_line"],
+                             end_line=item["end_line"],
+                             sha256=item["sha256"], text=item["text"])
+            for item in body["excerpts"]),
+        dependencies=tuple(
+            AA.DependencyFact(ecosystem=item["ecosystem"],
+                              status=item["status"],
+                              ref_path=item["ref_path"],
+                              detail=item["detail"])
+            for item in body["dependencies"]),
+        runner_kind=body["runner_kind"],
+        excluded_count=body["excluded_count"],
+        truncated_count=body["truncated_count"],
+        file_count=body["file_count"],
+        byte_count=body["byte_count"],
+    )
+
+
+def test_recorded_claude_reply_stripped_to_data_only():
+    """Regression on the real recorded Claude reply: with its five
+    ptest-owned envelope keys dropped, the ``{"data": ...}`` remainder
+    must clear the raw boundary, then either validate or fail only for a
+    genuine data-level reason (reported exactly, never papered over)."""
+    from ptest import agent_assessment as AA
+
+    raw_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-raw-assessment.json"
+    request_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-request.json"
+    if not raw_path.exists() or not request_path.exists():
+        pytest.skip("recorded native evidence is absent")
+    recorded = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert set(recorded) == {"data", "domain", "error", "kind",
+                             "ptest_version", "schema_version"}
+    stripped = {"data": recorded["data"]}
+    packet = _packet_from_request_dict(
+        json.loads(request_path.read_text(encoding="utf-8"))["packet"])
+    AA._reject_extra_raw_keys(stripped)
+    try:
+        child = AA.parse_assessment(
+            (json.dumps(stripped) + "\n").encode("utf-8"), packet)
+    except C.Problem as exc:
+        assert (exc.code, exc.message) == (
+            "report-invalid",
+            "assessment.children[0].limitations[0] has an unknown code")
+    else:
+        assert child.score is not None

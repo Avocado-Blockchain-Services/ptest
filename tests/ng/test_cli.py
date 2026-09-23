@@ -1777,14 +1777,17 @@ def _normalized_unknown_assessment(request):
         }],
         "limitations": [],
     }
-    return json.dumps({
-        "schema_version": C.SCHEMA_VERSION,
-        "kind": "agent-assessment",
-        "ptest_version": C.PTEST_VERSION,
-        "domain": None,
-        "data": data,
-        "error": None,
-    }).encode("utf-8")
+    # Raw model reply: exactly {"data": ...}; ptest owns the envelope.
+    return json.dumps({"data": data}).encode("utf-8")
+
+
+def test_model_facing_schema_requires_only_data():
+    """The provider response schema is data-only: ptest owns the envelope."""
+    from ptest import cli
+
+    schema = json.loads(cli._raw_assessment_schema())
+    assert set(schema["properties"]) == {"data"}
+    assert schema["required"] == ["data"]
 
 
 def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
@@ -2535,19 +2538,14 @@ def _native_replay_executable(bindir, name):
         "rows = [{'id': row_id, 'status': 'unknown',",
         "        'rationale': 'The bounded source evidence does not establish this row.',",
         "        'evidence': []} for row_id in " + repr(checklist) + "]",
-        "assessment = {'schema_version': " + repr(C.SCHEMA_VERSION) + ",",
-        "              'kind': 'agent-assessment',",
-        "              'ptest_version': " + repr(C.PTEST_VERSION) + ",",
-        "              'domain': None,",
-        "              'data': {'schema': " + repr(C.AGENT_ASSESSMENT_SCHEMA) + ",",
+        "assessment = {'data': {'schema': " + repr(C.AGENT_ASSESSMENT_SCHEMA) + ",",
         "                       'children': [{'project_id': packet['project_id'],",
         "                                     'scope': packet['scope'],",
         "                                     'packet_sha256': packet['packet_sha256'],",
         "                                     'rows': rows,",
         "                                     'findings': [],",
         "                                     'limitations': []}],",
-        "                       'limitations': []},",
-        "              'error': None}",
+        "                       'limitations': []}}",
         "payload = json.dumps(assessment)",
     ])
     if name == "claude":

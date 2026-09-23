@@ -121,11 +121,8 @@ def _raw_assessment(request: bytes) -> bytes:
             ),
             "evidence": [citation] if is_gap else [],
         })
+    # Raw model reply: exactly {"data": ...}; ptest owns the envelope.
     payload = {
-        "schema_version": C.SCHEMA_VERSION,
-        "kind": "agent-assessment",
-        "ptest_version": C.PTEST_VERSION,
-        "domain": None,
         "data": {
             "schema": C.AGENT_ASSESSMENT_SCHEMA,
             "children": [{
@@ -146,7 +143,6 @@ def _raw_assessment(request: bytes) -> bytes:
             }],
             "limitations": [],
         },
-        "error": None,
     }
     return json.dumps(payload).encode("utf-8")
 
