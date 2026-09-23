@@ -1203,10 +1203,15 @@ def test_score_floor_unknown_in_denominator_and_null(tmp_path):
         if status == "not-applicable":
             rationale = (f"Affirmative: {excerpt.path} shows no artifact "
                          f"for {row_id}, confirmed by manifest.")
+        from ptest.checklist import CATALOG as _CATALOG
+
+        label = next(entry.label for entry in _CATALOG
+                     if entry.id == row_id)
         return AA.AssessmentRow(id=row_id, status=status,
                                 rationale=rationale,
                                 evidence=tuple(
-                                    AA.Citation(**c) for c in evidence))
+                                    AA.Citation(**c) for c in evidence),
+                                label=label)
 
     rows = ((row("FIX-001", "satisfied"),)
             + tuple(row(i, "unknown") for i in ("FIX-002", "DB-001"))
@@ -2055,3 +2060,834 @@ def test_recorded_round4_replies_parse_against_vendored_packet(reply):
         (json.dumps({"data": rebound}) + "\n").encode("utf-8"), packet)
     assert [row.id for row in child.rows] == list(EXPECTED_IDS)
     assert child.scope == "."
+
+
+# --- T4: tiered admission priority and artifact exclusion ---------------------
+
+def test_build_packets_admits_manifests_then_test_config_then_tests(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+
+    root = _monorepo_root(tmp_path, {
+        "api": _v1_config_text(CHILD_PID, "pytest"),
+    })
+    api = root / "api"
+    (api / ".superpowers" / "sdd").mkdir(parents=True)
+    (api / ".superpowers" / "sdd" / "x.diff").write_text(
+        "drop_database(\n", encoding="utf-8")
+    (api / ".pipeline").mkdir()
+    (api / ".pipeline" / "review.md").write_text(
+        "drop_database(\n", encoding="utf-8")
+    (api / "recommendations.md").write_text(
+        "drop_database(\n", encoding="utf-8")
+    (api / "tests").mkdir()
+    for index in range(80):
+        (api / "tests" / f"test_n{index:02d}.py").write_text(
+            f"def test_n{index:02d}():\n    assert True\n", encoding="utf-8")
+    conftest_lines = [f"# conftest line {number}"
+                      for number in range(1, 501)]
+    conftest_lines[446] = 'TEST_DB_NAME = "worker-owned-db"'
+    (api / "tests" / "conftest.py").write_text(
+        "\n".join(conftest_lines) + "\n", encoding="utf-8")
+    (api / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n", encoding="utf-8")
+    (api / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    resolution = config_api.resolve_config(root)
+    workspace = doctor.inspect_workspace(
+        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
+    packets = AA.build_packets(workspace, resolution)
+    assert len(packets) == 1
+    packet = packets[0]
+    paths = [excerpt.path for excerpt in packet.excerpts]
+
+    assert "api/.superpowers/sdd/x.diff" not in paths
+    assert "api/.pipeline/review.md" not in paths
+    assert "api/recommendations.md" not in paths
+    assert not any(path.endswith((".diff", ".patch")) for path in paths)
+    conftest = next(e for e in packet.excerpts
+                    if e.path == "api/tests/conftest.py")
+    assert (conftest.start_line, conftest.end_line) == (1, 500)
+    assert paths[:3] == ["api/pyproject.toml", "api/uv.lock",
+                         "api/tests/conftest.py"]
+
+    reviews = AA.plan_item_reviews(packet)
+    assert [review.item_id for review in reviews] == list(EXPECTED_IDS)
+    db_isolation = next(r for r in reviews if r.item_id == "DB-002")
+    assert "api/tests/conftest.py" in db_isolation.excerpt_paths
+
+
+# --- T4: per-item review planning --------------------------------------------
+
+def _pure_library_packet(tmp_path, extra=None):
+    files = {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+        "src/demo.py": "def add(a, b):\n    return a + b\n",
+    }
+    files.update(extra or {})
+    return _packet_for(tmp_path, files)
+
+
+def test_plan_item_reviews_returns_eleven_bounded_routed_reviews(tmp_path):
+    import json
+
+    from ptest import agent_assessment as AA
+    from ptest import agent_providers as providers
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    assert len(reviews) == len(EXPECTED_IDS) == 11
+    assert [review.item_id for review in reviews] == list(EXPECTED_IDS)
+    for review in reviews:
+        assert review.label.strip()
+        assert isinstance(review.schema, bytes) and review.schema
+        assert (review.request is None) == (review.skip_reason is not None)
+        assert len(review.excerpt_paths) <= AA.ITEM_MAX_FILES
+        if review.request is not None:
+            assert len(review.request) <= (
+                providers.PROMPT_INPUT_MAX_BYTES - len(review.schema))
+            body = json.loads(review.request.decode("utf-8"))
+            assert body["policy"]["item"]["id"] == review.item_id
+            assert len(body["excerpts"]) <= AA.ITEM_MAX_FILES
+            assert sum(len(item["text"].encode("utf-8"))
+                       for item in body["excerpts"]) <= AA.ITEM_MAX_BYTES
+            assert [item["path"] for item in body["excerpts"]] == list(
+                review.excerpt_paths)
+
+
+def test_plan_item_reviews_skips_fire_for_pure_library(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    manifests = [e for e in packet.excerpts
+                 if e.path.rsplit("/", 1)[-1] in ("pyproject.toml",)]
+    assert manifests
+    names = ", ".join(sorted({e.path.rsplit("/", 1)[-1]
+                              for e in manifests}))
+    for item_id, noun in (("DB-001", "database"), ("DB-002", "database"),
+                          ("CACHE-001", "cache")):
+        review = reviews[item_id]
+        assert review.request is None
+        assert review.skip_reason == (
+            AA.SKIP_PREFIX + f"no {noun} library in {names} and no {noun} "
+            "configuration or usage in the admitted evidence.")
+        assert review.skip_reason.startswith(AA.SKIP_PREFIX)
+
+
+def test_plan_item_reviews_skip_rows_cite_every_manifest(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "uv.lock": "version = 1\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    reviews = AA.plan_item_reviews(packet)
+    child = AA.assemble_child(
+        packet, reviews,
+        tuple(None if review.request is None else _satisfied_reply(packet, review)
+              for review in reviews))
+    manifest_paths = {"pyproject.toml", "uv.lock"}
+    for row in child.rows:
+        if row.id in ("DB-001", "DB-002", "CACHE-001"):
+            assert row.status == "not-applicable"
+            assert {cite.path for cite in row.evidence} == manifest_paths
+
+
+def _db_packet(tmp_path, manifest_text, code_text):
+    return _packet_for(tmp_path, {
+        "pyproject.toml": manifest_text,
+        "tests/test_db.py": code_text,
+    })
+
+
+def test_plan_item_reviews_skip_absent_when_db_library_declared(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _db_packet(tmp_path, "[project]\nname = 'demo'\ndependencies = ['sqlalchemy']\n",
+                        "def test_x():\n    assert True\n")
+    reviews = {r.item_id: r for r in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_when_db_usage_appears(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _db_packet(tmp_path, "[project]\nname = 'demo'\n",
+                        "import sqlite3\ndef test_x():\n    sqlite3.connect('f.db')\n")
+    reviews = {r.item_id: r for r in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_when_scanner_hit_exists(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _db_packet(tmp_path, "[project]\nname = 'demo'\n",
+                        "def teardown():\n    drop_database()\n")
+    reviews = {r.item_id: r for r in AA.plan_item_reviews(packet)}
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_when_no_manifest_admitted(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    reviews = {r.item_id: r for r in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["CACHE-001"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_when_cache_library_declared(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\ndependencies = ['redis']\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    reviews = {r.item_id: r for r in AA.plan_item_reviews(packet)}
+    assert reviews["CACHE-001"].request is not None
+
+
+def test_route_excerpts_ranks_scanner_hit_above_generic_files(tmp_path):
+    """A scanner-hit file sorted after 24 generic files still routes."""
+    from ptest import agent_assessment as AA
+
+    files = {
+        "pyproject.toml":
+            "[project]\nname = 'demo'\ndependencies = ['sqlalchemy']\n",
+    }
+    for index in range(40):
+        files[f"tests/test_a{index:02d}.py"] = (
+            f"def test_a{index:02d}():\n    assert True\n")
+    files["tests/test_zz_db.py"] = "def teardown():\n    drop_database(url)\n"
+    packet = _packet_for(tmp_path, files)
+    assert len(packet.excerpts) == 42
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    db_isolation = reviews["DB-002"]
+    assert db_isolation.request is not None
+    assert len(db_isolation.excerpt_paths) <= AA.ITEM_MAX_FILES
+    assert "tests/test_zz_db.py" in db_isolation.excerpt_paths
+    assert db_isolation.excerpt_paths[0] == "tests/test_zz_db.py"
+
+
+@pytest.mark.parametrize(("manifest", "dependency", "items"), [
+    ("pyproject.toml", "pymssql", ("DB-001", "DB-002")),
+    ("pyproject.toml", "duckdb", ("DB-001", "DB-002")),
+    ("package.json", '"pg": "^8.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"mysql2": "^3.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"mongodb": "^6.0.0"', ("DB-001", "DB-002")),
+    ("package.json", '"drizzle-orm": "^0.30.0"', ("DB-001", "DB-002")),
+    ("package.json", '"kysely": "^0.27.0"', ("DB-001", "DB-002")),
+    ("package.json", '"@supabase/supabase-js": "^2.0.0"',
+     ("DB-001", "DB-002")),
+    ("go.mod", "gorm.io/gorm", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/jackc/pgx/v5", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/lib/pq", ("DB-001", "DB-002")),
+    ("go.mod", "github.com/jmoiron/sqlx", ("DB-001", "DB-002")),
+    ("Cargo.toml", 'diesel = "2"', ("DB-001", "DB-002")),
+    ("Cargo.toml", 'rusqlite = "0.31"', ("DB-001", "DB-002")),
+    ("Cargo.toml", 'sqlx = "0.7"', ("DB-001", "DB-002")),
+    ("package.json", '"keyv": "^4.0.0"', ("CACHE-001",)),
+    ("package.json", '"lru-cache": "^10.0.0"', ("CACHE-001",)),
+    ("package.json", '"node-cache": "^5.0.0"', ("CACHE-001",)),
+    ("package.json", '"diskcache": "^5.0.0"', ("CACHE-001",)),
+])
+def test_plan_item_reviews_skip_absent_for_declared_driver_per_ecosystem(
+        tmp_path, manifest, dependency, items):
+    """Declaring any known DB/cache driver per ecosystem forces a review."""
+    from ptest import agent_assessment as AA
+
+    if manifest == "package.json":
+        manifest_text = ('{"name": "demo", "dependencies": {'
+                         + dependency + "}}\n")
+    elif manifest == "go.mod":
+        manifest_text = "module demo\n\ngo 1.21\n\nrequire " + dependency + " v0.0.0\n"
+    elif manifest == "Cargo.toml":
+        manifest_text = ('[package]\nname = "demo"\nversion = "0.1.0"\n'
+                         "[dependencies]\n" + dependency + "\n")
+    else:
+        manifest_text = ("[project]\nname = 'demo'\ndependencies = ['"
+                         + dependency + "']\n")
+    packet = _packet_for(tmp_path, {
+        manifest: manifest_text,
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    for item_id in items:
+        assert reviews[item_id].request is not None
+
+
+@pytest.mark.parametrize("token", [
+    "pg", "postgres", "mysql2", "mongodb", "mssql", "pymssql", "duckdb",
+    "drizzle-orm", "kysely", "@supabase/supabase-js", "gorm", "pgx",
+    "lib/pq", "sqlx", "diesel", "rusqlite", "jdbc", "hibernate", "jpa",
+    "jooq", "mybatis",
+])
+def test_db_library_regex_covers_listed_drivers(token):
+    """Every probed driver token (incl. JVM) matches the DB library regex."""
+    from ptest import agent_assessment as AA
+
+    assert AA._DB_LIBRARY_RE.search(token)
+
+
+@pytest.mark.parametrize("token", [
+    "keyv", "lru-cache", "node-cache", "diskcache",
+])
+def test_cache_library_regex_covers_listed_caches(token):
+    """Every probed cache token matches the cache library regex."""
+    from ptest import agent_assessment as AA
+
+    assert AA._CACHE_LIBRARY_RE.search(token)
+
+
+@pytest.mark.parametrize("usage", [
+    "url = 'mongodb://localhost:27017'\n",
+    "url = 'mssql://user@host/db'\n",
+    "import duckdb\nduckdb.sql('select 1')\n",
+])
+def test_plan_item_reviews_skip_absent_for_db_usage_variants(
+        tmp_path, usage):
+    """URL schemes and driver call styles in evidence force a DB review."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_db.py": "def test_q():\n    " + usage.replace("\n", "\n    "),
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_skip_absent_for_declared_duckdb_end_to_end(
+        tmp_path):
+    """Finding repro: pymssql+duckdb declared and used must not skip."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": ("[project]\nname = 'demo'\n"
+                           "dependencies = ['pymssql', 'duckdb']\n"),
+        "tests/test_duck.py": ("import duckdb\ndef test_q():\n"
+                               "    duckdb.sql('select 1')\n"
+                               "    assert True\n"),
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert reviews["DB-001"].request is not None
+    assert reviews["DB-002"].request is not None
+
+
+def test_plan_item_reviews_is_pure_without_filesystem(tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("plan touched the filesystem")
+
+    monkeypatch.setattr("os.scandir", _boom)
+    monkeypatch.setattr("os.lstat", _boom)
+    monkeypatch.setattr("os.stat", _boom)
+    reviews = AA.plan_item_reviews(packet)
+    assert len(reviews) == 11
+
+
+# --- T4: one-row replies and child assembly -----------------------------------
+
+def _packet_in_root(root, files):
+    """Build one standalone packet over an explicit project root."""
+    from ptest import agent_assessment as AA
+
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    workspace, resolution = _workspace(root)
+    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
+    assert len(packets) == 1
+    return packets[0]
+
+
+def _subset_citation(packet, path, start=1, end=None):
+    from ptest import agent_assessment as AA
+
+    excerpt = next(e for e in packet.excerpts if e.path == path)
+    assert isinstance(excerpt, AA.SourceExcerpt)
+    return {"path": path, "start_line": start,
+            "end_line": end if end is not None else excerpt.end_line,
+            "sha256": excerpt.sha256}
+
+
+def _one_row_bytes(packet, review, *, status, paths, rationale=None,
+                   finding="null"):
+    if rationale is None:
+        rationale = (f"Row {review.item_id} judged {status} against "
+                     "the cited excerpt lines.")
+    evidence = [_subset_citation(packet, item) if isinstance(item, str)
+                else _subset_citation(packet, *item) for item in paths]
+    if finding == "null":
+        finding_value = None
+    else:
+        summary, change, fpaths = finding
+        finding_value = {
+            "summary": summary, "suggested_change": change,
+            "evidence": [_subset_citation(packet, item) for item in fpaths]}
+    return __import__("json").dumps(
+        {"status": status, "rationale": rationale, "evidence": evidence,
+         "finding": finding_value}).encode("utf-8")
+
+
+def _satisfied_reply(packet, review):
+    assert review.excerpt_paths, review.item_id
+    return _one_row_bytes(packet, review, status="satisfied",
+                          paths=[review.excerpt_paths[0]])
+
+
+def _assembled_all_ok(packet):
+    from ptest import agent_assessment as AA
+
+    reviews = AA.plan_item_reviews(packet)
+    replies = tuple(
+        None if review.request is None else _satisfied_reply(packet, review)
+        for review in reviews)
+    return packet, reviews, AA.assemble_child(packet, reviews, replies)
+
+
+def test_assemble_child_valid_replies_carry_labels_findings_and_score(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest.checklist import CATALOG
+
+    labels = {entry.id: entry.label for entry in CATALOG}
+    recipes = {entry.id: entry.recipe for entry in CATALOG}
+    packet = _pure_library_packet(
+        tmp_path, {"pyproject.toml": "[project]\nname = 'demo'\ndependencies = ['sqlalchemy', 'redis']\n",
+                   "tests/test_db.py": "import sqlalchemy\ndef test_x():\n    assert True\n"})
+    reviews = AA.plan_item_reviews(packet)
+    assert all(review.request is not None for review in reviews)
+    replies = []
+    for review in reviews:
+        if review.item_id == "DB-002":
+            replies.append(_one_row_bytes(
+                packet, review, status="gap",
+                paths=[review.excerpt_paths[0]],
+                rationale="The teardown removes records without naming an owner.",
+                finding=("Unowned teardown removes shared records.",
+                         "Record the owner before cleanup and remove only that namespace.",
+                         [review.excerpt_paths[0]])))
+        else:
+            replies.append(_satisfied_reply(packet, review))
+    child = AA.assemble_child(packet, reviews, tuple(replies))
+    assert [row.id for row in child.rows] == list(EXPECTED_IDS)
+    assert all(row.label == labels[row.id] for row in child.rows)
+    assert [finding.id for finding in child.findings] == ["DB-002"]
+    assert child.findings[0].recipe_id == recipes["DB-002"]
+    assert child.score is not None
+    assert (child.score.satisfied, child.score.applicable) == (10, 11)
+    assert child.score.percent == (100 * 10) // 11
+
+
+def test_assemble_child_noop_fails_without_valid_assertion(tmp_path):
+    """A no-op assembler returning all-unknown must fail this test's sightline.
+
+    Guards against vacuous assembly coverage: replacing the implementation
+    with ``unknown`` rows changes the asserted statuses.
+    """
+    packet, _, child = _assembled_all_ok(_pure_library_packet(tmp_path))
+    assert any(row.status == "satisfied" for row in child.rows)
+    assert any(row.status == "not-applicable" for row in child.rows)
+
+
+def _invalid_reply_cases(packet, review):
+    import json
+
+    good_path = review.excerpt_paths[0]
+    good_cite = _subset_citation(packet, good_path)
+    bad_cite = {"path": "elsewhere/missing.py", "start_line": 1,
+                "end_line": 1, "sha256": "0" * 64}
+    return {
+        "not-json": b"{nope",
+        "extra-key": json.dumps({"status": "satisfied", "rationale": "Rationale with enough substance here.",
+                                 "evidence": [good_cite], "finding": None,
+                                 "score": 1}).encode(),
+        "missing-key": json.dumps({"status": "satisfied",
+                                   "rationale": "Rationale with enough substance here.",
+                                   "evidence": []}).encode(),
+        "outside-subset": json.dumps({"status": "satisfied", "rationale": "Cites a file outside the routed subset.",
+                                      "evidence": [bad_cite], "finding": None}).encode(),
+        "gap-without-finding": json.dumps({"status": "gap", "rationale": "A gap with no finding attached.",
+                                           "evidence": [good_cite], "finding": None}).encode(),
+        "satisfied-with-finding": json.dumps({"status": "satisfied", "rationale": "Satisfied yet carries a finding.",
+                                              "evidence": [good_cite],
+                                              "finding": {"summary": "Extra summary.",
+                                                          "suggested_change": "Extra change.",
+                                                          "evidence": [good_cite]}}).encode(),
+        "injected-failed-prefix": json.dumps({"status": "satisfied",
+                                              "rationale": "Review failed: timed out here.",
+                                              "evidence": [good_cite], "finding": None}).encode(),
+        "untrusted-prose": json.dumps({"status": "satisfied",
+                                       "rationale": "See https://invalid.test for detail.",
+                                       "evidence": [good_cite], "finding": None}).encode(),
+        "na-too-brief": json.dumps({"status": "not-applicable", "rationale": "N/A.",
+                                    "evidence": [good_cite], "finding": None}).encode(),
+        "satisfied-no-citation": json.dumps({"status": "satisfied", "rationale": "No citation given at all.",
+                                             "evidence": [], "finding": None}).encode(),
+    }
+
+
+def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(
+        tmp_path, {"pyproject.toml": "[project]\nname = 'demo'\ndependencies = ['sqlalchemy', 'redis']\n",
+                   "tests/test_db.py": "import sqlalchemy\ndef test_x():\n    assert True\n"})
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.item_id == "FIX-001")
+    for name, payload in _invalid_reply_cases(packet, target).items():
+        replies = tuple(
+            payload if review.item_id == "FIX-001"
+            else _satisfied_reply(packet, review) for review in reviews)
+        child = AA.assemble_child(packet, reviews, replies)
+        row = next(r for r in child.rows if r.id == "FIX-001")
+        assert (name, row.status, row.rationale) == (
+            name, "unknown", AA.FAILED_PREFIX + "invalid reply")
+        assert [r.status for r in child.rows if r.id != "FIX-001"] == [
+            "satisfied"] * 10
+
+
+def test_assemble_child_str_replies_become_named_failures(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    replies = tuple(
+        "timed out" if review.item_id == target.item_id
+        else (None if review.request is None
+              else _satisfied_reply(packet, review))
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert row.status == "unknown"
+    assert row.rationale == AA.FAILED_PREFIX + "timed out"
+
+
+def test_assemble_child_rejects_misaligned_and_stale_inputs(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    good = tuple(
+        None if review.request is None else _satisfied_reply(packet, review)
+        for review in reviews)
+    with __import__("pytest").raises(ValueError):
+        AA.assemble_child(packet, reviews, good[:-1])
+    with __import__("pytest").raises(ValueError):
+        AA.assemble_child(packet, reviews,
+                          tuple(b"{}" if reply is None else reply
+                                for reply in good))
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other = _packet_in_root(other_root, {
+        "pyproject.toml": "[project]\nname = 'other'\n",
+        "tests/test_other.py": "def test_other():\n    assert True\n",
+    })
+    with __import__("pytest").raises(C.Problem) as excinfo:
+        AA.assemble_child(other, reviews, good)
+    assert excinfo.value.code == "stale-evidence"
+    with __import__("pytest").raises(TypeError):
+        AA.assemble_child(packet, list(reviews), good)
+
+
+def test_one_row_schema_shape_is_exact(tmp_path):
+    import json
+
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    schemas = {review.schema for review in reviews}
+    assert len(schemas) == 1
+    schema = json.loads(reviews[0].schema.decode("utf-8"))
+    assert set(schema["required"]) == {"status", "rationale", "evidence",
+                                       "finding"}
+
+
+# --- T4: dependency presence facts ------------------------------------------------
+
+def test_dependency_facts_report_present_not_admitted_and_missing_locks(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "uv.lock": "invalid \x00 binary\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    by_eco = {}
+    for fact in packet.dependencies:
+        by_eco.setdefault((fact.ecosystem, fact.status), []).append(fact)
+    present = by_eco.get(("python-lock", "uninspectable"), [])
+    assert any("uv.lock is present but was not admitted to the review packet"
+               in fact.detail for fact in present)
+    missing = by_eco.get(("python-lock", "missing"), [])
+    assert missing and all(fact.detail.endswith("is missing.")
+                           for fact in missing)
+
+
+# --- T4: public child dict minus execution validates ------------------------------
+
+def test_assembled_child_as_public_dict_minus_execution_validates(tmp_path):
+    import json
+
+    packet, _, child = _assembled_all_ok(_pure_library_packet(tmp_path))
+    rows = [{"id": row.id, "status": row.status, "rationale": row.rationale,
+             "label": row.label,
+             "evidence": [{"path": cite.path, "start_line": cite.start_line,
+                           "end_line": cite.end_line, "sha256": cite.sha256}
+                          for cite in row.evidence]} for row in child.rows]
+    findings = [{"id": finding.id, "summary": finding.summary,
+                 "suggested_change": finding.suggested_change,
+                 "recipe_id": finding.recipe_id,
+                 "evidence": [{"path": cite.path,
+                               "start_line": cite.start_line,
+                               "end_line": cite.end_line,
+                               "sha256": cite.sha256}
+                              for cite in finding.evidence]}
+                for finding in child.findings]
+    score = None if child.score is None else {
+        "satisfied": child.score.satisfied, "applicable": child.score.applicable,
+        "percent": child.score.percent}
+    child_dict = {"project_id": packet.project_id, "scope": packet.scope,
+                  "packet_sha256": packet.packet_sha256, "rows": rows,
+                  "score": score, "findings": findings, "limitations": []}
+    payload = {"schema": "ptest.agent-assessment/v1",
+               "provider": {"name": "claude", "cli_version": "1.2.3",
+                            "profile": "ptest-item-review-v1"},
+               "children": [child_dict], "limitations": [],
+               "publication": {"status": "created",
+                               "path": "recommendations.md",
+                               "sha256": "12" * 32}}
+    raw = json.dumps({"schema_version": 1, "kind": "agent-assessment",
+                      "ptest_version": "0.1.5", "domain": None, "data": payload,
+                      "error": None}).encode()
+    document = C.decode_public_document(raw)
+    assert document.kind == "agent-assessment"
+    assert len(document.data["children"][0]["rows"]) == 11
+
+
+# --- T4: vendored real-reply regression ------------------------------------------
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "agent_assessment"
+_E2E_SOURCE_PATHS = (
+    ".ptest.toml", "pyproject.toml", "src/demo/__init__.py",
+    "tests/test_demo.py",
+)
+
+
+def _e2e_packet(tmp_path, with_dependencies=False):
+    import json
+
+    request = json.loads(
+        (_FIXTURE_DIR / "e2e-demo-request.json").read_text(
+            encoding="utf-8"))
+    texts = {excerpt["path"]: excerpt["text"]
+             for excerpt in request["packet"]["excerpts"]
+             if excerpt["path"] in _E2E_SOURCE_PATHS}
+    assert set(texts) == set(_E2E_SOURCE_PATHS)
+    if with_dependencies:
+        texts["pyproject.toml"] = texts["pyproject.toml"].replace(
+            'version = "0.1.0"\n',
+            'version = "0.1.0"\ndependencies = ["sqlalchemy", "redis"]\n')
+    return _packet_for(tmp_path, texts)
+
+
+def _rebind_citation(cite, index, subset_paths):
+    if cite["path"] not in subset_paths:
+        return None
+    excerpt = index[cite["path"]]
+    start = max(excerpt.start_line,
+                min(cite["start_line"], excerpt.end_line))
+    end = max(start, min(cite["end_line"], excerpt.end_line))
+    return {"path": cite["path"], "start_line": start, "end_line": end,
+            "sha256": excerpt.sha256}
+
+
+def _check_real_reply_regression(tmp_path, fixture_name,
+                                 with_dependencies=False):
+    import json
+
+    from ptest import agent_assessment as AA
+
+    packet = _e2e_packet(tmp_path, with_dependencies=with_dependencies)
+    index = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    document = json.loads(
+        (_FIXTURE_DIR / fixture_name).read_text(encoding="utf-8"))
+    rows = document["data"]["children"][0]["rows"]
+    assert [row["id"] for row in rows] == list(EXPECTED_IDS)
+    replies = []
+    expected = []
+    for row in rows:
+        review = reviews[row["id"]]
+        subset_paths = set(review.excerpt_paths)
+        if review.request is None:
+            # Deterministic skip replaces the model call: the assembled row
+            # is N/A even where an old full reply said unknown.
+            replies.append(None)
+            expected.append("not-applicable")
+            continue
+        rebound = [_rebind_citation(cite, index, subset_paths)
+                   for cite in row["evidence"]]
+        if any(cite is None for cite in rebound):
+            replies.append(json.dumps({
+                "status": row["status"], "rationale": row["rationale"],
+                "evidence": row["evidence"], "finding": None}).encode())
+            expected.append("unknown")
+            continue
+        replies.append(json.dumps({
+            "status": row["status"], "rationale": row["rationale"],
+            "evidence": rebound, "finding": None}).encode())
+        expected.append(row["status"])
+    if with_dependencies:
+        assert all(review.request is not None
+                   for review in reviews.values())
+        assert all(
+            all(cite["path"] in set(reviews[row["id"]].excerpt_paths)
+                for cite in row["evidence"])
+            for row in rows), "every fixture citation must route in-subset"
+    ordered = tuple(reviews[row_id] for row_id in EXPECTED_IDS)
+    ordered_replies = tuple(
+        replies[[row["id"] for row in rows].index(row_id)]
+        for row_id in EXPECTED_IDS)
+    child = AA.assemble_child(packet, ordered, ordered_replies)
+    assert [row.status for row in child.rows] == expected
+    assert child.score == AA.score(child.rows)
+
+
+def test_real_reply_regression_claude_2(tmp_path):
+    _check_real_reply_regression(tmp_path, "claude-e2e-raw-assessment-2.json")
+
+
+def test_real_reply_regression_claude_3(tmp_path):
+    _check_real_reply_regression(tmp_path, "claude-e2e-raw-assessment-3.json")
+
+
+def test_real_reply_regression_codex_1(tmp_path):
+    _check_real_reply_regression(tmp_path, "codex-e2e-raw-assessment-1.json")
+
+
+def test_real_reply_regression_full_review_without_skips(tmp_path):
+    """With dependencies declared, every row is model-reviewed in-subset."""
+    _check_real_reply_regression(
+        tmp_path, "claude-e2e-raw-assessment-2.json", with_dependencies=True)
+    _check_real_reply_regression(
+        tmp_path, "codex-e2e-raw-assessment-1.json", with_dependencies=True)
+
+
+def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
+    import json
+
+    from ptest import agent_assessment as AA
+
+    packet = _e2e_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    stray = {"path": "ghost/missing.py", "start_line": 1, "end_line": 1,
+             "sha256": "0" * 64}
+    replies = tuple(
+        json.dumps({"status": "satisfied",
+                    "rationale": "Cites a file outside the routed subset.",
+                    "evidence": [stray], "finding": None}).encode()
+        if review.item_id == target.item_id
+        else (None if review.request is None
+              else _satisfied_reply(packet, review))
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert (row.status, row.rationale) == (
+        "unknown", AA.FAILED_PREFIX + "invalid reply")
+
+
+# --- T4: chain through the real provider launcher ---------------------------------
+
+def test_chain_fake_claude_through_real_launch_review(tmp_path, monkeypatch):
+    import json
+    import os
+    import stat as stat_module
+
+    from ptest import agent_assessment as AA
+    from ptest import agent_providers as providers
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    pending = [review for review in reviews if review.request is not None]
+    assert pending
+    assert any(review.request is None for review in reviews)
+
+    fake = tmp_path / "claude"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "request = json.loads(sys.stdin.read())\n"
+        "first = request['excerpts'][0]\n"
+        "item_id = request['policy']['item']['id']\n"
+        "reply = {'status': 'satisfied',\n"
+        "         'rationale': 'Reviewed ' + item_id + ' against the cited excerpt lines.',\n"
+        "         'evidence': [{'path': first['path'], 'start_line': first['start_line'],\n"
+        "                     'end_line': first['end_line'], 'sha256': first['sha256']}],\n"
+        "         'finding': None}\n"
+        "envelope = {'type': 'result', 'subtype': 'success', 'is_error': False,\n"
+        "            'num_turns': 1, 'permission_denials': [],\n"
+        "            'result': json.dumps(reply)}\n"
+        "sys.stdout.write(json.dumps(envelope))\n",
+        encoding="utf-8")
+    os.chmod(fake, os.stat(fake).st_mode | stat_module.S_IXUSR)
+    adapter = providers.ReviewerAdapter(
+        name="claude", executable=str(fake), argv=(str(fake),), qualified=True,
+        qualification_note="test double qualified")
+
+    replies = []
+    for review in reviews:
+        if review.request is None:
+            replies.append(None)
+            continue
+        result = providers.launch_review(
+            adapter, review.request, review.schema, 60, lambda event: None)
+        assert result.ok, result.error
+        replies.append(result.assessment)
+    child = AA.assemble_child(packet, reviews, tuple(replies))
+    assert [row.id for row in child.rows] == list(EXPECTED_IDS)
+    assert child.score is not None
+    assert child.score.applicable == len(pending)
+    assert child.score.satisfied == len(pending)
+    assert child.findings == ()
+
+
+def test_plan_and_assemble_empty_packet(tmp_path):
+    import json
+
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {})
+    assert packet.excerpts == ()
+    reviews = AA.plan_item_reviews(packet)
+    assert len(reviews) == 11
+    assert all(review.request is not None for review in reviews)
+    replies = tuple(json.dumps({
+        "status": "unknown", "rationale": "No evidence was admitted.",
+        "evidence": [], "finding": None}).encode() for _ in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    assert [row.status for row in child.rows] == ["unknown"] * 11
+    assert child.score is not None
+    assert (child.score.satisfied, child.score.applicable,
+            child.score.percent) == (0, 11, 0)

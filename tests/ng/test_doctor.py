@@ -1302,217 +1302,57 @@ def test_forged_worksheet_source_cannot_elevate_readiness_or_prompt(case):
     assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
 
 
-def test_agent_checklist_table_orders_rows_sanitizes_cells_and_bounds_output():
-    from ptest.render import render_agent_checklist_table
 
-    children = [
-        {
-            "scope": "api|core",
-            "rows": [
-                {"id": "A-1", "status": "satisfied", "rationale": "reviewed", "evidence": [
-                    {"path": "tests/test_api.py", "start_line": 4, "end_line": 6,
-                     "sha256": "a" * 64},
-                ]},
-                {"id": "A-2", "status": "gap", "rationale": "needs | review\x1b\nnext", "evidence": [
-                    {"path": "tests/log|entry\x1b.txt", "start_line": 8, "end_line": 8,
-                     "sha256": "b" * 64},
-                ]},
-            ],
-        },
-        {
-            "scope": "web",
-            "rows": [
-                {"id": "B-1", "status": "unknown", "rationale": "not established", "evidence": []},
-                {"id": "B-2", "status": "not-applicable", "rationale": "out of scope", "evidence": [
-                    {"path": "docs/decision.md", "start_line": 2, "end_line": 3,
-                     "sha256": "c" * 64},
-                ]},
-            ],
-        },
-    ]
+# --- T4: agent/pipeline exclusion and match_rules ----------------------------
 
-    table = render_agent_checklist_table(children)
-
-    assert table.startswith("Project | Checklist | Status | Evidence\n")
-    assert table.index("A-1") < table.index("A-2") < table.index("B-1") < table.index("B-2")
-    assert "api\\|core" in table
-    assert "reviewed" not in table and "needs" not in table
-    assert "\x1b" not in table
-    assert "tests/test_api.py:4-6" in table
-    assert r"tests/log\|entry\x1b.txt:8" in table
-    assert "docs/decision.md:2-3" in table
-    assert "evidence: []" not in table
-    assert "sha256" not in table and "a" * 64 not in table
-    assert "{'path':" not in table
-    assert "satisfied" in table and "gap" in table
-    assert "unknown" in table and "not-applicable" in table
-
-    many_rows = [{"id": f"{i}-" + "é" * 400, "status": "unknown", "rationale": "r" * 900,
-                  "evidence": []}
-                 for i in range(100)]
-    bounded = render_agent_checklist_table([{"scope": "large", "rows": many_rows}])
-    assert len(bounded.encode("utf-8")) <= 32_768
-
-
-def test_agent_checklist_table_escapes_html_and_markdown_in_every_cell():
-    from ptest.render import render_agent_checklist_table
-
-    table = render_agent_checklist_table([{
-        "scope": "<b>project</b>",
-        "rows": [{
-            "id": "[link](url)",
-            "status": "<script>blocked</script>",
-            "evidence": [{
-                "path": "<b>name</b>/[link](url).py",
-                "start_line": 3,
-                "end_line": 3,
-            }],
-        }],
-    }])
-
-    assert "<b>" not in table and "</b>" not in table and "<script>" not in table
-    assert "[link](url)" not in table
-    assert "&lt;b&gt;project&lt;/b&gt;" in table
-    assert "&#91;link&#93;&#40;url&#41;" in table
-    assert "&lt;b&gt;name&lt;/b&gt;/&#91;link&#93;&#40;url&#41;.py:3" in table
-
-
-def test_agent_checklist_table_does_not_render_any_rationale():
-    from ptest.render import render_agent_checklist_table
-
-    table = render_agent_checklist_table([{
-        "scope": "api",
-        "rows": [{
-            "id": "A-1",
-            "status": "satisfied",
-            "rationale": "pytest passed",
-            "evidence": [],
-        }],
-    }])
-
-    assert "pytest passed" not in table
-    assert "Rationale omitted" not in table
-
-
-def test_agent_checklist_table_does_not_render_model_rationale():
-    from ptest.render import render_agent_checklist_table
-
-    table = render_agent_checklist_table([{
-        "scope": "api",
-        "rows": [{
-            "id": "A-1",
-            "status": "satisfied",
-            "rationale": "All tests succeeded",
-            "evidence": [{
-                "path": "tests/test_api.py",
-                "start_line": 4,
-                "end_line": 6,
-                "sha256": "d" * 64,
-            }],
-        }],
-    }])
-
-    assert table.startswith("Project | Checklist | Status | Evidence\n")
-    assert "All tests succeeded" not in table
-
-
-def test_agent_checklist_table_neutralizes_bare_urls_in_every_untrusted_cell():
-    from ptest.render import render_agent_checklist_table
-
-    table = render_agent_checklist_table([{
-        "scope": "https://example.test",
-        "rows": [{
-            "id": "www.example.test",
-            "status": "http://status.example.test",
-            "rationale": "not rendered",
-            "evidence": [{
-                "path": "www.example.test/evidence.py",
-                "start_line": 7,
-                "end_line": 8,
-                "sha256": "e" * 64,
-            }],
-        }],
-    }])
-
-    assert "https://example.test" not in table
-    assert "www.example.test" not in table
-    assert "http://status.example.test" not in table
-
-
-def test_agent_assessment_human_output_keeps_capability_claims_separate(case):
-    from ptest.doctor import inspect_workspace
-    from ptest.render import render_agent_assessment
+def test_inspect_skips_agent_pipeline_trees_diff_patch_and_own_report(case):
+    from ptest.doctor import inspect
 
     domain = case.domain()
-    root = case.project(domain, kind="pytest")
-    (root / "tests").mkdir()
-    (root / "tests" / "test_sample.py").write_text(
-        "def test_sample():\n    assert True\n", encoding="utf-8")
-    resolution = _resolution(case, root)
-    workspace = inspect_workspace(
-        domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
-    rows = [{"id": row_id, "status": "unknown", "rationale": "not known",
-             "evidence": []} for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS]
-    children = [{
-        "scope": ".", "score": {"satisfied": 0, "applicable": 11, "percent": 0},
-        "rows": rows,
-        "limitations": [{"code": "partial-evidence",
-                         "message": "bounded evidence", "paths": ["."]}],
-        "findings": [{"id": "FIX-001",
-                      "summary": "Review <script>hostile</script> [link](https://invalid.test) | content.",
-                      "suggested_change": "Use the owned recipe."}],
-    }]
-
-    output = render_agent_assessment(
-        children, workspace, report_path="recommendations.md",
-        publication_status="created")
-
-    assert output.startswith(
-        "Project | Execution | Parallel | Selection | Timing | Checklist\n")
-    assert "pytest declared" in output
-    assert "basic-serial; reviewed isolation unverified" in output
-    assert ("| disabled | unmeasured | 0/11 &#40;0%&#41;, agent-reviewed; "
-            "partial evidence" in output)
-    assert output.index("Project | Checklist | Status | Evidence") > output.index("Project | Execution")
-    assert output.index("Findings:") > output.index("Project | Checklist | Status | Evidence")
-    assert "<script>" not in output and "https://invalid.test" not in output
-    assert "hostile link / content." in output
-    assert "pytest passed" not in output
-    assert "Execution verification: not run." in output
+    root = case.project(domain)
+    (root / "tests").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    planted = {
+        ".superpowers/sdd/x.py": "drop_database()\n",
+        ".pipeline/review.md": "drop_database()\n",
+        ".claude/notes.md": "drop_database()\n",
+        ".agents/notes.md": "drop_database()\n",
+        ".codex/notes.md": "drop_database()\n",
+        ".opencode/notes.md": "drop_database()\n",
+        ".gemini/notes.md": "drop_database()\n",
+        "notes.diff": "drop_database()\n",
+        "change.patch": "drop_database()\n",
+        "recommendations.md": "drop_database()\n",
+        "src/nested.diff/kept.py": "x = 1\n",
+    }
+    for rel, text in planted.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    report = inspect(domain, _resolution(case, root),
+                     C.DEFAULT_SCAN_LIMITS, None)
+    assert report.findings == ()
 
 
-def test_agent_assessment_capability_line_without_dependency_codes():
-    from types import SimpleNamespace
+def test_match_rules_reports_codes_linewise_with_bounded_lines():
+    from ptest.doctor import match_rules
 
-    from ptest.render import render_agent_assessment
+    assert match_rules("x = 1\n") == frozenset()
+    assert match_rules("drop_database()\n") == frozenset(
+        {"db.cleanup-ownership"})
+    assert match_rules("result = cache.clearAll()\n") == frozenset(
+        {"cache.global-flush"})
+    assert match_rules("drop_database()\nflushall()\n") == frozenset(
+        {"db.cleanup-ownership", "cache.global-flush"})
+    long_line = "x = '" + "y" * 9000 + "drop_database()'\n"
+    assert "db.cleanup-ownership" not in match_rules(long_line)
 
-    config = SimpleNamespace(
-        runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
-        selection=SimpleNamespace(enabled=True),
-    )
-    workspace = SimpleNamespace(repositories=(SimpleNamespace(
-        declaration="api", config=config, config_problem=None),))
 
-    def capability_row(limitations):
-        child = {
-            "scope": "api", "score": None, "rows": [], "findings": [],
-            "limitations": limitations,
-        }
-        text = render_agent_assessment(
-            [child], workspace, report_path="recommendations.md",
-            publication_status="created")
-        return next(line for line in text.splitlines()
-                    if line.startswith("api |"))
+def test_match_rules_is_pure_and_returns_codes_only():
+    from ptest.doctor import match_rules
 
-    empty = capability_row([])
-    assert "no dependency limitations recorded; not execution-verified" in empty
-    assert "uninspectable prerequisites" not in empty
-
-    coded = capability_row([
-        {"code": "dependency-missing", "message": "absent", "paths": []},
-        {"code": "dependency-unsupported", "message": "odd", "paths": []},
-        {"code": "dependency-uninspectable", "message": "opaque",
-         "paths": []},
-    ])
-    assert "missing, unsupported, uninspectable prerequisites" in coded
-    assert "not execution-verified" in coded
+    codes = match_rules("time.sleep(1)\n")
+    assert codes == frozenset({"time.blocking-sleep"})
+    assert isinstance(codes, frozenset)
+    assert all(isinstance(code, str) for code in codes)
