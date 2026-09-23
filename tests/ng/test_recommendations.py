@@ -41,13 +41,17 @@ def _citation(path="src/example.py", start=3, end=9, sha=CITATION_SHA):
             "sha256": sha}
 
 
-def _row(row_id, status="satisfied", rationale=None, evidence=None):
+def _row(row_id, status="satisfied", rationale=None, evidence=None,
+         label=None):
     if rationale is None:
         rationale = f"Row {row_id} judged {status} against packet excerpt."
     if evidence is None:
         evidence = [] if status == "unknown" else [_citation()]
-    return {"id": row_id, "status": status, "rationale": rationale,
-            "evidence": evidence}
+    row = {"id": row_id, "status": status, "rationale": rationale,
+           "evidence": evidence}
+    if label is not None:
+        row["label"] = label
+    return row
 
 
 def _finding(row_id, summary=None, change=None, recipe="__catalog__",
@@ -87,15 +91,33 @@ def _mixed_rows():
     return rows
 
 
+LABELS = {
+    "FIX-001": "Test data factories",
+    "FIX-002": "Fixture state isolation",
+    "DB-001": "Database setup reuse",
+    "DB-002": "Database isolation",
+    "CACHE-001": "Cache isolation",
+    "RESOURCE-001": "Files and ports",
+    "NETWORK-001": "Network isolation",
+    "PROCESS-001": "Child processes",
+    "TIME-001": "Deterministic time",
+    "SELECT-001": "Test selection",
+    "TIMING-001": "Test timing",
+}
+
+
 def _child(rows=None, findings=None, scope="child-a",
-           packet_sha=PACKET_SHA, project_id=PROJECT_ID):
+           packet_sha=PACKET_SHA, project_id=PROJECT_ID, execution=None):
     rows = _mixed_rows() if rows is None else rows
     if findings is None:
         findings = [_finding("FIX-002")]
-    return {"project_id": project_id, "scope": scope,
-            "packet_sha256": packet_sha, "rows": rows,
-            "score": {"satisfied": 0, "applicable": 1, "percent": 0},
-            "findings": findings, "limitations": []}
+    child = {"project_id": project_id, "scope": scope,
+             "packet_sha256": packet_sha, "rows": rows,
+             "score": {"satisfied": 0, "applicable": 1, "percent": 0},
+             "findings": findings, "limitations": []}
+    if execution is not None:
+        child["execution"] = execution
+    return child
 
 
 def _run(children=None, provider=None, limitations=None):
@@ -131,8 +153,8 @@ def test_render_includes_file_line_sha_evidence_per_item():
 def test_render_recomputes_score_and_ignores_model_score():
     from ptest.recommendations import render_recommendations
     out = render_recommendations(_run()).decode("utf-8")
-    # 8 satisfied of 10 applicable -> floor 80; bogus model score ignored.
-    assert "8/10 (80%), agent-reviewed" in out
+    # 8 satisfied of 10 applicable; bogus model score ignored.
+    assert "8 of 10 checks confirmed from evidence" in out
     assert '"percent": 0' not in out
 
 
@@ -156,7 +178,7 @@ def test_render_foregrounds_deterministic_initialization_limitation_once():
 
     assert hashlib.sha256(body).hexdigest() == marker_hash
     assert rendered.index(blocker) < rendered.index(
-        "8/10 (80%), agent-reviewed")
+        "8 of 10 checks confirmed from evidence")
     assert rendered.count(blocker) == 1
 
 
@@ -202,6 +224,96 @@ def test_render_all_na_child_has_no_score():
     out = render_recommendations(_run(children=[_child(rows=rows,
                                                        findings=[])])).decode("utf-8")
     assert "no score" in out
+
+
+def test_render_item_headings_show_id_and_label():
+    from ptest.recommendations import render_recommendations
+    rows = [_row(row_id, "satisfied", label=LABELS[row_id])
+            for row_id in CHECKLIST_IDS]
+    out = render_recommendations(
+        _run(children=[_child(rows=rows, findings=[])])).decode("utf-8")
+    for row_id in CHECKLIST_IDS:
+        assert f"## {row_id} {LABELS[row_id]}" in out
+    assert "## Finding" not in out
+
+
+def test_render_gap_heading_carries_id_and_label():
+    from ptest.recommendations import render_recommendations
+    rows = [_row("FIX-002", "gap", label=LABELS["FIX-002"])]
+    rows += [_row(row_id, "satisfied", label=LABELS[row_id])
+             for row_id in CHECKLIST_IDS if row_id != "FIX-002"]
+    out = render_recommendations(_run(children=[_child(rows=rows)])).decode(
+        "utf-8")
+    assert "## FIX-002 Fixture state isolation" in out
+
+
+def test_render_project_section_starts_with_execution_fact():
+    from ptest.recommendations import render_recommendations
+    execution = {
+        "status": "caveat",
+        "detail": ("exclusive: Vitest runs as one command and manages "
+                   "its own workers"),
+        "fix": None,
+    }
+    out = render_recommendations(
+        _run(children=[_child(execution=execution)])).decode("utf-8")
+    scope_at = out.index("## Scope child-a")
+    execution_at = out.index(
+        "Execution: ready with caveats: exclusive: Vitest runs as one "
+        "command and manages its own workers.")
+    packet_at = out.index("Packet:")
+    assert scope_at < execution_at < packet_at
+
+    blocked = _child(execution={
+        "status": "not-executable",
+        "detail": "pytest addopts enable xdist, which ptest runs serially",
+        "fix": 'add "-n", "0" to [runner] args in api/.ptest.toml',
+    })
+    blocked_out = render_recommendations(
+        _run(children=[blocked])).decode("utf-8")
+    assert ("Execution: not runnable: pytest addopts enable xdist, which "
+            "ptest runs serially — fix: ") in blocked_out
+    assert 'add "-n", "0" to [runner] args in api/.ptest.toml' in blocked_out
+
+    unrecorded = render_recommendations(_run()).decode("utf-8")
+    assert "Execution: not recorded." in unrecorded
+
+
+def test_render_skip_and_failed_rows_use_report_wording():
+    from ptest.recommendations import render_recommendations
+    rows = [_mixed_rows()[0]]
+    rows.append(_row("DB-001", "unknown",
+                     rationale="Review failed: timed out", evidence=[]))
+    rows.append(_row(
+        "DB-002", "not-applicable",
+        rationale=("Skipped without a model call: no database library in "
+                   "pyproject.toml and no database configuration or usage "
+                   "in the admitted evidence."),
+        evidence=[_citation()], label=LABELS["DB-002"]))
+    rows.extend(row for row in _mixed_rows() if row["id"] not in
+                ("FIX-001", "DB-001", "DB-002"))
+    out = render_recommendations(
+        _run(children=[_child(rows=rows)])).decode("utf-8")
+    assert "unknown (review failed: timed out)" in out
+    assert "not applicable (skipped without a model call)" in out
+
+
+def test_render_rejects_bad_label_and_execution_shapes():
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    with pytest.raises(Problem):
+        render_recommendations(_run(children=[_child(execution={
+            "status": "bogus", "detail": "ready", "fix": None})]))
+    with pytest.raises(Problem):
+        render_recommendations(_run(children=[_child(execution={
+            "status": "executable", "detail": "ready", "fix": None,
+            "extra": 1})]))
+    with pytest.raises(Problem):
+        render_recommendations(_run(children=[_child(rows=[
+            _row("FIX-001", "satisfied", label="x" * 65)])]))
+    with pytest.raises(Problem):
+        render_recommendations(_run(children=[_child(rows=[
+            _row("FIX-001", "satisfied", label="")])]))
 
 
 def test_render_has_blank_observed_fields_and_unverified():

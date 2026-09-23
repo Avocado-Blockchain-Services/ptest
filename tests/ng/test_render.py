@@ -13,217 +13,345 @@ from ptest.render import (
 )
 
 
-def test_agent_assessment_matches_scoped_child_to_exact_declared_repository():
+def _aa_workspace(declaration="api", runner="pytest", selection=True):
     config = SimpleNamespace(
-        runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
-        selection=SimpleNamespace(enabled=True),
+        runner=SimpleNamespace(kind=SimpleNamespace(value=runner)),
+        selection=SimpleNamespace(enabled=selection),
     )
-    workspace = SimpleNamespace(repositories=(SimpleNamespace(
-        declaration="api", config=config, config_problem=None),))
+    return SimpleNamespace(repositories=(SimpleNamespace(
+        declaration=declaration, config=config, config_problem=None),))
+
+
+def _aa_citation(path="api/tests/test_example.py", start=3, end=9):
+    return {"path": path, "start_line": start, "end_line": end,
+            "sha256": "ef" * 32}
+
+
+def _aa_row(row_id, status, label=None, rationale=None, evidence="default"):
+    if rationale is None:
+        rationale = f"Row {row_id} judged {status} against packet excerpts."
+    if evidence == "default":
+        evidence = ([] if status in ("unknown", "not-applicable")
+                    else [_aa_citation()])
+    row = {"id": row_id, "status": status, "rationale": rationale,
+           "evidence": evidence}
+    if label is not None:
+        row["label"] = label
+    return row
+
+
+def test_agent_assessment_renders_project_block_with_execution_score_and_items():
     child = {
-        "scope": "api/tests",
-        "score": {"satisfied": 8, "applicable": 10, "percent": 80},
-        "rows": [], "findings": [], "limitations": [],
+        "scope": "api",
+        "execution": {"status": "executable", "detail": "ready",
+                     "fix": None},
+        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "gap", label="Fixture state isolation",
+                    rationale="Shares module-global state between tests."),
+            _aa_row("DB-001", "unknown",
+                    rationale="Review failed: timed out"),
+            _aa_row("DB-002", "not-applicable", label="Database isolation",
+                    rationale=("Skipped without a model call: no database "
+                               "library in pyproject.toml and no database "
+                               "configuration or usage in the admitted "
+                               "evidence.")),
+        ],
+        "findings": [{"id": "FIX-002",
+                      "summary": "Share one module-global fixture.",
+                      "suggested_change": "Build a per-test factory.",
+                      "recipe_id": "factories",
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
     }
 
     text = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
+        [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
 
-    api_row = next(line for line in text.splitlines()
-                   if line.startswith("api/tests |"))
-    assert "pytest declared" in api_row
-    assert "enabled; correctness unverified" in api_row
-    assert "api/tests" in api_row
+    assert "api (pytest)" in text
+    assert "ptest: ready" in text
+    assert "1 of 3 checks confirmed from evidence; 1 not applicable" in text
+    assert "✓ Test data factories" in text
+    assert "✗ Fixture state isolation" in text
+    assert ("  finding: Share one module-global fixture. Suggested change: "
+            "Build a per-test factory.") in text
+    assert "? DB-001 — unknown (review failed: timed out)" in text
+    assert ("– Database isolation — n/a: no database library in "
+            "pyproject.toml and no database configuration or usage in the "
+            "admitted evidence.") in text
+    assert "Skipped without a model call" not in text
+    assert "test_example" not in text
+    assert "recommendations.md" in text
+    assert "Execution verification: not run." in text
+    assert "Project |" not in text
+    for leaked in ("&#", "&lt;", "&gt;", "&amp;"):
+        assert leaked not in text
 
-    child["scope"] = "api"
-    full_child = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
+
+def test_agent_assessment_reports_caveat_verdict():
+    child = {
+        "scope": "web",
+        "execution": {
+            "status": "caveat",
+            "detail": ("exclusive: Vitest runs as one command and manages "
+                       "its own workers"),
+            "fix": None,
+        },
+        "score": {"satisfied": 2, "applicable": 2, "percent": 100},
+        "rows": [
+            _aa_row("SELECT-001", "satisfied", label="Test selection"),
+            _aa_row("TIMING-001", "satisfied", label="Test timing"),
+        ],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(declaration="web", runner="vitest"),
+        report_path="recommendations.md", publication_status="created")
+
+    assert "web (vitest)" in text
+    assert ("ptest: ready with caveats: exclusive: Vitest runs as one "
+            "command and manages its own workers") in text
+    assert "2 of 2 checks confirmed from evidence" in text
+
+
+def test_agent_assessment_not_executable_uses_checklist_only_score_line():
+    child = {
+        "scope": "api",
+        "execution": {
+            "status": "not-executable",
+            "detail": "pytest addopts enable xdist, which ptest runs serially",
+            "fix": 'add "-n", "0" to [runner] args in api/.ptest.toml',
+        },
+        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "gap", label="Fixture state isolation"),
+            _aa_row("DB-001", "unknown",
+                    rationale="Row DB-001 judged unknown."),
+        ],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    full_child_row = next(line for line in full_child.splitlines()
-                          if line.startswith("api |"))
-    assert "pytest declared" in full_child_row
 
-    child["scope"] = "api-malicious/tests"
-    mismatched = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
+    assert ("ptest: not runnable: pytest addopts enable xdist, which ptest "
+            "runs serially — fix: ") in text
+    assert 'add "-n", "0" to [runner] args in api/.ptest.toml' in text
+    assert ("Checklist review only: 1 of 3 checks confirmed from evidence "
+            "(ptest cannot run this project yet)") in text
+    assert "no finding recorded; see recommendations.md" in text
+
+
+def test_agent_assessment_omits_execution_without_facts_and_falls_back_to_ids():
+    child = {
+        "scope": "api",
+        "score": None,
+        "rows": [
+            _aa_row("FIX-001", "satisfied"),
+            _aa_row("DB-001", "unknown",
+                    rationale="Row DB-001 judged unknown."),
+        ],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    mismatch_row = next(line for line in mismatched.splitlines()
-                        if line.startswith("api-malicious/tests |"))
-    assert "unknown declared" in mismatch_row
-    assert "invalid/unavailable" in mismatch_row
+
+    assert "api (pytest)" in text
+    assert "ptest:" not in text
+    assert "no applicable checks" in text
+    assert "✓ FIX-001" in text
+    assert "? DB-001 — unknown" in text
+    assert "(review failed" not in text
 
 
-def test_agent_assessment_keeps_standalone_full_child_identity():
-    config = SimpleNamespace(
-        runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
-        selection=SimpleNamespace(enabled=True),
-    )
-    workspace = SimpleNamespace(repositories=(SimpleNamespace(
-        declaration=".", config=config, config_problem=None),))
+def test_agent_assessment_bounds_skip_reasons_to_160_chars():
+    child = {
+        "scope": "api",
+        "score": None,
+        "rows": [
+            _aa_row("DB-002", "not-applicable", label="Database isolation",
+                    rationale="Skipped without a model call: " + "x" * 200),
+        ],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+
+    line = next(line for line in text.splitlines() if "n/a:" in line)
+    assert line == "– Database isolation — n/a: " + "x" * 160
+
+
+def test_agent_assessment_no_color_uses_bracket_icons(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "gap", label="Fixture state isolation"),
+            _aa_row("DB-001", "unknown",
+                    rationale="Review failed: timed out"),
+            _aa_row("DB-002", "not-applicable", label="Database isolation",
+                    rationale="Skipped without a model call: no cache."),
+        ],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+
+    assert "[ok] Test data factories" in text
+    assert "[gap] Fixture state isolation" in text
+    assert "[?] DB-001 — unknown (review failed: timed out)" in text
+    assert "[n/a] Database isolation — n/a:" in text
+    assert "✓" not in text
+    assert "✗" not in text
+    assert "–" not in text
+
+
+def test_agent_assessment_neutralizes_hostile_model_text():
+    summary = ("<script>alert(1)</script> see "
+               "[details](https://example.invalid/x) or "
+               "https://example.invalid/y a|b `code` \u202eRTL "
+               "&#40;45%&#41; &amp; done")
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 0, "applicable": 1, "percent": 0},
+        "rows": [_aa_row("FIX-002", "gap", label="Fixture | `isolation`",
+                         rationale="gap", evidence=[])],
+        "findings": [{"id": "FIX-002", "summary": summary,
+                      "suggested_change": "Apply the packaged recipe.",
+                      "recipe_id": "factories",
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+
+    assert "alert(1)" in text
+    assert "details" in text
+    assert "<script" not in text
+    assert "https://example.invalid" not in text
+    assert "Fixture / 'isolation'" in text
+    assert "\u202e" not in text
+    for leaked in ("&#", "&lt;", "&gt;", "&amp;", "|"):
+        assert leaked not in text
+
+
+def test_agent_assessment_dependency_wording_passes_through_verbatim():
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 1, "applicable": 1, "percent": 100},
+        "rows": [_aa_row("FIX-001", "satisfied",
+                         label="Test data factories")],
+        "findings": [],
+        "limitations": [
+            {"code": "dependency-uninspectable",
+             "message": ("uv.lock is present but was not admitted to the "
+                         "review packet"),
+             "paths": []},
+            {"code": "dependency-missing",
+             "message": "package-lock.json is missing",
+             "paths": []},
+            {"code": "partial-evidence",
+             "message": "Bounded evidence was omitted.",
+             "paths": []},
+        ],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+
+    assert "1 of 1 checks confirmed from evidence; partial evidence" in text
+    details = text[text.index("Dependencies:"):text.index("Report:")]
+    assert ("uv.lock is present but was not admitted to the review packet"
+            in details)
+    assert "package-lock.json is missing" in details
+    assert text.index("api (pytest)") < text.index("Dependencies:")
+    assert (text.index("Dependencies:")
+            < text.index("Report: recommendations.md (created). Citations, "
+                         "suggested changes and verification steps are "
+                         "there."))
+    assert (text.index("Report:") <
+            text.index("Execution verification: not run."))
+    assert len(text.encode("utf-8")) <= 256 * 1024
+
+
+def test_agent_assessment_header_names_runner_or_unknown():
+    standalone = SimpleNamespace(repositories=(SimpleNamespace(
+        declaration=".", config=SimpleNamespace(
+            runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
+            selection=SimpleNamespace(enabled=True)),
+        config_problem=None),))
     child = {
         "scope": ".", "score": None, "rows": [], "findings": [],
         "limitations": [],
     }
 
     text = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
+        [child], standalone, report_path="recommendations.md",
         publication_status="created")
+    assert ". (pytest)" in text
 
-    standalone_row = next(line for line in text.splitlines()
-                          if line.startswith(". |"))
-    assert "pytest declared" in standalone_row
-    assert "enabled; correctness unverified" in standalone_row
+    mismatched = render_agent_assessment(
+        [{**child, "scope": "other"}], _aa_workspace(),
+        report_path="recommendations.md", publication_status="created")
+    assert "other (unknown)" in mismatched
 
 
-def test_agent_assessment_foregrounds_deterministic_config_blocker_over_score():
-    problem = SimpleNamespace(code="initialization-required")
-    workspace = SimpleNamespace(repositories=(SimpleNamespace(
-        declaration=".", config=None, config_problem=problem),))
-    child = {
-        "scope": ".",
+def test_agent_assessment_output_bounded_and_lists_every_scope():
+    ids_labels = (
+        ("FIX-001", "Test data factories"),
+        ("FIX-002", "Fixture state isolation"),
+        ("DB-001", "Database setup reuse"),
+        ("DB-002", "Database isolation"),
+        ("CACHE-001", "Cache isolation"),
+        ("RESOURCE-001", "Files and ports"),
+        ("NETWORK-001", "Network isolation"),
+        ("PROCESS-001", "Child processes"),
+        ("TIME-001", "Deterministic time"),
+        ("SELECT-001", "Test selection"),
+        ("TIMING-001", "Test timing"),
+    )
+    children = [{
+        "scope": f"child-{index:03d}",
+        "execution": {"status": "executable", "detail": "ready",
+                     "fix": None},
         "score": {"satisfied": 11, "applicable": 11, "percent": 100},
-        "rows": [],
-        "findings": [{"id": "TQ-001", "summary": "review-only concern",
-                      "suggested_change": "inspect the test fixture"}],
-        "limitations": [],
-    }
-
-    text = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
-        publication_status="created")
-
-    assert "initialization-required" in text
-    assert "not execution-ready" in text
-    assert text.index("initialization-required") < text.index(
-        "11/11 &#40;100%&#41;, agent-reviewed")
-    assert "review-only concern" in text
-    capability_row = next(line for line in text.splitlines()
-                          if line.startswith(". |"))
-    assert "review-only concern" not in capability_row
-
-
-def test_agent_assessment_lists_mixed_dependency_details_after_capability_table():
-    config = SimpleNamespace(
-        runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
-        selection=SimpleNamespace(enabled=True),
-    )
-    workspace = SimpleNamespace(repositories=(SimpleNamespace(
-        declaration="api", config=config, config_problem=None),))
-    child = {
-        "scope": "api/tests",
-        "score": {"satisfied": 8, "applicable": 10, "percent": 80},
-        "rows": [],
+        "rows": [_aa_row(row_id, "satisfied", label=label)
+                 for row_id, label in ids_labels],
         "findings": [],
-        "limitations": [
-            {"code": "dependency-missing",
-             "message": "pytest prerequisite is missing",
-             "paths": ["api/pyproject.toml"]},
-            {"code": "dependency-unsupported",
-             "message": "unsupported [lock](https://example.invalid) "
-                        "<b>source</b> | detail",
-             "paths": ["api/package-lock.json"]},
-            {"code": "dependency-uninspectable",
-             "message": "local environment prerequisite is uninspectable",
-             "paths": []},
-        ],
-    }
-
-    text = render_agent_assessment(
-        [child], workspace, report_path="recommendations.md",
-        publication_status="created")
-
-    capability_row = next(line for line in text.splitlines()
-                          if line.startswith("api/tests |"))
-    details_start = text.index("Dependency details:")
-    checklist_start = text.index("Project | Checklist")
-    findings_start = text.index("Findings:")
-    details = text[details_start:checklist_start]
-
-    assert "pytest declared" in capability_row
-    assert "not execution-verified" in capability_row
-    assert capability_row.index("missing") < capability_row.index("unsupported")
-    assert capability_row.index("unsupported") < capability_row.index(
-        "uninspectable")
-    assert text.index("api/tests |") < details_start
-    assert details_start < checklist_start < findings_start
-    assert "- api/tests: missing prerequisite: pytest prerequisite is missing " \
-           "(root-relative paths: api/pyproject.toml)" in details
-    assert "- api/tests: unsupported prerequisite: unsupported lock source / " \
-           "detail (root-relative paths: api/package-lock.json)" in details
-    assert "- api/tests: uninspectable prerequisite: local environment " \
-           "prerequisite is uninspectable" in details
-    assert "https://example.invalid" not in text
-    assert "<b>" not in text and "</b>" not in text
-    assert len(text.encode("utf-8")) <= 256 * 1024
-
-
-def test_agent_assessment_dependency_pressure_preserves_required_sections():
-    children = []
-    dependency_codes = (
-        "dependency-missing",
-        "dependency-unsupported",
-        "dependency-uninspectable",
-    )
-    for index in range(256):
-        scope = f"child-{index:03d}/tests"
-        prefix = f"{scope}/" if index else "child-000/\x1b[31mhttps://example.invalid/"
-        path = prefix + "p" * (4096 - len(prefix))
-        children.append({
-            "scope": scope,
-            "score": None,
-            "rows": [],
-            "findings": [{
-                "id": f"F-{index:03d}",
-                "summary": "bounded finding",
-                "suggested_change": "inspect the declared prerequisite",
-            }],
-            "limitations": [{
-                "code": code,
-                "message": (
-                    "missing [package](https://example.invalid/package) "
-                    "<b>source</b> | detail\x1b[2J\r\t\x7f\u009b\u202e"
-                ),
-                "paths": [path],
-            } for code in dependency_codes],
-        })
+        "limitations": [],
+    } for index in range(256)]
 
     text = render_agent_assessment(
         children, SimpleNamespace(repositories=()),
         report_path="recommendations.md", publication_status="created")
 
     assert len(text.encode("utf-8")) <= 256 * 1024
-    required_sections = (
-        "Project | Execution",
-        "Dependency details:",
-        "Project | Checklist",
-        "Findings:",
-        "Guidance:",
-        "Execution verification: not run.",
-    )
-    assert all(section in text for section in required_sections)
+    for index in range(256):
+        assert f"child-{index:03d} (unknown)" in text
+    assert text.count("11 of 11 checks confirmed from evidence") == 256
+    assert "recommendations.md" in text
     assert text.rstrip().endswith("Execution verification: not run.")
-    positions = [text.index(section) for section in required_sections[:5]]
-    assert positions == sorted(positions)
-
-    details_start = text.index("Dependency details:")
-    checklist_start = text.index("Project | Checklist")
-    details = text[details_start:checklist_start]
-    visible_details = sum(
-        line.startswith("- child-") for line in details.splitlines())
-    omitted = 256 * len(dependency_codes) - visible_details
-    assert omitted > 0
-    assert (
-        f"[{omitted} dependency details omitted; see recommendations.md "
-        "for full limitations]" in details
-    )
-    findings = text[text.index("Findings:"):text.index("Guidance:")]
-    assert "child-255/tests F-255: bounded finding" in findings
-
-    for control in ("\x1b", "\r", "\t", "\x7f", "\u009b", "\u202e"):
-        assert control not in text
-    assert "https://example.invalid" not in text
-    assert "<b>" not in text and "</b>" not in text
 
 
 def test_render_json_uses_shared_descriptor_and_never_exposes_argv():

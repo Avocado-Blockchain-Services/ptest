@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.resources
 import itertools
 import json
+import os
 import re
 
 from . import checklist as checklist_api
@@ -43,130 +44,29 @@ def terminal_text(value: object) -> str:
     return "".join(parts)
 
 
-_AGENT_CHECKLIST_TABLE_MAX_BYTES = 32 * 1024
-_AGENT_CHECKLIST_EVIDENCE_MAX_BYTES = 1024
-_AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS = 256
 _AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
-_AGENT_ASSESSMENT_CAPABILITY_MAX_BYTES = 48 * 1024
-_AGENT_ASSESSMENT_FINDINGS_MAX_BYTES = 48 * 1024
 
-
-def _render_agent_checklist_evidence(evidence) -> str:
-    """Render bounded citation locations without exposing citation metadata."""
-    if not isinstance(evidence, list) or not evidence:
-        return ""
-
-    marker = "[truncated]"
-    parts = []
-    used = 0
-    text_limit = _AGENT_CHECKLIST_EVIDENCE_MAX_BYTES
-    truncated = False
-    for citation in itertools.islice(evidence, _AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS):
-        if not isinstance(citation, dict):
-            continue
-        path = citation.get("path")
-        start_line = citation.get("start_line")
-        end_line = citation.get("end_line")
-        if (not isinstance(path, str)
-                or not isinstance(start_line, int) or isinstance(start_line, bool)
-                or not isinstance(end_line, int) or isinstance(end_line, bool)
-                or start_line < 1 or end_line < start_line):
-            continue
-
-        location = terminal_text(path)
-        if not location:
-            continue
-        location += f":{start_line}"
-        if end_line != start_line:
-            location += f"-{end_line}"
-        chunk = (", " if parts else "") + location
-        chunk_bytes = len(chunk.encode("utf-8"))
-        # Reserve enough space for a truncation marker if more citations remain.
-        if used + chunk_bytes > text_limit - len(marker) - 2:
-            truncated = True
-            break
-        parts.append(chunk)
-        used += chunk_bytes
-    else:
-        truncated = len(evidence) > _AGENT_CHECKLIST_EVIDENCE_MAX_ITEMS
-
-    if truncated:
-        parts.append((", " if parts else "") + marker)
-    return "".join(parts)
-
-
-def _agent_checklist_table_cell(value: object) -> str:
-    """Sanitize untrusted table text for terminal controls and Markdown syntax."""
-    safe = []
-    backslashes = 0
-    text = terminal_text(value)
-    text = re.sub(
-        r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+",
-        "[URL omitted]",
-        text,
-    )
-    for character in text:
-        if character == "\\":
-            safe.append(character)
-            backslashes += 1
-            continue
-        if character == "|":
-            if backslashes % 2 == 0:
-                safe.append("\\")
-            safe.append(character)
-        elif character == "&":
-            safe.append("&amp;")
-        elif character == "<":
-            safe.append("&lt;")
-        elif character == ">":
-            safe.append("&gt;")
-        elif character in "[]()":
-            safe.append(f"&#{ord(character)};")
-        else:
-            safe.append(character)
-        backslashes = 0
-    return "".join(safe)
-
-
-def render_agent_checklist_table(children) -> str:
-    """Render ordered, validated agent-assessment checklist children."""
-    header = "Project | Checklist | Status | Evidence"
-    separator = "------- | --------- | ------ | --------"
-    omitted = "... | ... | ... | [additional rows omitted at output limit]"
-    lines = [header, separator]
-    used = len((header + "\n" + separator).encode("utf-8"))
-    omitted_cost = len(("\n" + omitted).encode("utf-8"))
-    row_limit = _AGENT_CHECKLIST_TABLE_MAX_BYTES - omitted_cost
-
-    for child in children:
-        project = child["scope"]
-        for row in child["rows"]:
-            evidence = _render_agent_checklist_evidence(row["evidence"])
-            cells = (
-                project,
-                row["id"],
-                row["status"],
-                evidence,
-            )
-            line = " | ".join(_agent_checklist_table_cell(cell) for cell in cells)
-            line_cost = len(("\n" + line).encode("utf-8"))
-            if used + line_cost > row_limit:
-                lines.append(omitted)
-                return "\n".join(lines)
-            lines.append(line)
-            used += line_cost
-
-    return "\n".join(lines)
+# Review-flow rationale prefixes (duplicated verbatim from the frozen
+# interface; agent_assessment owns the canonical constants after T4).
+_SKIPPED_REVIEW_PREFIX = "Skipped without a model call: "
+_FAILED_REVIEW_PREFIX = "Review failed: "
+_NA_REASON_MAX_CHARS = 160
+_ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z]+);")
 
 
 def _agent_assessment_prose(value: object) -> str:
-    """Render bounded model prose as inert terminal text."""
+    """Render bounded model prose as inert terminal text.
+
+    HTML entities are neutralized rather than emitted: terminal output must
+    never carry ``&#``, ``&lt;``, ``&gt;`` or ``&amp;`` sequences.
+    """
     text = terminal_text(value)
     text = re.sub(r"\[([^\]\n]*)\]\([^\)\n]*\)", r"\1", text)
     text = re.sub(r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>",
                   "[link omitted]", text)
     text = re.sub(r"</?[A-Za-z][^<>\n]*>", "", text)
     text = re.sub(r"(?i)(?:https?://|www\.)\S+", "[URL omitted]", text)
+    text = _ENTITY_RE.sub("[entity omitted]", text)
     text = "".join(char for char in text if ord(char) not in {
         0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D,
         0x202E, 0x2066, 0x2067, 0x2068, 0x2069,
@@ -199,160 +99,198 @@ def _agent_dependency_detail_lines(children) -> list[str]:
     return lines
 
 
-def _bound_agent_assessment_lines(lines, byte_limit, omission_marker):
-    """Keep whole lines within a section budget and account for omitted rows."""
-    total = sum(len(line.encode("utf-8")) for line in lines) + max(0, len(lines) - 1)
-    if total <= byte_limit:
-        return lines
+def _assessment_icons() -> dict:
+    """One icon per checklist status, with a bracket fallback for NO_COLOR."""
+    if "NO_COLOR" in os.environ:
+        return {"satisfied": "[ok]", "gap": "[gap]", "unknown": "[?]",
+                "not-applicable": "[n/a]"}
+    return {"satisfied": "✓", "gap": "✗", "unknown": "?",
+            "not-applicable": "–"}
 
-    output = []
-    used = 0
-    for index, line in enumerate(lines):
-        line_cost = len(line.encode("utf-8"))
-        separator_cost = 1 if output else 0
-        candidate_cost = used + separator_cost + line_cost
-        remaining = len(lines) - index - 1
-        if remaining:
-            marker_cost = len(omission_marker(remaining).encode("utf-8"))
-            if candidate_cost + 1 + marker_cost > byte_limit:
-                output.append(omission_marker(len(lines) - index))
-                break
-        elif candidate_cost > byte_limit:
-            output.append(omission_marker(1))
-            break
-        output.append(line)
-        used = candidate_cost
-    return output
+
+def _assessment_runner(scope: str, workspace) -> str:
+    """Resolve the declared runner kind for one child scope, or unknown."""
+    repositories = (tuple(workspace.repositories)
+                    if workspace is not None else ())
+    standalone = [item for item in repositories
+                  if item.declaration == "."]
+    if len(standalone) == 1 and len(repositories) == 1:
+        repository = standalone[0]
+    else:
+        matches = [item for item in repositories
+                   if item.declaration != "."
+                   and (scope == item.declaration
+                        or scope.startswith(item.declaration + "/"))]
+        repository = matches[0] if len(matches) == 1 else None
+    config = None if repository is None else repository.config
+    if config is None:
+        return "unknown"
+    return config.runner.kind.value
+
+
+def _execution_verdict_text(execution) -> str | None:
+    """Verdict for one public ``execution`` fact, or None when absent."""
+    if not isinstance(execution, dict):
+        return None
+    status = execution.get("status")
+    raw_detail = execution.get("detail", "")
+    detail = _agent_assessment_prose(
+        raw_detail if isinstance(raw_detail, str) else "")
+    if status == "executable":
+        return "ready"
+    if status == "caveat":
+        if detail:
+            return f"ready with caveats: {detail}"
+        return "ready with caveats"
+    if status == "not-executable":
+        raw_fix = execution.get("fix", "")
+        fix = _agent_assessment_prose(
+            raw_fix if isinstance(raw_fix, str) else "")
+        if fix:
+            return f"not runnable: {detail} — fix: {fix}"
+        return f"not runnable: {detail}"
+    return None
+
+
+def _assessment_score_line(child) -> str:
+    """Score wording shared by every project block."""
+    rows = child.get("rows", []) if isinstance(child, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    not_applicable = sum(1 for row in rows
+                         if isinstance(row, dict)
+                         and row.get("status") == "not-applicable")
+    limitations = (child.get("limitations", [])
+                   if isinstance(child, dict) else [])
+    if not isinstance(limitations, list):
+        limitations = []
+    partial = any(isinstance(item, dict)
+                  and item.get("code") == "partial-evidence"
+                  for item in limitations)
+    suffix = ""
+    if not_applicable:
+        suffix += f"; {not_applicable} not applicable"
+    if partial:
+        suffix += "; partial evidence"
+    score = child.get("score") if isinstance(child, dict) else None
+    applicable = (score.get("applicable") if isinstance(score, dict)
+                  else None)
+    if (not isinstance(applicable, int) or isinstance(applicable, bool)
+            or applicable <= 0):
+        return "no applicable checks" + suffix
+    satisfied = score.get("satisfied", 0)
+    base = f"{satisfied} of {applicable} checks confirmed from evidence"
+    execution = child.get("execution") if isinstance(child, dict) else None
+    if (isinstance(execution, dict)
+            and execution.get("status") == "not-executable"):
+        base = ("Checklist review only: " + base +
+                " (ptest cannot run this project yet)")
+    return base + suffix
+
+
+def _assessment_item_lines(child, icons: dict) -> list[str]:
+    """One icon line per checklist item with its finding under each gap."""
+    rows = child.get("rows", []) if isinstance(child, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    findings = child.get("findings", []) if isinstance(child, dict) else []
+    by_id = {}
+    if isinstance(findings, list):
+        for finding in findings:
+            if (isinstance(finding, dict)
+                    and finding.get("id") not in by_id):
+                by_id[finding["id"]] = finding
+    lines = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_label = row.get("label") or row.get("id")
+        label = _agent_assessment_prose(
+            raw_label if isinstance(raw_label, str) else "")
+        if not label:
+            label = "unknown"
+        status = row.get("status")
+        icon = icons.get(status, icons["unknown"])
+        if status == "satisfied":
+            lines.append(f"{icon} {label}")
+        elif status == "gap":
+            lines.append(f"{icon} {label}")
+            finding = by_id.get(row.get("id"))
+            if finding is None:
+                lines.append("  finding: no finding recorded; "
+                             "see recommendations.md.")
+            else:
+                summary = _agent_assessment_prose(
+                    finding.get("summary", ""))
+                change = _agent_assessment_prose(
+                    finding.get("suggested_change", ""))
+                lines.append(f"  finding: {summary} "
+                             f"Suggested change: {change}")
+        elif status == "unknown":
+            rationale = row.get("rationale", "")
+            if (isinstance(rationale, str)
+                    and rationale.startswith(_FAILED_REVIEW_PREFIX)):
+                reason = _agent_assessment_prose(
+                    rationale[len(_FAILED_REVIEW_PREFIX):])
+                lines.append(f"{icon} {label} — unknown "
+                             f"(review failed: {reason})")
+            else:
+                lines.append(f"{icon} {label} — unknown")
+        elif status == "not-applicable":
+            rationale = row.get("rationale", "")
+            if not isinstance(rationale, str):
+                rationale = ""
+            if rationale.startswith(_SKIPPED_REVIEW_PREFIX):
+                rationale = rationale[len(_SKIPPED_REVIEW_PREFIX):]
+            reason = _agent_assessment_prose(
+                rationale)[:_NA_REASON_MAX_CHARS]
+            lines.append(f"{icon} {label} — n/a: {reason}")
+        else:
+            lines.append(f"{icons['unknown']} {label} — unknown")
+    return lines
 
 
 def render_agent_assessment(children, workspace, *, report_path: str,
                             publication_status: str) -> str:
-    """Render the complete human review in the fixed, evidence-bounded order."""
-    repositories = tuple(workspace.repositories)
-    capability_header = [
-        "Project | Execution | Parallel | Selection | Timing | Checklist",
-        "------- | --------- | -------- | --------- | ------ | ---------",
-    ]
-    capability_rows = []
-    for child in children:
-        scope = child["scope"]
-        standalone = [item for item in repositories
-                      if item.declaration == "."]
-        if len(standalone) == 1 and len(repositories) == 1:
-            repository = standalone[0]
-        else:
-            matches = [item for item in repositories
-                       if item.declaration != "."
-                       and (scope == item.declaration
-                            or scope.startswith(item.declaration + "/"))]
-            repository = matches[0] if len(matches) == 1 else None
-        config = None if repository is None else repository.config
-        runner = "unknown" if config is None else config.runner.kind.value
-        dependency_codes = {item["code"] for item in child["limitations"]}
-        dependency_states = [
-            status for code, status in (
-                ("dependency-missing", "missing"),
-                ("dependency-unsupported", "unsupported"),
-                ("dependency-uninspectable", "uninspectable"),
-            ) if code in dependency_codes
-        ]
-        if dependency_states:
-            dependency = f"{', '.join(dependency_states)} prerequisites"
-        else:
-            dependency = "no dependency limitations recorded"
-        execution = (f"{runner} declared; {dependency}; "
-                     "not execution-verified")
-        config_problem = (None if repository is None
-                          else repository.config_problem)
-        if (config is None and config_problem is not None
-                and config_problem.code == "initialization-required"):
-            execution = ("initialization-required; ptest is not execution-ready; "
-                         "not execution-verified")
-        parallel = ("basic-serial; reviewed isolation unverified"
-                    if runner == "pytest"
-                    else "supported mode unknown; isolation unverified")
-        if config is None:
-            selection = "invalid/unavailable"
-        elif not config.selection.enabled:
-            selection = "disabled"
-        else:
-            selection = "enabled; correctness unverified"
-        score = child["score"]
-        if score is None:
-            checklist = "unscored"
-        else:
-            checklist = (f"{score['satisfied']}/{score['applicable']} "
-                          f"({score['percent']}%), agent-reviewed")
-        if "partial-evidence" in dependency_codes:
-            checklist += "; partial evidence"
-        cells = (child["scope"], execution, parallel, selection,
-                 "unmeasured", checklist)
-        capability_rows.append(" | ".join(_agent_checklist_table_cell(cell)
-                                          for cell in cells))
+    """Render one headed block per project with item verdicts and findings.
 
-    capability_prefix = "\n".join(capability_header)
-    capability_row_budget = (
-        _AGENT_ASSESSMENT_CAPABILITY_MAX_BYTES
-        - len(capability_prefix.encode("utf-8")) - 1
-    )
-    capability_rows = _bound_agent_assessment_lines(
-        capability_rows, capability_row_budget,
-        lambda count: f"[{count} capability rows omitted at output limit]",
-    )
-    capability_section = capability_prefix
-    if capability_rows:
-        capability_section += "\n" + "\n".join(capability_rows)
+    Each block carries the deterministic executability verdict, the
+    evidence-worded score, and one icon line per checklist item. Findings
+    sit directly under their gap line; citations live only in
+    ``recommendations.md``. Terminal output never carries Markdown tables
+    or HTML entities.
+    """
+    icons = _assessment_icons()
+    sections = []
+    for child in children:
+        scope = (child.get("scope", "unknown")
+                 if isinstance(child, dict) else "unknown")
+        runner = _assessment_runner(scope, workspace)
+        lines = [f"{terminal_text(scope)} ({terminal_text(runner)})"]
+        verdict = _execution_verdict_text(
+            child.get("execution") if isinstance(child, dict) else None)
+        if verdict is not None:
+            lines.append(f"ptest: {verdict}")
+        lines.append(_assessment_score_line(child))
+        lines.extend(_assessment_item_lines(child, icons))
+        sections.append("\n".join(lines))
 
     dependency_details = _agent_dependency_detail_lines(children)
-    checklist_section = render_agent_checklist_table(children)
-    finding_lines = []
-    for child in children:
-        for finding in child["findings"]:
-            summary = _agent_assessment_prose(finding["summary"])
-            change = _agent_assessment_prose(finding["suggested_change"])
-            finding_lines.append(
-                f"- {terminal_text(child['scope'])} {terminal_text(finding['id'])}: "
-                f"{summary} Suggested change: {change}")
-    if not any(child["findings"] for child in children):
-        finding_lines.append("- No gap findings were returned.")
-    findings_prefix = "Findings:"
-    finding_lines = _bound_agent_assessment_lines(
-        finding_lines,
-        _AGENT_ASSESSMENT_FINDINGS_MAX_BYTES
-        - len(findings_prefix.encode("utf-8")) - 1,
-        lambda count: f"[{count} findings omitted at output limit]",
-    )
-    findings_section = findings_prefix + "\n" + "\n".join(finding_lines)
-
-    guidance_section = "\n".join((
-        "Guidance: recommendations.md contains evidence, scoped changes, "
-        "regressions, and later ptest verification steps.",
-        f"Report: {terminal_text(report_path)} ({terminal_text(publication_status)}).",
-        "Execution verification: not run.",
-    ))
-
-    sections = [capability_section]
     if dependency_details:
-        fixed_sections = (
-            capability_section, checklist_section, findings_section,
-            guidance_section,
-        )
-        fixed_bytes = sum(len(section.encode("utf-8"))
-                          for section in fixed_sections)
-        detail_budget = (
-            _AGENT_ASSESSMENT_MAX_BYTES - fixed_bytes - 2 * 4 - 1
-        )
-        detail_lines = _bound_agent_assessment_lines(
-            dependency_details,
-            detail_budget - len("Dependency details:".encode("utf-8")) - 1,
-            lambda count: (
-                f"[{count} dependency details omitted; see recommendations.md "
-                "for full limitations]"
-            ),
-        )
-        sections.append("\n".join(("Dependency details:", *detail_lines)))
-    sections.extend((checklist_section, findings_section, guidance_section))
-    return "\n\n".join(sections) + "\n"
+        sections.append("\n".join(("Dependencies:", *dependency_details)))
+    sections.append("\n".join((
+        f"Report: {terminal_text(report_path)} "
+        f"({terminal_text(publication_status)}). Citations, suggested "
+        "changes and verification steps are there.",
+        "Execution verification: not run.",
+    )))
+    text = "\n\n".join(sections) + "\n"
+    if len(text.encode("utf-8")) > _AGENT_ASSESSMENT_MAX_BYTES:
+        marker = "[agent assessment truncated at the configured bound]"
+        room = _AGENT_ASSESSMENT_MAX_BYTES - len(marker.encode("utf-8"))
+        piece = text.encode("utf-8")[:room].decode("utf-8", errors="ignore")
+        return piece + marker
+    return text
 
 
 def render_json(document: C.PublicDocument) -> bytes:
