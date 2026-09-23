@@ -12,6 +12,7 @@ import os
 import hashlib
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,7 +93,7 @@ def test_smoke_monorepo_reports_children_in_declaration_order(case, tmp_path):
     assert workspace.aggregate.usage.files == 4
 
 
-def test_smoke_external_manifest_is_opt_in_and_sandboxed():
+def test_smoke_external_manifest_is_opt_in_and_sandboxed(tmp_path):
     """External real-repository smoke runs only with an explicit manifest.
 
     The manifest names an absolute candidate ``ptest`` binary and snapshot
@@ -144,23 +145,65 @@ def test_smoke_external_manifest_is_opt_in_and_sandboxed():
     assert {name for name, _snapshot in snapshots} == set(approved_snapshots)
 
     for name, snapshot in snapshots:
-        def run(*args):
+        provider_bin = tmp_path / f"{name}-provider-bin"
+        provider_bin.mkdir()
+        provider_marker = tmp_path / f"{name}-provider-launched"
+        for provider in ("claude", "codex", "opencode"):
+            executable = provider_bin / provider
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                f"Path({str(provider_marker)!r}).touch()\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+
+        def run(*args, env=None):
             return subprocess.run([str(binary), *args], cwd=snapshot,
-                                  text=True, capture_output=True, timeout=60)
-        human = run("doctor")
+                                  text=True, capture_output=True, timeout=60,
+                                  stdin=subprocess.DEVNULL, env=env)
+
+        report = snapshot / "recommendations.md"
+
+        def report_state():
+            try:
+                stamp = os.lstat(report)
+            except FileNotFoundError:
+                return ("absent",)
+            identity = (stamp.st_dev, stamp.st_ino, stamp.st_mode, stamp.st_size,
+                        stamp.st_mtime_ns, stamp.st_ctime_ns)
+            if stat.S_ISLNK(stamp.st_mode):
+                return ("symlink", os.readlink(report), *identity)
+            if stat.S_ISREG(stamp.st_mode):
+                return ("file", *identity)
+            return ("other", *identity)
+
+        report_before = report_state()
+        provider_env = {**os.environ, "PATH": str(provider_bin)}
+        bare = run("doctor", env=provider_env)
+        assert bare.returncode == 2
+        assert "consent-required" in bare.stdout + bare.stderr
+        assert report_state() == report_before
+        assert not provider_marker.exists(), "bare doctor must not launch a reviewer"
+
+        human = run("doctor", "--offline", env=provider_env)
         assert human.returncode == 0 and "ptest doctor" in human.stdout
         assert "FIX-001" in human.stdout and "TIMING-001" in human.stdout
-        structured = run("doctor", "--json")
+        structured = run("doctor", "--json", env=provider_env)
         assert structured.returncode == 0
         assert C.decode_public_document(structured.stdout).kind == "doctor"
-        prompt = run("doctor", "--prompt")
+        prompt = run("doctor", "--prompt", env=provider_env)
         assert prompt.returncode == 0 and "Assessment request:" in prompt.stdout
         guide = run("guide")
         assert guide.returncode == 0 and "Doctor assessment checklist" in guide.stdout
         if name == "monorepo-root":
             for scope in ("api", "web", "api/tests"):
-                assert run("doctor", "--scope", scope).returncode == 0
-            assert run("doctor", "--max-files", "1").returncode == 0
+                assert run("doctor", "--offline", "--scope", scope,
+                           env=provider_env).returncode == 0
+            assert run("doctor", "--offline", "--max-files", "1",
+                       env=provider_env).returncode == 0
             for unsafe in ("ghost", "../api", "api/.ptest.toml"):
-                rejected = run("doctor", "--scope", unsafe)
+                rejected = run("doctor", "--offline", "--scope", unsafe,
+                               env=provider_env)
                 assert rejected.returncode == 2 and not rejected.stdout
+        assert not provider_marker.exists(), "static doctor modes must not launch a reviewer"

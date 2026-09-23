@@ -169,10 +169,28 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
     assert names[:2] == ["candidate-version", "init"]
     expected_success = {"candidate-version", "init", "where", "plan", "doctor", "status", "full", "scoped", "automatic"}
     observed = {attempt["name"]: attempt for attempt in evidence["attempts"]}
-    assert expected_success | {"cancel"} <= set(observed)
+    assert expected_success | {"doctor-consent-required", "cancel"} <= set(observed)
     for name in expected_success:
         assert observed[name]["status"] == "passed"
         assert observed[name]["exit_code"] == 0
+    assert observed["doctor"]["command"][-2:] == ("doctor", "--offline")
+    assert any("static-only" in note and "model review" in note
+               for note in observed["doctor"]["notes"])
+    consent = observed["doctor-consent-required"]
+    assert consent["command"][-1] == "doctor"
+    assert consent["status"] == "blocked-unverified"
+    assert consent["exit_code"] == 2
+    assert any("expected" in note and "consent-required" in note
+               for note in consent["notes"])
+    assert any("no recommendations.md report" in note for note in consent["notes"])
+    assert any("no model review was performed" in note
+               for note in consent["notes"])
+    consent_artifacts = Path(consent["artifact"])
+    raw_consent_output = (
+        consent_artifacts.joinpath("doctor-consent-required.stdout").read_text()
+        + consent_artifacts.joinpath("doctor-consent-required.stderr").read_text()
+    )
+    assert "consent-required" in raw_consent_output
     assert observed["cancel"]["status"] == "blocked-unverified"
     assert observed["cancel"]["exit_code"] is None
     assert evidence["candidate_identity"]["version"] == "0.1.5"

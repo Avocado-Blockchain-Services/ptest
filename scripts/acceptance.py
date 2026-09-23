@@ -285,7 +285,8 @@ def run_acceptance(
                 ("init", ("init", "--dry-run", "--runner", "command")),
                 ("where", ("where",)),
                 ("plan", ("plan",)),
-                ("doctor", ("doctor",)),
+                ("doctor", ("doctor", "--offline")),
+                ("doctor-consent-required", ("doctor",)),
                 ("status", ("status",)),
                 ("full", ("--full", "--no-setup")),
                 ("scoped", ("--no-setup", "tests/nested/test_smoke.py")),
@@ -309,12 +310,49 @@ def run_acceptance(
             for name, tail in lifecycle:
                 command = (candidate.path, "--fixture-domain", str(domain), *tail)
                 sample = run_command(command, cwd=project, timeout=timeout,
-                                     artifact_dir=output / "attempts" / name, label=name)
-                attempts.append(_attempt_from_sample(
+                                     artifact_dir=output / "attempts" / name, label=name,
+                                     env={"PATH": ""} if name == "doctor-consent-required" else None)
+                attempt = _attempt_from_sample(
                     name, command, project, sample,
                     setup="validated TOML fixture domain and miniature command project",
                     network="none",
-                ))
+                )
+                if name == "doctor":
+                    attempt = replace(
+                        attempt,
+                        notes=tuple(attempt.notes) + (
+                            "--offline static-only diagnostic; no reviewer qualification or launch occurred; not a model review",
+                        ),
+                    )
+                elif name == "doctor-consent-required":
+                    stdout = (Path(sample.artifact) / "doctor-consent-required.stdout").read_text(
+                        encoding="utf-8", errors="replace")
+                    stderr = (Path(sample.artifact) / "doctor-consent-required.stderr").read_text(
+                        encoding="utf-8", errors="replace")
+                    report = project / "recommendations.md"
+                    no_report = not report.exists() and not report.is_symlink()
+                    expected_rejection = (
+                        not sample.capped and sample.exit_code == 2
+                        and "consent-required" in stdout + stderr
+                        and no_report
+                    )
+                    rejection_note = (
+                        "expected non-TTY fail-closed rejection: consent-required; no model review was performed"
+                        if expected_rejection else
+                        "expected consent-required rejection was not fully observed; this is not a successful model review"
+                    )
+                    report_note = (
+                        "no recommendations.md report was created"
+                        if no_report else
+                        "recommendations.md exists after rejection; report absence contract failed"
+                    )
+                    attempt = replace(
+                        attempt,
+                        status=("blocked-unverified" if expected_rejection
+                                else "capped" if sample.capped else "failed"),
+                        notes=tuple(attempt.notes) + (rejection_note, report_note),
+                    )
+                attempts.append(attempt)
             attempts.append(Attempt(
                 name="cancel", command=(candidate.path, "--fixture-domain", str(domain), "cancel"),
                 cwd=str(project), status="blocked-unverified", exit_code=None, seconds=None,
