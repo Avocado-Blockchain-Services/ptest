@@ -43,8 +43,10 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "one database per worker per run" in guide
     assert "Never use global cache flush" in guide
     assert "ptest --full" in guide
-    assert "monorepo root" in guide
+    assert "repository root" in guide
     assert "ptest api/" in guide
+    assert "-n 0" in guide
+    assert "vitest run" in guide
     assert FAST_FORWARD_GATE_RULE in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert agents.startswith("# Existing rules\n")
@@ -129,8 +131,10 @@ def test_repository_guide_states_assessment_only_authority():
     assert "assessment authority only" in guide
     assert "separate user instruction" in guide
     assert FAST_FORWARD_GATE_RULE in guide
-    assert "During iteration run the smallest relevant\nscope." in guide
     assert "Run `ptest --full` once after the integrated change" in guide
+    assert "one cheap-model call per checklist item" in guide
+    assert "`ptest doctor --offline` is static" in guide
+    assert len(guide.splitlines()) <= 45
 
 
 def test_local_repair_guide_preserves_gate_and_fast_forward_guidance():
@@ -184,9 +188,7 @@ def test_every_generated_skill_has_valid_front_matter_and_root_paths(tmp_path):
                            if line.startswith("description:"))
         assert len(description.split(":", 1)[1].strip()) > 0
         assert "docs/ptest-agent.md" in text
-        assert "ptest --full" in text
-        assert "ptest api/" in text
-        assert FAST_FORWARD_GATE_RULE in text
+        assert "run tests only through `ptest` from the repository root" in text.lower()
         seen.add(text)
     assert len(seen) >= 2
 
@@ -609,6 +611,88 @@ def test_unreadable_legacy_codex_artifact_is_not_silently_missing(tmp_path, monk
 
     with pytest.raises(Problem, match="denial"):
         preview(tmp_path, agents=("codex",))
+
+
+def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path):
+    result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
+
+    assert result.changed is True
+    for relative in (".claude/skills/ptest/SKILL.md",
+                     ".agents/skills/ptest/SKILL.md",
+                     ".opencode/skills/ptest/SKILL.md",
+                     ".gemini/skills/ptest/SKILL.md"):
+        text = (tmp_path / relative).read_text(encoding="utf-8")
+        assert text.startswith("---\nname: ptest\n")
+        head = text.split("---", 2)[1]
+        assert "description:" in head
+        body = text.split("---", 2)[2].strip("\n").splitlines()
+        assert len(body) <= 4
+        assert "docs/ptest-agent.md" in text
+        assert "run tests only through `ptest` from the repository root" in text.lower()
+        # Merge/graphify guidance lives only in the guide, never in skills.
+        assert "graphify" not in text
+        assert "fast-forward" not in text
+        assert "ptest --full" not in text
+
+
+def test_previous_managed_skill_upgrades_in_place(tmp_path):
+    from ptest.agent_rules import _previous_provider_text, _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    previous = _previous_provider_text("claude")
+    assert b"graphify" in previous
+    (target / "SKILL.md").write_bytes(previous)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+    assert ("updated", ".claude/skills/ptest/SKILL.md") in [
+        (item.action, item.target) for item in result.details]
+    repeat = apply(tmp_path, agents=("claude",))
+    assert repeat.changed is False
+
+
+def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+
+    sentinel = b"# old managed guide\n"
+    monkeypatch.setattr(rules_module, "_BASE_GUIDE_SHA256",
+                        hashlib.sha256(sentinel).hexdigest())
+    guide_dir = tmp_path / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(sentinel)
+
+    plan = preview(tmp_path)
+    assert "update docs/ptest-agent.md" in plan.actions
+
+    result = apply(tmp_path)
+
+    assert result.changed is True
+    assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
+    assert ("updated", "docs/ptest-agent.md") in [
+        (item.action, item.target) for item in result.details]
+    repeat = apply(tmp_path)
+    assert repeat.changed is False
+
+
+def test_user_edited_guide_still_conflicts_before_any_write(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "ptest-agent.md").write_text(
+        "# user guide\n", encoding="utf-8")
+
+    with pytest.raises(Problem, match="already exists"):
+        apply(tmp_path)
+
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / "docs" / "ptest-agent.md").read_text(
+        encoding="utf-8") == "# user guide\n"
 
 
 def test_replace_rejects_in_place_edit_before_publish(tmp_path, monkeypatch):

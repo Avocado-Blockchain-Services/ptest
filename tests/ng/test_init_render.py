@@ -1,8 +1,11 @@
-"""Pure init banner renderer contracts.
+"""Init render v2: per-project status and verified next steps.
 
 The renderer consumes completed init/rules objects only and never touches
-the filesystem. Every test below must fail until src/ptest/init_render.py
-exists and implements the specified banner behavior.
+the filesystem. Project status arrives as executability notes in
+``InitResult.details`` (``action="note"``, ``source="config"``):
+
+- project note: ``"<project> · <runner> · <verdict>"``
+- run note: ``"run: <verified command>"``
 """
 from __future__ import annotations
 
@@ -47,6 +50,32 @@ def _detail(target, action, source):
     return C.ActionRecord(target=target, action=action, source=source)
 
 
+def _note(target):
+    return C.ActionRecord(target=target, action="note", source="config")
+
+
+def _cell(line: str) -> str:
+    cell = line.strip()
+    if cell.startswith("│"):
+        cell = cell[1:]
+    if cell.endswith("│"):
+        cell = cell[:-1]
+    return cell
+
+
+def _root_config_lines(text: str):
+    # The stable contract is the cell content; the box borders are stripped
+    # before matching, mirroring how a terminal reader sees the row.
+    found = []
+    for line in text.splitlines():
+        match = re.match(
+            r"\s*(created|updated|unchanged|would create)\s+\.ptest\.toml\s*$",
+            _cell(line))
+        if match:
+            found.append(match.group(1))
+    return found
+
+
 def test_created_banner_has_box_wordmark_and_ordered_sections(tmp_path):
     result = _result(details=(
         _detail(".ptest.toml", "created", "config"),
@@ -60,7 +89,8 @@ def test_created_banner_has_box_wordmark_and_ordered_sections(tmp_path):
     guidance_at = text.index("Guidance")
     next_at = text.index("Next steps")
     assert config_at < guidance_at < next_at
-    assert "created: .ptest.toml" in text
+    assert _root_config_lines(text) == ["created"]
+    assert ": .ptest.toml" not in text
 
 
 def test_preview_header_uses_would_verbs_and_never_created(tmp_path):
@@ -85,10 +115,17 @@ def test_repeat_init_reports_unchanged_config_and_guidance_paths(tmp_path):
 
     assert "ptest already configured" in text
     assert "ptest initialized\n" not in text
-    assert "unchanged: .ptest.toml" in text
+    assert _root_config_lines(text) == ["unchanged"]
     assert "already present" not in text
     assert re.search(r"unchanged +docs/ptest-agent\.md", text)
     assert re.search(r"unchanged +AGENTS\.md", text)
+
+
+def test_existing_standalone_with_empty_details_synthesizes_root_once():
+    result = _result(action=C.InitAction.EXISTING, warnings=())
+    text = render_init(result, None, agents=())
+
+    assert _root_config_lines(text) == ["unchanged"]
 
 
 def test_invalid_existing_config_renders_attention_header(tmp_path):
@@ -128,7 +165,93 @@ def test_renderer_reports_exact_per_child_config_actions():
     assert "already present" not in text
     assert "api/.ptest.toml" in text
     assert re.search(r"unchanged +web/\.ptest\.toml", text)
-    assert "ptest api/tests/" in text
+    # No invented next steps: without executability notes there are no
+    # verified commands, so neither a child scope nor the full gate appears.
+    assert "ptest api/tests/" not in text
+    assert "ptest --full" not in text
+
+
+def test_projects_section_renders_notes_in_section_order():
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _detail("api/.ptest.toml", "created", "config"),
+        _note("api · pytest · ready"),
+        _note("run: ptest api/tests/test_api.py"),
+    ))
+    text = render_init(result, None, agents=())
+
+    config_at = text.index("Configuration")
+    projects_at = text.index("Projects")
+    next_at = text.index("Next steps")
+    assert config_at < projects_at < next_at
+    assert "api" in text and "pytest" in text and "ready" in text
+    assert "ptest api/tests/test_api.py" in text
+
+
+def test_next_steps_lists_verified_commands_and_fixes_only():
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _detail("api/.ptest.toml", "created", "config"),
+        _note("api · pytest · not runnable: pytest addopts enable xdist, "
+              "which ptest runs serially — fix: add \"-n\", \"0\" to [runner] "
+              "args in api/.ptest.toml"),
+        _note("web · vitest · ready with caveats: exclusive: Vitest runs as "
+              "one command and manages its own workers"),
+        _note("run: ptest web/src/a.test.ts"),
+    ))
+    text = render_init(result, None, agents=())
+
+    assert "ptest web/src/a.test.ts" in text
+    assert "fix api:" in text
+    assert "add \"-n\", \"0\" to [runner] args in api/.ptest.toml" in text
+    # The generic full-gate line appears only with a verified run note.
+    assert "run the integrated gate" not in text
+
+
+def test_next_steps_shows_full_gate_only_with_verified_run_note():
+    without = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note(". · pytest · ready"),
+    ))
+    assert "ptest --full" not in render_init(without, None, agents=())
+
+    with_full = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note(". · pytest · ready"),
+        _note("run: ptest --full"),
+    ))
+    assert "ptest --full" in render_init(with_full, None, agents=())
+
+
+def test_other_config_notes_render_unchanged():
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note("declared child 'web' has no configuration"),
+    ))
+    text = render_init(result, None, agents=())
+
+    assert "declared child" in text
+    assert "Projects" not in text
+
+
+def test_hostile_project_note_is_escaped_and_bounded():
+    evil = "bad\x1b[2J\r\n\x00\x07\u202e" + "界" * 2000
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note(f"{evil} · pytest · ready"),
+        _note("run: ptest tests/test_x.py"),
+    ))
+    text = render_init(result, None, agents=())
+
+    assert "\x1b" not in text and "\r" not in text and "\x00" not in text
+    assert "\u202e" not in text
+    assert "[truncated]" in text
+    # The box geometry is unchanged: every drawn row is 64 chars wide.
+    for line in text.splitlines():
+        stripped = _strip_ansi(line)
+        if stripped and stripped[0] in "┌├└│":
+            assert len(stripped) == 64
+    assert len(text.encode("utf-8")) < 32768
 
 
 def test_renderer_never_claims_unselected_providers(tmp_path):
@@ -262,6 +385,6 @@ def test_preview_and_existing_layout_preserved_with_banner(tmp_path):
 
     assert _WORDMARK_LINES[0] in existing_text
     assert "ptest already configured" in existing_text
-    assert "unchanged: .ptest.toml" in existing_text
+    assert _root_config_lines(existing_text) == ["unchanged"]
     assert "already present" not in existing_text
     assert re.search(r"unchanged +docs/ptest-agent\.md", existing_text)
