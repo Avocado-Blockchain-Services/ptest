@@ -18,11 +18,13 @@ instead of launching or killing.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import errno
 import json
 import logging
 import math
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -31,8 +33,8 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
 from .contracts import Problem
 
@@ -821,7 +823,30 @@ def _normalize(name: str, stdout: bytes) -> tuple[bool, bytes, str]:
 
 def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                   timeout_s: int,
-                  progress: Callable[[ProgressEvent], None]) -> ProviderResult:
+                  progress: Callable[[ProgressEvent], None], *,
+                  cancel: threading.Event | None = None) -> ProviderResult:
+    """Run one owned provider child and normalize exactly one assessment.
+
+    The positional call shape is unchanged; the keyword-only ``cancel``
+    event stops the owned group and reports ``error="cancelled"`` when set.
+    """
+    if cancel is not None and not isinstance(cancel, threading.Event):
+        raise TypeError("cancel must be a threading.Event or None")
+    return _launch_one(adapter, packet, schema, timeout_s, progress, cancel)
+
+
+def _cancelled_result(adapter: ReviewerAdapter,
+                      exit_code: int | None = None,
+                      scratch: str = "unstarted") -> ProviderResult:
+    return _result(adapter, ok=False, assessment=b"", error="cancelled",
+                   exit_code=exit_code, timed_out=False, cancelled=True,
+                   truncated=False, pid=os.getpid(), scratch=scratch)
+
+
+def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
+                timeout_s: int,
+                progress: Callable[[ProgressEvent], None],
+                cancel: threading.Event | None) -> ProviderResult:
     """Run one owned provider child and normalize exactly one assessment."""
     if not isinstance(adapter, ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
@@ -844,6 +869,8 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
             adapter.executable, os.X_OK):
         raise _problem("provider-unavailable",
                        f"reviewer {adapter.name} executable missing")
+    if cancel is not None and cancel.is_set():
+        return _cancelled_result(adapter)
 
     scratch = tempfile.mkdtemp(prefix="ptest-review-")
     try:
@@ -946,6 +973,14 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         last_beat = start
         try:
             while True:
+                if cancel is not None and cancel.is_set():
+                    _stop_owned(proc, pgid, sid, leader_start)
+                    log.info("review cancelled provider=%s", adapter.name)
+                    return _result(
+                        adapter, ok=False, assessment=b"",
+                        error="cancelled", exit_code=proc.poll(),
+                        timed_out=False, cancelled=True, truncated=False,
+                        pid=proc.pid, scratch=scratch)
                 elapsed = time.monotonic() - start
                 if elapsed >= timeout_s:
                     timed_out = True
@@ -1058,3 +1093,227 @@ def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         raise
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def launch_reviews(adapter: ReviewerAdapter,
+                   requests: Sequence[tuple[bytes, bytes]],
+                   timeout_s: int, *,
+                   concurrency: int = 4,
+                   on_done: Callable[[int, ProviderResult], None] | None = None
+                   ) -> tuple[ProviderResult, ...]:
+    """Run one review per request with bounded concurrency.
+
+    Results stay aligned with ``requests``; a per-item failure marks only
+    that item. KeyboardInterrupt in the waiting thread sets the shared
+    cancel event, joins every worker, then raises ``review-cancelled``.
+    """
+    if not isinstance(adapter, ReviewerAdapter):
+        raise TypeError("adapter must be ReviewerAdapter")
+    if not isinstance(requests, Sequence):
+        raise TypeError("requests must be a sequence of (packet, schema)")
+    pairs = list(requests)
+    for pair in pairs:
+        if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                or not isinstance(pair[0], bytes)
+                or not isinstance(pair[1], bytes)):
+            raise TypeError("requests must hold (bytes, bytes) pairs")
+    if not _is_int(timeout_s):
+        raise TypeError("timeout_s must be int")
+    if timeout_s < TIMEOUT_MIN_S or timeout_s > TIMEOUT_MAX_S:
+        raise _problem("invalid-bound", "timeout_s outside 1..900 seconds")
+    if not _is_int(concurrency):
+        raise TypeError("concurrency must be int")
+    if not 1 <= concurrency <= 8:
+        raise _problem("invalid-bound", "concurrency outside 1..8")
+    if on_done is not None and not callable(on_done):
+        raise TypeError("on_done must be callable or None")
+    if not adapter.qualified:
+        raise _problem("provider-unqualified",
+                       f"reviewer {adapter.name} profile unproven")
+    if not pairs:
+        return ()
+
+    def _quiet(event: ProgressEvent) -> None:
+        return None
+
+    cancel = threading.Event()
+
+    def _work(index: int, packet: bytes, schema: bytes) -> ProviderResult:
+        try:
+            return _launch_one(adapter, packet, schema, timeout_s, _quiet,
+                               cancel)
+        except Problem as problem:
+            return ProviderResult(
+                provider=adapter.name, ok=False, assessment=b"",
+                error=problem.code, exit_code=None, timed_out=False,
+                cancelled=False, truncated=False, pid=os.getpid(),
+                argv=adapter.argv, scratch="unstarted")
+
+    results: list = [None] * len(pairs)
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency) as executor:
+        pending = {executor.submit(_work, index, packet, schema): index
+                   for index, (packet, schema) in enumerate(pairs)}
+        try:
+            concurrent.futures.wait(list(pending))
+        except KeyboardInterrupt:
+            cancel.set()
+            raise _problem("review-cancelled",
+                           "review was cancelled") from None
+        for future, index in pending.items():
+            results[index] = future.result()
+    if on_done is not None:
+        for index, result in enumerate(results):
+            try:
+                on_done(index, result)
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                pass  # progress reporting must never fail the review
+    return tuple(results)
+
+
+_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
+
+
+def with_model(adapter: ReviewerAdapter, model: str) -> ReviewerAdapter:
+    """Return the adapter with only the frozen model flag appended.
+
+    Claude gains ``--model <model>`` and Codex gains ``-m <model>``; any
+    other provider raises provider-unqualified. The qualified tool-denial
+    canary must be re-run whenever the chosen model changes.
+    """
+    if not isinstance(adapter, ReviewerAdapter):
+        raise TypeError("adapter must be ReviewerAdapter")
+    if not isinstance(model, str) or _MODEL_RE.fullmatch(model) is None:
+        raise _problem("invalid-bound", f"invalid review model {model!r}")
+    if adapter.name == "claude":
+        extra = ("--model", model)
+    elif adapter.name == "codex":
+        extra = ("-m", model)
+    else:
+        raise _problem("provider-unqualified",
+                       f"reviewer {adapter.name} profile unproven")
+    return replace(adapter, argv=adapter.argv + extra)
+
+
+_DISCOVERY_TIMEOUT_S = 20
+_DISCOVERY_MAX_BYTES = 4 * 1024 * 1024
+_VERSION_TIMEOUT_S = 10
+_VERSION_MAX_BYTES = 1024 * 1024
+
+
+def _discover_model_entries(adapter: ReviewerAdapter) -> tuple[dict, ...]:
+    """Listed codex model entries in catalog order, stripped to three keys."""
+    proc = subprocess.Popen(
+        [adapter.executable, "debug", "models"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
+        shell=False)
+    try:
+        stdout, _ = proc.communicate(timeout=_DISCOVERY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return ()
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return ()
+    if proc.poll() != 0:
+        return ()
+    if len(stdout) > _DISCOVERY_MAX_BYTES:
+        return ()
+    try:
+        payload = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return ()
+    if not isinstance(payload, dict):
+        return ()
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return ()
+    entries = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        if item.get("visibility") != "list":
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str) or not slug:
+            continue
+        display = item.get("display_name")
+        description = item.get("description")
+        entries.append({
+            "slug": slug,
+            "display_name": display if isinstance(display, str) else "",
+            "description": description if isinstance(description, str) else "",
+        })
+    return tuple(entries)
+
+
+def discover_models(adapter: ReviewerAdapter) -> tuple[str, ...]:
+    """List codex model slugs with visibility ``list``; () on any failure.
+
+    Claude has no listing (aliases are used instead), so non-codex
+    adapters report () without launching anything.
+    """
+    if not isinstance(adapter, ReviewerAdapter):
+        raise TypeError("adapter must be ReviewerAdapter")
+    if adapter.name != "codex":
+        return ()
+    try:
+        return tuple(entry["slug"]
+                     for entry in _discover_model_entries(adapter))
+    except OSError:
+        return ()
+
+
+def cli_version(adapter: ReviewerAdapter) -> str | None:
+    """First stdout line of ``<executable> --version``; None on failure."""
+    if not isinstance(adapter, ReviewerAdapter):
+        raise TypeError("adapter must be ReviewerAdapter")
+    try:
+        proc = subprocess.Popen(
+            [adapter.executable, "--version"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
+            shell=False)
+    except OSError:
+        return None
+    try:
+        stdout, _ = proc.communicate(timeout=_VERSION_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return None
+    if proc.poll() != 0 or len(stdout) > _VERSION_MAX_BYTES:
+        return None
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = text.splitlines()
+    if not lines or not lines[0].strip():
+        return None
+    return lines[0].strip()[:128]

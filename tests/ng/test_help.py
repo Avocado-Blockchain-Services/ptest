@@ -418,3 +418,30 @@ def test_rules_apply_help_rejects_without_files(tmp_path, monkeypatch, capsys):
     assert captured.out == ""
     assert captured.err.strip()
     assert _tree_bytes(tmp_path) == before
+
+
+def test_help_documents_review_model_flags_per_item_review_and_canary(
+        tmp_path, monkeypatch, capsys):
+    _no_execution(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("help", "doctor")) == 0
+    doctor_help = " ".join(capsys.readouterr().out.split())
+    for marker in (
+        "--review-model", "--review-concurrency",
+        "one model call per checklist item",
+        "cheapest adequate",
+        "PTEST_REVIEW_MODEL",
+        "haiku",
+        "one extra call that sends only the model list",
+        "cached per provider and CLI version",
+        "tool-denial qualification must be re-run when the chosen model changes",
+        "Citations are in recommendations.md",
+    ):
+        assert marker.lower() in doctor_help.lower(), marker
+
+    assert main(("help", "init")) == 0
+    init_help = capsys.readouterr().out
+    assert "--review-model" in init_help
+    assert "--review-concurrency" in init_help
+    assert "PTEST_REVIEW_MODEL" in init_help

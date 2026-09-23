@@ -2878,6 +2878,12 @@ _AGENT_ASSESSMENT_CHILD_FIELDS = frozenset({
 _AGENT_ASSESSMENT_ROW_FIELDS = frozenset({
     "id", "status", "rationale", "evidence",
 })
+# Additive v2 fields stay optional in the validator and are kept by
+# projection when present: rows[i]["label"] and child["execution"].
+_AGENT_ASSESSMENT_EXECUTION_FIELDS = frozenset({"status", "detail", "fix"})
+_AGENT_ASSESSMENT_EXECUTION_STATUSES = frozenset({
+    "executable", "caveat", "not-executable",
+})
 _AGENT_ASSESSMENT_CITATION_FIELDS = frozenset({
     "path", "start_line", "end_line", "sha256",
 })
@@ -2987,6 +2993,8 @@ def _check_aa_row(item: object, ctx: str, index: int) -> None:
         raise _invalid("report-invalid", f"{ctx} has an unknown status")
     _check_aa_text("rationale", item["rationale"], ctx, 2048,
                    allow_newline=True)
+    if "label" in item:
+        _check_aa_text("label", item["label"], ctx, 64)
     _check_aa_evidence(item["evidence"], f"{ctx}.evidence",
                        min_items=0 if item["status"] == "unknown" else 1)
     if item["status"] == "not-applicable":
@@ -3068,8 +3076,22 @@ def _check_aa_publication(item: object, ctx: str) -> None:
     _check_hex_field(item, "sha256", ctx, 64)
 
 
+def _check_aa_execution(value: object, ctx: str) -> None:
+    if not isinstance(value, dict):
+        raise _invalid("report-invalid", f"{ctx} must be an object")
+    if set(value) != set(_AGENT_ASSESSMENT_EXECUTION_FIELDS):
+        raise _invalid("report-invalid", f"{ctx} has unexpected keys")
+    if value["status"] not in _AGENT_ASSESSMENT_EXECUTION_STATUSES:
+        raise _invalid("report-invalid", f"{ctx} has an unknown status")
+    _check_aa_text("detail", value["detail"], ctx, 512, allow_newline=True)
+    if value["fix"] is not None:
+        _check_aa_text("fix", value["fix"], ctx, 512, allow_newline=True)
+
+
 def _check_aa_child(item: object, ctx: str) -> None:
     _check_required_keys(item, _AGENT_ASSESSMENT_CHILD_FIELDS, ctx)
+    if "execution" in item:
+        _check_aa_execution(item["execution"], f"{ctx}.execution")
     _check_hex_field(item, "project_id", ctx, 32)
     _check_aa_relpath("scope", item["scope"], ctx)
     _check_hex_field(item, "packet_sha256", ctx, 64)
@@ -3371,9 +3393,12 @@ def _project_aa_evidence(value: list) -> list:
 
 
 def _project_aa_row(item: dict) -> dict:
-    return {"id": item["id"], "status": item["status"],
-            "rationale": item["rationale"],
-            "evidence": _project_aa_evidence(item["evidence"])}
+    row = {"id": item["id"], "status": item["status"],
+           "rationale": item["rationale"],
+           "evidence": _project_aa_evidence(item["evidence"])}
+    if "label" in item:
+        row["label"] = item["label"]
+    return row
 
 
 def _project_aa_finding(item: dict) -> dict:
@@ -3402,7 +3427,7 @@ def _project_aa_publication(item: dict) -> dict:
 
 
 def _project_aa_child(item: dict) -> dict:
-    return {
+    child = {
         "project_id": item["project_id"], "scope": item["scope"],
         "packet_sha256": item["packet_sha256"],
         "rows": [_project_aa_row(entry) for entry in item["rows"]],
@@ -3412,6 +3437,12 @@ def _project_aa_child(item: dict) -> dict:
         "limitations": [_project_aa_limitation(entry)
                         for entry in item["limitations"]],
     }
+    if "execution" in item:
+        execution = item["execution"]
+        child["execution"] = {"status": execution["status"],
+                              "detail": execution["detail"],
+                              "fix": execution["fix"]}
+    return child
 
 
 def _project_agent_assessment_payload(data: dict) -> dict:
@@ -4218,6 +4249,21 @@ def _aa_citation_schema() -> dict:
     }
 
 
+def _aa_execution_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string",
+                       "enum": ["executable", "caveat", "not-executable"]},
+            "detail": {"type": "string", "minLength": 1, "maxLength": 512},
+            "fix": {"type": ["string", "null"], "minLength": 1,
+                    "maxLength": 512},
+        },
+        "required": ["status", "detail", "fix"],
+        "additionalProperties": False,
+    }
+
+
 def _aa_row_schema() -> dict:
     return {
         "type": "object",
@@ -4230,6 +4276,7 @@ def _aa_row_schema() -> dict:
             "rationale": {"type": "string"},
             "evidence": {"type": "array", "items": _aa_citation_schema(),
                          "minItems": 0, "maxItems": 16},
+            "label": {"type": "string", "minLength": 1, "maxLength": 64},
         },
         "required": ["id", "status", "rationale", "evidence"],
     }
@@ -4294,6 +4341,7 @@ def _aa_child_schema() -> dict:
             "limitations": {"type": "array",
                             "items": _aa_limitation_schema(),
                             "maxItems": 64},
+            "execution": _aa_execution_schema(),
         },
         "required": ["project_id", "scope", "packet_sha256", "rows",
                      "score", "findings", "limitations"],

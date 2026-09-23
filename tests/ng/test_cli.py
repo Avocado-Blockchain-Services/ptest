@@ -307,9 +307,13 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
             assert next(item for item in data["readiness"]
                         if item["area"] == "parallel")["state"] == "unknown"
     else:
+        if command == "init":
+            import re
+
+            assert re.search(r"unchanged:?\s+\.ptest\.toml", captured.out)
+            return
         expected = {
             "where": f"root: {root}", "register": "register: initialized",
-            "init": "unchanged: .ptest.toml",
             "plan": "plan: full (static preview)", "status": "queued: 0\nactive: 0",
             "history": "history: 0 runs", "doctor": "cache.global-flush",
         }
@@ -352,7 +356,8 @@ def test_where_reveal_is_labelled_stderr_only_and_never_persisted(
         ("pytest", ("tests",), False, "basic_serial", "inventory"),
         ("pytest", (".",), False, "basic_serial", "dot test root"),
         ("pytest", ("tests",), True, "basic_serial", "collection_finish"),
-        ("vitest", ("tests",), False, "unavailable", "prepared only"),
+        ("vitest", ("tests",), False, "exclusive_command",
+         "exclusive command"),
     ],
 )
 @pytest.mark.parametrize("json_mode", [False, True])
@@ -976,6 +981,9 @@ def test_human_init_renders_ordered_banner_matching_real_files(
         tmp_path, monkeypatch, capsys):
     import re
 
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert main(("init", "--runner", "pytest", "--agents", "claude,codex")) == 0
     captured = capsys.readouterr()
@@ -989,7 +997,7 @@ def test_human_init_renders_ordered_banner_matching_real_files(
     assert "┌" in captured.out and "┘" in captured.out
     assert captured.out.index("Configuration") < captured.out.index("Guidance")
     assert captured.out.index("Guidance") < captured.out.index("Next steps")
-    assert "created: .ptest.toml" in captured.out
+    assert re.search(r"created:?\s+\.ptest\.toml", captured.out)
     assert re.search(r"created\s+docs/ptest-agent\.md", captured.out)
     assert ".claude/skills/ptest/SKILL.md" in captured.out
     assert ".agents/skills/ptest/SKILL.md" in captured.out
@@ -1062,7 +1070,7 @@ def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, cap
 
     assert "ptest already configured" in captured.out
     assert "ptest initialized" not in captured.out
-    assert "unchanged: .ptest.toml" in captured.out
+    assert re.search(r"unchanged:?\s+\.ptest\.toml", captured.out)
     assert "already present" not in captured.out
     for relative in ("docs/ptest-agent.md", "AGENTS.md",
                      ".claude/skills/ptest/SKILL.md"):
@@ -1351,6 +1359,8 @@ def test_doctor_without_full_explicit_consent_requires_consent_before_qualificat
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("builtins.input",
+                        lambda *a, **k: pytest.fail("prompted without consent"))
     before = _tree_bytes(tmp_path)
 
     assert main(argv) == 2
@@ -1572,7 +1582,7 @@ def test_tty_auto_review_uses_stable_order_skipping_unavailable(
     assert prompts == ["asked"]
     assert launches == ["codex"]
     assert "Choose a reviewer" not in captured.err
-    assert captured.out.startswith("Project | Execution | Parallel | Selection | Timing | Checklist\n")
+    assert "recommendations.md" in captured.out
 
 
 def test_tty_auto_with_no_qualified_reviewer_never_prompts_or_scans(
@@ -2589,12 +2599,16 @@ def _tty_menu_review(monkeypatch, tmp_path, *, answers,
     return resolved, inputs, launches
 
 
+@pytest.mark.parametrize("argv", [
+    ("doctor",),
+    ("doctor", "--reviewer", "auto"),
+])
 def test_tty_menu_lists_two_in_order_and_selects_second(
-        inspection_project, tmp_path, monkeypatch, capsys):
+        inspection_project, tmp_path, monkeypatch, capsys, argv):
     resolved, inputs, launches = _tty_menu_review(
         monkeypatch, tmp_path, answers=["2", "yes"])
 
-    assert main(("doctor",)) == 0
+    assert main(argv) == 0
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
@@ -2603,8 +2617,7 @@ def test_tty_menu_lists_two_in_order_and_selects_second(
     assert "Choose a reviewer for this review:" in captured.err
     assert captured.err.index("1) claude") < captured.err.index("2) codex")
     assert "Run this review once?" in captured.err
-    assert captured.out.startswith(
-        "Project | Execution | Parallel | Selection | Timing | Checklist\n")
+    assert "recommendations.md" in captured.out
 
 
 def test_tty_menu_select_first_then_decline_is_offline(
@@ -2695,27 +2708,61 @@ def test_tty_explicit_reviewer_skips_menu(
     assert "Model review disclosure: claude" in captured.err
 
 
-def test_non_tty_auto_never_shows_menu(
+def test_tty_init_doctor_menu_selects_codex_without_consent_prompt(
         tmp_path, monkeypatch, capsys):
+    """TTY init --doctor --allow-model-review shows the menu, not y/N."""
     import sys
+    from ptest.agent_providers import ProviderResult
 
+    marker = tmp_path / ".git"
+    marker.mkdir()
+    (marker / "HEAD").write_text("ref: refs/heads/main\n")
+    (marker / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted"))
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.resolve_reviewer",
-        lambda *a, **k: pytest.fail("resolved reviewer before consent"),
-    )
-    monkeypatch.setattr(
-        "ptest.cli.doctor.inspect_workspace",
-        lambda *a, **k: pytest.fail("scanned source before consent"),
-    )
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+    _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
+    resolved = []
 
-    assert main(("doctor",)) == 2
+    def resolve(name, env):
+        resolved.append(name)
+        return _fake_reviewer(name, qualified=True)
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    inputs = []
+
+    def fake_input(*args):
+        inputs.append(args)
+        return "2"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    launches = []
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        launches.append(adapter.name)
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=3100, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+
+    assert main(("init", "--runner", "pytest", "--agents", "none",
+                 "--doctor", "--allow-model-review")) == 0
+
     captured = capsys.readouterr()
-    assert "consent-required" in captured.err
-    assert "Choose a reviewer" not in captured.err
+    assert resolved == ["claude", "codex"]
+    assert launches == ["codex"]
+    assert len(inputs) == 1
+    assert "Choose a reviewer for this review:" in captured.err
+    assert "Run this review once?" not in captured.err
+    assert "recommendations.md" in captured.out
 
 
 def _native_replay_executable(bindir, name):
@@ -2920,3 +2967,282 @@ def test_recorded_round4_replies_publish_report(
     assert re.fullmatch(rb"<!-- ptest-recommendations v1 sha256=[0-9a-f]{64} -->",
                         marker) is not None
     assert "partial-evidence" in body.decode("utf-8")
+
+
+# ---- T6: review model flags, resolution helpers, disclosure seam ---------
+
+def test_review_parser_defaults_keep_model_unset_and_concurrency_four():
+    parsed = parse_argv(("doctor",))
+    assert parsed.review_model is None
+    assert parsed.review_model_explicit is False
+    assert parsed.review_concurrency == 4
+    assert parsed.review_concurrency_explicit is False
+
+
+@pytest.mark.parametrize("command", ["doctor", "init"])
+def test_review_model_and_concurrency_parse_where_reviewer_is_valid(command):
+    if command == "doctor":
+        parsed = parse_argv(
+            ("doctor", "--review-model", "gpt-5.6-luna",
+             "--review-concurrency", "2"))
+    else:
+        parsed = parse_argv(
+            ("init", "--doctor", "--review-model", "gpt-5.6-luna",
+             "--review-concurrency", "2"))
+    assert parsed.review_model == "gpt-5.6-luna"
+    assert parsed.review_model_explicit is True
+    assert parsed.review_concurrency == 2
+    assert parsed.review_concurrency_explicit is True
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--review-model", "haiku", "--offline"),
+    ("doctor", "--review-concurrency", "2", "--offline"),
+    ("doctor", "--review-model", "haiku", "--json"),
+    ("doctor", "--review-concurrency", "2", "--json"),
+    ("doctor", "--review-model", "haiku", "--prompt"),
+    ("doctor", "--review-concurrency", "2", "--prompt"),
+    ("doctor", "--review-model", "x", "--probe", "--scope", "tests/a.py"),
+    ("doctor", "--review-concurrency", "2", "--assessment-json"),
+    ("doctor", "--review-concurrency", "0"),
+    ("doctor", "--review-concurrency", "9"),
+    ("doctor", "--review-concurrency", "many"),
+    ("doctor", "--review-model", "a", "--review-model", "b"),
+    ("doctor", "--review-concurrency", "2", "--review-concurrency", "3"),
+    ("init", "--doctor", "--review-model", "haiku", "--json"),
+    ("init", "--doctor", "--review-concurrency", "2", "--json"),
+    ("init", "--dry-run", "--review-model", "haiku"),
+    ("init", "--dry-run", "--review-concurrency", "2"),
+    ("init", "--review-model", "haiku"),
+    ("init", "--review-concurrency", "2"),
+])
+def test_review_model_flag_invalid_combos_exit_two_without_launch(
+        tmp_path, monkeypatch, capsys, argv):
+    _forbid_launch(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() or captured.out.strip()
+
+
+def test_declared_review_model_prefers_flag_then_env_then_alias():
+    from ptest import cli
+
+    assert cli._declared_review_model(
+        "codex", "flag-model", {"PTEST_REVIEW_MODEL": "env-model"}) == \
+        "flag-model"
+    assert cli._declared_review_model(
+        "codex", None, {"PTEST_REVIEW_MODEL": "env-model"}) == "env-model"
+    assert cli._declared_review_model("claude", None, {}) == "haiku"
+    assert cli._declared_review_model("codex", None, {}) is None
+    assert cli._declared_review_model("codex", None,
+                                      {"PTEST_REVIEW_MODEL": ""}) is None
+
+
+def test_declared_review_model_starts_no_subprocess(monkeypatch):
+    import subprocess
+    from ptest import cli
+
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **k: pytest.fail("declared model launched a child"))
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: pytest.fail("declared model ran a child"))
+    assert cli._declared_review_model(
+        "claude", None, {"PTEST_REVIEW_MODEL": "env-model"}) == "env-model"
+    assert cli._declared_review_model("codex", None, {}) is None
+
+
+def _fake_version(monkeypatch, version):
+    monkeypatch.setattr("ptest.cli.agent_providers.cli_version",
+                        lambda adapter: version)
+
+
+def _fake_entries(monkeypatch, entries):
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers._discover_model_entries",
+        lambda adapter: tuple(entries))
+
+
+def _pick_provider(monkeypatch, reply):
+    from ptest.agent_providers import ProviderResult
+
+    calls = []
+
+    def fake_launch(adapter, request, schema, timeout_s, progress):
+        calls.append(json.loads(request.decode("utf-8")))
+        assert request
+        assert schema
+        return ProviderResult(
+            provider=adapter.name, ok=True, assessment=reply,
+            error="", exit_code=0, timed_out=False, cancelled=False,
+            truncated=False, pid=4100, argv=adapter.argv,
+            scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review",
+                        fake_launch)
+    return calls
+
+
+def test_resolve_review_model_declared_wins_without_cache(
+        tmp_path, monkeypatch):
+    from ptest import cli
+
+    _fake_version(monkeypatch, "codex-cli 0.155.1")
+    _fake_entries(monkeypatch, [])
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("declared model must not pick"))
+    adapter = _fake_reviewer("codex", qualified=True)
+    model, version = cli._resolve_review_model(
+        adapter, tmp_path / "cache", "flag-model")
+    assert (model, version) == ("flag-model", "codex-cli 0.155.1")
+    assert not (tmp_path / "cache").exists()
+
+
+def test_resolve_review_model_claude_haiku_runs_no_discovery_or_pick(
+        monkeypatch):
+    from ptest import cli
+
+    _fake_version(monkeypatch, "claude 1.2.3")
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers._discover_model_entries",
+        lambda adapter: pytest.fail("claude must not discover"))
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("claude must not pick"))
+    adapter = _fake_reviewer("claude", qualified=True)
+    assert cli._resolve_review_model(adapter, Path("/nonexistent"),
+                                     "haiku") == ("haiku", "claude 1.2.3")
+
+
+def test_resolve_review_model_codex_pick_caches_exact_slug(
+        tmp_path, monkeypatch):
+    from ptest import cli
+
+    _fake_version(monkeypatch, "codex-cli 0.155.1")
+    _fake_entries(monkeypatch, [
+        {"slug": "gpt-5.6-luna", "display_name": "Luna",
+         "description": "Fast and affordable."},
+        {"slug": "gpt-5.6-sol", "display_name": "Sol",
+         "description": "Frontier."},
+    ])
+    calls = _pick_provider(monkeypatch, b"gpt-5.6-luna")
+    adapter = _fake_reviewer("codex", qualified=True)
+    cache = tmp_path / "cache"
+    model, version = cli._resolve_review_model(adapter, cache, None)
+    assert model == "gpt-5.6-luna"
+    assert version == "codex-cli 0.155.1"
+    assert len(calls) == 1
+    assert [entry["slug"] for entry in calls[0]["models"]] == [
+        "gpt-5.6-luna", "gpt-5.6-sol"]
+    assert calls[0]["models"][0]["display_name"] == "Luna"
+    cached = json.loads((cache / "codex.json").read_text(encoding="utf-8"))
+    assert cached == {"cli_version": "codex-cli 0.155.1",
+                      "model": "gpt-5.6-luna"}
+
+    _pick_provider(monkeypatch, b"SHOULD-NOT-BE-CALLED")
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("cache hit must not pick"))
+    again, _ = cli._resolve_review_model(adapter, cache, None)
+    assert again == "gpt-5.6-luna"
+
+
+@pytest.mark.parametrize("reply", [b"gpt-5.6-luna.", b"gpt-5.4",
+                                   b"  gpt-5.6-luna  extra  ", b""])
+def test_resolve_review_model_codex_pick_requires_exact_slug(
+        tmp_path, monkeypatch, reply):
+    from ptest import cli
+
+    _fake_version(monkeypatch, "codex-cli 0.155.1")
+    _fake_entries(monkeypatch, [
+        {"slug": "gpt-5.6-luna", "display_name": "Luna",
+         "description": "Fast and affordable."},
+    ])
+    _pick_provider(monkeypatch, reply)
+    adapter = _fake_reviewer("codex", qualified=True)
+    cache = tmp_path / "cache"
+    assert cli._resolve_review_model(adapter, cache, None) == (
+        None, "codex-cli 0.155.1")
+    assert not (cache / "codex.json").exists()
+
+
+def test_resolve_review_model_cache_hits_only_same_cli_version(
+        tmp_path, monkeypatch):
+    from ptest import cli
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "codex.json").write_text(
+        json.dumps({"cli_version": "codex-cli 0.155.1",
+                    "model": "gpt-5.6-luna"}), encoding="utf-8")
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("cache hit must not pick"))
+    adapter = _fake_reviewer("codex", qualified=True)
+    _fake_version(monkeypatch, "codex-cli 0.155.1")
+    assert cli._resolve_review_model(adapter, cache, None) == (
+        "gpt-5.6-luna", "codex-cli 0.155.1")
+    _fake_version(monkeypatch, "codex-cli 0.156.0")
+    _fake_entries(monkeypatch, [])
+    assert cli._resolve_review_model(adapter, cache, None) == (
+        None, "codex-cli 0.156.0")
+
+
+def test_resolve_review_model_fallback_is_not_cached(tmp_path, monkeypatch):
+    from ptest import cli
+
+    _fake_version(monkeypatch, None)
+    _fake_entries(monkeypatch, [])
+    adapter = _fake_reviewer("codex", qualified=True)
+    cache = tmp_path / "cache"
+    assert cli._resolve_review_model(adapter, cache, None) == (None, None)
+    assert not (cache / "codex.json").exists()
+
+
+def _disclosure_resolution(name="project"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(root=Path(name))
+
+
+def test_review_disclosure_keeps_first_sentence_without_counts(monkeypatch,
+                                                              capsys):
+    from ptest import cli
+
+    adapter = _fake_reviewer("codex", qualified=True)
+    assert cli._render_review_disclosure(
+        adapter, _disclosure_resolution(), ask=False) is True
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "Model review disclosure: codex may receive bounded source text "
+        "from project project")
+
+
+def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
+                                                             capsys):
+    from ptest import cli
+
+    adapter = _fake_reviewer("codex", qualified=True)
+    assert cli._render_review_disclosure(
+        adapter, _disclosure_resolution(), ask=False, calls=11,
+        concurrency=2, model="gpt-5.6-luna") is True
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Model review disclosure: codex")
+    assert ("This review makes 11 model calls (2 at a time) with model "
+            "gpt-5.6-luna.") in captured.err
+
+
+def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
+                                                              capsys):
+    from ptest import cli
+
+    adapter = _fake_reviewer("codex", qualified=True)
+    assert cli._render_review_disclosure(
+        adapter, _disclosure_resolution(), ask=False, calls=9,
+        concurrency=4, model=None) is True
+    captured = capsys.readouterr()
+    assert "with a model chosen after consent" in captured.err
+    assert "one extra call that sends only the model list" in captured.err

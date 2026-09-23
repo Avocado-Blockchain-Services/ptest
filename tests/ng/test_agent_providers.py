@@ -94,10 +94,25 @@ def test_supported_reviewers_exact_order():
 
 def test_exact_function_signatures():
     assert list(inspect.signature(ap.launch_review).parameters) == [
-        "adapter", "packet", "schema", "timeout_s", "progress",
+        "adapter", "packet", "schema", "timeout_s", "progress", "cancel",
     ]
+    assert inspect.signature(ap.launch_review).parameters["cancel"].default is None
+    assert inspect.signature(
+        ap.launch_review).parameters["cancel"].kind is inspect.Parameter.KEYWORD_ONLY
     assert list(inspect.signature(ap.resolve_reviewer).parameters) == [
         "name", "env",
+    ]
+    assert list(inspect.signature(ap.launch_reviews).parameters) == [
+        "adapter", "requests", "timeout_s", "concurrency", "on_done",
+    ]
+    assert list(inspect.signature(ap.with_model).parameters) == [
+        "adapter", "model",
+    ]
+    assert list(inspect.signature(ap.discover_models).parameters) == [
+        "adapter",
+    ]
+    assert list(inspect.signature(ap.cli_version).parameters) == [
+        "adapter",
     ]
 
 
@@ -1119,3 +1134,321 @@ def test_codex_top_level_error_is_provider_failure(bindir):
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "provider-failed"
+
+
+# ---- review runtime: cancel event, bounded fan-out, cheap models (T6) -----
+
+def _python_bin(bindir: Path, name: str, script: str) -> None:
+    import sys as _sys
+
+    _write_bin(bindir, name, "#!" + _sys.executable + "\n" + script)
+
+
+def _echo_claude_script(log: str | None = None, delay_s: float = 0.0) -> str:
+    """Python fake: echoes the stdin packet id inside a Claude envelope."""
+    lines = [
+        "import json, sys, time",
+    ]
+    if log is not None:
+        lines.append(f"open({log!r}, 'a').write('start %d\\n' % time.monotonic_ns())")
+    lines.append("body = sys.stdin.read()")
+    if delay_s:
+        lines.append(f"time.sleep({delay_s!r})")
+    if log is not None:
+        lines.append(f"open({log!r}, 'a').write('end %d\\n' % time.monotonic_ns())")
+    lines += [
+        "item = json.loads(body)['id']",
+        "envelope = {'type': 'result', 'subtype': 'success',",
+        "            'is_error': False, 'num_turns': 1,",
+        "            'permission_denials': [], 'result': item}",
+        "sys.stdout.write(json.dumps(envelope))",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_launch_review_without_cancel_keeps_positional_shape(bindir):
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is True
+    assert result.cancelled is False
+
+
+def test_launch_review_cancel_is_keyword_only(bindir):
+    import threading
+
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    with pytest.raises(TypeError):
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]),
+                         threading.Event())
+
+
+def test_launch_review_preset_cancel_never_starts_child(bindir, tmp_path):
+    import threading
+
+    canary = tmp_path / "launched"
+    _python_bin(
+        bindir, "claude",
+        "import sys\n"
+        f"open({str(canary)!r}, 'w').write('x')\n"
+        "sys.stdout.write('never')\n",
+    )
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+    cancel = threading.Event()
+    cancel.set()
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 20, _no_progress([]),
+                              cancel=cancel)
+    assert result.ok is False
+    assert result.cancelled is True
+    assert result.error == "cancelled"
+    assert not canary.exists()
+
+
+def test_launch_review_cancel_event_mid_run_reaps_child(bindir):
+    import threading
+
+    adapter = _synthetic(_resolve(bindir, "codex", HANG))
+    neighbor = _neighbor()
+    cancel = threading.Event()
+
+    def _setter():
+        time.sleep(0.3)
+        cancel.set()
+
+    setter = threading.Thread(target=_setter, daemon=True)
+    try:
+        setter.start()
+        result = ap.launch_review(adapter, PACKET, SCHEMA, 30,
+                                  _no_progress([]), cancel=cancel)
+    finally:
+        neighbor_alive = neighbor.poll() is None
+        neighbor.terminate()
+        neighbor.wait()
+        setter.join(timeout=5)
+    assert result.ok is False
+    assert result.cancelled is True
+    assert result.error == "cancelled"
+    _assert_dead(result.pid)
+    assert neighbor_alive
+
+
+def test_launch_reviews_aligns_results_and_bounds_concurrency(bindir, tmp_path):
+    log = str(tmp_path / "fanout.log")
+    _python_bin(bindir, "claude", _echo_claude_script(log=log, delay_s=0.4))
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    requests = [
+        (json.dumps({"id": f"item-{index}"}).encode("utf-8"), SCHEMA)
+        for index in range(4)
+    ]
+    seen: list = []
+
+    results = ap.launch_reviews(adapter, requests, 20, concurrency=2,
+                                on_done=lambda i, r: seen.append(i))
+
+    assert [r.assessment for r in results] == [
+        f"item-{index}".encode("utf-8") for index in range(4)
+    ]
+    assert all(r.ok for r in results)
+    assert sorted(seen) == [0, 1, 2, 3]
+    marks = []
+    for line in Path(log).read_text(encoding="utf-8").splitlines():
+        kind, stamp = line.split()
+        marks.append((kind, int(stamp)))
+    assert len(marks) == 8
+    live = peak = 0
+    for kind, _ in sorted(marks, key=lambda m: m[1]):
+        live += 1 if kind == "start" else -1
+        peak = max(peak, live)
+    assert peak == 2
+
+
+def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
+    _python_bin(
+        bindir, "claude",
+        "import json, sys, time\n"
+        "body = sys.stdin.read()\n"
+        "item = json.loads(body)['id']\n"
+        "if item == 'slow':\n"
+        "    time.sleep(30)\n"
+        "envelope = {'type': 'result', 'subtype': 'success',\n"
+        "            'is_error': False, 'num_turns': 1,\n"
+        "            'permission_denials': [], 'result': item}\n"
+        "sys.stdout.write(json.dumps(envelope))\n",
+    )
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    requests = [
+        (json.dumps({"id": "slow"}).encode("utf-8"), SCHEMA),
+        (json.dumps({"id": "fast"}).encode("utf-8"), SCHEMA),
+    ]
+    results = ap.launch_reviews(adapter, requests, 3, concurrency=2)
+    assert results[0].ok is False and results[0].timed_out is True
+    assert results[0].error == "timeout"
+    assert results[1].ok is True and results[1].assessment == b"fast"
+    _assert_dead(results[0].pid)
+
+
+def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(
+        bindir, monkeypatch, tmp_path):
+    import concurrent.futures as _futures
+
+    pidlog = tmp_path / "pids.log"
+    body = ("#!/bin/sh\n"
+            f"echo $$ >> {pidlog}\n"
+            "cat >/dev/null\nsleep 30\nexit 0\n")
+    adapter = _synthetic(_resolve(bindir, "codex", body))
+    requests = [(PACKET, SCHEMA), (PACKET, SCHEMA)]
+    real_wait = _futures.wait
+    calls = []
+
+    def _boom(*args, **kwargs):
+        calls.append(1)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                lines = pidlog.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                lines = []
+            if len([line for line in lines if line.strip()]) >= 2:
+                break
+            time.sleep(0.05)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_futures, "wait", _boom)
+    start = time.monotonic()
+    with pytest.raises(Problem) as exc:
+        ap.launch_reviews(adapter, requests, 30, concurrency=2)
+    elapsed = time.monotonic() - start
+    assert exc.value.code == "review-cancelled"
+    assert calls == [1]
+    assert real_wait is not None
+    assert elapsed < 10
+    pids = [int(line.strip()) for line in
+            pidlog.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(pids) == 2
+    for pid in pids:
+        _assert_dead(pid)
+
+
+def test_launch_reviews_rejects_bad_concurrency(bindir):
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    for bad in (0, 9):
+        with pytest.raises(Problem) as exc:
+            ap.launch_reviews(adapter, [(PACKET, SCHEMA)], 10,
+                              concurrency=bad)
+        assert exc.value.code == "invalid-bound"
+
+
+def test_launch_reviews_empty_requests_returns_empty(bindir):
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    assert ap.launch_reviews(adapter, [], 10) == ()
+
+
+def test_with_model_appends_only_the_model_flag(bindir):
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    claude = ap.resolve_reviewer("claude", _env_for(bindir))
+    modeled = ap.with_model(claude, "haiku")
+    assert tuple(modeled.argv) == tuple(claude.argv) + ("--model", "haiku")
+    assert tuple(claude.argv) == tuple(
+        ap.resolve_reviewer("claude", _env_for(bindir)).argv)
+
+    _write_bin(bindir, "codex", "#!/bin/sh\nexit 0\n")
+    codex = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert tuple(ap.with_model(codex, "gpt-5.6-luna").argv) == (
+        tuple(codex.argv) + ("-m", "gpt-5.6-luna"))
+
+
+@pytest.mark.parametrize("bad", ["", "--model", "-m", "has space", "a;b",
+                                 "x" * 129, "-leading-dash"])
+def test_with_model_rejects_invalid_ids(bindir, bad):
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    with pytest.raises(Problem):
+        ap.with_model(adapter, bad)
+
+
+def test_with_model_accepts_boundary_length_id(bindir):
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    assert ap.with_model(adapter, "a" * 128).argv[-1] == "a" * 128
+
+
+def test_with_model_rejects_unqualified_provider(bindir):
+    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
+    with pytest.raises(Problem) as exc:
+        ap.with_model(adapter, "haiku")
+    assert exc.value.code == "provider-unqualified"
+
+
+def _debug_models_bin(bindir: Path, payload: bytes, *, exit_code: int = 0) -> None:
+    blob = bindir / "codex.models.payload"
+    blob.write_bytes(payload)
+    _write_bin(
+        bindir, "codex",
+        "#!/bin/sh\n"
+        "if [ \"$1\" = debug ] && [ \"$2\" = models ]; then\n"
+        f"  cat \"{blob}\"; exit {exit_code}\n"
+        "fi\n"
+        "exit 3\n",
+    )
+
+
+def test_discover_models_lists_only_visible_slugs(bindir):
+    payload = (FIXTURE_DIR / "codex-debug-models.json").read_bytes()
+    _debug_models_bin(bindir, payload)
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert ap.discover_models(adapter) == (
+        "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        "gpt-5.5",
+    )
+
+
+@pytest.mark.parametrize("payload,exit_code", [
+    (b"{}", 0),
+    (b"not json", 0),
+    (b'{"models": []}', 1),
+    (b'{"models": "nope"}', 0),
+])
+def test_discover_models_returns_empty_on_failure(bindir, payload, exit_code):
+    _debug_models_bin(bindir, payload, exit_code=exit_code)
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert ap.discover_models(adapter) == ()
+
+
+def test_discover_models_over_bound_output_returns_empty(bindir):
+    blob = b'{"models": [' + b" " * (4 * 1024 * 1024 + 1) + b"]}"
+    _debug_models_bin(bindir, blob)
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert ap.discover_models(adapter) == ()
+
+
+def test_discover_models_timeout_returns_empty(bindir, monkeypatch):
+    _write_bin(bindir, "codex", "#!/bin/sh\nsleep 30\nexit 0\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    monkeypatch.setattr(ap, "_DISCOVERY_TIMEOUT_S", 1)
+    assert ap.discover_models(adapter) == ()
+
+
+def test_discover_models_non_codex_returns_empty_without_launch(tmp_path):
+    adapter = ap.ReviewerAdapter(
+        name="claude", executable=str(tmp_path / "missing-claude"),
+        argv=(str(tmp_path / "missing-claude"),), qualified=True,
+        qualification_note="synthetic",
+    )
+    assert ap.discover_models(adapter) == ()
+
+
+def test_cli_version_reports_first_line(bindir):
+    _write_bin(bindir, "codex",
+               "#!/bin/sh\nprintf 'codex-cli 0.155.1\\nsha: abc\\n'\nexit 0\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert ap.cli_version(adapter) == "codex-cli 0.155.1"
+
+
+def test_cli_version_returns_none_on_failure(bindir, monkeypatch):
+    _write_bin(bindir, "codex", "#!/bin/sh\nexit 3\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    assert ap.cli_version(adapter) is None
+    _write_bin(bindir, "codex", "#!/bin/sh\nsleep 30\nexit 0\n")
+    slow = ap.resolve_reviewer("codex", _env_for(bindir))
+    monkeypatch.setattr(ap, "_VERSION_TIMEOUT_S", 1)
+    assert ap.cli_version(slow) is None

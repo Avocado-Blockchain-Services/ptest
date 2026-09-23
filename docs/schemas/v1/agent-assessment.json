@@ -6,6 +6,38 @@
         "children": {
           "items": {
             "properties": {
+              "execution": {
+                "additionalProperties": false,
+                "properties": {
+                  "detail": {
+                    "maxLength": 512,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "fix": {
+                    "maxLength": 512,
+                    "minLength": 1,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "executable",
+                      "caveat",
+                      "not-executable"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status",
+                  "detail",
+                  "fix"
+                ],
+                "type": "object"
+              },
               "findings": {
                 "items": {
                   "properties": {
@@ -177,6 +209,11 @@
                         "SELECT-001",
                         "TIMING-001"
                       ],
+                      "type": "string"
+                    },
+                    "label": {
+                      "maxLength": 64,
+                      "minLength": 1,
                       "type": "string"
                     },
                     "rationale": {

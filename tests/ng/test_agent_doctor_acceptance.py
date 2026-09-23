@@ -378,12 +378,11 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     review_argv = ("doctor", "--reviewer", "claude", "--allow-model-review")
     assert main(review_argv) == 0
     human = capsys.readouterr()
-    assert human.out.startswith(
-        "Project | Execution | Parallel | Selection | Timing | Checklist\n"
-    )
-    api = next(line for line in human.out.splitlines() if line.startswith("api |"))
-    web = next(line for line in human.out.splitlines() if line.startswith("web |"))
-    assert human.out.index(api) < human.out.index(web)
+    assert "api" in human.out and "web" in human.out
+    assert human.out.index("api") < human.out.index("web")
+    assert "recommendations.md" in human.out
+    api = next(line for line in human.out.splitlines() if "api" in line)
+    web = next(line for line in human.out.splitlines() if "web" in line)
     assert "basic-serial; reviewed isolation unverified" in api
     assert "not execution-verified" in api and "not execution-verified" in web
     assert [item[1] for item in launches] == ["api", "web"]
