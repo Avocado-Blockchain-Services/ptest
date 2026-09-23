@@ -117,6 +117,35 @@ _UNSUPPORTED_MARKERS = frozenset({
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
 
+# Execution-claim words the model must never use in prose. The same tuple
+# feeds the rejection regex below and the policy instruction, so the rule
+# the model reads and the rule the filter enforces cannot drift apart.
+# Naming a test library (``pytest``, ``ptest``) is not an execution claim.
+_EXEC_CLAIM_WORDS = (
+    "exit code", "exit status", "test output", "observed",
+    "passed", "failed", "executed", "verified",
+)
+
+
+def _exec_claim_pattern(words: tuple[str, ...]) -> str:
+    """Build the execution-claim alternative from ``words``.
+
+    Multi-word phrases match across flexible whitespace; single words
+    match whole words, except ``observed`` which keeps its historical
+    substring match.
+    """
+    parts = []
+    for phrase in words:
+        tokens = phrase.split()
+        if len(tokens) > 1:
+            parts.append(r"\s*".join(tokens))
+        elif phrase == "observed":
+            parts.append(phrase)
+        else:
+            parts.append(rf"\b{phrase}\b")
+    return "|".join(parts)
+
+
 _REVIEW_INSTRUCTION = (
     "Produce exactly one assessment: a raw ptest agent-assessment JSON "
     "object for exactly one child and the single packet in this request. "
@@ -142,7 +171,11 @@ _REVIEW_INSTRUCTION = (
     "packet evidence that the item cannot apply; absence of code is "
     "`unknown`, never not-applicable. The reply must validate against "
     "response_schema; limitation codes and status enums come only from "
-    "it; assess each row against its checklist criterion."
+    "it; assess each row against its checklist criterion. Prose fields "
+    "(rationales, summaries, suggested changes) are plain text only: no "
+    "Markdown, backticks, pipe characters, links, HTML, headings, or "
+    "percent figures. Never claim execution: do not use the words "
+    + ", ".join(_EXEC_CLAIM_WORDS) + "."
 )
 
 # Raw payload keys the model must never supply. The public codec projects
@@ -211,10 +244,8 @@ _AUTOLINK_RE = re.compile(
 _HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
 _HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
 _PERCENT_RE = re.compile(r"\d\s*%")
-_EXEC_CLAIM_RE = re.compile(
-    r"exit\s*code|exit\s*status|test\s*output|observed|\bpytest\b"
-    r"|\bptest\b|\bpassed\b|\bfailed\b|\bexecuted\b|\bverified\b",
-    re.IGNORECASE)
+_EXEC_CLAIM_RE = re.compile(_exec_claim_pattern(_EXEC_CLAIM_WORDS),
+                            re.IGNORECASE)
 
 
 def _fail(code: str, message: str) -> C.Problem:

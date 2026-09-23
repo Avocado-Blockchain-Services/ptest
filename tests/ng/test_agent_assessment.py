@@ -1929,3 +1929,91 @@ def test_recorded_claude_reply_stripped_to_data_only():
             "assessment.children[0].limitations[0] has an unknown code")
     else:
         assert child.score is not None
+
+
+# --- round 3: prose filter names libraries, not execution claims ---------------
+
+def test_parse_assessment_accepts_library_naming_without_execution_claim(
+        tmp_path):
+    """Naming a test library is not an execution claim: the spec forbids
+    model-supplied execution proof, not the words ``pytest``/``ptest``."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[0] = _row(packet, "FIX-001",
+                   rationale="The negative path asserts "
+                             "pytest.raises(ValueError) on the excerpt.")
+    rows[10] = _row(packet, "TIMING-001", status="unknown",
+                    rationale="The packet holds no ptest timing data, "
+                              "so durations stay unknown.",
+                    evidence=[])
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    assert child.rows[0].status == "satisfied"
+    assert child.rows[10].status == "unknown"
+
+
+@pytest.mark.parametrize("rationale", [
+    "The pytest suite passed on the excerpt lines.",
+    "All listed tests executed against the excerpt.",
+    "The suite finished with exit code 0 on the excerpt.",
+])
+def test_parse_assessment_still_rejects_execution_claims(tmp_path, rationale):
+    """Execution claims stay rejected with or without a library name."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[0] = _row(packet, "FIX-001", rationale=rationale)
+    with pytest.raises(C.Problem) as caught:
+        AA.parse_assessment(
+            _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    assert caught.value.code == "invalid-assessment"
+    assert "untrusted model content" in caught.value.message
+
+
+def test_review_instruction_states_plain_text_prose_rules():
+    """The policy instruction tells the model the exact prose rules the
+    filter enforces: plain text only, and no execution-claim words."""
+    from ptest import agent_assessment as AA
+
+    instruction = AA._REVIEW_INSTRUCTION
+    assert "plain text" in instruction
+    for token in ("Markdown", "backticks", "pipe", "links", "HTML",
+                  "headings", "percent"):
+        assert token in instruction
+    for words in ("exit code", "exit status", "test output", "observed",
+                  "passed", "failed", "executed", "verified"):
+        assert words in instruction
+
+
+_FIXTURE_ASSESSMENT_DIR = (
+    Path(__file__).resolve().parent / "fixtures" / "agent_assessment")
+
+
+def test_recorded_claude_reply_2_parses_without_prose_rejection():
+    """Regression on the second real Claude reply: its rationales name the
+    test library (``pytest.raises(ValueError)``, ``imports only pytest``)
+    and packet paths (``.ptest.toml``, ``ptest result``), which the old
+    prose filter misread as execution claims. Rebound only on
+    ``packet_sha256`` to the recorded request packet (the reply was cut
+    against a narrower packet whose excerpts are identical), the ``data``
+    remainder must parse."""
+    import copy
+
+    from ptest import agent_assessment as AA
+
+    fixture = _FIXTURE_ASSESSMENT_DIR / "claude-e2e-raw-assessment-2.json"
+    request_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-request.json"
+    if not request_path.exists():
+        pytest.skip("recorded native request is absent")
+    recorded = json.loads(fixture.read_text(encoding="utf-8"))
+    packet = _packet_from_request_dict(
+        json.loads(request_path.read_text(encoding="utf-8"))["packet"])
+    rebound = copy.deepcopy(recorded["data"])
+    rebound["children"][0]["packet_sha256"] = packet.packet_sha256
+    child = AA.parse_assessment(
+        (json.dumps({"data": rebound}) + "\n").encode("utf-8"), packet)
+    assert [row.id for row in child.rows] == list(EXPECTED_IDS)
+    assert child.score is not None
