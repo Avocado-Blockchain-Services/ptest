@@ -50,9 +50,9 @@ The modes are closed and are rejected before scanning, writing, or launching:
 
 | Invocation | Contract |
 |---|---|
-| `doctor` on a TTY | Resolve one qualified installed reviewer, show the disclosure, ask once for this invocation, then launch only after an affirmative answer. Decline renders the offline result and says optimization review is disabled, not that ptest is unusable. |
+| `doctor` on a TTY | Without an explicit concrete `--reviewer` (absent or `auto`), list the qualified installed reviewers in the stable order. If there are two or more, ask the user to choose one by number; if there is exactly one, use it. Then show the disclosure for that reviewer, ask once for this invocation, and launch only after an affirmative answer. An empty, invalid, or EOF answer to either prompt is a decline. A decline renders the offline result and says optimization review is disabled, not that ptest is unusable. The post-init review offer follows the same rules. |
 | `doctor` without a TTY or with `CI` set | Never prompt or launch. Return `consent-required` unless both `--reviewer PROVIDER` (not `auto`) and `--allow-model-review` were explicit. |
-| `doctor --reviewer …` | Select review mode; it does not itself express consent in automation. `auto` uses the stable order `claude`, `codex`, `opencode`, considering qualified installed adapters only. |
+| `doctor --reviewer …` | Select review mode; it does not itself express consent in automation. On a TTY, `auto` means "ask the user" (see above); only qualified installed adapters are offered, in the stable order `claude`, `codex`, `opencode`. |
 | `doctor --offline` | Current bounded human static output, with no model call or report write. |
 | `doctor --json` | Preserve the current `PublicDocument(kind="doctor")` static schema and bytes semantics; always offline. |
 | `doctor --prompt` | Preserve the current bounded offline prompt; never launches a provider. |
