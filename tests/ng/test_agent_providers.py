@@ -97,6 +97,8 @@ def test_exact_function_signatures():
         "adapter", "packet", "schema", "timeout_s", "progress", "cancel",
     ]
     assert inspect.signature(ap.launch_review).parameters["cancel"].default is None
+    assert inspect.signature(
+        ap.launch_review).parameters["cancel"].kind is inspect.Parameter.KEYWORD_ONLY
     assert list(inspect.signature(ap.resolve_reviewer).parameters) == [
         "name", "env",
     ]
@@ -1171,6 +1173,15 @@ def test_launch_review_without_cancel_keeps_positional_shape(bindir):
     assert result.cancelled is False
 
 
+def test_launch_review_cancel_is_keyword_only(bindir):
+    import threading
+
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    with pytest.raises(TypeError):
+        ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]),
+                         threading.Event())
+
+
 def test_launch_review_preset_cancel_never_starts_child(bindir, tmp_path):
     import threading
 
@@ -1276,24 +1287,45 @@ def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
 
 
 def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(
-        bindir, monkeypatch):
+        bindir, monkeypatch, tmp_path):
     import concurrent.futures as _futures
 
-    adapter = _synthetic(_resolve(bindir, "codex", HANG))
+    pidlog = tmp_path / "pids.log"
+    body = ("#!/bin/sh\n"
+            f"echo $$ >> {pidlog}\n"
+            "cat >/dev/null\nsleep 30\nexit 0\n")
+    adapter = _synthetic(_resolve(bindir, "codex", body))
     requests = [(PACKET, SCHEMA), (PACKET, SCHEMA)]
     real_wait = _futures.wait
     calls = []
 
     def _boom(*args, **kwargs):
         calls.append(1)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                lines = pidlog.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                lines = []
+            if len([line for line in lines if line.strip()]) >= 2:
+                break
+            time.sleep(0.05)
         raise KeyboardInterrupt
 
     monkeypatch.setattr(_futures, "wait", _boom)
+    start = time.monotonic()
     with pytest.raises(Problem) as exc:
         ap.launch_reviews(adapter, requests, 30, concurrency=2)
+    elapsed = time.monotonic() - start
     assert exc.value.code == "review-cancelled"
     assert calls == [1]
     assert real_wait is not None
+    assert elapsed < 10
+    pids = [int(line.strip()) for line in
+            pidlog.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(pids) == 2
+    for pid in pids:
+        _assert_dead(pid)
 
 
 def test_launch_reviews_rejects_bad_concurrency(bindir):

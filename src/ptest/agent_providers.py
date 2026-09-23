@@ -823,7 +823,7 @@ def _normalize(name: str, stdout: bytes) -> tuple[bool, bytes, str]:
 
 def launch_review(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                   timeout_s: int,
-                  progress: Callable[[ProgressEvent], None],
+                  progress: Callable[[ProgressEvent], None], *,
                   cancel: threading.Event | None = None) -> ProviderResult:
     """Run one owned provider child and normalize exactly one assessment.
 
