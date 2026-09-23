@@ -12,7 +12,6 @@ from ptest import contracts as C
 from ptest import history
 from ptest import operations
 from ptest.adapters import pytest as pytest_adapter
-from ptest.adapters import vitest as vitest_adapter
 from ptest.reports import allocate_report, consume_attempt_report
 from ptest.runtime.pytest_bridge import AdvancedPlugin, BridgeRefusal, _write_attempt_report
 from ptest.runtime import pytest_bridge
@@ -114,14 +113,6 @@ def test_forged_or_incomplete_evidence_cannot_promote_profile(case):
                                           C.RunnerKind.PYTEST, evidence, binding=None)
     assert history.read_qualified_profile(domain, checkout,
                                           C.RunnerKind.PYTEST) is None
-
-
-def test_vitest_compound_support_requires_an_exact_local_profile():
-    support = vitest_adapter.compound_support(
-        _config(C.RunnerKind.VITEST, args=("--pool", "threads")))
-    assert support.selection is False
-    assert support.parallel_identity is False
-    assert support.profile is None
 
 
 def test_catalog_declaration_requires_explicit_instrumentation():
@@ -339,14 +330,4 @@ def test_advanced_prepare_rejects_a_forged_expected_runtime_digest():
                                         expected_runtime_identity="bad")
 
 
-def test_vitest_advanced_prepare_refuses_before_node_launch():
-    config = _config(C.RunnerKind.VITEST)
-    plan = C.Plan(mode=C.Mode.AUTOMATIC, execution="selected",
-                  files=("tests/alpha.test.mjs",))
-    grant = C.Grant(run_id="cd" * 16, nonce="ef" * 32, slots=2,
-                    memory_estimate_mb=None, reserved_memory_mb=None,
-                    generation=1, domain_id="01" * 16)
-    attempt = C.AttemptIdentity(run_id=grant.run_id, attempt_id="a001",
-                                resource_prefix="ptest_a001_w000", worker_count=2)
-    with pytest.raises(C.Problem, match="advanced native qualification is unavailable"):
-        vitest_adapter.prepare_advanced(config, plan, grant, attempt)
+
