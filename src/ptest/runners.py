@@ -93,9 +93,7 @@ _REGISTRY: dict[C.RunnerKind, RunnerAdapter] = {
     ),
     C.RunnerKind.VITEST: RunnerAdapter(
         C.RunnerKind.VITEST, vitest_adapter.prepare,
-        _compound_support=vitest_adapter.compound_support,
-        _qualified_profile=vitest_adapter.qualified_profile,
-        _prepare_advanced=vitest_adapter.prepare_advanced,
+        _exclusive=True, automatic_full=True,
     ),
     C.RunnerKind.GO: RunnerAdapter(
         C.RunnerKind.GO, simple_adapter.prepare, automatic_full=True,

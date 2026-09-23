@@ -893,3 +893,202 @@ def test_guard_launch_forwards_only_doctor_smoke_manifest(case, monkeypatch):
     seen = json.loads((root / "seen-env.json").read_text(encoding="utf-8"))
     assert seen["manifest"] == "/tmp/smoke-manifest.json"
     assert seen["hostile"] is None
+
+
+_FAKE_NODE_SCRIPT = (
+    "#!/usr/bin/env python3\n"
+    "import json, os, sys\n"
+    "from pathlib import Path\n"
+    "root = Path(os.getcwd())\n"
+    "(root / 'node-record.json').write_text(json.dumps(\n"
+    "    {'argv': sys.argv, 'cwd': os.getcwd()}))\n"
+    "with open(root / 'order.log', 'a') as log:\n"
+    "    log.write('node\\n')\n"
+    "exit_file = root / 'node-exit'\n"
+    "raise SystemExit(int(exit_file.read_text().strip()) if exit_file.exists() else 0)\n"
+)
+
+_SETUP_SCRIPT = (
+    "from pathlib import Path\n"
+    "Path('node_modules').mkdir(exist_ok=True)\n"
+    "with open('order.log', 'a') as log:\n"
+    "    log.write('setup\\n')\n"
+)
+
+
+def _fake_node(root: Path) -> str:
+    node = root / "node"
+    node.write_text(_FAKE_NODE_SCRIPT, encoding="utf-8")
+    node.chmod(0o755)
+    return str(node)
+
+
+def _vitest_project(case, domain, *, args=(), full_args=(), setup=False):
+    root = case.project(domain, kind="vitest")
+    node = _fake_node(root)
+    project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
+        'project_id = "', 1
+    )[1].split('"', 1)[0]
+    config = (
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        f"launcher = {json.dumps([node])}\n"
+        f"args = {json.dumps(list(args))}\n"
+        f"full_args = {json.dumps(list(full_args))}\n"
+        'kind = "vitest"\n'
+        'test_roots = ["."]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n'
+    )
+    if setup:
+        (root / "setup.py").write_text(_SETUP_SCRIPT, encoding="utf-8")
+        config += (
+            "[setup]\n"
+            f"argv = {json.dumps([sys.executable, 'setup.py'])}\n"
+            'required_paths = ["node_modules"]\n'
+            "network = false\n"
+            "lifecycle_scripts = false\n"
+        )
+    (root / ".ptest.toml").write_text(config, encoding="utf-8")
+    return root
+
+
+def _node_record(root: Path) -> dict:
+    return json.loads((root / "node-record.json").read_text(encoding="utf-8"))
+
+
+def test_vitest_scoped_executes_literal_exclusive_command(case):
+    domain = case.domain()
+    root = _vitest_project(case, domain)
+
+    completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
+
+    assert completed.code == 0
+    record = _node_record(root)
+    assert record["argv"][0] == str(root / "node")
+    assert record["argv"][1:] == ["node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
+    assert record["cwd"] == str(root)
+    result = _run_data(completed)
+    assert result["status"] == "passed"
+    assert result["runner_exit_code"] == 0
+    assert result["plan"]["execution"] == "scoped"
+
+
+def test_vitest_failure_preserves_native_exit(case):
+    domain = case.domain()
+    root = _vitest_project(case, domain)
+    (root / "node-exit").write_text("1", encoding="utf-8")
+
+    completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
+
+    assert completed.code == 1
+    result = _run_data(completed)
+    assert result["status"] == "failed"
+    assert result["runner_exit_code"] == 1
+
+
+def test_vitest_full_appends_full_args(case):
+    domain = case.domain()
+    root = _vitest_project(case, domain,
+                           args=("--reporter", "verbose"), full_args=("--coverage",))
+
+    completed = case.invoke(domain, root, timeout=20)
+
+    assert completed.code == 0
+    record = _node_record(root)
+    assert record["argv"][1:] == ["node_modules/vitest/vitest.mjs", "run",
+                                  "--reporter", "verbose", "--coverage"]
+    assert _run_data(completed)["plan"]["execution"] == "full"
+
+
+def test_vitest_setup_runs_first_when_required_paths_missing(case):
+    domain = case.domain()
+    root = _vitest_project(case, domain, setup=True)
+
+    completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
+
+    assert completed.code == 0
+    assert (root / "order.log").read_text(encoding="utf-8").splitlines() == ["setup", "node"]
+    assert (root / "node_modules").is_dir()
+
+
+def test_vitest_setup_is_skipped_once_current(case):
+    domain = case.domain()
+    root = _vitest_project(case, domain, setup=True)
+
+    assert case.invoke(domain, root, "--", "src/a.test.ts", timeout=20).code == 0
+    assert case.invoke(domain, root, "--", "src/a.test.ts", timeout=20).code == 0
+
+    assert (root / "order.log").read_text(encoding="utf-8").splitlines() == ["setup", "node", "node"]
+
+
+def test_setup_summary_kind_matches_vitest_config(case):
+    from ptest import operations as ops_module
+    from ptest.adapters import vitest as vitest_adapter
+
+    domain = case.domain()
+    root = _vitest_project(case, domain, setup=True)
+    config = config_api.resolve_config(root).config
+    checkout = case.checkout(domain)
+    plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=())
+    grant = C.Grant(run_id="ab" * 16, nonce="cd" * 32, slots=1,
+                    memory_estimate_mb=None, reserved_memory_mb=None,
+                    generation=0, domain_id="ef" * 16)
+    attempt = C.AttemptIdentity(run_id=grant.run_id, attempt_id="a001",
+                                resource_prefix="pt_prefix", worker_count=1)
+    prepared = vitest_adapter.prepare(config, plan, grant, attempt)
+
+    setup_prepared = ops_module._setup_prepared(
+        config, replace(checkout, root=root), C.RunRequest(mode=C.Mode.SCOPED),
+        prepared, domain, grant, attempt)
+
+    assert setup_prepared is not None
+    assert setup_prepared.summary.kind is C.RunnerKind.VITEST
+
+
+@pytest.mark.parametrize("kind", ["go", "cargo"])
+def test_native_go_cargo_execution_remains_deferred(case, kind):
+    domain = case.domain()
+    root = case.project(domain, kind=kind)
+    (root / ".ptest.toml").write_text(
+        (root / ".ptest.toml").read_text(encoding="utf-8")
+        + 'test_roots = ["tests"]\n',
+        encoding="utf-8",
+    )
+
+    completed = case.invoke(domain, root, timeout=20)
+
+    assert completed.code == 2
+    assert b"native profile execution is deferred" in completed.stderr
+    assert completed.result is None
+
+
+def test_monorepo_scope_routes_to_vitest_child(case):
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    web = root / "web"
+    web.mkdir()
+    node = _fake_node(web)
+    (web / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{"cd" * 16}"\n'
+        "[runner]\n"
+        f"launcher = {json.dumps([node])}\n"
+        "args = []\n"
+        "full_args = []\n"
+        'kind = "vitest"\n'
+        'test_roots = ["."]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    (root / ".ptest.toml").write_text(
+        "version = 2\n\n[monorepo]\nchildren = [\"web\"]\n", encoding="utf-8")
+
+    completed = case.invoke(domain, root, "--", "web/src/a.test.ts", timeout=20)
+
+    assert completed.code == 0
+    record = _node_record(web)
+    assert record["argv"][1:] == ["node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
+    assert record["cwd"] == str(web)

@@ -372,7 +372,7 @@ def _setup_prepared(config: C.Config, checkout: C.CheckoutIdentity,
         env_updates=identity,
         capability=prepared.capability,
         summary=C.summarize_command(
-            C.RunnerKind.PYTEST, C.Mode.SCOPED, setup.argv,
+            config.runner.kind, C.Mode.SCOPED, setup.argv,
             workers=grant.slots, provenance=("declared-setup",)),
     )
 
@@ -1818,10 +1818,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
         if request.mode is C.Mode.FULL and "." in config.runner.test_roots:
             raise _problem("unsupported-capability", "pytest full execution does not support a dot test root")
-    elif config.runner.kind is not C.RunnerKind.COMMAND:
+    elif config.runner.kind not in (C.RunnerKind.COMMAND, C.RunnerKind.VITEST):
         raise _problem("unsupported-capability", "native profile execution is deferred")
-    if not native_runner and config.setup is not None:
-        raise _problem("unsupported-capability", "setup execution is deferred for command profiles")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
     if not native_runner and not adapter.requires_exclusive(config):
