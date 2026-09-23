@@ -104,6 +104,7 @@ def test_exact_function_signatures():
     ]
     assert list(inspect.signature(ap.launch_reviews).parameters) == [
         "adapter", "requests", "timeout_s", "concurrency", "on_done",
+        "progress",
     ]
     assert list(inspect.signature(ap.with_model).parameters) == [
         "adapter", "model",
@@ -1312,7 +1313,7 @@ def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(
             time.sleep(0.05)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(_futures, "wait", _boom)
+    monkeypatch.setattr(_futures, "as_completed", _boom)
     start = time.monotonic()
     with pytest.raises(Problem) as exc:
         ap.launch_reviews(adapter, requests, 30, concurrency=2)
@@ -1340,6 +1341,57 @@ def test_launch_reviews_rejects_bad_concurrency(bindir):
 def test_launch_reviews_empty_requests_returns_empty(bindir):
     adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
     assert ap.launch_reviews(adapter, [], 10) == ()
+
+
+def test_launch_reviews_reports_each_item_as_it_completes(monkeypatch):
+    """on_done fires per completion, not after the whole fan-out."""
+    import threading
+
+    from ptest.agent_providers import ProgressEvent, ProviderResult
+
+    proceed = threading.Event()
+    events: list = []
+
+    def fake_launch_one(adapter, packet, schema, timeout_s, progress,
+                        cancel):
+        progress(ProgressEvent(phase="reviewing", provider=adapter.name,
+                               elapsed_s=0.0))
+        if packet == b"slow":
+            assert proceed.wait(timeout=10), "fan-out deadlocked"
+        return ProviderResult(
+            provider=adapter.name, ok=True, assessment=packet, error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=os.getpid(), argv=adapter.argv, scratch="synthetic")
+
+    monkeypatch.setattr(ap, "_launch_one", fake_launch_one)
+    adapter = ap.ReviewerAdapter(
+        name="codex", executable="/fake/codex", argv=("/fake/codex",),
+        qualified=True, qualification_note="synthetic")
+    outcome: dict = {}
+
+    def run():
+        outcome["results"] = ap.launch_reviews(
+            adapter, [(b"fast", SCHEMA), (b"slow", SCHEMA)], 60,
+            concurrency=2, on_done=lambda i, r: events.append(i),
+            progress=lambda e: events.append(e.phase))
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10
+        while 0 not in events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # The fast item is reported while the slow one still runs; the
+        # old wait-then-report loop could never do this.
+        assert 0 in events
+        assert 1 not in events
+    finally:
+        proceed.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert sorted(i for i in events if isinstance(i, int)) == [0, 1]
+    assert "reviewing" in events
+    assert [r.assessment for r in outcome["results"]] == [b"fast", b"slow"]
 
 
 def test_with_model_appends_only_the_model_flag(bindir):

@@ -1099,13 +1099,17 @@ def launch_reviews(adapter: ReviewerAdapter,
                    requests: Sequence[tuple[bytes, bytes]],
                    timeout_s: int, *,
                    concurrency: int = 4,
-                   on_done: Callable[[int, ProviderResult], None] | None = None
+                   on_done: Callable[[int, ProviderResult], None] | None = None,
+                   progress: Callable[[ProgressEvent], None] | None = None
                    ) -> tuple[ProviderResult, ...]:
     """Run one review per request with bounded concurrency.
 
     Results stay aligned with ``requests``; a per-item failure marks only
-    that item. KeyboardInterrupt in the waiting thread sets the shared
-    cancel event, joins every worker, then raises ``review-cancelled``.
+    that item. ``on_done`` fires per item as it completes (via
+    ``as_completed``), and ``progress`` — shared thread-safely by every
+    worker — carries each item's reviewing heartbeat during long fan-out.
+    KeyboardInterrupt in the waiting thread sets the shared cancel event,
+    joins every worker, then raises ``review-cancelled``.
     """
     if not isinstance(adapter, ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
@@ -1127,20 +1131,33 @@ def launch_reviews(adapter: ReviewerAdapter,
         raise _problem("invalid-bound", "concurrency outside 1..8")
     if on_done is not None and not callable(on_done):
         raise TypeError("on_done must be callable or None")
+    if progress is not None and not callable(progress):
+        raise TypeError("progress must be callable or None")
     if not adapter.qualified:
         raise _problem("provider-unqualified",
                        f"reviewer {adapter.name} profile unproven")
     if not pairs:
         return ()
 
-    def _quiet(event: ProgressEvent) -> None:
+    lock = threading.Lock()
+
+    def _emit(event: ProgressEvent) -> None:
+        if progress is None:
+            return None
+        try:
+            with lock:
+                progress(event)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass  # progress reporting must never fail the review
         return None
 
     cancel = threading.Event()
 
     def _work(index: int, packet: bytes, schema: bytes) -> ProviderResult:
         try:
-            return _launch_one(adapter, packet, schema, timeout_s, _quiet,
+            return _launch_one(adapter, packet, schema, timeout_s, _emit,
                                cancel)
         except Problem as problem:
             return ProviderResult(
@@ -1149,27 +1166,30 @@ def launch_reviews(adapter: ReviewerAdapter,
                 cancelled=False, truncated=False, pid=os.getpid(),
                 argv=adapter.argv, scratch="unstarted")
 
+    def _report(index: int, result: ProviderResult) -> None:
+        if on_done is None:
+            return
+        try:
+            on_done(index, result)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass  # progress reporting must never fail the review
+
     results: list = [None] * len(pairs)
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=concurrency) as executor:
         pending = {executor.submit(_work, index, packet, schema): index
                    for index, (packet, schema) in enumerate(pairs)}
         try:
-            concurrent.futures.wait(list(pending))
+            for future in concurrent.futures.as_completed(pending):
+                index = pending[future]
+                results[index] = future.result()
+                _report(index, results[index])
         except KeyboardInterrupt:
             cancel.set()
             raise _problem("review-cancelled",
                            "review was cancelled") from None
-        for future, index in pending.items():
-            results[index] = future.result()
-    if on_done is not None:
-        for index, result in enumerate(results):
-            try:
-                on_done(index, result)
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                pass  # progress reporting must never fail the review
     return tuple(results)
 
 
