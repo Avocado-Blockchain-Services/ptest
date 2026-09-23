@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import sys
 import time
 from dataclasses import dataclass
@@ -42,10 +41,8 @@ SMOKE_QUEUE_TIMEOUT_S = 60
 
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_ENTRIES = 2000
-_MAX_DEPTH = 6
 _MAX_SCAN = 32
 _MAX_LINES = 5
-_VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
 # Database, network, or service library names, any language. Conservative:
 # a hit only disqualifies one file, never the project.
 _TAINT_NAMES = re.compile(
@@ -82,18 +79,12 @@ def parse_consent(answer: str) -> bool:
     return answer.strip().lower() in ("", "y", "yes")
 
 
-def _name_ok(name: str, kind: C.RunnerKind) -> bool:
-    if kind is C.RunnerKind.PYTEST:
-        return (name.startswith("test_") and name.endswith(".py")) \
-            or name.endswith("_test.py")
-    if kind is C.RunnerKind.VITEST:
-        return _VITEST_TEST_RE.search(name) is not None
-    return False
-
-
 def _safe_root(test_root: str) -> bool:
+    # A dot root is safe: the shared selection walks src/__tests__ first
+    # under it, so the bounded walk reaches real tests instead of
+    # alphabetically-first tooling directories.
     if test_root in (".", ""):
-        return False
+        return True
     if test_root.startswith(("-", "@", "/")) or "\\" in test_root \
             or "::" in test_root:
         return False
@@ -104,24 +95,20 @@ def _collect(root: Path, test_roots: tuple[str, ...],
              kind: C.RunnerKind) -> list[tuple[int, str]]:
     """(size, project-relative path) of candidate test files, bounded.
 
-    Walks with the executability walker so the two static scans share one
-    traversal; only name-matching candidates pay for a size stat.
+    Uses the shared executability selection, so the smoke candidate and
+    the executability example pick from the same filtered traversal; only
+    selected candidates pay for a size stat.
     """
     found: list[tuple[int, str]] = []
+    seen: set[str] = set()
     budget = [_MAX_ENTRIES]
     for test_root in test_roots:
         if not _safe_root(test_root):
             continue
-        base = root / test_root
-        try:
-            stamp = os.lstat(base)
-        except OSError:
-            continue
-        if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
-            continue
-        for rel in _exec_check.iter_files(root, base, _MAX_DEPTH, budget):
-            if not _name_ok(Path(rel).name, kind):
+        for rel in _exec_check.iter_candidates(root, test_root, kind, budget):
+            if rel in seen:
                 continue
+            seen.add(rel)
             try:
                 size = os.lstat(root / rel).st_size
             except OSError:

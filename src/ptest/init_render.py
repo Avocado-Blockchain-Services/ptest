@@ -177,13 +177,19 @@ def _config_lines(result: C.InitResult) -> list[str]:
     # JSON document. The root line is synthesized from the result action
     # only when no detail record names it, so it always appears exactly
     # once and never in the historical ``created: .ptest.toml`` shape.
+    # A child with a Projects entry renders only there (as its status
+    # line), so its config action never duplicates across sections.
     records = _config_records(result)
+    projects, _, others = _split_notes(result)
+    noted = {project for project, _, _ in projects if project != "."}
     lines: list[str] = []
     if not any(target == _CONFIG_NAME for _, target in records):
         lines.extend(_entry(_synthesized_root_action(result), _CONFIG_NAME))
     for action, target in records:
+        if any(target == f"{project}/{_CONFIG_NAME}" for project in noted):
+            continue
         lines.extend(_entry(action, target))
-    for target in _split_notes(result)[2]:
+    for target in others:
         lines.extend(_entry("note", target))
     return lines
 
@@ -213,32 +219,60 @@ def _split_notes(result: C.InitResult) -> tuple[list, list, list]:
     return projects, runs, others
 
 
-def _project_config_lines(records: list, project: str) -> list[str]:
-    """Config action lines belonging to a named project, if any.
+_CAVEATS_PREFIX = "ready with caveats:"
+_BULLET_PREFIX = "    - "
+_BULLET_CONT = "      "
 
-    The root project ``.`` owns the root line already shown under
-    Configuration, so it is never repeated and the root still appears
-    exactly once.
+
+def _split_verdict(verdict: str) -> tuple[str, list[str]]:
+    """Split a project verdict into a short head plus one bullet per detail.
+
+    ``ready with caveats: c1; c2`` becomes the head ``ready with caveats``
+    with one bullet per caveat; ``not runnable: reason — fix: fix`` becomes
+    the head ``not runnable`` with reason and fix bullets. Anything else
+    renders as a single head line, so an unknown verdict never loses text.
     """
-    if project == ".":
+    if verdict == "ready":
+        return "ready", []
+    if verdict.startswith(_CAVEATS_PREFIX):
+        rest = verdict[len(_CAVEATS_PREFIX):].strip()
+        bullets = [part.strip() for part in rest.split(";")]
+        return "ready with caveats", [part for part in bullets if part]
+    if verdict.startswith(_NOT_RUNNABLE_PREFIX):
+        rest = verdict[len(_NOT_RUNNABLE_PREFIX):]
+        if _FIX_SEP in rest:
+            reason, fix = rest.split(_FIX_SEP, 1)
+            bullets = [reason.strip(), f"fix: {fix.strip()}"]
+        else:
+            bullets = [rest.strip()]
+        return "not runnable", [part for part in bullets if part]
+    return verdict, []
+
+
+def _bullet_lines(text: str) -> list[str]:
+    """One caveat as a wrapped bullet; every row fits the box width."""
+    width = _INNER - len(_BULLET_PREFIX)
+    chunks = textwrap.wrap(
+        text, width=width, break_long_words=True, break_on_hyphens=False,
+        replace_whitespace=False, drop_whitespace=True,
+    )
+    if not chunks:
         return []
-    lines: list[str] = []
-    for action, target in records:
-        if target == f"{project}/{_CONFIG_NAME}":
-            lines.extend(_entry(action, target))
-    return lines
+    return [_BULLET_PREFIX + chunks[0]] + [
+        _BULLET_CONT + chunk for chunk in chunks[1:]]
 
 
 def _project_lines(result: C.InitResult) -> list[str]:
     projects, _, _ = _split_notes(result)
     if not projects:
         return []
-    records = _config_records(result)
     lines: list[str] = []
     for project, runner, verdict in projects:
-        lines.extend(_wrapped(f"{project}  {runner}  {verdict}",
+        head, bullets = _split_verdict(verdict)
+        lines.extend(_wrapped(f"{project}  {runner}  {head}",
                               indent=_ENTRY_INDENT))
-        lines.extend(_project_config_lines(records, project))
+        for bullet in bullets:
+            lines.extend(_bullet_lines(bullet))
     return lines
 
 

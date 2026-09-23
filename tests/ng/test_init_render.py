@@ -171,6 +171,58 @@ def test_renderer_reports_exact_per_child_config_actions():
     assert "ptest --full" not in text
 
 
+def test_project_with_caveats_renders_once_with_bullet_lines():
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _detail("api/.ptest.toml", "created", "config"),
+        _note("api · pytest · ready with caveats: first caveat; second caveat"),
+        _note("run: ptest api/tests/test_a.py"),
+    ))
+    text = render_init(result, None, agents=())
+
+    # The child config action no longer duplicates the Projects entry.
+    assert "api/.ptest.toml" not in text
+    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
+    assert "api  pytest  ready with caveats" in projects
+    assert "- first caveat" in projects
+    assert "- second caveat" in projects
+
+
+def test_long_caveat_wraps_as_own_bullet_with_intact_head():
+    caveat = ("setup runs when required paths or its fingerprint are missing: "
+              "uv sync --locked --extra-index-url https://example.test/simple")
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note(f"api · pytest · ready with caveats: {caveat}"),
+    ))
+    text = render_init(result, None, agents=())
+
+    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
+    assert "api  pytest  ready with caveats" in projects
+    # Every drawn row keeps the 64-column box geometry.
+    for line in text.splitlines():
+        stripped = _strip_ansi(line)
+        if stripped and stripped[0] in "┌├└│":
+            assert _dwidth(stripped) == 64
+
+
+def test_not_runnable_project_shows_reason_and_fix_bullets():
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note("api · pytest · not runnable: pytest addopts enable xdist, "
+              "which ptest runs serially — fix: add \"-n\", \"0\" to [runner] "
+              "args in api/.ptest.toml"),
+        _note("run: ptest web/src/a.test.ts"),
+    ))
+    text = render_init(result, None, agents=())
+
+    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
+    assert "api  pytest  not runnable" in projects
+    assert "- pytest addopts enable xdist" in projects
+    # The verified fix still reaches Next steps exactly once.
+    assert text.count("fix api:") == 1
+
+
 def test_projects_section_renders_notes_in_section_order():
     result = _result(details=(
         _detail(".ptest.toml", "created", "config"),

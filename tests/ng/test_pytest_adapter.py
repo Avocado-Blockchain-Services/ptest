@@ -404,6 +404,71 @@ def test_active_xdist_state_still_refuses_with_existing_messages(options):
         pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 
+@pytest.mark.parametrize("module", ["anyio.pytest_plugin", "anyio"])
+def test_anyio_hook_module_is_accepted_in_scoped_serial(module, bridge_env):
+    """anyio arrives transitively with FastAPI/httpx and only wraps test calls.
+
+    Its auto-registered pytest plugin defines ``pytest_pyfunc_call``; the
+    serial grant approves the ``anyio`` module prefix the same way it
+    approves pytest_asyncio/pytest_timeout.
+    """
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("anyio", plugin),),
+        [_hookimpl("pytest_pyfunc_call", module, plugin)],
+    )
+    scoped = _native_config()
+    scoped.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(scoped)
+
+    full = _native_config()
+    full.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution="full").pytest_configure(full)
+
+
+@pytest.mark.parametrize("module", ["anyiox.pytest_plugin", "evil.anyio"])
+def test_anyio_lookalike_hook_is_still_refused(module):
+    """A look-alike prefix never authenticates an anyio-shaped hook."""
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("lookalike", plugin),),
+        [_hookimpl("pytest_pyfunc_call", module, plugin)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="not owned by the serial grant"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
+def test_persea_api_plugin_set_is_accepted_in_scoped_serial(bridge_env):
+    """Mirror of the persea api plugin set: faker, cov, timeout, asyncio, anyio.
+
+    None of these owns execution under the serial grant, so a scoped run
+    with all of them loaded must not refuse.
+    """
+    faker = _module("faker.contrib.pytest.plugin")
+    cov = _module("pytest_cov.plugin")
+    timeout = _module("pytest_timeout")
+    asyncio_plugin = _module("pytest_asyncio.plugin")
+    anyio_plugin = _module("anyio.pytest_plugin")
+    manager = _loaded_manager(
+        (("faker", faker),
+         ("pytest-cov", cov),
+         ("timeout", timeout),
+         ("asyncio", asyncio_plugin),
+         ("anyio", anyio_plugin)),
+        [_hookimpl("pytest_sessionfinish", "pytest_cov.plugin", cov),
+         _hookimpl("pytest_runtest_protocol", "pytest_timeout", timeout),
+         _hookimpl("pytest_pyfunc_call", "pytest_asyncio.plugin", asyncio_plugin),
+         _hookimpl("pytest_pyfunc_call", "anyio.pytest_plugin", anyio_plugin)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
 @pytest.mark.parametrize("module", ["pytest_asyncio.plugin", "pytest_timeout"])
 def test_hook_only_modules_are_accepted_in_scoped_serial(module, bridge_env):
     plugin = _module(module)

@@ -514,8 +514,13 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
 
 
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
-# additive under the basic-serial grant.
-_BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout")
+# additive under the basic-serial grant. anyio arrives transitively with
+# FastAPI/httpx/starlette and only wraps test calls (pytest_pyfunc_call),
+# so it is approved at the same module-prefix granularity. There is no
+# version pin: like pytest_asyncio/pytest_timeout, approval is by hook
+# ownership, not by version (the only version pin in this bridge is the
+# frozen pytest-cov/coverage evidence tuple, which is unrelated).
+_BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio")
 
 
 class OwnedPlugin:

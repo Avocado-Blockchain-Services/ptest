@@ -91,6 +91,60 @@ def test_candidate_picks_vitest_shape(tmp_path):
         tmp_path, C.RunnerKind.VITEST, ("tests",)) == "tests/a.test.ts"
 
 
+def _persea_web_shape(root):
+    """Persea-web-shaped fixture: Playwright specs in e2e/, unit tests in src/."""
+    _git(root)
+    (root / "vitest.config.ts").write_text(
+        "import { defineConfig, configDefaults } from 'vitest/config';\n"
+        "export default defineConfig({\n"
+        "  test: {\n"
+        "    exclude: [...configDefaults.exclude, 'e2e/**'],\n"
+        "  },\n"
+        "});\n",
+        encoding="utf-8")
+    (root / "playwright.config.ts").write_text(
+        "import { defineConfig } from '@playwright/test';\n"
+        "export default defineConfig({ testDir: './e2e' });\n",
+        encoding="utf-8")
+    e2e = root / "e2e"
+    e2e.mkdir()
+    (e2e / "agents.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n"
+        "test('flow', () => {});\n",
+        encoding="utf-8")
+    src = root / "src"
+    src.mkdir()
+    (src / "i18n-defaults.test.ts").write_text(
+        "import { it } from 'vitest';\n"
+        "it('defaults to Spanish when browser locale starts with es', () => {});\n",
+        encoding="utf-8")
+
+
+def test_candidate_finds_src_test_under_dot_root(tmp_path):
+    """Diagnosed persea-web failure: test_roots "." yielded no candidate."""
+    from ptest import init_smoke
+
+    _persea_web_shape(tmp_path)
+
+    assert init_smoke.choose_candidate(
+        tmp_path, C.RunnerKind.VITEST, (".",)) == "src/i18n-defaults.test.ts"
+
+
+def test_candidate_skips_playwright_specs_under_dot_root(tmp_path):
+    from ptest import init_smoke
+
+    _persea_web_shape(tmp_path)
+    src = tmp_path / "src"
+    # Smaller than i18n-defaults.test.ts, so it is scanned first: only the
+    # Playwright-import check can reject it.
+    (src / "a-play.spec.ts").write_text(
+        "import{test}from'@playwright/test';test('f',()=>{});\n",
+        encoding="utf-8")
+
+    assert init_smoke.choose_candidate(
+        tmp_path, C.RunnerKind.VITEST, (".",)) == "src/i18n-defaults.test.ts"
+
+
 # --- consent matrix (execute stubbed: consent plumbing only) ----------------
 
 

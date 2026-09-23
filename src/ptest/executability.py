@@ -12,7 +12,7 @@ import shlex
 import stat
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import contracts as C
 from .adapters.pytest import reject_unowned_controls, require_python_launcher
@@ -364,24 +364,330 @@ def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(found)
 
 
-def _example_test(root: Path, test_root: str, kind: C.RunnerKind) -> str | None:
-    base = root if test_root in (".", "") else root / test_root
-    try:
-        stamp = os.lstat(base)
-    except OSError:
-        return None
-    if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
-        return None
-    budget = [_MAX_WALK_ENTRIES]
-    for rel in iter_files(root, base, 6, budget):
-        name = Path(rel).name
-        if kind is C.RunnerKind.PYTEST:
-            if name.startswith("test_") and name.endswith(".py") \
-                    or name.endswith("_test.py"):
-                return rel
+# Stock vitest ``configDefaults.exclude``: a config that spreads it (the
+# common ``exclude: [...configDefaults.exclude, 'e2e/**']`` shape) lists no
+# literal for the spread, so the known defaults are always applied.
+_VITEST_DEFAULT_EXCLUDE = (
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/cypress/**",
+    "**/.{idea,git,cache,output,temp}/**",
+    "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build}.config.*",
+)
+_VITEST_CONFIG_NAMES = (
+    "vitest.config.ts", "vitest.config.js", "vitest.config.mjs",
+    "vitest.config.mts", "vite.config.ts", "vite.config.js",
+    "vite.config.mjs", "vite.config.mts",
+)
+_PLAYWRIGHT_CONFIG_NAMES = (
+    "playwright.config.ts", "playwright.config.js",
+    "playwright.config.mjs", "playwright.config.mts",
+)
+_PLAYWRIGHT_IMPORT = "@playwright/test"
+_HEAD_BYTES = 4096
+
+
+def _js_tokens(text: str) -> list:
+    """Lex a JS/TS config into braces, strings, idents and punctuation.
+
+    Static only: nothing is executed. Comments are dropped, template
+    literals are opaque, and regex literals are skipped so a ``{`` inside
+    one cannot corrupt brace-depth tracking. Non-literal values (spreads,
+    identifiers, calls) surface as punctuation/idents and are ignored by
+    the array readers below.
+    """
+    tokens: list = []
+    i, n = 0, len(text)
+    last: tuple | None = None
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n\v\f":
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i + 2)
+            i = n if end < 0 else end + 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        elif ch == "/" and i + 1 < n and text[i + 1] not in ("/", "*") \
+                and (last is None or last in (
+                    ("punct", "="), ("punct", "("), ("punct", ","),
+                    ("punct", ":"), ("punct", "["), ("punct", "!"),
+                    ("punct", "&"), ("punct", "|"), ("punct", "?"),
+                    ("punct", "{"))):
+            # Regex literal, not division: skip it including classes/escapes.
+            j = i + 1
+            in_class = False
+            while j < n:
+                c = text[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    j += 1
+                    break
+                elif c == "\n":
+                    break
+                j += 1
+            i = j
+        elif ch in ("'", '"'):
+            j = i + 1
+            out: list[str] = []
+            closed = False
+            while j < n:
+                c = text[j]
+                if c == "\\" and j + 1 < n:
+                    out.append(text[j + 1])
+                    j += 2
+                    continue
+                if c == ch:
+                    closed = True
+                    j += 1
+                    break
+                if c == "\n":
+                    break
+                out.append(c)
+                j += 1
+            if closed:
+                last = ("string", "".join(out))
+                tokens.append(last)
+            i = j
+        elif ch == "`":
+            j = i + 1
+            depth = 0
+            while j < n:
+                c = text[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "$" and j + 1 < n and text[j + 1] == "{":
+                    depth += 1
+                    j += 2
+                    continue
+                if c == "}" and depth:
+                    depth -= 1
+                    j += 1
+                    continue
+                if c == "`" and not depth:
+                    j += 1
+                    break
+                j += 1
+            i = j
+        elif ch in "{}[]():,":
+            last = ("punct", ch)
+            tokens.append(last)
+            i += 1
+        elif ch.isalpha() or ch in "_$":
+            j = i + 1
+            while j < n and (text[j].isalnum() or text[j] in "_$"):
+                j += 1
+            last = ("ident", text[i:j])
+            tokens.append(last)
+            i = j
         else:
-            if _VITEST_TEST_RE.search(name):
-                return rel
+            i += 1
+    return tokens
+
+
+def _test_block_arrays(text: str) -> tuple[list[str], list[str]]:
+    """Literal ``exclude``/``include`` strings from the ``test: {...}`` block.
+
+    Only keys one level inside ``test:`` are read, so nested ``include``
+    arrays (coverage, typecheck) are ignored along with every non-literal
+    value. Unknown or absent blocks yield empty lists.
+    """
+    tokens = _js_tokens(text)
+    n = len(tokens)
+    index = 0
+    while index + 2 < n:
+        if tokens[index] == ("ident", "test") \
+                and tokens[index + 1] == ("punct", ":") \
+                and tokens[index + 2] == ("punct", "{"):
+            break
+        index += 1
+    else:
+        return [], []
+    excludes: list[str] = []
+    includes: list[str] = []
+    depth = 1
+    index += 3
+    while index < n and depth > 0:
+        token = tokens[index]
+        if token == ("punct", "{"):
+            depth += 1
+        elif token == ("punct", "}"):
+            depth -= 1
+        elif depth == 1 and token in (("ident", "exclude"), ("ident", "include")) \
+                and index + 2 < n \
+                and tokens[index + 1] == ("punct", ":") \
+                and tokens[index + 2] == ("punct", "["):
+            target = excludes if token[1] == "exclude" else includes
+            brackets = 1
+            index += 3
+            while index < n and brackets > 0:
+                item = tokens[index]
+                if item == ("punct", "["):
+                    brackets += 1
+                elif item == ("punct", "]"):
+                    brackets -= 1
+                elif item[0] == "string" and brackets >= 1:
+                    target.append(item[1])
+                index += 1
+            continue
+        index += 1
+    return excludes, includes
+
+
+def _playwright_test_dir(root: Path) -> str:
+    """Literal Playwright ``testDir`` (default ``e2e``); never executed."""
+    for name in _PLAYWRIGHT_CONFIG_NAMES:
+        raw = _read(root, name)
+        if raw is None:
+            continue
+        try:
+            tokens = _js_tokens(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            continue
+        for first, second, third in zip(tokens, tokens[1:], tokens[2:]):
+            if first == ("ident", "testDir") and second == ("punct", ":") \
+                    and third[0] == "string":
+                cleaned = third[1].strip().removeprefix("./").rstrip("/")
+                if cleaned.startswith("/"):
+                    continue  # absolute dirs point outside the project
+                if cleaned and cleaned != ".":
+                    return cleaned
+    return "e2e"
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """Expand one ``{a,b}`` group; deeper nesting is out of scope."""
+    start = pattern.find("{")
+    end = pattern.find("}", start + 1) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return [pattern]
+    return [pattern[:start] + part + pattern[end + 1:]
+            for part in pattern[start + 1:end].split(",")]
+
+
+def _glob_match(pattern: str, rel: str) -> bool:
+    """Match one config glob against a project-relative posix path."""
+    cleaned = pattern.strip().removeprefix("./")
+    if not cleaned or cleaned == "**":
+        return bool(cleaned)
+    path = PurePosixPath(rel)
+    for expanded in _expand_braces(cleaned):
+        if path.match(expanded):
+            return True
+        # Unlike pathlib, glob ``**/`` also matches zero directories, so
+        # ``src/**/*.test.ts`` covers ``src/a.test.ts`` as vitest does.
+        if "**/" in expanded and path.match(expanded.replace("**/", "")):
+            return True
+    return False
+
+
+def _vitest_filters(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(excludes, includes)`` globs for one project root."""
+    excludes = list(_VITEST_DEFAULT_EXCLUDE)
+    includes: list[str] = []
+    for name in _VITEST_CONFIG_NAMES:
+        raw = _read(root, name)
+        if raw is None:
+            continue
+        try:
+            found, wanted = _test_block_arrays(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            continue
+        excludes.extend(found)
+        includes.extend(wanted)
+    excludes.append(_playwright_test_dir(root).rstrip("/") + "/**")
+    return tuple(excludes), tuple(includes)
+
+
+def _imports_playwright(root: Path, rel: str) -> bool:
+    """True when the file head imports ``@playwright/test`` (or is unreadable)."""
+    try:
+        raw = read_regular(root, rel, _HEAD_BYTES + 1)
+    except C.Problem:
+        return True
+    try:
+        head = raw[:_HEAD_BYTES].decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return _PLAYWRIGHT_IMPORT in head
+
+
+def _is_vitest_candidate(root: Path, rel: str, excludes: tuple[str, ...],
+                         includes: tuple[str, ...]) -> bool:
+    if not _VITEST_TEST_RE.search(Path(rel).name):
+        return False
+    if includes and not any(_glob_match(pattern, rel) for pattern in includes):
+        return False
+    if any(_glob_match(pattern, rel) for pattern in excludes):
+        return False
+    return not _imports_playwright(root, rel)
+
+
+def _walk_bases(root: Path, test_root: str) -> list[Path]:
+    """Walk starts in selection order: ``src``/``__tests__`` first under ``.``.
+
+    A dot root otherwise walks alphabetically, so ``e2e/`` shadows the real
+    unit tests and a shared entry budget can expire before ``src/`` is
+    reached. Priority starts reach the real tests first; the full root walk
+    still follows so nothing is missed.
+    """
+    if test_root not in (".", ""):
+        return [root / test_root]
+    bases: list[Path] = []
+    for sub in ("src", "__tests__"):
+        candidate = root / sub
+        try:
+            stamp = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISDIR(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode):
+            bases.append(candidate)
+    bases.append(root)
+    return bases
+
+
+def iter_candidates(root: Path, test_root: str, kind: C.RunnerKind,
+                    budget: list) -> object:
+    """Yield candidate test paths in selection order, deduped and bounded.
+
+    The single selection shared by the executability example and the smoke
+    candidate: name shape, vitest exclude/include globs, the Playwright
+    testDir, ``@playwright/test`` imports, and src-first ordering under a
+    dot root. ``budget`` is the shared ``[remaining]`` entry counter.
+    """
+    filters = _vitest_filters(root) if kind is C.RunnerKind.VITEST else None
+    seen: set[str] = set()
+    for base in _walk_bases(root, test_root):
+        try:
+            stamp = os.lstat(base)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+            continue
+        for rel in iter_files(root, base, 6, budget):
+            if rel in seen:
+                continue
+            seen.add(rel)
+            name = Path(rel).name
+            if kind is C.RunnerKind.PYTEST:
+                if name.startswith("test_") and name.endswith(".py") \
+                        or name.endswith("_test.py"):
+                    yield rel
+            elif filters is not None and _is_vitest_candidate(root, rel, *filters):
+                yield rel
+
+
+def _example_test(root: Path, test_root: str, kind: C.RunnerKind) -> str | None:
+    for rel in iter_candidates(root, test_root, kind, [_MAX_WALK_ENTRIES]):
+        return str(rel)
     return None
 
 

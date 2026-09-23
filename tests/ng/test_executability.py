@@ -473,3 +473,105 @@ def test_non_xdist_addopts_are_untouched_by_serial_detection(tmp_path):
     config = _fresh_config(tmp_path, tmp_path / ".ptest.toml", C.RunnerKind.PYTEST)
 
     assert config.runner.args == ()
+
+
+def _persea_web_shape(root):
+    """Persea-web-shaped fixture: Playwright specs in e2e/, unit tests in src/."""
+    _write(root / "vitest.config.ts",
+           "import { defineConfig, configDefaults } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           "  test: {\n"
+           "    exclude: [...configDefaults.exclude, 'e2e/**'],\n"
+           "  },\n"
+           "});\n")
+    _write(root / "playwright.config.ts",
+           "import { defineConfig } from '@playwright/test';\n"
+           "export default defineConfig({ testDir: './e2e' });\n")
+    _write(root / "e2e" / "agents.spec.ts",
+           "import { test } from '@playwright/test';\n"
+           "test('flow', () => {});\n")
+    _write(root / "src" / "i18n-defaults.test.ts",
+           "import { it } from 'vitest';\n"
+           "it('defaults', () => {});\n")
+    _write(root / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+
+def _vitest_dot_config(tmp_path):
+    return _config(tmp_path, kind=C.RunnerKind.VITEST, launcher=("node",),
+                   test_roots=(".",))
+
+
+def test_vitest_example_skips_excluded_e2e_spec(tmp_path):
+    _persea_web_shape(tmp_path)
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/i18n-defaults.test.ts"
+
+
+def test_vitest_example_skips_playwright_test_dir_without_config(tmp_path):
+    _write(tmp_path / "e2e" / "agents.spec.ts",
+           "import { test } from '@playwright/test';\n"
+           "test('flow', () => {});\n")
+    _write(tmp_path / "src" / "a.test.ts",
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_vitest_example_skips_playwright_import_outside_test_dir(tmp_path):
+    # The Playwright file sorts first, so only the import check can skip it.
+    _write(tmp_path / "src" / "a-play.spec.ts",
+           "import { test } from '@playwright/test';\n"
+           "test('flow', () => {});\n")
+    _write(tmp_path / "src" / "z.test.ts",
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/z.test.ts"
+
+
+def test_vitest_example_applies_literal_include(tmp_path):
+    _write(tmp_path / "vitest.config.ts",
+           "import { defineConfig } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           "  test: { include: ['src/**/*.test.ts'] },\n"
+           "});\n")
+    _write(tmp_path / "e2e" / "agents.spec.ts",
+           "import { it } from 'vitest';\n"
+           "it('flow', () => {});\n")
+    _write(tmp_path / "src" / "a.test.ts",
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_vitest_example_ignores_non_literal_config_parts(tmp_path):
+    _write(tmp_path / "vitest.config.ts",
+           "import { defineConfig, configDefaults } from 'vitest/config';\n"
+           "const EXTRA = 'dist/**';\n"
+           "export default defineConfig({\n"
+           "  test: { exclude: [...configDefaults.exclude, SOME_CONST, 'e2e/**'] },\n"
+           "});\n")
+    _write(tmp_path / "e2e" / "agents.spec.ts",
+           "import { it } from 'vitest';\n"
+           "it('flow', () => {});\n")
+    _write(tmp_path / "src" / "a.test.ts",
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
