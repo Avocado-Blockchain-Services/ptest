@@ -1,8 +1,8 @@
 # Agent-backed doctor and init diagnostic
 
 Status: implementation in progress under the user's prior authorization;
-model review remains disabled pending the all-three provider qualification
-gate. This document is the design and implementation specification.
+model review is enabled only for provider profiles that passed qualification
+(Claude and Codex; OpenCode is unqualified, see below). This document is the design and implementation specification.
 
 ## Outcome and boundaries
 
@@ -231,10 +231,16 @@ external plugins and merged configuration may retain permissions/MCP; a fixed
 owned agent with every permission denied and isolated config must be proven.
 `--bare` is not an acceptable Claude fallback because it disables normal auth.
 
-All three adapters are a single release gate. If any cannot meet the boundary,
-the default feature remains disabled and reports `provider-unqualified`; the
-implementation must seek a design decision rather than weaken containment or
-ship a partial provider set.
+Qualification is per provider profile (user decision, 2026-09-23, revising the
+earlier all-three gate). A qualified profile is frozen as one exact argv plus
+the allowlisted environment. Selecting an unqualified provider, or `auto`
+finding only unqualified providers, fails closed with `provider-unqualified`
+and states the reason. Claude and Codex are qualified by the 2026-09-23 record
+in `docs/research/2026-09-22-agent-provider-qualification.md`. OpenCode is not:
+its free tier refuses every tool-free profile with HTTP 403 `FreeTierError`.
+Codex still lists tools under its qualified profile, but every one was observed
+failing closed, so its evidence is behavioral. The Codex normalizer therefore
+treats any tool-shaped stream item as a tool attempt and fails the review.
 
 ### Process ownership and progress
 
@@ -397,9 +403,10 @@ inject controls.
 2. Init offers the identical in-process review after created or existing config.
    **Negative:** it never nests ptest, changes init JSON, or rolls back successful
    config because review was declined or failed.
-3. All three qualified providers share one adapter contract. **Negative:** flags,
-   `PATH` presence, prompt promises, read-only labels, or only two passing
-   providers cannot satisfy the release gate.
+3. Every qualified provider shares one adapter contract and one frozen argv.
+   **Negative:** flags, `PATH` presence, prompt promises, or read-only labels
+   cannot qualify a provider. An unqualified provider never launches, and
+   `auto` never selects it.
 4. Packets are finite, sanitized, identity-bound, and exclusion-aware, with
    partial evidence coverage separate from interrupted review.
    **Negative:** symlinks, recognized private/secret-bearing files, generated/dependency data,
