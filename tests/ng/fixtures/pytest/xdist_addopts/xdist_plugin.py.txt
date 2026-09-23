@@ -1,0 +1,52 @@
+"""Test double of pytest-xdist: options, hookspec, serial neutralization.
+
+Mirrors the real xdist contract the serial grant relies on: with
+``numprocesses == 0`` the plugin stays loaded (so conftest xdist hooks keep
+their spec) but distribution is off (``dist = "no"``, ``tx = []``). Any other
+worker count fails the session instead of distributing.
+"""
+from __future__ import annotations
+
+import pytest
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("xdist", "test distribution (test double)")
+    # Like the real xdist, use the private entry point: pytest reserves
+    # lowercase short options for itself, so addoption("-n", ...) raises.
+    group._addoption(
+        "-n", "--numprocesses", dest="numprocesses", metavar="numprocesses",
+        action="store", type=int, default=None,
+        help="distribute tests across workers (test double)",
+    )
+    group.addoption(
+        "--dist", metavar="distmode", action="store", default=None,
+        help="distribution mode (test double)",
+    )
+    group.addoption(
+        "--tx", action="append", default=[],
+        help="worker transports (test double)",
+    )
+    group.addoption(
+        "--maxprocesses", action="store", type=int, default=None,
+        help="maximum worker count (test double)",
+    )
+
+
+class _XdistSpecs:
+    def pytest_configure_node(self, node):
+        """Configure one worker node (test-double hookspec)."""
+
+
+def pytest_addhooks(pluginmanager):
+    pluginmanager.add_hookspecs(_XdistSpecs)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config):
+    numprocesses = config.option.numprocesses
+    if numprocesses is None or numprocesses == 0:
+        config.option.dist = "no"
+        config.option.tx = []
+        return None
+    pytest.exit("fake xdist would distribute", returncode=4)

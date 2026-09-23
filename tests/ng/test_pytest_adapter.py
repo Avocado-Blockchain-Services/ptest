@@ -273,21 +273,137 @@ def _native_config(**options):
                            getini=lambda name: [], invocation_params=SimpleNamespace(args=()))
 
 
-def test_loaded_xdist_is_refused_even_when_native_options_are_inactive():
-    plugin = object()
-    manager = SimpleNamespace(
-        list_name_plugin=lambda: (("xdist", plugin),),
-        hook=SimpleNamespace(**{
-            name: SimpleNamespace(get_hookimpls=lambda: [])
-            for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
-                         "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
-                         "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_runtest_makereport",
-                         "pytest_report_teststatus", "pytest_sessionfinish")
-        }),
+@pytest.mark.parametrize("serial", [
+    ("-n", "0"), ("-n0",), ("--numprocesses", "0"), ("--numprocesses=0",),
+])
+def test_generated_serial_spellings_are_accepted_before_bridge(serial):
+    prepared = prepare(
+        _config(args=serial),
+        _plan(execution="scoped", files=("tests/test_a.py",)),
+        _grant(1), _attempt(1),
+    )
+
+    assert prepared.argv[2:2 + len(serial)] == serial
+
+
+@pytest.mark.parametrize("unsafe", [
+    ("-n", "2"), ("-n", "1"), ("-nauto",), ("--numprocesses", "2"),
+    ("--numprocesses=2",), ("--dist", "load"), ("--dist=load",),
+    ("--maxprocesses", "0"), ("--maxprocesses=0",),
+    ("--tx", "popen"), ("@args.txt",),
+])
+def test_non_serial_parallel_controls_stay_rejected(unsafe):
+    with pytest.raises(C.Problem, match="native-config-invalid"):
+        prepare(_config(args=unsafe), _plan(), _grant(1), _attempt(1))
+
+
+_HOOK_NAMES = ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+               "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+               "pytest_collection_modifyitems", "pytest_ignore_collect",
+               "pytest_runtest_makereport", "pytest_report_teststatus",
+               "pytest_sessionfinish")
+
+
+def _hookimpl(hook, module, plugin):
+    def function(*args, **kwargs):
+        raise AssertionError("hookimpl must not run in a static check")
+    function.__module__ = module
+    return hook, SimpleNamespace(plugin=plugin, function=function)
+
+
+def _loaded_manager(plugins, hookimpls=()):
+    by_hook = {}
+    for hook in _HOOK_NAMES:
+        impls = [impl for name, impl in hookimpls if name == hook]
+        by_hook[hook] = SimpleNamespace(
+            get_hookimpls=(lambda impls: lambda: list(impls))(impls))
+    return SimpleNamespace(
+        list_name_plugin=lambda: tuple(plugins),
+        hook=SimpleNamespace(**by_hook),
+    )
+
+
+def _module(name):
+    import types
+    return types.ModuleType(name)
+
+
+def test_loaded_but_inactive_xdist_is_accepted_under_serial_grant():
+    xdist = _module("xdist.plugin")
+    looponfail = _module("xdist.looponfail")
+    manager = _loaded_manager(
+        (("xdist", xdist), ("xdist-looponfail", looponfail)),
+        [_hookimpl("pytest_runtest_protocol", "xdist.plugin", xdist),
+         _hookimpl("pytest_collection", "xdist.looponfail", looponfail)],
     )
     config = _native_config()
     config.pluginmanager = manager
-    with pytest.raises(pytest.UsageError, match="xdist"):
+
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+def test_xdist_prefix_lookalike_hook_is_still_refused():
+    evil = _module("xdistevil")
+    manager = _loaded_manager(
+        (("xdistevil", evil),),
+        [_hookimpl("pytest_runtestloop", "xdistevil", evil)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="not owned by the serial grant"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
+@pytest.mark.parametrize("options", [
+    {"numprocesses": 2},
+    {"numprocesses": 2, "tx": ["popen", "popen"]},
+    {"tx": ["popen"]},
+    {"px": ["popen"]},
+    {"looponfail": True},
+])
+def test_active_xdist_state_still_refuses_with_existing_messages(options):
+    xdist = _module("xdist.plugin")
+    manager = _loaded_manager((("xdist", xdist),))
+    config = _native_config(**options)
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="native-config-invalid"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("module", ["pytest_asyncio.plugin", "pytest_timeout"])
+def test_hook_only_modules_are_accepted_in_scoped_serial(module, bridge_env):
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("asyncio-or-timeout", plugin),),
+        [_hookimpl("pytest_runtest_protocol", module, plugin),
+         _hookimpl("pytest_collection_modifyitems", module, plugin)],
+    )
+    scoped = _native_config()
+    scoped.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(scoped)
+
+    full = _native_config()
+    full.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution="full").pytest_configure(full)
+
+
+def test_plugin_named_timeout_is_no_longer_an_executor():
+    manager = _loaded_manager((("timeout", _module("timeout")),))
+    config = _native_config()
+    config.pluginmanager = manager
+
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("executor", ["rerunfailures", "repeat", "forked", "parallel", "loop"])
+def test_other_execution_control_plugins_stay_refused(executor):
+    manager = _loaded_manager(((executor, _module(f"pytest_{executor}")),))
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="execution-control"):
         pytest_bridge.OwnedPlugin(1).pytest_configure(config)
 
 

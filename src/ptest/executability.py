@@ -1,0 +1,571 @@
+"""Deterministic per-project executability checks.
+
+Pure static inspection: no model, no subprocess, no imports of project
+code. Reads are bounded and never follow symlinks.
+"""
+from __future__ import annotations
+
+import configparser
+import os
+import re
+import shlex
+import stat
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import contracts as C
+from .adapters.pytest import _reject_unowned_controls, _require_python_launcher
+from .files import read_regular
+
+STATUS_EXECUTABLE = "executable"
+STATUS_CAVEAT = "caveat"
+STATUS_NOT_EXECUTABLE = "not-executable"
+
+VITEST_ENTRY = "node_modules/vitest/vitest.mjs"
+VITEST_EXCLUSIVE_NOTE = ("Vitest runs as one exclusive command (node node_modules/vitest/vitest.mjs run); "
+                         "ptest does not own Vitest workers, selection or per-test results")
+
+_MAX_BYTES = 256 * 1024
+_MAX_CONFTEST_FILES = 64
+_MAX_WALK_ENTRIES = 2000
+_SKIP_DIRS = frozenset({"node_modules", ".venv", "venv", "__pycache__"})
+
+_SCOPED_REFUSED_HOOKS = frozenset({
+    "pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
+    "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
+})
+_FULL_REFUSED_HOOKS = frozenset({
+    "pytest_collection_modifyitems", "pytest_ignore_collect",
+    "pytest_runtest_makereport", "pytest_report_teststatus",
+    "pytest_sessionfinish",
+})
+_HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
+_SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
+_VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
+
+_NARROWING_OPTIONS = frozenset({
+    "-k", "-m", "-x", "--exitfirst", "--maxfail", "--deselect", "--lf", "--last-failed",
+    "--ff", "--failed-first", "--sw", "--stepwise", "--ignore",
+    "--ignore-glob",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class Executability:
+    project: str
+    runner: str
+    status: str
+    caveats: tuple[str, ...]
+    reason: str | None
+    fix: str | None
+    full: bool
+    example: str | None
+
+    def verdict(self) -> str:
+        if self.status == STATUS_NOT_EXECUTABLE:
+            return f"not runnable: {self.reason} — fix: {self.fix}"
+        if self.status == STATUS_CAVEAT:
+            return "ready with caveats: " + "; ".join(self.caveats)
+        return "ready"
+
+    def to_public(self) -> dict:
+        if self.status == STATUS_NOT_EXECUTABLE:
+            detail = self.reason
+        else:
+            detail = "; ".join(self.caveats) or "ready"
+        return {"status": self.status, "detail": detail,
+                "fix": self.fix if self.status == STATUS_NOT_EXECUTABLE else None}
+
+
+def _cfg(project: str) -> str:
+    return ".ptest.toml" if project == "." else f"{project}/.ptest.toml"
+
+
+def _project_root(config: C.Config, project: str) -> Path:
+    if config.config_path is not None:
+        return config.config_path.parent
+    if config.checkout is not None:
+        return config.checkout.root
+    return Path(project) if project != "." else Path(".")
+
+
+def _read(root: Path, name: str) -> bytes | None:
+    try:
+        raw = read_regular(root, name, _MAX_BYTES + 1)
+    except C.Problem:
+        return None
+    if len(raw) > _MAX_BYTES:
+        return None
+    return raw
+
+
+def _ini_addopts(raw: bytes, section: str) -> tuple[str, ...] | None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return None
+    if not parser.has_section(section):
+        return None
+    if not parser.has_option(section, "addopts"):
+        return ()
+    return _split_addopts(parser.get(section, "addopts"))
+
+
+def _split_addopts(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            return tuple(shlex.split(value))
+        except ValueError:
+            return ()
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return ()
+
+
+def _pytest_addopts(root: Path) -> tuple[str, ...]:
+    """First pytest section wins: pytest.ini, pyproject, tox.ini, setup.cfg."""
+    raw = _read(root, "pytest.ini")
+    if raw is not None:
+        found = _ini_addopts(raw, "pytest")
+        if found is not None:
+            return found
+    raw = _read(root, "pyproject.toml")
+    if raw is not None:
+        try:
+            parsed = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            tool = parsed.get("tool", {})
+            if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+                section = tool["pytest"]
+                ini_options = section.get("ini_options", {})
+                if isinstance(ini_options, dict) and "addopts" in ini_options:
+                    return _split_addopts(ini_options["addopts"])
+                if "addopts" in section:
+                    return _split_addopts(section["addopts"])
+                return ()
+    raw = _read(root, "tox.ini")
+    if raw is not None:
+        found = _ini_addopts(raw, "pytest")
+        if found is not None:
+            return found
+    raw = _read(root, "setup.cfg")
+    if raw is not None:
+        found = _ini_addopts(raw, "tool:pytest")
+        if found is not None:
+            return found
+    return ()
+
+
+def _has_no_xdist(tokens: tuple[str, ...]) -> bool:
+    for index, token in enumerate(tokens):
+        if token == "no:xdist":
+            return True
+        if token == "-p" and index + 1 < len(tokens) \
+                and tokens[index + 1] in ("no:xdist",):
+            return True
+        if token in ("-pno:xdist", "-p=no:xdist"):
+            return True
+    return False
+
+
+def _xdist_active(tokens: tuple[str, ...]) -> bool:
+    """True when pytest config tokens activate xdist (no:xdist suppresses)."""
+    if _has_no_xdist(tokens):
+        return False
+    for index, token in enumerate(tokens):
+        if token == "-n" or _SHORT_N_RE.match(token):
+            return True
+        if token == "--numprocesses" or token.startswith("--numprocesses="):
+            return True
+        if token == "--dist" or token.startswith("--dist="):
+            return True
+        if token == "--maxprocesses" or token.startswith("--maxprocesses="):
+            return True
+        if token == "-p" and index + 1 < len(tokens) \
+                and tokens[index + 1] in ("xdist", "xdist.plugin"):
+            return True
+        if token in ("-pxdist", "-pxdist.plugin", "-p=xdist", "-p=xdist.plugin"):
+            return True
+    return False
+
+
+def pytest_xdist_active(root: Path) -> bool:
+    """Shared init/executability predicate for static xdist activation."""
+    return _xdist_active(_pytest_addopts(root))
+
+
+def _has_serial_spelling(argv: tuple[str, ...]) -> bool:
+    for index, token in enumerate(argv):
+        if token == "-n0" or token == "--numprocesses=0":
+            return True
+        if token in ("-n", "--numprocesses") \
+                and index + 1 < len(argv) and argv[index + 1] == "0":
+            return True
+    return False
+
+
+def _unowned_token(argv: tuple[str, ...]) -> str | None:
+    """First token _reject_unowned_controls would refuse (full=False)."""
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if (token in ("-n", "--numprocesses")
+                and index + 1 < len(argv) and argv[index + 1] == "0"):
+            index += 2
+            continue
+        if token in ("-n0", "--numprocesses=0"):
+            index += 1
+            continue
+        try:
+            _reject_unowned_controls((token,), full=False)
+        except C.Problem:
+            return token
+        index += 1
+    return None
+
+
+def _iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
+    """Yield project-relative files, sorted, bounded, skipping owned dirs."""
+    try:
+        entries = sorted(os.scandir(start), key=lambda entry: entry.name)
+    except OSError:
+        return
+    for entry in entries:
+        if not budget:
+            return
+        name = entry.name
+        try:
+            stamp = os.lstat(entry.path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            continue
+        if name in _SKIP_DIRS or name.startswith("."):
+            continue
+        budget[0] -= 1
+        if budget[0] < 0:
+            return
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            if depth > 0:
+                yield from _iter_files(root, Path(entry.path), depth - 1, budget)
+        else:
+            try:
+                rel = Path(entry.path).relative_to(root)
+            except ValueError:
+                continue
+            yield rel.as_posix()
+
+
+def _conftest_paths(root: Path, test_roots: tuple[str, ...]) -> list[str]:
+    """conftest.py at the root and under literal test roots, depth 3."""
+    starts: list[tuple[str, int]] = [("", 1)]
+    for test_root in test_roots:
+        if test_root in (".", ""):
+            continue
+        if test_root.startswith(("-", "@", "/")) or "\\" in test_root \
+                or "::" in test_root:
+            continue
+        if any(part in {"", ".", ".."} for part in test_root.split("/")):
+            continue
+        starts.append((test_root, 3))
+    found: list[str] = []
+    try:
+        stamp = os.lstat(root / "conftest.py")
+    except OSError:
+        pass
+    else:
+        if stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode):
+            found.append("conftest.py")
+    for start, depth in starts:
+        if start == "":
+            continue
+        base = root / start
+        try:
+            stamp = os.lstat(base)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+            continue
+        budget = [_MAX_WALK_ENTRIES]
+        for rel in _iter_files(root, base, depth, budget):
+            if Path(rel).name != "conftest.py" or rel in found:
+                continue
+            found.append(rel)
+            if len(found) >= _MAX_CONFTEST_FILES:
+                return sorted(found)
+    return sorted(found)
+
+
+def _defined_hooks(root: Path, rel: str) -> list[str]:
+    raw = _read(root, rel)
+    if raw is None:
+        return []
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    hooks: list[str] = []
+    for line in text.splitlines():
+        match = _HOOK_RE.match(line)
+        if match:
+            hooks.append(match.group(1))
+    return hooks
+
+
+def _scan_conftest_hooks(root: Path, test_roots: tuple[str, ...]) -> list[tuple[str, str]]:
+    """(conftest path, hook) pairs in file order for refused hooks."""
+    pairs: list[tuple[str, str]] = []
+    for rel in _conftest_paths(root, test_roots):
+        for hook in _defined_hooks(root, rel):
+            if hook in _SCOPED_REFUSED_HOOKS or hook in _FULL_REFUSED_HOOKS:
+                pairs.append((rel, hook))
+    return pairs
+
+
+def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    found: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name = token.split("=", 1)[0]
+        if token in ("-k", "-m") or token.startswith("-k") and not token.startswith("--") \
+                or token.startswith("-m") and not token.startswith("--"):
+            found.append("-k" if token[1] == "k" else "-m")
+        elif name in _NARROWING_OPTIONS:
+            if name == "--maxfail":
+                value = token.partition("=")[2] if "=" in token else (
+                    tokens[index + 1] if index + 1 < len(tokens) else "")
+                if value.strip() == "0":
+                    index += 2 if "=" not in token else 1
+                    continue
+            found.append(name)
+        index += 1
+    return tuple(found)
+
+
+def _example_test(root: Path, test_root: str, kind: C.RunnerKind) -> str | None:
+    base = root if test_root in (".", "") else root / test_root
+    try:
+        stamp = os.lstat(base)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+        return None
+    budget = [_MAX_WALK_ENTRIES]
+    for rel in _iter_files(root, base, 6, budget):
+        name = Path(rel).name
+        if kind is C.RunnerKind.PYTEST:
+            if name.startswith("test_") and name.endswith(".py") \
+                    or name.endswith("_test.py"):
+                return rel
+        else:
+            if _VITEST_TEST_RE.search(name):
+                return rel
+    return None
+
+
+def _setup_missing(root: Path, setup: C.SetupConfig | None) -> bool:
+    if setup is None:
+        return False
+    for required in setup.required_paths:
+        if required.startswith("/") or "\\" in required or "\x00" in required:
+            return True
+        if any(part in {"", ".", ".."} for part in required.split("/")):
+            return True
+        try:
+            os.lstat(root / required)
+        except OSError:
+            return True
+    return False
+
+
+def _regular_present(root: Path, relative: str) -> bool:
+    try:
+        stamp = os.lstat(root / relative)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode)
+
+
+def check_config(config: C.Config, *, project: str = ".") -> Executability:
+    cfg = _cfg(project)
+    root = _project_root(config, project)
+    kind = config.runner.kind
+    example: str | None = None
+    roots = config.runner.test_roots
+    first_root = roots[0] if roots else "."
+    if kind is C.RunnerKind.PYTEST:
+        example = _example_test(root, first_root, kind)
+    elif kind is C.RunnerKind.VITEST:
+        example = _example_test(root, first_root, kind)
+
+    if kind is C.RunnerKind.PYTEST:
+        try:
+            _require_python_launcher(config.runner.launcher)
+        except C.Problem:
+            return Executability(
+                project=project, runner=kind.value,
+                status=STATUS_NOT_EXECUTABLE, caveats=(),
+                reason="pytest launcher is not a supported Python interpreter launcher",
+                fix=f'set [runner] launcher = ["uv", "run", "--locked", "--no-sync", "python"]'
+                    f' or ["python"] in {cfg}',
+                full=False, example=example)
+        bad = _unowned_token(
+            tuple(config.runner.args) + tuple(config.runner.full_args))
+        if bad is not None:
+            return Executability(
+                project=project, runner=kind.value,
+                status=STATUS_NOT_EXECUTABLE, caveats=(),
+                reason=f"runner args contain a parallel, remote or argfile control ({bad})",
+                fix=f"remove {bad} from [runner] args in {cfg}",
+                full=False, example=example)
+        addopts = _pytest_addopts(root)
+        active = _xdist_active(addopts)
+        serial = _has_serial_spelling(
+            tuple(config.runner.args) + tuple(config.runner.full_args))
+        if active and not serial:
+            return Executability(
+                project=project, runner=kind.value,
+                status=STATUS_NOT_EXECUTABLE, caveats=(),
+                reason="pytest addopts enable xdist, which ptest runs serially",
+                fix=f'add "-n", "0" to [runner] args in {cfg}',
+                full=False, example=example)
+        pairs = _scan_conftest_hooks(root, roots)
+        for rel, hook in pairs:
+            if hook in _SCOPED_REFUSED_HOOKS:
+                return Executability(
+                    project=project, runner=kind.value,
+                    status=STATUS_NOT_EXECUTABLE, caveats=(),
+                    reason=f"{rel} defines {hook}, which ptest refuses",
+                    fix=f"move {hook} out of conftest.py into an installed plugin,"
+                        " or configure a command profile",
+                    full=False, example=example)
+        caveats: list[str] = []
+        full = True
+        if active and serial:
+            caveats.append("serial: xdist disabled under ptest (-n 0)")
+        if "." in roots:
+            caveats.append('ptest --full unavailable: test_roots is "."')
+            full = False
+        narrowing = _narrowing_tokens(addopts)
+        if narrowing:
+            caveats.append(
+                "ptest --full unavailable: pytest addopts narrow the inventory ("
+                + " ".join(narrowing) + ")")
+            full = False
+        for rel, hook in pairs:
+            if hook in _FULL_REFUSED_HOOKS:
+                caveats.append(f"ptest --full unavailable: {rel} defines {hook}")
+                full = False
+                break
+        if _setup_missing(root, config.setup):
+            caveats.append(
+                "first run executes setup: " + " ".join(config.setup.argv))
+        if caveats:
+            return Executability(
+                project=project, runner=kind.value, status=STATUS_CAVEAT,
+                caveats=tuple(caveats), reason=None, fix=None,
+                full=full, example=example)
+        return Executability(
+            project=project, runner=kind.value, status=STATUS_EXECUTABLE,
+            caveats=(), reason=None, fix=None, full=True, example=example)
+
+    if kind is C.RunnerKind.VITEST:
+        launcher = config.runner.launcher
+        if not (launcher == ("node",)
+                or (len(launcher) == 1 and Path(launcher[0]).is_absolute()
+                    and Path(launcher[0]).name == "node")):
+            return Executability(
+                project=project, runner=kind.value,
+                status=STATUS_NOT_EXECUTABLE, caveats=(),
+                reason="vitest launcher must be node",
+                fix=f'set [runner] launcher = ["node"] in {cfg}',
+                full=False, example=example)
+        if not _regular_present(root, VITEST_ENTRY) and config.setup is None:
+            return Executability(
+                project=project, runner=kind.value,
+                status=STATUS_NOT_EXECUTABLE, caveats=(),
+                reason="node_modules/vitest/vitest.mjs is missing",
+                fix='install dependencies, or declare [setup] argv = ["npm", "ci"]'
+                    f' in {cfg}',
+                full=False, example=example)
+        caveats = ["exclusive: Vitest runs as one command and manages its own workers"]
+        if _setup_missing(root, config.setup):
+            caveats.append(
+                "first run executes setup: " + " ".join(config.setup.argv))
+        return Executability(
+            project=project, runner=kind.value, status=STATUS_CAVEAT,
+            caveats=tuple(caveats), reason=None, fix=None,
+            full=True, example=example)
+
+    if kind is C.RunnerKind.COMMAND:
+        caveats = ["exclusive: runs as one literal command"]
+        if _setup_missing(root, config.setup):
+            caveats.append(
+                "first run executes setup: " + " ".join(config.setup.argv))
+        return Executability(
+            project=project, runner=kind.value, status=STATUS_CAVEAT,
+            caveats=tuple(caveats), reason=None, fix=None,
+            full=True, example=example)
+
+    return Executability(
+        project=project, runner=kind.value, status=STATUS_NOT_EXECUTABLE,
+        caveats=(),
+        reason=f"native {kind.value} execution is not available in this release",
+        fix=f'configure kind = "command" with an explicit launcher in {cfg}',
+        full=False, example=example)
+
+
+def check_resolution(resolution: C.ConfigResolution) -> tuple[Executability, ...]:
+    manifest = getattr(resolution, "monorepo", None)
+    children = tuple(getattr(manifest, "children", ()) or ()) \
+        if manifest is not None else ()
+    if children:
+        from .config import resolve_config
+        items: list[Executability] = []
+        for declaration in children:
+            child = resolve_config(resolution.root / declaration)
+            if child.config is None or child.problem is not None:
+                items.append(Executability(
+                    project=declaration, runner="unknown",
+                    status=STATUS_NOT_EXECUTABLE, caveats=(),
+                    reason="child configuration is missing or invalid",
+                    fix="run ptest init from the repository root",
+                    full=False, example=None))
+            else:
+                items.append(check_config(child.config, project=declaration))
+        return tuple(items)
+    if resolution.config is not None:
+        return (check_config(resolution.config, project="."),)
+    return (Executability(
+        project=".", runner="unknown", status=STATUS_NOT_EXECUTABLE,
+        caveats=(), reason="no ptest configuration",
+        fix="run ptest init from the repository root",
+        full=False, example=None),)
+
+
+def commands(items: tuple[Executability, ...]) -> tuple[str, ...]:
+    ordered: list[str] = []
+    for item in items:
+        if item.status == STATUS_NOT_EXECUTABLE or item.example is None:
+            continue
+        prefix = "" if item.project == "." else f"{item.project}/"
+        command = f"ptest {prefix}{item.example}"
+        if command not in ordered:
+            ordered.append(command)
+    if items and all(item.full for item in items):
+        if "ptest --full" not in ordered:
+            ordered.append("ptest --full")
+    return tuple(ordered[:8])
