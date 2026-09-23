@@ -538,3 +538,34 @@ def test_doctor_bytes_unchanged_by_registry_extension():
         "scope", "readiness", "findings", "limits", "usage",
         "limitations",
     }
+
+
+def test_accept_library_name_without_execution_claim_in_finding():
+    """Naming a test library is not an execution claim (round 3 decision).
+
+    A finding summary such as ``use pytest.raises`` must pass the public
+    contract; the ban covers claiming execution, not naming a library.
+    """
+    finding = dict(
+        _finding("FIX-002"),
+        summary="Use pytest.raises for the negative path.",
+        suggested_change="Record the ptest command for verification.")
+    payload = _payload(children=[_child(findings=[finding])])
+    doc = C.decode_public_document(_hostile(payload))
+    assert doc.data["children"][0]["findings"][0]["summary"] == (
+        "Use pytest.raises for the negative path.")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("summary", "The pytest suite passed on review."),
+    ("summary", "The ptest run passed on review."),
+    ("summary", "Finished with exit code 0 after review."),
+    ("summary", "The suite finished with exit status 1 after review."),
+    ("suggested_change", "Rerun until exit code 0 is observed."),
+])
+def test_reject_execution_claims_with_or_without_library_names(field, value):
+    """Execution claims stay rejected whether or not a library is named."""
+    finding = dict(_finding("FIX-002"), **{field: value})
+    payload = _payload(children=[_child(findings=[finding])])
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(_hostile(payload))

@@ -213,10 +213,13 @@ def _clean(text: object, *, field: str, max_chars: int = _MAX_PROSE_CHARS) -> st
     return value
 
 
-def _check_relpath(value: object, *, field: str) -> str:
+def _check_relpath(value: object, *, field: str,
+                   allow_dot: bool = False) -> str:
     if not isinstance(value, str) or not value:
         _fail("report-invalid", f"field {field!r} must be a nonempty string")
         raise AssertionError("unreachable")
+    if allow_dot and value == ".":
+        return value
     if (value.startswith(("/", "\\")) or "\\" in value
             or value.startswith("~")):
         _fail("report-invalid", f"field {field!r} must be root-relative")
@@ -452,7 +455,8 @@ def _normalize_limitations(value: object) -> list:
         result.append({"code": _clean(code, field="limitation", max_chars=128),
                        "message": _clean(item.get("message", ""),
                                          field="limitation"),
-                       "paths": [_check_relpath(p, field="limitation.paths")
+                       "paths": [_check_relpath(p, field="limitation.paths",
+                                                  allow_dot=True)
                                  for p in (item.get("paths", [])
                                            if isinstance(item.get("paths", []),
                                                          list) else [])]})

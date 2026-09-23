@@ -2779,9 +2779,39 @@ _AA_AUTOLINK_RE = re.compile(
 _AA_HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
 _AA_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
 _AA_PERCENT_RE = re.compile(r"\d\s*%")
+
+# Execution-claim words the model must never use in finding prose. This is
+# the single source: agent_assessment reuses these words and the builder
+# below for its own prose filter and policy instruction, so the rule the
+# model reads and the rules both filters enforce cannot drift apart.
+# Naming a test library (``pytest``, ``ptest``) is not an execution claim.
+_AA_EXEC_CLAIM_WORDS = (
+    "exit code", "exit status", "test output", "observed",
+    "passed", "failed", "executed", "verified",
+)
+
+
+def _aa_exec_claim_pattern(words: tuple) -> str:
+    """Build the execution-claim alternative from ``words``.
+
+    Multi-word phrases match across flexible whitespace; single words
+    match whole words, except ``observed`` which keeps its historical
+    substring match.
+    """
+    parts = []
+    for phrase in words:
+        tokens = phrase.split()
+        if len(tokens) > 1:
+            parts.append(r"\s*".join(tokens))
+        elif phrase == "observed":
+            parts.append(phrase)
+        else:
+            parts.append(rf"\b{phrase}\b")
+    return "|".join(parts)
+
+
 _AA_EXEC_CLAIM_RE = re.compile(
-    r"exit\s*code|exit\s*status|test\s*output|observed|\bpytest\b"
-    r"|\bptest\b|\bpassed\b|\bfailed\b|\bexecuted\b|\bverified\b",
+    _aa_exec_claim_pattern(_AA_EXEC_CLAIM_WORDS),
     re.IGNORECASE)
 
 _AGENT_ASSESSMENT_FIELDS = frozenset({

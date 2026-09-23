@@ -117,33 +117,13 @@ _UNSUPPORTED_MARKERS = frozenset({
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
 
-# Execution-claim words the model must never use in prose. The same tuple
-# feeds the rejection regex below and the policy instruction, so the rule
-# the model reads and the rule the filter enforces cannot drift apart.
-# Naming a test library (``pytest``, ``ptest``) is not an execution claim.
-_EXEC_CLAIM_WORDS = (
-    "exit code", "exit status", "test output", "observed",
-    "passed", "failed", "executed", "verified",
-)
-
-
-def _exec_claim_pattern(words: tuple[str, ...]) -> str:
-    """Build the execution-claim alternative from ``words``.
-
-    Multi-word phrases match across flexible whitespace; single words
-    match whole words, except ``observed`` which keeps its historical
-    substring match.
-    """
-    parts = []
-    for phrase in words:
-        tokens = phrase.split()
-        if len(tokens) > 1:
-            parts.append(r"\s*".join(tokens))
-        elif phrase == "observed":
-            parts.append(phrase)
-        else:
-            parts.append(rf"\b{phrase}\b")
-    return "|".join(parts)
+# Execution-claim words and pattern live in contracts (the single source);
+# this module reuses them for its prose filter and policy instruction so
+# the rule the model reads and the rules both filters enforce cannot drift
+# apart. Naming a test library (``pytest``, ``ptest``) is not an execution
+# claim.
+_EXEC_CLAIM_WORDS = C._AA_EXEC_CLAIM_WORDS
+_exec_claim_pattern = C._aa_exec_claim_pattern
 
 
 _REVIEW_INSTRUCTION = (

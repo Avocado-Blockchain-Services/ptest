@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2604,3 +2605,126 @@ def test_native_envelope_end_to_end_publishes_report(
     marker, _body = report.read_bytes().split(b"\n", 1)
     assert re.fullmatch(rb"<!-- ptest-recommendations v1 sha256=[0-9a-f]{64} -->",
                         marker) is not None
+
+
+_RECORDED_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "agent_assessment"
+
+
+def _write_recorded_demo_project(root):
+    """Rebuild the round-4 synthetic root project byte-identically.
+
+    Sources the four admitted files from the vendored request packet, then
+    adds one NUL-bearing file the packer must skip so the live packet
+    carries ``excluded_count == 1`` — the shape that makes ptest emit its
+    own partial-evidence limitation scoped ``"."``.
+    """
+    body = json.loads(
+        (_RECORDED_FIXTURE_DIR / "e2e-demo-request.json")
+        .read_text(encoding="utf-8"))["packet"]
+    wanted = {".ptest.toml", "pyproject.toml", "src/demo/__init__.py",
+              "tests/test_demo.py"}
+    for item in body["excerpts"]:
+        if item["path"] in wanted:
+            target = root / item["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(item["text"], encoding="utf-8")
+    (root / "notes.bin").write_bytes(b"binary-prefix\x00binary-tail\n")
+
+
+def _recorded_replay_executable(bindir, name, reply):
+    """Fake provider replaying a vendored real reply, rebound live.
+
+    Only packet binding fields (project/content identity) are rebound from
+    the request packet; every model-supplied row, finding, limitation, and
+    prose string replays verbatim inside the native envelope.
+    """
+    import sys as _sys
+
+    script = "\n".join([
+        "#!" + _sys.executable,
+        "import json, sys",
+        "fixture = " + repr(str(_RECORDED_FIXTURE_DIR / reply)),
+        "request = json.load(sys.stdin)",
+        "packet = request['packet']",
+        "recorded = json.load(open(fixture, encoding='utf-8'))",
+        "data = recorded['data']",
+        "child = data['children'][0]",
+        "child['project_id'] = packet['project_id']",
+        "child['scope'] = packet['scope']",
+        "child['packet_sha256'] = packet['packet_sha256']",
+        "by_path = {e['path']: e for e in packet['excerpts']}",
+        "def rebind(items):",
+        "    for item in items:",
+        "        for cit in item.get('evidence', []):",
+        "            excerpt = by_path.get(cit['path'])",
+        "            if excerpt is None:",
+        "                continue",
+        "            cit['sha256'] = excerpt['sha256']",
+        "            cit['start_line'] = max(excerpt['start_line'],",
+        "                min(cit['start_line'], excerpt['end_line']))",
+        "            cit['end_line'] = max(cit['start_line'],",
+        "                min(cit['end_line'], excerpt['end_line']))",
+        "rebind(child['rows'])",
+        "rebind(child.get('findings', []))",
+        "payload = json.dumps({'data': data})",
+    ])
+    if name == "claude":
+        script += "\n" + "\n".join([
+            "envelope = {'type': 'result', 'subtype': 'success',",
+            "            'is_error': False, 'num_turns': 1,",
+            "            'permission_denials': [], 'result': payload}",
+            "sys.stdout.write(json.dumps(envelope))",
+        ])
+    else:
+        script += "\n" + "\n".join([
+            "for event in ({'type': 'thread.started', 'thread_id': 'THREAD-E2E'},",
+            "              {'type': 'turn.started'},",
+            "              {'type': 'item.completed',",
+            "               'item': {'id': 'item_0', 'type': 'agent_message',",
+            "                        'text': payload}},",
+            "              {'type': 'turn.completed', 'usage': {}}):",
+            "    sys.stdout.write(json.dumps(event) + '\\n')",
+        ])
+    executable = bindir / name
+    executable.write_text(script + "\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+
+@pytest.mark.parametrize("provider,reply", [
+    ("claude", "claude-e2e-raw-assessment-3.json"),
+    ("codex", "codex-e2e-raw-assessment-1.json"),
+])
+def test_recorded_round4_replies_publish_report(
+        tmp_path, monkeypatch, capsys, provider, reply):
+    """End-to-end replay of both round-4 real replies publishes the report.
+
+    Each fake executable replays its vendored real reply (parse plus CLI
+    assembly/render path); review runs non-interactively and writes
+    recommendations.md carrying ptest's own partial-evidence limitation
+    for the root scope.
+    """
+    import re
+    import sys
+
+    root = tmp_path / "project"
+    root.mkdir()
+    _write_recorded_demo_project(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _recorded_replay_executable(bindir, provider, reply)
+    monkeypatch.setenv("PATH", str(bindir))
+
+    assert main(("doctor", "--reviewer", provider,
+                 "--allow-model-review")) == 0
+
+    capsys.readouterr()
+    report = root / "recommendations.md"
+    assert report.is_file()
+    marker, body = report.read_bytes().split(b"\n", 1)
+    assert re.fullmatch(rb"<!-- ptest-recommendations v1 sha256=[0-9a-f]{64} -->",
+                        marker) is not None
+    assert "partial-evidence" in body.decode("utf-8")

@@ -1973,6 +1973,27 @@ def test_parse_assessment_still_rejects_execution_claims(tmp_path, rationale):
     assert "untrusted model content" in caught.value.message
 
 
+def test_parse_assessment_accepts_library_name_in_finding_summary(tmp_path):
+    """Naming a test library in a finding is not an execution claim.
+
+    Guards the single-source exec-claim wiring: ``use pytest.raises``
+    must keep parsing after the words move into contracts.
+    """
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[1] = _row(packet, "FIX-002", status="gap")
+    finding = dict(_finding(packet, "FIX-002"),
+                   summary="Use pytest.raises for the negative path.")
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows,
+                                     findings=[finding])),
+        packet)
+    assert child.findings[0].summary == (
+        "Use pytest.raises for the negative path.")
+
+
 def test_review_instruction_states_plain_text_prose_rules():
     """The policy instruction tells the model the exact prose rules the
     filter enforces: plain text only, and no execution-claim words."""
@@ -2017,3 +2038,29 @@ def test_recorded_claude_reply_2_parses_without_prose_rejection():
         (json.dumps({"data": rebound}) + "\n").encode("utf-8"), packet)
     assert [row.id for row in child.rows] == list(EXPECTED_IDS)
     assert child.score is not None
+
+
+@pytest.mark.parametrize("reply", ["claude-e2e-raw-assessment-3.json",
+                                   "codex-e2e-raw-assessment-1.json"])
+def test_recorded_round4_replies_parse_against_vendored_packet(reply):
+    """Regression on both round-4 real replies: rebound only on
+    ``packet_sha256`` to the vendored request packet, each ``data``
+    remainder must clear ``parse_assessment`` — the validators must accept
+    the model-supplied paths and prose the real runs returned."""
+    import copy
+
+    from ptest import agent_assessment as AA
+
+    fixture_dir = (Path(__file__).resolve().parent
+                   / "fixtures" / "agent_assessment")
+    recorded = json.loads(
+        (fixture_dir / reply).read_text(encoding="utf-8"))
+    packet = _packet_from_request_dict(
+        json.loads((fixture_dir / "e2e-demo-request.json")
+                   .read_text(encoding="utf-8"))["packet"])
+    rebound = copy.deepcopy(recorded["data"])
+    rebound["children"][0]["packet_sha256"] = packet.packet_sha256
+    child = AA.parse_assessment(
+        (json.dumps({"data": rebound}) + "\n").encode("utf-8"), packet)
+    assert [row.id for row in child.rows] == list(EXPECTED_IDS)
+    assert child.scope == "."

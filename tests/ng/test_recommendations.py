@@ -1195,3 +1195,49 @@ def test_render_backtick_scope_markdown_safe_single_command():
         # ... and appears as its own indented code line.
         assert any(line.strip() == argv
                    for line in out.splitlines()), scope
+
+
+def test_render_accepts_dot_limitation_path_for_root_project(
+        tmp_path, monkeypatch):
+    """Root-project partial evidence (paths ["."]) renders and publishes.
+
+    Regression: ``cli._assessment_limitations`` emits ptest's own
+    partial-evidence limitation with ``paths == [packet.scope]``, which is
+    ``"."`` for a root project; the public contract accepts ``"."`` as the
+    root, so the render path must too.
+    """
+    from ptest.recommendations import render_recommendations
+    from ptest.recommendations import publish_recommendations
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path))
+    root = tmp_path / "proj"
+    root.mkdir()
+    limitation = {
+        "code": "partial-evidence",
+        "message": "Bounded evidence omitted 1 entries and truncated "
+                   "0 files or excerpts.",
+        "paths": ["."],
+    }
+    child = _child(scope=".")
+    child["limitations"] = [limitation]
+    payload = render_recommendations(
+        _run(children=[child], limitations=[limitation]))
+    out = payload.decode("utf-8")
+    assert "partial-evidence" in out
+    assert "` . `" not in out
+    assert "`" + "." + "`" in out
+    result = publish_recommendations(root, payload, None, source_proof=[])
+    assert result.status == "created"
+    assert (root / "recommendations.md").is_file()
+
+
+@pytest.mark.parametrize("path", ["./x", "../x", "a//b", "`x`", "a|b",
+                                   "/x", "C:/x", "~/x", "a\nb", "a\\b"])
+def test_render_still_rejects_non_normalized_limitation_paths(path):
+    """Every other limitation-path rejection stays exactly as before."""
+    from ptest.recommendations import render_recommendations
+    from ptest.contracts import Problem
+    limitation = {"code": "partial-evidence",
+                  "message": "Bounded evidence was partial.",
+                  "paths": [path]}
+    with pytest.raises(Problem, match="report-invalid"):
+        render_recommendations(_run(limitations=[limitation]))
