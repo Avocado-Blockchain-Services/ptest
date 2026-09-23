@@ -343,6 +343,23 @@ def _required_setup_state(config: C.Config,
     return None
 
 
+def setup_blocker(domain: C.DomainPaths, config: C.Config) -> str | None:
+    """Bounded missing/stale setup reason, or None when no setup run is due.
+
+    Read-only: never executes setup. Init smoke uses it to skip with the
+    exact setup command instead of installing silently.
+    """
+    if not isinstance(domain, C.DomainPaths) or not isinstance(config, C.Config):
+        raise TypeError("setup_blocker requires DomainPaths and Config")
+    if config.setup is None:
+        return None
+    try:
+        checkout = _checkout(config)
+    except C.Problem:
+        return "setup state cannot be determined"
+    return _required_setup_state(config, checkout, domain)
+
+
 def _setup_prepared(config: C.Config, checkout: C.CheckoutIdentity,
                     request: C.RunRequest, prepared: C.PreparedRun,
                     domain: C.DomainPaths,

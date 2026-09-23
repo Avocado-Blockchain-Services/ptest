@@ -54,6 +54,7 @@ Syntax:
              [--reviewer auto|claude|codex|opencode]
              [--allow-model-review] [--review-timeout SECONDS]
              [--review-model MODEL] [--review-concurrency 1..8]
+             [--smoke | --no-smoke]
 
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
@@ -67,7 +68,10 @@ Notes:
   the review offer and --no-doctor suppresses it. Review flags cannot be
   combined with --json or --dry-run. --review-model (or PTEST_REVIEW_MODEL)
   overrides the cheap-model choice; --review-concurrency 1..8 (default 4)
-  bounds parallel model calls."""
+  bounds parallel model calls. After init, --smoke runs one small real
+  test per project through the scoped runner, --no-smoke skips it, and a
+  TTY asks once naming the files. --dry-run and --json never run smoke;
+  a smoke failure keeps the written config and the exit status."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 

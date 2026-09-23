@@ -753,7 +753,9 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
         cli.agent_providers, "resolve_reviewer",
         lambda *a, **k: pytest.fail("resolved reviewer for unqualified offer"),
     )
-    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted with no qualified reviewer"))
+    # The smoke prompt fires before the review offer; declining it keeps
+    # this test's no-qualified-reviewer path intact with no run.
+    monkeypatch.setattr("builtins.input", lambda: "n")
     monkeypatch.setattr(
         cli.doctor, "inspect_workspace",
         lambda *a, **k: pytest.fail("scanned source with no qualified reviewer"),
@@ -770,7 +772,6 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
 
 
 @pytest.mark.parametrize("extra", [
-    ("--no-doctor",),
     ("--json",),
     ("--dry-run",),
 ])
@@ -790,6 +791,32 @@ def test_tty_init_no_doctor_json_and_dry_run_never_offer_review(
 
     assert cli.main(("init", "--runner", "pytest", "--agents", "none", *extra)) == 0
     captured = capsys.readouterr()
+    assert "review" not in captured.err.lower()
+
+
+def test_tty_init_no_doctor_still_asks_smoke_but_never_offers_review(
+        tmp_path, monkeypatch, capsys):
+    """--no-doctor suppresses the review offer, not the smoke question."""
+    from ptest import cli
+
+    _make_cli_init_repo(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_tiny.py").write_text(
+        "def test_tiny():\n    assert True\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "n")
+    monkeypatch.setattr(
+        cli.agent_providers, "resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer for suppressed init offer"),
+    )
+
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none", "--no-doctor")) == 0
+    captured = capsys.readouterr()
+    assert prompts == [1]
+    assert "Run a quick smoke test to confirm ptest works? [Y/n]" in captured.err
     assert "review" not in captured.err.lower()
 
 

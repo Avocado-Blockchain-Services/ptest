@@ -19,7 +19,7 @@ from typing import Sequence
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, executability, files, help as help_api, history
-from . import init_render
+from . import init_render, init_smoke
 from . import operations, platform, recommendations, scheduler
 from . import render
 from .adapters import pytest as pytest_adapter
@@ -89,6 +89,7 @@ class ParsedArgs:
     review_concurrency_explicit: bool = False
     offline: bool = False
     doctor_request: bool | None = None
+    smoke: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +259,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         review_timeout_s = 300
         review_model = None
         review_concurrency = 4
+        smoke: bool | None = None
+        smoke_seen = no_smoke_seen = False
         index = 0
         while index < len(args):
             token = args[index]
@@ -343,6 +346,16 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 concurrency_seen = True
                 review_concurrency = _integer(value, lo=1, hi=8)
                 continue
+            elif token == "--smoke":
+                if smoke_seen or no_smoke_seen:
+                    raise _problem("invalid-config", "init smoke modes cannot be combined or repeated")
+                smoke_seen = True
+                smoke = True
+            elif token == "--no-smoke":
+                if no_smoke_seen or smoke_seen:
+                    raise _problem("invalid-config", "init smoke modes cannot be combined or repeated")
+                no_smoke_seen = True
+                smoke = False
             elif token == "--assessment-json":
                 raise _problem("invalid-config", "assessment output is only available for doctor")
             elif token == "--json":
@@ -373,7 +386,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           review_model_explicit=model_seen,
                           review_concurrency=review_concurrency,
                           review_concurrency_explicit=concurrency_seen,
-                          doctor_request=doctor_request)
+                          doctor_request=doctor_request,
+                          smoke=smoke)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -762,6 +776,49 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
 def _interactive_review() -> bool:
     """TTY review is interactive only outside CI, even if stdin is a TTY."""
     return sys.stdin.isatty() and "CI" not in os.environ
+
+
+def _ask_init_smoke(runnable: Sequence[init_smoke.SmokePlan]) -> bool:
+    """TTY consent for the smoke run; names each file that would execute."""
+    print("Smoke candidates:", file=sys.stderr)
+    for plan in runnable:
+        print(f"  {init_smoke.display_command(plan.project, plan.candidate)}",
+              file=sys.stderr)
+    print(init_smoke.SMOKE_QUESTION, file=sys.stderr)
+    try:
+        answer = input()
+    except EOFError:
+        return False
+    return init_smoke.parse_consent(answer)
+
+
+def _init_smoke_text(parsed: ParsedArgs, cwd: Path) -> str:
+    """One smoke run per project; never changes init's outcome or status.
+
+    Dry runs, machine output, and explicit opt-out never execute. TTY init
+    asks once; non-interactive init runs only with ``--smoke``.
+    """
+    if parsed.dry_run or parsed.json or parsed.smoke is False:
+        return ""
+    try:
+        resolution = config_api.resolve_config(cwd)
+        domain = platform.domain_paths(parsed.fixture_domain)
+        plans = init_smoke.plan_resolution(resolution, domain)
+    except Exception:
+        # Smoke is best-effort confirmation: planning trouble never changes
+        # init's configuration-based outcome or exit status.
+        return ""
+    if not plans:
+        return ""
+    runnable = [plan for plan in plans if plan.skip_reason is None]
+    if parsed.smoke is not True:
+        if not runnable or not _interactive_review() or not _ask_init_smoke(runnable):
+            return ""
+    results = tuple(
+        init_smoke.run_plan(domain, plan, fixture_domain=parsed.fixture_domain)
+        for plan in plans
+    )
+    return init_smoke.format_smoke(results)
 
 
 def _review_consent_problem() -> C.Problem:
@@ -1631,6 +1688,9 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
+            smoke_text = _init_smoke_text(parsed, cwd)
+            if smoke_text:
+                sys.stdout.write(smoke_text)
             offer_review = (
                 parsed.doctor_request is True
                 or (parsed.doctor_request is None and not parsed.json
