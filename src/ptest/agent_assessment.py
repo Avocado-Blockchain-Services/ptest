@@ -117,15 +117,11 @@ _UNSUPPORTED_MARKERS = frozenset({
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
 
-# Execution-claim words and pattern live in contracts (the single source);
-# this module reuses them for its prose filter and policy instruction so
-# the rule the model reads and the rules both filters enforce cannot drift
-# apart. Naming a test library (``pytest``, ``ptest``) is not an execution
-# claim.
-_EXEC_CLAIM_WORDS = C._AA_EXEC_CLAIM_WORDS
-_exec_claim_pattern = C._aa_exec_claim_pattern
-
-
+# Prose trust lives in contracts.aa_prose_is_untrusted (the single
+# source); this module calls it for its filter and derives the policy
+# instruction from C.AA_EXEC_CLAIM_WORDS so the rule the model reads and
+# the rule both filters enforce cannot drift apart. Naming a test
+# library (``pytest``, ``ptest``) is not an execution claim.
 _REVIEW_INSTRUCTION = (
     "Produce exactly one assessment: a raw ptest agent-assessment JSON "
     "object for exactly one child and the single packet in this request. "
@@ -155,7 +151,7 @@ _REVIEW_INSTRUCTION = (
     "(rationales, summaries, suggested changes) are plain text only: no "
     "Markdown, backticks, pipe characters, links, HTML, headings, or "
     "percent figures. Never claim execution: do not use the words "
-    + ", ".join(_EXEC_CLAIM_WORDS) + "."
+    + ", ".join(C.AA_EXEC_CLAIM_WORDS) + "."
 )
 
 # Raw payload keys the model must never supply. The public codec projects
@@ -217,16 +213,6 @@ _ASSESSMENT_PUBLICATION = {
     "path": "recommendations.md",
     "sha256": "00" * 32,
 }
-
-_LINK_RE = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)")
-_AUTOLINK_RE = re.compile(
-    r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>")
-_HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
-_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
-_PERCENT_RE = re.compile(r"\d\s*%")
-_EXEC_CLAIM_RE = re.compile(_exec_claim_pattern(_EXEC_CLAIM_WORDS),
-                            re.IGNORECASE)
-
 
 def _fail(code: str, message: str) -> C.Problem:
     return C.Problem(code=code, message=message, phase=_PHASE,
@@ -1500,10 +1486,7 @@ def _provisional_score(rows: object) -> dict | None:
 
 
 def _reject_untrusted_prose(text: str, ctx: str) -> None:
-    if (_LINK_RE.search(text) or _AUTOLINK_RE.search(text)
-            or _HTML_RE.search(text) or "|" in text or "`" in text
-            or _HEADLINE_RE.search(text) or _PERCENT_RE.search(text)
-            or _EXEC_CLAIM_RE.search(text)):
+    if C.aa_prose_is_untrusted(text):
         raise _fail("invalid-assessment",
                     f"{ctx} carries untrusted model content")
 

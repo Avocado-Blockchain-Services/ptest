@@ -1868,11 +1868,6 @@ def test_parse_assessment_rejects_model_supplied_envelope_metadata(
     assert "unknown field" in caught.value.message
 
 
-_NATIVE_EVIDENCE_DIR = Path(
-    "/home/ingmar/worktrees/ptest/cx-init-onboarding/ptest/.pipeline"
-    "/agent-doctor-2026-09-23/native")
-
-
 def _packet_from_request_dict(body: dict):
     """Rebuild one EvidencePacket from a recorded provider request packet."""
     from ptest import agent_assessment as AA
@@ -1902,35 +1897,6 @@ def _packet_from_request_dict(body: dict):
     )
 
 
-def test_recorded_claude_reply_stripped_to_data_only():
-    """Regression on the real recorded Claude reply: with its five
-    ptest-owned envelope keys dropped, the ``{"data": ...}`` remainder
-    must clear the raw boundary, then either validate or fail only for a
-    genuine data-level reason (reported exactly, never papered over)."""
-    from ptest import agent_assessment as AA
-
-    raw_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-raw-assessment.json"
-    request_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-request.json"
-    if not raw_path.exists() or not request_path.exists():
-        pytest.skip("recorded native evidence is absent")
-    recorded = json.loads(raw_path.read_text(encoding="utf-8"))
-    assert set(recorded) == {"data", "domain", "error", "kind",
-                             "ptest_version", "schema_version"}
-    stripped = {"data": recorded["data"]}
-    packet = _packet_from_request_dict(
-        json.loads(request_path.read_text(encoding="utf-8"))["packet"])
-    AA._reject_extra_raw_keys(stripped)
-    try:
-        child = AA.parse_assessment(
-            (json.dumps(stripped) + "\n").encode("utf-8"), packet)
-    except C.Problem as exc:
-        assert (exc.code, exc.message) == (
-            "report-invalid",
-            "assessment.children[0].limitations[0] has an unknown code")
-    else:
-        assert child.score is not None
-
-
 # --- round 3: prose filter names libraries, not execution claims ---------------
 
 def test_parse_assessment_accepts_library_naming_without_execution_claim(
@@ -1958,6 +1924,14 @@ def test_parse_assessment_accepts_library_naming_without_execution_claim(
     "The pytest suite passed on the excerpt lines.",
     "All listed tests executed against the excerpt.",
     "The suite finished with exit code 0 on the excerpt.",
+    "ptest --full is green on the excerpt lines.",
+    "Ran ptest --full\nand all 12 tests pass.",
+    "pytest passes for this module.",
+    "The suite succeeded under pytest.",
+    "uv run pytest -x tests/test_db.py --maxfail=1.",
+    "Run python3 -m pytest tests/ to confirm.",
+    "See https://evil.example/x for the fix.",
+    "Docs live at www.x.com/fix for reference.",
 ])
 def test_parse_assessment_still_rejects_execution_claims(tmp_path, rationale):
     """Execution claims stay rejected with or without a library name."""
@@ -1994,6 +1968,26 @@ def test_parse_assessment_accepts_library_name_in_finding_summary(tmp_path):
         "Use pytest.raises for the negative path.")
 
 
+@pytest.mark.parametrize("rationale", [
+    "The negative path asserts pytest.raises(ValueError) on the excerpt.",
+    "The excerpt imports only pytest for assertions.",
+    "Selection is closed per .ptest.toml in the packet.",
+    "The packet holds no ptest configuration data.",
+])
+def test_parse_assessment_accepts_library_naming_variants(tmp_path,
+                                                          rationale):
+    """Library and config names stay allowed: only command shapes, bare
+    URLs, and execution-claim words are untrusted, never the names."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    rows = [_row(packet, row_id) for row_id in EXPECTED_IDS]
+    rows[0] = _row(packet, "FIX-001", rationale=rationale)
+    child = AA.parse_assessment(
+        _envelope_bytes(_payload_for(packet, rows=rows)), packet)
+    assert child.rows[0].rationale == rationale
+
+
 def test_review_instruction_states_plain_text_prose_rules():
     """The policy instruction tells the model the exact prose rules the
     filter enforces: plain text only, and no execution-claim words."""
@@ -2018,17 +2012,14 @@ def test_recorded_claude_reply_2_parses_without_prose_rejection():
     test library (``pytest.raises(ValueError)``, ``imports only pytest``)
     and packet paths (``.ptest.toml``, ``ptest result``), which the old
     prose filter misread as execution claims. Rebound only on
-    ``packet_sha256`` to the recorded request packet (the reply was cut
-    against a narrower packet whose excerpts are identical), the ``data``
+    ``packet_sha256`` to the vendored request packet, the ``data``
     remainder must parse."""
     import copy
 
     from ptest import agent_assessment as AA
 
     fixture = _FIXTURE_ASSESSMENT_DIR / "claude-e2e-raw-assessment-2.json"
-    request_path = _NATIVE_EVIDENCE_DIR / "claude-e2e-request.json"
-    if not request_path.exists():
-        pytest.skip("recorded native request is absent")
+    request_path = _FIXTURE_ASSESSMENT_DIR / "e2e-demo-request.json"
     recorded = json.loads(fixture.read_text(encoding="utf-8"))
     packet = _packet_from_request_dict(
         json.loads(request_path.read_text(encoding="utf-8"))["packet"])

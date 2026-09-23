@@ -2776,18 +2776,25 @@ _AGENT_ASSESSMENT_BIDI = frozenset({
 _AA_LINK_RE = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)")
 _AA_AUTOLINK_RE = re.compile(
     r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>")
+_AA_BARE_URL_RE = re.compile(r"https?://\S|\bwww\.\S", re.IGNORECASE)
 _AA_HTML_RE = re.compile(r"<!--|</?[A-Za-z][^<>\n]*>")
 _AA_HEADLINE_RE = re.compile(r"(?m)^[ \t]*#{1,6}(?:\s|$)")
 _AA_PERCENT_RE = re.compile(r"\d\s*%")
+_AA_COMMAND_RE = re.compile(
+    r"\bp?y?test\s+(?:-|\S*/|\S+\.py\b)|\buv\s+run\b|\bpython3?\s+-m\b",
+    re.IGNORECASE)
 
-# Execution-claim words the model must never use in finding prose. This is
-# the single source: agent_assessment reuses these words and the builder
-# below for its own prose filter and policy instruction, so the rule the
-# model reads and the rules both filters enforce cannot drift apart.
-# Naming a test library (``pytest``, ``ptest``) is not an execution claim.
-_AA_EXEC_CLAIM_WORDS = (
+# Execution-claim words the model must never use in prose. This is the
+# single source: the public predicate below and the review instruction
+# both derive from it, so the rule the model reads and the rule both
+# filters enforce cannot drift apart. Naming a test library (``pytest``,
+# ``ptest``) or config file (``.ptest.toml``) is not an execution claim:
+# only command shapes (flags, paths, ``uv run``, ``python -m``) and claim
+# inflections (passes, passing, succeeded, is green) are.
+AA_EXEC_CLAIM_WORDS = (
     "exit code", "exit status", "test output", "observed",
     "passed", "failed", "executed", "verified",
+    "passes", "passing", "succeeded", "is green",
 )
 
 
@@ -2811,8 +2818,29 @@ def _aa_exec_claim_pattern(words: tuple) -> str:
 
 
 _AA_EXEC_CLAIM_RE = re.compile(
-    _aa_exec_claim_pattern(_AA_EXEC_CLAIM_WORDS),
+    _aa_exec_claim_pattern(AA_EXEC_CLAIM_WORDS),
     re.IGNORECASE)
+
+
+def aa_prose_is_untrusted(text: str) -> bool:
+    """Single predicate: True when model prose carries untrusted content.
+
+    Covers Markdown links, autolinks, bare URLs, HTML, headlines,
+    percent figures, table pipes, code backticks, execution claims,
+    and observed-command shapes.
+    """
+    return bool(
+        _AA_LINK_RE.search(text)
+        or _AA_AUTOLINK_RE.search(text)
+        or _AA_BARE_URL_RE.search(text)
+        or _AA_HTML_RE.search(text)
+        or _AA_HEADLINE_RE.search(text)
+        or _AA_PERCENT_RE.search(text)
+        or "|" in text
+        or "`" in text
+        or _AA_EXEC_CLAIM_RE.search(text)
+        or _AA_COMMAND_RE.search(text)
+    )
 
 _AGENT_ASSESSMENT_FIELDS = frozenset({
     "schema", "provider", "children", "limitations", "publication",
@@ -2922,10 +2950,7 @@ def _check_aa_evidence(value: object, ctx: str, *, min_items: int) -> None:
 
 
 def _reject_aa_untrusted_content(name: str, text: str, ctx: str) -> None:
-    if (_AA_LINK_RE.search(text) or _AA_AUTOLINK_RE.search(text)
-            or _AA_HTML_RE.search(text) or "|" in text or "`" in text
-            or _AA_HEADLINE_RE.search(text) or _AA_PERCENT_RE.search(text)
-            or _AA_EXEC_CLAIM_RE.search(text)):
+    if aa_prose_is_untrusted(text):
         raise _invalid("report-invalid",
                        f"{ctx} field {name!r} carries untrusted content")
 

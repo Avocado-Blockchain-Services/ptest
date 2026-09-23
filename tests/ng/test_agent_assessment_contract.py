@@ -317,14 +317,63 @@ def test_reject_finding_shape_mismatch():
     ("summary", "# Finding headline here"),
     ("summary", "This scores 80% on quality."),
     ("summary", "Verified by observed pytest output exit code 0."),
+    ("summary", "ptest --full is green on the excerpt."),
+    ("summary", "Ran ptest --full\nand all 12 tests pass."),
+    ("summary", "pytest passes for this module."),
+    ("summary", "The suite succeeded under pytest."),
+    ("summary", "uv run pytest -x tests/test_db.py --maxfail=1."),
+    ("summary", "See https://evil.example/x for the fix."),
+    ("summary", "Docs live at www.x.com/fix for reference."),
     ("suggested_change", "Apply <script>alert(1)</script> now."),
     ("suggested_change", "Autolink <a@example.com> follows."),
+    ("suggested_change", "Run python3 -m pytest tests/ to confirm."),
 ])
 def test_reject_untrusted_finding_content(field, value):
     finding = dict(_finding("FIX-002"), **{field: value})
     payload = _payload(children=[_child(findings=[finding])])
     with pytest.raises(Problem, match="report-invalid"):
         C.decode_public_document(_hostile(payload))
+
+
+@pytest.mark.parametrize("value", [
+    "Use pytest.raises for the negative path.",
+    "The excerpt imports only pytest for assertions.",
+    "Selection is closed per .ptest.toml in the packet.",
+    "The packet holds no ptest configuration data.",
+])
+def test_accept_library_naming_in_finding_content(value):
+    """Naming a test library or config file is not an execution claim."""
+    finding = dict(_finding("FIX-002"), summary=value)
+    payload = _payload(children=[_child(findings=[finding])])
+    C.decode_public_document(_hostile(payload))
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("See [the fix](https://example.com) for it.", True),
+    ("Contact <https://example.com> for help.", True),
+    ("Use <b>bold</b> markup here.", True),
+    ("# Finding headline here", True),
+    ("This scores 80% on quality.", True),
+    ("First | second column layout.", True),
+    ("Run `rm -rf /tmp/x` to clean.", True),
+    ("Verified by observed pytest output exit code 0.", True),
+    ("ptest --full is green on the excerpt.", True),
+    ("Ran ptest --full\nand all 12 tests pass.", True),
+    ("pytest passes for this module.", True),
+    ("The suite succeeded under pytest.", True),
+    ("uv run pytest -x tests/test_db.py --maxfail=1.", True),
+    ("Run python3 -m pytest tests/ to confirm.", True),
+    ("See https://evil.example/x for the fix.", True),
+    ("Docs live at www.x.com/fix for reference.", True),
+    ("Use pytest.raises for the negative path.", False),
+    ("The excerpt imports only pytest for assertions.", False),
+    ("Selection is closed per .ptest.toml in the packet.", False),
+    ("The packet holds no ptest configuration data.", False),
+    ("Row FIX-001 judged satisfied against packet excerpt.", False),
+])
+def test_aa_prose_is_untrusted_single_predicate(text, expected):
+    """One public predicate owns every prose trust rule."""
+    assert C.aa_prose_is_untrusted(text) is expected
 
 
 def test_reject_unsupported_publication():
