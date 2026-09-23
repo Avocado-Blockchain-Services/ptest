@@ -105,6 +105,22 @@ actually works by running a small real test through ptest, per project.
   configuration, and init's exit status stays configuration-based. Show the smoke result clearly.
 - Must pass on persea: `api` with its serial xdist handling (A.1), and `web` with vitest execution (A.2).
 
+## F. What `ptest --full` means (user decision, 2026-09-23)
+
+Real projects narrow their own suite in checked-in configuration. For example, persea api has
+`addopts = "-m \"not extended_migration\""` and a `conftest.py` `pytest_collection_modifyitems` hook. ptest used to
+refuse `--full` for such projects.
+
+- `--full` runs **the project's own full suite as its checked-in configuration defines it**. Narrowing that comes from
+  the project's own pytest config (addopts marker/keyword filters, `-p`, `testpaths`) or from its `conftest.py`
+  collection hooks is allowed in full mode.
+- The result is **clearly labelled**, never silent. The human output and the result record state the filters, for
+  example `full (project-filtered: -m not extended_migration; conftest collection hook)`. Init's executability line
+  says the same.
+- Narrowing supplied at invocation time (CLI args, `-k`/`-m`/`-x`/`--lf` passed to ptest, redirects such as `--rootdir`
+  or `-c`, or `PYTEST_ADDOPTS`) is **still refused** in full mode, so a narrowed run can never pass as full.
+- Unowned execution plugins, xdist, and other serial-grant rules are unchanged.
+
 ## D. Constraints
 
 - Follow `secure-by-spec` and `audit-spec`. All tests go through `ptest` only. Tasks never launch real
