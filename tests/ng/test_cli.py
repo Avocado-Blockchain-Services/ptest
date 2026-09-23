@@ -308,7 +308,7 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
     else:
         expected = {
             "where": f"root: {root}", "register": "register: initialized",
-            "init": "existing: .ptest.toml",
+            "init": "unchanged: .ptest.toml",
             "plan": "plan: full (static preview)", "status": "queued: 0\nactive: 0",
             "history": "history: 0 runs", "doctor": "cache.global-flush",
         }
@@ -504,7 +504,8 @@ def test_init_preview_creates_nothing_then_creation_preserves_existing_bytes(
             assert document.data["action"] == action
             assert document.data["exists"] is (action != "preview")
         else:
-            assert f"{action}: .ptest.toml" in captured.out
+            human_action = "unchanged" if action == "existing" else action
+            assert f"{human_action}: .ptest.toml" in captured.out
         if action == "preview":
             assert not target.exists()
         else:
@@ -1037,6 +1038,8 @@ def test_hostile_repository_name_cannot_inject_terminal_structure(
 
 
 def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, capsys):
+    import re
+
     monkeypatch.chdir(tmp_path)
     assert main(("init", "--runner", "pytest", "--agents", "claude")) == 0
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -1047,7 +1050,11 @@ def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, cap
 
     assert "ptest already configured" in captured.out
     assert "ptest initialized" not in captured.out
-    assert "already present" in captured.out
+    assert "unchanged: .ptest.toml" in captured.out
+    assert "already present" not in captured.out
+    for relative in ("docs/ptest-agent.md", "AGENTS.md",
+                     ".claude/skills/ptest/SKILL.md"):
+        assert re.search(rf"unchanged +{re.escape(relative)}", captured.out)
     assert {path: path.read_bytes() for path in tmp_path.rglob("*")
             if path.is_file()} == before
 

@@ -240,7 +240,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     statuses = _patch_qualification(monkeypatch)
-    answers = iter(("none", "no", "none", "no"))
+    answers = iter(("codex", "no", "codex", "no"))
     inputs = []
 
     def input_answer():
@@ -260,15 +260,20 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     created = capsys.readouterr()
     config = root / ".ptest.toml"
     assert config.is_file() and "created:" in created.out
+    assert "created: .ptest.toml" in created.out
     assert "Optimization review is disabled" in created.err
     original_config = config.read_bytes()
 
     assert main(("init", "--runner", "pytest")) == 0
     existing = capsys.readouterr()
-    assert "existing: .ptest.toml" in existing.out
+    assert "unchanged: .ptest.toml" in existing.out
+    assert "already present" not in existing.out
+    for relative in ("docs/ptest-agent.md", "AGENTS.md",
+                     ".agents/skills/ptest/SKILL.md"):
+        assert re.search(rf"unchanged +{re.escape(relative)}", existing.out)
     assert "Optimization review is disabled" in existing.err
     assert config.read_bytes() == original_config
-    assert inputs == ["none", "no", "none", "no"]
+    assert inputs == ["codex", "no", "codex", "no"]
     assert launches == []
 
     qualifications_before_no_doctor = len(statuses)
@@ -283,7 +288,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     assert "Run this review once?" not in no_doctor.err
     assert len(statuses) == qualifications_before_no_doctor
     assert guidance_prompts == ["asked"]
-    assert inputs == ["none", "no", "none", "no"]
+    assert inputs == ["codex", "no", "codex", "no"]
     assert launches == []
     assert not (root / "recommendations.md").exists()
 

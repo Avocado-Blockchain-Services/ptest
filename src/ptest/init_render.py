@@ -97,6 +97,12 @@ def _clean(value: object) -> str:
     return terminal_text(value)
 
 
+def _human_action(action: str) -> str:
+    if action in ("existing", "already present"):
+        return "unchanged"
+    return action
+
+
 def _wrapped(text: str, *, indent: str = "", subsequent: str | None = None) -> list[str]:
     width = _INNER - len(indent)
     chunks = textwrap.wrap(
@@ -143,12 +149,13 @@ def _config_lines(result: C.InitResult) -> list[str]:
     # The configuration result keeps the historical one-line shape
     # (``created: .ptest.toml``), shown relative to the repository root;
     # the absolute typed target stays in the frozen JSON document.
-    lines = [f"{result.action.value}: {_CONFIG_NAME}"]
+    lines = [f"{_human_action(result.action.value)}: {_CONFIG_NAME}"]
     lines = [item for line in lines for item in _wrapped(line)]
     for item in result.details:
         if item.source != "config":
             continue
-        lines.extend(_entry(_clean(item.action), _clean(item.target)))
+        lines.extend(_entry(_human_action(_clean(item.action)),
+                             _clean(item.target)))
     return lines
 
 
@@ -163,7 +170,7 @@ def _guidance_lines(rules: object) -> list[str]:
         if action == "note":
             lines.extend(_wrapped(f"note: {target}", indent=_ENTRY_INDENT))
         else:
-            lines.extend(_entry(action, target))
+            lines.extend(_entry(_human_action(action), target))
     if not lines:
         for action in getattr(rules, "actions", ()):
             lines.extend(_wrapped(_clean(action), indent=_ENTRY_INDENT))

@@ -76,7 +76,7 @@ def test_preview_header_uses_would_verbs_and_never_created(tmp_path):
     assert "updated" not in text
 
 
-def test_repeat_init_reports_already_configured_with_unchanged_files(tmp_path):
+def test_repeat_init_reports_unchanged_config_and_guidance_paths(tmp_path):
     agent_rules.apply(tmp_path)
     unchanged = agent_rules.apply(tmp_path)
     assert unchanged.changed is False
@@ -85,7 +85,10 @@ def test_repeat_init_reports_already_configured_with_unchanged_files(tmp_path):
 
     assert "ptest already configured" in text
     assert "ptest initialized\n" not in text
-    assert "already present" in text
+    assert "unchanged: .ptest.toml" in text
+    assert "already present" not in text
+    assert re.search(r"unchanged +docs/ptest-agent\.md", text)
+    assert re.search(r"unchanged +AGENTS\.md", text)
 
 
 def test_invalid_existing_config_renders_attention_header(tmp_path):
@@ -121,9 +124,10 @@ def test_renderer_reports_exact_per_child_config_actions():
     ))
     text = render_init(result, None, agents=())
 
-    assert "created" in text and "already present" in text
+    assert "created" in text and "unchanged" in text
+    assert "already present" not in text
     assert "api/.ptest.toml" in text
-    assert "web/.ptest.toml" in text
+    assert re.search(r"unchanged +web/\.ptest\.toml", text)
     assert "ptest api/tests/" in text
 
 
@@ -258,4 +262,6 @@ def test_preview_and_existing_layout_preserved_with_banner(tmp_path):
 
     assert _WORDMARK_LINES[0] in existing_text
     assert "ptest already configured" in existing_text
-    assert "already present" in existing_text
+    assert "unchanged: .ptest.toml" in existing_text
+    assert "already present" not in existing_text
+    assert re.search(r"unchanged +docs/ptest-agent\.md", existing_text)
