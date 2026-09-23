@@ -1452,3 +1452,47 @@ def test_cli_version_returns_none_on_failure(bindir, monkeypatch):
     slow = ap.resolve_reviewer("codex", _env_for(bindir))
     monkeypatch.setattr(ap, "_VERSION_TIMEOUT_S", 1)
     assert ap.cli_version(slow) is None
+
+
+def _fifo_eof_within(reader: int, deadline_s: float) -> bool:
+    """True once the fifo has no writers left (read returns EOF)."""
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(reader, 65536)
+        except BlockingIOError:
+            time.sleep(0.05)
+            continue
+        if chunk == b"":
+            return True
+    return False
+
+
+def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
+        bindir, monkeypatch):
+    """A forked grandchild holding a fifo write end leaves no survivor.
+
+    The fake CLI backgrounds a 60s sleep holding the fifo open, then
+    sleeps itself; the 1s owned capture must kill the whole group.
+    Liveness is proved by fifo EOF (all writers dead), never by a
+    /proc scan. Both cli_version and _discover_model_entries delegate
+    to the same _run_owned_capture helper.
+    """
+    fifo = bindir / "grandchild.fifo"
+    os.mkfifo(fifo)
+    _write_bin(
+        bindir, "codex",
+        "#!/bin/sh\n"
+        f'F="{fifo}"\n'
+        'sleep 60 <> "$F" &\n'
+        "exec sleep 60\n",
+    )
+    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    monkeypatch.setattr(ap, "_VERSION_TIMEOUT_S", 1)
+    assert ap.cli_version(adapter) is None
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        assert _fifo_eof_within(reader, 10.0), \
+            "grandchild survived the owned capture"
+    finally:
+        os.close(reader)

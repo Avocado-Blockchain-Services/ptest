@@ -1203,34 +1203,144 @@ _VERSION_TIMEOUT_S = 10
 _VERSION_MAX_BYTES = 1024 * 1024
 
 
+def _spawn_owned(argv: Sequence[str]) -> tuple[subprocess.Popen,
+                                              int | None, int | None,
+                                              int | None]:
+    """Spawn a session-leader child owned by the launch_review machinery.
+
+    Returns ``(proc, pgid, sid, leader_start)`` for :func:`_stop_owned`.
+    A Popen ``OSError`` (missing executable) propagates so callers keep
+    their unavailable contracts; an unverifiable identity fails closed
+    with a Problem instead of launching an unowned child.
+    """
+    start_new = os.name == "posix"
+    if start_new and not _PIDFD_AVAILABLE:
+        raise _problem(
+            "provider-failed",
+            "launch refused: pidfd containment unavailable on this host, "
+            "so group cleanup could not be proved safe")
+    proc = subprocess.Popen(
+        list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
+        shell=False, start_new_session=start_new)
+    if not start_new:
+        return proc, None, None, None
+    pgid: int | None = None
+    sid: int | None = None
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pgid = None
+    try:
+        sid = os.getsid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        sid = None
+    leader_start = _proc_starttime(proc.pid)
+    if pgid is None or sid is None or leader_start is None:
+        _stop_owned(proc, pgid, sid, leader_start)
+        raise _problem(
+            "provider-failed",
+            "launch refused: process identity unverifiable, so group "
+            "cleanup could not be proved safe")
+    return proc, pgid, sid, leader_start
+
+
+def _collect_owned(proc: subprocess.Popen, timeout_s: int | float,
+                   max_bytes: int) -> bytes | None:
+    """Incrementally read stdout up to ``max_bytes`` before ``timeout_s``.
+
+    Returns the bytes on a zero exit, else None (timeout, over-bound
+    output, nonzero exit, or read error). Teardown belongs to the caller
+    via :func:`_stop_owned`, which also reaps the child.
+    """
+    if proc.stdout is None:
+        return None
+    try:
+        os.set_blocking(proc.stdout.fileno(), False)
+    except (OSError, ValueError):
+        return None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout_s
+    selector = selectors.DefaultSelector()
+    try:
+        try:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+        except (OSError, ValueError, KeyError):
+            return None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                ready = selector.select(min(0.2, remaining))
+            except OSError:
+                return None
+            for key, _ in ready:
+                try:
+                    chunk = key.fileobj.read(65536)
+                except (BlockingIOError, OSError, ValueError):
+                    chunk = None
+                if not chunk:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except (KeyError, ValueError):
+                        pass
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                chunks.append(chunk)
+            if not selector.get_map():
+                break
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError:
+            return None
+        if proc.poll() != 0:
+            return None
+        return b"".join(chunks)
+    finally:
+        selector.close()
+
+
+def _run_owned_capture(argv: Sequence[str], *, timeout_s: int | float,
+                       max_bytes: int) -> bytes | None:
+    """Run one owned child synchronously and capture its bounded stdout.
+
+    The child runs as a session leader under the same :func:`_stop_owned`
+    machinery as :func:`launch_review`: on timeout, over-bound output, or
+    any error the whole group is killed and the child reaped. Returns the
+    stdout bytes on a zero exit, else None. A Popen ``OSError`` propagates.
+    """
+    try:
+        proc, pgid, sid, leader_start = _spawn_owned(argv)
+    except Problem:
+        return None
+    outcome: bytes | None = None
+    try:
+        outcome = _collect_owned(proc, timeout_s, max_bytes)
+    except Exception:
+        outcome = None
+    finally:
+        try:
+            _stop_owned(proc, pgid, sid, leader_start)
+        except Problem:
+            # Containment incomplete: fail closed, and teardown must not
+            # raise out of a capture call. (An assignment here cannot
+            # swallow an in-flight exception; only return could.)
+            outcome = None
+    return outcome
+
+
 def _discover_model_entries(adapter: ReviewerAdapter) -> tuple[dict, ...]:
     """Listed codex model entries in catalog order, stripped to three keys."""
-    proc = subprocess.Popen(
+    stdout = _run_owned_capture(
         [adapter.executable, "debug", "models"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
-        shell=False)
-    try:
-        stdout, _ = proc.communicate(timeout=_DISCOVERY_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        return ()
-    except Exception:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        return ()
-    if proc.poll() != 0:
-        return ()
-    if len(stdout) > _DISCOVERY_MAX_BYTES:
+        timeout_s=_DISCOVERY_TIMEOUT_S, max_bytes=_DISCOVERY_MAX_BYTES)
+    if stdout is None:
         return ()
     try:
         payload = json.loads(stdout.decode("utf-8"))
@@ -1282,32 +1392,12 @@ def cli_version(adapter: ReviewerAdapter) -> str | None:
     if not isinstance(adapter, ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
     try:
-        proc = subprocess.Popen(
+        stdout = _run_owned_capture(
             [adapter.executable, "--version"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
-            shell=False)
+            timeout_s=_VERSION_TIMEOUT_S, max_bytes=_VERSION_MAX_BYTES)
     except OSError:
         return None
-    try:
-        stdout, _ = proc.communicate(timeout=_VERSION_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        return None
-    except Exception:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        return None
-    if proc.poll() != 0 or len(stdout) > _VERSION_MAX_BYTES:
+    if stdout is None:
         return None
     try:
         text = stdout.decode("utf-8")
