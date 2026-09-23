@@ -975,11 +975,6 @@ def _raw_assessment_schema() -> bytes:
     child["properties"].pop("score", None)
     child["required"] = [key for key in child["required"]
                          if key != "score"]
-    row = child["properties"]["rows"]["items"]
-    row["properties"]["status"]["enum"] = [
-        value for value in row["properties"]["status"]["enum"]
-        if value != "not-applicable"
-    ]
     return json.dumps(schema, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True).encode("utf-8")
 

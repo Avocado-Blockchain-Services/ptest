@@ -256,9 +256,10 @@ def render_agent_assessment(children, workspace, *, report_path: str,
                 ("dependency-uninspectable", "uninspectable"),
             ) if code in dependency_codes
         ]
-        if not dependency_states:
-            dependency_states = ["uninspectable"]
-        dependency = f"{', '.join(dependency_states)} prerequisites"
+        if dependency_states:
+            dependency = f"{', '.join(dependency_states)} prerequisites"
+        else:
+            dependency = "no dependency limitations recorded"
         execution = (f"{runner} declared; {dependency}; "
                      "not execution-verified")
         config_problem = (None if repository is None

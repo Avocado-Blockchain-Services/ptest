@@ -1018,19 +1018,30 @@ def test_tty_human_init_colors_banner_only_without_no_color(
     assert ("\x1b[" in captured.out) is has_color
 
 
+@pytest.mark.parametrize("no_color", [False, True])
 def test_hostile_repository_name_cannot_inject_terminal_structure(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, no_color):
+    import re
     import sys
 
     root = tmp_path / "project\x1b[2J\r\nforged"
     root.mkdir()
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    if no_color:
+        monkeypatch.setenv("NO_COLOR", "")
+    else:
+        monkeypatch.delenv("NO_COLOR", raising=False)
 
     assert main(("init", "--runner", "pytest")) == 0
     captured = capsys.readouterr()
 
-    assert "\x1b" not in captured.out
+    if no_color:
+        assert "\x1b" not in captured.out
+    else:
+        stripped = re.sub(r"\x1b\[[0-9;]*m", "", captured.out)
+        assert "\x1b" not in stripped
+    assert "\x1b[2J" not in captured.out
     assert "\r" not in captured.out
     assert "\nforged" not in captured.out
     assert any("project" in line and "forged" in line
@@ -1886,7 +1897,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
         assert "publication" not in response_data["properties"]
         response_child = response_data["properties"]["children"]["items"]
         assert "score" not in response_child["properties"]
-        assert "not-applicable" not in response_child["properties"]["rows"]["items"]["properties"]["status"]["enum"]
+        assert "not-applicable" in response_child["properties"]["rows"]["items"]["properties"]["status"]["enum"]
         requests.append(request)
         launches.append((packet["declaration"], timeout_s))
         return ProviderResult(

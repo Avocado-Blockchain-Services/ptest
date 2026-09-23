@@ -1479,3 +1479,40 @@ def test_agent_assessment_human_output_keeps_capability_claims_separate(case):
     assert "hostile link / content." in output
     assert "pytest passed" not in output
     assert "Execution verification: not run." in output
+
+
+def test_agent_assessment_capability_line_without_dependency_codes():
+    from types import SimpleNamespace
+
+    from ptest.render import render_agent_assessment
+
+    config = SimpleNamespace(
+        runner=SimpleNamespace(kind=SimpleNamespace(value="pytest")),
+        selection=SimpleNamespace(enabled=True),
+    )
+    workspace = SimpleNamespace(repositories=(SimpleNamespace(
+        declaration="api", config=config, config_problem=None),))
+
+    def capability_row(limitations):
+        child = {
+            "scope": "api", "score": None, "rows": [], "findings": [],
+            "limitations": limitations,
+        }
+        text = render_agent_assessment(
+            [child], workspace, report_path="recommendations.md",
+            publication_status="created")
+        return next(line for line in text.splitlines()
+                    if line.startswith("api |"))
+
+    empty = capability_row([])
+    assert "no dependency limitations recorded; not execution-verified" in empty
+    assert "uninspectable prerequisites" not in empty
+
+    coded = capability_row([
+        {"code": "dependency-missing", "message": "absent", "paths": []},
+        {"code": "dependency-unsupported", "message": "odd", "paths": []},
+        {"code": "dependency-uninspectable", "message": "opaque",
+         "paths": []},
+    ])
+    assert "missing, unsupported, uninspectable prerequisites" in coded
+    assert "not execution-verified" in coded
