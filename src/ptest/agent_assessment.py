@@ -648,8 +648,14 @@ def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
     return request
 
 
-def _dependency_facts(names: set[str], prefix: str) -> tuple:
+def _dependency_facts(names: set[str], prefix: str,
+                      scoped_paths: dict[str, str] | None = None) -> tuple:
     """Static declaration/lock facts; environment stays uninspectable."""
+    def ref_path(name: str) -> str:
+        if scoped_paths is not None:
+            return scoped_paths[name]
+        return f"{prefix}{name}" if prefix else name
+
     facts: list[DependencyFact] = []
     seen_ecosystems: set[str] = set()
     for filename, (ecosystem, _) in sorted(_DECLARATIONS.items()):
@@ -657,14 +663,14 @@ def _dependency_facts(names: set[str], prefix: str) -> tuple:
             seen_ecosystems.add(ecosystem)
             facts.append(DependencyFact(
                 ecosystem=ecosystem, status="declared",
-                ref_path=f"{prefix}{filename}" if prefix else filename,
+                ref_path=ref_path(filename),
                 detail=f"Static declaration {filename}; provenance "
                        "declaration, content unexecuted."))
     for marker in sorted(_UNSUPPORTED_MARKERS):
         if marker in names:
             facts.append(DependencyFact(
                 ecosystem="project", status="unsupported",
-                ref_path=f"{prefix}{marker}" if prefix else marker,
+                ref_path=ref_path(marker),
                 detail=f"{marker} is not a supported declaration; "
                        "prerequisite unknown."))
     present_locks = {name for name in names if name in _LOCKS}
@@ -675,7 +681,7 @@ def _dependency_facts(names: set[str], prefix: str) -> tuple:
         if hit:
             facts.append(DependencyFact(
                 ecosystem=want, status="locked",
-                ref_path=f"{prefix}{hit[0]}" if prefix else hit[0],
+                ref_path=ref_path(hit[0]),
                 detail=f"Authoritative lock {hit[0]}; provenance lockfile, "
                        "content unexecuted."))
         else:
@@ -694,6 +700,88 @@ def _dependency_facts(names: set[str], prefix: str) -> tuple:
                "installed; the ptest runtime environment is never project "
                "evidence, so installed prerequisites stay unknown."))
     return tuple(facts)
+
+
+def _scope_problem(message: str) -> C.Problem:
+    return _fail("unsafe-path", message)
+
+
+def _validate_scope_directory(root: Path, relative: str) -> None:
+    """Require every selected path component to be an existing directory."""
+    current = root
+    try:
+        stamp = os.lstat(current)
+    except OSError:
+        raise _scope_problem("selected evidence scope is unavailable") from None
+    if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+        raise _scope_problem("selected evidence scope is unsafe")
+    if relative in ("", "."):
+        return
+    for component in relative.split("/"):
+        current = current / component
+        try:
+            stamp = os.lstat(current)
+        except OSError:
+            raise _scope_problem("selected evidence scope is unavailable") from None
+        if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode):
+            raise _scope_problem("selected evidence scope is unsafe")
+
+
+def _packet_scope_context(root: Path, workspace, repo) -> tuple:
+    """Validate inspection scope provenance and return its collection root."""
+    declaration = repo.declaration
+    try:
+        declaration = _check_relpath(declaration, "inspection.declaration")
+    except (TypeError, ValueError):
+        raise _scope_problem("declared evidence root is unsafe") from None
+    if declaration != "." and any(
+            ord(char) < 32 or ord(char) == 127 for char in declaration):
+        raise _scope_problem("declared evidence root is unsafe")
+    local_scope = repo.local_scope
+    if local_scope is not None:
+        try:
+            local_scope = _check_relpath(local_scope,
+                                         "inspection.local_scope")
+        except (TypeError, ValueError):
+            raise _scope_problem("selected evidence scope is malformed") from None
+        if local_scope == "." or any(
+                ord(char) < 32 or ord(char) == 127 for char in local_scope):
+            raise _scope_problem("selected evidence scope is malformed")
+
+    workspace_scope = workspace.scope
+    if (not isinstance(workspace_scope, tuple)
+            or any(not isinstance(path, str) for path in workspace_scope)):
+        raise _scope_problem("workspace evidence scope is malformed")
+
+    if declaration == ".":
+        child_root = root
+        declaration_path = ""
+    else:
+        child_root = root / declaration
+        declaration_path = declaration
+    _validate_scope_directory(root, declaration_path)
+
+    if local_scope is None:
+        scope = declaration
+        scan_start = ""
+    else:
+        scope = (local_scope if declaration == "."
+                 else f"{declaration}/{local_scope}")
+        scan_start = local_scope
+        if len(workspace.repositories) != 1:
+            raise _scope_problem("selected evidence scope is ambiguous")
+        _validate_scope_directory(child_root, local_scope)
+
+    if local_scope is not None:
+        if workspace_scope != (scope,):
+            raise _scope_problem("workspace and child evidence scopes differ")
+    elif workspace_scope and (
+            len(workspace.repositories) != 1
+            or declaration == "."
+            or workspace_scope != (declaration,)):
+        raise _scope_problem("workspace and child evidence scopes differ")
+
+    return child_root, scan_start, scope
 
 
 def build_packets(workspace, resolution,
@@ -718,18 +806,28 @@ def build_packets(workspace, resolution,
             raise _fail("invalid-config",
                         "declared child configuration is unavailable; "
                         "assessment packets cannot be built")
-    for repo in workspace.repositories:
-        packets.append(_build_one_packet(root, repo, resolution, limits))
+    contexts = [
+        _packet_scope_context(root, workspace, repo)
+        for repo in workspace.repositories
+    ]
+    for repo, scope_context in zip(workspace.repositories, contexts):
+        packets.append(_build_one_packet(
+            root, repo, resolution, limits, scope_context))
     return tuple(packets)
 
 
 def _build_one_packet(root: Path, repo, resolution,
-                      limits: EvidenceLimits) -> EvidencePacket:
+                      limits: EvidenceLimits,
+                      scope_context: tuple) -> EvidencePacket:
     declaration = repo.declaration
-    child_rel = "" if declaration == "." else declaration
-    child_root = root if declaration == "." else root / declaration
+    child_root, scan_start, scope = scope_context
     entries: list = []
-    _iter_regular_files(child_root, "", entries)
+    if any(_excluded_name(part)
+           for path in (declaration, scan_start)
+           for part in path.split("/")):
+        entries.append(("skip", scan_start or declaration))
+    else:
+        _iter_regular_files(child_root, scan_start, entries)
     regular = [(rel, size) for kind, *rest in entries
                if kind == "file" for rel, size in [tuple(rest)]]
     skipped = sum(1 for entry in entries if entry[0] == "skip")
@@ -737,7 +835,7 @@ def _build_one_packet(root: Path, repo, resolution,
     prefix = "" if declaration == "." else declaration + "/"
 
     excerpts: list[SourceExcerpt] = []
-    names: set[str] = set()
+    paths: dict[str, str] = {}
     byte_count = 0
     truncated = 0
     for rel, _size in regular:
@@ -768,12 +866,13 @@ def _build_one_packet(root: Path, repo, resolution,
         if was_cut:
             truncated += 1
         lines = text.splitlines() or [""]
+        excerpt_path = f"{prefix}{rel}"
         excerpt = SourceExcerpt(
-            path=f"{prefix}{rel}", start_line=1,
+            path=excerpt_path, start_line=1,
             end_line=len(lines),
             sha256=hashlib.sha256(chunk).hexdigest(), text=text)
         excerpts.append(excerpt)
-        names.add(rel.rsplit("/", 1)[-1])
+        paths.setdefault(rel.rsplit("/", 1)[-1], excerpt_path)
         byte_count += len(chunk)
 
     config = repo.config
@@ -787,11 +886,12 @@ def _build_one_packet(root: Path, repo, resolution,
     else:
         runner_kind = "unknown"
         project_id = "0" * 32
-    dependencies = _dependency_facts(names, prefix)
+    dependencies = _dependency_facts(
+        set(paths), prefix, paths if scan_start else None)
 
     # Enforce the prompt cap by dropping trailing excerpts; coverage counts
     # stay explicit so partial evidence is visible, not silent.
-    body = _packet_body(declaration, project_id, declaration, excerpts,
+    body = _packet_body(declaration, project_id, scope, excerpts,
                         dependencies, runner_kind, skipped, truncated,
                         byte_count)
     while (len(json.dumps(body, sort_keys=True, separators=(",", ":"),
@@ -800,12 +900,12 @@ def _build_one_packet(root: Path, repo, resolution,
         dropped = excerpts.pop()
         byte_count -= len(dropped.text.encode("utf-8"))
         truncated += 1
-        body = _packet_body(declaration, project_id, declaration,
+        body = _packet_body(declaration, project_id, scope,
                             excerpts, dependencies, runner_kind, skipped,
                             truncated, byte_count)
     digest = _packet_identity(body)
     return EvidencePacket(
-        declaration=declaration, project_id=project_id, scope=declaration,
+        declaration=declaration, project_id=project_id, scope=scope,
         packet_sha256=digest, excerpts=tuple(excerpts),
         dependencies=dependencies, runner_kind=runner_kind,
         excluded_count=skipped, truncated_count=truncated,

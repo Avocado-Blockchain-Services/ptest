@@ -1932,6 +1932,69 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
     assert (root / "recommendations.md").read_bytes() == original
 
 
+def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
+        case, tmp_path, monkeypatch, capsys):
+    import sys
+    from ptest.agent_providers import ProviderResult
+
+    domain = case.domain()
+    root = case.project(domain)
+    _review_project(root)
+    scoped_source = root / "api" / "tests" / "test_scoped.py"
+    scoped_source.parent.mkdir()
+    scoped_source.write_text("def test_scoped():\n    assert True\n",
+                             encoding="utf-8")
+    outside_source = root / "api" / "src" / "outside.py"
+    outside_source.parent.mkdir()
+    outside_source.write_text("SCOPED_REVIEW_OUTSIDE_SENTINEL_251b\n",
+                              encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                      str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    launches = []
+    mutate_during_review = [False]
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        packet = json.loads(request)["packet"]
+        assert packet["declaration"] == "api"
+        assert packet["scope"] == "api/tests"
+        assert [excerpt["path"] for excerpt in packet["excerpts"]] == [
+            "api/tests/test_scoped.py"]
+        assert b"SCOPED_REVIEW_OUTSIDE_SENTINEL_251b" not in request
+        launches.append(packet["packet_sha256"])
+        if mutate_during_review[0]:
+            scoped_source.write_bytes(
+                scoped_source.read_bytes() + b"\n# changed during review\n")
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=4500, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+
+    argv = ("doctor", "--scope", "api/tests", "--reviewer", "claude",
+            "--allow-model-review", "--assessment-json")
+    assert main(argv) == 0
+
+    public_document = C.decode_public_document(capsys.readouterr().out)
+    assert public_document.data["children"][0]["scope"] == "api/tests"
+    published = (root / "recommendations.md").read_bytes()
+
+    mutate_during_review[0] = True
+    assert main(argv) == 2
+
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.data is None
+    assert document.error.code == "stale-evidence"
+    assert len(launches) == 2
+    assert (root / "recommendations.md").read_bytes() == published
+
+
 @pytest.mark.parametrize(("case_name", "exit_code"), [
     ("timeout", 124), ("cancel", 130), ("invalid", 2),
 ])

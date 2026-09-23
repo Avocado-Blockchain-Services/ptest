@@ -108,6 +108,167 @@ def _packet_for(root: Path, files: dict[str, str] | None = None):
     return packets[0]
 
 
+def test_standalone_scoped_packet_excludes_files_outside_selected_directory(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    inside = tmp_path / "tests" / "test_inside.py"
+    inside.parent.mkdir()
+    inside.write_text("def test_inside():\n    assert True\n",
+                      encoding="utf-8")
+    outside = tmp_path / "src" / "private_sentinel.py"
+    outside.parent.mkdir()
+    outside.write_text("OUTSIDE_SCOPE_SENTINEL_61c0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "OUTSIDE_DEPENDENCY_SENTINEL_61c0\n", encoding="utf-8")
+    resolution = _resolution(tmp_path)
+    workspace = doctor.inspect_workspace(
+        _domain(tmp_path), resolution, C.DEFAULT_SCAN_LIMITS, "tests")
+
+    packet = AA.build_packets(workspace, resolution)[0]
+    request = AA.encode_review_request(packet, b"{}")
+
+    assert b"OUTSIDE_SCOPE_SENTINEL_61c0" not in request
+    assert packet.declaration == "."
+    assert packet.scope == "tests"
+    assert [excerpt.path for excerpt in packet.excerpts] == [
+        "tests/test_inside.py"]
+    assert all(fact.ref_path != "pyproject.toml"
+               for fact in packet.dependencies)
+
+
+def test_v2_scoped_packet_rebases_scope_and_excludes_sibling_evidence(
+        tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+
+    root = _monorepo_root(tmp_path, {
+        "api": _v1_config_text("11" * 16, "pytest"),
+    })
+    inside = root / "api" / "tests" / "test_inside.py"
+    inside.parent.mkdir()
+    inside.write_text("def test_inside():\n    assert True\n",
+                      encoding="utf-8")
+    outside = root / "api" / "src" / "private_sentinel.py"
+    outside.parent.mkdir()
+    outside.write_text("OUTSIDE_SCOPE_SENTINEL_7ac4\n", encoding="utf-8")
+    (root / "api" / "pyproject.toml").write_text(
+        "OUTSIDE_DEPENDENCY_SENTINEL_7ac4\n", encoding="utf-8")
+    resolution = config_api.resolve_config(root)
+    workspace = doctor.inspect_workspace(
+        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, "api/tests")
+
+    packet = AA.build_packets(workspace, resolution)[0]
+    request = AA.encode_review_request(packet, b"{}")
+    request_packet = json.loads(request.decode("utf-8"))["packet"]
+
+    assert b"OUTSIDE_SCOPE_SENTINEL_7ac4" not in request
+    assert packet.declaration == "api"
+    assert packet.scope == "api/tests"
+    assert [excerpt.path for excerpt in packet.excerpts] == [
+        "api/tests/test_inside.py"]
+    assert request_packet["declaration"] == "api"
+    assert request_packet["scope"] == "api/tests"
+    assert request_packet["packet_sha256"] == packet.packet_sha256
+    assert "api/tests/test_inside.py" in {
+        excerpt["path"] for excerpt in request_packet["excerpts"]}
+    assert all(fact["ref_path"] != "api/pyproject.toml"
+               for fact in request_packet["dependencies"])
+
+
+@pytest.mark.parametrize(("local_scope", "workspace_scope"), [
+    ("../outside", "../outside"),
+    (42, "tests"),
+    ("missing", "missing"),
+    ("tests/test_inside.py", "tests/test_inside.py"),
+    ("tests", "other"),
+])
+def test_build_packets_fails_closed_for_invalid_or_mismatched_local_scope(
+        tmp_path, local_scope, workspace_scope):
+    from ptest import agent_assessment as AA
+
+    test_file = tmp_path / "tests" / "test_inside.py"
+    test_file.parent.mkdir()
+    test_file.write_text("assert True\n", encoding="utf-8")
+    resolution = _resolution(tmp_path)
+    inspected = doctor.inspect_workspace(
+        _domain(tmp_path), resolution, C.DEFAULT_SCAN_LIMITS, "tests")
+    repo = replace(inspected.repositories[0], local_scope=local_scope)
+    workspace = replace(inspected, scope=(workspace_scope,),
+                        repositories=(repo,))
+
+    with pytest.raises(C.Problem):
+        AA.build_packets(workspace, resolution)
+
+
+def test_build_packets_fails_closed_when_local_scope_is_a_symlink(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_inside.py").write_text(
+        "assert True\n", encoding="utf-8")
+    (tmp_path / "linked-tests").symlink_to("tests", target_is_directory=True)
+    resolution = _resolution(tmp_path)
+    inspected = doctor.inspect_workspace(
+        _domain(tmp_path), resolution, C.DEFAULT_SCAN_LIMITS, "tests")
+    repo = replace(inspected.repositories[0], local_scope="linked-tests")
+    workspace = replace(inspected, scope=("linked-tests",),
+                        repositories=(repo,))
+
+    with pytest.raises(C.Problem):
+        AA.build_packets(workspace, resolution)
+
+
+def test_scoping_at_excluded_directory_does_not_bypass_exclusion(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    excluded = tmp_path / ".claude"
+    excluded.mkdir()
+    (excluded / "notes.md").write_text(
+        "EXCLUDED_SCOPE_SENTINEL_aa91\n", encoding="utf-8")
+    resolution = _resolution(tmp_path)
+    workspace = doctor.inspect_workspace(
+        _domain(tmp_path), resolution, C.DEFAULT_SCAN_LIMITS, ".claude")
+
+    packet = AA.build_packets(workspace, resolution)[0]
+    request = AA.encode_review_request(packet, b"{}")
+
+    assert packet.excerpts == ()
+    assert b"EXCLUDED_SCOPE_SENTINEL_aa91" not in request
+    assert packet.excluded_count > 0
+
+
+def test_v2_full_child_packet_excludes_excluded_declaration_path(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+
+    root = _monorepo_root(tmp_path, {
+        ".claude": _v1_config_text("11" * 16, "pytest"),
+    })
+    sentinel = root / ".claude" / "notes.md"
+    sentinel.write_text("EXCLUDED_DECLARATION_SENTINEL_0f42\n",
+                        encoding="utf-8")
+    resolution = config_api.resolve_config(root)
+    workspace = doctor.inspect_workspace(
+        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
+
+    packets = AA.build_packets(workspace, resolution)
+    assert len(packets) == 1
+    packet = packets[0]
+    request = AA.encode_review_request(packet, b"{}")
+
+    assert resolution.monorepo.children == (".claude",)
+    assert packet.declaration == ".claude"
+    assert packet.scope == ".claude"
+    assert packet.excerpts == ()
+    assert packet.file_count == 0
+    assert packet.byte_count == 0
+    assert packet.excluded_count == 1
+    assert b"EXCLUDED_DECLARATION_SENTINEL_0f42" not in request
+
+
 def _citation_for(packet, start=1, end=None):
     excerpt = packet.excerpts[0]
     return {"path": excerpt.path, "start_line": start,
