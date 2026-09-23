@@ -215,18 +215,46 @@ def _full_addopts(config: Any) -> tuple[str, ...]:
     return env + _split_addopts(configured)
 
 
+def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
+    """Display name when full mode refuses ``tokens[index]``, else None.
+
+    This is the token-level classification behind
+    :func:`_reject_full_addopts`, exposed so static checks (executability)
+    derive the same verdict instead of a second list. ``--exitfirst`` is
+    included because parsed pytest maps it to ``maxfail=1``, which the
+    option check below refuses; clustered ``-x`` (``-vx``, ``-xvs``)
+    mirrors the adapter's full-mode rule in ``adapters/pytest.py``.
+    """
+    token = tokens[index]
+    option = token.split("=", 1)[0]
+    redirect_cluster = _short_redirect_cluster(token)
+    short_narrow = len(token) > 2 and token.startswith(("-k", "-m"))
+    maxfail_zero = (option == "--maxfail" and (
+        token.partition("=")[2] == "0"
+        or ("=" not in token and index + 1 < len(tokens) and tokens[index + 1] == "0")
+    ))
+    if maxfail_zero:
+        return None
+    if token.startswith("@"):
+        return token
+    if option in _FULL_REDIRECT_OPTIONS or option in _FULL_NARROWING_OPTIONS:
+        return option
+    if option == "--exitfirst":
+        return option
+    if redirect_cluster:
+        return token
+    if short_narrow:
+        return token[:2]
+    if _node_id_token(tokens, index):
+        return token
+    if re.fullmatch(r"-[qvs]*x[qvs]*", token):
+        return token
+    return None
+
+
 def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
-    for index, token in enumerate(tokens):
-        option = token.split("=", 1)[0]
-        redirect_cluster = _short_redirect_cluster(token)
-        short_narrow = len(token) > 2 and token.startswith(("-k", "-m"))
-        maxfail_zero = (option == "--maxfail" and (
-            token.partition("=")[2] == "0"
-            or ("=" not in token and index + 1 < len(tokens) and tokens[index + 1] == "0")
-        ))
-        if (token.startswith("@") or option in _FULL_REDIRECT_OPTIONS
-                or option in _FULL_NARROWING_OPTIONS or redirect_cluster or short_narrow
-                or _node_id_token(tokens, index)) and not maxfail_zero:
+    for index in range(len(tokens)):
+        if full_refusal_name(tokens, index) is not None:
             _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from . import contracts as C
 from .adapters.pytest import _reject_unowned_controls, _require_python_launcher
 from .files import read_regular
+from .runtime.pytest_bridge import full_refusal_name
 
 STATUS_EXECUTABLE = "executable"
 STATUS_CAVEAT = "caveat"
@@ -43,13 +44,6 @@ _FULL_REFUSED_HOOKS = frozenset({
 _HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
 _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
 _VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
-
-_NARROWING_OPTIONS = frozenset({
-    "-k", "-m", "-x", "--exitfirst", "--maxfail", "--deselect", "--lf", "--last-failed",
-    "--ff", "--failed-first", "--sw", "--stepwise", "--ignore",
-    "--ignore-glob",
-})
-
 
 @dataclass(frozen=True, slots=True)
 class Executability:
@@ -177,23 +171,53 @@ def _has_no_xdist(tokens: tuple[str, ...]) -> bool:
 
 
 def _xdist_active(tokens: tuple[str, ...]) -> bool:
-    """True when pytest config tokens activate xdist (no:xdist suppresses)."""
+    """True when pytest config tokens activate xdist (no:xdist suppresses).
+
+    Zero worker counts (``-n 0``, ``-n0``, ``--numprocesses=0``) and
+    ``--dist no`` serialize xdist instead of enabling it, matching the
+    serial spellings the adapter accepts.
+    """
     if _has_no_xdist(tokens):
         return False
-    for index, token in enumerate(tokens):
-        if token == "-n" or _SHORT_N_RE.match(token):
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token in ("-n", "--numprocesses"):
+            if nxt == "0":
+                index += 2
+                continue
             return True
-        if token == "--numprocesses" or token.startswith("--numprocesses="):
+        if token in ("-n0", "--numprocesses=0"):
+            index += 1
+            continue
+        if token == "--dist":
+            if nxt == "no":
+                index += 2
+                continue
             return True
-        if token == "--dist" or token.startswith("--dist="):
+        if token == "--dist=no":
+            index += 1
+            continue
+        if token.startswith("--dist="):
+            return True
+        if _SHORT_N_RE.match(token):
+            # Attached cluster value (``-n2``, ``-vn4``): only zero
+            # serializes; anything else enables xdist.
+            rest = token[token.index("n", 1) + 1:]
+            if rest == "0":
+                index += 1
+                continue
+            return True
+        if token.startswith("--numprocesses="):
             return True
         if token == "--maxprocesses" or token.startswith("--maxprocesses="):
             return True
-        if token == "-p" and index + 1 < len(tokens) \
-                and tokens[index + 1] in ("xdist", "xdist.plugin"):
+        if token == "-p" and nxt in ("xdist", "xdist.plugin"):
             return True
         if token in ("-pxdist", "-pxdist.plugin", "-p=xdist", "-p=xdist.plugin"):
             return True
+        index += 1
     return False
 
 
@@ -335,23 +359,16 @@ def _scan_conftest_hooks(root: Path, test_roots: tuple[str, ...]) -> list[tuple[
 
 
 def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """Full-mode narrowing/redirect names, derived from the bridge.
+
+    Each name comes from the bridge's own full-mode classifier, so init
+    never prints a ``run:`` command the bridge would refuse.
+    """
     found: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        name = token.split("=", 1)[0]
-        if token in ("-k", "-m") or token.startswith("-k") and not token.startswith("--") \
-                or token.startswith("-m") and not token.startswith("--"):
-            found.append("-k" if token[1] == "k" else "-m")
-        elif name in _NARROWING_OPTIONS:
-            if name == "--maxfail":
-                value = token.partition("=")[2] if "=" in token else (
-                    tokens[index + 1] if index + 1 < len(tokens) else "")
-                if value.strip() == "0":
-                    index += 2 if "=" not in token else 1
-                    continue
-            found.append(name)
-        index += 1
+    for index in range(len(tokens)):
+        refusal = full_refusal_name(tokens, index)
+        if refusal is not None and refusal not in found:
+            found.append(refusal)
     return tuple(found)
 
 
@@ -472,7 +489,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 break
         if _setup_missing(root, config.setup):
             caveats.append(
-                "first run executes setup: " + " ".join(config.setup.argv))
+                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         if caveats:
             return Executability(
                 project=project, runner=kind.value, status=STATUS_CAVEAT,
@@ -504,7 +521,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
         caveats = ["exclusive: Vitest runs as one command and manages its own workers"]
         if _setup_missing(root, config.setup):
             caveats.append(
-                "first run executes setup: " + " ".join(config.setup.argv))
+                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         return Executability(
             project=project, runner=kind.value, status=STATUS_CAVEAT,
             caveats=tuple(caveats), reason=None, fix=None,
@@ -514,7 +531,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
         caveats = ["exclusive: runs as one literal command"]
         if _setup_missing(root, config.setup):
             caveats.append(
-                "first run executes setup: " + " ".join(config.setup.argv))
+                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         return Executability(
             project=project, runner=kind.value, status=STATUS_CAVEAT,
             caveats=tuple(caveats), reason=None, fix=None,

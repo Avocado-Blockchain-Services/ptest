@@ -117,6 +117,51 @@ def test_no_xdist_suppresses_activation(tmp_path):
     assert result.full is True
 
 
+@pytest.mark.parametrize("tokens,active", [
+    (("-n0",), False),
+    (("-n", "0"), False),
+    (("--numprocesses=0",), False),
+    (("--numprocesses", "0"), False),
+    (("--dist", "no"), False),
+    (("--dist=no",), False),
+    (("-vn0",), False),
+    (("-n", "2"), True),
+    (("-n2",), True),
+    (("-nauto",), True),
+    (("--numprocesses=2",), True),
+    (("--dist", "load"), True),
+    (("--dist=load",), True),
+    (("-n",), True),
+])
+def test_xdist_activation_is_value_aware(tokens, active):
+    assert E._xdist_active(tokens) is active
+
+
+@pytest.mark.parametrize("tokens,expected", [
+    (("-vx",), ("-vx",)),
+    (("-xvs",), ("-xvs",)),
+    (("-kfoo",), ("-kfoo",)),
+    (("-c", "other.ini"), ("-c",)),
+    (("tests/test_a.py::test_x",), ("tests/test_a.py::test_x",)),
+    (("--collect-only",), ("--collect-only",)),
+    (("--exitfirst",), ("--exitfirst",)),
+    (("-q",), ()),
+])
+def test_narrowing_tokens_match_bridge_full_refusals(tokens, expected):
+    assert E._narrowing_tokens(tokens) == expected
+
+
+def test_clustered_x_addopts_withhold_full_run_command(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-vx"\n')
+    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.full is False
+    assert "ptest --full" not in E.commands((result,))
+
+
 def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
     _write(tmp_path / "tests" / "conftest.py",
            "def pytest_runtest_protocol(item, nextitem):\n    return None\n")
@@ -264,7 +309,7 @@ def test_missing_setup_path_is_trailing_caveat(tmp_path):
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
         "exclusive: Vitest runs as one command and manages its own workers",
-        "first run executes setup: npm ci")
+        "setup runs when required paths or its fingerprint are missing: npm ci")
 
 
 def test_example_prefers_first_pytest_test_file(tmp_path):

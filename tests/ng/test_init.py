@@ -692,7 +692,8 @@ def test_existing_persea_shaped_monorepo_reports_per_project_notes(tmp_path):
          "note", "config"),
         ("web · vitest · ready with caveats: "
          "exclusive: Vitest runs as one command and manages its own workers; "
-         "first run executes setup: npm ci", "note", "config"),
+         "setup runs when required paths or its fingerprint are missing: npm ci",
+         "note", "config"),
         ("run: ptest web/tests/a.test.ts", "note", "config"),
     ]
 
