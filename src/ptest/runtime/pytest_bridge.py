@@ -215,6 +215,36 @@ def _full_addopts(config: Any) -> tuple[str, ...]:
     return env + _split_addopts(configured)
 
 
+# Short flags that take a value: a cluster starting with one carries an
+# attached value (``-kEXPR``, ``-n2``, ``-Werror``), so the cluster rule
+# below leaves it to the attached-expression classifiers.
+_VALUE_FLAG_LEADS = frozenset({"W", "p", "o", "c", "m", "k", "n"})
+
+
+def cluster_narrow_name(token: str) -> str | None:
+    """Display name when a short-option cluster narrows full mode, else None.
+
+    The single cluster rule shared by the bridge and ``adapters/pytest``:
+    any all-alpha cluster containing the boolean ``x`` flag (``-lx``,
+    ``-xl``, ``-vx``), or ending in the value-taking ``k``/``m`` flags
+    whose expression arrives as the next token (``-vk foo``), narrows the
+    inventory. Attached values (``-kEXPR``, ``-n2``) are classified
+    elsewhere, as are ``-W``/``-p``/``-o``/``-c`` clusters.
+    """
+    if not token.startswith("-") or token.startswith("--"):
+        return None
+    body = token[1:]
+    if not body or not body.isalpha():
+        return None
+    if len(body) == 1:
+        return token if body == "x" else None
+    if body[0] in _VALUE_FLAG_LEADS:
+        return None
+    if "x" in body or body[-1] in ("k", "m"):
+        return token
+    return None
+
+
 def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
     """Display name when full mode refuses ``tokens[index]``, else None.
 
@@ -222,8 +252,8 @@ def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
     :func:`_reject_full_addopts`, exposed so static checks (executability)
     derive the same verdict instead of a second list. ``--exitfirst`` is
     included because parsed pytest maps it to ``maxfail=1``, which the
-    option check below refuses; clustered ``-x`` (``-vx``, ``-xvs``)
-    mirrors the adapter's full-mode rule in ``adapters/pytest.py``.
+    option check below refuses; short clusters go through the one shared
+    :func:`cluster_narrow_name` rule.
     """
     token = tokens[index]
     option = token.split("=", 1)[0]
@@ -247,7 +277,7 @@ def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
         return token[:2]
     if _node_id_token(tokens, index):
         return token
-    if re.fullmatch(r"-[qvs]*x[qvs]*", token):
+    if cluster_narrow_name(token) is not None:
         return token
     return None
 

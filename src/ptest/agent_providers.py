@@ -880,20 +880,10 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         shutil.rmtree(scratch, ignore_errors=True)
         raise
 
-    start_new = os.name == "posix"
-    if start_new and not _PIDFD_AVAILABLE:
-        shutil.rmtree(scratch, ignore_errors=True)
-        raise _problem(
-            "provider-failed",
-            f"reviewer {adapter.name} launch refused: pidfd containment "
-            "unavailable on this host, so group cleanup could not be "
-            "proved safe")
     try:
-        proc = subprocess.Popen(
+        proc, pgid, sid, leader_start = _spawn_owned(
             list(adapter.argv), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=scratch,
-            env=sanitized_child_env(os.environ), shell=False,
-            start_new_session=start_new)
+            stderr=subprocess.PIPE, cwd=scratch)
     except OSError as exc:
         shutil.rmtree(scratch, ignore_errors=True)
         raise _problem("provider-unavailable",
@@ -901,33 +891,6 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
-    pgid: int | None = None
-    sid: int | None = None
-    leader_start: int | None = None
-    if start_new:
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError, OSError):
-            pgid = None
-        try:
-            sid = os.getsid(proc.pid)
-        except (ProcessLookupError, PermissionError, OSError):
-            sid = None
-        leader_start = _proc_starttime(proc.pid)
-        if pgid is None or sid is None or leader_start is None:
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            try:
-                proc.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-            raise _problem(
-                "provider-failed",
-                f"reviewer {adapter.name} launch refused: process identity "
-                "unverifiable, so group cleanup could not be proved safe")
 
     def _emit(phase: str) -> None:
         try:
@@ -991,15 +954,8 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                     last_beat = now
                 remaining = timeout_s - elapsed
                 for key, _ in selector.select(min(0.2, remaining)):
-                    try:
-                        chunk = key.fileobj.read(65536)
-                    except (BlockingIOError, OSError):
-                        chunk = None
-                    if not chunk:
-                        try:
-                            selector.unregister(key.fileobj)
-                        except (KeyError, ValueError):
-                            pass
+                    chunk = _read_ready(selector, key)
+                    if chunk is None:
                         continue
                     if key.fileobj is proc.stdout:
                         out_chunks.append(chunk)
@@ -1223,15 +1179,40 @@ _VERSION_TIMEOUT_S = 10
 _VERSION_MAX_BYTES = 1024 * 1024
 
 
-def _spawn_owned(argv: Sequence[str]) -> tuple[subprocess.Popen,
-                                              int | None, int | None,
-                                              int | None]:
+def _read_ready(selector: selectors.BaseSelector,
+                key: selectors.SelectorKey) -> bytes | None:
+    """Read one ready owned stream; unregister on EOF or error.
+
+    The one read step shared by the review reader and the capture reader:
+    both drain nonblocking pipes the same way, while their loop policies
+    (heartbeat, cancel, exhaustion versus byte bound, timeout) stay with
+    their callers.
+    """
+    try:
+        chunk = key.fileobj.read(65536)
+    except (BlockingIOError, OSError, ValueError):
+        chunk = None
+    if not chunk:
+        try:
+            selector.unregister(key.fileobj)
+        except (KeyError, ValueError):
+            pass
+        return None
+    return chunk
+
+
+def _spawn_owned(argv: Sequence[str], *, stdin=None, stderr=None,
+                 cwd=None) -> tuple[subprocess.Popen,
+                                    int | None, int | None, int | None]:
     """Spawn a session-leader child owned by the launch_review machinery.
 
     Returns ``(proc, pgid, sid, leader_start)`` for :func:`_stop_owned`.
-    A Popen ``OSError`` (missing executable) propagates so callers keep
-    their unavailable contracts; an unverifiable identity fails closed
-    with a Problem instead of launching an unowned child.
+    Stdout is always piped; ``stdin``/``stderr``/``cwd`` default to the
+    capture shape (DEVNULL/DEVNULL/inherit) and accept the review shape
+    (pipes/scratch dir). A Popen ``OSError`` (missing executable)
+    propagates so callers keep their unavailable contracts; an
+    unverifiable identity fails closed with a Problem instead of launching
+    an unowned child.
     """
     start_new = os.name == "posix"
     if start_new and not _PIDFD_AVAILABLE:
@@ -1240,8 +1221,11 @@ def _spawn_owned(argv: Sequence[str]) -> tuple[subprocess.Popen,
             "launch refused: pidfd containment unavailable on this host, "
             "so group cleanup could not be proved safe")
     proc = subprocess.Popen(
-        list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, env=sanitized_child_env(os.environ),
+        list(argv),
+        stdin=subprocess.DEVNULL if stdin is None else stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL if stderr is None else stderr,
+        cwd=cwd, env=sanitized_child_env(os.environ),
         shell=False, start_new_session=start_new)
     if not start_new:
         return proc, None, None, None
@@ -1297,15 +1281,8 @@ def _collect_owned(proc: subprocess.Popen, timeout_s: int | float,
             except OSError:
                 return None
             for key, _ in ready:
-                try:
-                    chunk = key.fileobj.read(65536)
-                except (BlockingIOError, OSError, ValueError):
-                    chunk = None
-                if not chunk:
-                    try:
-                        selector.unregister(key.fileobj)
-                    except (KeyError, ValueError):
-                        pass
+                chunk = _read_ready(selector, key)
+                if chunk is None:
                     continue
                 total += len(chunk)
                 if total > max_bytes:
@@ -1324,6 +1301,11 @@ def _collect_owned(proc: subprocess.Popen, timeout_s: int | float,
         return b"".join(chunks)
     finally:
         selector.close()
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except (OSError, ValueError):
+            pass
 
 
 def _run_owned_capture(argv: Sequence[str], *, timeout_s: int | float,
@@ -1379,6 +1361,8 @@ def discover_model_entries(adapter: ReviewerAdapter) -> tuple[dict, ...]:
             continue
         slug = item.get("slug")
         if not isinstance(slug, str) or not slug:
+            continue
+        if MODEL_RE.fullmatch(slug) is None:
             continue
         display = item.get("display_name")
         description = item.get("description")

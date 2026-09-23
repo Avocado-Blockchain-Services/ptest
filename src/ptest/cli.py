@@ -782,12 +782,24 @@ def _ask_init_smoke(runnable: Sequence[init_smoke.SmokePlan]) -> bool:
     """TTY consent for the smoke run; names each file that would execute."""
     print("Smoke candidates:", file=sys.stderr)
     for plan in runnable:
-        print(f"  {init_smoke.display_command(plan.project, plan.candidate)}",
+        print(f"  {render.terminal_text(
+            init_smoke.display_command(plan.project, plan.candidate))}",
               file=sys.stderr)
     print(init_smoke.SMOKE_QUESTION, file=sys.stderr)
     try:
         answer = input()
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return init_smoke.parse_consent(answer)
+
+
+def _ask_init_setup(plan: init_smoke.SmokePlan) -> bool:
+    """TTY consent to run owed setup through ptest before the smoke."""
+    argv = render.terminal_text(" ".join(plan.setup_argv or ()))
+    print(init_smoke.SETUP_QUESTION.format(argv=argv), file=sys.stderr)
+    try:
+        answer = input()
+    except (EOFError, KeyboardInterrupt):
         return False
     return init_smoke.parse_consent(answer)
 
@@ -796,7 +808,9 @@ def _init_smoke_text(parsed: ParsedArgs, cwd: Path) -> str:
     """One smoke run per project; never changes init's outcome or status.
 
     Dry runs, machine output, and explicit opt-out never execute. TTY init
-    asks once; non-interactive init runs only with ``--smoke``.
+    asks once; non-interactive init runs only with ``--smoke``. Owed setup
+    never installs silently: TTY init offers to run it through ptest first,
+    and non-interactive init skips with the working advice.
     """
     if parsed.dry_run or parsed.json or parsed.smoke is False:
         return ""
@@ -810,15 +824,36 @@ def _init_smoke_text(parsed: ParsedArgs, cwd: Path) -> str:
         return ""
     if not plans:
         return ""
+    if parsed.smoke is True:
+        results = tuple(
+            init_smoke.skip_result(plan, init_smoke.setup_advice(plan))
+            if plan.skip_reason is None and plan.setup_argv is not None
+            else init_smoke.run_plan(
+                domain, plan, fixture_domain=parsed.fixture_domain)
+            for plan in plans
+        )
+        return init_smoke.format_smoke(results)
     runnable = [plan for plan in plans if plan.skip_reason is None]
-    if parsed.smoke is not True:
-        if not runnable or not _interactive_review() or not _ask_init_smoke(runnable):
-            return ""
-    results = tuple(
-        init_smoke.run_plan(domain, plan, fixture_domain=parsed.fixture_domain)
-        for plan in plans
-    )
-    return init_smoke.format_smoke(results)
+    if not runnable or not _interactive_review() \
+            or not _ask_init_smoke(runnable):
+        return ""
+    results = []
+    for plan in plans:
+        if plan.skip_reason is not None:
+            results.append(init_smoke.skip_result(plan, plan.skip_reason))
+        elif plan.setup_argv is not None and not _ask_init_setup(plan):
+            results.append(
+                init_smoke.skip_result(plan, init_smoke.setup_advice(plan)))
+        else:
+            if plan.setup_argv is not None:
+                reason = init_smoke.run_setup(
+                    domain, plan, fixture_domain=parsed.fixture_domain)
+                if reason is not None:
+                    results.append(init_smoke.skip_result(plan, reason))
+                    continue
+            results.append(init_smoke.run_plan(
+                domain, plan, fixture_domain=parsed.fixture_domain))
+    return init_smoke.format_smoke(tuple(results))
 
 
 def _review_consent_problem() -> C.Problem:
@@ -998,10 +1033,9 @@ def _write_cached_review_model(cache_root: Path, provider: str,
     if cli_version is None:
         return
     try:
-        root = Path(cache_root)
-        directory = files.ensure_private_dir(root.parent, root.name)
+        # The caller created cache_root with ensure_private_dir already.
         files.publish_atomic(
-            directory, f"{provider}.json",
+            Path(cache_root), f"{provider}.json",
             json.dumps({"cli_version": cli_version, "model": model},
                        sort_keys=True).encode("utf-8"))
     except (OSError, C.Problem):
@@ -1479,7 +1513,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                         concurrency=parsed.review_concurrency,
                         on_done=lambda index, result, scope=packet.scope: progress(
                             "reviewing", adapter.name, scope,
-                            time.monotonic() - started))
+                            time.monotonic() - started),
+                        progress=lambda _event: heartbeat())
                 except C.Problem as problem:
                     if problem.code == "review-cancelled":
                         raise _problem("review-cancelled", "review was cancelled") from None

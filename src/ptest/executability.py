@@ -385,21 +385,6 @@ def _example_test(root: Path, test_root: str, kind: C.RunnerKind) -> str | None:
     return None
 
 
-def _setup_missing(root: Path, setup: C.SetupConfig | None) -> bool:
-    if setup is None:
-        return False
-    for required in setup.required_paths:
-        if required.startswith("/") or "\\" in required or "\x00" in required:
-            return True
-        if any(part in {"", ".", ".."} for part in required.split("/")):
-            return True
-        try:
-            os.lstat(root / required)
-        except OSError:
-            return True
-    return False
-
-
 def _regular_present(root: Path, relative: str) -> bool:
     try:
         stamp = os.lstat(root / relative)
@@ -477,7 +462,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 caveats.append(f"ptest --full unavailable: {rel} defines {hook}")
                 full = False
                 break
-        if _setup_missing(root, config.setup):
+        if config.setup is not None:
             caveats.append(
                 "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         if caveats:
@@ -509,7 +494,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                     f' in {cfg}',
                 full=False, example=example)
         caveats = ["exclusive: Vitest runs as one command and manages its own workers"]
-        if _setup_missing(root, config.setup):
+        if config.setup is not None:
             caveats.append(
                 "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         return Executability(
@@ -519,7 +504,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
 
     if kind is C.RunnerKind.COMMAND:
         caveats = ["exclusive: runs as one literal command"]
-        if _setup_missing(root, config.setup):
+        if config.setup is not None:
             caveats.append(
                 "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
         return Executability(

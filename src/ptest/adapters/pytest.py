@@ -6,6 +6,7 @@ import json
 import re
 
 from ptest import contracts as C
+from ptest.runtime.pytest_bridge import cluster_narrow_name
 
 
 _REMOTE_OPTIONS = {"--tx", "--px", "--rsyncdir"}
@@ -158,7 +159,8 @@ def reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> Non
         if full and (option in _NARROWING_OPTIONS or option in _FULL_REDIRECT_OPTIONS
                      or redirect_cluster or _node_id_token(argv, index)
                      or (short and short[1] in {"k", "m"})
-                     or re.fullmatch(r"-[qvs]*x[qvs]*", token)) and not maxfail_zero:
+                     or cluster_narrow_name(token) is not None) \
+                and not maxfail_zero:
             raise _problem("native-config-invalid", "full pytest plans cannot narrow the inventory")
         index += 1
 
