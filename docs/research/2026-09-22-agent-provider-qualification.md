@@ -108,3 +108,21 @@ The recorded native outputs are kept under the chain's
 `.pipeline/agent-doctor-2026-09-23/native/` and seed the test fixtures. The
 evidence is tied to the versions above; a CLI upgrade requires re-running the
 canaries.
+
+## End-to-end runs — 2026-09-23
+
+On the chain at 9065a79, `ptest doctor --reviewer <p> --allow-model-review` ran against a synthetic two-file pytest
+project. No user source was sent.
+
+- claude: exit 0 in 54 s; `recommendations.md` published.
+- codex: exit 0 in 48 s; `recommendations.md` published.
+- opencode: exit 2 in 0 s; refused with `provider-unqualified` and the free-tier reason before any launch.
+
+Earlier real runs exposed four integration defects that the fake-provider tests had hidden. All four are fixed and
+covered by vendored real-reply fixtures:
+1. the model had to invent ptest-owned envelope metadata;
+2. the response schema was never sent to the model;
+3. the checklist definitions were never sent to the model;
+4. ptest's own `.` root limitation path was rejected by the report renderer.
+The prose filter keeps two documented denylist trade-offs: it over-rejects "a test passes <object>", and it can miss
+paraphrased result claims such as "CI is green". Report text still labels review conclusions as not execution proof.
