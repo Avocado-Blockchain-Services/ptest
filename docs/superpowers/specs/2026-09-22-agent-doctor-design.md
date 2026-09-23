@@ -4,11 +4,6 @@ Status: implementation in progress under the user's prior authorization;
 model review remains disabled pending the all-three provider qualification
 gate. This document is the design and implementation specification.
 
-Provider process ownership and its release gate are amended by
-[`2026-09-23-agent-review-containment-design.md`](2026-09-23-agent-review-containment-design.md).
-The amendment supersedes process-group cleanup claims below; it records
-unresolved host prerequisites and does not authorize provider launch.
-
 ## Outcome and boundaries
 
 `ptest doctor` becomes an evidence-bounded review performed by an installed
@@ -243,12 +238,19 @@ ship a partial provider set.
 
 ### Process ownership and progress
 
-The process-group cleanup design is withdrawn. A group can lose descendants
-after `setsid`, double-fork, or normal leader exit. The per-review user/PID/mount
-namespace boundary, mandatory fail-closed preflight, cleanup protocol, and remaining
-release blockers are specified in the linked containment amendment. No
-process-group fallback is permitted for agent review. There is no ptest daemon
-or fake percentage.
+Every child launch starts a new owned process group. ptest stores and verifies
+the child PID/PGID, streams bounded output, waits synchronously, and on Ctrl-C,
+timeout, or output exhaustion sends TERM and then KILL only to that still-owned
+group, reaps it, and records incomplete state. It never enumerates or kills by
+name and never touches another run's process. There is no daemon or fake
+percentage.
+
+The provider runs as an ordinary child process with the invoking user's own
+account, privileges, and permissions: no cgroups, namespaces, sandbox, `/proc`
+descendant scans, or extra host setup. Known limitation: a provider that
+deliberately detaches (for example `setsid` or daemonizing) can outlive its
+group, exactly as when the user runs that CLI directly. ptest does not claim
+otherwise, and this is not a release blocker.
 
 TTY stderr uses a spinner with phase (`collecting`, `reviewing`, `validating`,
 `publishing`), elapsed time, sanitized provider, and sanitized project. Non-TTY
@@ -417,10 +419,8 @@ inject controls.
    authorize repair, hide unsupported orchestration, weaken assertions/coverage/
    inventory, or claim proposed verification was observed.
 9. Provider work is sequential, synchronous, visible, bounded, cancellable, and
-   contained from launch in one per-review PID namespace under the linked amendment.
-   **Negative:** no process-group fallback, cross-run kill, fake percentage,
-   provider launch without qualified containment, success after unproven
-   teardown, or claim of sandboxing a hostile provider is permitted.
+   process-group owned. **Negative:** no daemon, fake percentage, leaked child,
+   or signal to another run is permitted.
 10. Report writes are atomic, ownership-checked, serialize concurrent ptest
     writers, and preserve the last complete result on detected conflicts.
     **Negative:** detected custom/edited reports, stale source, and failures are
@@ -437,9 +437,8 @@ inject controls.
 The secure-by-spec axes are covered explicitly: identity uses existing provider
 auth and surfaces missing/expired sessions without revealing credentials;
 authorization requires invocation-local upload consent and no agent tools;
-tenancy means separate child packets, checkout identities, and qualified
-per-review namespace containment as amended; input requires bounded schemas,
-safe paths, and untrusted-content handling;
+tenancy means separate child packets, checkout identities, and owned process
+groups; input requires bounded schemas, safe paths, and untrusted-content handling;
 state covers stale source, repeat init, cancellation, and publication conflicts;
 exposure excludes recognized sensitive material and discloses residual source
 sharing; availability caps fanout, bytes, duration, and progress; dependencies
@@ -454,15 +453,16 @@ earlier committed interfaces and do not rewrite unrelated work.
 |---|---|---|
 | 1 | Public contract/qualification barrier: `src/ptest/contracts.py`, `src/ptest/agent_assessment.py`, `src/ptest/agent_providers.py`, `scripts/export-schemas.py`, `docs/schemas/v1/agent-assessment.json`, `tests/ng/test_contracts.py`, `tests/ng/test_agent_assessment_contract.py`, `tests/ng/test_agent_providers.py`, `docs/research/2026-09-22-agent-provider-qualification.md` | RED then GREEN: `ptest tests/ng/test_contracts.py tests/ng/test_agent_assessment_contract.py`; `ptest tests/ng/test_agent_providers.py`. Extend the existing public-kind/validator/projection/schema registries additively, preserving all legacy documents. Freeze exact qualified argv/env or stop as blocked. |
 | 2 | Evidence admission, strict validation, scoring: `src/ptest/agent_assessment.py`, `tests/ng/test_agent_assessment.py`, `tests/ng/fixtures/agent_assessment/**` | `ptest tests/ng/test_agent_assessment.py`; include secret/symlink/instruction/bounds/duplicate-ID/stale-identity negatives. |
-| 3 | Process lifecycle and progress: `src/ptest/agent_providers.py`, `tests/ng/test_agent_providers.py` | `ptest tests/ng/test_agent_providers.py`; prove the linked containment amendment's launch, escape, normal-exit, timeout/cancel/exhaustion, parent-death, and cross-run negatives; keep non-TTY progress stable. Do not enable review until its host prerequisites and all-three provider gate qualify. |
+| 3 | Process lifecycle and progress: `src/ptest/agent_providers.py`, `tests/ng/test_agent_providers.py` | `ptest tests/ng/test_agent_providers.py`; prove timeout/cancel/exhaustion reaps only the owned PGID and non-TTY progress is stable. |
 | 4 | Report rendering/publication: `src/ptest/recommendations.py`, `tests/ng/test_recommendations.py` | `ptest tests/ng/test_recommendations.py`; prove custom edits, symlink/race, interruption, stale source, prior-report preservation, injection, footer, and sentinel guidance. |
 | 5 | Shared doctor/post-init orchestration and CLI/help integration: `src/ptest/cli.py`, `src/ptest/help.py`, `src/ptest/render.py`, `README.md`, `tests/ng/test_cli.py`, `tests/ng/test_help.py`, `tests/ng/test_doctor.py`, `tests/ng/test_doctor_smoke.py` | `ptest tests/ng/test_cli.py tests/ng/test_help.py tests/ng/test_doctor.py tests/ng/test_doctor_smoke.py`; preserve literal argv, legacy schemas, exit status, dry-run no-effects, and probe separation. README distinguishes optional consented review from model-independent normal runs. |
 | 6 | Branded renderer and init-flow regression coverage (CLI wiring is task 5): `src/ptest/init_render.py`, `tests/ng/test_init.py`, `tests/ng/test_init_render.py` | `ptest tests/ng/test_init.py tests/ng/test_init_render.py`; created/existing/decline/non-TTY/JSON/repeated-init/NO_COLOR/hostile-name cases. |
 | 7 | Copied-repository acceptance only: `tests/ng/test_agent_doctor_acceptance.py`, `scripts/acceptance.py` if its registered scenario list must change | `ptest tests/ng/test_agent_doctor_acceptance.py`; then the one integrated `ptest --full` after all source changes. |
 
-For subsequent work, Claude Opus authors specifications, Muse writes all code
-and tests under the imported Dan Jefferies brief, and Luna performs audits. Controller checks
-owned files and mechanical gates before scoped task audits.
+Claude Opus authors specifications and Luna performs audits; Muse writes
+all code/tests, including contract implementation and repairs, using the imported
+Dan Jefferies profile's three-pass evidence review without historical memory.
+Controller checks owned files and mechanical gates before scoped task audits.
 
 Every focused task records the initial failing regression before repair and the
 GREEN command, cwd, exit status, and raw output. After source changes run
