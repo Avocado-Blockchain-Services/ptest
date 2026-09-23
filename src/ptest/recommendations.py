@@ -332,6 +332,52 @@ def _evidence_list(value: object, *, field: str, min_items: int) -> list:
     return value
 
 
+_EXECUTION_STATUSES = ("executable", "caveat", "not-executable")
+_SKIPPED_REVIEW_PREFIX = "Skipped without a model call: "
+_FAILED_REVIEW_PREFIX = "Review failed: "
+
+
+def _check_label(value: object, *, row_id: str):
+    """Optional human row label: 1..64 bytes of plain text, no controls."""
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not value
+            or len(value.encode("utf-8")) > 64
+            or _CONTROL_RE.search(value)):
+        _fail("report-invalid", f"row {row_id!r} has an invalid label")
+        raise AssertionError("unreachable")
+    return value
+
+
+def _check_execution(value: object):
+    """Optional public execution fact: exactly status, detail and fix."""
+    if value is None:
+        return None
+    item = _as_mapping(value, field="execution")
+    if set(item.keys()) != {"status", "detail", "fix"}:
+        _fail("report-invalid",
+              "execution must carry exactly status, detail and fix")
+        raise AssertionError("unreachable")
+    status = item.get("status")
+    if status not in _EXECUTION_STATUSES:
+        _fail("report-invalid", "execution status is unknown")
+        raise AssertionError("unreachable")
+    detail = item.get("detail")
+    if (not isinstance(detail, str) or not detail
+            or len(detail.encode("utf-8")) > 512):
+        _fail("report-invalid",
+              "execution detail must be 1..512 bytes of text")
+        raise AssertionError("unreachable")
+    fix = item.get("fix")
+    if (fix is not None
+            and (not isinstance(fix, str) or not fix
+                 or len(fix.encode("utf-8")) > 512)):
+        _fail("report-invalid",
+              "execution fix must be null or 1..512 bytes of text")
+        raise AssertionError("unreachable")
+    return {"status": status, "detail": detail, "fix": fix}
+
+
 def _check_rows(rows: object) -> list:
     if not isinstance(rows, list) or not rows:
         _fail("report-invalid", "child rows must be a nonempty list")
@@ -356,7 +402,9 @@ def _check_rows(rows: object) -> list:
             _citation_text(citation)
         checked.append({"id": row_id, "status": status,
                         "rationale": rationale,
-                        "evidence": list(item["evidence"])})
+                        "evidence": list(item["evidence"]),
+                        "label": _check_label(item.get("label"),
+                                             row_id=row_id)})
     return checked
 
 
@@ -435,6 +483,7 @@ def _normalize_run(run: object) -> dict:
             "rows": _check_rows(entry.get("rows")),
             "findings": _finding_map(entry.get("findings", [])),
             "limitations": _normalize_limitations(entry.get("limitations", [])),
+            "execution": _check_execution(entry.get("execution")),
         })
     return {"provider": {"name": name, "cli_version": cli_version,
                          "profile": profile},
@@ -496,8 +545,24 @@ def _score_text(rows: list) -> str:
     if applicable == 0:
         return "no score (every row is not-applicable)"
     satisfied = sum(1 for row in rows if row["status"] == "satisfied")
-    percent = (100 * satisfied) // applicable
-    return f"{satisfied}/{applicable} ({percent}%), agent-reviewed"
+    return f"{satisfied} of {applicable} checks confirmed from evidence"
+
+
+def _execution_fact_text(execution) -> str:
+    """One-line execution fact opening each project section."""
+    if execution is None:
+        return "not recorded"
+    detail = _clean(execution["detail"], field="execution",
+                    max_chars=512)
+    if execution["status"] == "executable":
+        return "ready"
+    if execution["status"] == "caveat":
+        return f"ready with caveats: {detail}"
+    fix = execution["fix"]
+    if fix is None:
+        return f"not runnable: {detail}"
+    return (f"not runnable: {detail} — fix: "
+            f"{_clean(fix, field='execution', max_chars=512)}")
 
 
 def _verify_block(scope: str, root_label: str) -> str:
@@ -544,10 +609,60 @@ def _sketch_for(row_id: str) -> str:
     return _REGRESSION_SKETCH["OTHER"]
 
 
+def _item_heading(row: dict) -> str:
+    """One ``## <ID> <label>`` heading per checklist item."""
+    row_id = row["id"]
+    label = row.get("label")
+    if label:
+        safe = _clean(label, field=f"rows.{row_id}.label", max_chars=64)
+        return f"## {row_id} {safe}"
+    return f"## {row_id}"
+
+
+def _status_section(row: dict) -> str:
+    """Compact report section for one non-gap row."""
+    status = row["status"]
+    rationale = row["rationale"]
+    lines = [_item_heading(row), ""]
+    if status == "satisfied":
+        lines.append("Status: satisfied.")
+        lines.append("")
+    elif status == "unknown":
+        if rationale.startswith(_FAILED_REVIEW_PREFIX):
+            reason = rationale[len(_FAILED_REVIEW_PREFIX):]
+            lines.append(f"Status: unknown (review failed: {reason}).")
+            lines.append("")
+        else:
+            lines.append("Status: unknown.")
+            lines.append("")
+            lines.append(f"Rationale: {rationale}")
+            lines.append("")
+    elif rationale.startswith(_SKIPPED_REVIEW_PREFIX):
+        reason = rationale[len(_SKIPPED_REVIEW_PREFIX):]
+        lines.append("Status: not applicable (skipped without a model call).")
+        lines.append("")
+        lines.append(f"Reason: {reason}")
+        lines.append("")
+    else:
+        lines.append("Status: not applicable.")
+        lines.append("")
+        lines.append(f"Rationale: {rationale}")
+        lines.append("")
+    if row["evidence"]:
+        lines.append("Evidence:")
+        lines.append("")
+        for citation in row["evidence"]:
+            lines.append(f"- {_citation_text(citation)}")
+        if status == "satisfied":
+            lines.append(f"- Why it matters: {rationale}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _finding_section(row: dict, finding: dict | None, scope: str,
                      root_label: str) -> str:
     row_id = row["id"]
-    lines = [f"## Finding {row_id}", ""]
+    lines = [_item_heading(row), ""]
     citations = row["evidence"] if finding is None else finding["evidence"]
     if finding is None:
         lines.append(f"Reviewer conclusion: gap recorded for `{row_id}` with "
@@ -665,9 +780,10 @@ def render_recommendations(run: object) -> bytes:
     for child in children:
         out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")
+        out.append(f"Execution: {_execution_fact_text(child.get('execution'))}.")
+        out.append("")
         out.append(f"Packet: {child['packet_sha256']}. Checklist: "
-                   f"{_score_text(child['rows'])}. Execution capability: "
-                   f"not execution-verified.")
+                   f"{_score_text(child['rows'])}.")
         out.append("")
         scope_limitations = []
         for limitation in _group_limitations(child["limitations"]):
@@ -690,6 +806,8 @@ def render_recommendations(run: object) -> bytes:
             out.append("")
         for row in child["rows"]:
             if row["status"] != "gap":
+                out.append(_status_section(row))
+                out.append("")
                 continue
             out.append(_finding_section(
                 row, child["findings"].get(row["id"]), child["scope"],
