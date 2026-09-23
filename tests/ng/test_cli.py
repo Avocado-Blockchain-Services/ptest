@@ -1596,6 +1596,10 @@ def test_tty_auto_with_no_qualified_reviewer_never_prompts_or_scans(
         "ptest.cli.doctor.inspect_workspace",
         lambda *a, **k: pytest.fail("scanned source without a qualified reviewer"),
     )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("launched without a qualified reviewer"),
+    )
 
     assert main(("doctor",)) == 2
     assert resolved == []
@@ -1705,50 +1709,6 @@ def test_tty_auto_skips_unqualified_opencode_without_prompting(
 
     assert main(("doctor",)) == 2
     assert prompts == []
-    assert resolved == ["claude", "codex"]
-    err = capsys.readouterr().err
-    assert "provider-unqualified" in err
-    assert "install claude or codex" in err
-    assert "opencode is not supported" in err
-
-
-def test_tty_auto_with_only_opencode_installed_stays_unqualified(
-        inspection_project, monkeypatch, capsys):
-    """Auto never consults an installed but unqualified opencode.
-
-    Only claude and codex are missing here; opencode would resolve, but
-    auto fails closed with provider-unqualified before any prompt,
-    disclosure, or source scan.
-    """
-    import sys
-
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
-    resolved = []
-
-    def resolve(name, env):
-        resolved.append(name)
-        if name == "opencode":
-            return _fake_reviewer(name, qualified=False)
-        raise C.Problem(code="provider-unavailable", message="not installed",
-                        phase="provider")
-
-    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
-    monkeypatch.setattr(
-        "builtins.input",
-        lambda: pytest.fail("prompted without a qualified reviewer"),
-    )
-    monkeypatch.setattr(
-        "ptest.cli.doctor.inspect_workspace",
-        lambda *a, **k: pytest.fail("scanned source without a qualified reviewer"),
-    )
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
-        lambda *a, **k: pytest.fail("launched without a qualified reviewer"),
-    )
-
-    assert main(("doctor",)) == 2
     assert resolved == ["claude", "codex"]
     err = capsys.readouterr().err
     assert "provider-unqualified" in err
