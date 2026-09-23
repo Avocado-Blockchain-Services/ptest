@@ -444,7 +444,7 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
         updated_contents).hexdigest()
     assert public.data["publication"]["status"] == "unchanged"
     assert [item[1] for item in launches] == ["api", "web", "api", "web"]
-    assert statuses == ["claude", "codex", "opencode"] * 2
+    assert statuses == ["claude"] * 2
 
 
 @pytest.mark.parametrize(

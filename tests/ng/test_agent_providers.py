@@ -134,6 +134,13 @@ def test_qualification_status_per_provider(bindir):
     assert ap.qualification_status("opencode").qualified is False
 
 
+def test_fourth_supported_name_is_unqualified(monkeypatch):
+    monkeypatch.setattr(
+        ap, "SUPPORTED_REVIEWERS", ("claude", "codex", "opencode", "fourth"))
+    status = ap.qualification_status("fourth")
+    assert status.qualified is False
+
+
 def test_launch_rejects_unqualified_adapter(bindir):
     _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
     adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
@@ -986,6 +993,16 @@ def test_claude_permission_denial_is_tool_attempt(bindir):
     assert result.error == "tool-attempt"
 
 
+def test_claude_missing_permission_denials_is_invalid(bindir):
+    envelope = json.loads(
+        (FIXTURE_DIR / "claude-success.json").read_text(encoding="utf-8"))
+    del envelope["permission_denials"]
+    adapter = _replay(bindir, "claude", json.dumps(envelope).encode("utf-8"))
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+
+
 def test_claude_error_envelope_is_invalid(bindir):
     adapter = _replay(bindir, "claude", _claude_variant(is_error=True))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
@@ -1055,6 +1072,37 @@ def test_codex_missing_turn_completed_is_invalid(bindir):
         '{"type": "turn.started"}',
         '{"type": "item.completed", "item": {"id": "item_0", '
         '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+
+
+def test_codex_event_after_turn_completed_is_invalid(bindir):
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "turn.started"}',
+        '{"type": "item.completed", "item": {"id": "item_0", '
+        '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
+        '{"type": "turn.completed", "usage": {}}',
+        '{"type": "item.completed", "item": {"id": "item_1", '
+        '"type": "agent_message", "text": "trailing"}}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+
+
+def test_codex_second_turn_started_is_invalid(bindir):
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "turn.started"}',
+        '{"type": "turn.started"}',
+        '{"type": "item.completed", "item": {"id": "item_0", '
+        '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
+        '{"type": "turn.completed", "usage": {}}',
     )
     adapter = _replay(bindir, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))

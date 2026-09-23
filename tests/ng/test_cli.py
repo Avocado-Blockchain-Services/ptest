@@ -1683,7 +1683,7 @@ def test_tty_auto_skips_unqualified_opencode_without_prompting(
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    statuses = _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
+    _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
     resolved = []
     prompts = []
 
@@ -1706,8 +1706,54 @@ def test_tty_auto_skips_unqualified_opencode_without_prompting(
     assert main(("doctor",)) == 2
     assert prompts == []
     assert resolved == ["claude", "codex"]
-    assert statuses == ["claude", "codex", "opencode"] * 2
-    assert "provider-unqualified" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "provider-unqualified" in err
+    assert "install claude or codex" in err
+    assert "opencode is not supported" in err
+
+
+def test_tty_auto_with_only_opencode_installed_stays_unqualified(
+        inspection_project, monkeypatch, capsys):
+    """Auto never consults an installed but unqualified opencode.
+
+    Only claude and codex are missing here; opencode would resolve, but
+    auto fails closed with provider-unqualified before any prompt,
+    disclosure, or source scan.
+    """
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
+    resolved = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        if name == "opencode":
+            return _fake_reviewer(name, qualified=False)
+        raise C.Problem(code="provider-unavailable", message="not installed",
+                        phase="provider")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda: pytest.fail("prompted without a qualified reviewer"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source without a qualified reviewer"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("launched without a qualified reviewer"),
+    )
+
+    assert main(("doctor",)) == 2
+    assert resolved == ["claude", "codex"]
+    err = capsys.readouterr().err
+    assert "provider-unqualified" in err
+    assert "install claude or codex" in err
+    assert "opencode is not supported" in err
 
 
 def _review_project(root):
@@ -1856,7 +1902,7 @@ def test_only_selected_profile_qualification_gates_source_scan(
     _fake_cli_executable(tmp_path, monkeypatch)
     statuses = _fake_qualified_profiles(monkeypatch, unqualified=("codex",))
     cli._require_review_qualification("claude")
-    assert statuses == ["claude", "codex", "opencode"]
+    assert statuses == ["claude"]
     with pytest.raises(C.Problem) as caught:
         cli._require_review_qualification("codex")
     assert caught.value.code == "provider-unqualified"
@@ -1875,7 +1921,7 @@ def test_only_selected_profile_qualification_gates_source_scan(
     assert main(("doctor", "--reviewer", "codex",
                  "--allow-model-review")) == 2
 
-    assert statuses == ["claude", "codex", "opencode"]
+    assert statuses == ["codex"]
     text = capsys.readouterr().err
     assert "provider-unqualified" in text
 
@@ -1897,7 +1943,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _fake_cli_executable(tmp_path, monkeypatch)
-    statuses = _fake_qualified_profiles(monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
     launches = []
     requests = []
     publication_deadlines = []
@@ -1968,9 +2014,6 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     assert len(requests) == 2
     assert all(b"must-not-enter-review-packet" not in item for item in requests)
     assert inspect_count == [1, 1]
-    # Gate reads all three records in order; the resolver re-reads the
-    # selected record to take qualification from it (single source of truth).
-    assert statuses == ["claude", "codex", "opencode", "claude"]
     assert (root / "recommendations.md").is_file()
     assert captured.err
 

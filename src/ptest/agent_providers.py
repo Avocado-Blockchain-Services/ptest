@@ -60,13 +60,13 @@ _ENV_ALLOWLIST = frozenset({
 _CRED_DENY = ("token", "secret", "key", "credential", "password", "auth",
               "session", "cookie")
 
-# Frozen qualified argv tails (executable prepended at resolution). Single
-# source of truth, copied exactly from
+# Frozen argv tails (executable prepended at resolution). Single source of
+# truth, copied exactly from
 # docs/research/2026-09-22-agent-provider-qualification.md, section
 # "Claude and Codex qualification — 2026-09-23". Deliberately no "--bare"
 # Claude fallback (it disables normal auth). OpenCode keeps its unqualified
 # candidate tail and stays disabled (see _OPENCODE_NOTE).
-_QUALIFIED_TAILS = {
+_TAILS = {
     "claude": ("--print", "--output-format", "json",
                "--input-format", "text",
                "--safe-mode", "--tools", "",
@@ -118,6 +118,12 @@ _OPENCODE_NOTE = (
     "OpenCode's free tier refuses tool-free runs (HTTP 403 FreeTierError); "
     "not supported for review in this release"
 )
+
+# Explicit qualification allowlist: only these names are qualified. Every
+# other supported name is unqualified by default.
+_QUALIFIED = frozenset({"claude", "codex"})
+
+_UNQUALIFIED_NOTE = "not supported for review in this release"
 
 
 def _problem(code: str, message: str) -> Problem:
@@ -256,19 +262,23 @@ class QualificationStatus:
 def qualification_status(name: str) -> QualificationStatus:
     """Expose the per-provider qualification state of a profile.
 
-    Claude and Codex are qualified under the frozen argv above; OpenCode
-    is unqualified (see _OPENCODE_NOTE).
+    Names in _QUALIFIED are qualified under the frozen argv above; every
+    other supported name is unqualified (OpenCode keeps its record note).
     """
     _check_str("name", name)
     if name not in SUPPORTED_REVIEWERS:
         raise _problem("provider-unavailable", f"unsupported reviewer {name}")
+    if name in _QUALIFIED:
+        return QualificationStatus(name=name, qualified=True,
+                                   argv=(name,) + _TAILS[name],
+                                   note=_QUALIFIED_NOTE)
     if name == "opencode":
         return QualificationStatus(name=name, qualified=False,
-                                   argv=(name,) + _QUALIFIED_TAILS[name],
+                                   argv=(name,) + _TAILS[name],
                                    note=_OPENCODE_NOTE)
-    return QualificationStatus(name=name, qualified=True,
-                               argv=(name,) + _QUALIFIED_TAILS[name],
-                               note=_QUALIFIED_NOTE)
+    return QualificationStatus(name=name, qualified=False,
+                               argv=(name,) + _TAILS.get(name, ()),
+                               note=_UNQUALIFIED_NOTE)
 
 
 def _find_executable(name: str, env: Mapping) -> str:
@@ -303,7 +313,7 @@ def resolve_reviewer(name: str, env: Mapping[str, str]) -> ReviewerAdapter:
     executable = _find_executable(name, env)
     status = qualification_status(name)
     return ReviewerAdapter(name=name, executable=executable,
-                           argv=(executable,) + _QUALIFIED_TAILS[name],
+                           argv=(executable,) + status.argv[1:],
                            qualified=status.qualified,
                            qualification_note=status.note)
 
@@ -709,12 +719,13 @@ def _normalize_claude(text: str) -> tuple[bool, bytes, str]:
     if envelope.get("is_error") is not False:
         return False, b"", "invalid-assessment"
     turns = envelope.get("num_turns")
-    if isinstance(turns, bool) or turns != 1:
-        if isinstance(turns, int) and not isinstance(turns, bool) \
-                and turns > 1:
-            return False, b"", "tool-attempt"
+    if not _is_int(turns):
         return False, b"", "invalid-assessment"
-    denials = envelope.get("permission_denials", [])
+    if turns > 1:
+        return False, b"", "tool-attempt"
+    if turns != 1:
+        return False, b"", "invalid-assessment"
+    denials = envelope.get("permission_denials")
     if not isinstance(denials, list):
         return False, b"", "invalid-assessment"
     if len(denials) > 0:
@@ -734,6 +745,7 @@ def _normalize_codex(text: str) -> tuple[bool, bytes, str]:
         except (json.JSONDecodeError, ValueError):
             return False, b"", "invalid-assessment"
     completed_turns = 0
+    started = False
     last_message: str | None = None
     for event in events:
         if not isinstance(event, dict) or not isinstance(
@@ -744,6 +756,13 @@ def _normalize_codex(text: str) -> tuple[bool, bytes, str]:
             return False, b"", "provider-failed"
         if kind not in _CODEX_ALLOWED_EVENTS:
             return False, b"", "invalid-assessment"
+        if completed_turns:
+            return False, b"", "invalid-assessment"
+        if kind == "turn.started":
+            if started:
+                return False, b"", "invalid-assessment"
+            started = True
+            continue
         if kind == "turn.completed":
             completed_turns += 1
             continue
