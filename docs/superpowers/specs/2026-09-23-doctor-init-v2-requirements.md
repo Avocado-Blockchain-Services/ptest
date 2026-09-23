@@ -84,6 +84,27 @@ deferred", because init wrote `kind = "vitest"`, which ptest cannot execute.
 7. The reviewer menu (base branch) and consent/disclosure rules stay as they are. One disclosure covers the whole
    fan-out, and it states the number of calls and the chosen model.
 
+## E. Init proves it works with a smoke run (added by the user, 2026-09-23)
+
+After writing the configuration and passing the executability check (A.3), init confirms to the user that testing
+actually works by running a small real test through ptest, per project.
+
+- **ptest runs the test, never the model.** Execution goes through ptest's normal scoped runner, with the same
+  isolation, timeouts, and exit-code contract as `ptest <path>`. No provider gets tools.
+- **Choosing the smoke test:** deterministic by default. Prefer a small test file under the project's test roots
+  that imports no database, network, or service fixtures, as the static scanner sees them. If a qualified reviewer
+  is available and the user already consented to model use in this init, a cheap model (the C.4 selection; Claude
+  `haiku` alias) may choose instead, from ptest's own list of candidate files. Accept only an exact listed path, and
+  send no file contents beyond names and sizes.
+- **Consent:** running tests executes project code. On a TTY, ask once per init: "Run a quick smoke test to confirm
+  ptest works? [Y/n]", naming the files. Non-interactive init runs it only with an explicit flag (for example
+  `--smoke`). `--no-smoke` skips it.
+- **Report per project:** passed (with the command and duration), failed (with the command, exit code, and the
+  first useful lines), or skipped (with the reason). Setup that has not been done (no `.venv` or `node_modules`) is a
+  skip with the exact setup command, never a silent install. A smoke failure never rolls back the written
+  configuration, and init's exit status stays configuration-based. Show the smoke result clearly.
+- Must pass on persea: `api` with its serial xdist handling (A.1), and `web` with vitest execution (A.2).
+
 ## D. Constraints
 
 - Follow `secure-by-spec` and `audit-spec`. All tests go through `ptest` only. Tasks never launch real
