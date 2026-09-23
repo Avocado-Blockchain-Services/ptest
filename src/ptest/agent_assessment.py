@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
+from .checklist import CATALOG as _CHECKLIST_CATALOG
 from .files import read_regular
 
 _PHASE = "validation"
@@ -139,7 +140,9 @@ _REVIEW_INSTRUCTION = (
     "root-relative paths, line ranges, and content identities. Use "
     "not-applicable only with a specific rationale citing affirmative "
     "packet evidence that the item cannot apply; absence of code is "
-    "`unknown`, never not-applicable."
+    "`unknown`, never not-applicable. The reply must validate against "
+    "response_schema; limitation codes and status enums come only from "
+    "it; assess each row against its checklist criterion."
 )
 
 # Raw payload keys the model must never supply. The public codec projects
@@ -665,8 +668,12 @@ def _raw_output_shape() -> dict[str, list[str]]:
 def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
     """Encode one identity-checked packet as bounded canonical provider input.
 
-    The provider schema remains a separate input to the provider boundary;
-    its byte length is included in the shared input budget here.
+    The provider schema is embedded in the policy as ``response_schema``
+    (parsed JSON object) alongside the canonical ``checklist`` rows, so a
+    provider with no file tools still sees the schema and the checklist
+    meaning. The schema bytes stay a separate input to the provider
+    boundary; the shared 1 MiB input budget here applies once to the
+    combined request bytes that already embed them.
     """
     if not isinstance(packet, EvidencePacket):
         raise TypeError("packet must be EvidencePacket")
@@ -674,6 +681,14 @@ def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
         raise TypeError("schema must be bytes")
     if not schema:
         raise _fail("invalid-bound", "provider schema must be nonempty")
+    try:
+        response_schema = json.loads(schema.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise _fail("invalid-bound",
+                    "provider schema must be a JSON object") from None
+    if not isinstance(response_schema, dict):
+        raise _fail("invalid-bound",
+                    "provider schema must be a JSON object")
 
     body = _packet_body(
         packet.declaration, packet.project_id, packet.scope,
@@ -684,12 +699,22 @@ def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
                         message="evidence packet identity is stale",
                         phase=_PHASE, retryable=False)
 
+    # Single ordered source for both the model-visible checklist rows and
+    # the checklist IDs: the canonical catalog.
+    checklist = [
+        {"id": entry.id, "criterion": entry.criterion,
+         "evidence": entry.evidence,
+         "recommendation": entry.recommendation}
+        for entry in _CHECKLIST_CATALOG
+    ]
     request = json.dumps(
         {
             "policy": {
                 "instruction": _REVIEW_INSTRUCTION,
                 "assessment_schema": C.AGENT_ASSESSMENT_SCHEMA,
-                "checklist_ids": list(C.AGENT_ASSESSMENT_CHECKLIST_IDS),
+                "checklist_ids": [row["id"] for row in checklist],
+                "checklist": checklist,
+                "response_schema": response_schema,
                 "statuses": sorted(C.AGENT_ASSESSMENT_STATUSES),
                 "raw_output_shape": _raw_output_shape(),
             },
@@ -698,12 +723,13 @@ def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
         sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode("utf-8")
 
-    # Reuse the provider boundary's authority for the combined request/schema
-    # budget without resolving or launching an adapter.
+    # Reuse the provider boundary's authority for the input budget without
+    # resolving or launching an adapter. The request already embeds the
+    # schema, so the budget applies once to the request bytes alone.
     from .agent_providers import PROMPT_INPUT_MAX_BYTES
 
-    if len(request) + len(schema) > PROMPT_INPUT_MAX_BYTES:
-        raise _fail("invalid-bound", "provider request and schema exceed 1 MiB")
+    if len(request) > PROMPT_INPUT_MAX_BYTES:
+        raise _fail("invalid-bound", "provider request exceeds 1 MiB")
     return request
 
 

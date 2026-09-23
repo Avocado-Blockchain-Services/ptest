@@ -666,12 +666,16 @@ def test_encode_review_request_enforces_combined_provider_input_bound(
     from ptest import agent_assessment as AA
     from ptest import agent_providers
 
+    def object_schema(pad: int) -> bytes:
+        return b'{"pad":"' + b"x" * pad + b'"}'
+
     packet = _packet_for(tmp_path, {"src/example.py": "x = 1\n"})
-    request = AA.encode_review_request(packet, b"{}")
-    exact_schema = b"x" * (agent_providers.PROMPT_INPUT_MAX_BYTES - len(request))
-    assert AA.encode_review_request(packet, exact_schema) == request
+    base = len(AA.encode_review_request(packet, b'{"pad":""}'))
+    pad_exact = agent_providers.PROMPT_INPUT_MAX_BYTES - base
+    exact = AA.encode_review_request(packet, object_schema(pad_exact))
+    assert len(exact) == agent_providers.PROMPT_INPUT_MAX_BYTES
     with pytest.raises(C.Problem) as caught:
-        AA.encode_review_request(packet, exact_schema + b"x")
+        AA.encode_review_request(packet, object_schema(pad_exact + 1))
     assert caught.value.code == "invalid-bound"
 
 
@@ -704,8 +708,86 @@ def test_default_packet_reserve_allows_ordinary_capped_evidence(tmp_path):
         "src/large.py": "x = 1\n" * 70_000,
     })
 
-    request = AA.encode_review_request(packet, b"s" * (64 * 1024))
-    assert len(request) + 64 * 1024 <= 1024 * 1024
+    schema = b'{"pad":"' + b"s" * (64 * 1024 - 10) + b'"}'
+    assert len(schema) == 64 * 1024
+    request = AA.encode_review_request(packet, schema)
+    assert len(request) <= 1024 * 1024
+
+
+def test_encode_review_request_embeds_response_schema_and_checklist(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest.checklist import CATALOG
+
+    packet = _packet_for(tmp_path, {"src/example.py": "x = 1\n"})
+    schema = b'{"type":"object","properties":{"data":{"type":"object"}}}'
+    document = json.loads(
+        AA.encode_review_request(packet, schema).decode("utf-8"))
+    policy = document["policy"]
+
+    assert policy["response_schema"] == json.loads(schema)
+    assert policy["checklist"] == [
+        {"id": entry.id, "criterion": entry.criterion,
+         "evidence": entry.evidence,
+         "recommendation": entry.recommendation}
+        for entry in CATALOG
+    ]
+    assert policy["checklist_ids"] == [
+        row["id"] for row in policy["checklist"]]
+    assert [row["id"] for row in policy["checklist"]] == list(
+        C.AGENT_ASSESSMENT_CHECKLIST_IDS)
+
+
+def test_encode_review_request_rejects_invalid_schema_bytes(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/example.py": "x = 1\n"})
+    for bad in (b"not json", b"[1,2]", b'"str"', b"42", b"null", b""):
+        with pytest.raises(C.Problem) as caught:
+            AA.encode_review_request(packet, bad)
+        assert caught.value.code == "invalid-bound"
+
+
+def test_encode_review_request_instruction_names_response_schema(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {"src/example.py": "x = 1\n"})
+    document = json.loads(
+        AA.encode_review_request(packet, b"{}").decode("utf-8"))
+    instruction = document["policy"]["instruction"]
+    assert "response_schema" in instruction
+
+
+def test_encode_review_request_embeds_real_schema_limitation_codes(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest.cli import _raw_assessment_schema
+
+    packet = _packet_for(tmp_path, {"src/example.py": "x = 1\n"})
+    schema = _raw_assessment_schema()
+    document = json.loads(
+        AA.encode_review_request(packet, schema).decode("utf-8"))
+    embedded = document["policy"]["response_schema"]
+    assert embedded == json.loads(schema)
+
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            props = node.get("properties")
+            if (isinstance(props, dict)
+                    and set(props) == {"code", "message", "paths"}):
+                code = props.get("code")
+                if isinstance(code, dict) and "enum" in code:
+                    found.append(code["enum"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(embedded)
+    assert found
+    for enum in found:
+        assert sorted(enum) == sorted(C.AGENT_ASSESSMENT_LIMITATION_CODES)
 
 
 def test_build_packets_excludes_symlink_secret_instruction_generated_dependency(  # noqa: E501
