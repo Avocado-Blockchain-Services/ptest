@@ -724,7 +724,7 @@ def _review_consent_problem() -> C.Problem:
 
 
 def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
-    """Resolve one adapter after the shared qualification gate has passed."""
+    """Resolve one adapter; the per-provider gate has already enforced it."""
     selected = parsed.reviewer
     if selected not in (None, "auto"):
         return agent_providers.resolve_reviewer(selected, os.environ)
@@ -734,34 +734,60 @@ def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
         # turn an explicit consent flag into permission to inspect PATH.
         raise _review_consent_problem()
 
+    skipped: list[str] = []
     for name in agent_providers.SUPPORTED_REVIEWERS:
+        status = agent_providers.qualification_status(name)
+        if not status.qualified:
+            skipped.append(f"{name} is unqualified: {status.note}")
+            continue
         try:
-            adapter = agent_providers.resolve_reviewer(name, os.environ)
+            return agent_providers.resolve_reviewer(name, os.environ)
         except C.Problem as problem:
             if problem.code == "provider-unavailable":
                 continue
             raise
-        return adapter
+    if skipped:
+        raise _problem(
+            "provider-unqualified",
+            "no qualified review provider is installed ("
+            + "; ".join(skipped) + ")",
+        )
     raise _problem("provider-unavailable", "no supported review provider is installed")
 
 
-def _require_review_qualification(_selected_adapter=None) -> None:
-    """Fail closed unless every supported provider profile is qualified."""
-    if (_selected_adapter is not None
-            and not isinstance(_selected_adapter,
-                               agent_providers.ReviewerAdapter)):
-        raise TypeError("selected adapter must be ReviewerAdapter")
+def _require_review_qualification(selected: str | None = None) -> None:
+    """Read every shared qualification record; enforce only the selection.
+
+    The shared status records stay the sole qualification authority and
+    keep their registry shape (one record per SUPPORTED_REVIEWERS, in
+    order). Only the explicitly selected provider gates the review here:
+    an unqualified selection fails closed with provider-unqualified and
+    the record note, before any launch. Auto selection enforces per
+    provider while resolving.
+    """
+    if selected is not None and not isinstance(selected, str):
+        raise TypeError("selected must be a reviewer name or None")
     statuses = tuple(
         agent_providers.qualification_status(name)
         for name in agent_providers.SUPPORTED_REVIEWERS
     )
     if (len(statuses) != len(agent_providers.SUPPORTED_REVIEWERS)
             or tuple(status.name for status in statuses)
-            != agent_providers.SUPPORTED_REVIEWERS
-            or any(not status.qualified for status in statuses)):
+            != agent_providers.SUPPORTED_REVIEWERS):
+        raise _problem(
+            "provider-unavailable",
+            "reviewer qualification registry mismatch",
+        )
+    if selected in (None, "auto"):
+        return
+    if selected not in agent_providers.SUPPORTED_REVIEWERS:
+        raise _problem("provider-unavailable",
+                       f"unsupported reviewer {selected}")
+    status = next(item for item in statuses if item.name == selected)
+    if not status.qualified:
         raise _problem(
             "provider-unqualified",
-            "agent review is disabled until every supported provider profile is qualified",
+            f"reviewer {selected} is unqualified: {status.note}",
         )
 
 
@@ -802,13 +828,11 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
             and parsed.allow_model_review):
         raise _review_consent_problem()
 
-    _require_review_qualification()
+    _require_review_qualification(
+        parsed.reviewer if parsed.reviewer_explicit else None)
+    # Qualification comes only from the resolver (which reads the shared
+    # status records); no override here.
     adapter = _resolve_review_adapter(parsed, interactive=interactive)
-    # The shared status records are the sole qualification authority. Resolver
-    # candidates stay disabled by default and are enabled here only after the
-    # all-three gate succeeds.
-    adapter = replace(adapter, qualified=True,
-                      qualification_note="shared profile gate passed")
     if interactive and not _render_review_disclosure(
             adapter, resolution, ask=not preconsented):
         print(
@@ -1014,10 +1038,9 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                        domain: C.DomainPaths, *, adapter=None) -> None:
     """Collect, sequentially validate, revalidate, then publish one review."""
     if adapter is None:
-        _require_review_qualification()
+        _require_review_qualification(
+            parsed.reviewer if parsed.reviewer_explicit else None)
         adapter = _resolve_review_adapter(parsed, interactive=_interactive_review())
-        adapter = replace(adapter, qualified=True,
-                          qualification_note="shared profile gate passed")
     started = time.monotonic()
     deadline = started + _REVIEW_TOTAL_TIMEOUT_S
     limits = _doctor_limits(parsed)

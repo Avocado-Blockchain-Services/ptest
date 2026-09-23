@@ -6,10 +6,10 @@ to run tests. Run `ptest init`, then use `ptest <scoped paths>` or
 `ptest --full`.
 
 Doctor has explicit offline static modes (`--offline`, `--json`, and `--prompt`)
-and a separately consented CLI review design. Provider-backed review is
-currently disabled because the Claude, Codex, and OpenCode profiles are
-unqualified. All three must pass qualification before review is enabled. If
-enabled, review sends bounded source text to the selected provider using your
+and a separately consented CLI review design. Claude and Codex are qualified
+reviewers. OpenCode is not supported because its free tier refuses tool-free
+runs (HTTP 403 FreeTierError). Review sends bounded source text to the
+selected provider using your
 existing account; provider or account costs may apply. Choosing agents with
 `ptest init --agents` installs guidance only and does not authorize model
 review. See `ptest help doctor` for details; agents start at `ptest help agents`.

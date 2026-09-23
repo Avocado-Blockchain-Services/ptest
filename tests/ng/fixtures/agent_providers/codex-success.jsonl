@@ -1,0 +1,5 @@
+{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "The workspace is read-only, so no tool ran.\n"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "{\"assessment\": \"payload\"}"}}
+{"type": "turn.completed", "usage": {"input_tokens": 31767, "output_tokens": 84}}

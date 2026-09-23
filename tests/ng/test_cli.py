@@ -1360,11 +1360,11 @@ def test_doctor_without_full_explicit_consent_requires_consent_before_qualificat
     assert "provider-unqualified" not in captured.err + captured.out
 
 
-def test_explicit_provider_and_consent_with_unqualified_provider_never_launches(
+def test_explicit_provider_and_consent_with_missing_provider_never_launches(
         tmp_path, monkeypatch, capsys):
-    """Explicit reviewer plus consent reaches qualification without assuming PATH.
+    """Explicit reviewer plus consent reaches resolution without assuming PATH.
 
-    PATH is emptied so no real installed provider can satisfy qualification;
+    PATH is emptied so no real installed provider can satisfy resolution;
     the result must be provider-unavailable/unqualified, never a launch and
     never consent-required.
     """
@@ -1531,7 +1531,7 @@ def _fake_reviewer(name, *, qualified):
                            qualified=qualified, qualification_note="test")
 
 
-def test_tty_auto_review_uses_stable_order_after_shared_qualification(
+def test_tty_auto_review_uses_stable_order_skipping_unavailable(
         inspection_project, tmp_path, monkeypatch, capsys):
     import sys
     from ptest.agent_providers import ProviderResult
@@ -1579,6 +1579,8 @@ def test_tty_auto_with_no_qualified_reviewer_never_prompts_or_scans(
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
+    _fake_qualified_profiles(monkeypatch, unqualified=("claude", "codex",
+                                                       "opencode"))
     resolved = []
 
     def resolve(name, env):
@@ -1669,14 +1671,28 @@ def test_tty_review_disclosure_names_excluded_source_classes(
     assert "generated/minified files" in disclosure
 
 
-def test_tty_affirmative_consent_waits_for_all_profile_qualification(
+def test_tty_auto_skips_unqualified_opencode_without_prompting(
         inspection_project, monkeypatch, capsys):
+    """Per-provider gate: unqualified opencode never blocks or prompts auto.
+
+    Claude and Codex are qualified but not installed here, so auto finds
+    no qualified installed provider and fails closed before any prompt,
+    disclosure, or source scan.
+    """
     import sys
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     statuses = _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
+    resolved = []
     prompts = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        raise C.Problem(code="provider-unavailable", message="not installed",
+                        phase="provider")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
     monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "yes")
     monkeypatch.setattr(
         "ptest.cli.doctor.inspect_workspace",
@@ -1689,7 +1705,8 @@ def test_tty_affirmative_consent_waits_for_all_profile_qualification(
 
     assert main(("doctor",)) == 2
     assert prompts == []
-    assert statuses == ["claude", "codex", "opencode"]
+    assert resolved == ["claude", "codex"]
+    assert statuses == ["claude", "codex", "opencode"] * 2
     assert "provider-unqualified" in capsys.readouterr().err
 
 
@@ -1829,35 +1846,38 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert "provider" not in legacy.data
 
 
-def test_all_three_profile_qualification_is_required_before_source_scan(
+def test_only_selected_profile_qualification_gates_source_scan(
         inspection_project, tmp_path, monkeypatch, capsys):
+    """Per-provider gate: an unqualified sibling never blocks a qualified pick,
+    while the unqualified pick itself fails closed before scan or launch."""
     import sys
     from ptest import cli
 
     _fake_cli_executable(tmp_path, monkeypatch)
     statuses = _fake_qualified_profiles(monkeypatch, unqualified=("codex",))
-    with pytest.raises(C.Problem) as caught:
-        cli._require_review_qualification(
-            _fake_reviewer("claude", qualified=True))
-    assert caught.value.code == "provider-unqualified"
+    cli._require_review_qualification("claude")
     assert statuses == ["claude", "codex", "opencode"]
+    with pytest.raises(C.Problem) as caught:
+        cli._require_review_qualification("codex")
+    assert caught.value.code == "provider-unqualified"
     statuses.clear()
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setattr(
         "ptest.cli.doctor.inspect_workspace",
-        lambda *a, **k: pytest.fail("scanned with an incomplete profile gate"),
+        lambda *a, **k: pytest.fail("scanned with an unqualified selection"),
     )
     monkeypatch.setattr(
         "ptest.cli.agent_providers.launch_review",
-        lambda *a, **k: pytest.fail("launched with an incomplete profile gate"),
+        lambda *a, **k: pytest.fail("launched with an unqualified selection"),
     )
 
-    assert main(("doctor", "--reviewer", "claude",
+    assert main(("doctor", "--reviewer", "codex",
                  "--allow-model-review")) == 2
 
     assert statuses == ["claude", "codex", "opencode"]
-    assert "provider-unqualified" in capsys.readouterr().err
+    text = capsys.readouterr().err
+    assert "provider-unqualified" in text
 
 
 def test_doctor_reviews_children_sequentially_and_publishes_one_document(
@@ -1948,7 +1968,9 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     assert len(requests) == 2
     assert all(b"must-not-enter-review-packet" not in item for item in requests)
     assert inspect_count == [1, 1]
-    assert statuses == ["claude", "codex", "opencode"]
+    # Gate reads all three records in order; the resolver re-reads the
+    # selected record to take qualification from it (single source of truth).
+    assert statuses == ["claude", "codex", "opencode", "claude"]
     assert (root / "recommendations.md").is_file()
     assert captured.err
 
@@ -2396,3 +2418,188 @@ def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
     assert published_proofs == [sum(packet_excerpt_counts)]
     assert published_proofs[0] > 256
     assert (root / "recommendations.md").is_file()
+
+
+# --- Per-provider qualification (2026-09-23 record): explicit, auto, e2e. ---
+
+def _sentinel_bin(tmp_path, monkeypatch, name, sentinel):
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    executable = bindir / name
+    executable.write_text(
+        "#!/bin/sh\ntouch \"" + str(sentinel) + "\"\ncat >/dev/null\n"
+        "printf '{\"result\": \"SHOULD-NEVER-RUN\"}'\nexit 0\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    return bindir
+
+
+def test_opencode_explicit_selection_fails_closed_without_launch(
+        tmp_path, monkeypatch, capsys):
+    """Explicit opencode plus consent must fail closed before any launch.
+
+    The fake executable is never run: the sentinel file stays absent and
+    the report names provider-unqualified with the free-tier reason.
+    """
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    sentinel = tmp_path / "opencode-launched"
+    _sentinel_bin(tmp_path, monkeypatch, "opencode", sentinel)
+
+    assert main(("doctor", "--reviewer", "opencode",
+                 "--allow-model-review")) == 2
+
+    captured = capsys.readouterr()
+    text = captured.err + captured.out
+    assert "provider-unqualified" in text
+    assert "FreeTierError" in text
+    assert not sentinel.exists()
+
+
+def test_auto_with_only_opencode_installed_fails_closed(
+        tmp_path, monkeypatch, capsys):
+    """Auto never selects the unqualified provider, even when it is alone."""
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("auto prompted"))
+    sentinel = tmp_path / "opencode-launched"
+    _sentinel_bin(tmp_path, monkeypatch, "opencode", sentinel)
+
+    assert main(("doctor", "--reviewer", "auto",
+                 "--allow-model-review")) == 2
+
+    captured = capsys.readouterr()
+    text = captured.err + captured.out
+    assert "provider-unqualified" in text
+    assert not sentinel.exists()
+
+
+def test_auto_with_codex_and_opencode_picks_codex(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    """Auto skips missing claude and unqualified opencode, selecting codex."""
+    import sys
+    from ptest.agent_providers import ProviderResult
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name in ("codex", "opencode"):
+        executable = bindir / name
+        executable.write_text("#!/bin/sh\ncat >/dev/null\nexit 0\n",
+                              encoding="utf-8")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr("builtins.input", lambda: "yes")
+    launches = []
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        launches.append(adapter.name)
+        assert adapter.qualified is True
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=3009, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+
+    assert main(("doctor", "--reviewer", "auto",
+                 "--allow-model-review")) == 0
+
+    assert launches == ["codex"]
+
+
+def _native_replay_executable(bindir, name):
+    """Fake provider that wraps a packet-bound assessment in its envelope."""
+    import sys as _sys
+
+    checklist = list(C.AGENT_ASSESSMENT_CHECKLIST_IDS)
+    script = "\n".join([
+        "#!" + _sys.executable,
+        "import json, sys",
+        "request = json.load(sys.stdin)",
+        "packet = request['packet']",
+        "rows = [{'id': row_id, 'status': 'unknown',",
+        "        'rationale': 'The bounded source evidence does not establish this row.',",
+        "        'evidence': []} for row_id in " + repr(checklist) + "]",
+        "assessment = {'schema_version': " + repr(C.SCHEMA_VERSION) + ",",
+        "              'kind': 'agent-assessment',",
+        "              'ptest_version': " + repr(C.PTEST_VERSION) + ",",
+        "              'domain': None,",
+        "              'data': {'schema': " + repr(C.AGENT_ASSESSMENT_SCHEMA) + ",",
+        "                       'children': [{'project_id': packet['project_id'],",
+        "                                     'scope': packet['scope'],",
+        "                                     'packet_sha256': packet['packet_sha256'],",
+        "                                     'rows': rows,",
+        "                                     'findings': [],",
+        "                                     'limitations': []}],",
+        "                       'limitations': []},",
+        "              'error': None}",
+        "payload = json.dumps(assessment)",
+    ])
+    if name == "claude":
+        script += "\n" + "\n".join([
+            "envelope = {'type': 'result', 'subtype': 'success',",
+            "            'is_error': False, 'num_turns': 1,",
+            "            'permission_denials': [], 'result': payload}",
+            "sys.stdout.write(json.dumps(envelope))",
+        ])
+    else:
+        script += "\n" + "\n".join([
+            "for event in ({'type': 'thread.started', 'thread_id': 'THREAD-E2E'},",
+            "              {'type': 'turn.started'},",
+            "              {'type': 'item.completed',",
+            "               'item': {'id': 'item_0', 'type': 'agent_message',",
+            "                        'text': payload}},",
+            "              {'type': 'turn.completed', 'usage': {}}):",
+            "    sys.stdout.write(json.dumps(event) + '\\n')",
+        ])
+    executable = bindir / name
+    executable.write_text(script + "\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_native_envelope_end_to_end_publishes_report(
+        tmp_path, monkeypatch, capsys, provider):
+    """Real launch_review against a fake native CLI publishes the report.
+
+    Each fake executable replays a valid packet-bound assessment inside
+    its provider's native envelope; review runs non-interactively and
+    writes recommendations.md.
+    """
+    import re
+    import sys
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _native_replay_executable(bindir, provider)
+    monkeypatch.setenv("PATH", str(bindir))
+
+    assert main(("doctor", "--reviewer", provider,
+                 "--allow-model-review")) == 0
+
+    capsys.readouterr()
+    report = root / "recommendations.md"
+    assert report.is_file()
+    marker, _body = report.read_bytes().split(b"\n", 1)
+    assert re.fullmatch(rb"<!-- ptest-recommendations v1 sha256=[0-9a-f]{64} -->",
+                        marker) is not None

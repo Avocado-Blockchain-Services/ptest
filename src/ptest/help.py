@@ -130,10 +130,11 @@ Notes:
   In automation, provide both --reviewer PROVIDER and --allow-model-review;
   --reviewer auto never selects a provider without an interactive TTY.
 
-  Provider-backed review is currently disabled: Claude, Codex, and OpenCode
-  are all currently unqualified, and review fails closed until all three
-  profiles pass the shared gate. Normal test execution remains local and
-  model-free.
+  Claude and Codex are qualified reviewers. OpenCode is not supported
+  because its free tier refuses tool-free runs (HTTP 403 FreeTierError).
+  Selecting an unqualified provider, or auto finding only unqualified
+  providers, fails closed with provider-unqualified. Normal test execution
+  remains local and model-free.
   --assessment-json is the versioned review document; legacy --json and
   --prompt stay static and offline. --prompt grants assessment text only,
   never repair authority.
@@ -223,8 +224,9 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
      ptest doctor --prompt         # assessment text for repair planning only
      ptest doctor --json           # typed findings document
    Doctor review is separately consented and may send bounded source text to
-   the selected provider; costs may apply. Provider review remains disabled
-   until Claude, Codex, and OpenCode all qualify. Use --offline, --prompt, or
+   the selected provider; costs may apply. Claude and Codex are qualified
+   reviewers; OpenCode is not supported because its free tier refuses
+   tool-free runs. Use --offline, --prompt, or
    legacy --json for static output. --prompt and --json are mutually
    exclusive. Never infer readiness from an unknown or incomplete static
    scan: report unknown honestly; a clean or truncated scan is never a pass

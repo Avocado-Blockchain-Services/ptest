@@ -54,6 +54,8 @@ def _synthetic(adapter):
 
     This does NOT qualify the real provider profile; it only lets the
     subprocess/normalization machinery run against fake executables.
+    Only needed for providers the record leaves unqualified (opencode);
+    qualified providers already resolve as qualified.
     """
     return dataclasses.replace(
         adapter,
@@ -112,25 +114,29 @@ def test_resolve_reviewer_missing_executable(bindir):
 
 
 def test_resolve_reviewer_fail_closed_unqualified(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
-    assert adapter.name == "claude"
+    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
+    assert adapter.name == "opencode"
     assert adapter.qualified is False
     assert tuple(adapter.argv[:1]) != ()
-    assert adapter.argv[0].endswith("/claude")
+    assert adapter.argv[0].endswith("/opencode")
     assert len(adapter.argv) > 1  # fixed containment argv, not bare binary
     assert "--bare" not in adapter.argv  # no auth-disabling fallback
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    qualified = ap.resolve_reviewer("claude", _env_for(bindir))
+    assert qualified.qualified is True
+    assert qualified.argv[0].endswith("/claude")
 
 
-def test_qualification_status_all_unproven(bindir):
-    for name in ap.SUPPORTED_REVIEWERS:
-        status = ap.qualification_status(name)
-        assert status.qualified is False
+def test_qualification_status_per_provider(bindir):
+    assert ap.qualification_status("claude").qualified is True
+    assert ap.qualification_status("codex").qualified is True
+    assert ap.qualification_status("opencode").qualified is False
 
 
 def test_launch_rejects_unqualified_adapter(bindir):
-    _write_bin(bindir, "codex", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
     assert adapter.qualified is False
     with pytest.raises(Problem) as exc:
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
@@ -175,10 +181,19 @@ def test_launch_missing_executable_at_launch(bindir, tmp_path):
 
 # ---- clean success per provider ------------------------------------------
 
-CLAUDE_OK = "#!/bin/sh\ncat >/dev/null\ntest -f schema.json || exit 5\nprintf '{\"result\": \"CLAUDE-OK\"}'\nexit 0\n"
+CLAUDE_OK = (
+    "#!/bin/sh\ncat >/dev/null\ntest -f schema.json || exit 5\n"
+    "printf '{\"type\": \"result\", \"subtype\": \"success\", \"is_error\": false, "
+    "\"num_turns\": 1, \"permission_denials\": [], \"result\": \"CLAUDE-OK\"}'\n"
+    "exit 0\n"
+)
 CODEX_OK = (
     "#!/bin/sh\ncat >/dev/null\ntest -f schema.json || exit 5\n"
-    "printf '%s\\n' '{\"type\":\"message\",\"content\":\"FIRST\"}' '{\"type\":\"message\",\"content\":\"LAST\"}'\n"
+    "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"THREAD-PLACEHOLDER\"}' "
+    "'{\"type\":\"turn.started\"}' "
+    "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"FIRST\"}}' "
+    "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"LAST\"}}' "
+    "'{\"type\":\"turn.completed\",\"usage\":{}}'\n"
     "exit 0\n"
 )
 OPENCODE_OK = (
@@ -224,7 +239,9 @@ def test_fixed_argv_and_hostile_packet_never_executes(bindir, tmp_path):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "for a in \"$@\"; do case \"$a\" in *" + MARKER + "*) exit 7;; esac; done\n"
-        "printf '{\"result\": \"nargs=%s\"}' \"$#\"\nexit 0\n"
+        "printf '{\"type\": \"result\", \"subtype\": \"success\", \"is_error\": false, "
+        "\"num_turns\": 1, \"permission_denials\": [], \"result\": \"nargs=%s\"}' \"$#\"\n"
+        "exit 0\n"
     )
     adapter = _synthetic(_resolve(bindir, "claude", body))
     result = ap.launch_review(adapter, hostile, SCHEMA, 10, _no_progress([]))
@@ -329,7 +346,9 @@ def test_codex_without_message_is_failure(bindir):
 def test_claude_tool_attempt_is_failure_not_assessment(bindir):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
-        "printf '{\"result\": \"X\", \"tool_use\": [{\"id\": \"1\"}]}'\nexit 0\n"
+        "printf '{\"type\": \"result\", \"subtype\": \"success\", \"is_error\": false, "
+        "\"num_turns\": 1, "
+        "\"permission_denials\": [{\"tool\": \"Read\"}], \"result\": \"X\"}'\nexit 0\n"
     )
     adapter = _synthetic(_resolve(bindir, "claude", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
@@ -341,7 +360,12 @@ def test_claude_tool_attempt_is_failure_not_assessment(bindir):
 def test_codex_tool_call_is_failure(bindir):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
-        "printf '%s\\n' '{\"type\":\"tool_call\",\"content\":\"rm\"}' '{\"type\":\"message\",\"content\":\"HI\"}'\n"
+        "printf '%s\\n' "
+        "'{\"type\":\"thread.started\",\"thread_id\":\"THREAD-PLACEHOLDER\"}' "
+        "'{\"type\":\"turn.started\"}' "
+        "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"text\":\"rm\"}}' "
+        "'{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"HI\"}}' "
+        "'{\"type\":\"turn.completed\",\"usage\":{}}'\n"
         "exit 0\n"
     )
     adapter = _synthetic(_resolve(bindir, "codex", body))
@@ -836,3 +860,214 @@ def test_dead_pin_with_unreadable_starttime_is_skipped_safely(monkeypatch):
     owned = ap._owned_group_members(40000, 50000, 99999, 100)
     assert owned == []
     assert 9011 in closed
+
+
+# ---- per-provider qualification (2026-09-23 record) -------------------------
+#
+# Frozen argv tails below are copied from
+# docs/research/2026-09-22-agent-provider-qualification.md, section
+# "Claude and Codex qualification — 2026-09-23". Any drift fails.
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "agent_providers"
+
+_CLAUDE_FROZEN_TAIL = (
+    "--print", "--output-format", "json",
+    "--input-format", "text",
+    "--safe-mode", "--tools", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+)
+
+_CODEX_DISABLED_FEATURES = (
+    "shell_tool", "unified_exec", "apps", "browser_use",
+    "browser_use_external", "computer_use", "hooks", "image_generation",
+    "in_app_browser", "multi_agent", "plugins", "remote_plugin",
+    "plugin_sharing", "skill_search", "skill_mcp_dependency_install",
+    "sleep_tool", "tool_suggest", "tool_call_mcp_elicitation",
+    "view_image", "code_mode_host", "goals", "guardian_approval",
+    "workspace_dependencies", "in_app_chat", "in_app_local_automation",
+    "browser_use_full_cdp_access", "unified_exec_tty", "shell_snapshot",
+)
+
+_CODEX_FROZEN_TAIL = (
+    "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+    "--skip-git-repo-check", "--sandbox", "read-only", "--json",
+    "-c", 'web_search="disabled"',
+) + tuple(token for feature in _CODEX_DISABLED_FEATURES
+          for token in ("--disable", feature))
+
+_INVENTED_FLAGS = ("--allowedTools", "--mcp-config", "--no-slash-commands",
+                   "--no-browser", "--no-shell")
+
+_OPENCODE_NOTE = (
+    "OpenCode's free tier refuses tool-free runs (HTTP 403 FreeTierError); "
+    "not supported for review in this release"
+)
+
+
+def _replay(bindir: Path, name: str, payload: bytes):
+    """Fake executable that replays one fixed native envelope on stdout."""
+    blob = bindir / f"{name}.payload"
+    blob.write_bytes(payload)
+    _write_bin(bindir, name,
+               "#!/bin/sh\ncat >/dev/null\ncat \"" + str(blob) + "\"\nexit 0\n")
+    return ap.resolve_reviewer(name, _env_for(bindir))
+
+
+def _claude_variant(**overrides):
+    envelope = json.loads(
+        (FIXTURE_DIR / "claude-success.json").read_text(encoding="utf-8"))
+    envelope.update(overrides)
+    return json.dumps(envelope).encode("utf-8")
+
+
+def _codex_stream(*lines: str) -> bytes:
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def test_frozen_argv_matches_qualification_record(bindir):
+    for name, tail in (("claude", _CLAUDE_FROZEN_TAIL),
+                       ("codex", _CODEX_FROZEN_TAIL)):
+        status = ap.qualification_status(name)
+        assert tuple(status.argv) == (name,) + tuple(tail)
+        _write_bin(bindir, name, "#!/bin/sh\nexit 0\n")
+        adapter = ap.resolve_reviewer(name, _env_for(bindir))
+        assert tuple(adapter.argv[1:]) == tuple(tail)
+        for flag in _INVENTED_FLAGS:
+            assert flag not in adapter.argv
+        assert "--bare" not in adapter.argv
+
+
+def test_qualification_status_names_the_record():
+    claude = ap.qualification_status("claude")
+    assert claude.qualified is True
+    assert "2026-09-23" in claude.note and "qualification" in claude.note
+    codex = ap.qualification_status("codex")
+    assert codex.qualified is True
+    assert "2026-09-23" in codex.note and "qualification" in codex.note
+    opencode = ap.qualification_status("opencode")
+    assert opencode.qualified is False
+    assert opencode.note == _OPENCODE_NOTE
+
+
+def test_resolve_reviewer_carries_qualification_from_status(bindir):
+    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    status = ap.qualification_status("claude")
+    assert adapter.qualified is True
+    assert adapter.qualification_note == status.note
+    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
+    denied = ap.resolve_reviewer("opencode", _env_for(bindir))
+    assert denied.qualified is False
+    assert denied.qualification_note == _OPENCODE_NOTE
+
+
+def test_claude_native_envelope_success_from_fixture(bindir):
+    payload = (FIXTURE_DIR / "claude-success.json").read_bytes()
+    adapter = _replay(bindir, "claude", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is True
+    assert result.assessment == b'{"assessment": "payload"}'
+
+
+def test_claude_extra_turn_is_tool_attempt(bindir):
+    adapter = _replay(bindir, "claude", _claude_variant(num_turns=2))
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "tool-attempt"
+
+
+def test_claude_permission_denial_is_tool_attempt(bindir):
+    adapter = _replay(bindir, "claude", _claude_variant(
+        permission_denials=[{"tool": "Read", "path": "/tmp/decoy"}]))
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "tool-attempt"
+
+
+def test_claude_error_envelope_is_invalid(bindir):
+    adapter = _replay(bindir, "claude", _claude_variant(is_error=True))
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+    failed = _replay(bindir, "claude", _claude_variant(subtype="error"))
+    result = ap.launch_review(failed, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+
+
+def test_codex_native_stream_success_from_fixture(bindir):
+    payload = (FIXTURE_DIR / "codex-success.jsonl").read_bytes()
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is True
+    assert result.assessment == b'{"assessment": "payload"}'
+
+
+def test_codex_startup_error_item_is_accepted(bindir):
+    payload = (FIXTURE_DIR / "codex-startup-error.jsonl").read_bytes()
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is True
+    assert result.assessment == b'{"assessment": "payload"}'
+
+
+@pytest.mark.parametrize("item_type", ["command_execution", "file_change",
+                                       "collab_agent"])
+def test_codex_tool_shaped_item_is_tool_attempt(bindir, item_type):
+    tool_item = json.dumps({"id": "item_0", "type": item_type,
+                            "text": "ran"})
+    message_item = json.dumps({"id": "item_1", "type": "agent_message",
+                               "text": '{"assessment": "payload"}'})
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "turn.started"}',
+        json.dumps({"type": "item.completed",
+                    "item": json.loads(tool_item)}),
+        json.dumps({"type": "item.completed",
+                    "item": json.loads(message_item)}),
+        '{"type": "turn.completed", "usage": {}}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "tool-attempt"
+
+
+def test_codex_turn_failed_is_provider_failure(bindir):
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "turn.started"}',
+        '{"type": "item.completed", "item": {"id": "item_0", '
+        '"type": "agent_message", "text": "partial"}}',
+        '{"type": "turn.failed", "error": "boom"}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "provider-failed"
+
+
+def test_codex_missing_turn_completed_is_invalid(bindir):
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "turn.started"}',
+        '{"type": "item.completed", "item": {"id": "item_0", '
+        '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "invalid-assessment"
+
+
+def test_codex_top_level_error_is_provider_failure(bindir):
+    payload = _codex_stream(
+        '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
+        '{"type": "error", "message": "transport exploded"}',
+    )
+    adapter = _replay(bindir, "codex", payload)
+    result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
+    assert result.ok is False
+    assert result.error == "provider-failed"

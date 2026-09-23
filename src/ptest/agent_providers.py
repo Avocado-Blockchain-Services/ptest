@@ -1,9 +1,11 @@
 """Owned provider subprocess boundary (task 1A owned).
 
-Single release gate for the ``claude`` / ``codex`` / ``opencode`` reviewer
-adapters. Every profile below is a CANDIDATE: adversarial qualification is
-a separate required gate, so all adapters resolve as unqualified and
-:func:`launch_review` fails closed until each exact profile is proved.
+Per-provider qualification for the ``claude`` / ``codex`` / ``opencode``
+reviewer adapters. The frozen argv tails below are the single source of
+truth, copied from the 2026-09-23 qualification record; :func:`resolve_reviewer`
+takes ``qualified`` from :func:`qualification_status`, and there is no
+second copy. Claude and Codex are qualified; OpenCode is not, and
+:func:`launch_review` fails closed for unqualified adapters.
 Synthetic tests exercise the machinery with fake executables only and
 never qualify a real provider.
 
@@ -58,23 +60,63 @@ _ENV_ALLOWLIST = frozenset({
 _CRED_DENY = ("token", "secret", "key", "credential", "password", "auth",
               "session", "cookie")
 
-# Candidate fixed argv tails (executable prepended at resolution). Unproven:
-# the qualification gate must freeze these exactly before any real use.
-# Deliberately no "--bare" Claude fallback (it disables normal auth).
-_CANDIDATE_TAILS = {
-    "claude": ("--print", "--output-format", "json", "--input-format",
-               "text", "--safe-mode", "--allowedTools", "",
-               "--mcp-config", "", "--no-slash-commands",
+# Frozen qualified argv tails (executable prepended at resolution). Single
+# source of truth, copied exactly from
+# docs/research/2026-09-22-agent-provider-qualification.md, section
+# "Claude and Codex qualification — 2026-09-23". Deliberately no "--bare"
+# Claude fallback (it disables normal auth). OpenCode keeps its unqualified
+# candidate tail and stays disabled (see _OPENCODE_NOTE).
+_QUALIFIED_TAILS = {
+    "claude": ("--print", "--output-format", "json",
+               "--input-format", "text",
+               "--safe-mode", "--tools", "",
+               "--strict-mcp-config",
+               "--disable-slash-commands",
                "--no-session-persistence"),
-    "codex": ("exec", "--sandbox", "read-only", "--skip-git-repo-check",
-              "--no-browser", "--no-shell", "--ephemeral"),
+    "codex": ("exec", "--ignore-user-config", "--ignore-rules",
+              "--ephemeral", "--skip-git-repo-check",
+              "--sandbox", "read-only", "--json",
+              "-c", 'web_search="disabled"',
+              "--disable", "shell_tool",
+              "--disable", "unified_exec",
+              "--disable", "apps",
+              "--disable", "browser_use",
+              "--disable", "browser_use_external",
+              "--disable", "computer_use",
+              "--disable", "hooks",
+              "--disable", "image_generation",
+              "--disable", "in_app_browser",
+              "--disable", "multi_agent",
+              "--disable", "plugins",
+              "--disable", "remote_plugin",
+              "--disable", "plugin_sharing",
+              "--disable", "skill_search",
+              "--disable", "skill_mcp_dependency_install",
+              "--disable", "sleep_tool",
+              "--disable", "tool_suggest",
+              "--disable", "tool_call_mcp_elicitation",
+              "--disable", "view_image",
+              "--disable", "code_mode_host",
+              "--disable", "goals",
+              "--disable", "guardian_approval",
+              "--disable", "workspace_dependencies",
+              "--disable", "in_app_chat",
+              "--disable", "in_app_local_automation",
+              "--disable", "browser_use_full_cdp_access",
+              "--disable", "unified_exec_tty",
+              "--disable", "shell_snapshot"),
     "opencode": ("run", "--pure", "--format", "json",
                  "--agent", "ptest-locked-denied"),
 }
 
-_UNPROVEN_NOTE = (
-    "candidate profile only; adversarial qualification pending, "
-    "real provider use blocked until the exact argv/environment is proved"
+_QUALIFIED_NOTE = (
+    "qualified per docs/research/2026-09-22-agent-provider-qualification.md, "
+    "section \"Claude and Codex qualification — 2026-09-23\""
+)
+
+_OPENCODE_NOTE = (
+    "OpenCode's free tier refuses tool-free runs (HTTP 403 FreeTierError); "
+    "not supported for review in this release"
 )
 
 
@@ -212,13 +254,21 @@ class QualificationStatus:
 
 
 def qualification_status(name: str) -> QualificationStatus:
-    """Expose the (currently unproven) qualification state of a profile."""
+    """Expose the per-provider qualification state of a profile.
+
+    Claude and Codex are qualified under the frozen argv above; OpenCode
+    is unqualified (see _OPENCODE_NOTE).
+    """
     _check_str("name", name)
     if name not in SUPPORTED_REVIEWERS:
         raise _problem("provider-unavailable", f"unsupported reviewer {name}")
-    return QualificationStatus(name=name, qualified=False,
-                               argv=(name,) + _CANDIDATE_TAILS[name],
-                               note=_UNPROVEN_NOTE)
+    if name == "opencode":
+        return QualificationStatus(name=name, qualified=False,
+                                   argv=(name,) + _QUALIFIED_TAILS[name],
+                                   note=_OPENCODE_NOTE)
+    return QualificationStatus(name=name, qualified=True,
+                               argv=(name,) + _QUALIFIED_TAILS[name],
+                               note=_QUALIFIED_NOTE)
 
 
 def _find_executable(name: str, env: Mapping) -> str:
@@ -240,17 +290,22 @@ def _find_executable(name: str, env: Mapping) -> str:
 
 
 def resolve_reviewer(name: str, env: Mapping[str, str]) -> ReviewerAdapter:
-    """Resolve a supported reviewer to a fixed, unqualified adapter."""
+    """Resolve a supported reviewer to its frozen qualified adapter.
+
+    Qualification comes only from :func:`qualification_status`; there is
+    no second copy and no override.
+    """
     _check_str("name", name)
     if not isinstance(env, Mapping):
         raise TypeError("env must be a mapping")
     if name not in SUPPORTED_REVIEWERS:
         raise _problem("provider-unavailable", f"unsupported reviewer {name}")
     executable = _find_executable(name, env)
+    status = qualification_status(name)
     return ReviewerAdapter(name=name, executable=executable,
-                           argv=(executable,) + _CANDIDATE_TAILS[name],
-                           qualified=False,
-                           qualification_note=_UNPROVEN_NOTE)
+                           argv=(executable,) + _QUALIFIED_TAILS[name],
+                           qualified=status.qualified,
+                           qualification_note=status.note)
 
 
 def sanitized_child_env(source: Mapping) -> dict[str, str]:
@@ -629,15 +684,86 @@ def _stop_owned(proc: subprocess.Popen, pgid: int | None,
             pass
 
 
-def _tool_key_present(mapping: Mapping) -> bool:
-    for key in mapping:
-        if isinstance(key, str) and "tool" in key.lower():
-            return True
-    kind = mapping.get("type")
-    if isinstance(kind, str) and kind.lower() in ("tool_use", "tool_call",
-                                                  "function_call"):
-        return True
-    return False
+_CODEX_ALLOWED_EVENTS = frozenset({
+    "thread.started", "turn.started",
+    "item.started", "item.updated", "item.completed",
+    "turn.completed",
+})
+
+# Codex tools stay listed but inert under the qualified profile, so every
+# non-message stream item is treated as a tool attempt and fails review.
+_CODEX_ALLOWED_ITEMS = frozenset({"agent_message", "reasoning", "error"})
+
+
+def _normalize_claude(text: str) -> tuple[bool, bytes, str]:
+    try:
+        envelope = json.loads(text.strip() or "null")
+    except (json.JSONDecodeError, ValueError):
+        return False, b"", "invalid-assessment"
+    if not isinstance(envelope, dict):
+        return False, b"", "invalid-assessment"
+    if envelope.get("type") != "result":
+        return False, b"", "invalid-assessment"
+    if envelope.get("subtype") != "success":
+        return False, b"", "invalid-assessment"
+    if envelope.get("is_error") is not False:
+        return False, b"", "invalid-assessment"
+    turns = envelope.get("num_turns")
+    if isinstance(turns, bool) or turns != 1:
+        if isinstance(turns, int) and not isinstance(turns, bool) \
+                and turns > 1:
+            return False, b"", "tool-attempt"
+        return False, b"", "invalid-assessment"
+    denials = envelope.get("permission_denials", [])
+    if not isinstance(denials, list):
+        return False, b"", "invalid-assessment"
+    if len(denials) > 0:
+        return False, b"", "tool-attempt"
+    candidate = envelope.get("result")
+    if not isinstance(candidate, str) or not candidate:
+        return False, b"", "invalid-assessment"
+    return True, candidate.encode("utf-8"), ""
+
+
+def _normalize_codex(text: str) -> tuple[bool, bytes, str]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    events: list = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            return False, b"", "invalid-assessment"
+    completed_turns = 0
+    last_message: str | None = None
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(
+                event.get("type"), str):
+            return False, b"", "invalid-assessment"
+        kind = event["type"]
+        if kind in ("turn.failed", "error"):
+            return False, b"", "provider-failed"
+        if kind not in _CODEX_ALLOWED_EVENTS:
+            return False, b"", "invalid-assessment"
+        if kind == "turn.completed":
+            completed_turns += 1
+            continue
+        if kind in ("item.started", "item.updated", "item.completed"):
+            item = event.get("item")
+            if not isinstance(item, dict) or not isinstance(
+                    item.get("type"), str):
+                return False, b"", "invalid-assessment"
+            if item["type"] not in _CODEX_ALLOWED_ITEMS:
+                return False, b"", "tool-attempt"
+            if kind == "item.completed" and item["type"] == "agent_message":
+                message = item.get("text")
+                if not isinstance(message, str):
+                    return False, b"", "invalid-assessment"
+                last_message = message
+    if completed_turns != 1:
+        return False, b"", "invalid-assessment"
+    if not last_message:
+        return False, b"", "invalid-assessment"
+    return True, last_message.encode("utf-8"), ""
 
 
 def _normalize(name: str, stdout: bytes) -> tuple[bool, bytes, str]:
@@ -646,29 +772,9 @@ def _normalize(name: str, stdout: bytes) -> tuple[bool, bytes, str]:
     except UnicodeDecodeError:
         return False, b"", "invalid-assessment"
     if name == "claude":
-        try:
-            envelope = json.loads(text.strip() or "null")
-        except (json.JSONDecodeError, ValueError):
-            return False, b"", "invalid-assessment"
-        if not isinstance(envelope, dict):
-            return False, b"", "invalid-assessment"
-        if _tool_key_present(envelope):
-            return False, b"", "tool-attempt"
-        has_result = "result" in envelope
-        has_results = "results" in envelope
-        candidate = None
-        if has_result and not has_results:
-            candidate = envelope["result"]
-        elif has_results and not has_result:
-            items = envelope["results"]
-            if not isinstance(items, list) or len(items) != 1:
-                return False, b"", "invalid-assessment"
-            candidate = items[0]
-        else:
-            return False, b"", "invalid-assessment"
-        if not isinstance(candidate, str) or not candidate:
-            return False, b"", "invalid-assessment"
-        return True, candidate.encode("utf-8"), ""
+        return _normalize_claude(text)
+    if name == "codex":
+        return _normalize_codex(text)
     lines = [line for line in text.splitlines() if line.strip()]
     events: list = []
     for line in lines:
@@ -676,22 +782,6 @@ def _normalize(name: str, stdout: bytes) -> tuple[bool, bytes, str]:
             events.append(json.loads(line))
         except (json.JSONDecodeError, ValueError):
             return False, b"", "invalid-assessment"
-    if name == "codex":
-        for event in events:
-            if not isinstance(event, dict) or not isinstance(
-                    event.get("type"), str):
-                return False, b"", "invalid-assessment"
-            kind = event["type"].lower()
-            if kind in ("tool_call", "tool_use",
-                        "function_call") or kind.startswith("tool"):
-                return False, b"", "tool-attempt"
-        messages = [e["content"] for e in events
-                    if isinstance(e.get("type"), str)
-                    and e["type"].lower() == "message" and isinstance(
-                        e.get("content"), str)]
-        if not messages or not messages[-1]:
-            return False, b"", "invalid-assessment"
-        return True, messages[-1].encode("utf-8"), ""
     if name == "opencode":
         results = []
         for event in events:
