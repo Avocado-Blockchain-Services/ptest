@@ -1,0 +1,471 @@
+"""Deterministic acceptance journeys for agent-backed doctor and init.
+
+All projects live under pytest's temporary root. Provider qualification and
+review are represented by in-process fakes; this module never invokes a
+provider CLI or a project test runner.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+
+import pytest
+
+from ptest import contracts as C
+from ptest.cli import main
+
+
+def _write_v1(root, project_id: str, *, runner: str = "command") -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".ptest.toml").write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        f'kind = "{runner}"\n'
+        'launcher = ["python"]\n'
+        'args = []\n'
+        'full_args = []\n'
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    tests = root / "tests"
+    tests.mkdir(exist_ok=True)
+    (tests / "test_cache.py").write_text(
+        "def test_cache_cleanup():\n"
+        "    cache.flushall()\n",
+        encoding="utf-8",
+    )
+
+
+def _write_v2(root, *, runner: str = "command") -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n',
+        encoding="utf-8",
+    )
+    for name, prefix in (("api", "ab"), ("web", "cd")):
+        _write_v1(root / name, prefix * 16, runner=runner)
+
+
+def _tree_state(root):
+    state = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if path.is_symlink():
+            state[relative] = ("symlink", path.readlink())
+        elif path.is_file():
+            state[relative] = ("file", path.read_bytes())
+        elif path.is_dir():
+            state[relative] = ("directory",)
+    return state
+
+
+def _patch_qualification(monkeypatch, *, unavailable: bool = False):
+    from ptest.agent_providers import (
+        QualificationStatus,
+        ReviewerAdapter,
+    )
+
+    statuses = []
+
+    def qualification_status(name: str):
+        statuses.append(name)
+        return QualificationStatus(
+            name=name, qualified=True, argv=(name,), note="synthetic acceptance profile",
+        )
+
+    def resolve_reviewer(name: str, env):
+        if unavailable:
+            raise C.Problem(
+                code="provider-unavailable", message="synthetic provider unavailable",
+                phase="provider", retryable=False,
+            )
+        return ReviewerAdapter(
+            name=name, executable=f"/synthetic/{name}",
+            argv=(f"/synthetic/{name}",), qualified=False,
+            qualification_note="synthetic acceptance adapter",
+        )
+
+    monkeypatch.setattr("ptest.cli.agent_providers.qualification_status", qualification_status)
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve_reviewer)
+    return statuses
+
+
+def _raw_assessment(request: bytes) -> bytes:
+    """Return packet-bound prose with one cited cache-isolation gap."""
+    packet = json.loads(request)["packet"]
+    excerpts = packet["excerpts"]
+    assert excerpts, "synthetic test source should be admitted to each packet"
+    excerpt = excerpts[0]
+    citation = {
+        key: excerpt[key]
+        for key in ("path", "start_line", "end_line", "sha256")
+    }
+    rows = []
+    cache_id = next(row_id for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS
+                    if row_id.startswith("CACHE-"))
+    for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS:
+        is_gap = row_id == cache_id
+        rows.append({
+            "id": row_id,
+            "status": "gap" if is_gap else "unknown",
+            "rationale": (
+                "The cited bounded source shows cache cleanup without evidence "
+                "that another owner remains isolated."
+                if is_gap else
+                "The supplied bounded evidence does not establish this criterion."
+            ),
+            "evidence": [citation] if is_gap else [],
+        })
+    payload = {
+        "schema_version": C.SCHEMA_VERSION,
+        "kind": "agent-assessment",
+        "ptest_version": C.PTEST_VERSION,
+        "domain": None,
+        "data": {
+            "schema": C.AGENT_ASSESSMENT_SCHEMA,
+            "children": [{
+                "project_id": packet["project_id"],
+                "scope": packet["scope"],
+                "packet_sha256": packet["packet_sha256"],
+                "rows": rows,
+                "findings": [{
+                    "id": cache_id,
+                    "summary": "Cache cleanup has no neighbor ownership assertion.",
+                    "suggested_change": (
+                        "Add an executable test that proves a neighbor cache key survives cleanup."
+                    ),
+                    "recipe_id": C.AGENT_ASSESSMENT_RECIPES[cache_id],
+                    "evidence": [citation],
+                }],
+                "limitations": [],
+            }],
+            "limitations": [],
+        },
+        "error": None,
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def _install_fake_review(monkeypatch, *, cancelled: bool = False):
+    from ptest.agent_providers import ProviderResult
+
+    launches = []
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        packet = json.loads(request)["packet"]
+        launches.append((adapter.name, packet["declaration"], timeout_s))
+        return ProviderResult(
+            provider=adapter.name,
+            ok=not cancelled,
+            assessment=b"" if cancelled else _raw_assessment(request),
+            error="cancelled" if cancelled else "",
+            exit_code=None if cancelled else 0,
+            timed_out=False,
+            cancelled=cancelled,
+            truncated=False,
+            pid=7301 + len(launches),
+            argv=adapter.argv,
+            scratch="/tmp/ptest-agent-doctor-acceptance",
+        )
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    return launches
+
+
+@pytest.mark.parametrize("topology", ["standalone", "v2-monorepo"])
+def test_static_doctor_modes_compose_without_review_or_report_writes(
+        tmp_path, monkeypatch, capsys, topology):
+    root = tmp_path / topology
+    if topology == "standalone":
+        _write_v1(root, "ab" * 16)
+        expected_sources = ("tests/test_cache.py",)
+    else:
+        _write_v2(root)
+        (root / "root_noise_test.py").write_text(
+            "cache.flushall()\n", encoding="utf-8")
+        expected_sources = ("api/tests/test_cache.py", "web/tests/test_cache.py")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda *args, **kwargs: pytest.fail("static doctor resolved a reviewer"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *args, **kwargs: pytest.fail("static doctor launched a reviewer"),
+    )
+    before = _tree_state(root)
+
+    assert main(("doctor", "--offline")) == 0
+    human = capsys.readouterr()
+    assert "ptest doctor" in human.out
+    assert human.err == ""
+    for source in expected_sources:
+        assert source in human.out
+    if topology == "v2-monorepo":
+        assert human.out.index("| 1 | api ") < human.out.index("| 2 | web ")
+        assert "root_noise_test.py" not in human.out
+
+    assert main(("doctor", "--json")) == 0
+    legacy = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert legacy.kind == "doctor" and legacy.error is None
+    assert set(legacy.data) == {
+        "scope", "readiness", "findings", "limits", "usage", "limitations",
+    }
+    assert "provider" not in legacy.data and "children" not in legacy.data
+
+    assert main(("doctor", "--prompt")) == 0
+    prompt = capsys.readouterr()
+    assert "Assessment request:" in prompt.out
+    assert prompt.err == ""
+    assert _tree_state(root) == before
+
+
+def test_init_created_and_existing_configs_offer_review_but_decline_and_no_doctor_stay_offline(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "init-project"
+    root.mkdir()
+    git = root / ".git"
+    git.mkdir()
+    (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git / "config").write_text("[core]\n\trepositoryformatversion = 0\n",
+                                encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["pytest>=8"]\n', encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    statuses = _patch_qualification(monkeypatch)
+    answers = iter(("none", "no", "none", "no"))
+    inputs = []
+
+    def input_answer():
+        answer = next(answers)
+        inputs.append(answer)
+        return answer
+
+    monkeypatch.setattr("builtins.input", input_answer)
+    launches = []
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *args, **kwargs: launches.append(args) or pytest.fail(
+            "declined init launched a reviewer"),
+    )
+
+    assert main(("init", "--runner", "pytest")) == 0
+    created = capsys.readouterr()
+    config = root / ".ptest.toml"
+    assert config.is_file() and "created:" in created.out
+    assert "Optimization review is disabled" in created.err
+    original_config = config.read_bytes()
+
+    assert main(("init", "--runner", "pytest")) == 0
+    existing = capsys.readouterr()
+    assert "existing: .ptest.toml" in existing.out
+    assert "Optimization review is disabled" in existing.err
+    assert config.read_bytes() == original_config
+    assert inputs == ["none", "no", "none", "no"]
+    assert launches == []
+
+    qualifications_before_no_doctor = len(statuses)
+    guidance_prompts = []
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda: guidance_prompts.append("asked") or "none",
+    )
+    assert main(("init", "--runner", "pytest", "--no-doctor")) == 0
+    no_doctor = capsys.readouterr()
+    assert "Model review disclosure" not in no_doctor.err
+    assert "Run this review once?" not in no_doctor.err
+    assert len(statuses) == qualifications_before_no_doctor
+    assert guidance_prompts == ["asked"]
+    assert inputs == ["none", "no", "none", "no"]
+    assert launches == []
+    assert not (root / "recommendations.md").exists()
+
+
+def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_report(
+        tmp_path, monkeypatch, capsys):
+    from ptest import cli
+    from ptest import doctor as doctor_api
+    from ptest.agent_providers import ReviewerAdapter
+
+    root = tmp_path / "configured"
+    _write_v1(root, "ab" * 16)
+    real_inspect = doctor_api.inspect_workspace
+    report = root / "recommendations.md"
+    report.write_bytes(b"user-owned report; preserve exact bytes\n")
+    before = (report.read_bytes(), report.stat().st_ino,
+              report.stat().st_mtime_ns, report.stat().st_ctime_ns)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    resolution_calls = []
+    launch_calls = []
+
+    def resolve(*args, **kwargs):
+        resolution_calls.append(args)
+        return ReviewerAdapter("claude", "/synthetic/claude", ("/synthetic/claude",))
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *args, **kwargs: launch_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *args, **kwargs: pytest.fail("bare non-TTY doctor scanned source before consent"),
+    )
+
+    assert main(("doctor",)) == 2
+    captured = capsys.readouterr()
+    assert "consent-required" in captured.err + captured.out
+    assert resolution_calls == []
+    assert launch_calls == []
+    assert (report.read_bytes(), report.stat().st_ino,
+            report.stat().st_mtime_ns, report.stat().st_ctime_ns) == before
+
+    # Sensitivity check: temporarily bypass the shared consent entry point.
+    # The fake provider is cancelled immediately, and the no-launch property
+    # below demonstrably fails while this local mutation is active.
+    adapter = ReviewerAdapter("claude", "/synthetic/claude", ("/synthetic/claude",),
+                              qualified=True, qualification_note="test-only bypass")
+    from ptest.agent_providers import ProviderResult
+
+    def cancelled_launch(adapter, request, schema, timeout_s, progress):
+        launch_calls.append((adapter.name,))
+        return ProviderResult(
+            provider=adapter.name, ok=False, assessment=b"", error="cancelled",
+            exit_code=None, timed_out=False, cancelled=True, truncated=False,
+            pid=7401, argv=adapter.argv, scratch="/tmp/ptest-agent-doctor-acceptance",
+        )
+
+    def bypass(parsed, resolution, domain, *, interactive, preconsented=False):
+        cli._run_doctor_review(parsed, resolution, domain, adapter=adapter)
+        return False
+
+    with monkeypatch.context() as disabled_boundary:
+        disabled_boundary.setattr("ptest.cli.agent_providers.launch_review", cancelled_launch)
+        disabled_boundary.setattr("ptest.cli._run_review_entry", bypass)
+        disabled_boundary.setattr("ptest.cli.doctor.inspect_workspace",
+                                  real_inspect)
+        assert main(("doctor",)) == 130
+        capsys.readouterr()
+        with pytest.raises(AssertionError):
+            assert launch_calls == []
+
+
+def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying_report(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "review-monorepo"
+    _write_v2(root, runner="pytest")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "review-locks"))
+    statuses = _patch_qualification(monkeypatch)
+    launches = _install_fake_review(monkeypatch)
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda *args, **kwargs: pytest.fail("doctor review executed project tests"),
+    )
+
+    review_argv = ("doctor", "--reviewer", "claude", "--allow-model-review")
+    assert main(review_argv) == 0
+    human = capsys.readouterr()
+    assert human.out.startswith(
+        "Project | Execution | Parallel | Selection | Timing | Checklist\n"
+    )
+    api = next(line for line in human.out.splitlines() if line.startswith("api |"))
+    web = next(line for line in human.out.splitlines() if line.startswith("web |"))
+    assert human.out.index(api) < human.out.index(web)
+    assert "basic-serial; reviewed isolation unverified" in api
+    assert "not execution-verified" in api and "not execution-verified" in web
+    assert [item[1] for item in launches] == ["api", "web"]
+
+    report = root / "recommendations.md"
+    contents = report.read_bytes()
+    marker, body = contents.split(b"\n", 1)
+    match = re.fullmatch(
+        rb"<!-- ptest-recommendations v1 sha256=([0-9a-f]{64}) -->", marker,
+    )
+    assert match is not None
+    digest = hashlib.sha256(body).hexdigest().encode("ascii")
+    assert match.group(1) == digest
+    rendered = body.decode("utf-8")
+    for proof in (
+        "Execution verification: not run",
+        "test_cache_cleanup_preserves_neighbor_sentinel_owned",
+        "cross-owner reads, overwrites, and deletes",
+        "Observed command: (blank)",
+        "Observed cwd: (blank)",
+        "Observed exit status: (blank)",
+        "Observed output: (blank)",
+        "Status: unverified",
+        "ptest api",
+        "ptest web",
+        "ptest --full",
+    ):
+        assert proof in rendered
+
+    assert main((*review_argv, "--assessment-json")) == 0
+    public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert public.kind == "agent-assessment" and public.error is None
+    assert set(public.data) == {
+        "schema", "provider", "children", "limitations", "publication",
+    }
+    assert public.data["schema"] == C.AGENT_ASSESSMENT_SCHEMA
+    assert public.data["provider"]["name"] == "claude"
+    assert [child["scope"] for child in public.data["children"]] == ["api", "web"]
+    for child in public.data["children"]:
+        assert [row["id"] for row in child["rows"]] == list(
+            C.AGENT_ASSESSMENT_CHECKLIST_IDS)
+        assert child["score"] == {"satisfied": 0, "applicable": 11, "percent": 0}
+    assert public.data["publication"]["path"] == "recommendations.md"
+    updated_contents = report.read_bytes()
+    updated_marker, updated_body = updated_contents.split(b"\n", 1)
+    updated_match = re.fullmatch(
+        rb"<!-- ptest-recommendations v1 sha256=([0-9a-f]{64}) -->",
+        updated_marker,
+    )
+    assert updated_match is not None
+    updated_digest = hashlib.sha256(updated_body).hexdigest().encode("ascii")
+    assert updated_match.group(1) == updated_digest
+    assert public.data["publication"]["sha256"] == hashlib.sha256(
+        updated_contents).hexdigest()
+    assert public.data["publication"]["status"] == "unchanged"
+    assert [item[1] for item in launches] == ["api", "web", "api", "web"]
+    assert statuses == ["claude", "codex", "opencode"] * 2
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "expected_exit"),
+    [("unavailable", "provider-unavailable", 2),
+     ("cancelled", "review-cancelled", 130)],
+)
+def test_review_unavailable_or_cancelled_preserves_existing_report(
+        tmp_path, monkeypatch, capsys, failure, expected_code, expected_exit):
+    root = tmp_path / failure
+    _write_v1(root, "ef" * 16)
+    report = root / "recommendations.md"
+    report.write_bytes(b"previous complete result\n")
+    before = _tree_state(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    _patch_qualification(monkeypatch, unavailable=(failure == "unavailable"))
+    launches = []
+    if failure == "cancelled":
+        launches = _install_fake_review(monkeypatch, cancelled=True)
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == expected_exit
+    document = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert document.kind == "doctor" and document.data is None
+    assert document.error.code == expected_code
+    assert _tree_state(root) == before
+    assert [item[1] for item in launches] == ([] if failure == "unavailable" else ["."])
