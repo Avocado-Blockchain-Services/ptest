@@ -40,3 +40,27 @@ OpenCode model/account (and accept its terms/cost), then all three adversarial
 profiles can be completed; alternatively the user can explicitly revise the
 all-three release gate. Until then, doctor/init model review must not be
 enabled.
+
+## OpenCode retry — 2026-09-23
+
+OpenCode 1.18.32, synthetic prompts only, from an empty scratch directory; no
+repository source, credential file, or default-model change was involved.
+
+- The default configured model (OpenCode Zen free tier) now answers a plain
+  `opencode run --pure --format json` prompt (twice, exit 0, cost 0). The
+  earlier `AccessDenied.Unpurchased` 403 is gone.
+- Any tool-free profile is refused with HTTP 403 `FreeTierError` ("OpenCode's
+  free tier can only be used from within OpenCode"). This happened with the
+  candidate custom agent `ptest-locked-denied` defined through
+  `OPENCODE_CONFIG_CONTENT`, with the built-in agent under
+  `permission: {"*": "deny"}` alone, and with the built-in agent under
+  `tools: {"*": false}` alone. No tool ran and the canary sentinel was never
+  created.
+- The native JSON events are `{"type": "step_start" | "text" | "step_finish" |
+  "error", "part": {...}}`. The candidate normalizer expects
+  `{"event": ..., "data": ...}` and would reject every real response.
+
+Conclusion: on the free tier, OpenCode cannot run the tool-free review the spec
+requires. Qualifying it needs an already authorized non-free OpenCode provider
+or model chosen by the user (`-m provider/model`), or a user revision of the
+all-three gate. The adapter stays `qualified=False`.

@@ -156,3 +156,4 @@ progress, dependency diagnostics, and branded init banner.
 - 2026-09-23T15:12:25Z auditor-agent re-audit: all 4 findings resolved; 1 new LOW (readdir-order-dependent test). Muse round4 launched.
 - 2026-09-23T15:14:38Z round4 0e49c69 (order-independent bound test, matches auditor fix; mutation-proven). Chain ff to 0e49c69. Full gate starting.
 - 2026-09-23T15:17:40Z chain 0e49c69: ptest --full 2709 passed, 31 skipped, exit 0 (NO_COLOR unset); graphify update done. Blockers N/A-parsing and dependency-env-metadata CLOSED. Remaining: all-three provider qualification (OpenCode 403, user decision). Not pushed, not merged to main.
+- 2026-09-23T15:22:55Z OpenCode retry: plain prompt OK (free tier, cost 0); every tool-free profile -> 403 FreeTierError; native event shape mismatches normalizer. Recorded in docs/research qualification record. User decision needed (authorized non-free model or revise gate).
