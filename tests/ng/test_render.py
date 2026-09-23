@@ -354,6 +354,34 @@ def test_agent_assessment_output_bounded_and_lists_every_scope():
     assert text.rstrip().endswith("Execution verification: not run.")
 
 
+def test_agent_assessment_oversized_input_keeps_every_scope_and_trailer():
+    gap_ids = ("FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
+               "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+               "SELECT-001", "TIMING-001")
+    children = [{
+        "scope": f"proj-{index:03d}",
+        "execution": {"status": "executable", "detail": "ready",
+                      "fix": None},
+        "score": {"satisfied": 0, "applicable": 11, "percent": 0},
+        "rows": [_aa_row(row_id, "gap") for row_id in gap_ids],
+        "findings": [{"id": row_id, "summary": "s" * 1024,
+                      "suggested_change": "c" * 1024} for row_id in gap_ids],
+        "limitations": [],
+    } for index in range(60)]
+
+    text = render_agent_assessment(
+        children, SimpleNamespace(repositories=()),
+        report_path="recommendations.md", publication_status="created")
+
+    assert len(text.encode("utf-8")) <= 256 * 1024
+    for index in range(60):
+        assert f"proj-{index:03d} (unknown)" in text
+    assert text.count("0 of 11 checks confirmed from evidence") == 60
+    assert "findings omitted; see recommendations.md" in text
+    assert "recommendations.md" in text
+    assert text.rstrip().endswith("Execution verification: not run.")
+
+
 def test_render_json_uses_shared_descriptor_and_never_exposes_argv():
     command = C.summarize_command(
         C.RunnerKind.COMMAND, C.Mode.FULL,

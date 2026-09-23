@@ -46,6 +46,13 @@ def terminal_text(value: object) -> str:
 
 _AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
 
+# One gap finding line (summary plus suggested change) never costs more than
+# this many UTF-8 bytes; longer model prose is cut with a marker so a single
+# verbose finding cannot crowd out other projects. Residual over-budget
+# variable lines are omitted whole with an explicit omission marker, while
+# every project header, score line and the trailer are always kept.
+_AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES = 512
+
 # Review-flow rationale prefixes (duplicated verbatim from the frozen
 # interface; agent_assessment owns the canonical constants after T4).
 _SKIPPED_REVIEW_PREFIX = "Skipped without a model call: "
@@ -97,6 +104,43 @@ def _agent_dependency_detail_lines(children) -> list[str]:
             lines.append(
                 f"- {scope}: {status} prerequisite: {detail}{location}")
     return lines
+
+
+def _truncate_utf8_bytes(text: str, limit: int,
+                         marker: str = "[truncated]") -> str:
+    """Cut text to at most limit UTF-8 bytes without splitting a character."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    room = limit - len(marker.encode("utf-8"))
+    return encoded[:room].decode("utf-8", errors="ignore") + marker
+
+
+def _fit_lines_with_omission(lines: list[str], budget: int,
+                             marker_fn) -> list[str]:
+    """Keep whole lines within a byte budget and name the omitted count."""
+    cost = sum(len(line.encode("utf-8")) for line in lines)
+    cost += max(0, len(lines) - 1)
+    if cost <= budget:
+        return list(lines)
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        line_cost = len(line.encode("utf-8"))
+        separator_cost = 1 if kept else 0
+        remaining = len(lines) - index - 1
+        if remaining:
+            marker = marker_fn(len(lines) - index)
+            marker_cost = len(marker.encode("utf-8"))
+            if used + separator_cost + line_cost + 1 + marker_cost > budget:
+                kept.append(marker_fn(len(lines) - index))
+                break
+        elif used + separator_cost + line_cost > budget:
+            kept.append(marker_fn(1))
+            break
+        kept.append(line)
+        used += separator_cost + line_cost
+    return kept
 
 
 def _assessment_icons() -> dict:
@@ -224,8 +268,9 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
                     finding.get("summary", ""))
                 change = _agent_assessment_prose(
                     finding.get("suggested_change", ""))
-                lines.append(f"  finding: {summary} "
-                             f"Suggested change: {change}")
+                lines.append(_truncate_utf8_bytes(
+                    f"  finding: {summary} Suggested change: {change}",
+                    _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES))
         elif status == "unknown":
             rationale = row.get("rationale", "")
             if (isinstance(rationale, str)
@@ -261,36 +306,61 @@ def render_agent_assessment(children, workspace, *, report_path: str,
     or HTML entities.
     """
     icons = _assessment_icons()
-    sections = []
+    head_sections = []
+    variable_sections = []
     for child in children:
         scope = (child.get("scope", "unknown")
                  if isinstance(child, dict) else "unknown")
         runner = _assessment_runner(scope, workspace)
-        lines = [f"{terminal_text(scope)} ({terminal_text(runner)})"]
+        head = [f"{terminal_text(scope)} ({terminal_text(runner)})"]
         verdict = _execution_verdict_text(
             child.get("execution") if isinstance(child, dict) else None)
         if verdict is not None:
-            lines.append(f"ptest: {verdict}")
-        lines.append(_assessment_score_line(child))
-        lines.extend(_assessment_item_lines(child, icons))
-        sections.append("\n".join(lines))
+            head.append(f"ptest: {verdict}")
+        head.append(_assessment_score_line(child))
+        head_sections.append("\n".join(head))
+        variable_sections.append(_assessment_item_lines(child, icons))
 
     dependency_details = _agent_dependency_detail_lines(children)
-    if dependency_details:
-        sections.append("\n".join(("Dependencies:", *dependency_details)))
-    sections.append("\n".join((
+    trailer = "\n".join((
         f"Report: {terminal_text(report_path)} "
         f"({terminal_text(publication_status)}). Citations, suggested "
         "changes and verification steps are there.",
         "Execution verification: not run.",
-    )))
-    text = "\n\n".join(sections) + "\n"
-    if len(text.encode("utf-8")) > _AGENT_ASSESSMENT_MAX_BYTES:
-        marker = "[agent assessment truncated at the configured bound]"
-        room = _AGENT_ASSESSMENT_MAX_BYTES - len(marker.encode("utf-8"))
-        piece = text.encode("utf-8")[:room].decode("utf-8", errors="ignore")
-        return piece + marker
-    return text
+    ))
+    # Headers, score lines and the trailer are mandatory: the variable item
+    # and dependency lines share whatever the byte bound leaves over, split
+    # evenly per project so one verbose child cannot crowd out the rest.
+    # Sections join with "\n\n" and the output ends with "\n". The spare
+    # byte per project below is the "\n" joining a head to its kept items.
+    section_count = (len(head_sections) + (1 if dependency_details else 0)
+                     + 1)
+    fixed = (sum(len(section.encode("utf-8")) for section in head_sections)
+             + len(trailer.encode("utf-8"))
+             + 2 * (section_count - 1) + 1)
+    variable_budget = (_AGENT_ASSESSMENT_MAX_BYTES - fixed
+                       - len(head_sections))
+    siblings = max(1, len(variable_sections))
+    sections = []
+    for head, item_lines in zip(head_sections, variable_sections):
+        kept = _fit_lines_with_omission(
+            item_lines, max(0, variable_budget) // siblings,
+            lambda count: f"  [{count} findings omitted; "
+                          "see recommendations.md]")
+        sections.append(head if not kept else "\n".join((head, *kept)))
+    if dependency_details:
+        committed = (sum(len(section.encode("utf-8")) for section in sections)
+                     + len(trailer.encode("utf-8"))
+                     + 2 * (len(sections) + 1) + 1)
+        header_cost = len("Dependencies:".encode("utf-8")) + 1
+        kept_dependencies = _fit_lines_with_omission(
+            dependency_details,
+            max(0, _AGENT_ASSESSMENT_MAX_BYTES - committed - header_cost),
+            lambda count: (f"[{count} dependency details omitted; "
+                           "see recommendations.md for full limitations]"))
+        sections.append("\n".join(("Dependencies:", *kept_dependencies)))
+    sections.append(trailer)
+    return "\n\n".join(sections) + "\n"
 
 
 def render_json(document: C.PublicDocument) -> bytes:
