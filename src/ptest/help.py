@@ -122,7 +122,10 @@ Probe syntax (EXECUTES tests and setup; not a static inspection; single-project 
                [--no-setup] [--result-json PATH]
 
 Notes:
-  Once a provider profile is qualified, default review on a TTY discloses the
+  Without an explicit concrete --reviewer, default review on a TTY lists the
+  qualified installed reviewers in a stable order: one is used directly, while
+  two or more are offered once by number (an empty, invalid, out-of-range, or
+  EOF answer declines the review). It then discloses the
   selected provider and asks for invocation-local consent. It sends bounded
   source text using your existing provider account; provider or account costs
   may apply, and ptest cannot perfectly detect secrets. Declining the offer

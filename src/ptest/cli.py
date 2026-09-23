@@ -723,8 +723,49 @@ def _review_consent_problem() -> C.Problem:
     )
 
 
-def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
-    """Resolve one adapter; the per-provider gate has already enforced it."""
+def _collect_installed_reviewers() -> tuple[tuple, list[str]]:
+    """Collect qualified installed adapters in SUPPORTED_REVIEWERS order.
+
+    Installed means resolve_reviewer does not raise provider-unavailable.
+    Returns (installed, unsupported) where unsupported carries the
+    qualification notes for the existing provider-unqualified message.
+    """
+    installed = []
+    unsupported: list[str] = []
+    for name in agent_providers.SUPPORTED_REVIEWERS:
+        status = agent_providers.qualification_status(name)
+        if not status.qualified:
+            unsupported.append(f"{name} is not supported: {status.note}")
+            continue
+        try:
+            installed.append(agent_providers.resolve_reviewer(name, os.environ))
+        except C.Problem as problem:
+            if problem.code == "provider-unavailable":
+                continue
+            raise
+    return tuple(installed), unsupported
+
+
+def _unqualified_review_problem(unsupported: list[str]) -> C.Problem:
+    detail = "install claude or codex"
+    if unsupported:
+        detail += "; " + "; ".join(unsupported)
+    return _problem(
+        "provider-unqualified",
+        "no qualified review provider is installed (" + detail + ")",
+    )
+
+
+def _choose_review_adapter(parsed: ParsedArgs, *, interactive: bool):
+    """Resolve one adapter, or None when the user skips the reviewer menu.
+
+    An explicit concrete reviewer never shows a menu. Otherwise the
+    qualified installed reviewers are collected in SUPPORTED_REVIEWERS
+    order: none fails closed as before, one is used directly, and two or
+    more are offered once by number. An empty, invalid, out-of-range, or
+    EOF menu answer is a decline (None), exactly like declining the
+    disclosure prompt.
+    """
     selected = parsed.reviewer
     if selected not in (None, "auto"):
         return agent_providers.resolve_reviewer(selected, os.environ)
@@ -734,25 +775,38 @@ def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
         # turn an explicit consent flag into permission to inspect PATH.
         raise _review_consent_problem()
 
-    unsupported: list[str] = []
-    for name in agent_providers.SUPPORTED_REVIEWERS:
-        status = agent_providers.qualification_status(name)
-        if not status.qualified:
-            unsupported.append(f"{name} is not supported: {status.note}")
-            continue
-        try:
-            return agent_providers.resolve_reviewer(name, os.environ)
-        except C.Problem as problem:
-            if problem.code == "provider-unavailable":
-                continue
-            raise
-    detail = "install claude or codex"
-    if unsupported:
-        detail += "; " + "; ".join(unsupported)
-    raise _problem(
-        "provider-unqualified",
-        "no qualified review provider is installed (" + detail + ")",
+    installed, unsupported = _collect_installed_reviewers()
+    if not installed:
+        raise _unqualified_review_problem(unsupported)
+    if len(installed) == 1:
+        return installed[0]
+    lines = ["Choose a reviewer for this review:"]
+    for index, adapter in enumerate(installed, start=1):
+        lines.append(f"  {index}) {render.terminal_text(adapter.name)}")
+    print("\n".join(lines) + "\nNumber (Enter to skip): ",
+          end="", file=sys.stderr, flush=True)
+    try:
+        answer = input().strip()
+    except EOFError:
+        return None
+    try:
+        choice = int(answer)
+    except ValueError:
+        return None
+    if not 1 <= choice <= len(installed):
+        return None
+    return installed[choice - 1]
+
+
+def _declined_review_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                            domain: C.DomainPaths) -> bool:
+    """Render the shared decline outcome: offline result, exit 0 upstream."""
+    print(
+        "Optimization review is disabled; showing offline static doctor output.",
+        file=sys.stderr,
     )
+    _doctor_static_output(parsed, resolution, domain)
+    return True
 
 
 def _require_review_qualification(selected: str | None = None) -> None:
@@ -811,7 +865,9 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
         raise _review_consent_problem()
 
     _require_review_qualification(parsed.reviewer)
-    adapter = _resolve_review_adapter(parsed, interactive=interactive)
+    adapter = _choose_review_adapter(parsed, interactive=interactive)
+    if adapter is None:
+        return _declined_review_output(parsed, resolution, domain)
     if not adapter.qualified:
         raise _problem(
             "provider-unqualified",
@@ -820,12 +876,7 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
         )
     if interactive and not _render_review_disclosure(
             adapter, resolution, ask=not preconsented):
-        print(
-            "Optimization review is disabled; showing offline static doctor output.",
-            file=sys.stderr,
-        )
-        _doctor_static_output(parsed, resolution, domain)
-        return True
+        return _declined_review_output(parsed, resolution, domain)
 
     _run_doctor_review(parsed, resolution, domain, adapter=adapter)
     return False

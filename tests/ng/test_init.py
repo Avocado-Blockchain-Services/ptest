@@ -657,6 +657,12 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
                                qualification_note="qualification pending")
 
     monkeypatch.setattr(cli.agent_providers, "resolve_reviewer", unqualified_profile)
+    monkeypatch.setattr(
+        cli.agent_providers, "qualification_status",
+        lambda name: cli.agent_providers.QualificationStatus(
+            name=name, qualified=False, argv=(name,),
+            note="synthetic unqualified profile"),
+    )
     monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted with no qualified reviewer"))
     monkeypatch.setattr(
         cli.doctor, "inspect_workspace",
@@ -667,13 +673,12 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
     assert cli.main(args) == 0
     created = capsys.readouterr()
     assert "provider-unqualified" in created.err
-    assert resolved == ["claude"]
+    assert resolved == []
 
-    resolved.clear()
     assert cli.main(args) == 0
     existing = capsys.readouterr()
     assert "provider-unqualified" in existing.err
-    assert resolved == ["claude"]
+    assert resolved == []
 
 
 @pytest.mark.parametrize("extra", [
@@ -743,6 +748,51 @@ def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
     assert inspected == [1]
     assert "ptest doctor" in captured.out
     assert "review not yet performed" in captured.out
+
+
+def test_tty_init_offer_with_two_installed_shows_menu_and_decline_keeps_files(
+        tmp_path, monkeypatch, capsys):
+    from ptest import cli
+    from ptest.agent_providers import QualificationStatus, ReviewerAdapter
+
+    _make_cli_init_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        cli.agent_providers, "qualification_status",
+        lambda name: QualificationStatus(
+            name=name, qualified=name != "opencode", argv=(name,),
+            note="synthetic"),
+    )
+    resolved = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        return ReviewerAdapter(
+            name, f"/fake/{name}", (f"/fake/{name}",),
+            qualified=True, qualification_note="test")
+
+    monkeypatch.setattr(cli.agent_providers, "resolve_reviewer", resolve)
+    inputs = []
+    monkeypatch.setattr("builtins.input", lambda: inputs.append(1) or "")
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_review",
+        lambda *a, **k: pytest.fail("menu decline launched reviewer"),
+    )
+
+    assert cli.main(("init", "--runner", "pytest", "--agents", "none")) == 0
+    captured = capsys.readouterr()
+    assert inputs == [1]
+    assert resolved == ["claude", "codex"]
+    assert "Choose a reviewer for this review:" in captured.err
+    assert "1) claude" in captured.err
+    assert "2) codex" in captured.err
+    assert "opencode" not in captured.err
+    assert "Run this review once?" not in captured.err
+    assert "Optimization review is disabled" in captured.err
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert not (tmp_path / "recommendations.md").exists()
 
 
 def test_explicit_init_doctor_failure_preserves_initialized_files(

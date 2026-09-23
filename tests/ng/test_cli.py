@@ -1540,7 +1540,7 @@ def test_tty_auto_review_uses_stable_order_skipping_unavailable(
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
-    _fake_qualified_profiles(monkeypatch)
+    _fake_qualified_profiles(monkeypatch, unqualified=("opencode",))
     resolved = []
     prompts = []
 
@@ -1571,6 +1571,7 @@ def test_tty_auto_review_uses_stable_order_skipping_unavailable(
     assert resolved == ["claude", "codex"]
     assert prompts == ["asked"]
     assert launches == ["codex"]
+    assert "Choose a reviewer" not in captured.err
     assert captured.out.startswith("Project | Execution | Parallel | Selection | Timing | Checklist\n")
 
 
@@ -1617,10 +1618,15 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
     monkeypatch.chdir(hostile)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
+
+    def resolve(name, env):
+        if name != "claude":
+            raise C.Problem(code="provider-unavailable",
+                            message="not installed", phase="provider")
+        return _fake_reviewer("claude", qualified=True)
+
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.resolve_reviewer",
-        lambda name, env: _fake_reviewer("claude", qualified=True),
-    )
+        "ptest.cli.agent_providers.resolve_reviewer", resolve)
     _fake_qualified_profiles(monkeypatch)
     prompts = []
     monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "no")
@@ -1659,10 +1665,15 @@ def test_tty_review_disclosure_names_excluded_source_classes(
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
+
+    def resolve(name, env):
+        if name != "claude":
+            raise C.Problem(code="provider-unavailable",
+                            message="not installed", phase="provider")
+        return _fake_reviewer("claude", qualified=True)
+
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.resolve_reviewer",
-        lambda name, env: _fake_reviewer("claude", qualified=True),
-    )
+        "ptest.cli.agent_providers.resolve_reviewer", resolve)
     _fake_qualified_profiles(monkeypatch)
     monkeypatch.setattr("builtins.input", lambda: "no")
 
@@ -2524,6 +2535,187 @@ def test_auto_with_codex_and_opencode_picks_codex(
                  "--allow-model-review")) == 0
 
     assert launches == ["codex"]
+
+
+# --- Interactive reviewer choice: TTY menu when reviewer is absent/auto. ---
+
+def _tty_menu_review(monkeypatch, tmp_path, *, answers,
+                     unqualified=("opencode",), missing=()):
+    """Fake qualified profiles plus resolve; feed answers to each input().
+
+    OpenCode stays unqualified by default, mirroring the real record.
+    Returns (resolved, inputs, launches). An answer of EOF raises EOFError.
+    """
+    import sys
+    from ptest.agent_providers import ProviderResult
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+    _fake_qualified_profiles(monkeypatch, unqualified=unqualified)
+    resolved = []
+
+    def resolve(name, env):
+        resolved.append(name)
+        if name in missing:
+            raise C.Problem(code="provider-unavailable",
+                            message="not installed", phase="provider")
+        return _fake_reviewer(name, qualified=True)
+
+    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
+    inputs = []
+    iterator = iter(answers)
+
+    def fake_input(*args):
+        inputs.append(args)
+        answer = next(iterator)
+        if answer is EOFError:
+            raise EOFError("no more input")
+        return answer
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    launches = []
+
+    def launch(adapter, request, schema, timeout_s, progress):
+        launches.append(adapter.name)
+        return ProviderResult(
+            provider=adapter.name, ok=True,
+            assessment=_normalized_unknown_assessment(request), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=3100, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    return resolved, inputs, launches
+
+
+def test_tty_menu_lists_two_in_order_and_selects_second(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=["2", "yes"])
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert launches == ["codex"]
+    assert len(inputs) == 2
+    assert "Choose a reviewer for this review:" in captured.err
+    assert captured.err.index("1) claude") < captured.err.index("2) codex")
+    assert "Run this review once?" in captured.err
+    assert captured.out.startswith(
+        "Project | Execution | Parallel | Selection | Timing | Checklist\n")
+
+
+def test_tty_menu_select_first_then_decline_is_offline(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=["1", "n"])
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert launches == []
+    assert len(inputs) == 2
+    assert "Choose a reviewer for this review:" in captured.err
+    assert "Model review disclosure: claude" in captured.err
+    assert "optimization review is disabled" in captured.err.lower()
+    assert "review not yet performed" in captured.out
+
+
+@pytest.mark.parametrize("answer", ["", "9", "x", EOFError])
+def test_tty_menu_decline_variants_skip_disclosure_scan_and_launch(
+        inspection_project, tmp_path, monkeypatch, capsys, answer):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=[answer])
+    scans = []
+    real_inspect = __import__("ptest.doctor", fromlist=["inspect_workspace"]).inspect_workspace
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: scans.append(1) or real_inspect(*a, **k),
+    )
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert launches == []
+    assert len(inputs) == 1
+    assert scans == [1]
+    assert "Choose a reviewer for this review:" in captured.err
+    assert "Run this review once?" not in captured.err
+    assert "optimization review is disabled" in captured.err.lower()
+    assert "review not yet performed" in captured.out
+
+
+def test_tty_single_installed_reviewer_skips_menu(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=["yes"], missing=("claude", "opencode"))
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert launches == ["codex"]
+    assert len(inputs) == 1
+    assert "Choose a reviewer" not in captured.err
+    assert "Model review disclosure: codex" in captured.err
+
+
+def test_tty_menu_never_lists_unqualified_opencode(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=["1", "yes"],
+        unqualified=("opencode",))
+
+    assert main(("doctor",)) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude", "codex"]
+    assert launches == ["claude"]
+    assert "1) claude" in captured.err
+    assert "2) codex" in captured.err
+    assert "opencode" not in captured.err
+
+
+def test_tty_explicit_reviewer_skips_menu(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    resolved, inputs, launches = _tty_menu_review(
+        monkeypatch, tmp_path, answers=["yes"])
+
+    assert main(("doctor", "--reviewer", "claude")) == 0
+
+    captured = capsys.readouterr()
+    assert resolved == ["claude"]
+    assert launches == ["claude"]
+    assert len(inputs) == 1
+    assert "Choose a reviewer" not in captured.err
+    assert "Model review disclosure: claude" in captured.err
+
+
+def test_non_tty_auto_never_shows_menu(
+        tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted"))
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer before consent"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.doctor.inspect_workspace",
+        lambda *a, **k: pytest.fail("scanned source before consent"),
+    )
+
+    assert main(("doctor",)) == 2
+    captured = capsys.readouterr()
+    assert "consent-required" in captured.err
+    assert "Choose a reviewer" not in captured.err
 
 
 def _native_replay_executable(bindir, name):

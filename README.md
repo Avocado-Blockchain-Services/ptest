@@ -10,7 +10,10 @@ and a separately consented CLI review design. Claude and Codex are qualified
 reviewers. OpenCode is not supported because its free tier refuses tool-free
 runs (HTTP 403 FreeTierError). Review sends bounded source text to the
 selected provider using your
-existing account; provider or account costs may apply. Choosing agents with
+existing account; provider or account costs may apply. On a TTY without an
+explicit concrete --reviewer, review first asks which qualified installed
+reviewer to use (one is used directly; declining shows offline output).
+Choosing agents with
 `ptest init --agents` installs guidance only and does not authorize model
 review. See `ptest help doctor` for details; agents start at `ptest help agents`.
 
