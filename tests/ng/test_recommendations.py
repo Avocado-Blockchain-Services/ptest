@@ -899,6 +899,231 @@ def test_proof_line_bound_beyond_admitted_prefix_rejected(
     assert not (root / "recommendations.md").exists()
 
 
+def test_publish_accepts_more_than_256_source_proofs_and_rejects_above_total_bound(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.contracts import Problem
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    source_root = root / "src"
+    source_root.mkdir()
+    proof = []
+    for index in range(257):
+        raw = f"VALUE = {index}\n".encode("ascii")
+        relative = f"src/module_{index:03d}.py"
+        (root / relative).write_bytes(raw)
+        proof.append({"path": relative,
+                      "sha256": hashlib.sha256(raw).hexdigest(),
+                      "byte_count": len(raw),
+                      "start_line": 1, "end_line": 1})
+
+    payload = render_recommendations(_run())
+    assert publish_recommendations(
+        root, payload, None, source_proof=proof).status == "created"
+    assert (root / "recommendations.md").read_bytes() == payload
+
+    too_many = (proof * (16_385 // len(proof) + 1))[:16_385]
+    assert len(too_many) == 16_385
+    with pytest.raises(Problem, match="invalid-bound"):
+        publish_recommendations(
+            root, payload, _identity_of(root), source_proof=too_many)
+
+
+def test_publish_restores_prior_report_when_cancelled_after_atomic_rename(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    real_rename = rec.os.rename
+    interrupted = []
+
+    def rename_then_interrupt(src, dst, *args, **kwargs):
+        result = real_rename(src, dst, *args, **kwargs)
+        if dst == "recommendations.md" and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(rec.os, "rename", rename_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        publish_recommendations(root, second, previous, source_proof=[])
+
+    assert interrupted == [True]
+    assert (root / "recommendations.md").read_bytes() == first
+
+
+@pytest.mark.parametrize("stage_operation", ("write", "fsync"))
+def test_publish_cleans_staging_resources_when_cancelled_during_stage(
+        tmp_path, monkeypatch, stage_operation):
+    import ptest.recommendations as rec
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+
+    stage_fds = []
+    real_open = rec.os.open
+
+    def track_stage_fd(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if isinstance(path, str) and path.startswith("recommendations.md.tmp."):
+            stage_fds.append(fd)
+        return fd
+
+    monkeypatch.setattr(rec.os, "open", track_stage_fd)
+    if stage_operation == "write":
+        real_write = rec.os.write
+
+        def interrupt_stage_write(fd, data):
+            if stage_fds and fd == stage_fds[0]:
+                raise KeyboardInterrupt
+            return real_write(fd, data)
+
+        monkeypatch.setattr(rec.os, "write", interrupt_stage_write)
+    else:
+        real_fsync = rec.os.fsync
+
+        def interrupt_stage_fsync(fd):
+            if stage_fds and fd == stage_fds[0]:
+                raise KeyboardInterrupt
+            return real_fsync(fd)
+
+        monkeypatch.setattr(rec.os, "fsync", interrupt_stage_fsync)
+
+    with pytest.raises(KeyboardInterrupt):
+        publish_recommendations(root, second, previous, source_proof=[])
+
+    assert len(stage_fds) == 1
+    with pytest.raises(OSError):
+        os.fstat(stage_fds[0])
+    assert list(root.glob("recommendations.md.tmp.*")) == []
+    assert (root / "recommendations.md").read_bytes() == first
+
+
+def test_publish_cleans_staging_resources_when_cancelled_during_final_close(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+
+    stage_fds = []
+    real_open = rec.os.open
+    real_close = rec.os.close
+    interrupted = []
+
+    def track_stage_fd(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if isinstance(path, str) and path.startswith("recommendations.md.tmp."):
+            stage_fds.append(fd)
+        return fd
+
+    def interrupt_final_close(fd):
+        if stage_fds and fd == stage_fds[0] and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        return real_close(fd)
+
+    monkeypatch.setattr(rec.os, "open", track_stage_fd)
+    monkeypatch.setattr(rec.os, "close", interrupt_final_close)
+
+    with pytest.raises(KeyboardInterrupt):
+        publish_recommendations(root, second, previous, source_proof=[])
+
+    assert interrupted == [True]
+    assert len(stage_fds) == 1
+    with pytest.raises(OSError):
+        os.fstat(stage_fds[0])
+    assert list(root.glob("recommendations.md.tmp.*")) == []
+    assert (root / "recommendations.md").read_bytes() == first
+
+
+def test_publish_deadline_bounds_lock_wait_without_wall_clock_sleep(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.contracts import Problem
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    clock = [0.0]
+
+    def fake_flock(*args, **kwargs):
+        raise BlockingIOError
+
+    monkeypatch.setattr(rec.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        rec.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    monkeypatch.setattr(rec.fcntl, "flock", fake_flock)
+
+    with pytest.raises(Problem, match="review-timeout"):
+        publish_recommendations(
+            root, render_recommendations(_run()), None,
+            source_proof=[], deadline=0.025)
+
+    assert 0 < clock[0] <= 0.025
+    assert not (root / "recommendations.md").exists()
+
+
+def test_publish_rolls_back_if_deadline_expires_after_rename(
+        tmp_path, monkeypatch):
+    import ptest.recommendations as rec
+    from ptest.contracts import Problem
+    from ptest.recommendations import publish_recommendations
+    from ptest.recommendations import render_recommendations
+
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    first = render_recommendations(_run())
+    publish_recommendations(root, first, None, source_proof=[])
+    previous = _identity_of(root)
+    second = render_recommendations(_run(children=[_child(scope="child-b")]))
+    clock = [0.0]
+    real_rename = rec.os.rename
+
+    def rename_then_expire(src, dst, *args, **kwargs):
+        result = real_rename(src, dst, *args, **kwargs)
+        if dst == "recommendations.md":
+            clock[0] = 5.0
+        return result
+
+    monkeypatch.setattr(rec.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rec.os, "rename", rename_then_expire)
+    with pytest.raises(Problem, match="review-timeout"):
+        publish_recommendations(
+            root, second, previous, source_proof=[], deadline=5.0)
+
+    assert (root / "recommendations.md").read_bytes() == first
+
+
 def test_render_backtick_scope_markdown_safe_single_command():
     import shlex
     from ptest.recommendations import render_recommendations

@@ -18,18 +18,19 @@ Running tests from the repository root:
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
-Inspect (static, read-only unless noted):
+Inspect and review:
   ptest where                     # checkout identity and runner summary
   ptest status                    # queued/active leases and limits
   ptest plan                      # full-execution preview; single-project v1 only
   ptest history                   # committed run summaries; single-project v1 only
   ptest register                  # registration preview
-  ptest doctor                    # static scan; --probe EXECUTES tests/setup (probe: single-project v1 only)
+  ptest doctor                    # consented CLI review; use --offline for static-only
   ptest guide                     # render bundled repair guide text
   ptest rules                     # preview agent guidance
 
 Machine output:
-  --json on init/register/where/status/history/plan/doctor; guide is text-only.
+  Legacy doctor --json stays static; --assessment-json is the versioned review result.
+  --json on init/register/where/status/history/plan; guide is text-only.
 
 Discover commands:
   ptest help <topic>              # init register where status history plan doctor guide rules run agents
@@ -49,6 +50,9 @@ Syntax:
              [--child NAME --runner KIND]...
              [--agents none|all|claude,codex,opencode,gemini]
              [--dry-run] [--reveal-command] [--json]
+             [--doctor | --no-doctor]
+             [--reviewer auto|claude|codex|opencode]
+             [--allow-model-review] [--review-timeout SECONDS]
 
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
@@ -57,7 +61,10 @@ Notes:
   monorepo children; each --child requires a following --runner. Omit
   --runner to autodetect (including multi-child monorepos). command is not
   a usable init --runner choice: it requires an explicit pre-authored
-  configuration."""
+  configuration. --agents installs guidance only and is separate from
+  model-review consent. After successful initialization, --doctor requests
+  the review offer and --no-doctor suppresses it. Review flags cannot be
+  combined with --json or --dry-run."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 
@@ -96,12 +103,17 @@ Syntax:
 Static preview only: unavailable on a root v2 dispatcher. Selection stays
 disabled pending a verified execution identity."""
 
-_DOCTOR = """ptest doctor: bounded static scan (hypotheses, read-only) or a live probe (executes).
+_DOCTOR = """ptest doctor: consented bounded CLI review by default, offline static inspection, or an explicit live probe.
 
-Static syntax (default; never executes, never writes):
-  ptest doctor [--json | --prompt] [--scope PATH]
-               [--max-entries N] [--max-files N]
+Review syntax (default mode):
+  ptest doctor [--reviewer auto|claude|codex|opencode]
+               [--allow-model-review] [--assessment-json]
+               [--review-timeout 10..900] [--scope PATH]
+
+Offline static syntax (never launches a provider or writes a report):
+  ptest doctor --offline [--scope PATH] [--max-entries N] [--max-files N]
                [--max-file-bytes N] [--max-total-bytes N]
+  ptest doctor --json | --prompt [--scope PATH]
 
 Probe syntax (EXECUTES tests and setup; not a static inspection; single-project v1 only):
   ptest doctor --probe --scope S [--repeat 1..5 (default 2)]
@@ -110,15 +122,29 @@ Probe syntax (EXECUTES tests and setup; not a static inspection; single-project 
                [--no-setup] [--result-json PATH]
 
 Notes:
-  --json and --prompt are mutually exclusive output modes. --prompt grants
-  assessment text only, never repair authority. The probe requires --scope
-  and a single-project v1 configuration, cannot combine output modes or
-  static scan limits, and probe options require --probe. A root monorepo
-  supports static doctor, not live --probe. Probing executes configured
-  setup/tests, may use configured services/network, and requires
-  deliberate authorization with safe isolation. Never infer readiness from
-  an unknown or incomplete static scan: a clean or truncated scan is never
-  a pass."""
+  Once a provider profile is qualified, default review on a TTY discloses the
+  selected provider and asks for invocation-local consent. It sends bounded
+  source text using your existing provider account; provider or account costs
+  may apply, and ptest cannot perfectly detect secrets. Declining the offer
+  runs offline static output.
+  In automation, provide both --reviewer PROVIDER and --allow-model-review;
+  --reviewer auto never selects a provider without an interactive TTY.
+
+  Provider-backed review is currently disabled: Claude, Codex, and OpenCode
+  are all currently unqualified, and review fails closed until all three
+  profiles pass the shared gate. Normal test execution remains local and
+  model-free.
+  --assessment-json is the versioned review document; legacy --json and
+  --prompt stay static and offline. --prompt grants assessment text only,
+  never repair authority.
+
+  --probe requires --scope and a single-project v1 configuration, cannot
+  combine output modes or static scan limits, and probe options require
+  --probe. A root monorepo supports static doctor, not live --probe. Probing
+  executes configured setup/tests, may use configured services/network, and
+  requires deliberate authorization with safe isolation. Never infer
+  readiness from an unknown or incomplete static scan: a clean or truncated
+  scan is never a pass."""
 
 _GUIDE = """ptest guide: print the bundled local repair guide. Read-only except for --write.
 
@@ -162,7 +188,7 @@ Notes:
   Exit status mirrors the outcome: 0 passes, nonzero fails; only --full
   completes the change, a scoped green is iteration."""
 
-_AGENTS = """Agent workflow (self-contained; no model APIs or extra runtime required).
+_AGENTS = """Agent workflow (normal test execution needs no model APIs or extra runtime).
 
 1. Set up once, noninteractively, from the repository root (monorepo root
    when applicable):
@@ -191,14 +217,18 @@ _AGENTS = """Agent workflow (self-contained; no model APIs or extra runtime requ
    mirrors the outcome: 0 passes, nonzero fails, and root --full keeps the
    first child failure after all children finish.
 
-4. Diagnose statically first:
-     ptest doctor                  # static scan: hypotheses, read-only
+4. Review with consent or inspect offline:
+     ptest doctor                  # separately consented source review on a TTY
+     ptest doctor --offline        # static scan: hypotheses, read-only
      ptest doctor --prompt         # assessment text for repair planning only
      ptest doctor --json           # typed findings document
-   --prompt and --json are mutually exclusive. Never infer readiness from an
-   unknown or incomplete static scan: report unknown honestly; a clean or
-   truncated scan is never a pass and never proves parallel, timing, or
-   execution readiness.
+   Doctor review is separately consented and may send bounded source text to
+   the selected provider; costs may apply. Provider review remains disabled
+   until Claude, Codex, and OpenCode all qualify. Use --offline, --prompt, or
+   legacy --json for static output. --prompt and --json are mutually
+   exclusive. Never infer readiness from an unknown or incomplete static
+   scan: report unknown honestly; a clean or truncated scan is never a pass
+   and never proves parallel, timing, or execution readiness.
    ptest doctor --probe --scope tests/test_example.py EXECUTES tests and
    setup (may use configured services/network): requires deliberate
    authorization with safe isolation; use it only to reproduce, never to

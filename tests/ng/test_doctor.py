@@ -1437,3 +1437,45 @@ def test_agent_checklist_table_neutralizes_bare_urls_in_every_untrusted_cell():
     assert "https://example.test" not in table
     assert "www.example.test" not in table
     assert "http://status.example.test" not in table
+
+
+def test_agent_assessment_human_output_keeps_capability_claims_separate(case):
+    from ptest.doctor import inspect_workspace
+    from ptest.render import render_agent_assessment
+
+    domain = case.domain()
+    root = case.project(domain, kind="pytest")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_sample.py").write_text(
+        "def test_sample():\n    assert True\n", encoding="utf-8")
+    resolution = _resolution(case, root)
+    workspace = inspect_workspace(
+        domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+    rows = [{"id": row_id, "status": "unknown", "rationale": "not known",
+             "evidence": []} for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS]
+    children = [{
+        "scope": ".", "score": {"satisfied": 0, "applicable": 11, "percent": 0},
+        "rows": rows,
+        "limitations": [{"code": "partial-evidence",
+                         "message": "bounded evidence", "paths": ["."]}],
+        "findings": [{"id": "FIX-001",
+                      "summary": "Review <script>hostile</script> [link](https://invalid.test) | content.",
+                      "suggested_change": "Use the owned recipe."}],
+    }]
+
+    output = render_agent_assessment(
+        children, workspace, report_path="recommendations.md",
+        publication_status="created")
+
+    assert output.startswith(
+        "Project | Execution | Parallel | Selection | Timing | Checklist\n")
+    assert "pytest declared" in output
+    assert "basic-serial; reviewed isolation unverified" in output
+    assert ("| disabled | unmeasured | 0/11 &#40;0%&#41;, agent-reviewed; "
+            "partial evidence" in output)
+    assert output.index("Project | Checklist | Status | Evidence") > output.index("Project | Execution")
+    assert output.index("Findings:") > output.index("Project | Checklist | Status | Evidence")
+    assert "<script>" not in output and "https://invalid.test" not in output
+    assert "hostile link / content." in output
+    assert "pytest passed" not in output
+    assert "Execution verification: not run." in output

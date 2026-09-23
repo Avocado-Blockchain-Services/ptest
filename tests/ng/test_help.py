@@ -81,6 +81,39 @@ def test_help_topic_contents_are_command_specific(tmp_path, monkeypatch, capsys)
             assert marker in out, topic
 
 
+def test_doctor_help_documents_consented_review_and_unqualified_release_gate(
+        tmp_path, monkeypatch, capsys):
+    _no_execution(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("help",)) == 0
+    overview = capsys.readouterr().out
+    assert "consented" in overview.lower()
+    assert "--offline" in overview
+
+    assert main(("help", "doctor")) == 0
+    doctor_help = capsys.readouterr().out
+    normalized_doctor_help = " ".join(doctor_help.split())
+    for marker in (
+        "--reviewer", "--allow-model-review", "--review-timeout",
+        "--assessment-json", "--offline", "--json", "--prompt", "--probe",
+        "bounded source", "costs may apply", "secrets", "Claude", "Codex",
+        "OpenCode", "all three", "currently unqualified",
+    ):
+        assert marker.lower() in normalized_doctor_help.lower(), marker
+    assert "disabled" in normalized_doctor_help.lower()
+
+    assert main(("help", "init")) == 0
+    init_help = capsys.readouterr().out
+    assert "--doctor" in init_help and "--no-doctor" in init_help
+    assert "--agents" in init_help and "guidance" in init_help.lower()
+
+    assert main(("help", "agents")) == 0
+    agents_help = capsys.readouterr().out
+    assert "normal test execution" in agents_help.lower()
+    assert "separately consented" in agents_help.lower()
+
+
 def test_help_agents_is_self_contained_workflow(tmp_path, monkeypatch, capsys):
     _no_execution(monkeypatch)
     monkeypatch.chdir(tmp_path)

@@ -667,13 +667,13 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
     assert cli.main(args) == 0
     created = capsys.readouterr()
     assert "provider-unqualified" in created.err
-    assert len(resolved) == 3
+    assert resolved == []
 
     resolved.clear()
     assert cli.main(args) == 0
     existing = capsys.readouterr()
     assert "provider-unqualified" in existing.err
-    assert len(resolved) == 3
+    assert resolved == []
 
 
 @pytest.mark.parametrize("extra", [
@@ -703,7 +703,7 @@ def test_tty_init_no_doctor_json_and_dry_run_never_offer_review(
 def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
         tmp_path, monkeypatch, capsys):
     from ptest import cli
-    from ptest.agent_providers import ReviewerAdapter
+    from ptest.agent_providers import QualificationStatus, ReviewerAdapter
 
     _make_cli_init_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -713,6 +713,11 @@ def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        cli.agent_providers, "qualification_status",
+        lambda name: QualificationStatus(
+            name=name, qualified=True, argv=(name,), note="synthetic"),
+    )
     monkeypatch.setattr(
         cli.agent_providers, "resolve_reviewer",
         lambda name, env: ReviewerAdapter(
@@ -740,33 +745,46 @@ def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
     assert "review not yet performed" in captured.out
 
 
-def test_tty_init_explicit_consent_discloses_without_second_prompt_and_stays_disabled(
-        tmp_path, monkeypatch, capsys):
+def test_explicit_init_doctor_failure_preserves_initialized_files(
+        case, tmp_path, monkeypatch, capsys):
     from ptest import cli
-    from ptest.agent_providers import ReviewerAdapter
+    from ptest.agent_providers import ProviderResult, QualificationStatus
 
     _make_cli_init_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    monkeypatch.setattr(
-        cli.agent_providers, "resolve_reviewer",
-        lambda name, env: ReviewerAdapter(
-            "claude", "/fake/claude", ("/fake/claude",),
-            qualified=True, qualification_note="test"),
-    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    statuses = []
+
+    def qualified(name):
+        statuses.append(name)
+        return QualificationStatus(name=name, qualified=True,
+                                   argv=(name,), note="synthetic")
+
+    monkeypatch.setattr(cli.agent_providers, "qualification_status", qualified)
     prompts = []
     monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "yes")
-    monkeypatch.setattr(
-        cli.doctor, "inspect_workspace",
-        lambda *a, **k: pytest.fail("disabled init review scanned source"),
-    )
-    monkeypatch.setattr(
-        cli.agent_providers, "launch_review",
-        lambda *a, **k: pytest.fail("disabled init review launched provider"),
-    )
+    launched = []
 
-    assert cli.main(("init", "--runner", "pytest", "--agents", "none",
+    def fail_launch(adapter, request, schema, timeout_s, progress):
+        launched.append(adapter.name)
+        return ProviderResult(
+            provider=adapter.name, ok=False, assessment=b"",
+            error="provider-failed", exit_code=7, timed_out=False,
+            cancelled=False, truncated=False, pid=2001, argv=adapter.argv,
+            scratch="/tmp/ptest-review-test")
+
+    monkeypatch.setattr(cli.agent_providers, "launch_review", fail_launch)
+
+    domain = case.domain()
+    assert cli.main(("--fixture-domain", str(domain.root),
+                     "init", "--runner", "pytest", "--agents", "none",
                      "--doctor", "--reviewer", "claude",
                      "--allow-model-review")) == 2
 
@@ -774,4 +792,9 @@ def test_tty_init_explicit_consent_discloses_without_second_prompt_and_stays_dis
     assert prompts == []
     assert "Model review disclosure: claude" in captured.err
     assert "Run this review once?" not in captured.err
-    assert "review core remains disabled" in captured.err
+    assert "initialization succeeded; review incomplete" in captured.err
+    assert "provider-failed" in captured.err
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert not (tmp_path / "recommendations.md").exists()
+    assert statuses == ["claude", "codex", "opencode"]
+    assert launched == ["claude"]

@@ -8,15 +8,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
+import time
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
-from . import agent_providers, agent_rules, config as config_api
+from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, files, help as help_api, history, init_render
-from . import operations, platform, scheduler
+from . import operations, platform, recommendations, scheduler
 from . import render
 from .adapters import pytest as pytest_adapter
 from .runners import adapter_for
@@ -30,6 +33,10 @@ _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--result-json",
 })
 _EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow"})
+_REVIEW_TOTAL_TIMEOUT_S = 1800
+_REVIEW_CONFIG_MAX_BYTES = 256 * 1024
+# Keep collection preflight aligned with the writer's child/file proof bound.
+_REVIEW_SOURCE_PROOF_MAX = recommendations.MAX_SOURCE_PROOF_ENTRIES
 
 
 def _problem(code: str, message: str, *, phase: str = "cli") -> C.Problem:
@@ -696,6 +703,10 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
         sys.stdout.buffer.write(_document(kind, error=problem, domain=domain))
     else:
         print(render.terminal_text(problem), file=sys.stderr)
+    if problem.code in {"review-timeout", "execution-timeout"}:
+        return 124
+    if problem.code in {"review-cancelled", "cancelled"}:
+        return 130
     return 2 if problem.code not in {"coordinator-unavailable", "queue-timeout"} else 75
 
 
@@ -713,23 +724,16 @@ def _review_consent_problem() -> C.Problem:
 
 
 def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
-    """Resolve one installed adapter, selecting only qualified auto choices."""
+    """Resolve one adapter after the shared qualification gate has passed."""
     selected = parsed.reviewer
     if selected not in (None, "auto"):
-        adapter = agent_providers.resolve_reviewer(selected, os.environ)
-        if not adapter.qualified:
-            raise _problem(
-                "provider-unqualified",
-                f"reviewer {selected} is installed but its profile is not qualified",
-            )
-        return adapter
+        return agent_providers.resolve_reviewer(selected, os.environ)
 
     if not interactive:
         # Automation must name a concrete provider; auto selection must never
         # turn an explicit consent flag into permission to inspect PATH.
         raise _review_consent_problem()
 
-    saw_unqualified = False
     for name in agent_providers.SUPPORTED_REVIEWERS:
         try:
             adapter = agent_providers.resolve_reviewer(name, os.environ)
@@ -737,15 +741,28 @@ def _resolve_review_adapter(parsed: ParsedArgs, *, interactive: bool):
             if problem.code == "provider-unavailable":
                 continue
             raise
-        if adapter.qualified:
-            return adapter
-        saw_unqualified = True
-    if saw_unqualified:
+        return adapter
+    raise _problem("provider-unavailable", "no supported review provider is installed")
+
+
+def _require_review_qualification(_selected_adapter=None) -> None:
+    """Fail closed unless every supported provider profile is qualified."""
+    if (_selected_adapter is not None
+            and not isinstance(_selected_adapter,
+                               agent_providers.ReviewerAdapter)):
+        raise TypeError("selected adapter must be ReviewerAdapter")
+    statuses = tuple(
+        agent_providers.qualification_status(name)
+        for name in agent_providers.SUPPORTED_REVIEWERS
+    )
+    if (len(statuses) != len(agent_providers.SUPPORTED_REVIEWERS)
+            or tuple(status.name for status in statuses)
+            != agent_providers.SUPPORTED_REVIEWERS
+            or any(not status.qualified for status in statuses)):
         raise _problem(
             "provider-unqualified",
-            "installed review providers are not qualified for source review",
+            "agent review is disabled until every supported provider profile is qualified",
         )
-    raise _problem("provider-unavailable", "no supported review provider is installed")
 
 
 def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
@@ -785,7 +802,13 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
             and parsed.allow_model_review):
         raise _review_consent_problem()
 
+    _require_review_qualification()
     adapter = _resolve_review_adapter(parsed, interactive=interactive)
+    # The shared status records are the sole qualification authority. Resolver
+    # candidates stay disabled by default and are enabled here only after the
+    # all-three gate succeeds.
+    adapter = replace(adapter, qualified=True,
+                      qualification_note="shared profile gate passed")
     if interactive and not _render_review_disclosure(
             adapter, resolution, ask=not preconsented):
         print(
@@ -795,17 +818,12 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
         _doctor_static_output(parsed, resolution, domain)
         return True
 
-    # Provider use intentionally remains disabled until the shared review core
-    # and the all-provider adversarial qualification gate are complete.
-    raise _problem(
-        "provider-unqualified",
-        "review core remains disabled pending provider qualification and implementation",
-    )
+    _run_doctor_review(parsed, resolution, domain, adapter=adapter)
+    return False
 
 
-def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
-                          domain: C.DomainPaths) -> None:
-    limits = C.ScanLimits(
+def _doctor_limits(parsed: ParsedArgs) -> C.ScanLimits:
+    return C.ScanLimits(
         entries=parsed.max_entries or C.DEFAULT_SCAN_LIMITS.entries,
         files=parsed.max_files or C.DEFAULT_SCAN_LIMITS.files,
         file_bytes=parsed.max_file_bytes or C.DEFAULT_SCAN_LIMITS.file_bytes,
@@ -816,7 +834,340 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
         depth=C.DEFAULT_SCAN_LIMITS.depth,
         ast_nodes=C.DEFAULT_SCAN_LIMITS.ast_nodes,
     )
-    workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
+
+
+def _review_config_identity(resolution: C.ConfigResolution,
+                            workspace: doctor.WorkspaceInspection) -> str:
+    """Hash root and child config bytes in declaration order, without following links."""
+    paths = []
+    if resolution.path is not None:
+        paths.append(resolution.path)
+    for repo in workspace.repositories:
+        if repo.config is not None and repo.config.config_path is not None:
+            paths.append(repo.config.config_path)
+    unique = {}
+    for path in paths:
+        try:
+            relative = Path(path).relative_to(resolution.root).as_posix()
+        except ValueError:
+            raise _problem("stale-evidence", "configuration identity escaped the project root") from None
+        raw = files.read_regular(resolution.root, relative,
+                                 _REVIEW_CONFIG_MAX_BYTES + 1)
+        if len(raw) > _REVIEW_CONFIG_MAX_BYTES:
+            raise _problem("stale-evidence", "configuration identity exceeds its bound")
+        unique[relative] = hashlib.sha256(raw).hexdigest()
+    identity = {
+        "root": str(resolution.root),
+        "configurations": sorted(unique.items()),
+        "declarations": [repo.declaration for repo in workspace.repositories],
+    }
+    return hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _previous_report_identity(root: Path):
+    """Read a prior report through a no-follow descriptor for guarded replacement."""
+    path = root / "recommendations.md"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise _problem("report-conflict", "existing recommendations.md cannot be opened safely") from None
+    try:
+        try:
+            stamp = os.fstat(fd)
+        except OSError:
+            raise _problem("report-conflict", "existing recommendations.md cannot be inspected safely") from None
+        if (not stat.S_ISREG(stamp.st_mode) or stamp.st_uid != os.geteuid()
+                or stamp.st_size > 1024 * 1024):
+            raise _problem("report-conflict", "existing recommendations.md cannot be replaced safely")
+        chunks = []
+        remaining = 1024 * 1024 + 1
+        while remaining:
+            try:
+                chunk = os.read(fd, min(65536, remaining))
+            except OSError:
+                raise _problem("report-conflict", "existing recommendations.md cannot be read safely") from None
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > 1024 * 1024:
+            raise _problem("report-conflict", "existing recommendations.md exceeds its bound")
+        return recommendations.PublishedIdentity(
+            sha256=hashlib.sha256(raw).hexdigest(), st_dev=stamp.st_dev,
+            st_ino=stamp.st_ino, size=len(raw))
+    finally:
+        os.close(fd)
+
+
+def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
+    limitations = []
+    if top_level:
+        limitations.extend((
+            {"code": "execution-not-run",
+             "message": "No project tests or services were executed during this review.",
+             "paths": []},
+            {"code": "timing-unmeasured",
+             "message": "No qualified runtime measurements were collected.",
+             "paths": []},
+        ))
+    for packet in packets:
+        if (not packet.excerpts or packet.excluded_count
+                or packet.truncated_count):
+            limitation = {
+                "code": "partial-evidence",
+                "message": (
+                    "No source files were admitted to this project packet."
+                    if not packet.excerpts else
+                    f"Bounded evidence omitted {packet.excluded_count} entries and "
+                    f"truncated {packet.truncated_count} files or excerpts."),
+                "paths": [packet.scope],
+            }
+            if limitation not in limitations:
+                limitations.append(limitation)
+        for fact in packet.dependencies:
+            code = {
+                "missing": "dependency-missing",
+                "unsupported": "dependency-unsupported",
+                "uninspectable": "dependency-uninspectable",
+            }.get(fact.status)
+            if code is None:
+                continue
+            limitation = {"code": code, "message": fact.detail,
+                          "paths": [] if fact.ref_path is None else [fact.ref_path]}
+            if limitation not in limitations:
+                limitations.append(limitation)
+    return limitations[:64]
+
+
+def _raw_assessment_schema() -> bytes:
+    """Derive the provider response shape from the public contract authority."""
+    schema = deepcopy(C.PUBLIC_SCHEMAS["agent-assessment"])
+    data = schema["properties"]["data"]
+    data["properties"].pop("provider", None)
+    data["properties"].pop("publication", None)
+    data["required"] = [key for key in data["required"]
+                        if key not in {"provider", "publication"}]
+    child = data["properties"]["children"]["items"]
+    child["properties"].pop("score", None)
+    child["required"] = [key for key in child["required"]
+                         if key != "score"]
+    row = child["properties"]["rows"]["items"]
+    row["properties"]["status"]["enum"] = [
+        value for value in row["properties"]["status"]["enum"]
+        if value != "not-applicable"
+    ]
+    return json.dumps(schema, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("utf-8")
+
+
+def _child_assessment_data(packet, assessment, limitations: list[dict]) -> dict:
+    score = assessment.score
+    return {
+        "project_id": assessment.project_id,
+        "scope": assessment.scope,
+        "packet_sha256": assessment.packet_sha256,
+        "rows": [{
+            "id": row.id, "status": row.status,
+            "rationale": row.rationale,
+            "evidence": [{
+                "path": item.path, "start_line": item.start_line,
+                "end_line": item.end_line, "sha256": item.sha256,
+            } for item in row.evidence],
+        } for row in assessment.rows],
+        "score": (None if score is None else {
+            "satisfied": score.satisfied, "applicable": score.applicable,
+            "percent": score.percent,
+        }),
+        "findings": [{
+            "id": item.id, "summary": item.summary,
+            "suggested_change": item.suggested_change,
+            "recipe_id": item.recipe_id,
+            "evidence": [{
+                "path": cite.path, "start_line": cite.start_line,
+                "end_line": cite.end_line, "sha256": cite.sha256,
+            } for cite in item.evidence],
+        } for item in assessment.findings],
+        "limitations": limitations,
+    }
+
+
+def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                       domain: C.DomainPaths, *, adapter=None) -> None:
+    """Collect, sequentially validate, revalidate, then publish one review."""
+    if adapter is None:
+        _require_review_qualification()
+        adapter = _resolve_review_adapter(parsed, interactive=_interactive_review())
+        adapter = replace(adapter, qualified=True,
+                          qualification_note="shared profile gate passed")
+    started = time.monotonic()
+    deadline = started + _REVIEW_TOTAL_TIMEOUT_S
+    limits = _doctor_limits(parsed)
+    previous = _previous_report_identity(resolution.root)
+
+    def progress(phase: str, provider: str, project: str, elapsed_s: float):
+        detail = " | ".join((
+            render.terminal_text(phase),
+            "provider=" + render.terminal_text(provider),
+            "project=" + render.terminal_text(project),
+            f"elapsed={max(0, int(elapsed_s))}s",
+        ))
+        if sys.stderr.isatty():
+            spinner = "|/-\\"[int(max(0, elapsed_s)) % 4]
+            print(f"\r{spinner} doctor review: {detail}",
+                  end="", file=sys.stderr, flush=True)
+        else:
+            print("doctor review: " + detail, file=sys.stderr)
+
+    try:
+        progress("collecting", adapter.name, resolution.root.name,
+                 time.monotonic() - started)
+        workspace = doctor.inspect_workspace(domain, resolution, limits, parsed.scope)
+        packets = agent_assessment.build_packets(workspace, resolution)
+        if not packets:
+            raise _problem("invalid-config", "no selected project evidence is available")
+        if sum(len(packet.excerpts) for packet in packets) > _REVIEW_SOURCE_PROOF_MAX:
+            raise _problem(
+                "invalid-bound",
+                "collected source exceeds the guarded report proof bound",
+            )
+        config_identity = _review_config_identity(resolution, workspace)
+        declaration_set = tuple(repo.declaration for repo in workspace.repositories)
+        schema = _raw_assessment_schema()
+        assessments = []
+        for packet in packets:
+            request = agent_assessment.encode_review_request(packet, schema)
+            elapsed = time.monotonic() - started
+            remaining = _REVIEW_TOTAL_TIMEOUT_S - elapsed
+            if remaining <= 0:
+                raise _problem("review-timeout", "total review deadline expired")
+            timeout_s = min(parsed.review_timeout_s, int(remaining))
+            if timeout_s < 1:
+                raise _problem("review-timeout", "total review deadline expired")
+            child_progress = lambda event, scope=packet.scope: progress(
+                event.phase, event.provider, scope, time.monotonic() - started)
+            progress("reviewing", adapter.name, packet.scope,
+                     time.monotonic() - started)
+            try:
+                result = agent_providers.launch_review(
+                    adapter, request, schema, timeout_s, child_progress)
+            except KeyboardInterrupt:
+                raise _problem("review-cancelled", "review was cancelled") from None
+            if result.timed_out:
+                raise _problem("review-timeout", "review provider timed out")
+            if result.cancelled:
+                raise _problem("review-cancelled", "review was cancelled")
+            if result.truncated:
+                raise _problem("invalid-assessment", "review provider output exceeded its bound")
+            if result.provider != adapter.name:
+                raise _problem("invalid-assessment", "review provider identity did not match")
+            if not result.ok or result.exit_code != 0:
+                code = ("invalid-assessment" if result.error in {
+                    "invalid-assessment", "tool-attempt", "provider-error",
+                } else "provider-failed")
+                raise _problem(code, "review provider did not return a valid assessment")
+            progress("validating", adapter.name, packet.scope,
+                     time.monotonic() - started)
+            assessments.append(agent_assessment.parse_assessment(
+                result.assessment, packet))
+
+        if len(assessments) != len(packets):
+            raise _problem("invalid-assessment", "review did not validate every selected project")
+
+        # Re-resolve config and source packets immediately before publication.
+        progress("validating", adapter.name, resolution.root.name,
+                 time.monotonic() - started)
+        try:
+            fresh_resolution = config_api.resolve_config(resolution.root)
+            fresh_workspace = doctor.inspect_workspace(
+                domain, fresh_resolution, limits, parsed.scope)
+            fresh_packets = agent_assessment.build_packets(
+                fresh_workspace, fresh_resolution)
+            fresh_declarations = tuple(
+                repo.declaration for repo in fresh_workspace.repositories)
+            fresh_identity = _review_config_identity(
+                fresh_resolution, fresh_workspace)
+        except C.Problem:
+            raise _problem(
+                "stale-evidence",
+                "source or configuration could not be revalidated after review",
+            ) from None
+        if (fresh_declarations != declaration_set
+                or fresh_identity != config_identity
+                or tuple(packet.packet_sha256 for packet in fresh_packets)
+                != tuple(packet.packet_sha256 for packet in packets)):
+            raise _problem("stale-evidence", "source or configuration changed during review")
+
+        child_data = []
+        for packet, assessment in zip(packets, assessments):
+            child_data.append(_child_assessment_data(
+                packet, assessment, _assessment_limitations((packet,))))
+        limitations = _assessment_limitations(packets, top_level=True)
+        draft_data = {
+            "schema": C.AGENT_ASSESSMENT_SCHEMA,
+            "provider": {"name": adapter.name, "cli_version": "unreported",
+                         "profile": "ptest-agent-review-v1"},
+            "children": child_data,
+            "limitations": limitations,
+            "publication": {"status": "created", "path": "recommendations.md",
+                            "sha256": "0" * 64},
+        }
+        draft_document = C.PublicDocument(
+            kind="agent-assessment", ptest_version=C.PTEST_VERSION,
+            domain=_domain_public(domain), data=draft_data, error=None)
+        # Validate the complete public contract before any report write.
+        render.render_json(draft_document)
+        report_input = C.PublicDocument(
+            kind="agent-assessment", ptest_version=C.PTEST_VERSION,
+            domain=None, data=draft_data, error=None)
+        report_payload = recommendations.render_recommendations(report_input)
+        source_proof = [{
+            "path": excerpt.path,
+            "start_line": excerpt.start_line,
+            "end_line": excerpt.end_line,
+            "sha256": excerpt.sha256,
+            "byte_count": len(excerpt.text.encode("utf-8")),
+        } for packet in packets for excerpt in packet.excerpts]
+        if time.monotonic() >= deadline:
+            raise _problem("review-timeout", "total review deadline expired")
+        progress("publishing", adapter.name, resolution.root.name,
+                 time.monotonic() - started)
+        publication = recommendations.publish_recommendations(
+            resolution.root, report_payload, previous,
+            source_proof=source_proof, deadline=deadline)
+        draft_data["publication"] = {
+            "status": publication.status, "path": publication.path,
+            "sha256": publication.sha256,
+        }
+        document = C.PublicDocument(
+            kind="agent-assessment", ptest_version=C.PTEST_VERSION,
+            domain=_domain_public(domain), data=draft_data, error=None)
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        if parsed.assessment_json:
+            sys.stdout.buffer.write(render.render_json(document))
+        else:
+            sys.stdout.write(render.render_agent_assessment(
+                child_data, workspace, report_path=publication.path,
+                publication_status=publication.status))
+    except C.Problem:
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        raise
+    except KeyboardInterrupt:
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        raise _problem("review-cancelled", "review was cancelled") from None
+
+
+def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                          domain: C.DomainPaths) -> None:
+    workspace = doctor.inspect_workspace(domain, resolution,
+                                         _doctor_limits(parsed), parsed.scope)
     if parsed.prompt:
         sys.stdout.write(render.repair_prompt(
             workspace.aggregate, workspace=workspace))
@@ -1064,10 +1415,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 )
                 if declined:
                     return 0
-                raise _problem(
-                    "provider-unqualified",
-                    "review core remains disabled pending provider qualification and implementation",
-                )
+                return 0
             _doctor_static_output(parsed, resolution, domain)
             return 0
     except C.Problem as problem:

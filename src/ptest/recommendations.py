@@ -71,6 +71,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import hashlib
+import math
 import os
 import pwd
 import re
@@ -94,7 +95,9 @@ _MAX_PROSE_CHARS = 2048
 _MAX_EVIDENCE_PER_ITEM = 16
 _MAX_REPORT_BYTES = 1 << 20
 _MAX_TARGET_BYTES = 1 << 20
-_MAX_SOURCE_PROOF_ENTRIES = 256
+# A complete bounded review can admit 64 files in each of 256 children.
+MAX_SOURCE_PROOF_ENTRIES = _MAX_CHILDREN * 64
+_MAX_SOURCE_PROOF_ENTRIES = MAX_SOURCE_PROOF_ENTRIES
 _MAX_SOURCE_BYTES = 64 * 1024
 _PATH_BYTES = 4096
 _LOCK_TIMEOUT_S = 30.0
@@ -774,8 +777,10 @@ class _CooperativeLock:
     any report state is touched.
     """
 
-    def __init__(self, path: Path | None) -> None:
+    def __init__(self, path: Path | None,
+                 deadline: float | None = None) -> None:
         self._path = path
+        self._deadline = deadline
         self._fd: int | None = None
 
     def _abort(self, code: str, message: str) -> None:
@@ -826,19 +831,41 @@ class _CooperativeLock:
         if stamp.st_uid != os.geteuid():
             self._abort("report-conflict",
                         "recommendation lock has a foreign owner")
-        deadline = time.monotonic() + _LOCK_TIMEOUT_S
+        lock_deadline = time.monotonic() + _LOCK_TIMEOUT_S
+        if self._deadline is not None:
+            if time.monotonic() >= self._deadline:
+                self._abort("review-timeout",
+                            "total review deadline expired before report publication")
+            lock_deadline = min(lock_deadline, self._deadline)
         while True:
+            now = time.monotonic()
+            if now >= lock_deadline:
+                if (self._deadline is not None
+                        and now >= self._deadline):
+                    self._abort(
+                        "review-timeout",
+                        "total review deadline expired waiting for report lock")
+                self._abort("coordinator-unavailable",
+                            "recommendation publishers are busy")
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if (self._deadline is not None
+                        and time.monotonic() >= self._deadline):
+                    self._abort(
+                        "review-timeout",
+                        "total review deadline expired acquiring report lock")
                 return self
             except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    os.close(self._fd)
-                    self._fd = None
-                    _fail("coordinator-unavailable",
-                          "recommendation publishers are busy")
-                    raise AssertionError("unreachable")
-                time.sleep(0.01)
+                now = time.monotonic()
+                if now >= lock_deadline:
+                    if (self._deadline is not None
+                            and now >= self._deadline):
+                        self._abort(
+                            "review-timeout",
+                            "total review deadline expired waiting for report lock")
+                    self._abort("coordinator-unavailable",
+                                "recommendation publishers are busy")
+                time.sleep(min(0.01, lock_deadline - now))
 
     def __exit__(self, *args: object) -> None:
         if self._fd is not None:
@@ -973,7 +1000,9 @@ def _stage_temp(root_fd: int, full: bytes) -> str:
             view = view[written:]
         os.fchmod(fd, 0o644)
         os.fsync(fd)
-    except Exception:
+        os.close(fd)
+        return name
+    except BaseException:
         try:
             os.close(fd)
         except OSError:
@@ -983,8 +1012,6 @@ def _stage_temp(root_fd: int, full: bytes) -> str:
         except OSError:
             pass
         raise
-    os.close(fd)
-    return name
 
 
 def _check_source_proof(value: object) -> list:
@@ -1205,8 +1232,8 @@ def _read_target_raw(root_fd: int) -> bytes | None:
 def _restore_after_sync_failure(
         root_fd: int,
         current: tuple[bytes, int, int, int] | None,
-        written: bytes) -> None:
-    """Best-effort restore of the prior complete report; never raises.
+        written: bytes) -> bool:
+    """Best-effort restore and confirmation of the prior complete report.
 
     The live target is reread and compared before any restore: when an
     intervening edit landed after the atomic rename (custom report,
@@ -1216,23 +1243,23 @@ def _restore_after_sync_failure(
     """
     try:
         live = _read_target_raw(root_fd)
-        if live is not None and live != written:
-            return
+        if live != written:
+            return True
         if current is None:
             try:
                 os.unlink(_REPORT_NAME, dir_fd=root_fd)
             except OSError:
-                pass
+                return False
         else:
             try:
                 name = _stage_temp(root_fd, current[0])
-            except Exception:
-                return
+            except BaseException:
+                return False
             try:
                 os.rename(name, _REPORT_NAME,
                           src_dir_fd=root_fd, dst_dir_fd=root_fd)
-            except OSError:
-                pass
+            except BaseException:
+                return False
             finally:
                 try:
                     os.unlink(name, dir_fd=root_fd)
@@ -1241,22 +1268,32 @@ def _restore_after_sync_failure(
         try:
             os.fsync(root_fd)
         except OSError:
-            pass
-    except Exception:
-        pass
+            return False
+        restored = _read_target_raw(root_fd)
+        return restored is None if current is None else restored == current[0]
+    except BaseException:
+        return False
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        _fail("review-timeout",
+              "total review deadline expired during report publication")
 
 
 def publish_recommendations(root: object, payload: object,
                             previous: object,
-                            *, source_proof: object = None) -> PublishResult:
+                            *, source_proof: object = None,
+                            deadline: float | None = None) -> PublishResult:
     """Publish one marker-headed report with ownership checks.
 
     ``payload`` must be ``render_recommendations`` bytes (marker line plus
     body whose SHA-256 matches the marker). ``previous`` is an optional
     ``PublishedIdentity`` from an earlier read; when given, any drift in
     marker/hash/inode/bytes raises ``stale-evidence`` and the prior report
-    is preserved. ``source_proof`` is an optional bounded list of
-    collected source identities (``path``/``sha256``/``start_line``/
+    is preserved. ``source_proof`` is an optional bounded list of at most
+    16,384 collected source identities (256 children times 64 files each;
+    ``path``/``sha256``/``start_line``/
     ``end_line``); each entry is rechecked with a no-follow read before
     staging and again immediately before rename, and any drift raises
     ``stale-evidence`` with the prior report preserved. A prior-report
@@ -1265,9 +1302,17 @@ def publish_recommendations(root: object, payload: object,
     symlinked, non-regular, or unreadable targets raise
     ``report-conflict`` and are never clobbered. A parent-directory fsync
     failure raises ``state-unavailable`` after a best-effort restore of
-    the prior complete report. Returns ``created``, ``replaced``, or
-    ``unchanged`` (identical bytes).
+    the prior complete report. ``deadline`` is an optional absolute
+    ``time.monotonic()`` deadline; it bounds lock waiting and publication
+    work, and expiry after rename triggers a rollback attempt. Returns
+    ``created``, ``replaced``, or ``unchanged`` (identical bytes).
     """
+    if (deadline is not None
+            and (isinstance(deadline, bool)
+                 or not isinstance(deadline, (int, float))
+                 or not math.isfinite(deadline))):
+        raise TypeError("deadline must be a finite monotonic timestamp or None")
+    _check_deadline(deadline)
     claimed, body = _split_marker(payload)
     if hashlib.sha256(body).hexdigest() != claimed:
         _fail("report-invalid",
@@ -1280,22 +1325,28 @@ def publish_recommendations(root: object, payload: object,
               "preserved (pass [] to claim no admitted files)")
         raise AssertionError("unreachable")
     proof = _check_source_proof(source_proof)
-    with _CooperativeLock(_lock_path_for(Path(root))):  # type: ignore[arg-type]
+    _check_deadline(deadline)
+    with _CooperativeLock(_lock_path_for(Path(root)), deadline):  # type: ignore[arg-type]
+        _check_deadline(deadline)
         root_fd = _open_root(root)
         try:
+            _check_deadline(deadline)
             current = _read_target(root_fd)
+            _check_deadline(deadline)
             _check_previous(previous, current)
             if previous is not None and not isinstance(
                     previous, PublishedIdentity):
                 raise TypeError(
                     "previous must be PublishedIdentity or None")
             _verify_source_proof(root_fd, proof)
+            _check_deadline(deadline)
             if current is not None and current[0] == full:
                 return PublishResult(
                     status="unchanged", path=_REPORT_NAME,
                     sha256=hashlib.sha256(full).hexdigest())
             temp_name = _stage_temp(root_fd, full)
             try:
+                _check_deadline(deadline)
                 rechecked = _read_target(root_fd)
                 if (current is None) != (rechecked is None):
                     _fail("report-conflict",
@@ -1311,25 +1362,32 @@ def publish_recommendations(root: object, payload: object,
                               "recommendations.md changed while staging "
                               "(identity differs); refusing to replace it")
                 _verify_source_proof(root_fd, proof)
+                _check_deadline(deadline)
                 try:
                     os.rename(temp_name, _REPORT_NAME,
                               src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                    _check_deadline(deadline)
+                    os.fsync(root_fd)
+                    _check_deadline(deadline)
                 except OSError:
+                    if not _restore_after_sync_failure(root_fd, current, full):
+                        _fail("state-unavailable",
+                              "report publication failed and the prior "
+                              "complete report could not be confirmed")
                     _fail("state-unavailable",
-                          "atomic replace of recommendations.md failed")
+                          "parent sync or atomic replace failed; the prior "
+                          "complete report was restored where practical")
+                except BaseException:
+                    if not _restore_after_sync_failure(root_fd, current, full):
+                        _fail("state-unavailable",
+                              "report publication was interrupted and the "
+                              "prior complete report could not be confirmed")
+                    raise
             finally:
                 try:
                     os.unlink(temp_name, dir_fd=root_fd)
                 except OSError:
                     pass
-            try:
-                os.fsync(root_fd)
-            except OSError:
-                _restore_after_sync_failure(root_fd, current, full)
-                _fail("state-unavailable",
-                      "parent directory sync failed after atomic replace; "
-                      "the prior complete report was restored where "
-                      "practical")
             return PublishResult(
                 status="replaced" if current is not None else "created",
                 path=_REPORT_NAME,
@@ -1340,6 +1398,7 @@ def publish_recommendations(root: object, payload: object,
 
 __all__ = [
     "FOOTER",
+    "MAX_SOURCE_PROOF_ENTRIES",
     "PublishedIdentity",
     "PublishResult",
     "publish_recommendations",

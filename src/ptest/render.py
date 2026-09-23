@@ -156,6 +156,96 @@ def render_agent_checklist_table(children) -> str:
     return "\n".join(lines)
 
 
+def _agent_assessment_prose(value: object) -> str:
+    """Render bounded model prose as inert terminal text."""
+    text = terminal_text(value)
+    text = re.sub(r"\[([^\]\n]*)\]\([^\)\n]*\)", r"\1", text)
+    text = re.sub(r"<(?:https?://[^<>\s]*|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)>",
+                  "[link omitted]", text)
+    text = re.sub(r"</?[A-Za-z][^<>\n]*>", "", text)
+    text = re.sub(r"(?i)\b(?:https?://|www\.)\S+", "[URL omitted]", text)
+    text = "".join(char for char in text if ord(char) not in {
+        0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D,
+        0x202E, 0x2066, 0x2067, 0x2068, 0x2069,
+    })
+    return text.replace("|", "/").replace("`", "'")
+
+
+def render_agent_assessment(children, workspace, *, report_path: str,
+                            publication_status: str) -> str:
+    """Render the complete human review in the fixed, evidence-bounded order."""
+    repositories = {item.declaration: item for item in workspace.repositories}
+    lines = [
+        "Project | Execution | Parallel | Selection | Timing | Checklist",
+        "------- | --------- | -------- | --------- | ------ | ---------",
+    ]
+    for child in children:
+        repository = repositories.get(child["scope"])
+        config = None if repository is None else repository.config
+        runner = "unknown" if config is None else config.runner.kind.value
+        dependency = "uninspectable prerequisites"
+        dependency_codes = {item["code"] for item in child["limitations"]}
+        if "dependency-missing" in dependency_codes:
+            dependency = "missing prerequisite evidence"
+        elif "dependency-unsupported" in dependency_codes:
+            dependency = "unsupported prerequisite evidence"
+        execution = (f"{runner} declared; {dependency}; "
+                     "not execution-verified")
+        parallel = ("basic-serial; reviewed isolation unverified"
+                    if runner == "pytest"
+                    else "supported mode unknown; isolation unverified")
+        if config is None:
+            selection = "invalid/unavailable"
+        elif not config.selection.enabled:
+            selection = "disabled"
+        else:
+            selection = "enabled; correctness unverified"
+        score = child["score"]
+        if score is None:
+            checklist = "unscored"
+        else:
+            checklist = (f"{score['satisfied']}/{score['applicable']} "
+                          f"({score['percent']}%), agent-reviewed")
+        if "partial-evidence" in dependency_codes:
+            checklist += "; partial evidence"
+        cells = (child["scope"], execution, parallel, selection,
+                 "unmeasured", checklist)
+        lines.append(" | ".join(_agent_checklist_table_cell(cell)
+                                for cell in cells))
+
+    lines.extend(("", render_agent_checklist_table(children), "", "Findings:"))
+    for child in children:
+        for finding in child["findings"]:
+            summary = _agent_assessment_prose(finding["summary"])
+            change = _agent_assessment_prose(finding["suggested_change"])
+            lines.append(
+                f"- {terminal_text(child['scope'])} {terminal_text(finding['id'])}: "
+                f"{summary} Suggested change: {change}")
+    if not any(child["findings"] for child in children):
+        lines.append("- No gap findings were returned.")
+    lines.extend((
+        "",
+        "Guidance: recommendations.md contains evidence, scoped changes, "
+        "regressions, and later ptest verification steps.",
+        f"Report: {terminal_text(report_path)} ({terminal_text(publication_status)}).",
+        "Execution verification: not run.",
+    ))
+
+    # Keep terminal output finite even for a workspace at the 256-child cap.
+    output = []
+    used = 0
+    limit = 256 * 1024
+    for line in lines:
+        chunk = line + "\n"
+        cost = len(chunk.encode("utf-8"))
+        if used + cost > limit:
+            output.append("[additional assessment output omitted at limit]\n")
+            break
+        output.append(chunk)
+        used += cost
+    return "".join(output)
+
+
 def render_json(document: C.PublicDocument) -> bytes:
     """Encode one already-projected public document through the shared codec."""
     if not isinstance(document, C.PublicDocument):
