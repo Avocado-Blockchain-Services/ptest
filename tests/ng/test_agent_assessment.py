@@ -1383,7 +1383,7 @@ def test_render_recommendations_renders_parsed_not_applicable_row(tmp_path):
         "limitations": [],
     }
     out = recommendations.render_recommendations(run).decode("utf-8")
-    assert "10/10 (100%), agent-reviewed" in out
+    assert "10 of 10 checks confirmed from evidence" in out
 
 
 # --- project-local environment metadata (safe, no imports/execution) ---------

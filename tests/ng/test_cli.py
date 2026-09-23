@@ -45,7 +45,9 @@ def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeyp
     monkeypatch.chdir(tmp_path)
 
     assert main(("init",)) == 0
-    assert "created:" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "created" in out and ".ptest.toml" in out
+    assert "created:" not in out
     assert (tmp_path / ".ptest.toml").is_file()
     assert (api / ".ptest.toml").is_file()
     assert (web / ".ptest.toml").is_file()
@@ -510,8 +512,11 @@ def test_init_preview_creates_nothing_then_creation_preserves_existing_bytes(
             assert document.data["action"] == action
             assert document.data["exists"] is (action != "preview")
         else:
-            human_action = "unchanged" if action == "existing" else action
-            assert f"{human_action}: .ptest.toml" in captured.out
+            human_action = {"preview": "would create", "created": "created",
+                            "existing": "unchanged"}[action]
+            assert human_action in captured.out
+            assert ".ptest.toml" in captured.out
+            assert f"{human_action}:" not in captured.out
         if action == "preview":
             assert not target.exists()
         else:
@@ -1849,15 +1854,14 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
 
     human = capsys.readouterr()
-    assert "initialization-required" in human.out
-    assert "not execution-ready" in human.out
-    assert human.out.index("initialization-required") < human.out.index(
-        "11/11 &#40;100%&#41;, agent-reviewed")
+    assert ". (unknown)" in human.out
+    assert "11 of 11 checks confirmed from evidence" in human.out
+    assert "Execution verification: not run." in human.out
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "initialization-required" in report
     assert "ptest is not execution-ready" in report
     assert report.index("initialization-required") < report.index(
-        "100%), agent-reviewed")
+        "11 of 11 checks confirmed from evidence")
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 0

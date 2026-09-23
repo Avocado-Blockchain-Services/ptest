@@ -255,14 +255,16 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     assert main(("init", "--runner", "pytest")) == 0
     created = capsys.readouterr()
     config = root / ".ptest.toml"
-    assert config.is_file() and "created:" in created.out
-    assert "created: .ptest.toml" in created.out
+    assert config.is_file() and "created" in created.out
+    assert re.search(r"created +\.ptest\.toml", created.out)
+    assert "created:" not in created.out
     assert "Optimization review is disabled" in created.err
     original_config = config.read_bytes()
 
     assert main(("init", "--runner", "pytest")) == 0
     existing = capsys.readouterr()
-    assert "unchanged: .ptest.toml" in existing.out
+    assert re.search(r"unchanged +\.ptest\.toml", existing.out)
+    assert "unchanged:" not in existing.out
     assert "already present" not in existing.out
     for relative in ("docs/ptest-agent.md", "AGENTS.md",
                      ".agents/skills/ptest/SKILL.md"):
@@ -381,10 +383,11 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert "api" in human.out and "web" in human.out
     assert human.out.index("api") < human.out.index("web")
     assert "recommendations.md" in human.out
-    api = next(line for line in human.out.splitlines() if "api" in line)
-    web = next(line for line in human.out.splitlines() if "web" in line)
-    assert "basic-serial; reviewed isolation unverified" in api
-    assert "not execution-verified" in api and "not execution-verified" in web
+    lines = human.out.splitlines()
+    assert "api (pytest)" in lines and "web (pytest)" in lines
+    assert lines.index("api (pytest)") < lines.index("web (pytest)")
+    assert "0 of 11 checks confirmed from evidence" in human.out
+    assert "Execution verification: not run." in human.out
     assert [item[1] for item in launches] == ["api", "web"]
 
     report = root / "recommendations.md"
