@@ -3148,7 +3148,7 @@ def _fake_version(monkeypatch, version):
 
 def _fake_entries(monkeypatch, entries):
     monkeypatch.setattr(
-        "ptest.cli.agent_providers._discover_model_entries",
+        "ptest.cli.agent_providers.discover_model_entries",
         lambda adapter: tuple(entries))
 
 
@@ -3194,7 +3194,7 @@ def test_resolve_review_model_claude_haiku_runs_no_discovery_or_pick(
 
     _fake_version(monkeypatch, "claude 1.2.3")
     monkeypatch.setattr(
-        "ptest.cli.agent_providers._discover_model_entries",
+        "ptest.cli.agent_providers.discover_model_entries",
         lambda adapter: pytest.fail("claude must not discover"))
     monkeypatch.setattr(
         "ptest.cli.agent_providers.launch_review",

@@ -9,6 +9,7 @@ import re
 
 from . import checklist as checklist_api
 from . import contracts as C
+from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
 
 _STATIC_FINDINGS_CAVEAT = (
     "Static findings are hypotheses. No findings does not certify parallel safety. "
@@ -53,10 +54,8 @@ _AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
 # every project header, score line and the trailer are always kept.
 _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES = 512
 
-# Review-flow rationale prefixes (duplicated verbatim from the frozen
-# interface; agent_assessment owns the canonical constants after T4).
-_SKIPPED_REVIEW_PREFIX = "Skipped without a model call: "
-_FAILED_REVIEW_PREFIX = "Review failed: "
+# Review-flow rationale prefixes live with the frozen interface in
+# agent_assessment; this module only reads them.
 _NA_REASON_MAX_CHARS = 160
 _ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z]+);")
 
@@ -274,9 +273,9 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
         elif status == "unknown":
             rationale = row.get("rationale", "")
             if (isinstance(rationale, str)
-                    and rationale.startswith(_FAILED_REVIEW_PREFIX)):
+                    and rationale.startswith(FAILED_PREFIX)):
                 reason = _agent_assessment_prose(
-                    rationale[len(_FAILED_REVIEW_PREFIX):])
+                    rationale[len(FAILED_PREFIX):])
                 lines.append(f"{icon} {label} — unknown "
                              f"(review failed: {reason})")
             else:
@@ -285,8 +284,8 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
             rationale = row.get("rationale", "")
             if not isinstance(rationale, str):
                 rationale = ""
-            if rationale.startswith(_SKIPPED_REVIEW_PREFIX):
-                rationale = rationale[len(_SKIPPED_REVIEW_PREFIX):]
+            if rationale.startswith(SKIP_PREFIX):
+                rationale = rationale[len(SKIP_PREFIX):]
             reason = _agent_assessment_prose(
                 rationale)[:_NA_REASON_MAX_CHARS]
             lines.append(f"{icon} {label} — n/a: {reason}")

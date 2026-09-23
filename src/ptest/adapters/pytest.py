@@ -39,9 +39,9 @@ def _qualified_profile_catalog(config: C.Config) -> dict[str, str] | None:
     if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
         return None
     try:
-        _require_python_launcher(config.runner.launcher)
+        require_python_launcher(config.runner.launcher)
         controls = tuple(config.runner.args) + tuple(config.runner.full_args)
-        _reject_unowned_controls(controls, full=False)
+        reject_unowned_controls(controls, full=False)
     except C.Problem:
         return None
     # Coverage and a named terminal reporter are part of the frozen SELECT
@@ -84,8 +84,8 @@ def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | No
     if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
         return _unsupported("pytest compound support requires a pytest configuration")
     try:
-        _require_python_launcher(config.runner.launcher)
-        _reject_unowned_controls(config.runner.args + config.runner.full_args, full=False)
+        require_python_launcher(config.runner.launcher)
+        reject_unowned_controls(config.runner.args + config.runner.full_args, full=False)
     except C.Problem:
         return _unsupported("pytest native controls are not owned by the compound profile")
     if qualified_profile is None:
@@ -125,7 +125,7 @@ def _node_id_token(argv: tuple[str, ...], index: int) -> bool:
     return index == 0 or argv[index - 1] not in {"-W", "--pythonwarnings"}
 
 
-def _reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
+def reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> None:
     """Reject controls that would bypass the admission grant before import."""
     index = 0
     while index < len(argv):
@@ -187,7 +187,7 @@ def _bridge_path() -> Path:
     return Path(__file__).parents[1] / "runtime" / "pytest_bridge.py"
 
 
-def _require_python_launcher(launcher: tuple[str, ...]) -> None:
+def require_python_launcher(launcher: tuple[str, ...]) -> None:
     """A bridge file is meaningful only when the selected launcher is Python."""
     interpreter = Path(launcher[-1])
     valid_python = interpreter.name in {
@@ -212,7 +212,7 @@ def inspect_capability(config: C.Config) -> C.Capability:
     if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.PYTEST:
         raise _problem("native-config-invalid", "pytest adapter requires pytest config")
     try:
-        _require_python_launcher(config.runner.launcher)
+        require_python_launcher(config.runner.launcher)
     except C.Problem as problem:
         return C.Capability(
             execution=C.ExecutionTier.UNAVAILABLE, selection=False,
@@ -220,7 +220,7 @@ def inspect_capability(config: C.Config) -> C.Capability:
             limitations=(C.Reason(code=problem.code, message=problem.message),),
         )
     try:
-        _reject_unowned_controls(config.runner.args + config.runner.full_args
+        reject_unowned_controls(config.runner.args + config.runner.full_args
                                  + config.runner.test_roots, full=False)
     except C.Problem:
         return C.Capability(
@@ -253,7 +253,7 @@ def inspect_capability(config: C.Config) -> C.Capability:
         ))
     try:
         _validate_full_roots(config.runner.test_roots)
-        _reject_unowned_controls(config.runner.args + config.runner.full_args
+        reject_unowned_controls(config.runner.args + config.runner.full_args
                                  + config.runner.test_roots, full=True)
     except C.Problem:
         limitations.insert(0, C.Reason(
@@ -297,12 +297,12 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
     if plan.execution == "full":
         _validate_full_roots(config.runner.test_roots)
 
-    _require_python_launcher(config.runner.launcher)
+    require_python_launcher(config.runner.launcher)
     native = tuple(config.runner.args)
     literal_controls = native + config.runner.full_args + plan.files
     if plan.execution == "full":
         literal_controls += config.runner.test_roots
-    _reject_unowned_controls(literal_controls,
+    reject_unowned_controls(literal_controls,
                             full=plan.execution == "full")
     if plan.execution == "full":
         native += config.runner.full_args
@@ -373,10 +373,10 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
             raise _problem("native-config-invalid", "pytest advanced selection files are duplicated")
     if plan.execution == "full":
         _validate_full_roots(config.runner.test_roots)
-    _require_python_launcher(config.runner.launcher)
+    require_python_launcher(config.runner.launcher)
     controls = tuple(config.runner.args) + tuple(config.runner.full_args)
     controls += tuple(config.runner.test_roots if plan.execution == "full" else plan.files)
-    _reject_unowned_controls(controls, full=plan.execution == "full")
+    reject_unowned_controls(controls, full=plan.execution == "full")
     native = tuple(config.runner.args)
     if plan.execution == "full":
         native += tuple(config.runner.full_args) + tuple(config.runner.test_roots)

@@ -1193,7 +1193,7 @@ def launch_reviews(adapter: ReviewerAdapter,
     return tuple(results)
 
 
-_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 
 
 def with_model(adapter: ReviewerAdapter, model: str) -> ReviewerAdapter:
@@ -1205,7 +1205,7 @@ def with_model(adapter: ReviewerAdapter, model: str) -> ReviewerAdapter:
     """
     if not isinstance(adapter, ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
-    if not isinstance(model, str) or _MODEL_RE.fullmatch(model) is None:
+    if not isinstance(model, str) or MODEL_RE.fullmatch(model) is None:
         raise _problem("invalid-bound", f"invalid review model {model!r}")
     if adapter.name == "claude":
         extra = ("--model", model)
@@ -1355,7 +1355,7 @@ def _run_owned_capture(argv: Sequence[str], *, timeout_s: int | float,
     return outcome
 
 
-def _discover_model_entries(adapter: ReviewerAdapter) -> tuple[dict, ...]:
+def discover_model_entries(adapter: ReviewerAdapter) -> tuple[dict, ...]:
     """Listed codex model entries in catalog order, stripped to three keys."""
     stdout = _run_owned_capture(
         [adapter.executable, "debug", "models"],
@@ -1402,7 +1402,7 @@ def discover_models(adapter: ReviewerAdapter) -> tuple[str, ...]:
         return ()
     try:
         return tuple(entry["slug"]
-                     for entry in _discover_model_entries(adapter))
+                     for entry in discover_model_entries(adapter))
     except OSError:
         return ()
 

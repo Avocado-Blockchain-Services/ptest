@@ -23,6 +23,7 @@ from . import init_render
 from . import operations, platform, recommendations, scheduler
 from . import render
 from .adapters import pytest as pytest_adapter
+from .adapters import vitest as vitest_adapter
 from .runners import adapter_for
 
 
@@ -686,10 +687,7 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(
                 code="unsupported-capability",
-                message=("Vitest runs as one exclusive command (node "
-                         "node_modules/vitest/vitest.mjs run); ptest does "
-                         "not own Vitest workers, selection or per-test "
-                         "results"),
+                message=vitest_adapter.VITEST_EXCLUSIVE_NOTE,
             ),),
         )
     else:
@@ -930,7 +928,7 @@ def _read_cached_review_model(cache_root: Path, provider: str,
     model = data.get("model")
     if not isinstance(model, str) or not model:
         return None
-    if agent_providers._MODEL_RE.fullmatch(model) is None:
+    if agent_providers.MODEL_RE.fullmatch(model) is None:
         # Corrupted entry: fall back instead of failing every review with
         # invalid-bound until the CLI version changes.
         return None
@@ -1009,7 +1007,7 @@ def _resolve_review_model(adapter, cache_root: Path,
         if cached is not None:
             return (cached, version)
         try:
-            entries = agent_providers._discover_model_entries(adapter)
+            entries = agent_providers.discover_model_entries(adapter)
         except OSError:
             entries = ()
         if entries:

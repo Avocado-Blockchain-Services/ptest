@@ -15,17 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
-from .adapters.pytest import _reject_unowned_controls, _require_python_launcher
+from .adapters.pytest import reject_unowned_controls, require_python_launcher
+from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
 from .runtime.pytest_bridge import full_refusal_name
 
 STATUS_EXECUTABLE = "executable"
 STATUS_CAVEAT = "caveat"
 STATUS_NOT_EXECUTABLE = "not-executable"
-
-VITEST_ENTRY = "node_modules/vitest/vitest.mjs"
-VITEST_EXCLUSIVE_NOTE = ("Vitest runs as one exclusive command (node node_modules/vitest/vitest.mjs run); "
-                         "ptest does not own Vitest workers, selection or per-test results")
 
 _MAX_BYTES = 256 * 1024
 _MAX_CONFTEST_FILES = 64
@@ -81,7 +78,7 @@ def _project_root(config: C.Config, project: str) -> Path:
         return config.config_path.parent
     if config.checkout is not None:
         return config.checkout.root
-    return Path(project) if project != "." else Path(".")
+    return Path(project)
 
 
 def _read(root: Path, name: str) -> bytes | None:
@@ -237,7 +234,7 @@ def _has_serial_spelling(argv: tuple[str, ...]) -> bool:
 
 
 def _unowned_token(argv: tuple[str, ...]) -> str | None:
-    """First token _reject_unowned_controls would refuse (full=False)."""
+    """First token reject_unowned_controls would refuse (full=False)."""
     index = 0
     while index < len(argv):
         token = argv[index]
@@ -249,7 +246,7 @@ def _unowned_token(argv: tuple[str, ...]) -> str | None:
             index += 1
             continue
         try:
-            _reject_unowned_controls((token,), full=False)
+            reject_unowned_controls((token,), full=False)
         except C.Problem:
             return token
         index += 1
@@ -263,14 +260,11 @@ def _iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
     except OSError:
         return
     for entry in entries:
-        if not budget:
-            return
         name = entry.name
         try:
-            stamp = os.lstat(entry.path)
+            if entry.is_symlink():
+                continue
         except OSError:
-            continue
-        if stat.S_ISLNK(stamp.st_mode):
             continue
         if name in _SKIP_DIRS or name.startswith("."):
             continue
@@ -294,7 +288,7 @@ def _iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
 
 def _conftest_paths(root: Path, test_roots: tuple[str, ...]) -> list[str]:
     """conftest.py at the root and under literal test roots, depth 3."""
-    starts: list[tuple[str, int]] = [("", 1)]
+    starts: list[tuple[str, int]] = []
     for test_root in test_roots:
         if test_root in (".", ""):
             continue
@@ -313,8 +307,6 @@ def _conftest_paths(root: Path, test_roots: tuple[str, ...]) -> list[str]:
         if stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode):
             found.append("conftest.py")
     for start, depth in starts:
-        if start == "":
-            continue
         base = root / start
         try:
             stamp = os.lstat(base)
@@ -423,14 +415,12 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
     example: str | None = None
     roots = config.runner.test_roots
     first_root = roots[0] if roots else "."
-    if kind is C.RunnerKind.PYTEST:
-        example = _example_test(root, first_root, kind)
-    elif kind is C.RunnerKind.VITEST:
+    if kind is C.RunnerKind.PYTEST or kind is C.RunnerKind.VITEST:
         example = _example_test(root, first_root, kind)
 
     if kind is C.RunnerKind.PYTEST:
         try:
-            _require_python_launcher(config.runner.launcher)
+            require_python_launcher(config.runner.launcher)
         except C.Problem:
             return Executability(
                 project=project, runner=kind.value,

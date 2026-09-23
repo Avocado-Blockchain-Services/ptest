@@ -1527,7 +1527,7 @@ def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
     The fake CLI backgrounds a 60s sleep holding the fifo open, then
     sleeps itself; the 1s owned capture must kill the whole group.
     Liveness is proved by fifo EOF (all writers dead), never by a
-    /proc scan. Both cli_version and _discover_model_entries delegate
+    /proc scan. Both cli_version and discover_model_entries delegate
     to the same _run_owned_capture helper.
     """
     fifo = bindir / "grandchild.fifo"

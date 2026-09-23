@@ -46,9 +46,9 @@ from pathlib import Path
 
 from . import contracts as C
 from .checklist import CATALOG as _CHECKLIST_CATALOG
-from .checklist import _SRC_DIR as _GENERIC_SRC_DIR_PATTERN
-from .checklist import _TEST_DIR as _GENERIC_TEST_DIR_PATTERN
-from .checklist import _TEST_FILE as _GENERIC_TEST_FILE_PATTERN
+from .checklist import SRC_DIR as _GENERIC_SRC_DIR_PATTERN
+from .checklist import TEST_DIR as _GENERIC_TEST_DIR_PATTERN
+from .checklist import TEST_FILE as _GENERIC_TEST_FILE_PATTERN
 from .files import read_regular
 
 _PHASE = "validation"

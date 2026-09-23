@@ -83,6 +83,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
 from .contracts import Problem
 
 _PHASE = "publication"
@@ -333,8 +334,6 @@ def _evidence_list(value: object, *, field: str, min_items: int) -> list:
 
 
 _EXECUTION_STATUSES = ("executable", "caveat", "not-executable")
-_SKIPPED_REVIEW_PREFIX = "Skipped without a model call: "
-_FAILED_REVIEW_PREFIX = "Review failed: "
 
 
 def _check_label(value: object, *, row_id: str):
@@ -628,8 +627,8 @@ def _status_section(row: dict) -> str:
         lines.append("Status: satisfied.")
         lines.append("")
     elif status == "unknown":
-        if rationale.startswith(_FAILED_REVIEW_PREFIX):
-            reason = rationale[len(_FAILED_REVIEW_PREFIX):]
+        if rationale.startswith(FAILED_PREFIX):
+            reason = rationale[len(FAILED_PREFIX):]
             lines.append(f"Status: unknown (review failed: {reason}).")
             lines.append("")
         else:
@@ -637,8 +636,8 @@ def _status_section(row: dict) -> str:
             lines.append("")
             lines.append(f"Rationale: {rationale}")
             lines.append("")
-    elif rationale.startswith(_SKIPPED_REVIEW_PREFIX):
-        reason = rationale[len(_SKIPPED_REVIEW_PREFIX):]
+    elif rationale.startswith(SKIP_PREFIX):
+        reason = rationale[len(SKIP_PREFIX):]
         lines.append("Status: not applicable (skipped without a model call).")
         lines.append("")
         lines.append(f"Reason: {reason}")

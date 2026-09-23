@@ -31,9 +31,9 @@ _RECIPE_FILES = {
 }
 
 # Shared routing fragments (regexes searched against excerpt paths).
-_TEST_DIR = r"(?i)(?:^|/)(?:tests?|__tests__)(?:/|$)"
-_TEST_FILE = r"(?i)(?:^|/)test_[^/]*\.py$|[^/]*_test\.py$|\.test\.|\.spec\."
-_SRC_DIR = r"(?:^|/)src(?:/|$)"
+TEST_DIR = r"(?i)(?:^|/)(?:tests?|__tests__)(?:/|$)"
+TEST_FILE = r"(?i)(?:^|/)test_[^/]*\.py$|[^/]*_test\.py$|\.test\.|\.spec\."
+SRC_DIR = r"(?:^|/)src(?:/|$)"
 _CONFTEST = r"(?:^|/)conftest\.py$"
 _MANIFEST = (r"(?i)(?:^|/)(?:pyproject\.toml|package\.json|requirements"
              r"(?:[^/]*)?\.txt|uv\.lock|poetry\.lock|pdm\.lock|Cargo\.toml"
@@ -76,7 +76,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "unknown, never N/A."),
         path_patterns=(_CONFTEST,
                        r"(?i)(?:^|/)[^/]*(?:fixture|factor)[^/]*$",
-                       _TEST_DIR, _TEST_FILE, _SRC_DIR),
+                       TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"@pytest\.fixture", r"(?i)factor", r"def test_",
                        r"(?i)fixture"),
         scanner_codes=("fixture.shared-mutation",),
@@ -98,7 +98,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "evidence is unknown, never N/A."),
         path_patterns=(_CONFTEST,
                        r"(?i)(?:^|/)[^/]*(?:fixture|factor)[^/]*$",
-                       _TEST_DIR, _TEST_FILE, _SRC_DIR),
+                       TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"@pytest\.fixture",
                        r"scope\s*=\s*[\"'](?:session|module|package|class)[\"']",
                        r"(?i)fixture", r"(?i)shared|mutable|global"),
@@ -119,7 +119,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "cost evidence. Mark N/A only with evidence that no "
                 "database, server, or schema setup exists in the admitted "
                 "evidence. Absence of such evidence is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR, _MANIFEST,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
         text_patterns=(r"(?i)sqlalchemy|sqlmodel|django|alembic|psycopg|asyncpg"
@@ -145,7 +145,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "boundaries. Mark N/A only with evidence that no database "
                 "identities, records, or namespaces exist in the admitted "
                 "evidence. Absence of such evidence is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR, _MANIFEST,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
         text_patterns=(r"(?i)sqlalchemy|sqlmodel|django|alembic|psycopg|asyncpg"
@@ -175,7 +175,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "Mark N/A only with evidence that no mutable cache client "
                 "exists in the admitted evidence. Absence of such evidence "
                 "is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR, _MANIFEST,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*cach[^/]*$"),
         text_patterns=(r"(?i)redis|valkey|memcach|aiocache|cachetools"
@@ -196,7 +196,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "released? Cite temp roots and port allocation. Mark N/A "
                 "only with evidence that tests create no files and bind no "
                 "ports. Absence of such evidence is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"\bopen\s*\(", r"Path\s*\(",
                        r"tmp_path|tmpdir|TemporaryDirectory|mkstemp|mkdtemp",
@@ -218,7 +218,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "fake boundary. Mark N/A only with evidence that no network "
                 "client or target exists in scope. Absence of such evidence "
                 "is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR, _MANIFEST,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML),
         text_patterns=(r"https?://",
                        r"requests\.|httpx\.|urllib|aiohttp|axios"
@@ -239,7 +239,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "reaped? Cite spawn and teardown paths. Mark N/A only with "
                 "evidence that no child process is spawned in scope. Absence "
                 "of such evidence is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR,
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"subprocess|Popen|multiprocessing|start_new_session"
                        r"|setsid|detach|fork\s*\(|spawn|workers|lifecycle",),
@@ -259,7 +259,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "injection and barriers. Mark N/A only with evidence that no "
                 "clock read, sleep, or synchronization exists in scope. "
                 "Absence of such evidence is unknown, never N/A."),
-        path_patterns=(_CONFTEST, _TEST_DIR, _TEST_FILE, _SRC_DIR),
+        path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"(?i)sleep|monotonic|datetime|timezone|freeze_time"
                        r"|freezegun|deadline|timeout|clock",),
         scanner_codes=("time.blocking-sleep",),
@@ -282,8 +282,8 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "triggers. Mark N/A only with evidence that selection is "
                 "disabled or absent. Absence of such evidence is unknown, "
                 "never N/A."),
-        path_patterns=(_PTEST_TOML, _CONFTEST, _TEST_DIR, _TEST_FILE,
-                       _SRC_DIR),
+        path_patterns=(_PTEST_TOML, _CONFTEST, TEST_DIR, TEST_FILE,
+                       SRC_DIR),
         text_patterns=(r"os\.environ|getenv|subprocess|Path\.glob"
                        r"|\.glob\s*\(|selection|closed_inputs|input_roots"
                        r"|full_triggers",),
@@ -309,7 +309,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "unknown, never N/A."),
         path_patterns=(_PTEST_TOML, _MANIFEST,
                        r"(?i)(?:^|/)(?:pytest\.ini|tox\.ini|setup\.cfg)$",
-                       _TEST_DIR, _TEST_FILE, _SRC_DIR),
+                       TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"(?i)timeout|durations|benchmark|timing|\bslow\b"
                        r"|workers",),
         scanner_codes=(),
@@ -338,4 +338,5 @@ def load_recipe(name: str) -> str:
     return text
 
 
-__all__ = ["CATALOG", "ChecklistEntry", "load_recipe"]
+__all__ = ["CATALOG", "ChecklistEntry", "load_recipe", "TEST_DIR",
+           "TEST_FILE", "SRC_DIR"]
