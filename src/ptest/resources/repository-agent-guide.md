@@ -3,7 +3,8 @@
 Run every test command through `ptest` from the repository root. For focused work, prefix the scope with its declared child, such as `ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them, and never bypass them by changing directories.
 Run `ptest --full` once after the integrated change.
 
-Pytest runs serially under ptest: xdist is disabled with `-n 0`, which ptest adds when the project enables xdist. Never add `-n`, `--dist`, or other parallel controls to ptest args.
+Pytest runs serially under ptest: `ptest init` writes `-n 0` into a new pytest config when the project enables xdist. An existing config is never rewritten — init reports it as not runnable with the exact fix.
+The serial `-n 0` in `[runner] args` is the only allowed xdist control. Never add `-n N`, `--dist`, `--tx`, or other parallel controls to ptest args.
 
 Vitest runs as one exclusive `vitest run` command and manages its own workers; ptest reports only its exit code. Declared `[setup]` (such as `npm ci`) runs first when its required paths are missing.
 

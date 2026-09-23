@@ -24,8 +24,11 @@ show the reason and the exact fix instead. Re-running init is idempotent
 and never rewrites user-edited guidance.
 
 Pytest runs serially under ptest. When a project's pytest configuration
-enables xdist, ptest adds `-n 0` to the runner args; never add `-n`,
-`--dist`, or other parallel controls to ptest args. Vitest executes as one
+enables xdist, `ptest init` writes `-n 0` into a new pytest config; an
+existing config is never rewritten and is reported as not runnable with
+the exact fix. The serial `-n 0` in `[runner] args` is the only allowed
+xdist control; never add `-n N`, `--dist`, `--tx`, or other parallel
+controls to ptest args. Vitest executes as one
 exclusive `vitest run` command through the project-local Vitest CLI and
 manages its own workers; declared `[setup]` (such as `npm ci`) runs first
 when its required paths are missing.
