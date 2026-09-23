@@ -1436,7 +1436,7 @@ def test_build_packets_sanitizes_hostile_distribution_names(tmp_path):
     site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
     for hostile in ("evil-<script>-1.0", "back`tick-2.0",
                     "with space-3.0", "x" * 200 + "-4.0",
-                    "pytest-9.9.9\nrun-me", "coverage-[x](http://e)-1.0"):
+                    "pytest-9.9.9\nrun-me", "coverage-[x](http-e)-1.0"):
         (site / f"{hostile}.dist-info").mkdir()
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
     installed = [fact for fact in packet.dependencies
@@ -1592,6 +1592,28 @@ def test_build_packets_ignores_oversized_or_invalid_node_manifests(
     packet = _packet_for(tmp_path, {
         "src/m.py": "x = 1\n",
         "package.json": "{not valid json",
+    })
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+
+
+def test_build_packets_ignores_oversized_installed_node_manifest(tmp_path):
+    import json as json_lib
+
+    from ptest import agent_assessment as AA
+
+    node_modules = tmp_path / "node_modules" / "vitest"
+    node_modules.mkdir(parents=True)
+    (node_modules / "package.json").write_text(
+        json_lib.dumps({"name": "vitest", "version": "2.1.3"})
+        + " " * (64 * 1024 + 1024),
+        encoding="utf-8")
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "package.json": json_lib.dumps({
+            "name": "demo",
+            "devDependencies": {"vitest": "^2.0.0"},
+        }),
     })
     assert not any(fact.status == "installed"
                    for fact in packet.dependencies)

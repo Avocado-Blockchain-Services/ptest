@@ -11,7 +11,9 @@ Three-pass shape (collect, validate, score):
    plus SHA-256 excerpt identities. Dependency provenance is static text
    only: declarations and
    authoritative locks are distinguished, the local environment is never
-   executed or imported (recorded ``uninspectable``), ptest's own runtime
+   executed or imported (project-local interpreter metadata is reported
+   as ``installed`` facts, otherwise recorded ``uninspectable``),
+   ptest's own runtime
    environment is never treated as project evidence, and anything
    unprovable stays ``unknown``.
 2. :func:`parse_assessment` validates one normalized model-prose payload
@@ -19,10 +21,10 @@ Three-pass shape (collect, validate, score):
    contract (``ptest.agent-assessment/v1``) instead of a duplicate schema,
    then binds every citation to collected excerpt identity and ranges,
    and rejects stale packets, model-supplied commands/scores, raw
-   provider/publication fields, and every ``not-applicable`` row.
-   Raw N/A is unsupported in v1 (a quoted line proves nothing about
-   applicability; leave the row ``unknown``). Only pure :func:`score`
-   keeps N/A support for a future authoritative path.
+   provider/publication fields, and unjustified ``not-applicable`` rows.
+   A ``not-applicable`` row is accepted only with a specific rationale
+   (>=24 non-whitespace characters via the contract) and >=1 citation
+   bound to packet excerpts; absence of code stays ``unknown``.
 3. :func:`score` computes ``satisfied / (all - justified N/A)`` with
    integer floor; ``unknown`` stays in the denominator and zero applicable
    rows yield no score.
@@ -133,8 +135,10 @@ _REVIEW_INSTRUCTION = (
     "duplicate, or reorder fields or checklist rows. Do not include extra "
     "fields, model scores, execution-proof claims, test-run claims, observed "
     "commands, or observed results. Cite only packet excerpts using their "
-    "root-relative paths, line ranges, and content identities. The raw v1 "
-    "parser does not support not-applicable; leave such rows unknown."
+    "root-relative paths, line ranges, and content identities. Use "
+    "not-applicable only with a specific rationale citing affirmative "
+    "packet evidence that the item cannot apply; absence of code is "
+    "`unknown`, never not-applicable."
 )
 
 # Raw payload keys the model must never supply. The public codec projects
@@ -301,7 +305,8 @@ class DependencyFact:
         if not isinstance(self.ecosystem, str) or not self.ecosystem:
             raise TypeError("dependency.ecosystem must be nonempty str")
         if self.status not in ("declared", "locked", "missing",
-                               "unsupported", "uninspectable"):
+                               "unsupported", "uninspectable",
+                               "installed"):
             raise ValueError("dependency.status is unknown")
         if self.ref_path is not None:
             object.__setattr__(self, "ref_path",
@@ -698,9 +703,278 @@ def encode_review_request(packet: EvidencePacket, schema: bytes) -> bytes:
     return request
 
 
+# Project-local environment inspection bounds. Metadata is read without
+# imports or execution: ``pyvenv.cfg`` version keys, distribution directory
+# names, and installed ``package.json`` version fields only. Symlinks are
+# never followed out of the child root; every read is size-capped.
+_PYVENV_CFG_MAX_BYTES = 4096
+_NODE_PACKAGE_JSON_MAX_BYTES = 64 * 1024
+_MAX_DIST_INFO_ENTRIES = 512
+_MAX_ENV_SCAN_ENTRIES = 4096
+_ENV_DETAIL_MAX_CHARS = 512
+_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._+-]+")
+# Recognized test tools: small explicit allowlists, nothing else is named.
+_NODE_TEST_TOOLS = frozenset({"vitest", "jest", "mocha", "@playwright/test"})
+_PYTHON_TEST_TOOLS = frozenset({"pytest", "hypothesis", "coverage",
+                                "pytest-cov"})
+
+
+def _safe_token(value: object, max_len: int) -> str | None:
+    """Return ``value`` when it is a short plain token, else None.
+
+    Only ``[A-Za-z0-9._+-]`` tokens of bounded length may reach fact
+    detail; hostile names/versions (controls, markup, backticks, overlong)
+    are dropped, never reported.
+    """
+    if not isinstance(value, str) or not value or len(value) > max_len:
+        return None
+    if _SAFE_TOKEN_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
+def _is_real_dir(path: Path) -> bool:
+    """True only for a directory that is not a symlink (lstat, no follow)."""
+    try:
+        stamp = os.lstat(path)
+    except OSError:
+        return False
+    return (not stat.S_ISLNK(stamp.st_mode)
+            and stat.S_ISDIR(stamp.st_mode))
+
+
+def _read_pyvenv_version(child_root: Path, env_name: str) -> str | None:
+    """Read the ``version`` (or ``version_info``) key from pyvenv.cfg.
+
+    The file must be a regular file within the size cap; symlinks, FIFOs,
+    directories, oversized, or undecodable files are ignored. Only the
+    version keys are extracted; ``home`` and absolute paths never leave.
+    """
+    try:
+        raw = read_regular(child_root, f"{env_name}/pyvenv.cfg",
+                           _PYVENV_CFG_MAX_BYTES + 1)
+    except C.Problem:
+        return None
+    if len(raw) > _PYVENV_CFG_MAX_BYTES:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    fallback: str | None = None
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        key = key.strip()
+        if key == "version":
+            version = _safe_token(value.strip(), 32)
+            if version is not None:
+                return version
+        elif key == "version_info" and fallback is None:
+            fallback = _safe_token(value.strip(), 32)
+    return fallback
+
+
+def _scan_dist_info(child_root: Path, env_name: str, *,
+                    deadline: float | None,
+                    progress: Callable[[], None] | None
+                    ) -> tuple[int, bool, list[tuple[str, str]]]:
+    """Count ``*.dist-info`` dirs and name recognized test tools.
+
+    Returns ``(count, lower_bound, tools)`` where ``count`` is the number
+    of distribution directories observed and ``lower_bound`` reports that
+    the scan stopped at its entry bound. Symlinked entries are never
+    followed; only validated tokens reach ``tools``.
+    """
+    lib = child_root / env_name / "lib"
+    if not _is_real_dir(lib):
+        return (0, False, [])
+    try:
+        with os.scandir(lib) as handle:
+            interpreters = [(entry.name, entry.path) for entry in handle]
+    except OSError:
+        return (0, False, [])
+    tools: list[tuple[str, str]] = []
+    seen_tools: set[str] = set()
+    count = 0
+    examined = 0
+    for interpreter_name, interpreter_path in interpreters:
+        _review_checkpoint(deadline, progress)
+        try:
+            stamp = os.lstat(interpreter_path)
+        except OSError:
+            continue
+        if (stat.S_ISLNK(stamp.st_mode)
+                or not stat.S_ISDIR(stamp.st_mode)):
+            continue
+        if not interpreter_name.startswith("python3."):
+            continue
+        site = Path(interpreter_path) / "site-packages"
+        if not _is_real_dir(site):
+            continue
+        try:
+            with os.scandir(site) as handle:
+                entries = [(item.name, item.path) for item in handle]
+        except OSError:
+            continue
+        for item_name, item_path in entries:
+            _review_checkpoint(deadline, progress)
+            examined += 1
+            if examined > _MAX_ENV_SCAN_ENTRIES:
+                return (count, True, tools)
+            try:
+                item_stamp = os.lstat(item_path)
+            except OSError:
+                continue
+            if (stat.S_ISLNK(item_stamp.st_mode)
+                    or not stat.S_ISDIR(item_stamp.st_mode)):
+                continue
+            if not item_name.endswith(".dist-info"):
+                continue
+            count += 1
+            if count > _MAX_DIST_INFO_ENTRIES:
+                return (count - 1, True, tools)
+            stem = item_name[:-len(".dist-info")]
+            name, dash, version = stem.rpartition("-")
+            if not dash:
+                continue
+            clean_name = _safe_token(name, 64)
+            clean_version = _safe_token(version, 32)
+            if clean_name is None or clean_version is None:
+                continue
+            normalized = re.sub(r"[-_.]+", "-", clean_name.lower())
+            if (normalized in _PYTHON_TEST_TOOLS
+                    and normalized not in seen_tools):
+                seen_tools.add(normalized)
+                tools.append((clean_name, clean_version))
+    return (count, False, tools)
+
+
+def _inspect_python_env(child_root: Path, *,
+                        deadline: float | None,
+                        progress: Callable[[], None] | None
+                        ) -> DependencyFact | None:
+    """Describe a project-local ``.venv``/``venv`` without executing it."""
+    for env_name in (".venv", "venv"):
+        if not _is_real_dir(child_root / env_name):
+            continue
+        version = _read_pyvenv_version(child_root, env_name)
+        count, lower_bound, tools = _scan_dist_info(
+            child_root, env_name, deadline=deadline, progress=progress)
+        numbered = f"{count}+" if lower_bound else str(count)
+        detail = (f"Python {version if version is not None else 'unknown'} "
+                  f"project-local environment: {numbered} distributions")
+        if tools:
+            detail += "; " + ", ".join(
+                f"{name} {tool_version}" for name, tool_version in tools)
+        return DependencyFact(ecosystem="python", status="installed",
+                              ref_path=None,
+                              detail=detail[:_ENV_DETAIL_MAX_CHARS])
+    return None
+
+
+def _resolve_inside(node_modules: Path, node_real: str,
+                    parts: list[str]) -> Path | None:
+    """Resolve package components, following only contained symlinks.
+
+    A symlink (pnpm layout) is followed only when its real path stays
+    inside the child's ``node_modules``; an escaping link is ignored.
+    """
+    current = node_modules
+    for part in parts:
+        candidate = current / part
+        try:
+            is_link = os.lstat(candidate).st_mode
+        except OSError:
+            return None
+        if stat.S_ISLNK(is_link):
+            real = os.path.realpath(candidate)
+            try:
+                inside = os.path.commonpath([real, node_real]) == node_real
+            except ValueError:
+                return None
+            if not inside:
+                return None
+            current = Path(real)
+        else:
+            current = candidate
+    if not _is_real_dir(current):
+        return None
+    return current
+
+
+def _inspect_node_env(child_root: Path, package_json_text: str | None, *,
+                      deadline: float | None,
+                      progress: Callable[[], None] | None
+                      ) -> DependencyFact | None:
+    """Describe installed test tools named by the admitted package.json.
+
+    Only dependencies named in the admitted manifest that are also on the
+    explicit test-tool allowlist are inspected, reading at most the
+    ``version`` field of their installed ``package.json``.
+    """
+    if not package_json_text:
+        return None
+    try:
+        manifest = json.loads(package_json_text)
+    except ValueError:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    wanted: set[str] = set()
+    for section in ("dependencies", "devDependencies"):
+        entries = manifest.get(section)
+        if isinstance(entries, dict):
+            for name in entries:
+                if isinstance(name, str) and name in _NODE_TEST_TOOLS:
+                    wanted.add(name)
+    if not wanted:
+        return None
+    node_modules = child_root / "node_modules"
+    if not _is_real_dir(node_modules):
+        return None
+    node_real = os.path.realpath(node_modules)
+    found: list[tuple[str, str]] = []
+    for name in sorted(wanted):
+        _review_checkpoint(deadline, progress)
+        resolved = _resolve_inside(node_modules, node_real,
+                                   name.split("/"))
+        if resolved is None:
+            continue
+        try:
+            raw = read_regular(resolved, "package.json",
+                               _NODE_PACKAGE_JSON_MAX_BYTES + 1)
+        except C.Problem:
+            continue
+        if len(raw) > _NODE_PACKAGE_JSON_MAX_BYTES:
+            continue
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        version = _safe_token(document.get("version"), 32)
+        if version is None:
+            continue
+        found.append((name, version))
+    if not found:
+        return None
+    detail = ("Node project-local environment: "
+              + ", ".join(f"{name} {version}" for name, version in found))
+    return DependencyFact(ecosystem="node", status="installed",
+                          ref_path=None,
+                          detail=detail[:_ENV_DETAIL_MAX_CHARS])
+
+
 def _dependency_facts(names: set[str], prefix: str,
-                      scoped_paths: dict[str, str] | None = None) -> tuple:
-    """Static declaration/lock facts; environment stays uninspectable."""
+                      scoped_paths: dict[str, str] | None = None, *,
+                      child_root: Path | None = None,
+                      package_json_text: str | None = None,
+                      deadline: float | None = None,
+                      progress: Callable[[], None] | None = None) -> tuple:
+    """Static declaration/lock facts plus safe project-local env metadata."""
     def ref_path(name: str) -> str:
         if scoped_paths is not None:
             return scoped_paths[name]
@@ -744,11 +1018,25 @@ def _dependency_facts(names: set[str], prefix: str,
             ecosystem="project", status="missing", ref_path=None,
             detail="No recognized declaration file admitted in packet; "
                    "dependency provenance unknown."))
-    facts.append(DependencyFact(
-        ecosystem="environment", status="uninspectable", ref_path=None,
-        detail="Local environments are not executed, imported, or "
-               "installed; the ptest runtime environment is never project "
-               "evidence, so installed prerequisites stay unknown."))
+    installed: list[DependencyFact] = []
+    if child_root is not None:
+        _review_checkpoint(deadline, progress)
+        python_fact = _inspect_python_env(
+            child_root, deadline=deadline, progress=progress)
+        if python_fact is not None:
+            installed.append(python_fact)
+        node_fact = _inspect_node_env(
+            child_root, package_json_text, deadline=deadline,
+            progress=progress)
+        if node_fact is not None:
+            installed.append(node_fact)
+    if installed:
+        facts.extend(installed)
+    else:
+        facts.append(DependencyFact(
+            ecosystem="environment", status="uninspectable", ref_path=None,
+            detail="No project-local environment; external environments "
+                   "are not inspected."))
     return tuple(facts)
 
 
@@ -982,8 +1270,17 @@ def _build_one_packet(root: Path, repo, resolution,
     else:
         runner_kind = "unknown"
         project_id = "0" * 32
+    package_json_text: str | None = None
+    manifest_path = f"{prefix}package.json"
+    for excerpt in excerpts:
+        _review_checkpoint(deadline, progress)
+        if excerpt.path == manifest_path:
+            package_json_text = excerpt.text
+            break
     dependencies = _dependency_facts(
-        set(paths), prefix, paths if scan_start else None)
+        set(paths), prefix, paths if scan_start else None,
+        child_root=child_root, package_json_text=package_json_text,
+        deadline=deadline, progress=progress)
     _review_checkpoint(deadline, progress)
 
     # Enforce the prompt cap by dropping trailing excerpts; coverage counts
@@ -1253,10 +1550,9 @@ def parse_assessment(payload: bytes,
                             "assessment citation escapes its excerpt")
         _reject_untrusted_prose(entry["rationale"],
                                 f"rows[{position}].rationale")
-        if entry["status"] == "not-applicable":
-            raise _fail("invalid-assessment",
-                        "not-applicable is unsupported in v1 model "
-                        "input; leave the row unknown")
+        # A not-applicable row passing the contract (specific rationale,
+        # >=1 citation) with citations bound to packet excerpts above is
+        # accepted here; absence of code remains `unknown` by instruction.
         rows.append(AssessmentRow(id=entry["id"], status=entry["status"],
                                   rationale=entry["rationale"],
                                   evidence=citations))
