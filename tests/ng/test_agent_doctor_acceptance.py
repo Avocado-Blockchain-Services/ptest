@@ -95,56 +95,44 @@ def _patch_qualification(monkeypatch, *, unavailable: bool = False):
     return statuses
 
 
-def _raw_assessment(request: bytes) -> bytes:
-    """Return packet-bound prose with one cited cache-isolation gap."""
-    packet = json.loads(request)["packet"]
-    excerpts = packet["excerpts"]
-    assert excerpts, "synthetic test source should be admitted to each packet"
+def _one_row_assessment(request: bytes) -> bytes:
+    """Return one one-row reply with a cited cache-isolation gap row."""
+    body = json.loads(request)
+    item_id = body["policy"]["item"]["id"]
+    excerpts = body["excerpts"]
+    cache_id = next(row_id for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS
+                    if row_id.startswith("CACHE-"))
+    if not excerpts:
+        return json.dumps({
+            "status": "unknown",
+            "rationale": ("The item subset admitted no excerpts for "
+                          "this row."),
+            "evidence": [],
+            "finding": None,
+        }).encode("utf-8")
     excerpt = excerpts[0]
     citation = {
         key: excerpt[key]
         for key in ("path", "start_line", "end_line", "sha256")
     }
-    rows = []
-    cache_id = next(row_id for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS
-                    if row_id.startswith("CACHE-"))
-    for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS:
-        is_gap = row_id == cache_id
-        rows.append({
-            "id": row_id,
-            "status": "gap" if is_gap else "unknown",
-            "rationale": (
-                "The cited bounded source shows cache cleanup without evidence "
-                "that another owner remains isolated."
-                if is_gap else
-                "The supplied bounded evidence does not establish this criterion."
+    is_gap = item_id == cache_id
+    return json.dumps({
+        "status": "gap" if is_gap else "unknown",
+        "rationale": (
+            "The cited bounded source shows cache cleanup without evidence "
+            "that another owner remains isolated."
+            if is_gap else
+            "The supplied bounded evidence does not establish this criterion."
+        ),
+        "evidence": [citation] if is_gap else [],
+        "finding": ({
+            "summary": "Cache cleanup has no neighbor ownership assertion.",
+            "suggested_change": (
+                "Add an executable test that proves a neighbor cache key survives cleanup."
             ),
-            "evidence": [citation] if is_gap else [],
-        })
-    # Raw model reply: exactly {"data": ...}; ptest owns the envelope.
-    payload = {
-        "data": {
-            "schema": C.AGENT_ASSESSMENT_SCHEMA,
-            "children": [{
-                "project_id": packet["project_id"],
-                "scope": packet["scope"],
-                "packet_sha256": packet["packet_sha256"],
-                "rows": rows,
-                "findings": [{
-                    "id": cache_id,
-                    "summary": "Cache cleanup has no neighbor ownership assertion.",
-                    "suggested_change": (
-                        "Add an executable test that proves a neighbor cache key survives cleanup."
-                    ),
-                    "recipe_id": C.AGENT_ASSESSMENT_RECIPES[cache_id],
-                    "evidence": [citation],
-                }],
-                "limitations": [],
-            }],
-            "limitations": [],
-        },
-    }
-    return json.dumps(payload).encode("utf-8")
+            "evidence": [citation],
+        } if is_gap else None),
+    }).encode("utf-8")
 
 
 def _install_fake_review(monkeypatch, *, cancelled: bool = False):
@@ -152,24 +140,32 @@ def _install_fake_review(monkeypatch, *, cancelled: bool = False):
 
     launches = []
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        launches.append((adapter.name, packet["declaration"], timeout_s))
-        return ProviderResult(
-            provider=adapter.name,
-            ok=not cancelled,
-            assessment=b"" if cancelled else _raw_assessment(request),
-            error="cancelled" if cancelled else "",
-            exit_code=None if cancelled else 0,
-            timed_out=False,
-            cancelled=cancelled,
-            truncated=False,
-            pid=7301 + len(launches),
-            argv=adapter.argv,
-            scratch="/tmp/ptest-agent-doctor-acceptance",
-        )
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None):
+        results = []
+        for request, schema in requests:
+            body = json.loads(request)
+            launches.append(
+                (adapter.name, body["packet"]["declaration"], timeout_s))
+            results.append(ProviderResult(
+                provider=adapter.name,
+                ok=not cancelled,
+                assessment=b"" if cancelled else _one_row_assessment(request),
+                error="cancelled" if cancelled else "",
+                exit_code=None if cancelled else 0,
+                timed_out=False,
+                cancelled=cancelled,
+                truncated=False,
+                pid=7301 + len(launches),
+                argv=adapter.argv,
+                scratch="/tmp/ptest-agent-doctor-acceptance",
+            ))
+            if on_done is not None:
+                on_done(len(results) - 1, results[-1])
+        return tuple(results)
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
     return launches
 
 
@@ -191,7 +187,7 @@ def test_static_doctor_modes_compose_without_review_or_report_writes(
         lambda *args, **kwargs: pytest.fail("static doctor resolved a reviewer"),
     )
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *args, **kwargs: pytest.fail("static doctor launched a reviewer"),
     )
     before = _tree_state(root)
@@ -247,7 +243,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     monkeypatch.setattr("builtins.input", input_answer)
     launches = []
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *args, **kwargs: launches.append(args) or pytest.fail(
             "declined init launched a reviewer"),
     )
@@ -316,7 +312,7 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
 
     monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *args, **kwargs: launch_calls.append(args),
     )
     monkeypatch.setattr(
@@ -339,20 +335,27 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
                               qualified=True, qualification_note="test-only bypass")
     from ptest.agent_providers import ProviderResult
 
-    def cancelled_launch(adapter, request, schema, timeout_s, progress):
+    def cancelled_launches(adapter, requests, timeout_s, *, concurrency=4,
+                           on_done=None):
         launch_calls.append((adapter.name,))
-        return ProviderResult(
-            provider=adapter.name, ok=False, assessment=b"", error="cancelled",
-            exit_code=None, timed_out=False, cancelled=True, truncated=False,
-            pid=7401, argv=adapter.argv, scratch="/tmp/ptest-agent-doctor-acceptance",
-        )
+        return tuple(
+            ProviderResult(
+                provider=adapter.name, ok=False, assessment=b"",
+                error="cancelled", exit_code=None, timed_out=False,
+                cancelled=True, truncated=False, pid=7401, argv=adapter.argv,
+                scratch="/tmp/ptest-agent-doctor-acceptance",
+            )
+            for _ in requests)
 
     def bypass(parsed, resolution, domain, *, interactive, preconsented=False):
-        cli._run_doctor_review(parsed, resolution, domain, adapter=adapter)
+        cli._run_doctor_review(parsed, resolution, domain, adapter=adapter,
+                               interactive=interactive,
+                               preconsented=preconsented)
         return False
 
     with monkeypatch.context() as disabled_boundary:
-        disabled_boundary.setattr("ptest.cli.agent_providers.launch_review", cancelled_launch)
+        disabled_boundary.setattr("ptest.cli.agent_providers.launch_reviews",
+                                  cancelled_launches)
         disabled_boundary.setattr("ptest.cli._run_review_entry", bypass)
         disabled_boundary.setattr("ptest.cli.doctor.inspect_workspace",
                                   real_inspect)
@@ -388,7 +391,11 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert lines.index("api (pytest)") < lines.index("web (pytest)")
     assert "0 of 11 checks confirmed from evidence" in human.out
     assert "Execution verification: not run." in human.out
-    assert [item[1] for item in launches] == ["api", "web"]
+    declarations = [item[1] for item in launches]
+    api_count = declarations.count("api")
+    web_count = declarations.count("web")
+    assert api_count > 0 and web_count > 0
+    assert declarations == ["api"] * api_count + ["web"] * web_count
 
     report = root / "recommendations.md"
     contents = report.read_bytes()
@@ -428,6 +435,8 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
         assert [row["id"] for row in child["rows"]] == list(
             C.AGENT_ASSESSMENT_CHECKLIST_IDS)
         assert child["score"] == {"satisfied": 0, "applicable": 11, "percent": 0}
+        assert all(row["label"] for row in child["rows"])
+        assert child["execution"]["status"] in ("executable", "caveat")
     assert public.data["publication"]["path"] == "recommendations.md"
     updated_contents = report.read_bytes()
     updated_marker, updated_body = updated_contents.split(b"\n", 1)
@@ -441,7 +450,8 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert public.data["publication"]["sha256"] == hashlib.sha256(
         updated_contents).hexdigest()
     assert public.data["publication"]["status"] == "unchanged"
-    assert [item[1] for item in launches] == ["api", "web", "api", "web"]
+    rerun = [item[1] for item in launches][api_count + web_count:]
+    assert rerun == declarations
     assert statuses == ["claude"] * 2
 
 
@@ -471,4 +481,8 @@ def test_review_unavailable_or_cancelled_preserves_existing_report(
     assert document.kind == "doctor" and document.data is None
     assert document.error.code == expected_code
     assert _tree_state(root) == before
-    assert [item[1] for item in launches] == ([] if failure == "unavailable" else ["."])
+    scopes = [item[1] for item in launches]
+    if failure == "unavailable":
+        assert scopes == []
+    else:
+        assert scopes and all(scope == "." for scope in scopes)

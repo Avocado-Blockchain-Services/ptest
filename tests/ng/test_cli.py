@@ -1550,7 +1550,6 @@ def _fake_reviewer(name, *, qualified):
 def test_tty_auto_review_uses_stable_order_skipping_unavailable(
         inspection_project, tmp_path, monkeypatch, capsys):
     import sys
-    from ptest.agent_providers import ProviderResult
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
@@ -1569,23 +1568,16 @@ def test_tty_auto_review_uses_stable_order_skipping_unavailable(
     monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve)
     monkeypatch.setattr("builtins.input", lambda: prompts.append("asked") or "yes")
     launches = []
-
-    def launch(adapter, request, schema, timeout_s, progress):
-        launches.append(adapter.name)
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=3001, argv=adapter.argv, scratch="/tmp/ptest-review-test")
-
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, pid=3001))
 
     assert main(("doctor",)) == 0
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
     assert prompts == ["asked"]
-    assert launches == ["codex"]
+    assert launches and all(name == "codex" for name, _ in launches)
     assert "Choose a reviewer" not in captured.err
     assert "recommendations.md" in captured.out
 
@@ -1614,7 +1606,7 @@ def test_tty_auto_with_no_qualified_reviewer_never_prompts_or_scans(
         lambda *a, **k: pytest.fail("scanned source without a qualified reviewer"),
     )
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *a, **k: pytest.fail("launched without a qualified reviewer"),
     )
 
@@ -1652,7 +1644,7 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
         lambda *a, **k: scans.append(1) or real_inspect(*a, **k),
     )
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *a, **k: pytest.fail("decline launched reviewer"),
     )
 
@@ -1661,7 +1653,7 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
     captured = capsys.readouterr()
     disclosure = captured.err
     assert prompts == [1]
-    assert scans == [1]
+    assert scans == [1, 1]
     assert "claude" in disclosure
     assert r"project\x1b[31m\nname" in disclosure
     assert "bounded source" in disclosure
@@ -1730,7 +1722,7 @@ def test_tty_auto_skips_unqualified_opencode_without_prompting(
         lambda *a, **k: pytest.fail("disabled review scanned after acceptance"),
     )
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *a, **k: pytest.fail("accepted review launched provider"),
     )
 
@@ -1784,37 +1776,48 @@ def _fake_cli_executable(tmp_path, monkeypatch, name="claude"):
     monkeypatch.setenv("PATH", str(executable.parent))
 
 
-def _normalized_unknown_assessment(request):
-    packet = json.loads(request)["packet"]
-    rows = [{
-        "id": row_id,
-        "status": "unknown",
+def _one_row_reply(request, *, status="unknown"):
+    """One-row per-item reply citing the item request's own subset."""
+    body = json.loads(request)
+    excerpts = body["excerpts"]
+    evidence = []
+    if status in ("satisfied", "gap", "not-applicable") and excerpts:
+        first = excerpts[0]
+        evidence = [{key: first[key] for key in (
+            "path", "start_line", "end_line", "sha256")}]
+    if status in ("satisfied", "gap", "not-applicable") and not evidence:
+        status = "unknown"
+    return json.dumps({
+        "status": status,
         "rationale": "The bounded source evidence does not establish this row.",
-        "evidence": [],
-    } for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS]
-    data = {
-        "schema": C.AGENT_ASSESSMENT_SCHEMA,
-        "children": [{
-            "project_id": packet["project_id"],
-            "scope": packet["scope"],
-            "packet_sha256": packet["packet_sha256"],
-            "rows": rows,
-            "findings": [],
-            "limitations": [],
-        }],
-        "limitations": [],
-    }
-    # Raw model reply: exactly {"data": ...}; ptest owns the envelope.
-    return json.dumps({"data": data}).encode("utf-8")
+        "evidence": evidence,
+        "finding": None,
+    }).encode("utf-8")
 
 
-def test_model_facing_schema_requires_only_data():
-    """The provider response schema is data-only: ptest owns the envelope."""
-    from ptest import cli
+def _ok_item_launches(launches, hook=None, *, pid=1000, status="unknown"):
+    """Build a launch_reviews fake answering every item with a valid row."""
+    from ptest.agent_providers import ProviderResult
 
-    schema = json.loads(cli._raw_assessment_schema())
-    assert set(schema["properties"]) == {"data"}
-    assert schema["required"] == ["data"]
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None):
+        results = []
+        for request, schema in requests:
+            body = json.loads(request)
+            if hook is not None:
+                hook(adapter, body, request, timeout_s)
+            launches.append((adapter.name, body["packet"]["declaration"]))
+            results.append(ProviderResult(
+                provider=adapter.name, ok=True,
+                assessment=_one_row_reply(request, status=status), error="",
+                exit_code=0, timed_out=False, cancelled=False,
+                truncated=False, pid=pid + len(launches),
+                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+            if on_done is not None:
+                on_done(len(results) - 1, results[-1])
+        return tuple(results)
+
+    return launch_many
 
 
 def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
@@ -1832,44 +1835,60 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _fake_cli_executable(tmp_path, monkeypatch)
     _fake_qualified_profiles(monkeypatch)
+    argv_log = []
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        assessment = json.loads(_normalized_unknown_assessment(request))
-        assert packet["excerpts"]
-        excerpt = packet["excerpts"][0]
-        evidence = [{key: excerpt[key] for key in (
-            "path", "start_line", "end_line", "sha256") }]
-        for row in assessment["data"]["children"][0]["rows"]:
-            row["status"] = "satisfied"
-            row["evidence"] = evidence
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=json.dumps(assessment).encode("utf-8"), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=8003, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None):
+        results = []
+        for request, schema in requests:
+            body = json.loads(request)
+            assert body["packet"]["scope"] == "."
+            assert body["policy"]["item"]["id"]
+            argv_log.append(tuple(adapter.argv))
+            results.append(ProviderResult(
+                provider=adapter.name, ok=True,
+                assessment=_one_row_reply(request, status="satisfied"),
+                error="", exit_code=0, timed_out=False, cancelled=False,
+                truncated=False, pid=8003, argv=adapter.argv,
+                scratch="/tmp/ptest-review-test"))
+        return tuple(results)
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
 
+    # The parsed flags reach the provider: claude reviews on its haiku alias.
+    assert argv_log
+    assert all(item[-2:] == ("--model", "haiku") for item in argv_log)
+
     human = capsys.readouterr()
     assert ". (unknown)" in human.out
-    assert "11 of 11 checks confirmed from evidence" in human.out
+    assert "ptest: not runnable: no ptest configuration" in human.out
+    assert "run ptest init from the repository root" in human.out
+    assert "Checklist review only:" in human.out
+    assert "(ptest cannot run this project yet)" in human.out
+    assert " of 11 checks confirmed from evidence" in human.out
     assert "Execution verification: not run." in human.out
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "initialization-required" in report
     assert "ptest is not execution-ready" in report
     assert report.index("initialization-required") < report.index(
-        "11 of 11 checks confirmed from evidence")
+        "checks confirmed from evidence")
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 0
     document = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
     assert document.kind == "agent-assessment"
-    assert document.data["children"][0]["score"] == {
-        "satisfied": 11, "applicable": 11, "percent": 100,
+    child = document.data["children"][0]
+    assert child["execution"] == {
+        "status": "not-executable", "detail": "no ptest configuration",
+        "fix": "run ptest init from the repository root",
     }
+    assert all(row["label"] for row in child["rows"])
+    assert child["score"]["applicable"] == 11
+    assert document.data["provider"]["profile"] == (
+        "ptest-item-review-v1 model=haiku")
     blocker = next(item for item in document.data["limitations"]
                    if item["code"] == "capability-unsupported")
     assert "initialization-required" in blocker["message"]
@@ -1879,6 +1898,64 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert legacy.kind == "doctor"
     assert "children" not in legacy.data
     assert "provider" not in legacy.data
+
+
+def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
+        tmp_path, monkeypatch, capsys):
+    """All-skipped reviews produce a report with no disclosure or launch."""
+    import sys
+    from ptest import agent_assessment as AA
+    from ptest import cli
+
+    root = tmp_path / "all-skipped"
+    root.mkdir()
+    (root / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "abababababababababababababababab"\n'
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = \"demo\"\n", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_demo.py").write_text(
+        "def test_demo():\n    assert True\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    real_plan = AA.plan_item_reviews
+
+    def all_skipped(packet):
+        return tuple(
+            AA.ItemReview(item_id=review.item_id, label=review.label,
+                          scope=review.scope, request=None,
+                          schema=review.schema, excerpt_paths=(),
+                          skip_reason=AA.SKIP_PREFIX + "synthetic skip")
+            for review in real_plan(packet))
+
+    monkeypatch.setattr(cli.agent_assessment, "plan_item_reviews",
+                        all_skipped)
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_reviews",
+        lambda *a, **k: pytest.fail("zero-call review launched provider"),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda: pytest.fail("zero-call review prompted for disclosure"),
+    )
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.kind == "agent-assessment"
+    child = document.data["children"][0]
+    assert [row["status"] for row in child["rows"]] == (
+        ["not-applicable"] * 11)
+    assert child["score"] is None
+    assert (root / "recommendations.md").is_file()
 
 
 def test_only_selected_profile_qualification_gates_source_scan(
@@ -1903,7 +1980,7 @@ def test_only_selected_profile_qualification_gates_source_scan(
         lambda *a, **k: pytest.fail("scanned with an unqualified selection"),
     )
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
+        "ptest.cli.agent_providers.launch_reviews",
         lambda *a, **k: pytest.fail("launched with an unqualified selection"),
     )
 
@@ -1920,7 +1997,6 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     import time
     import sys
     from ptest import recommendations
-    from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
@@ -1935,6 +2011,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     _fake_qualified_profiles(monkeypatch)
     launches = []
     requests = []
+    timeouts = []
     publication_deadlines = []
     inspect_count = []
     real_inspect = __import__("ptest.doctor", fromlist=["inspect_workspace"]).inspect_workspace
@@ -1944,24 +2021,20 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
         inspect_count.append(1)
         return real_inspect(*args, **kwargs)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        response_schema = json.loads(schema)
-        response_data = response_schema["properties"]["data"]
-        assert "provider" not in response_data["properties"]
-        assert "publication" not in response_data["properties"]
-        response_child = response_data["properties"]["children"]["items"]
-        assert "score" not in response_child["properties"]
-        assert "not-applicable" in response_child["properties"]["rows"]["items"]["properties"]["status"]["enum"]
+    def hook(adapter, body, request, timeout_s):
+        item = body["policy"]["item"]
+        assert item["id"] in C.AGENT_ASSESSMENT_CHECKLIST_IDS
+        assert body["packet"]["declaration"] in ("api", "web")
         requests.append(request)
-        launches.append((packet["declaration"], timeout_s))
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=1000 + len(launches), argv=adapter.argv,
-            scratch="/tmp/ptest-review-test",
-        )
+        timeouts.append(timeout_s)
+        assert adapter.argv[-2:] == ("--model", "haiku")
+
+    def launch_many(adapter, requests_arg, timeout_s, *, concurrency=4,
+                    on_done=None):
+        assert concurrency == 4
+        return _ok_item_launches(launches, hook, pid=1000)(
+            adapter, requests_arg, timeout_s, concurrency=concurrency,
+            on_done=on_done)
 
     def publish(root_arg, payload, previous, *, source_proof, **kwargs):
         publication_deadlines.append(kwargs.pop("deadline", None))
@@ -1969,7 +2042,8 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
                             source_proof=source_proof, **kwargs)
 
     monkeypatch.setattr("ptest.cli.doctor.inspect_workspace", inspect)
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
     monkeypatch.setattr(recommendations, "publish_recommendations", publish)
 
     before = time.monotonic()
@@ -1982,6 +2056,8 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     assert document.kind == "agent-assessment"
     assert [child["scope"] for child in document.data["children"]] == ["api", "web"]
     assert document.data["provider"]["name"] == "claude"
+    assert document.data["provider"]["profile"] == (
+        "ptest-item-review-v1 model=haiku")
     assert document.data["publication"]["status"] == "created"
     assert set(document.data) == {
         "schema", "provider", "children", "limitations", "publication",
@@ -1990,24 +2066,32 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     assert document.data["children"][0]["score"] == {
         "satisfied": 0, "applicable": 11, "percent": 0,
     }
+    for child in document.data["children"]:
+        assert child["execution"]["status"] == "caveat"
+        assert all(row["label"] for row in child["rows"])
     assert "execution-not-run" in {
         item["code"] for item in document.data["limitations"]
     }
     assert "partial-evidence" in {
         item["code"] for item in document.data["children"][0]["limitations"]
     }
-    assert launches == [("api", 60), ("web", 60)]
+    declarations = [declaration for _, declaration in launches]
+    api_count = declarations.count("api")
+    web_count = declarations.count("web")
+    assert api_count > 0 and web_count > 0
+    assert declarations == ["api"] * api_count + ["web"] * web_count
+    assert timeouts and all(value == 60 for value in timeouts)
     assert len(publication_deadlines) == 1
     assert publication_deadlines[0] is not None
     assert before <= publication_deadlines[0] - 1800 <= after
-    assert len(requests) == 2
+    assert len(requests) == api_count + web_count
     assert all(b"must-not-enter-review-packet" not in item for item in requests)
     assert inspect_count == [1, 1]
     assert (root / "recommendations.md").is_file()
     assert captured.err
 
 
-def test_second_child_failure_keeps_prior_report_and_emits_no_assessment(
+def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
         case, tmp_path, monkeypatch, capsys):
     import sys
     from ptest.agent_providers import ProviderResult
@@ -2024,25 +2108,21 @@ def test_second_child_failure_keeps_prior_report_and_emits_no_assessment(
     (root / "recommendations.md").write_bytes(original)
     launches = []
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        launches.append(packet["declaration"])
-        if len(launches) == 2:
-            return ProviderResult(
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None):
+        results = []
+        for request, schema in requests:
+            body = json.loads(request)
+            launches.append(body["packet"]["declaration"])
+            results.append(ProviderResult(
                 provider=adapter.name, ok=False, assessment=b"",
                 error="provider-failed", exit_code=7, timed_out=False,
                 cancelled=False, truncated=False, pid=2002,
-                argv=adapter.argv, scratch="/tmp/ptest-review-test",
-            )
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=2001, argv=adapter.argv,
-            scratch="/tmp/ptest-review-test",
-        )
+                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+        return tuple(results)
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 2
@@ -2052,7 +2132,12 @@ def test_second_child_failure_keeps_prior_report_and_emits_no_assessment(
     assert failure_document.data is None
     assert failure_document.error.code == "provider-failed"
     assert "doctor review: reviewing" in captured.err
-    assert launches == ["api", "web"]
+    assert launches
+    declarations = [declaration for declaration in launches]
+    api_count = declarations.count("api")
+    web_count = declarations.count("web")
+    assert api_count > 0 and web_count > 0
+    assert declarations == ["api"] * api_count + ["web"] * web_count
     assert (root / "recommendations.md").read_bytes() == original
 
 
@@ -2060,7 +2145,6 @@ def test_second_child_failure_keeps_prior_report_and_emits_no_assessment(
 def test_revalidation_rejects_source_or_config_drift_before_publication(
         case, tmp_path, monkeypatch, capsys, mutation):
     import sys
-    from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
@@ -2080,11 +2164,12 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
         inspect_count.append(1)
         return real_inspect(*args, **kwargs)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        launches.append(packet["declaration"])
-        response = _normalized_unknown_assessment(request)
-        if packet["declaration"] == "web":
+    mutated = []
+
+    def hook(adapter, body, request, timeout_s):
+        declaration = body["packet"]["declaration"]
+        if declaration == "web" and not mutated:
+            mutated.append(1)
             if mutation == "source":
                 target = root / "web" / "test_example.py"
                 target.write_bytes(target.read_bytes() + b"\n# changed during review\n")
@@ -2093,14 +2178,11 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
                 target.write_bytes(target.read_bytes() + b"\n# changed during review\n")
             else:
                 (root / "web" / ".ptest.toml").write_bytes(b"not valid configuration\n")
-        return ProviderResult(
-            provider=adapter.name, ok=True, assessment=response, error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=4000 + len(launches), argv=adapter.argv,
-            scratch="/tmp/ptest-review-test")
 
     monkeypatch.setattr("ptest.cli.doctor.inspect_workspace", inspect)
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, hook, pid=4000))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 2
@@ -2109,7 +2191,12 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
     failure_document = C.decode_public_document(captured.out)
     assert failure_document.data is None
     assert failure_document.error.code == "stale-evidence"
-    assert launches == ["api", "web"]
+    assert mutated == [1]
+    declarations = [declaration for _, declaration in launches]
+    api_count = declarations.count("api")
+    web_count = declarations.count("web")
+    assert api_count > 0 and web_count > 0
+    assert declarations == ["api"] * api_count + ["web"] * web_count
     assert inspect_count == [1, 1]
     assert (root / "recommendations.md").read_bytes() == original
 
@@ -2117,7 +2204,6 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
 def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
         case, tmp_path, monkeypatch, capsys):
     import sys
-    from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
@@ -2139,25 +2225,24 @@ def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
     _fake_qualified_profiles(monkeypatch)
     launches = []
     mutate_during_review = [False]
+    mutated = []
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
+    def hook(adapter, body, request, timeout_s):
+        packet = body["packet"]
         assert packet["declaration"] == "api"
         assert packet["scope"] == "api/tests"
-        assert [excerpt["path"] for excerpt in packet["excerpts"]] == [
-            "api/tests/test_scoped.py"]
+        assert body["policy"]["item"]["id"] in C.AGENT_ASSESSMENT_CHECKLIST_IDS
+        assert [excerpt["path"] for excerpt in body["excerpts"]] == [
+            "api/tests/test_scoped.py"] or body["excerpts"] == []
         assert b"SCOPED_REVIEW_OUTSIDE_SENTINEL_251b" not in request
-        launches.append(packet["packet_sha256"])
-        if mutate_during_review[0]:
+        if mutate_during_review[0] and not mutated:
+            mutated.append(1)
             scoped_source.write_bytes(
                 scoped_source.read_bytes() + b"\n# changed during review\n")
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=4500, argv=adapter.argv, scratch="/tmp/ptest-review-test")
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, hook, pid=4500))
 
     argv = ("doctor", "--scope", "api/tests", "--reviewer", "claude",
             "--allow-model-review", "--assessment-json")
@@ -2166,6 +2251,8 @@ def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
     public_document = C.decode_public_document(capsys.readouterr().out)
     assert public_document.data["children"][0]["scope"] == "api/tests"
     published = (root / "recommendations.md").read_bytes()
+    first_run_launches = len(launches)
+    assert first_run_launches > 0
 
     mutate_during_review[0] = True
     assert main(argv) == 2
@@ -2173,15 +2260,18 @@ def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is None
     assert document.error.code == "stale-evidence"
-    assert len(launches) == 2
+    assert len(launches) == 2 * first_run_launches
     assert (root / "recommendations.md").read_bytes() == published
 
 
-@pytest.mark.parametrize(("case_name", "exit_code"), [
-    ("timeout", 124), ("cancel", 130), ("invalid", 2),
+@pytest.mark.parametrize(("case_name", "expected_code", "exit_code"), [
+    ("timeout", "provider-failed", 2),
+    ("cancel", "review-cancelled", 130),
+    ("invalid", "provider-failed", 2),
 ])
 def test_incomplete_or_invalid_provider_result_has_no_report(
-        inspection_project, tmp_path, monkeypatch, capsys, case_name, exit_code):
+        inspection_project, tmp_path, monkeypatch, capsys, case_name,
+        expected_code, exit_code):
     import sys
     from ptest.agent_providers import ProviderResult
 
@@ -2192,20 +2282,26 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
     _fake_cli_executable(tmp_path, monkeypatch)
     _fake_qualified_profiles(monkeypatch)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        timed_out = case_name == "timeout"
-        cancelled = case_name == "cancel"
-        invalid = case_name == "invalid"
-        return ProviderResult(
-            provider=adapter.name, ok=invalid,
-            assessment=b"{}" if invalid else b"",
-            error="" if invalid else ("timeout" if timed_out else
-                                      "cancelled" if cancelled else "provider-failed"),
-            exit_code=0 if invalid else None,
-            timed_out=timed_out, cancelled=cancelled, truncated=False,
-            pid=5001, argv=adapter.argv, scratch="/tmp/ptest-review-test")
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None):
+        results = []
+        for _request, _schema in requests:
+            timed_out = case_name == "timeout"
+            cancelled = case_name == "cancel"
+            invalid = case_name == "invalid"
+            results.append(ProviderResult(
+                provider=adapter.name, ok=invalid,
+                assessment=b"{}" if invalid else b"",
+                error="" if invalid else ("timeout" if timed_out else
+                                          "cancelled" if cancelled else "provider-failed"),
+                exit_code=0 if invalid else None,
+                timed_out=timed_out, cancelled=cancelled, truncated=False,
+                pid=5001, argv=adapter.argv,
+                scratch="/tmp/ptest-review-test"))
+        return tuple(results)
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == exit_code
@@ -2213,16 +2309,13 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
     assert failure_document.data is None
-    expected = {"timeout": "review-timeout", "cancel": "review-cancelled",
-                "invalid": "invalid-assessment"}[case_name]
-    assert failure_document.error.code == expected
+    assert failure_document.error.code == expected_code
     assert not (root / "recommendations.md").exists()
 
 
 def test_custom_report_conflict_preserves_user_content_after_complete_review(
         inspection_project, tmp_path, monkeypatch, capsys):
     import sys
-    from ptest.agent_providers import ProviderResult
 
     _, root = inspection_project
     monkeypatch.chdir(root)
@@ -2234,14 +2327,9 @@ def test_custom_report_conflict_preserves_user_content_after_complete_review(
     original = b"human notes: preserve these exactly\n"
     (root / "recommendations.md").write_bytes(original)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=6001, argv=adapter.argv, scratch="/tmp/ptest-review-test")
-
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches([], pid=6001))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 2
@@ -2268,7 +2356,7 @@ def test_total_review_deadline_prevents_late_provider_launch(
     _fake_qualified_profiles(monkeypatch)
     monkeypatch.setattr(cli, "_REVIEW_TOTAL_TIMEOUT_S", 0)
     monkeypatch.setattr(
-        cli.agent_providers, "launch_review",
+        cli.agent_providers, "launch_reviews",
         lambda *a, **k: pytest.fail("provider launched after total deadline"),
     )
 
@@ -2283,14 +2371,13 @@ def test_total_review_deadline_prevents_late_provider_launch(
 
 @pytest.mark.parametrize(("timeout_phase", "expected_launches"), [
     ("collecting", 0),
-    ("revalidating", 1),
+    ("revalidating", None),
 ])
 def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
         inspection_project, tmp_path, monkeypatch, capsys, timeout_phase,
         expected_launches):
     import sys
     from ptest import cli
-    from ptest.agent_providers import ProviderResult
 
     _, root = inspection_project
     monkeypatch.chdir(root)
@@ -2310,6 +2397,7 @@ def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
     build_count = 0
     review_deadline = []
     launches = []
+    launch_moments = []
 
     def build_packets(*args, **kwargs):
         nonlocal build_count
@@ -2320,17 +2408,14 @@ def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
             clock[0] = kwargs["deadline"]
         return real_build_packets(*args, **kwargs)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        launches.append(clock[0])
+    def hook(adapter, body, request, timeout_s):
+        launch_moments.append(clock[0])
         assert review_deadline and clock[0] < review_deadline[0]
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=8001, argv=adapter.argv, scratch="/tmp/ptest-review-test")
 
     monkeypatch.setattr(cli.agent_assessment, "build_packets", build_packets)
-    monkeypatch.setattr(cli.agent_providers, "launch_review", launch)
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_reviews",
+        _ok_item_launches(launches, hook, pid=8001))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 124
@@ -2338,7 +2423,11 @@ def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is None
     assert document.error.code == "review-timeout"
-    assert len(launches) == expected_launches
+    if expected_launches is None:
+        assert launch_moments
+    else:
+        assert launch_moments == []
+        assert launches == []
     assert report.read_bytes() == original_report
 
 
@@ -2346,7 +2435,6 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
         inspection_project, tmp_path, monkeypatch, capsys):
     import sys
     from ptest import cli
-    from ptest.agent_providers import ProviderResult
 
     _, root = inspection_project
     monkeypatch.chdir(root)
@@ -2368,15 +2456,10 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
         pulse()
         return real_build_packets(*args, **kwargs)
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=8002, argv=adapter.argv, scratch="/tmp/ptest-review-test")
-
     monkeypatch.setattr(cli.agent_assessment, "build_packets", build_packets)
-    monkeypatch.setattr(cli.agent_providers, "launch_review", launch)
+    monkeypatch.setattr(
+        cli.agent_providers, "launch_reviews",
+        _ok_item_launches([], pid=8002))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 0
@@ -2391,8 +2474,8 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
 def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
         case, tmp_path, monkeypatch, capsys):
     import sys
+    from ptest import cli
     from ptest import recommendations
-    from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
@@ -2418,27 +2501,27 @@ def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
     _fake_cli_executable(tmp_path, monkeypatch)
     _fake_qualified_profiles(monkeypatch)
     launched = []
-    packet_excerpt_counts = []
+    collected_packets = []
     published_proofs = []
     real_publish = recommendations.publish_recommendations
+    real_build_packets = cli.agent_assessment.build_packets
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        packet = json.loads(request)["packet"]
-        launched.append(packet["declaration"])
-        packet_excerpt_counts.append(len(packet["excerpts"]))
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=7000 + len(launched), argv=adapter.argv,
-            scratch="/tmp/ptest-review-test")
+    def build_packets(*args, **kwargs):
+        packets = real_build_packets(*args, **kwargs)
+        if not collected_packets:
+            collected_packets.append(packets)
+        return packets
 
     def publish(root_arg, payload, previous, *, source_proof, **kwargs):
         published_proofs.append(len(source_proof))
         return real_publish(root_arg, payload, previous,
                             source_proof=source_proof, **kwargs)
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(cli.agent_assessment, "build_packets",
+                        build_packets)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launched, pid=7000))
     monkeypatch.setattr(recommendations, "publish_recommendations", publish)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
@@ -2446,8 +2529,16 @@ def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is not None
-    assert launched == children
-    assert published_proofs == [sum(packet_excerpt_counts)]
+    declarations = [declaration for _, declaration in launched]
+    counts = [declarations.count(name) for name in children]
+    assert all(count > 0 for count in counts)
+    assert declarations == [
+        name for name, count in zip(children, counts)
+        for _ in range(count)]
+    assert collected_packets
+    assert published_proofs == [sum(
+        len(packet.excerpts) for packets in collected_packets
+        for packet in packets)]
     assert published_proofs[0] > 256
     assert (root / "recommendations.md").is_file()
 
@@ -2518,7 +2609,6 @@ def test_auto_with_codex_and_opencode_picks_codex(
         inspection_project, tmp_path, monkeypatch, capsys):
     """Auto skips missing claude and unqualified opencode, selecting codex."""
     import sys
-    from ptest.agent_providers import ProviderResult
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
@@ -2534,21 +2624,17 @@ def test_auto_with_codex_and_opencode_picks_codex(
     monkeypatch.setattr("builtins.input", lambda: "yes")
     launches = []
 
-    def launch(adapter, request, schema, timeout_s, progress):
-        launches.append(adapter.name)
+    def hook(adapter, body, request, timeout_s):
         assert adapter.qualified is True
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=3009, argv=adapter.argv, scratch="/tmp/ptest-review-test")
 
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, hook, pid=3009))
 
     assert main(("doctor", "--reviewer", "auto",
                  "--allow-model-review")) == 0
 
-    assert launches == ["codex"]
+    assert launches and all(name == "codex" for name, _ in launches)
 
 
 # --- Interactive reviewer choice: TTY menu when reviewer is absent/auto. ---
@@ -2561,7 +2647,6 @@ def _tty_menu_review(monkeypatch, tmp_path, *, answers,
     Returns (resolved, inputs, launches). An answer of EOF raises EOFError.
     """
     import sys
-    from ptest.agent_providers import ProviderResult
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
@@ -2590,16 +2675,9 @@ def _tty_menu_review(monkeypatch, tmp_path, *, answers,
 
     monkeypatch.setattr("builtins.input", fake_input)
     launches = []
-
-    def launch(adapter, request, schema, timeout_s, progress):
-        launches.append(adapter.name)
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=3100, argv=adapter.argv, scratch="/tmp/ptest-review-test")
-
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, pid=3100))
     return resolved, inputs, launches
 
 
@@ -2616,7 +2694,7 @@ def test_tty_menu_lists_two_in_order_and_selects_second(
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
-    assert launches == ["codex"]
+    assert launches and all(name == "codex" for name, _ in launches)
     assert len(inputs) == 2
     assert "Choose a reviewer for this review:" in captured.err
     assert captured.err.index("1) claude") < captured.err.index("2) codex")
@@ -2675,7 +2753,7 @@ def test_tty_single_installed_reviewer_skips_menu(
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
-    assert launches == ["codex"]
+    assert launches and all(name == "codex" for name, _ in launches)
     assert len(inputs) == 1
     assert "Choose a reviewer" not in captured.err
     assert "Model review disclosure: codex" in captured.err
@@ -2691,7 +2769,7 @@ def test_tty_menu_never_lists_unqualified_opencode(
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
-    assert launches == ["claude"]
+    assert launches and all(name == "claude" for name, _ in launches)
     assert "1) claude" in captured.err
     assert "2) codex" in captured.err
     assert "opencode" not in captured.err
@@ -2706,7 +2784,7 @@ def test_tty_explicit_reviewer_skips_menu(
 
     captured = capsys.readouterr()
     assert resolved == ["claude"]
-    assert launches == ["claude"]
+    assert launches and all(name == "claude" for name, _ in launches)
     assert len(inputs) == 1
     assert "Choose a reviewer" not in captured.err
     assert "Model review disclosure: claude" in captured.err
@@ -2716,7 +2794,6 @@ def test_tty_init_doctor_menu_selects_codex_without_consent_prompt(
         tmp_path, monkeypatch, capsys):
     """TTY init --doctor --allow-model-review shows the menu, not y/N."""
     import sys
-    from ptest.agent_providers import ProviderResult
 
     marker = tmp_path / ".git"
     marker.mkdir()
@@ -2746,23 +2823,16 @@ def test_tty_init_doctor_menu_selects_codex_without_consent_prompt(
 
     monkeypatch.setattr("builtins.input", fake_input)
     launches = []
-
-    def launch(adapter, request, schema, timeout_s, progress):
-        launches.append(adapter.name)
-        return ProviderResult(
-            provider=adapter.name, ok=True,
-            assessment=_normalized_unknown_assessment(request), error="",
-            exit_code=0, timed_out=False, cancelled=False, truncated=False,
-            pid=3100, argv=adapter.argv, scratch="/tmp/ptest-review-test")
-
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review", launch)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, pid=3100))
 
     assert main(("init", "--runner", "pytest", "--agents", "none",
                  "--doctor", "--allow-model-review")) == 0
 
     captured = capsys.readouterr()
     assert resolved == ["claude", "codex"]
-    assert launches == ["codex"]
+    assert launches and all(name == "codex" for name, _ in launches)
     assert len(inputs) == 1
     assert "Choose a reviewer for this review:" in captured.err
     assert "Run this review once?" not in captured.err
@@ -2770,27 +2840,19 @@ def test_tty_init_doctor_menu_selects_codex_without_consent_prompt(
 
 
 def _native_replay_executable(bindir, name):
-    """Fake provider that wraps a packet-bound assessment in its envelope."""
+    """Fake provider that wraps a one-row reply in its native envelope."""
     import sys as _sys
 
-    checklist = list(C.AGENT_ASSESSMENT_CHECKLIST_IDS)
     script = "\n".join([
         "#!" + _sys.executable,
         "import json, sys",
         "request = json.load(sys.stdin)",
-        "packet = request['packet']",
-        "rows = [{'id': row_id, 'status': 'unknown',",
+        "item_id = request['policy']['item']['id']",
+        "assert item_id in " + repr(list(C.AGENT_ASSESSMENT_CHECKLIST_IDS)),
+        "reply = {'status': 'unknown',",
         "        'rationale': 'The bounded source evidence does not establish this row.',",
-        "        'evidence': []} for row_id in " + repr(checklist) + "]",
-        "assessment = {'data': {'schema': " + repr(C.AGENT_ASSESSMENT_SCHEMA) + ",",
-        "                       'children': [{'project_id': packet['project_id'],",
-        "                                     'scope': packet['scope'],",
-        "                                     'packet_sha256': packet['packet_sha256'],",
-        "                                     'rows': rows,",
-        "                                     'findings': [],",
-        "                                     'limitations': []}],",
-        "                       'limitations': []}}",
-        "payload = json.dumps(assessment)",
+        "        'evidence': [], 'finding': None}",
+        "payload = json.dumps(reply)",
     ])
     if name == "claude":
         script += "\n" + "\n".join([
@@ -2817,10 +2879,10 @@ def _native_replay_executable(bindir, name):
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 def test_native_envelope_end_to_end_publishes_report(
         tmp_path, monkeypatch, capsys, provider):
-    """Real launch_review against a fake native CLI publishes the report.
+    """Real per-item launches against a fake native CLI publish the report.
 
-    Each fake executable replays a valid packet-bound assessment inside
-    its provider's native envelope; review runs non-interactively and
+    Each fake executable replays a valid one-row reply inside its
+    provider's native envelope; review runs non-interactively and
     writes recommendations.md.
     """
     import re
@@ -2875,11 +2937,12 @@ def _write_recorded_demo_project(root):
 
 
 def _recorded_replay_executable(bindir, name, reply):
-    """Fake provider replaying a vendored real reply, rebound live.
+    """Fake provider replaying one vendored real row per item, rebound live.
 
-    Only packet binding fields (project/content identity) are rebound from
-    the request packet; every model-supplied row, finding, limitation, and
-    prose string replays verbatim inside the native envelope.
+    The recorded row matching the requested item id replays verbatim,
+    with citations rebound to the item subset; rows citing outside the
+    subset keep their stale binding and become invalid replies, as in
+    the per-item contract test.
     """
     import sys as _sys
 
@@ -2888,28 +2951,32 @@ def _recorded_replay_executable(bindir, name, reply):
         "import json, sys",
         "fixture = " + repr(str(_RECORDED_FIXTURE_DIR / reply)),
         "request = json.load(sys.stdin)",
-        "packet = request['packet']",
+        "item_id = request['policy']['item']['id']",
         "recorded = json.load(open(fixture, encoding='utf-8'))",
-        "data = recorded['data']",
-        "child = data['children'][0]",
-        "child['project_id'] = packet['project_id']",
-        "child['scope'] = packet['scope']",
-        "child['packet_sha256'] = packet['packet_sha256']",
-        "by_path = {e['path']: e for e in packet['excerpts']}",
+        "child = recorded['data']['children'][0]",
+        "row = next(r for r in child['rows'] if r['id'] == item_id)",
+        "by_path = {e['path']: e for e in request['excerpts']}",
         "def rebind(items):",
-        "    for item in items:",
-        "        for cit in item.get('evidence', []):",
-        "            excerpt = by_path.get(cit['path'])",
-        "            if excerpt is None:",
-        "                continue",
-        "            cit['sha256'] = excerpt['sha256']",
-        "            cit['start_line'] = max(excerpt['start_line'],",
-        "                min(cit['start_line'], excerpt['end_line']))",
-        "            cit['end_line'] = max(cit['start_line'],",
-        "                min(cit['end_line'], excerpt['end_line']))",
-        "rebind(child['rows'])",
-        "rebind(child.get('findings', []))",
-        "payload = json.dumps({'data': data})",
+        "    for cit in items:",
+        "        excerpt = by_path.get(cit['path'])",
+        "        if excerpt is None:",
+        "            continue",
+        "        cit['sha256'] = excerpt['sha256']",
+        "        cit['start_line'] = max(excerpt['start_line'],",
+        "            min(cit['start_line'], excerpt['end_line']))",
+        "        cit['end_line'] = max(cit['start_line'],",
+        "            min(cit['end_line'], excerpt['end_line']))",
+        "rebind(row.get('evidence', []))",
+        "finding = next((f for f in child.get('findings', [])",
+        "                if f['id'] == item_id), None)",
+        "if finding is not None:",
+        "    rebind(finding.get('evidence', []))",
+        "    finding = {'summary': finding['summary'],",
+        "               'suggested_change': finding['suggested_change'],",
+        "               'evidence': finding['evidence']}",
+        "reply = {'status': row['status'], 'rationale': row['rationale'],",
+        "         'evidence': row['evidence'], 'finding': finding}",
+        "payload = json.dumps(reply)",
     ])
     if name == "claude":
         script += "\n" + "\n".join([
@@ -2941,10 +3008,10 @@ def test_recorded_round4_replies_publish_report(
         tmp_path, monkeypatch, capsys, provider, reply):
     """End-to-end replay of both round-4 real replies publishes the report.
 
-    Each fake executable replays its vendored real reply (parse plus CLI
-    assembly/render path); review runs non-interactively and writes
-    recommendations.md carrying ptest's own partial-evidence limitation
-    for the root scope.
+    Each fake executable replays its vendored real rows one item at a
+    time (CLI per-item assembly/render path); review runs
+    non-interactively and writes recommendations.md carrying ptest's own
+    partial-evidence limitation for the root scope.
     """
     import re
     import sys

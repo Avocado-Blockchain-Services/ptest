@@ -12,14 +12,14 @@ import stat
 import sys
 import time
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
-from . import doctor, files, help as help_api, history, init_render
+from . import doctor, executability, files, help as help_api, history
+from . import init_render
 from . import operations, platform, recommendations, scheduler
 from . import render
 from .adapters import pytest as pytest_adapter
@@ -1065,6 +1065,43 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
     return answer in {"y", "yes"}
 
 
+def _execution_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
+    """Map each project to its public executability fact for review children."""
+    return {item.project: item.to_public()
+            for item in executability.check_resolution(resolution)}
+
+
+def _review_failure_reason(result) -> str | None:
+    """Map one per-item provider result to its review row reason.
+
+    Returns None when the result carries a usable one-row reply; cancelled
+    results never become rows and fail the whole review instead.
+    """
+    if result.cancelled:
+        raise _problem("review-cancelled", "review was cancelled")
+    if result.timed_out:
+        return "timed out"
+    if result.truncated or result.error == "output-exhausted":
+        return "output exceeded its bound"
+    if result.error == "tool-attempt":
+        return "provider attempted a tool"
+    if result.error == "invalid-assessment":
+        return "invalid reply"
+    if result.error == "provider-unavailable":
+        return "provider unavailable"
+    if result.ok and result.exit_code in (0, None):
+        return None
+    return "provider exited with an error"
+
+
+def _review_profile(model: str | None) -> str:
+    """Provider profile naming the per-item review and its model."""
+    profile = f"ptest-item-review-v1 model={model or 'provider-default'}"
+    if len(profile.encode("utf-8")) > 128:
+        return "ptest-item-review-v1"
+    return profile
+
+
 def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
                       domain: C.DomainPaths, *, interactive: bool,
                       preconsented: bool = False) -> bool:
@@ -1084,12 +1121,9 @@ def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
             f"reviewer {adapter.name} is unqualified: "
             f"{adapter.qualification_note}",
         )
-    if interactive and not _render_review_disclosure(
-            adapter, resolution, ask=not preconsented):
-        return _declined_review_output(parsed, resolution, domain)
-
-    _run_doctor_review(parsed, resolution, domain, adapter=adapter)
-    return False
+    return _run_doctor_review(parsed, resolution, domain, adapter=adapter,
+                              interactive=interactive,
+                              preconsented=preconsented)
 
 
 def _doctor_limits(parsed: ParsedArgs) -> C.ScanLimits:
@@ -1233,41 +1267,16 @@ def _initialization_required_limitation(
     return None
 
 
-def _raw_assessment_schema() -> bytes:
-    """Derive the provider response shape from the public contract authority.
-
-    The model returns only ``{"data": ...}``: the envelope metadata
-    (``schema_version``, ``kind``, ``ptest_version``, ``domain``,
-    ``error``) is ptest-owned and filled by ``parse_assessment`` before
-    contract validation, as are ``provider``/``publication``/``score``.
-    """
-    schema = deepcopy(C.PUBLIC_SCHEMAS["agent-assessment"])
-    for key in ("schema_version", "kind", "ptest_version", "domain",
-                "error"):
-        schema["properties"].pop(key, None)
-    schema["required"] = ["data"]
-    data = schema["properties"]["data"]
-    data["properties"].pop("provider", None)
-    data["properties"].pop("publication", None)
-    data["required"] = [key for key in data["required"]
-                        if key not in {"provider", "publication"}]
-    child = data["properties"]["children"]["items"]
-    child["properties"].pop("score", None)
-    child["required"] = [key for key in child["required"]
-                         if key != "score"]
-    return json.dumps(schema, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=True).encode("utf-8")
-
-
-def _child_assessment_data(packet, assessment, limitations: list[dict]) -> dict:
+def _child_assessment_data(packet, assessment, limitations: list[dict], *,
+                         execution: dict | None = None) -> dict:
     score = assessment.score
-    return {
+    child = {
         "project_id": assessment.project_id,
         "scope": assessment.scope,
         "packet_sha256": assessment.packet_sha256,
         "rows": [{
             "id": row.id, "status": row.status,
-            "rationale": row.rationale,
+            "rationale": row.rationale, "label": row.label,
             "evidence": [{
                 "path": item.path, "start_line": item.start_line,
                 "end_line": item.end_line, "sha256": item.sha256,
@@ -1288,11 +1297,20 @@ def _child_assessment_data(packet, assessment, limitations: list[dict]) -> dict:
         } for item in assessment.findings],
         "limitations": limitations,
     }
+    if execution is not None:
+        child["execution"] = execution
+    return child
 
 
 def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
-                       domain: C.DomainPaths, *, adapter) -> None:
-    """Collect, sequentially validate, revalidate, then publish one review."""
+                       domain: C.DomainPaths, *, adapter, interactive: bool,
+                       preconsented: bool = False) -> bool:
+    """Collect, per-item review, revalidate, then publish one review.
+
+    Returns true for a declined offline result; all review paths fail
+    closed. One focused model call runs per (project, checklist item);
+    deterministically skipped items take no call.
+    """
     started = time.monotonic()
     deadline = started + _REVIEW_TOTAL_TIMEOUT_S
     limits = _doctor_limits(parsed)
@@ -1350,52 +1368,86 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             )
         config_identity = _review_config_identity(resolution, workspace)
         declaration_set = tuple(repo.declaration for repo in workspace.repositories)
-        schema = _raw_assessment_schema()
+        plans = [agent_assessment.plan_item_reviews(packet)
+                 for packet in packets]
+        ensure_deadline()
+        calls = sum(1 for reviews in plans for review in reviews
+                    if review.request is not None)
+        declared = _declared_review_model(
+            adapter.name, parsed.review_model, os.environ)
+        model = None
+        version = None
+        effective = adapter
+        if calls:
+            if not _render_review_disclosure(
+                    adapter, resolution,
+                    ask=(interactive and not preconsented),
+                    calls=calls, concurrency=parsed.review_concurrency,
+                    model=declared):
+                return _declined_review_output(parsed, resolution, domain)
+            ensure_deadline()
+            cache_root = files.ensure_private_dir(
+                domain.root, _REVIEW_MODEL_CACHE_DIR)
+            ensure_deadline()
+            model, version = _resolve_review_model(
+                adapter, cache_root, declared)
+            if model is not None:
+                effective = agent_providers.with_model(adapter, model)
         assessments = []
-        for packet in packets:
+        for packet, reviews in zip(packets, plans):
             ensure_deadline()
-            request = agent_assessment.encode_review_request(packet, schema)
-            ensure_deadline()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise _problem("review-timeout", "total review deadline expired")
-            timeout_s = min(parsed.review_timeout_s, int(remaining))
-            if timeout_s < 1:
-                raise _problem("review-timeout", "total review deadline expired")
-            child_progress = lambda event, scope=packet.scope: progress(
-                event.phase, event.provider, scope, time.monotonic() - started)
-            progress("reviewing", adapter.name, packet.scope,
-                     time.monotonic() - started)
-            try:
+            pending = [(review.request, review.schema)
+                       for review in reviews if review.request is not None]
+            results: tuple = ()
+            if pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _problem("review-timeout", "total review deadline expired")
+                timeout_s = min(parsed.review_timeout_s, int(remaining))
+                if timeout_s < 1:
+                    raise _problem("review-timeout", "total review deadline expired")
+                progress("reviewing", adapter.name, packet.scope,
+                         time.monotonic() - started)
+                try:
+                    ensure_deadline()
+                    results = agent_providers.launch_reviews(
+                        effective, pending, timeout_s,
+                        concurrency=parsed.review_concurrency,
+                        on_done=lambda index, result, scope=packet.scope: progress(
+                            "reviewing", adapter.name, scope,
+                            time.monotonic() - started))
+                except C.Problem as problem:
+                    if problem.code == "review-cancelled":
+                        raise _problem("review-cancelled", "review was cancelled") from None
+                    raise
+                except KeyboardInterrupt:
+                    raise _problem("review-cancelled", "review was cancelled") from None
                 ensure_deadline()
-                result = agent_providers.launch_review(
-                    adapter, request, schema, timeout_s, child_progress)
-            except KeyboardInterrupt:
-                raise _problem("review-cancelled", "review was cancelled") from None
-            ensure_deadline()
-            if result.timed_out:
-                raise _problem("review-timeout", "review provider timed out")
-            if result.cancelled:
-                raise _problem("review-cancelled", "review was cancelled")
-            if result.truncated:
-                raise _problem("invalid-assessment", "review provider output exceeded its bound")
-            if result.provider != adapter.name:
-                raise _problem("invalid-assessment", "review provider identity did not match")
-            if not result.ok or result.exit_code != 0:
-                code = ("invalid-assessment" if result.error in {
-                    "invalid-assessment", "tool-attempt", "provider-error",
-                } else "provider-failed")
-                raise _problem(code, "review provider did not return a valid assessment")
+            replies = []
+            cursor = 0
+            for review in reviews:
+                if review.request is None:
+                    replies.append(None)
+                    continue
+                result = results[cursor]
+                cursor += 1
+                reason = _review_failure_reason(result)
+                replies.append(result.assessment if reason is None else reason)
             progress("validating", adapter.name, packet.scope,
                      time.monotonic() - started)
             ensure_deadline()
-            assessment = agent_assessment.parse_assessment(
-                result.assessment, packet)
+            assessments.append(agent_assessment.assemble_child(
+                packet, reviews, tuple(replies)))
             ensure_deadline()
-            assessments.append(assessment)
 
-        if len(assessments) != len(packets):
-            raise _problem("invalid-assessment", "review did not validate every selected project")
+        reviewed_rows = [(review, row)
+                         for reviews, assessment in zip(plans, assessments)
+                         for review, row in zip(reviews, assessment.rows)
+                         if review.request is not None]
+        if reviewed_rows and all(row.rationale.startswith(
+                agent_assessment.FAILED_PREFIX) for _, row in reviewed_rows):
+            raise _problem("provider-failed",
+                           "review provider did not return a valid assessment")
 
         # Re-resolve config and source packets immediately before publication.
         progress("validating", adapter.name, resolution.root.name,
@@ -1427,6 +1479,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 != tuple(packet.packet_sha256 for packet in packets)):
             raise _problem("stale-evidence", "source or configuration changed during review")
 
+        facts = _execution_facts(resolution)
         child_data = []
         initialization_blocker = _initialization_required_limitation(resolution)
         for packet, assessment in zip(packets, assessments):
@@ -1434,14 +1487,16 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             if initialization_blocker is not None and packet.declaration == ".":
                 child_limitations.insert(0, dict(initialization_blocker))
             child_data.append(_child_assessment_data(
-                packet, assessment, child_limitations))
+                packet, assessment, child_limitations,
+                execution=facts.get(packet.declaration)))
         limitations = _assessment_limitations(packets, top_level=True)
         if initialization_blocker is not None:
             limitations.insert(0, dict(initialization_blocker))
         draft_data = {
             "schema": C.AGENT_ASSESSMENT_SCHEMA,
-            "provider": {"name": adapter.name, "cli_version": "unreported",
-                         "profile": "ptest-agent-review-v1"},
+            "provider": {"name": adapter.name,
+                         "cli_version": version or "unreported",
+                         "profile": _review_profile(model)},
             "children": child_data,
             "limitations": limitations,
             "publication": {"status": "created", "path": "recommendations.md",
@@ -1485,6 +1540,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             sys.stdout.write(render.render_agent_assessment(
                 child_data, workspace, report_path=publication.path,
                 publication_status=publication.status))
+        return False
     except C.Problem:
         if sys.stderr.isatty():
             print(file=sys.stderr)

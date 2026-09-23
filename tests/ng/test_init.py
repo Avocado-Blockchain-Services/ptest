@@ -734,27 +734,23 @@ def _make_cli_init_repo(root):
 def test_tty_init_default_offer_runs_after_created_and_existing_init(
         tmp_path, monkeypatch, capsys):
     from ptest import cli
-    from ptest.agent_providers import ReviewerAdapter
 
     _make_cli_init_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    resolved = []
 
-    def unqualified_profile(name, env):
+    def unqualified_status(name):
         assert (tmp_path / ".ptest.toml").is_file()
-        resolved.append(name)
-        return ReviewerAdapter(name, f"/fake/{name}", (f"/fake/{name}",),
-                               qualified=False,
-                               qualification_note="qualification pending")
-
-    monkeypatch.setattr(cli.agent_providers, "resolve_reviewer", unqualified_profile)
-    monkeypatch.setattr(
-        cli.agent_providers, "qualification_status",
-        lambda name: cli.agent_providers.QualificationStatus(
+        return cli.agent_providers.QualificationStatus(
             name=name, qualified=False, argv=(name,),
-            note="synthetic unqualified profile"),
+            note="synthetic unqualified profile")
+
+    monkeypatch.setattr(
+        cli.agent_providers, "qualification_status", unqualified_status)
+    monkeypatch.setattr(
+        cli.agent_providers, "resolve_reviewer",
+        lambda *a, **k: pytest.fail("resolved reviewer for unqualified offer"),
     )
     monkeypatch.setattr("builtins.input", lambda: pytest.fail("prompted with no qualified reviewer"))
     monkeypatch.setattr(
@@ -766,12 +762,10 @@ def test_tty_init_default_offer_runs_after_created_and_existing_init(
     assert cli.main(args) == 0
     created = capsys.readouterr()
     assert "provider-unqualified" in created.err
-    assert resolved == []
 
     assert cli.main(args) == 0
     existing = capsys.readouterr()
     assert "provider-unqualified" in existing.err
-    assert resolved == []
 
 
 @pytest.mark.parametrize("extra", [
@@ -831,7 +825,7 @@ def test_tty_init_decline_is_success_for_existing_config_and_scans_offline(
         lambda *a, **k: inspected.append(1) or real_inspect(*a, **k),
     )
     monkeypatch.setattr(
-        cli.agent_providers, "launch_review",
+        cli.agent_providers, "launch_reviews",
         lambda *a, **k: pytest.fail("declined init launched reviewer"),
     )
 
@@ -870,7 +864,7 @@ def test_tty_init_offer_with_two_installed_shows_menu_and_decline_keeps_files(
     inputs = []
     monkeypatch.setattr("builtins.input", lambda: inputs.append(1) or "")
     monkeypatch.setattr(
-        cli.agent_providers, "launch_review",
+        cli.agent_providers, "launch_reviews",
         lambda *a, **k: pytest.fail("menu decline launched reviewer"),
     )
 
@@ -915,15 +909,19 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     monkeypatch.setattr("builtins.input", lambda: prompts.append(1) or "yes")
     launched = []
 
-    def fail_launch(adapter, request, schema, timeout_s, progress):
-        launched.append(adapter.name)
-        return ProviderResult(
-            provider=adapter.name, ok=False, assessment=b"",
-            error="provider-failed", exit_code=7, timed_out=False,
-            cancelled=False, truncated=False, pid=2001, argv=adapter.argv,
-            scratch="/tmp/ptest-review-test")
+    def fail_launches(adapter, requests, timeout_s, *, concurrency=4,
+                      on_done=None):
+        for _request, _schema in requests:
+            launched.append(adapter.name)
+        return tuple(
+            ProviderResult(
+                provider=adapter.name, ok=False, assessment=b"",
+                error="provider-failed", exit_code=7, timed_out=False,
+                cancelled=False, truncated=False, pid=2001, argv=adapter.argv,
+                scratch="/tmp/ptest-review-test")
+            for _ in requests)
 
-    monkeypatch.setattr(cli.agent_providers, "launch_review", fail_launch)
+    monkeypatch.setattr(cli.agent_providers, "launch_reviews", fail_launches)
 
     domain = case.domain()
     assert cli.main(("--fixture-domain", str(domain.root),
@@ -940,4 +938,4 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     assert (tmp_path / ".ptest.toml").is_file()
     assert not (tmp_path / "recommendations.md").exists()
     assert statuses == ["claude", "claude"]
-    assert launched == ["claude"]
+    assert launched and all(name == "claude" for name in launched)
