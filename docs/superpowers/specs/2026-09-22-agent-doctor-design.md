@@ -244,8 +244,8 @@ ship a partial provider set.
 ### Process ownership and progress
 
 The process-group cleanup design is withdrawn. A group can lose descendants
-after `setsid`, double-fork, or normal leader exit. The dedicated cgroup-v2
-boundary, mandatory fail-closed preflight, cleanup protocol, and remaining
+after `setsid`, double-fork, or normal leader exit. The per-review user/PID/mount
+namespace boundary, mandatory fail-closed preflight, cleanup protocol, and remaining
 release blockers are specified in the linked containment amendment. No
 process-group fallback is permitted for agent review. There is no ptest daemon
 or fake percentage.
@@ -417,10 +417,10 @@ inject controls.
    authorize repair, hide unsupported orchestration, weaken assertions/coverage/
    inventory, or claim proposed verification was observed.
 9. Provider work is sequential, synchronous, visible, bounded, cancellable, and
-   contained from launch in one task-owned cgroup under the linked amendment.
+   contained from launch in one per-review PID namespace under the linked amendment.
    **Negative:** no process-group fallback, cross-run kill, fake percentage,
-   provider launch without qualified containment, or claim that a plain cgroup
-   handles parent death is permitted.
+   provider launch without qualified containment, success after unproven
+   teardown, or claim of sandboxing a hostile provider is permitted.
 10. Report writes are atomic, ownership-checked, serialize concurrent ptest
     writers, and preserve the last complete result on detected conflicts.
     **Negative:** detected custom/edited reports, stale source, and failures are
@@ -438,7 +438,7 @@ The secure-by-spec axes are covered explicitly: identity uses existing provider
 auth and surfaces missing/expired sessions without revealing credentials;
 authorization requires invocation-local upload consent and no agent tools;
 tenancy means separate child packets, checkout identities, and qualified
-task-owned cgroup containment as amended; input requires bounded schemas,
+per-review namespace containment as amended; input requires bounded schemas,
 safe paths, and untrusted-content handling;
 state covers stale source, repeat init, cancellation, and publication conflicts;
 exposure excludes recognized sensitive material and discloses residual source
@@ -460,8 +460,8 @@ earlier committed interfaces and do not rewrite unrelated work.
 | 6 | Branded renderer and init-flow regression coverage (CLI wiring is task 5): `src/ptest/init_render.py`, `tests/ng/test_init.py`, `tests/ng/test_init_render.py` | `ptest tests/ng/test_init.py tests/ng/test_init_render.py`; created/existing/decline/non-TTY/JSON/repeated-init/NO_COLOR/hostile-name cases. |
 | 7 | Copied-repository acceptance only: `tests/ng/test_agent_doctor_acceptance.py`, `scripts/acceptance.py` if its registered scenario list must change | `ptest tests/ng/test_agent_doctor_acceptance.py`; then the one integrated `ptest --full` after all source changes. |
 
-For subsequent work, Claude Opus authors specifications; Luna handles coding and
-audits under the user's current model-routing instruction. Controller checks
+For subsequent work, Claude Opus authors specifications, Muse writes all code
+and tests under the imported Dan Jefferies brief, and Luna performs audits. Controller checks
 owned files and mechanical gates before scoped task audits.
 
 Every focused task records the initial failing regression before repair and the
