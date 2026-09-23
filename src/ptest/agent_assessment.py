@@ -779,91 +779,108 @@ def _read_pyvenv_version(child_root: Path, env_name: str) -> str | None:
 def _scan_dist_info(child_root: Path, env_name: str, *,
                     deadline: float | None,
                     progress: Callable[[], None] | None
-                    ) -> tuple[int, bool, list[tuple[str, str]]]:
+                    ) -> tuple[int, bool, list[tuple[str, str]], bool]:
     """Count ``*.dist-info`` dirs and name recognized test tools.
 
-    Returns ``(count, lower_bound, tools)`` where ``count`` is the number
-    of distribution directories observed and ``lower_bound`` reports that
-    the scan stopped at its entry bound. Symlinked entries are never
-    followed; only validated tokens reach ``tools``.
+    Returns ``(count, lower_bound, tools, listed)`` where ``count`` is
+    the number of distribution directories observed, ``lower_bound``
+    reports that the scan stopped at its entry bound, and ``listed``
+    reports that at least one ``python3.*/site-packages`` directory was
+    actually listed. Both directory levels are iterated lazily with one
+    count plus deadline checkpoint per entry, as in
+    ``_iter_regular_files``. Symlinked entries are never followed; only
+    validated tokens reach ``tools``.
     """
     lib = child_root / env_name / "lib"
     if not _is_real_dir(lib):
-        return (0, False, [])
-    try:
-        with os.scandir(lib) as handle:
-            interpreters = [(entry.name, entry.path) for entry in handle]
-    except OSError:
-        return (0, False, [])
+        return (0, False, [], False)
     tools: list[tuple[str, str]] = []
     seen_tools: set[str] = set()
     count = 0
     examined = 0
-    for interpreter_name, interpreter_path in interpreters:
-        _review_checkpoint(deadline, progress)
-        try:
-            stamp = os.lstat(interpreter_path)
-        except OSError:
-            continue
-        if (stat.S_ISLNK(stamp.st_mode)
-                or not stat.S_ISDIR(stamp.st_mode)):
-            continue
-        if not interpreter_name.startswith("python3."):
-            continue
-        site = Path(interpreter_path) / "site-packages"
-        if not _is_real_dir(site):
-            continue
-        try:
-            with os.scandir(site) as handle:
-                entries = [(item.name, item.path) for item in handle]
-        except OSError:
-            continue
-        for item_name, item_path in entries:
-            _review_checkpoint(deadline, progress)
-            examined += 1
-            if examined > _MAX_ENV_SCAN_ENTRIES:
-                return (count, True, tools)
-            try:
-                item_stamp = os.lstat(item_path)
-            except OSError:
-                continue
-            if (stat.S_ISLNK(item_stamp.st_mode)
-                    or not stat.S_ISDIR(item_stamp.st_mode)):
-                continue
-            if not item_name.endswith(".dist-info"):
-                continue
-            count += 1
-            if count > _MAX_DIST_INFO_ENTRIES:
-                return (count - 1, True, tools)
-            stem = item_name[:-len(".dist-info")]
-            name, dash, version = stem.rpartition("-")
-            if not dash:
-                continue
-            clean_name = _safe_token(name, 64)
-            clean_version = _safe_token(version, 32)
-            if clean_name is None or clean_version is None:
-                continue
-            normalized = re.sub(r"[-_.]+", "-", clean_name.lower())
-            if (normalized in _PYTHON_TEST_TOOLS
-                    and normalized not in seen_tools):
-                seen_tools.add(normalized)
-                tools.append((clean_name, clean_version))
-    return (count, False, tools)
+    listed = False
+    try:
+        with os.scandir(lib) as handle:
+            for entry in handle:
+                _review_checkpoint(deadline, progress)
+                examined += 1
+                if examined > _MAX_ENV_SCAN_ENTRIES:
+                    return (count, True, tools, listed)
+                try:
+                    stamp = os.lstat(entry.path)
+                except OSError:
+                    continue
+                if (stat.S_ISLNK(stamp.st_mode)
+                        or not stat.S_ISDIR(stamp.st_mode)):
+                    continue
+                if not entry.name.startswith("python3."):
+                    continue
+                site = Path(entry.path) / "site-packages"
+                if not _is_real_dir(site):
+                    continue
+                try:
+                    site_handle = os.scandir(site)
+                except OSError:
+                    continue
+                with site_handle:
+                    listed = True
+                    for item in site_handle:
+                        _review_checkpoint(deadline, progress)
+                        examined += 1
+                        if examined > _MAX_ENV_SCAN_ENTRIES:
+                            return (count, True, tools, listed)
+                        try:
+                            item_stamp = os.lstat(item.path)
+                        except OSError:
+                            continue
+                        if (stat.S_ISLNK(item_stamp.st_mode)
+                                or not stat.S_ISDIR(item_stamp.st_mode)):
+                            continue
+                        if not item.name.endswith(".dist-info"):
+                            continue
+                        count += 1
+                        if count > _MAX_DIST_INFO_ENTRIES:
+                            return (count - 1, True, tools, listed)
+                        stem = item.name[:-len(".dist-info")]
+                        name, dash, version = stem.rpartition("-")
+                        if not dash:
+                            continue
+                        clean_name = _safe_token(name, 64)
+                        clean_version = _safe_token(version, 32)
+                        if clean_name is None or clean_version is None:
+                            continue
+                        normalized = re.sub(r"[-_.]+", "-",
+                                            clean_name.lower())
+                        if (normalized in _PYTHON_TEST_TOOLS
+                                and normalized not in seen_tools):
+                            seen_tools.add(normalized)
+                            tools.append((clean_name, clean_version))
+    except OSError:
+        return (0, False, [], False)
+    return (count, False, tools, listed)
 
 
 def _inspect_python_env(child_root: Path, *,
                         deadline: float | None,
                         progress: Callable[[], None] | None
                         ) -> DependencyFact | None:
-    """Describe a project-local ``.venv``/``venv`` without executing it."""
+    """Describe a project-local ``.venv``/``venv`` without executing it.
+
+    An ``installed`` fact needs provenance: ``pyvenv.cfg`` must have
+    yielded a version and at least one ``python3.*/site-packages``
+    directory must have been listed. Otherwise there is no fact, so the
+    environment stays ``uninspectable``.
+    """
     for env_name in (".venv", "venv"):
         if not _is_real_dir(child_root / env_name):
             continue
         version = _read_pyvenv_version(child_root, env_name)
-        count, lower_bound, tools = _scan_dist_info(
+        count, lower_bound, tools, listed = _scan_dist_info(
             child_root, env_name, deadline=deadline, progress=progress)
+        if version is None or not listed:
+            continue
         numbered = f"{count}+" if lower_bound else str(count)
-        detail = (f"Python {version if version is not None else 'unknown'} "
+        detail = (f"Python {version} "
                   f"project-local environment: {numbered} distributions")
         if tools:
             detail += "; " + ", ".join(
@@ -1030,13 +1047,13 @@ def _dependency_facts(names: set[str], prefix: str,
             progress=progress)
         if node_fact is not None:
             installed.append(node_fact)
-    if installed:
-        facts.extend(installed)
-    else:
+    facts.extend(installed)
+    installed_ecosystems = {fact.ecosystem for fact in installed}
+    if not installed or not seen_ecosystems <= installed_ecosystems:
         facts.append(DependencyFact(
             ecosystem="environment", status="uninspectable", ref_path=None,
-            detail="No project-local environment; external environments "
-                   "are not inspected."))
+            detail="Environments other than reported project-local "
+                   "metadata are not inspected."))
     return tuple(facts)
 
 

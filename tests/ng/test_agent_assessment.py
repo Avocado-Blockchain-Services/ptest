@@ -878,6 +878,8 @@ def test_build_packets_reject_child_without_valid_config_before_building_any(
 
 def test_build_packets_dependency_provenance_is_static_and_unknown_where_unprovable(  # noqa: E501
         tmp_path):
+    """No project-local env means ``uninspectable`` even though ptest
+    itself runs from a virtualenv; ptest's runtime is never evidence."""
     packet = _packet_for(tmp_path, {
         "pyproject.toml": "[project]\nname = 'demo'\n",
         "uv.lock": "version = 1\n",
@@ -888,13 +890,12 @@ def test_build_packets_dependency_provenance_is_static_and_unknown_where_unprova
     assert ("python-lock", "locked") in kinds
     env = [d for d in packet.dependencies
            if d.ecosystem == "environment"]
-    assert env and env[0].status == "uninspectable"
+    assert len(env) == 1 and env[0].status == "uninspectable"
+    assert ("Environments other than reported project-local metadata are "
+            "not inspected." in env[0].detail)
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
     assert all(".venv" not in e.path for e in packet.excerpts)
-    import pathlib
-    source = pathlib.Path("src/ptest/agent_assessment.py").read_text(
-        encoding="utf-8")
-    assert "import_module" not in source
-    assert "sys.path" not in source
 
 
 # --- parse_assessment: strict single-packet validation -----------------------
@@ -1331,29 +1332,6 @@ def test_build_packets_reports_installed_python_environment(tmp_path):
     assert all(".venv" not in excerpt.path for excerpt in packet.excerpts)
 
 
-def test_build_packets_without_local_environment_stays_uninspectable(
-        tmp_path):
-    """No project-local env means ``uninspectable`` even though ptest
-    itself runs from a virtualenv; ptest's runtime is never evidence."""
-    import pathlib
-
-    from ptest import agent_assessment as AA
-
-    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
-    env = [fact for fact in packet.dependencies
-           if fact.ecosystem == "environment"]
-    assert len(env) == 1 and env[0].status == "uninspectable"
-    assert "external environments are not inspected" in env[0].detail
-    assert not any(fact.status == "installed"
-                   for fact in packet.dependencies)
-    source = pathlib.Path(
-        "src/ptest/agent_assessment.py").read_text(encoding="utf-8")
-    assert "sys.prefix" not in source
-    assert "importlib" not in source
-    assert "import_module" not in source
-    assert "sys.path" not in source
-
-
 def test_build_packets_ignores_symlinked_venv(tmp_path):
     from ptest import agent_assessment as AA
 
@@ -1375,26 +1353,30 @@ def test_build_packets_ignores_symlinked_venv(tmp_path):
 
 def test_build_packets_ignores_unsafe_pyvenv_cfg(tmp_path):
     """A symlinked, oversized, or non-regular pyvenv.cfg never hangs the
-    scan and never contributes its target's version."""
+    scan and never yields an ``installed`` fact without a version."""
     from ptest import agent_assessment as AA
 
-    site = _make_venv(tmp_path, dists=("pytest-8.3.4",))
+    _make_venv(tmp_path, dists=("pytest-8.3.4",))
     cfg = tmp_path / ".venv" / "pyvenv.cfg"
     target = tmp_path / "evil.cfg"
     target.write_text("home = /usr/bin\nversion = 6.6.6\n", encoding="utf-8")
     cfg.unlink()
     os.symlink(str(target), cfg)
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
-    installed = [fact for fact in packet.dependencies
-                 if fact.status == "installed"]
-    assert len(installed) == 1 and "6.6.6" not in installed[0].detail
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    assert any(fact.status == "uninspectable"
+               for fact in packet.dependencies)
+    assert "6.6.6" not in " ".join(
+        fact.detail for fact in packet.dependencies)
     cfg.unlink()
     cfg.write_text("home = /usr/bin\nversion = 7.7.7\n" + "x" * 8192,
                    encoding="utf-8")
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
-    installed = [fact for fact in packet.dependencies
-                 if fact.status == "installed"]
-    assert len(installed) == 1 and "7.7.7" not in installed[0].detail
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    assert "7.7.7" not in " ".join(
+        fact.detail for fact in packet.dependencies)
 
 
 def test_build_packets_ignores_fifo_pyvenv_cfg_without_hang(tmp_path):
@@ -1408,9 +1390,10 @@ def test_build_packets_ignores_fifo_pyvenv_cfg_without_hang(tmp_path):
     except OSError:
         pytest.skip("fifo unavailable")
     packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
-    installed = [fact for fact in packet.dependencies
-                 if fact.status == "installed"]
-    assert len(installed) == 1 and "unknown" in installed[0].detail
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    assert any(fact.status == "uninspectable"
+               for fact in packet.dependencies)
 
 
 def test_build_packets_ignores_escaping_dist_info_symlink(tmp_path):
@@ -1642,3 +1625,103 @@ def test_dependency_env_scan_respects_review_deadline(tmp_path):
         AA._dependency_facts({"src/m.py"}, "", None, child_root=tmp_path,
                              deadline=0.0)
     assert caught.value.code == "review-timeout"
+
+
+def test_build_packets_venv_without_pyvenv_cfg_stays_uninspectable(tmp_path):
+    """A bare ``venv/`` dir proves nothing: no version, no listing, so no
+    ``installed`` fact and the honest ``uninspectable`` one stays."""
+    (tmp_path / "venv").mkdir()
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    env = [fact for fact in packet.dependencies
+           if fact.ecosystem == "environment"]
+    assert len(env) == 1 and env[0].status == "uninspectable"
+
+
+def test_build_packets_pypy_layout_without_cpython_site_packages_stays_uninspectable(  # noqa: E501
+        tmp_path):
+    """pyvenv.cfg alone is not provenance: without a listed
+    ``python3.*/site-packages`` there is no ``installed`` fact, even when
+    another layout (here PyPy) holds distributions."""
+    root = tmp_path / ".venv"
+    site = root / "lib" / "pypy3.10" / "site-packages"
+    site.mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.10.12\n",
+                                     encoding="utf-8")
+    (site / "pytest-8.0.dist-info").mkdir()
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    assert not any(fact.status == "installed"
+                   for fact in packet.dependencies)
+    env = [fact for fact in packet.dependencies
+           if fact.ecosystem == "environment"]
+    assert len(env) == 1 and env[0].status == "uninspectable"
+
+
+def test_build_packets_mixed_declared_ecosystems_keep_uninspectable(tmp_path):
+    """One ``installed`` fact must not silence the signal for the other
+    declared ecosystems (node/rust here); wording stays neutral."""
+    import json as json_lib
+
+    _make_venv(tmp_path)
+    (tmp_path / "node_modules").mkdir()
+    packet = _packet_for(tmp_path, {
+        "src/m.py": "x = 1\n",
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "uv.lock": "version = 1\n",
+        "package.json": json_lib.dumps({
+            "name": "demo",
+            "devDependencies": {"vitest": "^2.0.0"},
+        }),
+        "Cargo.toml": '[package]\nname = "demo"\n',
+    })
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert [fact.ecosystem for fact in installed] == ["python"]
+    env = [fact for fact in packet.dependencies
+           if fact.ecosystem == "environment"]
+    assert len(env) == 1 and env[0].status == "uninspectable"
+    assert ("Environments other than reported project-local metadata are "
+            "not inspected." in env[0].detail)
+    assert "No project-local environment" not in env[0].detail
+
+
+def test_dependency_env_scan_counts_interpreter_entries_against_bound(
+        tmp_path, monkeypatch):
+    """Interpreter entries count against the scan bound: the lib/ loop is
+    checkpointed lazily, so a small bound stops lower-bound early."""
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path, dists=tuple(f"pkg{i:02}-1.0" for i in range(10)))
+    lib = tmp_path / ".venv" / "lib"
+    for extra in ("pypy3.10", "junk-a", "junk-b"):
+        (lib / extra).mkdir()
+    monkeypatch.setattr(AA, "_MAX_ENV_SCAN_ENTRIES", 5)
+    packet = _packet_for(tmp_path, {"src/m.py": "x = 1\n"})
+    installed = [fact for fact in packet.dependencies
+                 if fact.status == "installed"]
+    assert len(installed) == 1
+    assert "1+" in installed[0].detail
+
+
+def test_dependency_env_scan_checkpoint_trips_mid_site_packages_loop(
+        tmp_path):
+    """A progress trip fires from inside the site-packages loop, not just
+    before the scan starts."""
+    from ptest import agent_assessment as AA
+
+    _make_venv(tmp_path, dists=tuple(f"pkg{i:02}-1.0" for i in range(10)))
+    calls = []
+
+    def _progress():
+        calls.append(1)
+        if len(calls) > 4:
+            raise C.Problem(code="review-timeout",
+                            message="total review deadline expired",
+                            phase="evidence", retryable=False)
+
+    with pytest.raises(C.Problem) as caught:
+        AA._dependency_facts({"src/m.py"}, "", None, child_root=tmp_path,
+                             deadline=None, progress=_progress)
+    assert caught.value.code == "review-timeout"
+    assert len(calls) > 4
