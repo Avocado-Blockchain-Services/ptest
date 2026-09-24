@@ -175,12 +175,17 @@ def _completed_full_runs(summaries) -> list:
 
 
 def _whole_run_s(summary: dict) -> float:
+    # Keys are the public history payload names emitted by
+    # ``contracts._timings_dict`` (``queue``, ``setup``, ``collection``,
+    # ``execution``, ``finalization``), not the ``Timings`` attribute names.
+    # ``queue`` is included: the serialized run attributes all five parts
+    # to the run, and the whole-run figure sums every recorded part.
     timings = summary.get("timings")
     if not isinstance(timings, dict):
         return 0.0
     total = 0.0
-    for key in ("queue_s", "setup_s", "collection_s", "execution_s",
-                "finalization_s"):
+    for key in ("queue", "setup", "collection", "execution",
+                "finalization"):
         value = timings.get(key)
         if isinstance(value, bool):
             continue

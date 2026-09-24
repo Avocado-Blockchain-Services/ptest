@@ -112,6 +112,39 @@ def _view(baseline=None, disabled=False):
                          selection_disabled=disabled, limitations=())
 
 
+def _full_run_summary(queue_s=1.0, setup_s=2.0, collection_s=3.0,
+                      execution_s=12.34, finalization_s=0.5):
+    """A summary with the real public history shape via serialize_run_result.
+
+    The timings keys must stay the public payload names (``queue`` etc.,
+    see ``contracts._timings_dict``); a hand-made dict here would hide a
+    key-shape mismatch between the reader and real history.
+    """
+    command = C.summarize_command(
+        C.RunnerKind.PYTEST, C.Mode.FULL, ["-q"],
+        workers=1, provenance=("test",),
+    )
+    plan = C.Plan(
+        mode=C.Mode.AUTOMATIC, execution="full", files=(), reasons=(),
+        input_digest=None, compatibility=None, baseline_run_id=None,
+        static_preview=False,
+    )
+    result = C.RunResult(
+        run_id="ab" * 16, project_id="ab" * 16, checkout_id="cd" * 16,
+        mode=C.Mode.FULL, status="passed", phase="complete",
+        started_at="2026-09-24T00:00:00+00:00",
+        finished_at="2026-09-24T00:00:19+00:00",
+        plan=plan, command=command,
+        timings=C.Timings(queue_s=queue_s, setup_s=setup_s,
+                          collection_s=collection_s, execution_s=execution_s,
+                          finalization_s=finalization_s),
+    )
+    summary = C.serialize_run_result(result)
+    assert set(summary["timings"]) == {
+        "queue", "setup", "collection", "execution", "finalization"}
+    return summary
+
+
 def test_ids_are_frozen():
     from ptest import deterministic_items as DI
 
@@ -267,8 +300,7 @@ def test_timing_whole_run_only_without_per_test_timings(tmp_path,
     from ptest import deterministic_items as DI
     from ptest import history as history_api
 
-    summary = {"mode": "full", "status": "passed",
-               "timings": {"execution_s": 12.34}}
+    summary = _full_run_summary()
     monkeypatch.setattr(history_api, "read_history",
                         lambda *_a, **_k: _view(_baseline([None, None])))
     monkeypatch.setattr(history_api, "read_history_summaries",
@@ -279,7 +311,7 @@ def test_timing_whole_run_only_without_per_test_timings(tmp_path,
     answer = answers["TIMING-001"]
     assert answer.status == "unknown"
     assert answer.reason == (
-        "ptest has whole-run timing only (last full run 12.3 s); "
+        "ptest has whole-run timing only (last full run 18.8 s); "
         "per-test timings are not recorded for this runner")
 
 
@@ -287,8 +319,7 @@ def test_timing_prefers_baseline_over_whole_run(tmp_path, monkeypatch):
     from ptest import deterministic_items as DI
     from ptest import history as history_api
 
-    summary = {"mode": "full", "status": "passed",
-               "timings": {"execution_s": 12.34}}
+    summary = _full_run_summary()
     monkeypatch.setattr(history_api, "read_history",
                         lambda *_a, **_k: _view(_baseline([0.2])))
     monkeypatch.setattr(history_api, "read_history_summaries",
