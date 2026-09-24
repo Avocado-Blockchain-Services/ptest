@@ -258,16 +258,15 @@ def test_select_fix_states_serial_tradeoff_when_parallel_active(tmp_path):
     forces serial runs, so the fix states the tradeoff plainly instead
     of instructing the user to just add --cov.
     """
-    from ptest import config as config_api
     from ptest import deterministic_items as DI
 
+    _stub_qualified_venv(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
         "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
-    (tmp_path / ".ptest.toml").write_text(
-        _v1_config_text(CHILD_PID, "pytest"), encoding="utf-8")
-    packet = _packet_for(tmp_path, None)
-    resolution = config_api.resolve_config(tmp_path)
-    answers = DI.answers_for(_domain(tmp_path), resolution, packet)
+    packet = _packet_for(tmp_path, {".ptest.toml": "[selection]"})
+    answers = DI.answers_for(
+        _domain(tmp_path),
+        _resolution(tmp_path, _parallel_config(tmp_path)), packet)
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
     assert "--cov" not in answer.finding_change
@@ -285,6 +284,53 @@ def test_select_fix_keeps_cov_guidance_when_not_parallel(tmp_path):
     assert "--cov" in answer.finding_change
 
 
+def test_select_fix_states_tradeoff_when_parallel_active_and_qualified(
+        tmp_path):
+    """Qualified xdist + --cov in runner args still states the tradeoff.
+
+    The coverage profile qualifies, yet xdist is active and ptest runs
+    coverage serially: the SELECT-001 fix must state the serial tradeoff
+    instead of staying silent, or it contradicts the PARALLEL-001 fix.
+    """
+    config = _parallel_config(
+        tmp_path, args=("--cov", "pkg", "--cov-report", "term"))
+    answers = _parallel_answers_for(tmp_path, addopts="-n 4", config=config)
+    answer = answers["SELECT-001"]
+    assert answer.status == "gap"
+    assert "runs serially under ptest" in answer.finding_change
+    assert "keep parallel runs" in answer.finding_change
+    assert "accept serial runs" in answer.finding_change
+    assert "add --cov" not in answer.finding_change
+
+
+def test_parallel_coverage_fix_names_runner_args_and_selection_cost(
+        tmp_path):
+    """PARALLEL-001 R3 with --cov in runner args names it, not addopts.
+
+    Removing --cov turns off test selection, so the fix states that cost
+    plainly and never says pytest configuration for a runner args setting.
+    """
+    config = _parallel_config(
+        tmp_path, args=("--cov", "pkg", "--cov-report", "term"))
+    answer = _parallel_answers_for(
+        tmp_path, addopts="-n 4", config=config)["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.finding_change == (
+        "Remove --cov from [runner] args in .ptest.toml to run with xdist "
+        "workers; removing it turns off ptest's test selection.")
+    assert "pytest configuration" not in answer.finding_change
+
+
+def test_parallel_coverage_fix_names_pytest_addopts_twin(tmp_path):
+    """Twin: --cov in pytest addopts names the addopts, same cost."""
+    answer = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --cov")["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.finding_change == (
+        "Remove --cov from the pytest addopts to run with xdist workers; "
+        "removing it turns off ptest's test selection.")
+
+
 def test_timing_without_history_is_unknown(tmp_path):
     answers = _answers_for(
         tmp_path, _config(), {".ptest.toml": "[selection]\nenabled = false\n"})
@@ -292,21 +338,33 @@ def test_timing_without_history_is_unknown(tmp_path):
     assert answer.status == "unknown"
     assert answer.reason == ("no timing history yet: run ptest --full once "
                              "for whole-run timing; per-test timings need "
-                             "the coverage/advanced profile")
+                             "pytest coverage and selection set up in "
+                             ".ptest.toml")
+
+
+def test_timing_without_history_vitest_keeps_short_reason(tmp_path):
+    """Twin: vitest keeps the short reason, no per-test clause."""
+    answers = _answers_for(
+        tmp_path, _config(runner_kind=C.RunnerKind.VITEST),
+        {".ptest.toml": "[selection]"})
+    answer = answers["TIMING-001"]
+    assert answer.status == "unknown"
+    assert answer.reason == "no timing history yet: run ptest --full once"
 
 
 def test_timing_unknown_names_what_changes_the_answer(tmp_path):
     """TIMING-001 unknown advice stays honest for basic pytest projects.
 
     A bare "run ptest --full once" pretends one run settles timing;
-    per-test timings only arrive with the coverage/advanced profile.
+    per-test timings need pytest coverage and selection set up.
     """
     answers = _answers_for(
         tmp_path, _config(), {".ptest.toml": "[selection]\nenabled = false\n"})
     answer = answers["TIMING-001"]
     assert answer.status == "unknown"
     assert "run ptest --full once" in answer.reason
-    assert "coverage/advanced profile" in answer.reason
+    assert "per-test timings need pytest coverage and selection" in (
+        answer.reason)
 
 
 def test_timing_unreadable_history_is_unknown(tmp_path, monkeypatch):

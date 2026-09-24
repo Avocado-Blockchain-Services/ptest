@@ -1027,11 +1027,15 @@ def _dependency_facts(names: set[str], prefix: str,
                 detail=f"{on_disk[0]} is present but was not admitted to "
                        "the review packet."))
             continue
-        for lock in sorted(name for name, kind in _LOCKS.items()
-                           if kind == want):
-            facts.append(DependencyFact(
-                ecosystem=want, status="missing", ref_path=None,
-                detail=f"{lock} is missing."))
+        want_locks = [name for name, kind in _LOCKS.items()
+                      if kind == want]
+        if len(want_locks) > 1:
+            listed = ", ".join(want_locks[:-1]) + f" or {want_locks[-1]}"
+        else:
+            listed = want_locks[0]
+        facts.append(DependencyFact(
+            ecosystem=want, status="missing", ref_path=None,
+            detail=f"no lockfile ({listed})"))
     if not seen_ecosystems:
         facts.append(DependencyFact(
             ecosystem="project", status="missing", ref_path=None,

@@ -1814,6 +1814,34 @@ def test_dependency_facts_report_present_not_admitted_and_missing_locks(tmp_path
     assert missing == []
 
 
+def test_dependency_facts_emit_one_missing_lock_line(tmp_path):
+    """No lock of the ecosystem: ONE missing fact, not three lines."""
+    from ptest import agent_assessment as AA
+
+    assert AA._LOCKS["uv.lock"] == "python-lock"
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    locks = [fact for fact in packet.dependencies
+             if fact.ecosystem == "python-lock"]
+    assert [(fact.status, fact.detail) for fact in locks] == [
+        ("missing", "no lockfile (uv.lock, poetry.lock or pdm.lock)")]
+
+
+def test_dependency_facts_emit_one_missing_lock_line_node_twin(tmp_path):
+    """Twin: node without a lock gets one missing line too."""
+    packet = _packet_for(tmp_path, {
+        "package.json": '{"name": "demo"}\n',
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    locks = [fact for fact in packet.dependencies
+             if fact.ecosystem == "node-lock"]
+    assert [(fact.status, fact.detail) for fact in locks] == [
+        ("missing",
+         "no lockfile (package-lock.json, pnpm-lock.yaml or yarn.lock)")]
+
+
 def test_dependency_facts_report_only_lock_in_use(tmp_path):
     """A project using uv.lock reports only uv.lock, never its siblings.
 

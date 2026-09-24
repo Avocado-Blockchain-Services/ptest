@@ -395,3 +395,47 @@ def test_doctor_select_fix_states_serial_tradeoff_on_parallel_project(
     flat = " ".join(capsys.readouterr().out.split())
     assert "add --cov" not in flat
     assert "runs serially under ptest" in flat
+
+
+def test_doctor_qualified_cov_states_same_tradeoff_both_items(
+        tmp_path, monkeypatch, capsys):
+    """Twin: qualified xdist + --cov in runner args stays consistent.
+
+    SELECT-001 states the serial tradeoff (never just orders --cov) and
+    PARALLEL-001 names [runner] args with the selection cost; neither
+    says pytest configuration for the runner args setting.
+    """
+    root = tmp_path / "qualified-cov"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
+    (root / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + "dd" * 16 + '"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        'args = ["--cov", "pkg", "--cov-report", "term"]\n'
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    _prepare_review(monkeypatch, root, bindir)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+
+    flat = " ".join(capsys.readouterr().out.split())
+    assert "add --cov" not in flat
+    assert "runs serially under ptest" in flat
+    assert "accept serial runs" in flat
+    assert "turns off ptest's test selection" in flat
+    assert "pytest configuration" not in flat

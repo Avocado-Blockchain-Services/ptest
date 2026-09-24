@@ -180,12 +180,12 @@ def _select_fix(config: C.Config, cfg: str, *,
         qualified = False
     fix = (f"Enable selection with closed_inputs, input_roots, and "
            f"full_triggers in {cfg}.")
-    if not qualified and config.runner.kind is C.RunnerKind.PYTEST:
+    if config.runner.kind is C.RunnerKind.PYTEST:
         if parallel_active:
             fix += (" Test selection needs the coverage profile, which "
                     "runs serially under ptest; keep parallel runs and "
                     "skip selection, or enable it and accept serial runs.")
-        else:
+        elif not qualified:
             fix += (" For pytest without the coverage catalog profile, first "
                     "add --cov and --cov-report to runner args.")
     return fix
@@ -258,11 +258,14 @@ def _timing_answer(domain: C.DomainPaths, config: C.Config, resolution,
             item_id="TIMING-001", status="unknown",
             reason="ptest history is unavailable, so timing cannot be read",
             evidence_paths=())
+    if config.runner.kind is C.RunnerKind.PYTEST:
+        reason = ("no timing history yet: run ptest --full once for "
+                  "whole-run timing; per-test timings need pytest "
+                  f"coverage and selection set up in {_cfg(declaration)}")
+    else:
+        reason = "no timing history yet: run ptest --full once"
     return DeterministicAnswer(
-        item_id="TIMING-001", status="unknown",
-        reason=("no timing history yet: run ptest --full once for "
-                "whole-run timing; per-test timings need the "
-                "coverage/advanced profile"),
+        item_id="TIMING-001", status="unknown", reason=reason,
         evidence_paths=())
 
 
@@ -322,8 +325,9 @@ def _parallel_unknown(runner: str) -> str:
 
 
 def _parallel_answer(facts: dict | None, runner: str,
-                     evidence: tuple[str, ...],
-                     cfg: str) -> DeterministicAnswer:
+                     evidence: tuple[str, ...], cfg: str, *,
+                     cov_in_runner_args: bool = False,
+                     ) -> DeterministicAnswer:
     """Build the PARALLEL-001 answer from one child's executability facts.
 
     The not-configured answer always plans the safe provisional fix
@@ -371,6 +375,15 @@ def _parallel_answer(facts: dict | None, runner: str,
                 fix = (facts.get("parallel_fix")
                        or _parallel_environment_fix(
                            facts, serial_reason, cfg))
+            elif "--cov" in serial_reason:
+                if cov_in_runner_args:
+                    where = f"[runner] args in {cfg}"
+                else:
+                    where = "the pytest addopts"
+                fix = (facts.get("parallel_fix") or facts.get("runs_fix")
+                       or f"Remove --cov from {where} to run with xdist "
+                       f"workers; removing it turns off ptest's test "
+                       f"selection.")
             else:
                 fix = (facts.get("parallel_fix") or facts.get("runs_fix")
                        or f"Clear the serial fallback in the pytest "
@@ -452,7 +465,13 @@ def parallel_answer_for(domain: C.DomainPaths,
             except Exception:
                 facts = None
         runner = config.runner.kind.value
-        answer = _parallel_answer(facts, runner, evidence, cfg)
+        runner_args = (tuple(config.runner.args)
+                       + tuple(config.runner.full_args))
+        cov_in_runner_args = any(
+            token == "--cov" or token.startswith("--cov=")
+            for token in runner_args)
+        answer = _parallel_answer(facts, runner, evidence, cfg,
+                                  cov_in_runner_args=cov_in_runner_args)
         if answer.status == "satisfied" and runner == "pytest" and evidence:
             source = _addopts_source(config, resolution, declaration)
             if source is not None and source in excerpt_paths:
@@ -490,17 +509,6 @@ def _packet_facts(config: C.Config, declaration: str) -> dict | None:
         return None
 
 
-def _packet_parallel_active(config: C.Config, declaration: str) -> bool:
-    """True when the child's pytest config activates the parallel tier."""
-    from . import executability as executability_api
-
-    try:
-        return bool(executability_api.parallel_request(
-            config, project=declaration).active)
-    except Exception:
-        return False
-
-
 def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
                  packet,
                  facts: dict | None = None) -> dict[str, DeterministicAnswer]:
@@ -522,10 +530,12 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
     if facts is None:
         facts = _packet_facts(config, declaration)
     parallel = parallel_answer_for(domain, resolution, packet, facts=facts)
+    parallel_fact = facts.get("parallel") if isinstance(facts, dict) else None
+    parallel_active = (isinstance(parallel_fact, str)
+                       and parallel_fact != NOT_CONFIGURED_PARALLEL)
     answers = {
         "SELECT-001": _select_answer(
-            config, cfg, evidence,
-            parallel_active=_packet_parallel_active(config, declaration)),
+            config, cfg, evidence, parallel_active=parallel_active),
         "TIMING-001": timing,
     }
     if parallel is not None:
