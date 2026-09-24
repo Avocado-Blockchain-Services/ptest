@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "dry_run": {
+          "type": "boolean"
+        },
+        "plan": {
+          "items": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "remove",
+                  "kept",
+                  "skipped"
+                ],
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "target",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "result": {
+          "properties": {
+            "applied": {
+              "type": "boolean"
+            },
+            "kept": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "nothing_to_remove": {
+              "type": "boolean"
+            },
+            "removed": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "skipped": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "removed",
+            "kept",
+            "skipped",
+            "nothing_to_remove",
+            "applied"
+          ],
+          "type": "object"
+        },
+        "root": {
+          "type": "string"
+        },
+        "self": {
+          "properties": {
+            "kept": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "path_symlink_removed": {
+              "type": "boolean"
+            },
+            "removed": {
+              "type": "boolean"
+            },
+            "requested": {
+              "type": "boolean"
+            },
+            "root": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "requested",
+            "root",
+            "removed",
+            "path_symlink_removed",
+            "kept"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "root",
+        "dry_run",
+        "plan",
+        "result",
+        "self"
+      ],
+      "type": "object"
+    },
+    "domain": {
+      "properties": {
+        "fixture": {
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "fixture"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "phase",
+        "retryable"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "kind": {
+      "const": "uninstall",
+      "type": "string"
+    },
+    "ptest_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "ptest_version",
+    "domain",
+    "data",
+    "error"
+  ],
+  "title": "ptest public document: uninstall",
+  "type": "object"
+}

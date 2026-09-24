@@ -47,7 +47,8 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "ptest api/" in guide
     assert "-n 0" in guide
     assert "vitest run" in guide
-    assert FAST_FORWARD_GATE_RULE in guide
+    assert FAST_FORWARD_GATE_RULE not in guide
+    assert "graphify" not in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert agents.startswith("# Existing rules\n")
     assert agents.count("ptest-agent-rules:start") == 1
@@ -131,7 +132,8 @@ def test_repository_guide_states_assessment_only_authority():
     flat = " ".join(guide.split())
     assert "assessment authority only" in guide
     assert "separate user instruction" in guide
-    assert FAST_FORWARD_GATE_RULE in guide
+    assert FAST_FORWARD_GATE_RULE not in guide
+    assert "graphify" not in guide
     assert "Run `ptest --full` once after the integrated change" in guide
     assert "one cheap-model call per checklist item that needs one" in flat
     assert "timing, selection and parallel execution" in flat
@@ -140,12 +142,13 @@ def test_repository_guide_states_assessment_only_authority():
     assert len(guide.splitlines()) <= 45
 
 
-def test_local_repair_guide_preserves_gate_and_fast_forward_guidance():
+def test_local_repair_guide_has_no_repo_internal_workflow():
     from importlib.resources import files
 
     guide = files("ptest").joinpath(
         "resources", "agent-guide.md").read_text(encoding="utf-8")
-    assert FAST_FORWARD_GATE_RULE in guide
+    assert FAST_FORWARD_GATE_RULE not in guide
+    assert "graphify" not in guide
     assert "run the scoped `ptest` command" in guide
     assert "run one `ptest --full` final gate" in guide
 
@@ -660,14 +663,57 @@ def test_previous_managed_skill_upgrades_in_place(tmp_path):
     assert repeat.changed is False
 
 
+def test_pre_gate_managed_skill_upgrades_in_place(tmp_path):
+    """The long skill shipped before the fast-forward-gate lines upgrades too.
+
+    Exact bytes of ``8cd2b54:src/ptest/agent_rules.py`` `_provider_text`
+    ("claude"): the long template without the merge-gate/graph tail.
+    """
+    from ptest.agent_rules import _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    pre_gate = (
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read the repository-root guide\n"
+        "`docs/ptest-agent.md`. That path is relative to the repository root,\n"
+        "not to this skill directory.\n"
+        "\n"
+        "Run every test command through `ptest` from the repository root (the\n"
+        "directory containing the root `.ptest.toml`). Never invoke pytest,\n"
+        "Vitest, or another runner directly.\n"
+        "\n"
+        "During iteration run the smallest relevant scope, such as\n"
+        "`ptest tests/<chosen-test>.py`. In a monorepo, prefix the scope with\n"
+        "its declared child, such as `ptest api/tests/<chosen-test>.py`; child\n"
+        "`.ptest.toml` files remain authoritative. Run the root full gate\n"
+        "`ptest --full` once after the integrated change.\n"
+    ).encode("utf-8")
+    (target / "SKILL.md").write_bytes(pre_gate)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
 def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
     import hashlib
 
     import ptest.agent_rules as rules_module
 
     sentinel = b"# old managed guide\n"
-    monkeypatch.setattr(rules_module, "_BASE_GUIDE_SHA256",
-                        hashlib.sha256(sentinel).hexdigest())
+    monkeypatch.setattr(rules_module, "_PREVIOUS_GUIDE_SHA256S",
+                        frozenset({hashlib.sha256(sentinel).hexdigest()}))
     guide_dir = tmp_path / "docs"
     guide_dir.mkdir()
     (guide_dir / "ptest-agent.md").write_bytes(sentinel)
@@ -683,6 +729,97 @@ def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
         (item.action, item.target) for item in result.details]
     repeat = apply(tmp_path)
     assert repeat.changed is False
+
+
+def test_previous_hashes_cover_main_pre_change_guide():
+    """The guide as shipped on main before the G1 cleanup must upgrade.
+
+    ``0b2ea2...`` is the sha256 of ``main:src/ptest/resources/
+    repository-agent-guide.md`` (byte-identical to what init writes);
+    ``72f2a5...`` is the older base-commit guide. The current guide
+    itself must never classify as previous.
+    """
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+
+    assert "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68" in rules_module._PREVIOUS_GUIDE_SHA256S
+    current = rules_module._guide()
+    assert hashlib.sha256(current).hexdigest() not in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"
+
+
+def test_every_shipped_guide_version_hashes_into_previous_set():
+    """Every guide version ever shipped on this branch must upgrade, not conflict.
+
+    Walks `git log` for the bundled resource and requires each historical
+    version's sha256 to classify as managed: either in
+    `_PREVIOUS_GUIDE_SHA256S` or byte-identical to the current guide.
+    (`ptest init` writes the resource bytes verbatim, so each shipped
+    version is exactly what some repo holds.) Skips with a clear reason
+    when git history is unavailable.
+    """
+    import hashlib
+    import subprocess
+
+    import ptest.agent_rules as rules_module
+
+    anchor = Path(__file__).resolve().parent
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=anchor, capture_output=True, text=True,
+            check=True).stdout.strip()
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--",
+             "src/ptest/resources/repository-agent-guide.md"],
+            cwd=toplevel, capture_output=True, text=True,
+            check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("git history for the guide resource is unavailable")
+    if not commits:
+        pytest.skip("git history for the guide resource is unavailable")
+    current = rules_module._guide()
+    current_hash = hashlib.sha256(current).hexdigest()
+    allowed = set(rules_module._PREVIOUS_GUIDE_SHA256S) | {current_hash}
+    missing = []
+    for commit in commits:
+        try:
+            raw = subprocess.run(
+                ["git", "show",
+                 f"{commit}:src/ptest/resources/repository-agent-guide.md"],
+                cwd=toplevel, capture_output=True, check=True).stdout
+        except subprocess.CalledProcessError:
+            pytest.skip(f"git history for the guide resource is unreadable at {commit}")
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest not in allowed:
+            missing.append(f"{commit[:7]} {digest}")
+    assert not missing, (
+        "shipped guide versions missing from _PREVIOUS_GUIDE_SHA256S: "
+        + ", ".join(missing))
+
+
+def test_init_upgrades_old_guide_in_place(tmp_path, monkeypatch):
+    """Twin: `ptest init` upgrades a previous-managed guide in place.
+
+    The user-edited half of the twin is ``test_user_edited_guide_still_conflicts_before_any_write``.
+    """
+    import hashlib
+
+    from ptest.cli import main
+    import ptest.agent_rules as rules_module
+
+    old = b"# old managed guide\n"
+    monkeypatch.setattr(rules_module, "_PREVIOUS_GUIDE_SHA256S",
+                        frozenset({hashlib.sha256(old).hexdigest()}))
+    monkeypatch.chdir(tmp_path)
+    guide_dir = tmp_path / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
 
 
 def test_user_edited_guide_still_conflicts_before_any_write(tmp_path):

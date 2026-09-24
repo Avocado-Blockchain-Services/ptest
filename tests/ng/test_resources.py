@@ -23,6 +23,12 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
     assert "Exactly 2 seconds starts optimization" in guide
     assert "exactly 3\nseconds remains in that band" in guide
     assert "assessment authority only" in guide
+    assert "function by default" in guide
+    assert "session only for expensive read-only" in guide
+    assert "no mutable shared fixture state" in guide
+    flat = " ".join(guide.split())
+    assert ("See `ptest guide` recipes: factories, databases, cache, "
+            "files-ports, processes, time-network." in flat)
 
 
 def test_agent_guide_describes_doctor_v2_first():
@@ -57,8 +63,33 @@ def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
             in " ".join(guide.split()))
     assert "one database per worker per run" in guide
     assert "assessment authority only" in guide
-    # The merge gate and graph refresh live only in the guide, not in skills.
-    assert "graphify update ." in guide
+    # ptest-repo-internal workflow (merge gate, graph refresh) must never
+    # ship to other people's repositories.
+    assert "graphify" not in guide
+    assert "fast-forward" not in guide
+    # Tightened test-design guidance: fixture scope, ownership, recipes.
+    assert "factories/builders for test records" in guide
+    assert "function by default" in guide
+    assert "session only for expensive read-only" in guide
+    assert "no mutable shared fixture state" in guide
+    assert "has an owner that cleans it up" in guide
+    assert "above 0.5 seconds" in guide
+    assert "at 2 seconds" in guide
+    assert "above 3 seconds" in guide
+    flat = " ".join(guide.split())
+    assert ("See `ptest guide` recipes: factories, databases, cache, "
+            "files-ports, processes, time-network." in flat)
+
+
+def test_shipped_guides_never_mention_repo_internal_workflow():
+    from importlib.resources import files
+
+    for name in ("repository-agent-guide.md", "agent-guide.md"):
+        guide = files("ptest").joinpath("resources", name).read_text(
+            encoding="utf-8")
+        assert "graphify" not in guide, name
+        assert "fast-forward" not in guide, name
+        assert "fast_forward" not in guide, name
 
 
 @pytest.mark.parametrize("name, required", [

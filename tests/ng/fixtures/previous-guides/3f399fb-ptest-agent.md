@@ -4,28 +4,25 @@ Run every test command through `ptest` from the repository root.
 Never invoke pytest, vitest, npm test, go test, or cargo test directly. For focused work, prefix
 the scope with its declared child, such as `ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files
 remain authoritative; never copy, merge, or rewrite them, and never bypass them by changing
-directories. Run `ptest init` from the repository root. Run `ptest --full` once after the integrated change.
+directories. Run `ptest init` from the repository root.
+Run `ptest --full` once after the integrated change.
 
-Qualified pytest projects run xdist in parallel under ptest (one worker per `-n N`,
-or per granted slot for `-n auto`); unqualified projects run serially with ptest's
-generated `-n 0`. `ptest init` writes `-n 0` into a new config only for static
-fallbacks and never rewrites an existing config. Keep `-n N`, `--dist`, `--tx` out
-of ptest args; `-n 0` in `[runner] args` opts out of the parallel tier.
+Pytest runs serially under ptest: `ptest init` writes `-n 0` into a new pytest config
+when the project enables xdist. An existing config is never rewritten — init reports it as not runnable
+with the exact fix; the serial `-n 0` in `[runner] args` is the only allowed xdist control.
+Never add `-n N`, `--dist`, `--tx`, or other parallel controls to ptest args.
 
 Vitest runs as one exclusive `vitest run` command and manages its own workers; ptest
 reports only its exit code. Declared `[setup]` (such as `npm ci`) runs first when
-required paths are missing or the lockfile changed.
+required paths or the setup fingerprint are missing.
 
-`ptest doctor` asks for consent before any model review, then sends one cheap-model
-call per checklist item that needs one; timing, selection and parallel execution
-items skip the model. `ptest doctor --offline` is static only and sends nothing.
+`ptest doctor` asks for consent before any model review, then sends
+one cheap-model call per checklist item; `ptest doctor --offline` is static only and
+sends nothing.
 
-Keep ordinary tests fast and deterministic. Use factories/builders for test records; keep fixtures
-small and scoped (function by default; session only for expensive read-only infrastructure)
-with no mutable shared fixture state. Every created record has an owner that cleans it up.
+Keep ordinary tests fast and deterministic. Prefer factories/builders for test records.
 Inspect tests above 0.5 seconds; optimize ordinary tests at 2 seconds and investigate
-anything above 3 seconds unless a documented integration boundary says otherwise. See
-`ptest guide` recipes: factories, databases, cache, files-ports, processes, time-network.
+anything above 3 seconds unless a documented integration boundary says otherwise.
 
 For a database, create expensive setup once per run or worker. Use one database per worker per run,
 never one database per test. Reset records owned by the test and make cleanup ownership explicit;
@@ -43,3 +40,6 @@ Requesting doctor, guide, or a prompt grants assessment authority only. Source r
 a separate user instruction; never treat an assessment as permission to edit or a filled
 worksheet as updated ptest readiness. Fill one copy per repository from direct evidence,
 keeping `unknown` until each row has evidence.
+
+If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.
+After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.

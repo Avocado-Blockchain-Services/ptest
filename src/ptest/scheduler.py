@@ -1299,6 +1299,50 @@ def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
         conn.close()
 
 
+def forget_checkouts(domain: DomainPaths, ids) -> int:
+    """Delete only terminal scheduler rows for ``ids``, under one lock.
+
+    Runs under ``BEGIN IMMEDIATE`` on the scheduler-owned coordinator:
+    when any non-terminal row exists for those checkout ids the whole
+    forget is refused (``active-run``) and nothing is deleted; otherwise
+    every terminal row for those ids is removed and the deleted count
+    is returned. Callers remove state directories only after this
+    returns, so a run admitted in between still refuses first.
+    """
+    wanted = list(dict.fromkeys(ids))
+    if not wanted:
+        return 0
+    for item in wanted:
+        if not isinstance(item, str) or not item:
+            raise TypeError("scheduler checkout ids must be nonempty strings")
+    conn, _ = _open_state(domain, create=False)
+    ok = False
+    try:
+        _begin(conn)
+        now = _now()
+        _recover_boot_locked(conn, now)
+        _reconcile_locked(conn, now)
+        marks = ",".join("?" for _ in wanted)
+        rows = conn.execute(
+            f"SELECT checkout_id, state FROM jobs WHERE checkout_id IN ({marks})",
+            wanted).fetchall()
+        live = sorted({row["checkout_id"] for row in rows
+                       if row["state"] not in _TERMINAL})
+        if live:
+            _fail("active-run",
+                  "a ptest run for this checkout is active; refusing to uninstall")
+        cursor = conn.execute(
+            f"DELETE FROM jobs WHERE checkout_id IN ({marks})"
+            " AND state IN ('RELEASED','CANCELLED')",
+            wanted)
+        ok = True
+        return cursor.rowcount
+    except sqlite3.Error:
+        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    finally:
+        _finish_transaction(conn, ok)
+
+
 def initialize(domain: DomainPaths) -> None:
     """Create and validate the account coordinator before read-only checks."""
     conn, _ = _open_state(domain, create=True)

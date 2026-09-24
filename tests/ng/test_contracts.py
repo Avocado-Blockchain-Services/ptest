@@ -316,10 +316,19 @@ def _full_payloads():
             "proposed_runner": "pytest", "commands": [_full_command_data()],
             "required_actions": ["initialize"], "warnings": [],
         },
+        "uninstall": {
+            "root": "/repo", "dry_run": False,
+            "plan": [{"action": "remove", "target": ".ptest.toml",
+                      "detail": "ptest config"}],
+            "result": {"removed": [".ptest.toml"], "kept": [], "skipped": [],
+                       "nothing_to_remove": False, "applied": True},
+            "self": {"requested": False, "root": None, "removed": False,
+                     "path_symlink_removed": False, "kept": []},
+        },
     }
 
 
-def test_eight_public_documents_parse():
+def test_nine_public_documents_parse():
     for kind, data in _full_payloads().items():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
@@ -351,6 +360,30 @@ def test_eight_public_documents_parse():
     assert init_doc.data["config"]["project_id"] == "ab" * 16
     assert [c["mode"] for c in init_doc.data["config"]["commands"]] == [
         "scoped", "full"]
+    uninstall_doc = C.decode_public_document(
+        C.encode_public_document("uninstall", _full_payloads()["uninstall"]))
+    assert uninstall_doc.data["root"] == "/repo"
+    assert uninstall_doc.data["dry_run"] is False
+    assert uninstall_doc.data["plan"][0]["action"] == "remove"
+    assert uninstall_doc.data["result"]["removed"] == [".ptest.toml"]
+    assert uninstall_doc.data["result"]["nothing_to_remove"] is False
+    assert uninstall_doc.data["self"]["requested"] is False
+    hostile_uninstall = dict(
+        _full_payloads()["uninstall"], root="/repo", extra_field="dropped",
+        plan=[dict(_full_payloads()["uninstall"]["plan"][0],
+                   extra_field="dropped")],
+        result=dict(_full_payloads()["uninstall"]["result"],
+                    extra_field="dropped"),
+        self=dict(_full_payloads()["uninstall"]["self"],
+                  extra_field="dropped"))
+    projected = C.decode_public_document(
+        C.encode_public_document("uninstall", hostile_uninstall))
+    assert set(projected.data) == {"root", "dry_run", "plan", "result", "self"}
+    assert set(projected.data["plan"][0]) == {"action", "target", "detail"}
+    assert set(projected.data["result"]) == {
+        "removed", "kept", "skipped", "nothing_to_remove", "applied"}
+    assert set(projected.data["self"]) == {
+        "requested", "root", "removed", "path_symlink_removed", "kept"}
     history_doc = C.decode_public_document(
         C.encode_public_document("history", _full_payloads()["history"]))
     assert history_doc.data["summaries"][0]["run_id"] == RUN_ID
@@ -456,7 +489,7 @@ def test_generated_schema_files_match_frozen_shapes():
     root = Path(__file__).resolve().parents[2]
     schemas = {}
     for kind in ("run", "plan", "where", "status", "history", "init",
-                 "doctor", "register"):
+                 "doctor", "register", "uninstall"):
         path = root / "docs" / "schemas" / "v1" / f"{kind}.json"
         schemas[kind] = json.loads(path.read_text(encoding="utf-8"))
     capability = schemas["where"]["properties"]["data"]["properties"][
@@ -484,6 +517,15 @@ def test_generated_schema_files_match_frozen_shapes():
         "findings"]["items"]
     assert findings["properties"]["code"]["enum"] == sorted(
         C.FINDING_CODES)
+    uninstall = schemas["uninstall"]["properties"]["data"]["properties"]
+    assert sorted(uninstall["plan"]["items"]["required"]) == [
+        "action", "detail", "target"]
+    assert uninstall["plan"]["items"]["properties"]["action"]["enum"] == [
+        "remove", "kept", "skipped"]
+    assert sorted(uninstall["result"]["required"]) == [
+        "applied", "kept", "nothing_to_remove", "removed", "skipped"]
+    assert sorted(uninstall["self"]["required"]) == [
+        "kept", "path_symlink_removed", "removed", "requested", "root"]
 
 
 def test_workspace_aggregate_keeps_exact_v1_doctor_keys_and_enums(case, tmp_path):
@@ -1426,6 +1468,7 @@ _PUBLIC_DATA_KEYS = {
                "limitations"},
     "register": {"root", "initialized", "proposed_runner", "commands",
                  "required_actions", "warnings"},
+    "uninstall": {"root", "dry_run", "plan", "result", "self"},
 }
 
 
@@ -1480,6 +1523,11 @@ def _dirty_payloads(sentinel):
     register["commands"] = [dict(register["commands"][0],
                                  future_command=sentinel)]
     payloads["plan"] = dict(payloads["plan"], future_plan=sentinel)
+    uninstall = payloads["uninstall"]
+    uninstall["future_uninstall"] = sentinel
+    uninstall["plan"] = [dict(uninstall["plan"][0], future_entry=sentinel)]
+    uninstall["result"] = dict(uninstall["result"], future_result=sentinel)
+    uninstall["self"] = dict(uninstall["self"], future_self=sentinel)
     return payloads
 
 

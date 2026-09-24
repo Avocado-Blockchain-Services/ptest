@@ -114,6 +114,38 @@ def _previous_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_gate_provider_text(provider: str) -> bytes:
+    """Exact long skill bytes before the fast-forward-gate lines.
+
+    ``8cd2b54:src/ptest/agent_rules.py`` `_provider_text`: the long
+    template without the merge-gate/graph tail that ``0c2cb7a`` added.
+    Recognized as previous managed content, like `_previous_provider_text`.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read the repository-root guide\n"
+        "`docs/ptest-agent.md`. That path is relative to the repository root,\n"
+        "not to this skill directory.\n"
+        "\n"
+        "Run every test command through `ptest` from the repository root (the\n"
+        "directory containing the root `.ptest.toml`). Never invoke pytest,\n"
+        "Vitest, or another runner directly.\n"
+        "\n"
+        "During iteration run the smallest relevant scope, such as\n"
+        "`ptest tests/<chosen-test>.py`. In a monorepo, prefix the scope with\n"
+        "its declared child, such as `ptest api/tests/<chosen-test>.py`; child\n"
+        "`.ptest.toml` files remain authoritative. Run the root full gate\n"
+        "`ptest --full` once after the integrated change.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus a short guide pointer.
 
@@ -176,7 +208,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
         return relative, target, current, "current"
     if current == _legacy_provider_text(provider):
         return relative, target, current, "legacy"
-    if current == _previous_provider_text(provider):
+    if current in (_previous_provider_text(provider),
+                   _pre_gate_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -574,10 +607,38 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
         _close_quietly(root_fd)
 
 
-# sha256 of the base-commit ``docs/ptest-agent.md`` bytes. Repositories
-# holding exactly these bytes get an in-place guide upgrade; any other
-# differing guide is a user edit and still raises ``already-exists``.
-_BASE_GUIDE_SHA256 = "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68"
+# sha256 digests of known previous ``docs/ptest-agent.md`` bytes.
+# Repositories holding exactly these bytes get an in-place guide upgrade;
+# any other differing guide is a user edit and still raises
+# ``already-exists``. One entry per shipped version of
+# ``src/ptest/resources/repository-agent-guide.md`` (`ptest init` writes
+# the resource bytes verbatim, so each shipped version is exactly what
+# some repo holds); each comment names the main commit whose
+# ``git show <commit>:src/ptest/resources/repository-agent-guide.md``
+# hashes to the entry below it. See
+# ``test_every_shipped_guide_version_hashes_into_previous_set``.
+_PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 93940f4: guide as shipped on main before the G1 cleanup.
+    "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6",
+    # 66822ca.
+    "fd5645f89deb506715c7cf7110ba51b5e3c0146675031e3799efd6c0f9f2df46",
+    # 7914c2a (also what the 3f399fb release wrote).
+    "22babcd66d575ec65c481c747a8527b9b2ad0b8f206f8d83c0dafa8254c4691c",
+    # 73b01b9.
+    "1fd32e2c9987144b265ba8e1d76e12d398b7e09af6d2aa1a5edb56900520e2cc",
+    # be7c27e.
+    "f6f40e2e94e2f66fa548b92ac9622f2c60e20bd36a6c7f2b4cb9774b9747d230",
+    # 0c2cb7a: base-commit guide (first fast-forward-gate version).
+    "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68",
+    # fe76ce0.
+    "5ff71de45dccc61b34b522c707a41cf6d0c599499be56f83b5867a340bdcf470",
+    # e6610a7.
+    "0c7cf1594cdfed4579f1b796485998ada1dee5a34ba72366ac3ccd69a7c4e692",
+    # 34d5e53.
+    "078dc0339477537f34a3f5a6fa380cd794c942c50a015fbbc98613e5461b5096",
+    # a86393c (initial snapshot).
+    "5d6319fdc79f1819985afabe469ce7adb08bea27a11938b5dd0f0e3b179e7ea2",
+})
 
 
 def _guide_kind(existing: str | None, guide: bytes) -> str:
@@ -587,7 +648,7 @@ def _guide_kind(existing: str | None, guide: bytes) -> str:
     raw = existing.encode("utf-8")
     if raw == guide:
         return "current"
-    if hashlib.sha256(raw).hexdigest() == _BASE_GUIDE_SHA256:
+    if hashlib.sha256(raw).hexdigest() in _PREVIOUS_GUIDE_SHA256S:
         return "previous"
     raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
 

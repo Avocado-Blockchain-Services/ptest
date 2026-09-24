@@ -74,3 +74,15 @@ running from a checkout without a global installation.
 
 The old implementation is retained only in Git history; see
 [docs/legacy-index.md](docs/legacy-index.md).
+
+`ptest uninstall` reverses what ptest set up in a repository: it removes the
+`.ptest.toml` files, ptest-managed guidance, the un-edited
+`recommendations.md` report, and this checkout's private state (history,
+setup records, scheduler rows). Files you edited are kept and reported;
+symlinks and anything outside the repository root are never touched. The
+plan prints first (grouped by action); a TTY is asked once, while
+non-interactive runs require `--yes` and `--dry-run` changes nothing.
+Skipped entries are informational and exit 0.
+`ptest uninstall --self` also removes the local installation (only
+installer-created entries; anything else inside the root is kept). See
+`ptest help uninstall` for details.
