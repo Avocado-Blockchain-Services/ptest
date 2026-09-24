@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import sqlite3
 import sys
@@ -583,8 +584,30 @@ def test_shared_review_model_cache_is_kept(case, tmp_path, monkeypatch, capsys):
 
 # --- --self -------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolate_self_discovery(tmp_path, monkeypatch):
+    """Incident U2: fake every --self candidate source toward tmp.
+
+    ``plan_self`` discovers roots from ``sys.argv[0]`` (the pytest
+    bridge when the suite runs under an installed ptest), the running
+    package's ``__file__``, ``shutil.which("ptest")``, and the passwd
+    home.  Point all four at tmp so no test can ever plan the real
+    install; the --self tests below wire their fixture root explicitly.
+    """
+    stub = tmp_path / "argv-stub"
+    stub.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(stub)])
+    from ptest import uninstall as uninstall_api
+    monkeypatch.setattr(uninstall_api, "__file__", str(stub))
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    home = tmp_path / "isolated-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        pwd, "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=str(home)))
+
+
 def _fake_home(tmp_path: Path, monkeypatch) -> Path:
-    import pwd
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr(
@@ -622,6 +645,9 @@ def test_self_removes_fixture_install_root_but_keeps_foreign_symlink(
     (bindir / "ptest").symlink_to(target)
     (bindir / "other").symlink_to("/bin/true")
     monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    monkeypatch.setattr(
+        shutil, "which", lambda *args, **kwargs: str(bindir / "ptest"))
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
@@ -654,6 +680,62 @@ def test_self_detects_running_binary_inside_install_root(
     out = capsys.readouterr().out
     assert "ptest was uninstalled" in out
     assert not inst.exists()
+
+
+def test_self_plans_only_the_argv_fixture_root_never_real_paths(
+        case, tmp_path, monkeypatch, capsys):
+    """Incident U2 twin: argv[0] inside a fake root plans only that root.
+
+    The real ``~/.local/ptest`` root is never a candidate here, and the
+    planned root is printed before confirmation runs.
+    """
+    from ptest import uninstall as uninstall_api
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+
+    plan = uninstall_api.plan_self()
+    assert plan.root == inst
+    assert plan.refused is None
+    assert plan.root.is_relative_to(tmp_path)
+    real_root = Path(os.environ["HOME"]) / ".local" / "ptest"
+    assert plan.root != real_root
+    assert (plan.refused_path or "") != str(real_root)
+
+    domain = case.domain()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    assert _uninstall(domain, "--self", "--yes") == 0
+    out = capsys.readouterr().out
+    assert str(inst) in out
+    assert not inst.exists()
+
+
+def test_self_discovery_refuses_a_root_outside_test_tmp(
+        tmp_path, monkeypatch):
+    """Incident U2 twin: the suite guard, not the plan, owns stray roots.
+
+    A valid install layout outside this test's tmp tree must raise out
+    of ``plan_self`` (via the conftest discovery guard) instead of ever
+    becoming a plan that ``apply_self`` could execute.
+    """
+    from ptest import uninstall as uninstall_api
+    _fake_home(tmp_path, monkeypatch)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir(exist_ok=True)
+    try:
+        target = _install_fixture(outside)
+        monkeypatch.setattr(sys, "argv", [str(target)])
+        with pytest.raises(AssertionError, match="outside test tmp"):
+            uninstall_api.plan_self()
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_self_refuses_a_root_without_install_layout(

@@ -761,10 +761,16 @@ def plan_self() -> SelfPlan:
 
     Every existing candidate is checked for an install.sh layout before
     any refusal: a stale candidate never vetoes a valid install root.
+
+    Only two kinds of root are ever planned: the one containing the
+    running ptest (``sys.argv[0]`` or this file) and the default install
+    root.  The caller prints the planned root before asking for
+    confirmation.
     """
     candidates: list[Path] = []
     located = shutil.which("ptest")
-    for source in (sys.argv[0] if sys.argv else None, located):
+    running = str(Path(__file__).resolve())
+    for source in (sys.argv[0] if sys.argv else None, running, located):
         root = _root_from_binary(source)
         if root is not None and root not in candidates:
             candidates.append(root)
