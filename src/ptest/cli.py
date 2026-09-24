@@ -1628,6 +1628,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                     model=declared):
                 return _declined_review_output(parsed, resolution, domain)
             ensure_deadline()
+            scheduler.prepare_state_directory(domain)
             cache_root = files.ensure_private_dir(
                 domain.root, _REVIEW_MODEL_CACHE_DIR)
             ensure_deadline()

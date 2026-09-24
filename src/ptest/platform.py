@@ -245,23 +245,56 @@ def _validate_existing_private_file(path: Path) -> None:
             raise
 
 
+def configured_state_directory() -> Path | None:
+    """Validate an explicit state location without creating or repairing it."""
+    raw = os.environ.get("PTEST_STATE_DIR")
+    if raw is None:
+        return None
+    path = Path(raw)
+    if (not raw or not path.is_absolute() or path.parent == path
+            or raw.startswith("//") or ".." in path.parts
+            or any(ord(char) < 32 or ord(char) == 127 for char in raw)):
+        _fail("unsafe-path", "PTEST_STATE_DIR must be an absolute directory without traversal or control characters")
+    uid, _ = _uid_pair()
+    # Inspect every ancestor before touching metadata below it. Shared sticky
+    # system temp directories may contain a private, user-owned parent.
+    for ancestor in reversed(path.parents):
+        stamp = _lstat(ancestor)
+        if stamp is None:
+            _fail("state-unavailable", "PTEST_STATE_DIR parent must already exist")
+        if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+            _fail("unsafe-path", "PTEST_STATE_DIR contains a non-directory or symlink")
+        trusted_sticky = stamp.st_uid == 0 and bool(stamp.st_mode & stat.S_ISVTX)
+        if stamp.st_mode & 0o022 and not trusted_sticky:
+            _fail("unsafe-path", "PTEST_STATE_DIR ancestor is group/other-writable")
+    _validate_dir_stamp(path.parent, uid, parent=True)
+    _validate_dir_stamp(path, uid, mode=0o700)
+    _validate_local_filesystem(path, _os_kind())
+    return path
+
+
 def _normal_domain() -> DomainPaths:
     system = _os_kind()
     uid, _ = _uid_pair()
-    home = _account_home(uid)
-    if system == "linux":
-        machine_parent = home / ".config" / "ptest"
-        coordination = home / ".local" / "state" / "ptest" / "coordination"
+    state = configured_state_directory()
+    if state is not None:
+        machine_parent = state
+        coordination = state / "coordination"
+        _validate_dir_stamp(coordination, uid, mode=0o700)
     else:
-        machine_parent = home / "Library" / "Application Support" / "ptest"
-        coordination = machine_parent / "coordination"
+        home = _account_home(uid)
+        if system == "linux":
+            machine_parent = home / ".config" / "ptest"
+            coordination = home / ".local" / "state" / "ptest" / "coordination"
+        else:
+            machine_parent = home / "Library" / "Application Support" / "ptest"
+            coordination = machine_parent / "coordination"
 
-    relative_machine_parent = tuple(machine_parent.relative_to(home).parts)
-    _validate_dir_chain(home, relative_machine_parent, uid)
+        relative_machine_parent = tuple(machine_parent.relative_to(home).parts)
+        _validate_dir_chain(home, relative_machine_parent, uid)
+        relative_coordination = tuple(coordination.relative_to(home).parts)
+        _validate_dir_chain(home, relative_coordination, uid, final_mode=0o700)
     _validate_local_filesystem(machine_parent, system)
-    relative_coordination = tuple(
-        coordination.relative_to(home).parts)
-    _validate_dir_chain(home, relative_coordination, uid, final_mode=0o700)
     _validate_local_filesystem(coordination, system)
 
     machine_config = machine_parent / _MACHINE_CONFIG_NAME
@@ -349,8 +382,9 @@ def _fixture_domain(fixture: Path) -> DomainPaths:
 def domain_paths(fixture: Path | None) -> DomainPaths:
     """Resolve a normal account domain or validate an explicit fixture.
 
-    The normal path is derived solely from the passwd account record and OS;
-    HOME, XDG and all ptest environment variables are intentionally ignored.
+    PTEST_STATE_DIR overrides normal storage. Otherwise paths derive from the
+    passwd account record and OS; HOME and XDG remain ignored. An explicit
+    fixture takes precedence over the environment override.
     """
     if fixture is None:
         return _normal_domain()

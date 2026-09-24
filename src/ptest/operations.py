@@ -38,10 +38,10 @@ _GUARD_SCRIPT = (
 _FRAME_TIMEOUT_S = 2.0
 _POLL_S = 0.05
 # The parent-to-guard boundary strips inherited PTEST_* control variables so
-# orchestrator state can never leak into the guard. The single exception is
-# the opt-in doctor smoke manifest path: the smoke test runs as a runner
-# grandchild of the invoking ptest process and reads only this variable.
-_GUARD_ENV_ALLOWLIST = frozenset({"PTEST_DOCTOR_SMOKE_MANIFEST"})
+# orchestrator state can never leak into the guard. Keep the configured state
+# directory so the guard validates the same domain, and the opt-in doctor
+# smoke manifest consumed by the runner grandchild.
+_GUARD_ENV_ALLOWLIST = frozenset({"PTEST_DOCTOR_SMOKE_MANIFEST", "PTEST_STATE_DIR"})
 _SETUP_MARKER_NAME = "setup-fingerprint.json"
 _SETUP_MARKER_MAX_BYTES = 8192
 _SETUP_INPUTS = (

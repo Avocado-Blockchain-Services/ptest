@@ -23,6 +23,44 @@ Release maintainers create the archive with
 `scripts/build-release-bundle.py`, passing the built ptest wheel, the pinned
 psutil wheel, compatible wheel tags, and an output `.tar.gz` path.
 
+## Workspace-local setup
+
+From a source checkout, create a virtual environment inside the checkout and
+keep uv's download cache alongside it in the workspace:
+
+```sh
+cd /absolute/workspace/ptest
+UV_CACHE_DIR="/absolute/workspace/.ptest-tools/uv-cache" uv sync --locked
+export PTEST_STATE_DIR="/absolute/workspace/.ptest-state"
+cd /absolute/workspace/your-project
+/absolute/workspace/ptest/.venv/bin/ptest doctor --offline
+```
+
+No global installation or shell profile changes are needed. Export the variable
+again in each new shell, or prefix individual commands with
+`PTEST_STATE_DIR=/absolute/workspace/.ptest-state`. A `.env` file is not loaded
+automatically.
+
+The override puts `machine.toml` directly in that directory and the coordinator
+database, run history, reports, and review-model cache under `coordination/`.
+Read-only commands do not create it. Test execution or a consented doctor review
+creates missing state directories with mode `0700`; private files use `0600`.
+The parent must already exist, belong to you, and be non-writable by group/other.
+An existing state directory must belong to you with mode `0700`. Symlinks,
+relative paths, parent traversal, and unsafe ancestors are rejected; ptest does
+not repair existing permissions. Use a supported local filesystem.
+
+Keep state outside source repositories, or ignore it in Git. Each distinct
+state directory has independent concurrency limits and history: use one shared
+absolute value for projects that must coordinate. Unsetting the variable restores
+the default account locations without moving or deleting state. An explicit
+`--fixture-domain` takes precedence over this variable.
+
+This setting controls ptest storage. Project files such as `.ptest.toml` and
+`recommendations.md` stay in the project; temporary scratch files use the OS
+temporary directory. Claude/Codex login and cache locations follow their own
+CLI settings.
+
 ## First repository setup
 
 From the repository root, run:

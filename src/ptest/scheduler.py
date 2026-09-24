@@ -73,6 +73,9 @@ def _state_marker(domain: DomainPaths) -> Path:
 
 
 def _expected_normal_paths() -> tuple[Path, Path, tuple[tuple[Path, str], ...]]:
+    state = platform.configured_state_directory()
+    if state is not None:
+        return state, state, ()
     try:
         home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     except (KeyError, OSError, TypeError, AttributeError):
@@ -131,6 +134,11 @@ def _prepare_root(domain: DomainPaths) -> None:
         return
 
     machine_parent, root_parent, steps = _expected_normal_paths()
+    if not steps:
+        files.ensure_private_dir(root_parent.parent, root_parent.name)
+        files.ensure_private_dir(root_parent, "coordination")
+        files.validate_private_dir(root)
+        return
     try:
         home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         stamp = os.lstat(home)
@@ -147,6 +155,11 @@ def _prepare_root(domain: DomainPaths) -> None:
     files.validate_private_dir(root)
     if machine_parent != Path(domain.machine_config).parent:
         _fail("unsafe-path", "machine config parent changed")
+
+
+def prepare_state_directory(domain: DomainPaths) -> None:
+    """Create validated private directories without admitting a test run."""
+    _prepare_root(domain)
 
 
 def _open_bootstrap(root: Path, *, create: bool = True):
@@ -1520,4 +1533,5 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
 __all__ = [
     "enqueue", "poll", "register_guard", "mark_draining", "cancel_pending",
     "begin_finalization", "reconcile", "finish", "effective_limits",
+    "prepare_state_directory",
 ]

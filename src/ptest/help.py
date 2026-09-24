@@ -28,6 +28,11 @@ Inspect and review:
   ptest guide                     # render bundled repair guide text
   ptest rules                     # preview agent guidance
 
+Local state:
+  PTEST_STATE_DIR=/absolute/path  # config, coordination, history, review cache
+  Parent must exist and be owned/non-writable by others; existing state must be 0700.
+  Use one value across projects to share limits. Explicit --fixture-domain wins.
+
 Machine output:
   Legacy doctor --json stays static; --assessment-json is the versioned review result.
   --json on init/register/where/status/history/plan; guide is text-only.

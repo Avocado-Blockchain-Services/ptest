@@ -60,5 +60,16 @@ wheels before atomically switching the local command. Its explicit
 `--dest --wheelhouse --manifest` form remains available for offline and
 enterprise installation. Security gate instructions are in [docs/security.md](docs/security.md).
 
+To keep ptest's configuration, coordinator, history, and review-model cache in
+your workspace, set `PTEST_STATE_DIR` to an absolute path before invoking ptest:
+
+```sh
+export PTEST_STATE_DIR="$PWD/.ptest-state"
+```
+
+Use the same value for every project that should share concurrency limits.
+See [workspace-local setup](docs/installation.md#workspace-local-setup) for
+running from a checkout without a global installation.
+
 The old implementation is retained only in Git history; see
 [docs/legacy-index.md](docs/legacy-index.md).
