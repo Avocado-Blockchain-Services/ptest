@@ -2074,9 +2074,22 @@ def _unquoted(line: str) -> str:
     return _QUOTED_RE.sub("", line)
 
 
-def _bracket_depth(line: str) -> int:
-    """Net ``[]{}()`` depth of ``line`` outside quoted segments."""
+def _code_part(line: str) -> str:
+    """``line`` without quoted segments and without a trailing comment.
+
+    A ``#``/``;`` outside quotes starts a comment (INI/TOML); brackets
+    inside quotes or comments never count toward entry spans.
+    """
     bare = _unquoted(line)
+    for index, char in enumerate(bare):
+        if char in "#;":
+            return bare[:index]
+    return bare
+
+
+def _bracket_depth(line: str) -> int:
+    """Net ``[]{}()`` depth of ``line`` outside quotes and comments."""
+    bare = _code_part(line)
     return (bare.count("[") + bare.count("{") + bare.count("(")
             - bare.count("]") - bare.count("}")
             - bare.count(")"))
@@ -2087,19 +2100,66 @@ def _continues(line: str) -> bool:
     return bool(line.strip()) and line[:1] in (" ", "\t")
 
 
-def _addopts_span(text: str) -> tuple[int, int] | None:
+_ADDOPTS_SECTION_RE = re.compile(r"\[\s*([^\]#;]+?)\s*\]")
+
+
+def _deciding_sections(basename: str) -> tuple | None:
+    """Deciding sections holding ``addopts`` for ``basename``.
+
+    ``[tool.pytest.ini_options]`` for pyproject.toml, ``[pytest]`` for
+    pytest.ini/tox.ini, ``[tool:pytest]`` for setup.cfg, and the top
+    level (None) or ``[pytest]`` for pytest.toml/``.pytest.toml`` (pytest
+    9). None means the basename is unknown: match anywhere, as before.
+    """
+    if basename == "pyproject.toml":
+        return ("tool.pytest.ini_options",)
+    if basename in ("pytest.ini", ".pytest.ini", "tox.ini"):
+        return ("pytest",)
+    if basename == "setup.cfg":
+        return ("tool:pytest",)
+    if basename in ("pytest.toml", ".pytest.toml"):
+        return ("pytest", None)
+    return None
+
+
+def _section_header(line: str) -> str | None:
+    """Section name when ``line`` is a section header, else None.
+
+    A header-looking line carrying ``=`` is a value, never a boundary.
+    """
+    code = _code_part(line).strip()
+    if not code.startswith("["):
+        return None
+    if "=" in code:
+        return None
+    match = _ADDOPTS_SECTION_RE.fullmatch(code)
+    if match is None:
+        return None
+    return match.group(1).strip().strip("'\"")
+
+
+def _addopts_span(text: str, basename: str = "") -> tuple[int, int] | None:
     """Return the 1-based line span of the ``addopts`` entry in ``text``.
 
-    The span starts at the ``addopts =``/``addopts:`` line and extends
-    through continuation lines: indented lines (INI continuations, values
-    on the next line) and lines while a bracket opened on the entry stays
-    unbalanced (multiline TOML arrays). None when no addopts entry is
-    present.
+    Only an entry inside the deciding section for ``basename`` (see
+    :func:`_deciding_sections`) starts the span; entries under any other
+    section are ignored. The span starts at the ``addopts =``/``addopts:``
+    line and extends through continuation lines: indented lines (INI
+    continuations, values on the next line) and lines while a bracket
+    opened on the entry stays unbalanced (multiline TOML arrays,
+    comments excluded). None when no deciding addopts entry is present.
     """
     lines = text.splitlines()
+    sections = _deciding_sections(basename.rsplit("/", 1)[-1])
+    in_scope = True if sections is None else None in sections
     start: int | None = None
     for index, line in enumerate(lines, 1):
-        if _ADDOPTS_KEY_RE.match(line):
+        header = _section_header(line)
+        if header is not None:
+            if sections is not None:
+                in_scope = header in sections
+            continue
+        if in_scope and start is None and _ADDOPTS_KEY_RE.match(line):
             start = index
             break
     if start is None:
@@ -2148,7 +2208,8 @@ def _answer_child_row(packet: EvidencePacket, entry,
                 start, end = span[0] + offset, span[1] + offset
         elif (entry.id == "PARALLEL-001"
                 and path.rsplit("/", 1)[-1] in _ADDOPTS_BASENAMES):
-            span = _addopts_span(excerpt.text)
+            span = _addopts_span(excerpt.text,
+                                 path.rsplit("/", 1)[-1])
             if span is not None:
                 offset = excerpt.start_line - 1
                 start, end = span[0] + offset, span[1] + offset

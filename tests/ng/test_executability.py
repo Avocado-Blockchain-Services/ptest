@@ -1406,3 +1406,14 @@ def test_setup_field_and_caveat_line(tmp_path):
     assert result.verdict() == (
         "runs: yes; parallel: no — xdist is not enabled in your pytest config; "
         "setup: uv sync --locked (ptest runs it when needed)")
+
+
+@pytest.mark.parametrize("name,text", [
+    ("pytest.ini", "[pytest]\naddopts = -n 4\n"),
+    ("tox.ini", "[tox:tox]\nskipsdist = true\n[pytest]\naddopts = -n 4\n"),
+    ("setup.cfg", "[metadata]\nname = demo\n[tool:pytest]\naddopts = -n 4\n"),
+])
+def test_addopts_source_names_ini_family_file(tmp_path, name, text):
+    """addopts_source reports the deciding INI-family file (DET3)."""
+    _write(tmp_path / name, text)
+    assert E.addopts_source(tmp_path) == name

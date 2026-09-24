@@ -890,3 +890,50 @@ def test_det1_rows_cite_exact_config_ranges_with_valid_identities(tmp_path):
     timing = by_id["TIMING-001"]
     assert timing.status == "unknown"
     assert "no timing history yet" in timing.rationale
+
+
+@pytest.mark.parametrize("name,text,span", [
+    ("pytest.ini",
+     "[pytest]\naddopts = -n 4  # (see docs\ntestpaths = tests\n",
+     (2, 2)),
+    ("tox.ini",
+     "[tox:tox]\nskipsdist = true\n[pytest]\n"
+     "addopts = -n 4  # (see docs\ntestpaths = tests\n",
+     (4, 4)),
+    ("setup.cfg",
+     "[metadata]\nname = demo\n[tool:pytest]\n"
+     "addopts = -n 4  # (see docs\ntestpaths = tests\n",
+     (4, 4)),
+])
+def test_det3_parallel_citation_reaches_ini_family_addopts(
+        tmp_path, name, text, span):
+    """The satisfied PARALLEL-001 citation narrows to the deciding file's
+    addopts entry; a bracket in a trailing comment must not extend it."""
+    from ptest import agent_assessment as AA
+    from ptest import deterministic_items as DI
+    from ptest import executability as E
+
+    _stub_qualified_venv(tmp_path)
+    assert E.addopts_source(tmp_path) is None
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    assert E.addopts_source(tmp_path) == name
+    config = _parallel_config(tmp_path)
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[selection]\nenabled = false\n",
+        name: text,
+        "tests/test_x.py": "def test_x():\n    assert True\n",
+    })
+    answers = DI.answers_for(_domain(tmp_path),
+                             _resolution(tmp_path, config), packet)
+    assert answers["PARALLEL-001"].status == "satisfied"
+    assert answers["PARALLEL-001"].evidence_paths == (".ptest.toml", name)
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == "PARALLEL-001")
+    assert row.status == "satisfied"
+    assert row.evidence[1].path == name
+    assert (row.evidence[1].start_line,
+            row.evidence[1].end_line) == span

@@ -2690,3 +2690,47 @@ def test_assemble_child_degrades_answer_without_evidence_paths(tmp_path):
     assert row.rationale.endswith(
         "(the ptest config is not in the review evidence)")
     assert row.evidence == ()
+
+
+def test_addopts_span_ignores_wrong_section_pyproject():
+    """Only [tool.pytest.ini_options] decides addopts in pyproject.toml."""
+    from ptest import agent_assessment as AA
+
+    text = ("[tool.other]\naddopts = \"zzz\"\n"
+            "[tool.pytest.ini_options]\naddopts = \"-n 4\"\n")
+    assert AA._addopts_span(text, "pyproject.toml") == (4, 4)
+
+
+def test_addopts_span_ignores_trailing_comment_bracket():
+    """A bracket inside a trailing comment must not extend the span."""
+    from ptest import agent_assessment as AA
+
+    text = "[tool.pytest.ini_options]\naddopts = \"-n 4\"  # (see docs\n"
+    assert AA._addopts_span(text, "pyproject.toml") == (2, 2)
+
+
+def test_addopts_span_multiline_toml_array():
+    from ptest import agent_assessment as AA
+
+    text = ("[tool.pytest.ini_options]\naddopts = [\n  \"-n\",\n  \"4\",\n]\n")
+    assert AA._addopts_span(text, "pyproject.toml") == (2, 5)
+
+
+def test_addopts_span_ini_indented_continuation():
+    from ptest import agent_assessment as AA
+
+    text = "[pytest]\naddopts = -n 4\n  --dist=loadgroup\n  -q\n"
+    assert AA._addopts_span(text, "pytest.ini") == (2, 4)
+
+
+def test_addopts_span_entry_on_last_line():
+    from ptest import agent_assessment as AA
+
+    text = "[pytest]\naddopts = -n 4"
+    assert AA._addopts_span(text, "pytest.ini") == (2, 2)
+
+
+def test_bracket_depth_ignores_comment_bracket():
+    from ptest import agent_assessment as AA
+
+    assert AA._bracket_depth('addopts = "-n 4"  # (see docs') == 0
