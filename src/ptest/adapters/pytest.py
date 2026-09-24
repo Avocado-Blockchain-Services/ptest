@@ -6,7 +6,7 @@ import json
 import re
 
 from ptest import contracts as C
-from ptest.runtime.pytest_bridge import _VALUE_FLAG_LEADS, cluster_narrow_name
+from ptest.runtime.pytest_bridge import cluster_narrow_name, short_redirect_cluster
 
 
 _REMOTE_OPTIONS = {"--tx", "--px", "--rsyncdir"}
@@ -109,26 +109,6 @@ def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | No
     )
 
 
-def _short_redirect_cluster(token: str) -> bool:
-    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster.
-
-    Same cluster rule as the bridge: stop at the first value-taking
-    letter, so a ``k``/``m``-led cluster is never a redirect.
-    """
-    if (not token.startswith("-") or token.startswith("--")
-            or token.startswith("-W")):
-        return False
-    body = token[1:]
-    if len(body) <= 1:
-        return False
-    for letter in body:
-        if letter in ("c", "o"):
-            return True
-        if letter in _VALUE_FLAG_LEADS:
-            return False
-    return False
-
-
 def _node_id_token(argv: tuple[str, ...], index: int) -> bool:
     """Only positional ``::`` tokens are native node selectors."""
     token = argv[index]
@@ -162,7 +142,7 @@ def reject_unowned_controls(argv: tuple[str, ...], *, full: bool = False) -> Non
         if token.startswith("@") or (short and short[1] == "n"):
             raise _problem("native-config-invalid",
                            "pytest remote or parallel control is not ptest-owned")
-        redirect_cluster = _short_redirect_cluster(token)
+        redirect_cluster = short_redirect_cluster(token)
         maxfail_zero = (full and option == "--maxfail" and (
             token.partition("=")[2] == "0"
             or ("=" not in token and index + 1 < len(argv) and argv[index + 1] == "0")
@@ -255,8 +235,8 @@ def inspect_capability(config: C.Config) -> C.Capability:
         code="unsupported-capability",
         message=("declared setup executes under the guard with its configured network and lifecycle-script "
                  "implications; automatic, shadow and probe remain unavailable; setup/fixtures may skip "
-                 "and allowed plain/wrapper pytest_collection_finish code may mutate the effective item "
-                 "list; selection, history, baseline and whole-gate obligations remain unavailable"),
+                 "and pytest_collection_finish drops after the final inventory make the run incomplete; "
+                 "selection, history, baseline and whole-gate obligations remain unavailable"),
     )]
     if "." in config.runner.test_roots:
         limitations.insert(0, C.Reason(

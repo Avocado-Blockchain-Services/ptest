@@ -473,7 +473,7 @@ def _result(*, run_id: str, checkout: C.CheckoutIdentity, request: C.RunRequest,
         limitations=(_reason("unsupported-capability",
                              "command execution has no inventory or verified runtime identity"),
                      *((_reason("unsupported-capability",
-                                "pytest full permits cooperative collection-finish mutation and setup skips; inventory is not complete"),)
+                                "pytest full refuses collected-item drops after the final inventory and permits cooperative setup skips; inventory is not complete"),)
                        if request.mode is C.Mode.FULL and command.kind is C.RunnerKind.PYTEST else ()),
                      *tuple(limitations)),
         input_before=input_before, input_after=input_after,

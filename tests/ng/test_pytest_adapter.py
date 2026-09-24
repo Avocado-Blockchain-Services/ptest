@@ -14,7 +14,7 @@ import pytest
 
 from ptest import contracts as C
 from ptest.adapters.pytest import inspect_capability, prepare
-from ptest.adapters.pytest import _short_redirect_cluster as _adapter_redirect_cluster
+from ptest.adapters.pytest import short_redirect_cluster as _adapter_redirect_cluster
 from ptest.runtime import pytest_bridge
 
 
@@ -303,6 +303,7 @@ _HOOK_NAMES = ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                "pytest_collection_modifyitems", "pytest_ignore_collect",
                "pytest_pycollect_makeitem", "pytest_collect_file",
                "pytest_collect_directory", "pytest_make_collect_report",
+               "pytest_collection_finish",
                "pytest_runtest_makereport", "pytest_report_teststatus",
                "pytest_sessionfinish")
 
@@ -792,6 +793,7 @@ def test_full_bridge_accepts_trusted_effective_root_paths(bridge_env, monkeypatc
 
 
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
+                                   "pytest_collection_finish",
                                    "pytest_runtest_makereport", "pytest_report_teststatus",
                                    "pytest_sessionfinish"])
 def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
@@ -803,7 +805,7 @@ def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
         hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
-                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_runtest_makereport",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
                                              "pytest_report_teststatus", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = manager
@@ -824,7 +826,7 @@ def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
         hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
-                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_runtest_makereport",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
                                              "pytest_report_teststatus", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = late_manager
@@ -835,6 +837,7 @@ def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
                                    "pytest_pycollect_makeitem", "pytest_collect_file",
                                    "pytest_collect_directory", "pytest_make_collect_report",
+                                   "pytest_collection_finish",
                                    "pytest_runtest_makereport", "pytest_report_teststatus",
                                    "pytest_sessionfinish"])
 def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
@@ -844,7 +847,7 @@ def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
         hook=SimpleNamespace(**{name: SimpleNamespace(get_hookimpls=lambda name=name: [implementation] if name == hook else [])
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
-                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_runtest_makereport",
+                                             "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
                                              "pytest_report_teststatus", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = manager
@@ -861,7 +864,8 @@ def _conftest_plugin(path):
 
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
                                    "pytest_pycollect_makeitem", "pytest_collect_file",
-                                   "pytest_collect_directory", "pytest_make_collect_report"])
+                                   "pytest_collect_directory", "pytest_make_collect_report",
+                                   "pytest_collection_finish"])
 def test_full_bridge_accepts_collection_hooks_from_project_conftest(
         bridge_env, tmp_path, monkeypatch, hook):
     """Section F: conftest.py collection hooks are allowed in full mode."""
@@ -959,6 +963,85 @@ def test_full_bridge_reports_accepted_hook_files(bridge_env, tmp_path, monkeypat
     owned.pytest_configure(config)
 
     assert owned.allowed_narrowing()["conftest_hooks"] == ["tests/conftest.py"]
+
+
+def _reconciliation_config():
+    return SimpleNamespace(
+        option=SimpleNamespace(),
+        getini=lambda name: [],
+        invocation_params=SimpleNamespace(args=()),
+        args=["tests"],
+    )
+
+
+def _drive_wrapper(generator):
+    """Run a wrapper hookimpl past its yield, like pluggy would."""
+    try:
+        next(generator)
+    except StopIteration:
+        return
+    try:
+        generator.send(None)
+    except StopIteration:
+        return
+
+
+def test_full_bridge_records_final_inventory_after_modifyitems(bridge_env):
+    """HIGH: the bridge snapshots collected ids after all modifyitems impls."""
+    owned = pytest_bridge.OwnedPlugin(1)
+    session = SimpleNamespace(items=[
+        SimpleNamespace(nodeid="tests/test_a.py::test_a"),
+        SimpleNamespace(nodeid="tests/test_b.py::test_b"),
+    ])
+
+    _drive_wrapper(owned.pytest_collection_modifyitems(session))
+
+    assert owned.full_unrun_items() == (
+        "tests/test_a.py::test_a", "tests/test_b.py::test_b")
+
+
+def test_full_bridge_reconciliation_reports_collected_never_run(bridge_env):
+    """HIGH: a would-be pass with an unrun collected item is incomplete."""
+    owned = pytest_bridge.OwnedPlugin(1)
+    session = SimpleNamespace(items=[
+        SimpleNamespace(nodeid="tests/test_a.py::test_a"),
+        SimpleNamespace(nodeid="tests/test_b.py::test_b"),
+    ])
+    _drive_wrapper(owned.pytest_collection_modifyitems(session))
+    _drive_wrapper(owned.pytest_runtest_protocol(
+        SimpleNamespace(nodeid="tests/test_a.py::test_a",
+                        config=_reconciliation_config()),
+        None))
+
+    assert owned.full_unrun_items() == ("tests/test_b.py::test_b",)
+
+
+def test_full_bridge_reconciliation_passes_when_every_item_runs(bridge_env):
+    """Reconciliation stays silent when the run set covers the inventory."""
+    owned = pytest_bridge.OwnedPlugin(1)
+    session = SimpleNamespace(items=[
+        SimpleNamespace(nodeid="tests/test_a.py::test_a"),
+        SimpleNamespace(nodeid="tests/test_b.py::test_b"),
+    ])
+    _drive_wrapper(owned.pytest_collection_modifyitems(session))
+    for item in session.items:
+        _drive_wrapper(owned.pytest_runtest_protocol(
+            SimpleNamespace(nodeid=item.nodeid,
+                            config=_reconciliation_config()),
+            None))
+
+    assert owned.full_unrun_items() == ()
+
+
+def test_full_bridge_reconciliation_ignores_parallel_controllers(bridge_env):
+    """An xdist controller never observes protocols, so it cannot reconcile."""
+    owned = pytest_bridge.OwnedPlugin(2)
+    session = SimpleNamespace(items=[
+        SimpleNamespace(nodeid="tests/test_a.py::test_a"),
+    ])
+    _drive_wrapper(owned.pytest_collection_modifyitems(session))
+
+    assert owned.full_unrun_items() == ()
 
 
 @pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus",
@@ -1201,16 +1284,21 @@ def test_value_led_cluster_trailing_k_is_not_narrow():
     assert pytest_bridge.cluster_narrow_name("-vrk") is None
 
 
+def test_short_redirect_cluster_is_the_bridges_single_function():
+    """LOW: the adapter imports the bridge's public cluster rule, no copy."""
+    assert _adapter_redirect_cluster is pytest_bridge.short_redirect_cluster
+
+
 @pytest.mark.parametrize("token", ["-kfoo", "-mnot_slow", "-mintegration", "-n2", "-po"])
 def test_short_redirect_cluster_stops_at_value_taking_letter(token):
     """A k/m-led cluster carries an attached expression, never a redirect."""
-    assert pytest_bridge._short_redirect_cluster(token) is False
+    assert pytest_bridge.short_redirect_cluster(token) is False
     assert _adapter_redirect_cluster(token) is False
 
 
 @pytest.mark.parametrize("token", ["-co", "-oc", "-vc", "-qc", "-vo"])
 def test_short_redirect_cluster_keeps_redirect_before_value_letter(token):
-    assert pytest_bridge._short_redirect_cluster(token) is True
+    assert pytest_bridge.short_redirect_cluster(token) is True
     assert _adapter_redirect_cluster(token) is True
 
 
@@ -1221,6 +1309,18 @@ def test_full_bridge_accepts_approved_makeitem_hook_module(bridge_env, module):
     manager = _loaded_manager(
         (("approved", plugin),),
         [_hookimpl("pytest_pycollect_makeitem", module, plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("module", ["anyio.pytest_plugin", "anyio"])
+def test_full_bridge_accepts_approved_collection_finish_hook_module(bridge_env, module):
+    """anyio's collection_finish stays approved like its makeitem hook."""
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("approved", plugin),),
+        [_hookimpl("pytest_collection_finish", module, plugin)],
     )
     config = _native_config(); config.pluginmanager = manager
     pytest_bridge.OwnedPlugin(1).pytest_configure(config)

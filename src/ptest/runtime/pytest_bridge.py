@@ -171,7 +171,7 @@ _SAFE_STRICT_OVERRIDES = frozenset({
 })
 
 
-def _short_redirect_cluster(token: str) -> bool:
+def short_redirect_cluster(token: str) -> bool:
     """Recognise value-taking ``-c``/``-o`` inside a short-option cluster.
 
     The single cluster rule shared with :func:`cluster_narrow_name`:
@@ -249,7 +249,7 @@ def full_redirect_name(tokens: tuple[str, ...], index: int) -> str | None:
     option = token.split("=", 1)[0]
     if option in _FULL_REDIRECT_OPTIONS:
         return option
-    if _short_redirect_cluster(token):
+    if short_redirect_cluster(token):
         return token
     if token.startswith("@"):
         return token
@@ -502,7 +502,7 @@ def full_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
     """
     token = tokens[index]
     option = token.split("=", 1)[0]
-    redirect_cluster = _short_redirect_cluster(token)
+    redirect_cluster = short_redirect_cluster(token)
     short_narrow = len(token) > 2 and token.startswith(("-k", "-m"))
     maxfail_zero = (option == "--maxfail" and (
         token.partition("=")[2] == "0"
@@ -773,17 +773,20 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
 
 # Full-only collection hooks are the project's own suite definition when
 # they live in a conftest.py under the admitted checkout (section F);
-# reporting hooks and non-conftest plugins stay refused. The four
+# reporting hooks and non-conftest plugins stay refused. The
 # collection-time hooks below can silently narrow a full run (a
-# pytest_pycollect_makeitem returning [] drops tests with RC 0), so they
-# are checked exactly like modifyitems/ignore_collect: accepted and
-# recorded only from a checkout conftest, refused from other plugins
-# unless the module is approved (pytest_asyncio and anyio implement
-# pytest_pycollect_makeitem and stay approved).
+# pytest_pycollect_makeitem returning [] drops tests with RC 0, and a
+# pytest_collection_finish mutating session.items drops them after the
+# modifyitems inventory), so they are checked exactly like
+# modifyitems/ignore_collect: accepted and recorded only from a checkout
+# conftest, refused from other plugins unless the module is approved
+# (pytest_asyncio and anyio implement pytest_pycollect_makeitem and stay
+# approved; anyio's collection_finish stays approved the same way).
 _FULL_COLLECTION_HOOKS = frozenset({
     "pytest_collection_modifyitems", "pytest_ignore_collect",
     "pytest_pycollect_makeitem", "pytest_collect_file",
     "pytest_collect_directory", "pytest_make_collect_report",
+    "pytest_collection_finish",
 })
 
 
@@ -823,6 +826,12 @@ class OwnedPlugin:
         # The bridge-owned record of allowed full-mode narrowing. The run
         # label is built from this report, never from a static prediction.
         self._narrowing_report: dict[str, Any] | None = None
+        # Full-mode collected-vs-run reconciliation: the final inventory
+        # snapshot (after all modifyitems impls) and every item observed
+        # through the bridge's own runtest_protocol. A would-be pass with
+        # an unrun collected item is incomplete, never PASSED.
+        self._collected: tuple[str, ...] | None = None
+        self._protocol_seen: set[str] = set()
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -857,7 +866,8 @@ class OwnedPlugin:
         Only the ``_FULL_COLLECTION_HOOKS`` collection hooks
         (``pytest_collection_modifyitems``/``pytest_ignore_collect`` plus
         the ``pytest_pycollect_makeitem``/``pytest_collect_file``/
-        ``pytest_collect_directory``/``pytest_make_collect_report`` family)
+        ``pytest_collect_directory``/``pytest_make_collect_report``/
+        ``pytest_collection_finish`` family)
         defined in a ``conftest.py`` module under the admitted checkout
         count as the project's own suite definition. The plugin object must
         itself be that module (a registered class instance or any other
@@ -1031,6 +1041,7 @@ class OwnedPlugin:
                 hooks += ("pytest_collection_modifyitems", "pytest_ignore_collect",
                           "pytest_pycollect_makeitem", "pytest_collect_file",
                           "pytest_collect_directory", "pytest_make_collect_report",
+                          "pytest_collection_finish",
                           "pytest_runtest_makereport", "pytest_report_teststatus",
                           "pytest_sessionfinish")
             loaded_plugins = [plugin for _, plugin in loaded]
@@ -1132,7 +1143,7 @@ class OwnedPlugin:
             for token in invocation:
                 option_name = str(token).split("=", 1)[0]
                 token_text = str(token)
-                redirect_cluster = _short_redirect_cluster(token_text)
+                redirect_cluster = short_redirect_cluster(token_text)
                 if option_name in redirects or redirect_cluster:
                     self._refuse("full pytest plans cannot redirect native configuration")
             if any(getattr(option, name, None) for name in
@@ -1174,8 +1185,48 @@ class OwnedPlugin:
         self._validate(session.config, generated=True)
         return (yield)
 
+    def pytest_collection_modifyitems(self, session: Any) -> Any:
+        """Snapshot the final collected inventory after all narrowing hooks.
+
+        Registered trylast, so the post-yield snapshot runs after every
+        other modifyitems implementation (including a checkout conftest's
+        labelled narrowing): items removed before this point are project
+        narrowing, while anything dropped later (collection_finish, a
+        fixture mutating session.items) is an unrun collected item.
+        """
+        result = yield
+        if self.execution == "full":
+            seen: set[str] = set()
+            collected: list[str] = []
+            for item in getattr(session, "items", ()):
+                nodeid = str(getattr(item, "nodeid", ""))
+                if nodeid and nodeid not in seen:
+                    seen.add(nodeid)
+                    collected.append(nodeid)
+            self._collected = tuple(collected)
+        return result
+
+    def full_unrun_items(self) -> tuple[str, ...]:
+        """Collected node ids that never reached the bridge protocol.
+
+        Only meaningful on a serial full run, where the bridge observes
+        every protocol: a parallel controller never sees worker items, and
+        non-full executions narrow by definition. An empty tuple means the
+        run set covers the inventory (or there is nothing to reconcile).
+        """
+        if self.execution != "full" or self.workers != 1:
+            return ()
+        if self._collected is None:
+            return ()
+        return tuple(nodeid for nodeid in self._collected
+                     if nodeid not in self._protocol_seen)
+
     def pytest_runtest_protocol(self, item: Any, nextitem: Any) -> Any:
         """Check execution hooks before each item can replace its protocol."""
+        if self.execution == "full":
+            nodeid = str(getattr(item, "nodeid", ""))
+            if nodeid:
+                self._protocol_seen.add(nodeid)
         self._validate(item.config, generated=True)
         return (yield)
 
@@ -1572,6 +1623,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_cmdline_main)
         pytest.hookimpl(tryfirst=True)(plugin_type.pytest_configure)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_collection)
+        pytest.hookimpl(wrapper=True, trylast=True)(plugin_type.pytest_collection_modifyitems)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_collection_finish)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtestloop)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtest_protocol)
@@ -1595,6 +1647,15 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                 plugin._validate(plugin._config, generated=True)
             except pytest.UsageError:
                 pass
+        # Collected-vs-run reconciliation (full mode only): a native exit
+        # that would pass while collected items never ran is an incomplete
+        # report, never PASSED. Nonzero exits already carry their verdict,
+        # so -x stopping after a failure stays a failure, KeyboardInterrupt
+        # (raised, never returned) and exit 5 (no tests) pass through.
+        if native_exit == 0 and not plugin.refused and plugin.full_unrun_items():
+            plugin.refused = True
+            _refusal_marker("native-config-invalid",
+                            "full pytest run left collected items unrun")
         if plugin.refused:
             problem = "bridge-refused"
             bridge_exit = 4 if native_exit == 0 else native_exit

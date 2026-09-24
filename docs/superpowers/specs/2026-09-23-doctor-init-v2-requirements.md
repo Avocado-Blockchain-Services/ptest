@@ -120,6 +120,10 @@ refuse `--full` for such projects.
 - Narrowing supplied at invocation time (CLI args, `-k`/`-m`/`-x`/`--lf` passed to ptest, redirects such as `--rootdir`
   or `-c`, or `PYTEST_ADDOPTS`) is **still refused** in full mode, so a narrowed run can never pass as full.
 - Unowned execution plugins, xdist, and other serial-grant rules are unchanged.
+- Scope boundary: §F labels narrowing of the collected **inventory**. Outcome changes that pytest itself reports —
+  skips from empty parametrize, skip marks added in hooks, `pytest.skip` in setup, `xfail` — are ordinary pytest
+  outcomes, visible in pytest's summary, not project filters. `xfail`-strict manipulation needs
+  `pytest_runtest_makereport`, which stays refused in full mode.
 
 ## D. Constraints
 

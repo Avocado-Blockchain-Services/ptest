@@ -318,13 +318,15 @@ def test_full_collection_finish_mutation_keeps_cooperative_claim_limits(case):
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
-    assert completed.code == 0
+    # The hook itself is project-owned, but the dropped collected item can
+    # never certify a pass: reconciliation makes the run incomplete.
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
     data = completed.result["data"]
-    assert data["status"] == "passed"
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
     assert data["counts"] is None
     assert data["full_gate_eligible"] is False
-    assert data["attempts"][0]["inventory_complete"] is False
-    assert any("collection-finish" in item["message"] for item in data["limitations"])
     assert not (root / "removed.marker").exists()
     assert (root / "body.marker").read_text() == "ran"
 
@@ -851,3 +853,134 @@ def test_full_conftest_collect_ignore_runs_labelled(case):
     assert any(reason["code"] == "project-filtered"
                and "collect_ignore in tests/conftest.py" in reason["message"]
                for reason in data["reasons"])
+
+
+def test_full_collection_finish_drop_is_incomplete(case):
+    """HIGH twin `finish`: dropping after the final inventory is incomplete."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_collection_finish(session):\n"
+        "    session.items[:] = [i for i in session.items if 'test_b' not in i.nodeid]\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert not (root / "b.marker").exists()
+
+
+def test_full_fixture_drop_is_incomplete(case):
+    """HIGH twin `fixturedrop`: a session fixture dropping items is incomplete."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def _drop(request):\n"
+        "    request.session.items[:] = [\n"
+        "        i for i in request.session.items if 'test_b' not in i.nodeid]\n"
+        "    yield\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert not (root / "b.marker").exists()
+
+
+def test_full_deselect_all_exit_five_passes_through(case):
+    """Reconciliation leaves exit 5 alone: nothing collected, nothing unrun."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "def test_a():\n    assert True\n"
+        "def test_b():\n    assert True\n")
+    (root / "pytest.ini").write_text(
+        "[pytest]\naddopts = --deselect=tests/test_native.py::test_a "
+        "--deselect=tests/test_native.py::test_b\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["runner_exit_code"] == 5
+    assert data["exit_origin"] == "runner"
+
+
+def test_full_normal_pass_runs_every_collected_item(case):
+    """Reconciliation keeps a clean full pass green: every item runs."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "passed"
+    assert (root / "a.marker").read_text() == "ran"
+    assert (root / "b.marker").read_text() == "ran"
+
+
+def test_full_maxfail_stop_after_failure_stays_failure(case):
+    """Reconciliation never masks a failure: -x stopping early stays failed."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    assert False\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\naddopts = -x\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 1, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "failed"
+    assert data["runner_exit_code"] == 1
+    assert data["exit_origin"] == "runner"
+    assert not (root / "b.marker").exists()
