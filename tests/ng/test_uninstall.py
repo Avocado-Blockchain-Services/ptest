@@ -217,6 +217,29 @@ def test_edited_guide_skill_report_kept_but_edited_config_removed(
     assert not config.exists()
 
 
+def test_previous_managed_guide_is_removed_by_uninstall(
+        case, tmp_path, monkeypatch, capsys):
+    """Twin: an old ptest-managed guide uninstalls as managed, not edited."""
+    import hashlib
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    old = b"# old managed guide\n"
+    monkeypatch.setattr(agent_rules, "_PREVIOUS_GUIDE_SHA256S",
+                        frozenset({hashlib.sha256(old).hexdigest()}))
+    guide_dir = root / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert not (guide_dir / "ptest-agent.md").exists()
+
+
 def test_unmanaged_skill_content_is_kept(case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
     root = tmp_path / "repo"

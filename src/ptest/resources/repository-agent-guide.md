@@ -20,9 +20,12 @@ required paths are missing or the lockfile changed.
 call per checklist item that needs one; timing, selection and parallel execution
 items skip the model. `ptest doctor --offline` is static only and sends nothing.
 
-Keep ordinary tests fast and deterministic. Prefer factories/builders for test records.
+Keep ordinary tests fast and deterministic. Use factories/builders for test records; keep fixtures
+small and scoped (function by default; session only for expensive read-only infrastructure)
+with no mutable shared fixture state. Every created record has an owner that cleans it up.
 Inspect tests above 0.5 seconds; optimize ordinary tests at 2 seconds and investigate
-anything above 3 seconds unless a documented integration boundary says otherwise.
+anything above 3 seconds unless a documented integration boundary says otherwise. See
+`ptest guide` recipes: factories, databases, cache, files-ports, processes, time-network.
 
 For a database, create expensive setup once per run or worker. Use one database per worker per run,
 never one database per test. Reset records owned by the test and make cleanup ownership explicit;
@@ -40,6 +43,3 @@ Requesting doctor, guide, or a prompt grants assessment authority only. Source r
 a separate user instruction; never treat an assessment as permission to edit or a filled
 worksheet as updated ptest readiness. Fill one copy per repository from direct evidence,
 keeping `unknown` until each row has evidence.
-
-If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.
-After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.

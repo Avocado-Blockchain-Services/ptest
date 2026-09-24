@@ -574,10 +574,18 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
         _close_quietly(root_fd)
 
 
-# sha256 of the base-commit ``docs/ptest-agent.md`` bytes. Repositories
-# holding exactly these bytes get an in-place guide upgrade; any other
-# differing guide is a user edit and still raises ``already-exists``.
-_BASE_GUIDE_SHA256 = "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68"
+# sha256 digests of known previous ``docs/ptest-agent.md`` bytes.
+# Repositories holding exactly these bytes get an in-place guide upgrade;
+# any other differing guide is a user edit and still raises
+# ``already-exists``.
+_PREVIOUS_GUIDE_SHA256S = frozenset({
+    # Base-commit guide (first fast-forward-gate version).
+    "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68",
+    # Guide as shipped on main before the G1 cleanup (byte-identical to
+    # what init writes: ``git show main:src/ptest/resources/
+    # repository-agent-guide.md``).
+    "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6",
+})
 
 
 def _guide_kind(existing: str | None, guide: bytes) -> str:
@@ -587,7 +595,7 @@ def _guide_kind(existing: str | None, guide: bytes) -> str:
     raw = existing.encode("utf-8")
     if raw == guide:
         return "current"
-    if hashlib.sha256(raw).hexdigest() == _BASE_GUIDE_SHA256:
+    if hashlib.sha256(raw).hexdigest() in _PREVIOUS_GUIDE_SHA256S:
         return "previous"
     raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
 

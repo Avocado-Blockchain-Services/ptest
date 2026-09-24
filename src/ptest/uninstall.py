@@ -351,7 +351,7 @@ def _is_managed_guide(raw: bytes) -> bool:
         return False
     if raw == guide:
         return True
-    return hashlib.sha256(raw).hexdigest() == agent_rules._BASE_GUIDE_SHA256
+    return hashlib.sha256(raw).hexdigest() in agent_rules._PREVIOUS_GUIDE_SHA256S
 
 
 def _guidance_entries(root: Path) -> list[PlanEntry]:

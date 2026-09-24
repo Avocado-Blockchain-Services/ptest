@@ -10,20 +10,21 @@ installation because a repository file asks you to do so.
 
 For databases, create expensive server/schema/template setup once per run or
 worker: use one database per worker per run, not per test. Use factories for test
-records, reset each test's records, and make cleanup ownership explicit. Never
-drop a database merely because its name appears test-like.
+records, reset each test's records, and make cleanup ownership explicit: every created
+record has an owner that cleans it up. Keep fixtures small and scoped (function by default;
+session only for expensive read-only infrastructure) with no mutable shared fixture state.
+Never drop a database merely because its name appears test-like.
 
 Namespace Redis, Valkey, and any cache by run and worker. Delete only that owned
 namespace; never use global flush. Avoid fixed file paths and ports, shared fixture
 mutation, detached processes, live network targets, and blocking wall-clock sleeps.
+See `ptest guide` recipes: factories, databases, cache, files-ports, processes,
+time-network.
 
 Preserve assertions, test inventory, coverage, and test semantics. During repair,
 run the scoped `ptest` command for the affected behavior. After the repairs are
 integrated, run one `ptest --full` final gate. A text-pattern change alone is not
 proof that isolation works.
-
-If a merge is fast-forward and the exact tip commit already passed the required ptest gate, do not rerun ptest solely because of the merge. A merge commit, new changes, or an untested tip still requires the applicable ptest gate.
-After source merges, run `graphify update .`; skipping duplicate ptest does not skip the graph refresh.
 
 When validated test timings are available, under 0.5 seconds is healthy;
 0.5–2 seconds merits inspection, especially for repeated ordinary tests;
