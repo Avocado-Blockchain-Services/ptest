@@ -861,3 +861,81 @@ def test_js_lexer_skips_regex_after_equals():
     assert ("ident", "a") not in tokens
     assert ("ident", "b") not in tokens
     assert tokens.count(("punct", "{")) == 1
+
+
+# --- Round 10 audit twins: invalid classes are unknown, braces are bounded -
+
+
+def test_glob_bad_range_never_matches_and_never_raises():
+    assert E._glob_match("x[z-a]y", "xby") is False
+    assert E._glob_match("[z-a]", "anything.test.ts") is False
+
+
+def test_glob_bad_range_exclude_is_ignored(tmp_path):
+    _write_vitest_config(tmp_path, test_body="    exclude: ['[z-a]'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_glob_bad_range_include_accepts(tmp_path):
+    _write_vitest_config(tmp_path, test_body="    include: ['[z-a]'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_glob_brace_explosion_is_unknown():
+    assert E._expand_braces("{a,b}" * 16) is None
+
+
+def test_glob_brace_explosion_compiles_nothing(tmp_path, monkeypatch):
+    calls: list[str] = []
+    real = E._glob_to_regex
+
+    def counting(pattern):
+        calls.append(pattern)
+        return real(pattern)
+
+    monkeypatch.setattr(E, "_glob_to_regex", counting)
+
+    assert E._glob_match("{a,b}" * 16, "src/a.test.ts") is False
+    assert calls == []
+
+
+def test_glob_brace_explosion_include_accepts(tmp_path):
+    _write_vitest_config(
+        tmp_path, test_body="    include: ['" + "{a,b}" * 16 + "'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_vitest_globs_compiled_once_per_filters_call(tmp_path, monkeypatch):
+    _write_vitest_config(
+        tmp_path,
+        test_body="    include: ['src/**/*.test.ts'],\n    exclude: ['e2e/**'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    calls: list[str] = []
+    real = E._glob_to_regex
+
+    def counting(pattern):
+        calls.append(pattern)
+        return real(pattern)
+
+    monkeypatch.setattr(E, "_glob_to_regex", counting)
+
+    excludes, includes, test_dir = E._vitest_filters(tmp_path)
+    compiled_at_filter = len(calls)
+    assert compiled_at_filter > 0
+    for _ in range(25):
+        assert E._is_vitest_candidate(
+            tmp_path, "src/a.test.ts", excludes, includes, test_dir)
+    assert len(calls) == compiled_at_filter

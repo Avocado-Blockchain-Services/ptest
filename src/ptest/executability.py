@@ -677,47 +677,59 @@ def _has_extglob(pattern: str) -> bool:
     return any(marker in pattern for marker in _EXTGLOB_MARKERS)
 
 
-def _expand_braces(pattern: str) -> list[str]:
+_MAX_BRACE_EXPANSIONS = 256
+"""Cap on brace-expansion products per config glob; beyond it the glob is unknown."""
+
+
+def _expand_braces(pattern: str) -> list[str] | None:
     """Expand every ``{a,b}`` group, including nested ones.
 
     Unbalanced braces and singletons (``{a}``) are left literal.
+    Returns None when expansion exceeds ``_MAX_BRACE_EXPANSIONS``: the
+    glob is then unknown (an unknown include accepts, an unknown
+    exclude is ignored).
     """
-    start = pattern.find("{")
-    if start < 0:
-        return [pattern]
-    depth = 0
-    end = -1
-    for pos in range(start, len(pattern)):
-        if pattern[pos] == "{":
-            depth += 1
-        elif pattern[pos] == "}":
-            depth -= 1
-            if depth == 0:
-                end = pos
-                break
-    if end < 0:
-        return [pattern]
-    parts: list[str] = []
-    current: list[str] = []
-    nested = 0
-    for char in pattern[start + 1:end]:
-        if char == "{":
-            nested += 1
-        elif char == "}":
-            nested -= 1
-        if char == "," and nested == 0:
+    expanded = [pattern]
+    while True:
+        for index, item in enumerate(expanded):
+            start = item.find("{")
+            if start < 0:
+                continue
+            depth = 0
+            end = -1
+            for pos in range(start, len(item)):
+                if item[pos] == "{":
+                    depth += 1
+                elif item[pos] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = pos
+                        break
+            if end < 0:
+                continue
+            parts: list[str] = []
+            current: list[str] = []
+            nested = 0
+            for char in item[start + 1:end]:
+                if char == "{":
+                    nested += 1
+                elif char == "}":
+                    nested -= 1
+                if char == "," and nested == 0:
+                    parts.append("".join(current))
+                    current = []
+                else:
+                    current.append(char)
             parts.append("".join(current))
-            current = []
+            if len(parts) == 1:
+                continue
+            expanded[index:index + 1] = [
+                item[:start] + part + item[end + 1:] for part in parts]
+            if len(expanded) > _MAX_BRACE_EXPANSIONS:
+                return None
+            break
         else:
-            current.append(char)
-    parts.append("".join(current))
-    if len(parts) == 1:
-        return [pattern]
-    expanded: list[str] = []
-    for part in parts:
-        expanded.extend(
-            _expand_braces(pattern[:start] + part + pattern[end + 1:]))
-    return expanded
+            return expanded
 
 
 def _glob_to_regex(pattern: str) -> str:
@@ -762,31 +774,65 @@ def _glob_to_regex(pattern: str) -> str:
     return "".join(out)
 
 
+_CompiledGlob = tuple[re.Pattern[str], ...] | None
+"""One config glob, expanded and compiled; None means unknown.
+
+Unknown covers extglob groups, brace explosions past
+``_MAX_BRACE_EXPANSIONS``, and invalid classes such as ``[z-a]``.
+"""
+
+
+def _compile_glob(pattern: str) -> _CompiledGlob:
+    """Expand and compile one config glob; None means unknown.
+
+    Unknown globs never match here; the candidate filter decides (an
+    unknown include accepts, an unknown exclude is ignored).
+    """
+    cleaned = pattern.strip().removeprefix("./")
+    if not cleaned:
+        return ()
+    expanded = _expand_braces(cleaned)
+    if expanded is None:
+        return None
+    compiled: list[re.Pattern[str]] = []
+    for item in expanded:
+        if _has_extglob(item):
+            continue
+        try:
+            compiled.append(re.compile(_glob_to_regex(item)))
+        except re.error:
+            continue
+    if not compiled:
+        return None
+    return tuple(compiled)
+
+
 def _glob_match(pattern: str, rel: str) -> bool:
     """Match one config glob against a project-relative posix path.
 
-    Anchored, so ``e2e/**`` never matches ``src/e2e/x.spec.ts``. Patterns
-    with extglob groups are unknown here and never match; the candidate
-    filter decides (unknown include accepts, unknown exclude is ignored).
+    Anchored, so ``e2e/**`` never matches ``src/e2e/x.spec.ts``. Unknown
+    patterns (extglob groups, brace explosions, invalid classes) never
+    match here; the candidate filter decides (unknown include accepts,
+    unknown exclude is ignored).
     """
-    cleaned = pattern.strip().removeprefix("./")
-    if not cleaned or cleaned == "**":
-        return bool(cleaned)
-    for expanded in _expand_braces(cleaned):
-        if _has_extglob(expanded):
-            continue
-        if re.match(_glob_to_regex(expanded), rel):
-            return True
-    return False
+    compiled = _compile_glob(pattern)
+    if compiled is None:
+        return False
+    return any(rx.match(rel) for rx in compiled)
 
 
-def _vitest_filters(root: Path) -> tuple[tuple[str, ...], tuple[str, ...], str]:
-    """``(excludes, includes, test_dir)`` for one project root.
+def _vitest_filters(
+    root: Path,
+) -> tuple[tuple[_CompiledGlob, ...], tuple[_CompiledGlob, ...], str]:
+    """``(excludes, includes, test_dir)`` for one project root, precompiled.
 
-    When a ``vitest.config.*`` file is present, ``vite.config.*`` files
-    are ignored: vitest resolves its ``test`` section from the vitest
-    config alone. The Playwright ``testDir`` is returned separately and
-    excluded with a plain prefix check, never as a glob.
+    Every glob is expanded and compiled once here, so per-file candidate
+    checks never recompile; unknown entries are None (an unknown include
+    accepts, an unknown exclude is ignored). When a ``vitest.config.*``
+    file is present, ``vite.config.*`` files are ignored: vitest resolves
+    its ``test`` section from the vitest config alone. The Playwright
+    ``testDir`` is returned separately and excluded with a plain prefix
+    check, never as a glob.
     """
     excludes = list(_VITEST_DEFAULT_EXCLUDE)
     includes: list[str] = []
@@ -806,7 +852,9 @@ def _vitest_filters(root: Path) -> tuple[tuple[str, ...], tuple[str, ...], str]:
             continue
         excludes.extend(found)
         includes.extend(wanted)
-    return tuple(excludes), tuple(includes), _playwright_test_dir(root)
+    return (tuple(_compile_glob(pattern) for pattern in excludes),
+            tuple(_compile_glob(pattern) for pattern in includes),
+            _playwright_test_dir(root))
 
 
 def _imports_playwright(root: Path, rel: str) -> bool:
@@ -822,19 +870,21 @@ def _imports_playwright(root: Path, rel: str) -> bool:
     return _PLAYWRIGHT_IMPORT in head
 
 
-def _is_vitest_candidate(root: Path, rel: str, excludes: tuple[str, ...],
-                         includes: tuple[str, ...], test_dir: str) -> bool:
+def _is_vitest_candidate(root: Path, rel: str,
+                         excludes: tuple[_CompiledGlob, ...],
+                         includes: tuple[_CompiledGlob, ...],
+                         test_dir: str) -> bool:
     if not _VITEST_TEST_RE.search(Path(rel).name):
         return False
     if rel == test_dir or rel.startswith(test_dir + "/"):
         return False
     if includes:
-        known = [pattern for pattern in includes
-                 if not _has_extglob(pattern)]
-        if len(known) == len(includes) \
-                and not any(_glob_match(pattern, rel) for pattern in known):
+        if all(pattern is not None for pattern in includes) \
+                and not any(rx.match(rel) for pattern in includes
+                            if pattern is not None for rx in pattern):
             return False
-    if any(_glob_match(pattern, rel) for pattern in excludes):
+    if any(rx.match(rel) for pattern in excludes
+           if pattern is not None for rx in pattern):
         return False
     return not _imports_playwright(root, rel)
 

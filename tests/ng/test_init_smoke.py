@@ -1064,3 +1064,45 @@ def test_smoke_skips_deeply_excluded_e2e_spec(tmp_path):
 
     assert init_smoke.choose_candidate(
         tmp_path, C.RunnerKind.VITEST, (".",)) == "src/a.test.ts"
+
+
+# --- Round 10 audit twins: invalid glob classes never crash init -----------
+
+
+def _vitest_repo_with_glob(root, *, test_body):
+    _git(root)
+    (root / "vitest.config.ts").write_text(
+        "import { defineConfig, configDefaults } from 'vitest/config';\n"
+        "export default defineConfig({\n"
+        "  test: {\n" + test_body + "\n"
+        "  },\n"
+        "});\n", encoding="utf-8")
+    src = root / "src"
+    src.mkdir(exist_ok=True)
+    (src / "a.test.ts").write_text(
+        "import { it } from 'vitest';\n"
+        "it('works', () => {});\n", encoding="utf-8")
+    marker = root / "node_modules" / "vitest"
+    marker.mkdir(parents=True, exist_ok=True)
+    (marker / "vitest.mjs").write_text("export {};\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("test_body", [
+    "    exclude: ['[z-a]'],",
+    "    include: ['[z-a]'],",
+], ids=["exclude", "include"])
+def test_dry_run_vitest_bad_range_glob_is_unknown(
+        tmp_path, monkeypatch, capsys, test_body):
+    """Round 10: '[z-a]' exits 0 with no traceback (unknown glob rule)."""
+    from ptest import cli
+
+    _vitest_repo_with_glob(tmp_path, test_body=test_body)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    assert cli.main((
+        "init", "--runner", "vitest", "--agents", "none",
+        "--no-doctor", "--no-smoke", "--dry-run")) == 0
+    out = capsys.readouterr()
+    assert "Traceback" not in out.out
+    assert "Traceback" not in out.err
