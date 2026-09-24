@@ -423,6 +423,7 @@ class AssessmentRow:
     rationale: str
     evidence: tuple
     label: str
+    dropped_citations: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -440,6 +441,11 @@ class AssessmentRow:
         object.__setattr__(self, "evidence", tuple(evidence))
         if not isinstance(self.label, str) or not self.label:
             raise TypeError("row.label must be nonempty str")
+        if (isinstance(self.dropped_citations, bool)
+                or not isinstance(self.dropped_citations, int)):
+            raise TypeError("row.dropped_citations must be int")
+        if self.dropped_citations < 0:
+            raise ValueError("row.dropped_citations must be >= 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1781,47 +1787,77 @@ def _short_reply_detail(message: str) -> str:
     return message
 
 
+def _normalize_one_row_prose(text: str) -> str:
+    """Strip inline-code backticks so cheap-model prose stays plain text.
+
+    Only the backtick characters go: links, autolinks, bare URLs, HTML,
+    headings, pipes, percent figures, execution-claim words, and command
+    shapes are still rejected exactly as before (a command shape wrapped
+    in backticks is still a command shape once they are removed).
+    """
+    return text.replace("`", "")
+
+
 def _check_one_row_prose(text: object, ctx: str) -> str:
     if not isinstance(text, str) or not text:
         raise _invalid_reply(f"{ctx} must be nonempty prose")
+    normalized = _normalize_one_row_prose(text)
+    if not normalized:
+        raise _invalid_reply(f"{ctx} must be nonempty prose")
     try:
-        size = len(text.encode("utf-8"))
+        size = len(normalized.encode("utf-8"))
     except UnicodeEncodeError:
         raise _invalid_reply(f"{ctx} is not valid UTF-8") from None
     if size > _ONE_ROW_PROSE_MAX_BYTES:
         raise _invalid_reply(f"{ctx} exceeds its bound")
-    if C.aa_prose_is_untrusted(text):
+    if C.aa_prose_is_untrusted(normalized):
         raise _invalid_reply(f"{ctx} carries untrusted model content")
-    return text
+    return normalized
 
 
-def _bind_one_row_citations(items: object, subset: dict, ctx: str) -> tuple:
+def _bind_one_row_citations(items: object, subset: dict,
+                            ctx: str) -> tuple[tuple, int]:
+    """Bind citations, dropping invalid ones instead of failing the item.
+
+    Returns ``(valid_citations, dropped_count)``. A citation that is
+    malformed, cites evidence outside the item subset (including files
+    excluded at admission, such as empty files), carries a stale
+    identity, or escapes its excerpt is dropped and counted; the caller
+    fails the item only when its status demands citations and none
+    remain. A non-list or over-long evidence value still fails the row.
+    """
     if not isinstance(items, list) or len(items) > _ONE_ROW_EVIDENCE_MAX:
         raise _invalid_reply(f"{ctx} must be a list of at most 16 citations")
     citations: list[Citation] = []
+    dropped = 0
     for position, item in enumerate(items):
         entry_ctx = f"{ctx}[{position}]"
-        _require_exact_keys(item, _ONE_ROW_CITATION_KEYS, entry_ctx)
         try:
-            citation = Citation(path=item["path"],
-                                start_line=item["start_line"],
-                                end_line=item["end_line"],
-                                sha256=item["sha256"])
-        except (TypeError, ValueError):
-            raise _invalid_reply(
-                f"{entry_ctx} is not a valid citation") from None
-        excerpt = subset.get(citation.path)
-        if excerpt is None:
-            raise _invalid_reply(
-                f"{entry_ctx} cites evidence outside the item subset")
-        if citation.sha256 != excerpt.sha256:
-            raise _invalid_reply(f"{entry_ctx} citation identity is stale")
-        if not (excerpt.start_line <= citation.start_line
-                <= citation.end_line <= excerpt.end_line):
-            raise _invalid_reply(
-                f"{entry_ctx} citation escapes its excerpt")
+            _require_exact_keys(item, _ONE_ROW_CITATION_KEYS, entry_ctx)
+            try:
+                citation = Citation(path=item["path"],
+                                    start_line=item["start_line"],
+                                    end_line=item["end_line"],
+                                    sha256=item["sha256"])
+            except (TypeError, ValueError):
+                raise _invalid_reply(
+                    f"{entry_ctx} is not a valid citation") from None
+            excerpt = subset.get(citation.path)
+            if excerpt is None:
+                raise _invalid_reply(
+                    f"{entry_ctx} cites evidence outside the item subset")
+            if citation.sha256 != excerpt.sha256:
+                raise _invalid_reply(
+                    f"{entry_ctx} citation identity is stale")
+            if not (excerpt.start_line <= citation.start_line
+                    <= citation.end_line <= excerpt.end_line):
+                raise _invalid_reply(
+                    f"{entry_ctx} citation escapes its excerpt")
+        except C.Problem:
+            dropped += 1
+            continue
         citations.append(citation)
-    return tuple(citations)
+    return tuple(citations), dropped
 
 
 def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
@@ -1845,10 +1881,10 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
                                      "reply.rationale")
     if rationale.startswith((SKIP_PREFIX, FAILED_PREFIX)):
         raise _invalid_reply("reply carries a ptest-owned prefix")
-    evidence = _bind_one_row_citations(document["evidence"], subset,
-                                       "reply.evidence")
+    evidence, dropped = _bind_one_row_citations(document["evidence"],
+                                                subset, "reply.evidence")
     if status in ("satisfied", "gap", "not-applicable") and not evidence:
-        raise _invalid_reply("reply needs at least one citation")
+        raise _invalid_reply("no valid citations")
     if status == "not-applicable" and sum(
             1 for char in rationale if not char.isspace()) < (
                 _SKIP_RATIONALE_MIN_NONSPACE):
@@ -1864,17 +1900,19 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
                                        "reply.finding.summary")
         change = _check_one_row_prose(raw_finding["suggested_change"],
                                       "reply.finding.suggested_change")
-        finding_evidence = _bind_one_row_citations(
+        finding_evidence, finding_dropped = _bind_one_row_citations(
             raw_finding["evidence"], subset, "reply.finding.evidence")
         if not finding_evidence:
-            raise _invalid_reply("finding needs at least one citation")
+            raise _invalid_reply("finding has no valid citations")
+        dropped += finding_dropped
         finding = Finding(id=entry.id, summary=summary,
                           suggested_change=change, recipe_id=entry.recipe,
                           evidence=finding_evidence)
     elif raw_finding is not None:
         raise _invalid_reply("non-gap reply must carry finding null")
     row = AssessmentRow(id=entry.id, status=status, rationale=rationale,
-                        evidence=evidence, label=entry.label)
+                        evidence=evidence, label=entry.label,
+                        dropped_citations=dropped)
     return row, finding
 
 

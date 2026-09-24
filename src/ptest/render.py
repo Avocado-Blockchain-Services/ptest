@@ -105,14 +105,41 @@ def _agent_dependency_detail_lines(children) -> list[str]:
     return lines
 
 
+def _word_cut(head: str, room: int) -> str:
+    """Cut ``head`` back to its last whitespace, unless that guts it.
+
+    Spaceless text has no word boundary to honor, so a cut that would
+    keep less than half the budget falls back to the hard cut: the
+    marker still shows the line continues.
+    """
+    cut = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    if cut > room // 2:
+        return head[:cut]
+    return head
+
+
 def _truncate_utf8_bytes(text: str, limit: int,
-                         marker: str = "[truncated]") -> str:
-    """Cut text to at most limit UTF-8 bytes without splitting a character."""
+                         marker: str = "…") -> str:
+    """Cut text to at most limit UTF-8 bytes at a word boundary.
+
+    The cut lands on the last whitespace within budget so terminal lines
+    never end mid-word; the full text stays in recommendations.md.
+    """
     encoded = text.encode("utf-8")
     if len(encoded) <= limit:
         return text
     room = limit - len(marker.encode("utf-8"))
-    return encoded[:room].decode("utf-8", errors="ignore") + marker
+    head = encoded[:room].decode("utf-8", errors="ignore")
+    return _word_cut(head, room).rstrip() + marker
+
+
+def _truncate_words(text: str, limit: int, marker: str = "…") -> str:
+    """Cut text to at most limit characters at a word boundary."""
+    if len(text) <= limit:
+        return text
+    room = limit - len(marker)
+    head = text[:room]
+    return _word_cut(head, room).rstrip() + marker
 
 
 def _fit_lines_with_omission(lines: list[str], budget: int,
@@ -286,8 +313,8 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
                 rationale = ""
             if rationale.startswith(SKIP_PREFIX):
                 rationale = rationale[len(SKIP_PREFIX):]
-            reason = _agent_assessment_prose(
-                rationale)[:_NA_REASON_MAX_CHARS]
+            reason = _truncate_words(
+                _agent_assessment_prose(rationale), _NA_REASON_MAX_CHARS)
             lines.append(f"{icon} {label} — n/a: {reason}")
         else:
             lines.append(f"{icons['unknown']} {label} — unknown")
