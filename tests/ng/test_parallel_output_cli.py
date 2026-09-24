@@ -1147,3 +1147,105 @@ def test_mirror_equality_with_wave1_names():
     assert (t1.QUALIFIED_XDIST_VERSIONS
             == exec_check.XDIST_QUALIFIED_VERSIONS)
     assert t1.PARALLEL_DIST_MODES == exec_check.XDIST_DIST_MODES
+
+
+# ---- DET1: deterministic rows cite the child .ptest.toml, never downgrade ---
+
+def _write_det1_shaped_monorepo(root: Path) -> None:
+    """Persea-shaped api (4 xdist workers) plus vitest web (DET1).
+
+    Mirrors ``_write_persea_shaped_monorepo`` but the api runner requests
+    real workers (empty ``args`` so ``-n 4`` from ``addopts`` applies) and
+    the api child holds private ``.ptest/`` runtime state that must never
+    reach the review evidence.
+    """
+    _write_persea_shaped_monorepo(root)
+    (root / "api" / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "abababababababababababababababab"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["uv", "run", "--locked", "--no-sync", "python"]\n'
+        "args = []\n"
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n'
+        "[selection]\n"
+        "enabled = false\n",
+        encoding="utf-8",
+    )
+    private = root / "api" / ".ptest" / "ledger"
+    private.mkdir(parents=True)
+    (private / "SENTINEL").write_text(
+        "PRIVATE_STATE_SENTINEL_DET1\n", encoding="utf-8")
+
+
+def test_doctor_det1_deterministic_rows_cite_child_config(
+        tmp_path, monkeypatch, capsys):
+    """DET1 twin: api parallel ✓ (4 workers), selection ✗ gap, timing ?.
+
+    The child ``.ptest.toml`` files are tier-0 evidence, so no deterministic
+    satisfied/gap row downgrades for a missing citation; citations carry the
+    exact ``[selection]``/``[runner]`` line ranges with valid identities;
+    private ``.ptest/`` state never reaches any output.
+    """
+    root = tmp_path / "det1-mono"
+    root.mkdir()
+    _write_det1_shaped_monorepo(root)
+    bindir = tmp_path / "bin"
+    _prepare_review(monkeypatch, root, bindir)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+    human = capsys.readouterr()
+    assert "✓ Parallel execution" in human.out
+    assert "? Parallel execution" not in human.out
+    assert "✗ Test selection" in human.out
+    assert ("? Test timing  no timing history yet: "
+            "run ptest --full once") in human.out
+    assert "(the ptest config is not in the review evidence)" not in human.out
+    assert "PRIVATE_STATE_SENTINEL_DET1" not in human.out
+
+    launches = _read_launches(bindir)
+    assert "PARALLEL-001" not in [entry["item"] for entry in launches]
+
+    report = (root / "recommendations.md").read_text(encoding="utf-8")
+    assert "PRIVATE_STATE_SENTINEL_DET1" not in report
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+    out = capsys.readouterr().out
+    assert "PRIVATE_STATE_SENTINEL_DET1" not in out
+    document = C.decode_public_document(out.encode("utf-8"))
+    assert document.kind == "agent-assessment" and document.error is None
+    by_scope = {child["scope"]: child
+                for child in document.data["children"]}
+    api_rows = {row["id"]: row for row in by_scope["api"]["rows"]}
+    parallel = api_rows["PARALLEL-001"]
+    assert parallel["status"] == "satisfied"
+    assert "4 workers" in parallel["rationale"]
+    assert len(parallel["evidence"]) == 1
+    assert parallel["evidence"][0]["path"] == "api/.ptest.toml"
+    runner_lines = (
+        parallel["evidence"][0]["start_line"],
+        parallel["evidence"][0]["end_line"])
+    assert runner_lines == (3, 10)
+    selection = api_rows["SELECT-001"]
+    assert selection["status"] == "gap"
+    assert len(selection["evidence"]) == 1
+    assert selection["evidence"][0]["path"] == "api/.ptest.toml"
+    assert (selection["evidence"][0]["start_line"],
+            selection["evidence"][0]["end_line"]) == (11, 12)
+    findings = {finding["id"]: finding
+                for finding in by_scope["api"]["findings"]}
+    assert "SELECT-001" in findings
+    assert "PARALLEL-001" not in findings
+    assert api_rows["TIMING-001"]["status"] == "unknown"
+    assert "no timing history yet" in api_rows["TIMING-001"]["rationale"]
+    # Web (vitest): no automatic selection, so n/a by design, still cited.
+    web_rows = {row["id"]: row for row in by_scope["web"]["rows"]}
+    assert web_rows["SELECT-001"]["status"] == "not-applicable"
+    assert web_rows["SELECT-001"]["evidence"]
+    assert web_rows["PARALLEL-001"]["status"] == "satisfied"
