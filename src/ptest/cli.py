@@ -6,7 +6,6 @@ the typed capability boundary until the scheduler/guard orchestration lands.
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import os
 import stat
@@ -810,7 +809,7 @@ def _init_facts(cwd: Path) -> tuple:
     try:
         items = executability.check_resolution(
             config_api.resolve_config(cwd))
-        return tuple(_executability_facts(item) for item in items)
+        return tuple(item.facts() for item in items)
     except Exception:
         # Facts never change init's configuration-based outcome: trouble
         # resolving them renders the notes-only shape instead.
@@ -819,16 +818,7 @@ def _init_facts(cwd: Path) -> tuple:
 
 def _render_init_text(result, rules, *, parsed: ParsedArgs,
                       repo_name: str, facts: tuple) -> str:
-    """Render the init header through the new renderer when available."""
-    try:
-        parameters = inspect.signature(
-            init_render.render_init).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    if "facts" not in parameters:
-        return init_render.render_init(
-            result, rules, dry_run=parsed.dry_run, agents=parsed.agents,
-            repo_name=repo_name, color=sys.stdout.isatty())
+    """Render the init header: wordmark, projects, grouped file actions."""
     return init_render.render_init(
         result, rules, dry_run=parsed.dry_run, agents=parsed.agents,
         repo_name=repo_name, color=sys.stdout.isatty(), facts=facts)
@@ -837,16 +827,15 @@ def _render_init_text(result, rules, *, parsed: ParsedArgs,
 def _render_init_footer_text(result, rules, *, parsed: ParsedArgs,
                              smoke: tuple, plans: tuple,
                              facts: tuple) -> str:
-    """Render the init footer (smoke, next steps, restart); "" when none."""
-    render_footer = getattr(init_render, "render_init_footer", None)
-    if render_footer is None:
-        return ""
-    try:
-        return render_footer(
-            result, rules, dry_run=parsed.dry_run, smoke=smoke,
-            plans=plans, facts=facts)
-    except Exception:
-        return ""
+    """Render the init footer (smoke, next steps, restart); "" when none.
+
+    The footer owns the smoke block: callers must not also write
+    ``init_smoke.format_smoke`` output. Fail-closed: a renderer bug
+    surfaces instead of silently dropping next steps or the restart line.
+    """
+    return init_render.render_init_footer(
+        result, rules, dry_run=parsed.dry_run, smoke=smoke,
+        plans=plans, facts=facts)
 
 
 def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
@@ -1207,28 +1196,9 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
     return answer in {"y", "yes"}
 
 
-def _executability_facts(item) -> dict:
-    """One frozen FACT_KEYS dict for a project, for init/doctor renderers.
-
-    Uses ``Executability.facts()`` once T2 lands; before that, builds the
-    same shape from the public verdict so doctor children already carry a
-    ``facts`` key the renderers can read.
-    """
-    facts = getattr(item, "facts", None)
-    if callable(facts):
-        return facts()
-    not_runnable = item.status == executability.STATUS_NOT_EXECUTABLE
-    return {"project": item.project, "runner": item.runner,
-            "runs": not not_runnable,
-            "runs_reason": item.reason if not_runnable else None,
-            "runs_fix": item.fix if not_runnable else None,
-            "parallel": None, "parallel_short": None, "parallel_fix": None,
-            "setup": None, "full_suite": None, "full_blocked": None}
-
-
 def _project_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
     """Map each project declaration to its FACT_KEYS facts dict."""
-    return {item.project: _executability_facts(item)
+    return {item.project: item.facts()
             for item in executability.check_resolution(resolution)}
 
 
@@ -1242,24 +1212,16 @@ def _plan_item_reviews(packet, domain: C.DomainPaths,
                        resolution: C.ConfigResolution):
     """Plan per-item reviews, answering deterministically where possible.
 
-    TIMING-001 and SELECT-001 (plus PARALLEL-001 once T4 lands) are
-    answered from ptest's own facts with no model call; every other item
-    keeps its provider request. Before the T4 merge this is the plain
-    planner.
+    Deterministic items (TIMING-001, SELECT-001) are answered from
+    ptest's own facts with no model call; every other item keeps its
+    provider request. Fail-closed: deterministic answers are always
+    applied, so the disclosed call count and the 'no model call'
+    promise stay exact.
     """
-    try:
-        from . import deterministic_items as deterministic
-    except ImportError:
-        return agent_assessment.plan_item_reviews(packet)
-    try:
-        answers = deterministic.answers_for(domain, resolution, packet)
-    except Exception:
-        answers = None
-    try:
-        return agent_assessment.plan_item_reviews(
-            packet, answers=answers)
-    except TypeError:
-        return agent_assessment.plan_item_reviews(packet)
+    from . import deterministic_items as deterministic
+
+    answers = deterministic.answers_for(domain, resolution, packet)
+    return agent_assessment.plan_item_reviews(packet, answers=answers)
 
 
 def _review_failure_reason(result) -> str | None:
@@ -1716,10 +1678,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             raise _problem("stale-evidence", "source or configuration changed during review")
 
         facts = _execution_facts(resolution)
-        try:
-            project_facts = _project_facts(resolution)
-        except Exception:
-            project_facts = {}
+        project_facts = _project_facts(resolution)
         child_data = []
         initialization_blocker = _initialization_required_limitation(resolution)
         for packet, assessment in zip(packets, assessments):
@@ -1880,9 +1839,6 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 smoke_results = _init_smoke_results(
                     parsed, cwd, smoke_plans, smoke_domain
                     if smoke_plans else None)
-                smoke_text = init_smoke.format_smoke(smoke_results)
-                if smoke_text:
-                    sys.stdout.write(smoke_text)
                 footer = _render_init_footer_text(
                     result, rules, parsed=parsed, smoke=smoke_results,
                     plans=smoke_plans, facts=facts)

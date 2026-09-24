@@ -260,12 +260,13 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
 
     assert main(("init", "--runner", "pytest")) == 0
     existing = capsys.readouterr()
-    assert re.search(r"unchanged +\.ptest\.toml", existing.out)
+    assert re.search(r"config +unchanged +\.ptest\.toml", existing.out)
     assert "unchanged:" not in existing.out
     assert "already present" not in existing.out
-    for relative in ("docs/ptest-agent.md", "AGENTS.md",
-                     ".agents/skills/ptest/SKILL.md"):
-        assert re.search(rf"unchanged +{re.escape(relative)}", existing.out)
+    # File actions group by action: one unchanged line names every file.
+    assert re.search(
+        r"guidance +unchanged +docs/ptest-agent\.md, AGENTS\.md, "
+        r"ptest skill for codex", existing.out)
     assert "Optimization review is disabled" in existing.err
     assert config.read_bytes() == original_config
     assert inputs == ["codex", "no", "codex", "no"]
@@ -388,11 +389,12 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert "api" in human.out and "web" in human.out
     assert human.out.index("api") < human.out.index("web")
     assert "recommendations.md" in human.out
-    lines = human.out.splitlines()
-    assert "api (pytest)" in lines and "web (pytest)" in lines
-    assert lines.index("api (pytest)") < lines.index("web (pytest)")
-    assert "0 of 11 checks confirmed from evidence" in human.out
-    assert "Execution verification: not run." in human.out
+    assert "api  pytest · " in human.out and "web  pytest · " in human.out
+    assert human.out.index("api  pytest · ") < human.out.index(
+        "web  pytest · ")
+    assert re.search(r"api  pytest · \d+ ok · \d+ gap · \d+ unknown",
+                     human.out)
+    assert "Report: recommendations.md (created)" in human.out
     declarations = [item[1] for item in launches]
     api_count = declarations.count("api")
     web_count = declarations.count("web")

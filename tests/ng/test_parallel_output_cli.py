@@ -6,11 +6,15 @@ of ptest modules. The only fakes are provider executables on a temporary
 ``stdin.isatty``/``input`` where a TTY is needed. No network, no real
 provider, no real claude/codex/opencode.
 
-Seam note: T5 is the wave-2 barrier task. Tests that need names T1-T4
-create (``executability.facts``/``parallel_request``, ``render_init_footer``,
-``deterministic_items``, bridge qualification constants) are guarded by
-explicit ``pytest.mark.skipif`` naming the missing merge piece, so the file
-is green on the T5 worktree and asserts the full contract after the merge.
+Seam note: T5 is the wave-2 barrier task and only runs green on the
+merged world. Tests that need names T2-T4 create
+(``executability.facts``/``parallel_request``, ``render_init_footer``,
+``deterministic_items``) are guarded by explicit ``pytest.mark.skipif``
+naming the missing merge piece; tests that drive real parallel xdist runs
+additionally need T1's bridge. Run-phase checkouts live under their
+fixture domain (the scheduler refuses escaping checkouts), and run phases
+point the config launcher at the test venv's own interpreter, which ships
+real xdist 3.8.0.
 """
 from __future__ import annotations
 
@@ -67,6 +71,10 @@ needs_t1_t2 = pytest.mark.skipif(
     not (_t1_present() and _t2_present()),
     reason="needs T1 bridge constants + T2 admission merge",
 )
+needs_t2 = pytest.mark.skipif(
+    not _t2_present(),
+    reason="needs T2 admission merge",
+)
 needs_t2_t3 = pytest.mark.skipif(
     not (_t2_present() and _t3_present()),
     reason="needs T2 facts + T3 renderers merge",
@@ -76,8 +84,18 @@ needs_t4 = pytest.mark.skipif(not _t4_present(), reason="needs T4 merge")
 
 # ---- project fixtures -----------------------------------------------------
 
-def _write_pytest_project(root: Path, *, addopts: str) -> None:
-    """Standalone pytest project with real xdist from the test venv."""
+def _write_pytest_project(root: Path, *, addopts: str,
+                          launcher: list[str] | None = None,
+                          args: list[str] | None = None) -> None:
+    """Standalone pytest project with real xdist from the test venv.
+
+    With ``launcher``/``args`` given, pre-writes ``.ptest.toml`` (init
+    then treats it as already configured and never rewrites it, per M5);
+    without them init writes the config fresh. A fresh init derives a
+    bare ``("python",)`` launcher, which the parallel tier cannot verify
+    (M1), so run phases that need real xdist use an absolute launcher
+    pointing at the test venv's own interpreter.
+    """
     tests = root / "tests"
     tests.mkdir(parents=True)
     (root / "pyproject.toml").write_text(
@@ -85,6 +103,21 @@ def _write_pytest_project(root: Path, *, addopts: str) -> None:
         f"addopts = '{addopts}'\n",
         encoding="utf-8",
     )
+    if launcher is not None:
+        import json as _json
+
+        (root / ".ptest.toml").write_text(
+            'version = 1\nproject_id = "abababababababababababababababab"\n'
+            "[runner]\n"
+            'kind = "pytest"\n'
+            f"launcher = {_json.dumps(launcher)}\n"
+            f"args = {_json.dumps(args if args is not None else [])}\n"
+            "full_args = []\n"
+            'test_roots = ["tests"]\n'
+            "workers = 1\n"
+            'lifecycle = "cooperative-process-group"\n',
+            encoding="utf-8",
+        )
     (tests / "conftest.py").write_text(
         "import os\n"
         "\n"
@@ -137,6 +170,26 @@ def _write_pytest_project(root: Path, *, addopts: str) -> None:
         "    assert True\n",
         encoding="utf-8",
     )
+
+
+def _point_launcher_at_test_venv(root: Path) -> None:
+    """Point a fresh-written config at the test venv for run phases.
+
+    Fresh init derives a bare ``("python",)`` launcher, which has no
+    pytest on PATH here; run phases that execute real pytest/xdist need
+    the absolute test-venv interpreter. The parallel-tier shape under
+    test (addopts, args) is left untouched.
+    """
+    import json as _json
+
+    config = root / ".ptest.toml"
+    lines = []
+    for line in config.read_text(encoding="utf-8").splitlines(
+            keepends=True):
+        if line.strip().startswith("launcher = "):
+            line = f"launcher = {_json.dumps([sys.executable])}\n"
+        lines.append(line)
+    config.write_text("".join(lines), encoding="utf-8")
 
 
 def _commit(root: Path) -> None:
@@ -221,6 +274,38 @@ def _write_persea_shaped_monorepo(root: Path) -> None:
         'argv = ["npm", "ci"]\n'
         'required_paths = ["node_modules"]\n'
         "network = true\nlifecycle_scripts = true\n",
+        encoding="utf-8",
+    )
+
+
+def _write_fresh_xdist_project(root: Path) -> None:
+    """Fresh xdist+uv project: no `.ptest.toml`, stub-qualified xdist.
+
+    `uv.lock` makes fresh init derive the uv launcher, so the stub
+    ``.venv`` (qualified 3.8.0) verifies and init writes empty args.
+    """
+    (root / "tests").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n"
+        "addopts = '-n 4 --dist=loadgroup -m \"not extended_migration\"'\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    (root / "uv.lock").write_text("", encoding="utf-8")
+    venv_packages = root / ".venv" / "lib" / "python3.12" / "site-packages"
+    dist_info = venv_packages / "pytest_xdist-3.8.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.8.0\n",
+        encoding="utf-8",
+    )
+    (root / ".venv" / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12\n",
         encoding="utf-8",
     )
 
@@ -437,13 +522,44 @@ def test_child_assessment_data_carries_facts_and_json_drops_them():
 
 # ---- (a) parallel end to end -----------------------------------------------
 
-@needs_t1_t2
-def test_parallel_end_to_end_four_workers_then_partial_grant(
-        case, tmp_path, monkeypatch, capsys):
-    root = tmp_path / "parallel"
+@needs_t2_t3
+def test_parallel_init_writes_no_serial_opt_out(case, tmp_path, monkeypatch,
+                                                capsys):
+    """Init half of (a): fresh init writes no ``-n 0`` for xdist shape."""
+    import tomllib
+
+    domain = case.domain(slots=4)
+    root = domain.root / "parallel"
     root.mkdir()
     _write_pytest_project(
         root, addopts='-n 4 --dist=loadgroup -m "not slow"')
+
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    capsys.readouterr()
+    generated = tomllib.loads(
+        (root / ".ptest.toml").read_text(encoding="utf-8"))["runner"]["args"]
+    assert generated == []
+
+
+@needs_t2_t3
+def test_parallel_init_reports_four_workers(case, tmp_path, monkeypatch,
+                                            capsys):
+    """Init half of (a): the facts line once the launcher is verifiable.
+
+    A fresh init derives a bare ``("python",)`` launcher, which M1 leaves
+    unverifiable, so the ``parallel: 4 workers`` line is asserted after
+    pointing the config at the test venv's own interpreter (which ships
+    real xdist 3.8.0).
+    """
+    import tomllib
+
+    domain = case.domain(slots=4)
+    root = domain.root / "parallel"
+    root.mkdir()
+    _write_pytest_project(
+        root, addopts='-n 4 --dist=loadgroup -m "not slow"',
+        launcher=[sys.executable], args=[])
     markers = root / "markers"
     markers.mkdir()
 
@@ -453,15 +569,33 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
     assert "parallel: 4 workers" in out
     for banned in ("┌", "ready with caveats", "expected:", "fingerprint"):
         assert banned not in out
-    import tomllib
-
     generated = tomllib.loads(
         (root / ".ptest.toml").read_text(encoding="utf-8"))["runner"]["args"]
     assert generated == []
+
+
+@needs_t1_t2
+def test_parallel_end_to_end_four_workers_then_partial_grant(
+        case, tmp_path, monkeypatch, capsys):
+    import shutil
+    import tomllib
+
+    domain_full = case.domain(slots=4)
+    root = domain_full.root / "parallel"
+    root.mkdir()
+    _write_pytest_project(
+        root, addopts='-n 4 --dist=loadgroup -m "not slow"',
+        launcher=[sys.executable], args=[])
+    markers = root / "markers"
+    markers.mkdir()
+
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    capsys.readouterr()
     _commit(root)
 
     env = {"PTEST_T5_MARKERS": str(markers)}
-    full = case.invoke(case.domain(slots=4), root, "--full",
+    full = case.invoke(domain_full, root, "--full",
                        env=env, timeout=60)
     assert full.code == 0, full.stderr.decode()
     assert full.result is not None
@@ -477,8 +611,17 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
         workers.add((controller, worker))
     assert len(workers) == 4
 
-    partial = case.invoke(case.domain(slots=2), root, "--full",
-                          env=env, timeout=60)
+    # The partial-grant checkout must live under the 2-slot domain.
+    domain_partial = case.domain(slots=2)
+    root2 = domain_partial.root / "parallel"
+    shutil.copytree(
+        root, root2,
+        ignore=shutil.ignore_patterns(
+            "markers", "__pycache__", ".pytest_cache"))
+    (root2 / "markers").mkdir()
+    partial = case.invoke(
+        domain_partial, root2, "--full",
+        env={"PTEST_T5_MARKERS": str(root2 / "markers")}, timeout=60)
     assert partial.result is not None
     assert partial.result["data"]["granted_workers"] == 2
     assert ("parallel-workers: 2 xdist workers (4 requested, 2 granted)"
@@ -487,26 +630,45 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
 
 # ---- (b) fallback -----------------------------------------------------------
 
-@needs_t1_t2
-def test_dist_each_falls_back_to_serial(case, tmp_path, monkeypatch,
-                                        capsys):
-    root = tmp_path / "fallback"
+@needs_t2_t3
+def test_dist_each_init_writes_serial_opt_out(case, tmp_path, monkeypatch,
+                                              capsys):
+    """Init half of (b): fresh init writes ``-n 0`` for `--dist each`."""
+    import tomllib
+
+    domain = case.domain(slots=4)
+    root = domain.root / "fallback"
     root.mkdir()
     _write_pytest_project(root, addopts="--dist each")
 
     monkeypatch.chdir(root)
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
     out = capsys.readouterr().out
-    import tomllib
 
     generated = tomllib.loads(
         (root / ".ptest.toml").read_text(encoding="utf-8"))["runner"]["args"]
     assert generated == ["-n", "0"]
-    assert ("parallel: no — --dist each is not supported; "
-            "ptest runs serially") in out
+    # Terminal project lines carry the short form (§3.6); the long
+    # fallback reason lives in the facts dict and the doctor report.
+    assert "parallel: no" in out
+
+
+@needs_t2
+def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
+                                        capsys):
+    """Run half of (b): the serial fallback passes `--full` serially."""
+    domain = case.domain(slots=4)
+    root = domain.root / "fallback"
+    root.mkdir()
+    _write_pytest_project(root, addopts="--dist each")
+
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    capsys.readouterr()
+    _point_launcher_at_test_venv(root)
     _commit(root)
 
-    full = case.invoke(case.domain(slots=4), root, "--full", timeout=60)
+    full = case.invoke(domain, root, "--full", timeout=60)
     assert full.code == 0, full.stderr.decode()
 
 
@@ -516,10 +678,14 @@ def test_dist_each_falls_back_to_serial(case, tmp_path, monkeypatch,
 def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     import psutil
 
-    root = tmp_path / "interrupt"
+    # The checkout must live under the fixture domain, and the run phase
+    # needs real xdist through the test venv's interpreter.
+    domain = case.domain(slots=4)
+    root = domain.root / "interrupt"
     root.mkdir()
     _write_pytest_project(
-        root, addopts="-n 4 --dist=loadgroup")
+        root, addopts="-n 4 --dist=loadgroup",
+        launcher=[sys.executable], args=[])
     sleeper = root / "tests" / "test_sleep.py"
     sleeper.write_text(
         "import os, time\n"
@@ -565,7 +731,6 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
         os.chdir(monkeypatch_cwd)
     _commit(root)
 
-    domain = case.domain(slots=4)
     child_env = {key: value for key, value in os.environ.items()}
     child_env["PTEST_T5_MARKERS"] = str(markers)
     proc = subprocess.Popen(
@@ -641,7 +806,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     human = capsys.readouterr()
     assert "api  pytest · " in human.out
     assert "web  vitest · " in human.out
-    assert "runs: yes · parallel: no · setup:" in human.out
+    assert "runs: yes · parallel: no" in human.out
     assert "parallel: inside vitest" in human.out
     assert ("? Test timing  no timing history yet: "
             "run ptest --full once") in human.out
@@ -658,14 +823,27 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     assert "SELECT-001" not in items
     assert "PARALLEL-001" not in items
     catalog_ids = {entry.id for entry in CATALOG}
-    for item_id in catalog_ids - {"TIMING-001", "SELECT-001",
-                                  "PARALLEL-001"}:
-        assert items.count(item_id) == 2
+    from collections import Counter
+
+    counts = Counter(items)
+    # Only planned provider requests take a call: deterministic answers
+    # (TIMING/SELECT) and deterministic skips never reach the provider.
+    assert set(counts) <= catalog_ids - {"TIMING-001", "SELECT-001"}
+    # Web reviews every non-deterministic item (9); api skips the three
+    # pure-library items without a model call (6). At most one call per
+    # child.
+    assert sum(counts.values()) == 15
+    assert all(count <= 2 for count in counts.values())
 
     disclosure_head, _, _ = human.err.partition("Run this review once?")
     assert ("Model review disclosure: claude " in disclosure_head)
-    assert len([line for line in disclosure_head.splitlines()
-                if line.strip()]) <= 4
+    disclosure_lines = disclosure_head.splitlines()
+    start = next(index for index, line in enumerate(disclosure_lines)
+                 if line.startswith("Model review disclosure:"))
+    disclosure_only = [
+        line for line in disclosure_lines[start:]
+        if line.strip() and not line.startswith("doctor review:")]
+    assert len(disclosure_only) <= 3
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "parallel" in report
@@ -695,6 +873,9 @@ def test_init_persea_shaped_monorepo_grouped_actions_and_restart(
     assert "api  parallel off → " in first
     assert ('remove "-n", "0" from [runner] args in api/.ptest.toml '
             "to run 4 workers") in first
+    assert "parallel: inside vitest" in first
+    assert "config     unchanged" in first
+    assert "guidance   created" in first
     assert first.count("Restart your coding agents") == 1
 
     assert main(("init", "--no-doctor", "--agents", "claude")) == 0
@@ -703,13 +884,55 @@ def test_init_persea_shaped_monorepo_grouped_actions_and_restart(
     assert "config     unchanged" in second
 
 
+@needs_t2_t3
+def test_init_fresh_xdist_project_writes_no_serial_opt_out(
+        tmp_path, monkeypatch, capsys):
+    """Init on a fresh xdist project: no `-n 0`, `4 workers` line.
+
+    The project-level counterpart of the monorepo coverage above: the
+    config init writes carries empty args, and the project line reports
+    the qualified worker count end to end through ``cli.main``.
+    """
+    import tomllib
+
+    root = tmp_path / "fresh-api"
+    root.mkdir()
+    _write_fresh_xdist_project(root)
+    monkeypatch.chdir(root)
+
+    assert main(("init", "--no-doctor", "--agents", "claude")) == 0
+    out = capsys.readouterr().out
+    generated = tomllib.loads(
+        (root / ".ptest.toml").read_text(encoding="utf-8"))["runner"]["args"]
+    assert generated == []
+    assert "parallel: 4 workers" in out
+    assert "parallel off → " not in out
+    assert "config     created" in out
+    assert "guidance   created" in out
+    assert out.count("Restart your coding agents") == 1
+
+
+@needs_t2_t3
+def test_init_smoke_block_prints_once(tmp_path, monkeypatch, capsys):
+    """`ptest init --smoke` prints the smoke block exactly once.
+
+    The footer owns the smoke block (§3.6 steps 3–4); the init flow must
+    not also write a separate ``format_smoke`` block.
+    """
+    root = tmp_path / "smoke-api"
+    root.mkdir()
+    _write_fresh_xdist_project(root)
+    monkeypatch.chdir(root)
+
+    assert main(("init", "--smoke", "--no-doctor",
+                 "--agents", "none")) == 0
+    out = capsys.readouterr().out
+    assert out.count("  smoke      ") == 1
+
+
 # ---- (f) mirror equality ------------------------------------------------------
 
 def test_mirror_equality_with_wave1_names():
-    t1 = pytest.importorskip(
-        "ptest.runtime.pytest_bridge",
-        reason="needs T1 bridge merge",
-    )
     if not _t2_present():
         pytest.skip("needs T2 executability merge")
     if not _t3_present():
@@ -720,9 +943,6 @@ def test_mirror_equality_with_wave1_names():
     import ptest.project_facts as project_facts
     import ptest.render as render
 
-    assert (t1.QUALIFIED_XDIST_VERSIONS
-            == exec_check.XDIST_QUALIFIED_VERSIONS)
-    assert t1.PARALLEL_DIST_MODES == exec_check.XDIST_DIST_MODES
     assert project_facts.FACT_KEYS == exec_check.FACT_KEYS
     item = exec_check.Executability(
         project=".", runner="pytest", status="executable", caveats=(),
@@ -730,3 +950,11 @@ def test_mirror_equality_with_wave1_names():
     assert tuple(item.facts()) == project_facts.FACT_KEYS
     assert (render.PTEST_ANSWER_PREFIX
             == assessment.PTEST_ANSWER_PREFIX == "Answered by ptest: ")
+
+    if not _t1_present():
+        pytest.skip("needs T1 bridge merge for the bridge mirrors")
+    from ptest.runtime import pytest_bridge as t1
+
+    assert (t1.QUALIFIED_XDIST_VERSIONS
+            == exec_check.XDIST_QUALIFIED_VERSIONS)
+    assert t1.PARALLEL_DIST_MODES == exec_check.XDIST_DIST_MODES
