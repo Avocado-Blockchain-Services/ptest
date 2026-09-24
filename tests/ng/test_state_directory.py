@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ptest import contracts as C, platform, scheduler
+from ptest import config as config_api, contracts as C, operations, platform, scheduler
 from ptest.cli import main
 
 
@@ -208,3 +208,151 @@ def test_state_directory_reaches_guard_and_preserves_runner_exit_status(
     assert (root / "ran").read_text() == "executed"
     assert (state / "machine.toml").is_file()
     assert (state / "coordination" / "coordinator.sqlite3").is_file()
+
+
+def _write_trivial_command_project(root):
+    (root / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + "ab" * 16 + '"\n'
+        "[runner]\nkind = \"command\"\n"
+        f"launcher = {json.dumps([sys.executable, '-c', 'pass'])}\n"
+        "args = []\nfull_args = []\nworkers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8")
+
+
+def _git_init_fixture(root):
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.test",
+               GIT_COMMITTER_EMAIL="fixture@example.test")
+    prefix = ("git", "-c", "core.hooksPath=" + os.devnull,
+              "-c", "commit.gpgsign=false", "-C", str(root))
+    subprocess.run((*prefix, "init"), env=env, check=True,
+                   capture_output=True)
+    subprocess.run((*prefix, "add", "."), env=env, check=True,
+                   capture_output=True)
+    subprocess.run((*prefix, "commit", "-m", "fixture"), env=env,
+                   check=True, capture_output=True)
+
+
+def test_state_directory_inside_checkout_refuses_before_admission(
+        account, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_trivial_command_project(root)
+    _git_init_fixture(root)
+    state = root / ".ptest-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    domain = platform.domain_paths(None)
+    config = config_api.resolve_config(root).config
+    assert config is not None
+
+    with pytest.raises(C.Problem) as caught:
+        operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+    assert caught.value.code == "unsafe-path"
+    assert "PTEST_STATE_DIR must be outside the repository" in caught.value.message
+    assert not state.exists()
+
+    monkeypatch.chdir(root)
+    assert main(("--full",)) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert "PTEST_STATE_DIR must be outside the repository" in captured.err
+    assert "70" not in captured.err
+    assert not state.exists()
+
+
+def test_state_directory_outside_checkout_runs_without_exit_70(
+        account, tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_trivial_command_project(root)
+    _git_init_fixture(root)
+    state = tmp_path / "state-outside"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    domain = platform.domain_paths(None)
+    config = config_api.resolve_config(root).config
+    assert config is not None
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+
+    assert result.exit_code == 0
+    assert (state / "machine.toml").is_file()
+    assert (state / "coordination" / "coordinator.sqlite3").is_file()
+
+
+def test_doctor_review_with_state_inside_checkout_refuses_without_writing(
+        account, tmp_path, monkeypatch, capsys):
+    from test_doctor_init_integration import _prepare_review, _write_db_standalone_repo
+
+    root = tmp_path / "project"
+    root.mkdir()
+    _write_db_standalone_repo(root)
+    state = root / ".ptest-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    _prepare_review(monkeypatch, root, tmp_path / "bin")
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert "PTEST_STATE_DIR must be outside the repository" in captured.err
+    assert not state.exists()
+    assert not (root / "recommendations.md").exists()
+
+
+def test_where_and_status_show_domain_root(case, monkeypatch, capsys):
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    monkeypatch.chdir(root)
+
+    assert main(("--fixture-domain", str(domain.root), "where")) == 0
+    text = capsys.readouterr().out
+    assert f"domain: {domain.root}" in text
+    assert "PTEST_STATE_DIR" not in text
+
+    assert main(("--fixture-domain", str(domain.root), "where", "--json")) == 0
+    payload = C.decode_public_document(capsys.readouterr().out).data
+    assert payload["domain_root"] == str(domain.root)
+    assert payload["domain_from_env"] is False
+
+    assert main(("--fixture-domain", str(domain.root), "status")) == 0
+    assert f"domain: {domain.root}" in capsys.readouterr().out
+
+    assert main(("--fixture-domain", str(domain.root), "status", "--json")) == 0
+    payload = C.decode_public_document(capsys.readouterr().out).data
+    assert payload["domain_root"] == str(domain.root)
+    assert payload["domain_from_env"] is False
+
+
+def test_where_and_status_note_env_selected_domain(
+        account, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    _write_trivial_command_project(root)
+    state = tmp_path / "state-outside"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    monkeypatch.chdir(root)
+
+    assert main(("where",)) == 0
+    text = capsys.readouterr().out
+    assert f"domain: {state / 'coordination'}" in text
+    assert "PTEST_STATE_DIR" in text
+
+    assert main(("where", "--json")) == 0
+    payload = C.decode_public_document(capsys.readouterr().out).data
+    assert payload["domain_root"] == str(state / "coordination")
+    assert payload["domain_from_env"] is True
+
+    assert main(("status",)) == 0
+    text = capsys.readouterr().out
+    assert f"domain: {state / 'coordination'}" in text
+    assert "PTEST_STATE_DIR" in text
+
+    assert main(("status", "--json")) == 0
+    payload = C.decode_public_document(capsys.readouterr().out).data
+    assert payload["domain_root"] == str(state / "coordination")
+    assert payload["domain_from_env"] is True
+    assert not state.exists()

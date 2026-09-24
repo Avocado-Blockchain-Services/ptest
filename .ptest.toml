@@ -11,7 +11,7 @@ workers = 1
 lifecycle = "cooperative-process-group"
 
 [setup]
-argv = ["uv", "sync", "--locked"]
+argv = ["uv", "sync", "--locked", "--extra", "test"]
 required_paths = [".venv/bin/python"]
 network = true
 lifecycle_scripts = true

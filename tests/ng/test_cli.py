@@ -564,8 +564,9 @@ def test_nonempty_status_and_history_are_real_producer_data(
                 assert any(item["file"] == "tests/test_cache.py"
                            for item in document.data["obligations"])
         else:
-            assert captured.out == ("queued: 1\nactive: 0\n" if name == "status"
-                                    else "history: 1 runs\n")
+            assert captured.out == (
+                f"queued: 1\nactive: 0\ndomain: {domain.root}\n"
+                if name == "status" else "history: 1 runs\n")
     assert _tree_bytes(domain.root) == before
 
 

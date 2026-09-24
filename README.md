@@ -61,10 +61,11 @@ wheels before atomically switching the local command. Its explicit
 enterprise installation. Security gate instructions are in [docs/security.md](docs/security.md).
 
 To keep ptest's configuration, coordinator, history, and review-model cache in
-your workspace, set `PTEST_STATE_DIR` to an absolute path before invoking ptest:
+your workspace, set `PTEST_STATE_DIR` to an absolute path outside the repository
+before invoking ptest:
 
 ```sh
-export PTEST_STATE_DIR="$PWD/.ptest-state"
+export PTEST_STATE_DIR=/abs/workspace/.ptest-state
 ```
 
 Use the same value for every project that should share concurrency limits.

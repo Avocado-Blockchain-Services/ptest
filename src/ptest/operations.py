@@ -1378,6 +1378,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                        "shadow requires a qualified pytest selection profile")
     adapter = adapter_for(config.runner.kind)
     checkout = _checkout(config)
+    platform.validate_state_outside_checkout(domain, checkout.root)
     history_view = history.read_history(domain, checkout)
     catalog = adapter.qualified_profile(config)
     stored = history.read_qualified_profile(domain, checkout, config.runner.kind)
@@ -1846,6 +1847,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise _problem("unsupported-capability",
                        "pytest automatic selection requires a qualified profile")
     checkout = _checkout(config)
+    # State inside the checkout would count ledger/history writes as source
+    # changes; refuse before admission (and before any state bootstrap).
+    platform.validate_state_outside_checkout(domain, checkout.root)
     needs_history = native_runner and (
         request.mode is C.Mode.AUTOMATIC or catalog_profile is not None)
     if needs_history:

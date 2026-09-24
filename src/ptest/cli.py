@@ -655,6 +655,26 @@ def _domain_public(domain: C.DomainPaths | None) -> dict | None:
     return {"id": domain.domain_id, "fixture": domain.fixture}
 
 
+def _domain_from_env(domain: C.DomainPaths | None) -> bool:
+    return bool(domain is not None and not domain.fixture
+                and os.environ.get("PTEST_STATE_DIR"))
+
+
+def _domain_facts(domain: C.DomainPaths | None) -> dict:
+    return {
+        "domain_root": None if domain is None else str(domain.root),
+        "domain_from_env": _domain_from_env(domain),
+    }
+
+
+def _domain_text(domain: C.DomainPaths | None) -> str:
+    text = "domain: " + render.terminal_text(
+        "<unresolved>" if domain is None else str(domain.root))
+    if _domain_from_env(domain):
+        text += " (PTEST_STATE_DIR)"
+    return text
+
+
 def _checkout(config: C.Config) -> C.CheckoutIdentity:
     root = config.checkout.root if config.checkout else config.config_path.parent
     checkout_id = hashlib.sha256(os.fsencode(os.path.realpath(root))).hexdigest()[:32]
@@ -691,6 +711,7 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
             "max_jobs": None, "memory_mb": None, "repo_workers": None},
             "provenance": list(resolution.provenance),
             "warnings": [],
+            **_domain_facts(domain),
         }
     adapter_for(config.runner.kind)  # closed registry validation only
     if config.runner.kind is C.RunnerKind.PYTEST:
@@ -743,6 +764,7 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
         },
         "provenance": list(resolution.provenance),
         "warnings": [_reason(item) for item in resolution.warnings],
+        **_domain_facts(domain),
     }
 
 
@@ -1546,6 +1568,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
     closed. One focused model call runs per (project, checklist item);
     deterministically skipped items take no call.
     """
+    platform.validate_state_outside_checkout(domain, resolution.root)
     started = time.monotonic()
     deadline = started + _REVIEW_TOTAL_TIMEOUT_S
     limits = _doctor_limits(parsed)
@@ -1979,6 +2002,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     print(f"capability: {payload['capability']['execution']}")
                     for limitation in payload["capability"]["limitations"]:
                         print(f"limitation: {render.terminal_text(limitation['message'])}")
+                print(_domain_text(domain))
             if parsed.reveal_command:
                 if resolution.config is None:
                     print("unredacted-command-disclosure: no command is configured",
@@ -2022,11 +2046,13 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 "queued": [_lease(item) for item in leases if item.state is C.LeaseState.QUEUED],
                 "active": [_lease(item) for item in leases if item.state not in {
                     C.LeaseState.QUEUED, C.LeaseState.RELEASED, C.LeaseState.CANCELLED}],
+                **_domain_facts(domain),
             }
             if parsed.json:
                 sys.stdout.buffer.write(_document("status", payload, domain=domain))
             else:
                 print(f"queued: {len(payload['queued'])}\nactive: {len(payload['active'])}")
+                print(_domain_text(domain))
             return 0
         if command == "history":
             if parsed.scope is not None:

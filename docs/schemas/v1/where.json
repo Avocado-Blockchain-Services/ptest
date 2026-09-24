@@ -125,6 +125,15 @@
             "null"
           ]
         },
+        "domain_from_env": {
+          "type": "boolean"
+        },
+        "domain_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "effective_limits": {
           "properties": {
             "max_jobs": {

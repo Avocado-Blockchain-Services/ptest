@@ -60,6 +60,30 @@ def test_domain_ignores_home_and_xdg(monkeypatch, tmp_path):
     assert P.domain_paths(None).root == before.root
 
 
+def test_explicit_state_directory_moves_domain_and_leaves_default_untouched(
+        monkeypatch, tmp_path):
+    home = _make_account_home(tmp_path)
+    _account_home(monkeypatch, home)
+    default = P.domain_paths(None)
+
+    state = tmp_path / "explicit-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    selected = P.domain_paths(None)
+
+    assert selected.root == state / "coordination"
+    assert selected.machine_config == state / "machine.toml"
+    assert selected.ledger == state / "coordination" / "coordinator.sqlite3"
+    assert selected.fixture is False
+    assert selected.root != default.root
+    assert not state.exists()
+
+    monkeypatch.delenv("PTEST_STATE_DIR")
+    assert P.domain_paths(None).root == default.root
+    assert P.domain_paths(None).machine_config == default.machine_config
+    assert not (home / ".local").exists()
+    assert not (home / ".config").exists()
+
+
 def test_normal_domain_resolves_account_paths_without_creating(monkeypatch, tmp_path):
     home = _make_account_home(tmp_path)
     _account_home(monkeypatch, home)

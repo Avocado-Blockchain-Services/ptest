@@ -273,6 +273,25 @@ def configured_state_directory() -> Path | None:
     return path
 
 
+def validate_state_outside_checkout(domain: DomainPaths, root: Path) -> None:
+    """Fail closed when the explicit state directory sits inside the checkout.
+
+    Ledger, history and report writes inside the repository count as source
+    changes, so every run would fail; refuse before admission instead.
+    Fixture domains take precedence over the environment and are exempt.
+    """
+    if domain.fixture:
+        return
+    raw = os.environ.get("PTEST_STATE_DIR")
+    if not raw:
+        return
+    state = Path(os.path.realpath(raw))
+    anchor = Path(os.path.realpath(root))
+    if state == anchor or anchor in state.parents:
+        _fail("unsafe-path",
+              "PTEST_STATE_DIR must be outside the repository: " + raw)
+
+
 def _normal_domain() -> DomainPaths:
     system = _os_kind()
     uid, _ = _uid_pair()

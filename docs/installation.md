@@ -50,11 +50,13 @@ An existing state directory must belong to you with mode `0700`. Symlinks,
 relative paths, parent traversal, and unsafe ancestors are rejected; ptest does
 not repair existing permissions. Use a supported local filesystem.
 
-Keep state outside source repositories, or ignore it in Git. Each distinct
+Keep state outside source repositories: a state directory at or under a
+repository root is refused before admission, even if Git ignores it. Each distinct
 state directory has independent concurrency limits and history: use one shared
-absolute value for projects that must coordinate. Unsetting the variable restores
-the default account locations without moving or deleting state. An explicit
-`--fixture-domain` takes precedence over this variable.
+absolute value for projects that must coordinate. Run every ptest command,
+including a future `ptest uninstall`, with the same PTEST_STATE_DIR. Unsetting
+the variable restores the default account locations without moving or deleting
+state. An explicit `--fixture-domain` takes precedence over this variable.
 
 This setting controls ptest storage. Project files such as `.ptest.toml` and
 `recommendations.md` stay in the project; temporary scratch files use the OS

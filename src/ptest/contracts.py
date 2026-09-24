@@ -2670,6 +2670,12 @@ def _validate_where_payload(data: dict) -> None:
     _check_str_list(_need_list(data, "provenance"), "where.provenance")
     for item in _need_list(data, "warnings"):
         _check_reason_dict(item)
+    if data.get("domain_root") is not None and not isinstance(
+            data["domain_root"], str):
+        raise _invalid("report-invalid", "where.domain_root must be a string or null")
+    if "domain_from_env" in data and not isinstance(
+            data["domain_from_env"], bool):
+        raise _invalid("report-invalid", "where.domain_from_env must be a boolean")
 
 
 def _validate_status_payload(data: dict) -> None:
@@ -2682,6 +2688,12 @@ def _validate_status_payload(data: dict) -> None:
         _check_lease_dict(entry, "status.queued entry")
     for entry in _need_list(data, "active"):
         _check_lease_dict(entry, "status.active entry")
+    if data.get("domain_root") is not None and not isinstance(
+            data["domain_root"], str):
+        raise _invalid("report-invalid", "status.domain_root must be a string or null")
+    if "domain_from_env" in data and not isinstance(
+            data["domain_from_env"], bool):
+        raise _invalid("report-invalid", "status.domain_from_env must be a boolean")
 
 
 def _validate_history_payload(data: dict) -> None:
@@ -3333,6 +3345,8 @@ def _project_where_payload(data: dict) -> dict:
         "provenance": list(data["provenance"]),
         "warnings": [_project_reason(entry)
                      for entry in data["warnings"]],
+        "domain_root": data.get("domain_root"),
+        "domain_from_env": data.get("domain_from_env", False),
     }
 
 
@@ -3342,6 +3356,8 @@ def _project_status_payload(data: dict) -> dict:
             data["effective_limits"]),
         "queued": [_project_lease(entry) for entry in data["queued"]],
         "active": [_project_lease(entry) for entry in data["active"]],
+        "domain_root": data.get("domain_root"),
+        "domain_from_env": data.get("domain_from_env", False),
     }
 
 
@@ -4415,6 +4431,8 @@ PUBLIC_SCHEMAS: dict = {
             "effective_limits": _effective_limits_schema(),
             "provenance": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": _reason_schema()},
+            "domain_root": {"type": ["string", "null"]},
+            "domain_from_env": {"type": "boolean"},
         },
         "required": ["root", "config_path", "initialized", "runner_kind",
                      "capability", "commands", "effective_limits",
@@ -4426,6 +4444,8 @@ PUBLIC_SCHEMAS: dict = {
             "effective_limits": _effective_limits_schema(),
             "queued": {"type": "array", "items": _lease_schema()},
             "active": {"type": "array", "items": _lease_schema()},
+            "domain_root": {"type": ["string", "null"]},
+            "domain_from_env": {"type": "boolean"},
         },
         "required": ["effective_limits", "queued", "active"],
     }),
