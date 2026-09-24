@@ -866,6 +866,17 @@ Source: requirements §U.5 (added after this design was written). Binding for T3
 - **T5** wires the facts T4 needs, and its integration test asserts PARALLEL-001 through `cli.main` for a
   persea-shaped fixture (4 xdist workers means satisfied) and for a serial-fallback fixture (gap with the reason).
 
+### T1f-audit (2026-09-24, controller decision on the T1 audit BLOCK): T1.7(e) Ctrl-C twins
+Source: `.ctl/T1-audit-findings.md` [MEDIUM]. Binding for T1 twins (e) in `tests/ng/test_pytest_parallel_subprocess.py`
+and (c) in `tests/ng/test_parallel_output_cli.py`; overrides the `start_new_session=True` wording in §4 T1.7(e).
+- No twin uses `start_new_session`: a detached session made the scheduler count a twin descendant in another process
+  group as escaped under a concurrent ptest admission, ending that run incomplete (exit 70).
+- The Ctrl-C twins deliver SIGINT to the bridge child PID only (`os.kill(pid, SIGINT)`); no-survivor proof is a
+  descendant-held fifo reaching EOF (every xdist worker holds the write end from test-module import until death),
+  never a process-group poll.
+- The catch-all `operations.py` guard-failure reason ("exceeded its deadline") now reports the actual guard problem
+  code and message (ownership/lease), so an incomplete handoff names its cause.
+
 ## 10. Shared-file content (verbatim)
 
 Four appends. Each block starts with an `=== APPEND TO: <path> ===` marker line, which is not part of the text. Append

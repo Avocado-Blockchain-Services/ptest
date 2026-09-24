@@ -113,11 +113,14 @@ def _run_bridge(root: Path, argv: list[str], *, execution: str,
     for key, value in (extra_env or {}).items():
         child_env[key] = value
 
+    # Same process group as the caller: a detached session made the
+    # scheduler count twin descendants as escaped under a concurrent ptest
+    # admission and ended that run incomplete (exit 70).
     completed = subprocess.run(
         [sys.executable, str(BRIDGE), *argv],
         cwd=str(root), env=child_env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, timeout=timeout, check=False,
+        timeout=timeout, check=False,
     )
     report = None
     if report_path.exists():
@@ -285,12 +288,30 @@ def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path):
 
 
 def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
-    """Twin (e): SIGINT the bridge session; exit fast, nothing survives."""
+    """Twin (e): SIGINT the bridge PID; exit fast, nothing survives.
+
+    The bridge runs in the caller's process group (no new session), so only
+    its own PID is signalled. Survivors are proven absent by a
+    descendant-held fifo reaching EOF: every worker holds the write end from
+    test-module import until death.
+    """
+    import select
+
     root = (tmp_path / "interrupt").resolve()
     root.mkdir()
+    markers = root / "markers"
+    markers.mkdir(exist_ok=True)
+    fifo = markers / "interrupt.fifo"
+    os.mkfifo(fifo)
     body = (
         "import os, time\n"
         "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
+        "_HOLD = None\n"
+        "try:\n"
+        "    _HOLD = os.open(os.path.join(MARKERS, 'interrupt.fifo'),\n"
+        "                   os.O_WRONLY)\n"
+        "except OSError:\n"
+        "    _HOLD = None\n"
         "def _mark(name):\n"
         "    with open(os.path.join(MARKERS, name), 'w',"
         " encoding='utf-8') as handle:\n"
@@ -322,17 +343,15 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
         "PTEST_GRANT_NONCE": _hex(64),
         "PTEST_PYTEST_ATTEMPT": "a001",
         "PTEST_PYTEST_EXECUTION": "scoped",
-        "PTEST_PARALLEL_MARKERS": str(root / "markers"),
+        "PTEST_PARALLEL_MARKERS": str(markers),
     })
-    (root / "markers").mkdir(exist_ok=True)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
     proc = subprocess.Popen(
         [sys.executable, str(BRIDGE), "-n", "4", "--dist", "load", "-q",
          "-p", "no:cacheprovider", "tests/test_sleep.py"],
         cwd=str(root), env=child_env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        markers = root / "markers"
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             if all((markers / name).exists() for name in "abcd"):
@@ -342,31 +361,29 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
             time.sleep(0.2)
         assert all((markers / name).exists() for name in "abcd"), \
             "workers never started"
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGINT)
+        os.kill(proc.pid, signal.SIGINT)
         assert proc.wait(timeout=15) != 0
+        # Every descendant held the fifo write end; EOF means none survive.
         gone_by = time.monotonic() + 10
+        eof = False
         while time.monotonic() < gone_by:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
+            ready, _, _ = select.select(
+                [reader], [], [],
+                max(0.0, gone_by - time.monotonic()))
+            if ready and os.read(reader, 65536) == b"":
+                eof = True
                 break
-            time.sleep(0.2)
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            pytest.fail("bridge session survived SIGINT")
+        assert eof, "bridge descendants survived SIGINT"
     finally:
         if proc.poll() is None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.kill(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
             proc.wait(timeout=10)
         proc.stdout.close()
         proc.stderr.close()
+        os.close(reader)
 
 
 def test_parallel_worker_deselect_runs_labelled(tmp_path):
@@ -640,4 +657,241 @@ def test_parallel_differing_collections_are_refused(tmp_path):
     assert twin.report["terminal_complete"] is False
     assert twin.report["problem"] == "bridge-refused"
     assert any("parallel workers collected different tests" in refusal.get(
+        "message", "") for refusal in twin.refusals)
+
+
+def _forgery_tests() -> str:
+    return (
+        _IDENTITY_TEST
+        + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
+        + "\ndef test_ok2():\n    _record('ok2')\n    assert True\n"
+        + "\ndef test_zz_fail():\n    _record('zz_fail')\n    assert False\n"
+    )
+
+
+def test_parallel_worker_serialize_forgery_is_refused(tmp_path):
+    """Twin (n1): a worker-only report-serialization rewrite is refused.
+
+    The conftest hook exists only on workers (gated on PYTEST_XDIST_WORKER),
+    so the controller side stays clean: the refusal must come from the
+    worker-half transport check and the controller-side reconciliation,
+    never an unlabelled pass.
+    """
+    root = tmp_path / "serialize"
+    root.mkdir()
+    _write(root, "tests/sub/conftest.py",
+           "import os\n"
+           "if os.environ.get('PYTEST_XDIST_WORKER'):\n"
+           "    import pytest\n"
+           "    @pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+           "    def pytest_report_to_serializable(config, report):\n"
+           "        data = yield\n"
+           "        if isinstance(data, dict):\n"
+           "            data['outcome'] = 'passed'\n"
+           "        return data\n")
+    _write(root, "tests/sub/test_mixed.py", _forgery_tests())
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code != 0
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert twin.refusals
+
+
+def test_parallel_controller_deserialize_forgery_is_refused(tmp_path):
+    """Twin (n2): a controller-only report-deserialization rewrite is refused.
+
+    The conftest hook exists only on the controller (absent on workers), so
+    the refusal must come from the controller-side transport check, never
+    an unlabelled pass.
+    """
+    root = tmp_path / "deserialize"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "import os\n"
+           "if not os.environ.get('PYTEST_XDIST_WORKER'):\n"
+           "    import pytest\n"
+           "    @pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+           "    def pytest_report_from_serializable(config, data):\n"
+           "        report = yield\n"
+           "        if report is not None and getattr(report, 'failed', False):\n"
+           "            report.outcome = 'passed'\n"
+           "        return report\n")
+    _write(root, "tests/test_mixed.py", _forgery_tests())
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest_report_from_serializable" in refusal.get(
+        "message", "") for refusal in twin.refusals)
+
+
+_SHADOW_IMPOSTOR = (
+    "import pytest\n"
+    "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+    "def pytest_report_to_serializable(config, report):\n"
+    "    data = yield\n"
+    "    if isinstance(data, dict):\n"
+    "        data['outcome'] = 'passed'\n"
+    "    return data\n"
+    "\n"
+    "def pytest_sessionfinish(session):\n"
+    "    config = getattr(session, 'config', None)\n"
+    "    if getattr(config, 'workerinput', None) is None:\n"
+    "        return None\n"
+    "    try:\n"
+    "        workeroutput = config.workeroutput\n"
+    "    except AttributeError:\n"
+    "        return None\n"
+    "    workeroutput['ptest_bridge'] = {\n"
+    "        'worker_id': config.workerinput.get('workerid', ''),\n"
+    "        'protocol_seen': 2,\n"
+    "        'failures': 0,\n"
+    "        'collection_errors': 0,\n"
+    "        'dropped': False,\n"
+    "        'conftest_hooks': [],\n"
+    "        'notes': [],\n"
+    "        'refused': False,\n"
+    "    }\n"
+    "    return None\n"
+)
+
+
+def _shadow_tests() -> str:
+    return (
+        _IDENTITY_TEST
+        + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
+        + "\ndef test_zz_fail():\n    _record('zz_fail')\n    assert False\n"
+    )
+
+
+def test_parallel_shadow_module_at_checkout_root_is_neutralized(tmp_path):
+    """Twin (o1): a checkout-root ``pytest_bridge`` impostor cannot forge.
+
+    The impostor rewrites outcomes in transit and writes a well-formed clean
+    worker record. The run must surface the true native failure, never an
+    unlabelled pass.
+    """
+    root = tmp_path / "shadowroot"
+    root.mkdir()
+    _write(root, "pytest_bridge.py", _SHADOW_IMPOSTOR)
+    _write(root, "tests/test_mixed.py", _shadow_tests())
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_mixed.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 1, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 1
+    assert twin.report["problem"] == "native-failure"
+
+
+def test_parallel_shadow_module_on_sys_path_is_neutralized(tmp_path):
+    """Twin (o2): a site-packages-style ``pytest_bridge`` shadow cannot forge.
+
+    Same impostor as (o1), reached through the import path instead of the
+    checkout root. The true native failure must surface.
+    """
+    root = tmp_path / "shadowpath"
+    root.mkdir()
+    stub = root / "stubpath"
+    stub.mkdir()
+    (stub / "pytest_bridge.py").write_text(_SHADOW_IMPOSTOR, encoding="utf-8")
+    _write(root, "tests/test_mixed.py", _shadow_tests())
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_mixed.py"],
+        execution="scoped", timeout=60,
+        extra_env={"PYTHONPATH": str(stub)})
+
+    assert twin.code == 1, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 1
+    assert twin.report["problem"] == "native-failure"
+
+
+def test_parallel_conftest_import_time_worker_identity(tmp_path):
+    """Twin (p): conftest import-time code sees distinct worker identities.
+
+    The root conftest records ``PTEST_WORKER_ID`` at import time. Every
+    worker must observe its own slot, not the shared ``w000`` seed.
+    """
+    root = tmp_path / "importtime"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "import os\n"
+           "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
+           "with open(os.path.join(MARKERS, 'import.log'), 'a',"
+           " encoding='utf-8') as handle:\n"
+           "    handle.write(os.environ.get('PYTEST_XDIST_WORKER', '-') + ':'\n"
+           "        + os.environ.get('PTEST_WORKER_ID', '-') + ':'\n"
+           "        + os.environ.get('PTEST_RESOURCE_PREFIX', '-') + '\\n')\n")
+    _write(root, "tests/test_ok.py", _identity_tests(4))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    lines = (root / "markers" / "import.log").read_text(
+        encoding="utf-8").splitlines()
+    worker_lines = [line.split(":") for line in lines
+                    if line.startswith("gw")]
+    assert len(worker_lines) == 4
+    assert {parts[1] for parts in worker_lines} == {
+        "w000", "w001", "w002", "w003"}
+    for xdist_id, ptest_id, prefix in worker_lines:
+        number = int(xdist_id[2:])
+        assert ptest_id == f"w{number:03d}"
+        assert prefix.endswith(ptest_id)
+
+
+def test_parallel_collection_shortening_is_refused(tmp_path):
+    """Twin (n3): a controller collection-finished pop is refused.
+
+    A tryfirst conftest runs before the bridge's own tryfirst collection
+    hook, so without a transport check the controller would record and
+    schedule the shortened list and pass with a test unrun.
+    """
+    root = tmp_path / "shorten"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "import os\n"
+           "if not os.environ.get('PYTEST_XDIST_WORKER'):\n"
+           "    import pytest\n"
+           "    @pytest.hookimpl(tryfirst=True)\n"
+           "    def pytest_xdist_node_collection_finished(node, ids):\n"
+           "        if len(ids) > 1:\n"
+           "            ids.pop()\n")
+    _write(root, "tests/test_mixed.py", _forgery_tests())
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest_xdist_node_collection_finished" in refusal.get(
         "message", "") for refusal in twin.refusals)

@@ -670,6 +670,20 @@ def test_guard_problem_cannot_be_pass_signal_or_missing_executable(case, monkeyp
     assert result.signal is None
 
 
+def test_guard_problem_reason_names_actual_cause(case, monkeypatch):
+    """An ownership/lease guard failure names its cause, never a deadline."""
+    domain = case.domain()
+    root = _command_project(case, domain, args=("exit", "0"))
+    _guard_fault(monkeypatch, "problem:ownership-uncertain:0")
+    result = _execute(root, domain)
+    assert (result.status, result.exit_code) == (C.Status.INCOMPLETE, 70)
+    assert any(reason.code == "ownership-uncertain"
+               and reason.message == "injected guard failure"
+               for reason in result.reasons)
+    assert not any("exceeded its deadline" in reason.message
+                   for reason in result.reasons)
+
+
 @pytest.mark.parametrize("raw, expected", [(0, 130), (1, 1), (2, 2), (-15, 143)])
 def test_runner_nonzero_precedes_cooperative_cancel(case, monkeypatch, raw, expected):
     domain = case.domain()

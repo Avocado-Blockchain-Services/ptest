@@ -684,7 +684,7 @@ def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
 
 @needs_t1_t2
 def test_ctrl_c_kills_parallel_workers(case, tmp_path):
-    import psutil
+    import select
 
     # The checkout must live under the fixture domain, and the run phase
     # needs real xdist through the test venv's interpreter.
@@ -697,6 +697,14 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     sleeper = root / "tests" / "test_sleep.py"
     sleeper.write_text(
         "import os, time\n"
+        "\n"
+        "MARKERS = os.environ.get('T5_WORKER_MARKERS', '')\n"
+        "_HOLD = None\n"
+        "try:\n"
+        "    _HOLD = os.open(os.path.join(MARKERS, 'interrupt.fifo'),\n"
+        "                   os.O_WRONLY)\n"
+        "except OSError:\n"
+        "    _HOLD = None\n"
         "\n"
         "MARKERS = os.environ.get('T5_WORKER_MARKERS', '')\n"
         "\n"
@@ -729,6 +737,10 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     )
     markers = root / "markers"
     markers.mkdir()
+    # Descendant-held fifo: every xdist worker holds the write end from
+    # test-module import until death; EOF proves no worker survives.
+    fifo = markers / "interrupt.fifo"
+    os.mkfifo(fifo)
 
     # Init through cli.main in-process (no result-json injection issue).
     monkeypatch_cwd = os.getcwd()
@@ -741,12 +753,15 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
 
     child_env = {key: value for key, value in os.environ.items()}
     child_env["T5_WORKER_MARKERS"] = str(markers)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    # Same process group as the caller: a detached session made the
+    # scheduler count twin descendants as escaped under a concurrent ptest
+    # admission and ended that run incomplete (exit 70).
     proc = subprocess.Popen(
         [sys.executable, "-m", "ptest", "--fixture-domain",
          str(domain.root), "--full"],
         cwd=str(root), env=child_env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 55
@@ -758,40 +773,30 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
             time.sleep(0.2)
         assert all((markers / name).exists() for name in "abcd"), \
             "workers never started"
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, subprocess.signal.SIGINT)
+        os.kill(proc.pid, subprocess.signal.SIGINT)
         code = proc.wait(timeout=20)
         assert code != 0
-        # No process of that session survives: poll the group, then scan.
+        # Every descendant held the fifo write end; EOF means none survive.
         gone_by = time.monotonic() + 10
+        eof = False
         while time.monotonic() < gone_by:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
+            ready, _, _ = select.select(
+                [reader], [], [],
+                max(0.0, gone_by - time.monotonic()))
+            if ready and os.read(reader, 65536) == b"":
+                eof = True
                 break
-            time.sleep(0.2)
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            leftovers = [
-                proc_info.info for proc_info in psutil.process_iter(
-                    ["pid", "cmdline"])
-                if proc_info.info["cmdline"]
-                and any(str(root) in part
-                        for part in proc_info.info["cmdline"])]
-            assert leftovers == [], leftovers
+        assert eof, "parallel workers survived SIGINT"
     finally:
         if proc.poll() is None:
             try:
-                os.killpg(os.getpgid(proc.pid),
-                          subprocess.signal.SIGKILL)
+                os.kill(proc.pid, subprocess.signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
             proc.wait(timeout=10)
         proc.stdout.close()
         proc.stderr.close()
+        os.close(reader)
 
 
 # ---- (d) doctor on a persea-shaped monorepo ----------------------------------
