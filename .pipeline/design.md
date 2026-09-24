@@ -3,8 +3,8 @@
 Author: architect (Claude Opus 5.5), 2026-09-24.
 Chain worktree: `/home/ingmar/worktrees/ptest/cc-parallel-and-output/ptest`, branch `feature/parallel-and-output`,
 base `main` 3f399fb. Authoritative spec: `docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md`
-(§P, §O, §U, §D). This design amends it and the three earlier specs; §9 lists the amendments, and the shared-file
-content appends them to the specs verbatim.
+(§P, §O, §U, §D). This design amends it and the three earlier specs; the amendments M1–M12 and the three pointer
+sections are written out in full in §10 (the shared-file content), which is appended to the specs verbatim.
 
 Waves: T1, T2, T3, T4 run in parallel off the same base, with disjoint files. **T5 is a barrier (wave 2): it
 starts only after T1–T4 are merged into the chain branch, and it is MANDATORY.** T5 imports names that T2, T3, and
@@ -145,6 +145,7 @@ T5  cli: wires facts, the init header/footer, deterministic answers, the short d
 
 ```python
 # src/ptest/executability.py  (T2)
+# literal; T3 keeps an identical literal in project_facts.FACT_KEYS (§3.8); T5 asserts equality (§4 T5.4(f))
 FACT_KEYS: tuple[str, ...] = (
     "project", "runner", "runs", "runs_reason", "runs_fix",
     "parallel", "parallel_short", "parallel_fix",
@@ -378,8 +379,8 @@ best-effort, `()` for `--dry-run` and on error. `--json` stays byte-compatible (
   `child["facts"] = facts` (exact `FACT_KEYS` dict) when facts is not None.
 - **Validator and projection:** `contracts` tolerates the extra key, and the projection drops it, so
   `--assessment-json` output is unchanged. T5 tests this.
-- **T3:** `recommendations._normalize_run` keeps a validated copy (keys ⊆ `FACT_KEYS`, types as in §3.1; invalid →
-  None). `render_agent_assessment` reads `child.get("facts")`. When facts are missing or invalid, both fall back to
+- **T3:** `recommendations._normalize_run` keeps a validated copy through `project_facts.check_facts` (keys ⊆
+  `project_facts.FACT_KEYS`, T3's own literal mirror; types as in §3.1; invalid → None). `render_agent_assessment` reads `child.get("facts")`. When facts are missing or invalid, both fall back to
   `child["execution"]`: `runs: yes`, or `runs: no — {detail} → {fix}`.
 
 ### 3.8 Doctor terminal and report (T3)
@@ -391,8 +392,13 @@ def render_agent_assessment(children, workspace, *, report_path: str, publicatio
 PTEST_ANSWER_PREFIX = "Answered by ptest: "   # literal mirror of agent_assessment.PTEST_ANSWER_PREFIX (T5 asserts equality)
 # src/ptest/project_facts.py  (T3, new) — pure helpers used by init_render, render, recommendations
 MIN_WIDTH, MAX_WIDTH = 60, 110
+FACT_KEYS: tuple[str, ...] = (                                    # literal mirror of executability.FACT_KEYS (T5 asserts equality)
+    "project", "runner", "runs", "runs_reason", "runs_fix",
+    "parallel", "parallel_short", "parallel_fix",
+    "setup", "full_suite", "full_blocked",
+)
 def terminal_width(width: int | None = None) -> int
-def check_facts(value: object) -> dict | None
+def check_facts(value: object) -> dict | None                     # dict with keys ⊆ FACT_KEYS and §3.1 value types, else None
 def summary_atoms(facts: Mapping[str, object]) -> list[str]        # ["runs: yes", "parallel: 4 workers", "setup: uv sync --locked"]
 def detail_lines(facts: Mapping[str, object]) -> list[str]         # ["full suite = …"] or ["full suite: not available — …"] or []
 def long_lines(facts: Mapping[str, object]) -> list[str]           # report: runs / parallel (long) / setup "(ptest runs it when needed)" / full suite
@@ -670,8 +676,10 @@ dead.
 7. **Scoped check:**
    `ptest tests/ng/test_init_render.py tests/ng/test_init_smoke.py tests/ng/test_render.py tests/ng/test_recommendations.py tests/ng/test_project_facts.py`
    passes.
-   - T3 never imports `Executability`, `deterministic_items`, or `agent_assessment.PTEST_ANSWER_PREFIX`. It uses
-     dict literals and its own `PTEST_ANSWER_PREFIX` literal.
+   - T3 never imports `ptest.executability` (no `Executability`, no `FACT_KEYS`), `deterministic_items`, or
+     `agent_assessment.PTEST_ANSWER_PREFIX`. It uses dict literals, its own `project_facts.FACT_KEYS` literal
+     (§3.8), and its own `PTEST_ANSWER_PREFIX` literal. `executability.FACT_KEYS` does not exist at base 3f399fb,
+     so importing it would fail in T3's wave-1 worktree.
 
 ### T4: fewer unknowns (owns `src/ptest/agent_assessment.py`, `src/ptest/checklist.py`, `src/ptest/deterministic_items.py` (new), `docs/schemas/v1/agent-assessment.json`, and tests `test_agent_assessment.py`, `test_agent_assessment_contract.py`, `test_checklist.py`, `test_deterministic_items.py` (new), `tests/ng/fixtures/agent_assessment/`)
 
@@ -765,6 +773,8 @@ wave-1 tests to update output-string assertions, and nothing else in them: `test
    - (f) **Mirror equality:**
      - `pytest_bridge.QUALIFIED_XDIST_VERSIONS == executability.XDIST_QUALIFIED_VERSIONS`;
      - `pytest_bridge.PARALLEL_DIST_MODES == executability.XDIST_DIST_MODES`;
+     - `project_facts.FACT_KEYS == executability.FACT_KEYS` (same order), and
+       `tuple(Executability(...).facts()) == project_facts.FACT_KEYS`;
      - `render.PTEST_ANSWER_PREFIX == agent_assessment.PTEST_ANSWER_PREFIX` (and the recommendations literal, if
        separate).
 5. **Suite health:**
@@ -795,7 +805,7 @@ wave-1 tests to update output-string assertions, and nothing else in them: `test
 | T3 | `src/ptest/init_render.py`, `src/ptest/init_smoke.py`, `src/ptest/render.py`, `src/ptest/recommendations.py`, `src/ptest/project_facts.py`*, tests listed in §4 T3 (`test_project_facts.py`*) |
 | T4 | `src/ptest/agent_assessment.py`, `src/ptest/checklist.py`, `src/ptest/deterministic_items.py`*, `docs/schemas/v1/agent-assessment.json`, tests listed in §4 T4 (`test_deterministic_items.py`*), `tests/ng/fixtures/agent_assessment/` |
 | T5 (wave 2) | `src/ptest/cli.py`, `src/ptest/help.py`, `README.md`, `tests/ng/test_cli.py`, `tests/ng/test_help.py`, `tests/ng/test_doctor_init_integration.py`, `tests/ng/test_parallel_output_cli.py`*, plus the post-merge assertion-only edits listed in §4 T5 |
-| transcription | the spec amendment appends (shared-file content) |
+| transcription | the §10 appends to the four files under `docs/superpowers/specs/` (shared-file content, applied verbatim before wave 1; no task edits these spec files) |
 
 \* marks new files. The exhaustive new-file list:
 - `src/ptest/project_facts.py` (T3)
@@ -833,9 +843,11 @@ Files no task touches: `reports.py`, `history.py`, `agent_rules.py`, `doctor.py`
 
 ## 9. Amendments
 
-The shared-file content appends these amendments to
-`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` (M1–M12), plus pointer sections to the three
-earlier specs. They are summarized in §2 and repeated verbatim in the shared-file content.
+The shared-file content in §10 appends the amendments M1–M12 to
+`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md`, and one pointer section to each of the three
+earlier specs (`2026-09-22-agent-doctor-design.md`, `2026-09-23-doctor-init-v2-requirements.md`,
+`2026-09-23-init-smoke-amendment.md`). §10 is the authoritative text; §2 and §3 implement it. Tasks told to honor an
+M-number read it in §10.
 
 ### A-user-1 (2026-09-24, user decision via controller): checklist item PARALLEL-001 "Parallel execution"
 Source: requirements §U.5 (added after this design was written). Binding for T3, T4 and T5.
@@ -853,3 +865,147 @@ Source: requirements §U.5 (added after this design was written). Binding for T3
   doctor terminal output and in `recommendations.md`.
 - **T5** wires the facts T4 needs, and its integration test asserts PARALLEL-001 through `cli.main` for a
   persea-shaped fixture (4 xdist workers means satisfied) and for a serial-fallback fixture (gap with the reason).
+
+## 10. Shared-file content (verbatim)
+
+Four appends. Each block starts with an `=== APPEND TO: <path> ===` marker line, which is not part of the text. Append
+everything after the marker (up to the next marker or the closing fence) to the end of that file, preceded by one
+blank line. Nothing else in these files changes.
+
+````text
+=== APPEND TO: docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md ===
+
+## Amendments (design, 2026-09-24)
+
+The gated design is `.pipeline/design.md` on `feature/parallel-and-output`. Where these amendments conflict with the
+sections above or with the three earlier specs, the amendments win. Each earlier spec carries a pointer section back
+here.
+
+- **M1 (parallel tier and worker count; amends §P.1, v2 §A.1, agent-doctor "Pytest's declared capability", A7).**
+  A pytest project qualifies for the parallel tier only when all three sources agree: its checked-in pytest addopts
+  activate xdist (config level, decided by init, doctor and every run); the project environment, reached through a
+  launcher ptest can verify, holds exactly one qualified `pytest-xdist` (3.8.0) dist-info (environment level, decided
+  again by every run); and the bridge re-verifies everything at runtime and fails closed. N is the project's `-n N` /
+  `--numprocesses N`; `-n auto` and `-n logical` request the machine's `max_slots`; `ptest --workers W` caps N at W;
+  `[runner] workers` is ignored for pytest xdist. An installed xdist alone still does not mean parallel support.
+- **M2 (slots; amends §P.1 "queues or runs with fewer workers").** ptest requests N slots. The scheduler grants
+  `min(N, max_slots)` and queues until that many slots are free. A grant of 2 or more runs `-n <granted>`; a grant of 1
+  runs serially with `-n 0`. A new additive reason code `parallel-workers` (in `C.REASON_CODES` and every run-side
+  schema enum, not `agent-assessment.json`) is emitted only when the grant is below the request or the run is serial
+  because of a fallback, with the exact messages `<g> xdist workers (<r> requested, <g> granted)`,
+  `serial (<r> requested, 1 granted)`, and `serial: <reason>`.
+- **M3 (distribution modes and remote workers; amends §P.1 and §P.4).** Supported `--dist` modes are `load`,
+  `loadscope`, `loadfile`, `loadgroup`, and `worksteal`; `no` runs as `load`; `xdist_group` works under `loadgroup`.
+  `--dist each` falls back to serial. Remote or rsync xdist (`--tx`, `--rsyncdir`, `--px` in the addopts) is **not
+  runnable**, as at base, rather than a serial fallback: the reason is "remote xdist workers (--tx, --rsyncdir, --px)
+  are not supported" and the fix is "remove --tx, --rsyncdir and --px from your pytest addopts".
+- **M4 (fallback and who writes `-n 0`; amends §P.4, v2 §A.1, A7).** ptest itself generates `-n 0` whenever an
+  xdist-active project runs serially, so the base rule "pytest addopts enable xdist … add `-n 0`" (not runnable) is
+  deleted. Init writes `-n 0` into `.ptest.toml` only for config-level reasons (unsupported `--dist`, `--cov`,
+  `--maxprocesses`). Environment-level reasons (xdist missing, duplicated, unqualified, or unverifiable for the
+  launcher) can change with `uv sync`, so they are reported and never written into config. The fallback reasons and
+  their precedence are the design's §3.1 table; each is shown as one plain `parallel: no — <reason>` line.
+- **M5 (init stays non-destructive; amends §P.4 and §O.3).** Init never rewrites an existing `.ptest.toml`. A `-n 0`
+  written by an earlier init stays in place. When removing it would really give parallel runs, init and doctor show
+  one actionable next step, `<project>  parallel off → remove "-n", "0" from [runner] args in <cfg> to run <N>
+  workers`. `-n 0` in `[runner] args` is the documented user opt-out from the parallel tier.
+- **M6 (coverage; resolves §P.5).** `pytest-cov` under xdist is out of scope. `--cov` in the addopts or the runner
+  args is a config-level fallback with the message "coverage (--cov) under xdist is out of scope; ptest runs
+  serially". The advanced (coverage-catalog) profile stays serial and also generates `-n 0` for xdist-active projects.
+- **M7 (no new profile or report format; amends §P and agent-doctor "Pytest's declared capability remains
+  basic-serial").** `ExecutionTier`, the private report field set and format, `reports.py`, and `history.py` are
+  unchanged. The private profile label stays `basic_serial`, now meaning "the bridge-observed basic profile", serial or
+  parallel. The public worker count is `granted_workers`. On the run side the only public schema change is the
+  additive `parallel-workers` reason code (M2). Every §F guarantee (own verdict, collected-versus-run reconciliation,
+  labelled narrowing, refused rewriting hooks, conftest ownership) holds in parallel mode through the loaded worker
+  half of the bridge, and anything unverifiable is `bridge-refused`, never passed.
+- **M8 (init presentation; amends §O.3, v2 §B, agent-doctor "Init presentation" and acceptance criterion 12,
+  init-smoke decision 5).** The wordmark stays, colored only on a capable TTY and plain under `NO_COLOR` or a non-TTY,
+  followed by the `ptest <version>` line. The separate repository and URL lines, the fixed 64-column box, the
+  Configuration/Guidance/Warnings/Next steps sections, the generic next steps, and the per-agent restart paragraphs
+  are replaced by: a header `<phrase> · <repository>`; one line per project with its facts; file actions grouped by
+  action (`created`, `updated`, `unchanged`, `conflicted`); one compact smoke line (`<project> ✓ <s>s`,
+  `<project> ✗ exit <code>` with at most 5 detail lines, `<project> – <reason>`); next steps only when actionable
+  (not runnable, parallel off, setup pending, smoke failed); and exactly one restart line, only when a skill was
+  created or updated. Every name still passes through `render.terminal_text`. Width is the terminal width clamped to
+  60–110, and labels, paths, commands, and fact segments never break. `init --json` is byte-compatible and carries no
+  banner, facts, or smoke.
+- **M9 (deterministic items; amends §U.1).** The spec's "SELECTION-001" is the canonical `SELECT-001`. SELECT-001 and
+  TIMING-001 are answered by ptest with no model call; the row rationale starts with `Answered by ptest: `, which the
+  model may never use. Satisfied, gap, and not-applicable answers cite the project's `.ptest.toml` excerpt; without
+  it they degrade to unknown with the reason. **TIMING-001 never answers gap:** ptest has no agreed per-test threshold
+  that makes a suite defective, so it answers satisfied (with the count of tests over 3 s and the slowest time) or
+  unknown with the exact reason (`no timing history yet: run ptest --full once`, history unavailable, or whole-run
+  timing only). History is read only; the scheduler is never initialized by doctor.
+- **M10 (plain project facts and doctor layout; amends §O.2, §O.4, v2 §A.3 wording and A2, init-smoke decision 4).**
+  Executability output uses the plain facts `runs`, `parallel`, `setup`, and `full suite`. The phrases
+  `ready with caveats`, `expected:`, `fingerprint`, and `serial: xdist disabled under ptest (-n 0)` disappear; a
+  setup-owed project now reads `setup: <argv> (ptest runs it when needed)` instead of `ready with caveats`. The
+  internal status `caveat` and `Executability.to_public()` (`status`, `detail`, `fix`) are unchanged. Doctor prints
+  one header line per project with counts, the facts, compacted satisfied columns, each gap with its finding and
+  change, and every unknown with a one-line reason (model reason, ptest reason, or `review failed: <reason>`); the
+  round-19 dropped-citation suffix stays. The facts reach the report through an additive `child["facts"]` that the
+  validator tolerates and the public projection drops, so `--assessment-json` is unchanged. `recommendations.md`
+  replaces its "Execution:" line with the plain facts and prints `Reason:` for unknown rows; all other content stays.
+- **M11 (model-review disclosure; amends §O.5 detail, agent-doctor disclosure paragraph, v2 §C.7, A5).** Before the
+  consent prompt ptest prints at most three lines: provider, project, call count, concurrency, and model (or "chosen
+  from the provider list after consent"); the excluded classes and that provider costs may apply; and pointers to
+  `ptest doctor --help` and `ptest doctor --offline`. The full legal disclosure text (the user's existing provider
+  account, that ptest cannot perfectly detect secrets, the excluded classes, costs) moves word for word to
+  `ptest doctor --help` and the README. Consent rules, one disclosure per fan-out, and "no provider executable runs
+  before consent" are unchanged. On a TTY a newline is printed before this and every other prompt that follows the
+  spinner.
+- **M12 (unchanged surfaces; confirms agent-doctor command matrix and acceptance 11).** `ptest doctor --offline` (the
+  bounded static doctor), `doctor --json`, `doctor --prompt`, `doctor --probe`, `init --json`, and
+  `--assessment-json` keep their contracts and bytes. The only public additions are the `parallel-workers` reason
+  code (M2) and the checklist item PARALLEL-001 (§U.5, additive).
+
+=== APPEND TO: docs/superpowers/specs/2026-09-22-agent-doctor-design.md ===
+
+## Amendments — parallel and output (2026-09-24)
+
+`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
+Where they conflict, the 2026-09-24 amendments win:
+
+- "Pytest's declared capability remains `basic-serial` … worker parallelism … out of scope" and A7: superseded for
+  pytest xdist by M1–M4 and M7. Acceptance criterion 7's negative still holds: xdist presence alone does not imply
+  parallel support.
+- "Init presentation" and acceptance criterion 12: amended by M8 (wordmark and version stay; box, fixed sections, and
+  URL line replaced; grouped actions; one restart line).
+- The disclosure paragraph and A5: amended by M11 (three-line disclosure; full text in `ptest doctor --help` and the
+  README; consent rules unchanged).
+- A2: refined by M10 (plain facts, compacted satisfied rows, a reason on every unknown).
+- Command matrix and acceptance criterion 11: confirmed unchanged by M12.
+
+=== APPEND TO: docs/superpowers/specs/2026-09-23-doctor-init-v2-requirements.md ===
+
+## Amendments — parallel and output (2026-09-24)
+
+`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
+Where they conflict, the 2026-09-24 amendments win:
+
+- §A.1 ("real parallel ownership of xdist workers is out of scope"; init disables xdist): superseded by M1–M5. ptest
+  now runs qualified xdist projects in parallel and generates `-n 0` itself for serial fallbacks; init writes `-n 0`
+  only for config-level reasons and never removes an earlier one.
+- §A.3 caveat wording ("serial: xdist disabled under ptest"): replaced by the plain facts of M10.
+- §B output: amended by M8. Idempotent, non-clobbering repeated init is unchanged (M5).
+- §C.7 disclosure: amended by M11. §C per-project, per-item review is unchanged; SELECT-001 and TIMING-001 are now
+  answered by ptest without a model call (M9).
+- §E smoke report format: amended by M8. §E behavior (consent, setup gating, failure containment) is unchanged.
+- §F ("xdist and other serial-grant rules are unchanged"): the serial-grant rules are unchanged for serial runs; the
+  parallel grant keeps every §F guarantee (M7).
+
+=== APPEND TO: docs/superpowers/specs/2026-09-23-init-smoke-amendment.md ===
+
+## Amendments — parallel and output (2026-09-24)
+
+`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
+Where they conflict, the 2026-09-24 amendments win:
+
+- Decision 4 ("a setup-owed project reads `ready with caveats`"): replaced by M10. A setup-owed project shows
+  `setup: <argv> (ptest runs it when needed)` and, when no smoke passed, the `setup pending` next step of M8.
+- Decision 5 (one `Smoke` section with `passed:` / `failed:` / `skipped:` lines): replaced by the compact smoke line
+  of M8. Every field still passes through `render.terminal_text`, and `init --json` stays untouched.
+- Decisions 1–3 and 6–9 (in-process execution, deterministic candidate, consent, failure containment, planning,
+  interrupts) are unchanged.
+````
