@@ -901,6 +901,66 @@ def test_finding_line_truncates_at_word_boundary_with_ellipsis():
     assert re.fullmatch(r"word\d{3}", line[:-1].rsplit(" ", 1)[-1])
 
 
+def test_truncate_utf8_bytes_cjk_cuts_at_word_boundary():
+    """CJK words (3 bytes/char) must still take the word-boundary branch."""
+    from ptest.render import _truncate_utf8_bytes
+
+    text = " ".join(["あいうえお"] * 12)
+    result = _truncate_utf8_bytes(text, 95)
+    assert result == " ".join(["あいうえお"] * 5) + "…"
+    assert len(result.encode("utf-8")) <= 95
+
+
+def test_truncate_utf8_bytes_accented_latin_cuts_at_word_boundary():
+    """Accented Latin (2 bytes/char) must still take the word-boundary branch."""
+    from ptest.render import _truncate_utf8_bytes
+
+    word = "é" * 10
+    text = " ".join([word] * 8)
+    result = _truncate_utf8_bytes(text, 95)
+    assert result == " ".join([word] * 4) + "…"
+    assert len(result.encode("utf-8")) <= 95
+
+
+def test_assessment_item_line_shows_dropped_citations():
+    row = _aa_row("DB-001", "satisfied", label="Database isolation")
+    row["dropped_citations"] = 2
+    plain = _aa_row("FIX-001", "satisfied", label="Plain label")
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 2, "applicable": 2, "percent": 100},
+        "rows": [row, plain],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+    assert ("✓ Database isolation — satisfied "
+            "(2 citations dropped)") in text
+    assert "✓ Plain label" in text
+    assert "Plain label —" not in text
+
+
+def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    row = _aa_row("DB-001", "satisfied", label="Database isolation")
+    row["dropped_citations"] = 1
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 1, "applicable": 1, "percent": 100},
+        "rows": [row],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+    assert ("[ok] Database isolation — satisfied "
+            "(1 citation dropped)") in text
+    assert "✓" not in text
+
+
 def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
     from ptest.render import render_agent_assessment
 

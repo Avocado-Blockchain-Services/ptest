@@ -109,11 +109,12 @@ def _word_cut(head: str, room: int) -> str:
     """Cut ``head`` back to its last whitespace, unless that guts it.
 
     Spaceless text has no word boundary to honor, so a cut that would
-    keep less than half the budget falls back to the hard cut: the
-    marker still shows the line continues.
+    keep less than half of ``head`` falls back to the hard cut: the
+    marker still shows the line continues. The comparison is in
+    characters, not bytes, so multibyte words still take the branch.
     """
     cut = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
-    if cut > room // 2:
+    if cut > len(head) // 2:
         return head[:cut]
     return head
 
@@ -258,6 +259,22 @@ def _assessment_score_line(child) -> str:
     return base + suffix
 
 
+def _dropped_suffix(row: dict) -> str:
+    """Short sanitized note for a row's dropped invalid-citation count.
+
+    The suffix carries only a validated integer and fixed words, so it
+    needs no prose sanitization; anything missing, zero, negative or
+    non-integer yields no suffix and the status line is unchanged.
+    """
+    dropped = (row.get("dropped_citations", 0)
+               if isinstance(row, dict) else 0)
+    if (isinstance(dropped, bool) or not isinstance(dropped, int)
+            or dropped <= 0):
+        return ""
+    noun = "citation" if dropped == 1 else "citations"
+    return f" ({dropped} {noun} dropped)"
+
+
 def _assessment_item_lines(child, icons: dict) -> list[str]:
     """One icon line per checklist item with its finding under each gap."""
     rows = child.get("rows", []) if isinstance(child, dict) else []
@@ -282,9 +299,13 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
         status = row.get("status")
         icon = icons.get(status, icons["unknown"])
         if status == "satisfied":
-            lines.append(f"{icon} {label}")
+            suffix = _dropped_suffix(row)
+            if suffix:
+                lines.append(f"{icon} {label} — satisfied{suffix}")
+            else:
+                lines.append(f"{icon} {label}")
         elif status == "gap":
-            lines.append(f"{icon} {label}")
+            lines.append(f"{icon} {label}{_dropped_suffix(row)}")
             finding = by_id.get(row.get("id"))
             if finding is None:
                 lines.append("  finding: no finding recorded; "
@@ -304,9 +325,11 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
                 reason = _agent_assessment_prose(
                     rationale[len(FAILED_PREFIX):])
                 lines.append(f"{icon} {label} — unknown "
-                             f"(review failed: {reason})")
+                             f"(review failed: {reason})"
+                             f"{_dropped_suffix(row)}")
             else:
-                lines.append(f"{icon} {label} — unknown")
+                lines.append(f"{icon} {label} — unknown"
+                             f"{_dropped_suffix(row)}")
         elif status == "not-applicable":
             rationale = row.get("rationale", "")
             if not isinstance(rationale, str):
@@ -315,9 +338,11 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
                 rationale = rationale[len(SKIP_PREFIX):]
             reason = _truncate_words(
                 _agent_assessment_prose(rationale), _NA_REASON_MAX_CHARS)
-            lines.append(f"{icon} {label} — n/a: {reason}")
+            lines.append(f"{icon} {label} — n/a: {reason}"
+                         f"{_dropped_suffix(row)}")
         else:
-            lines.append(f"{icons['unknown']} {label} — unknown")
+            lines.append(f"{icons['unknown']} {label} — unknown"
+                         f"{_dropped_suffix(row)}")
     return lines
 
 
