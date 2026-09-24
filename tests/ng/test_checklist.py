@@ -91,3 +91,46 @@ def test_catalog_db_cache_items_route_their_scanner_families():
     assert any(code.startswith("db.") for code in by_id["DB-002"].scanner_codes)
     assert any(code.startswith("cache.")
                for code in by_id["CACHE-001"].scanner_codes)
+
+
+def test_catalog_prompts_pin_gap_satisfied_unknown_standard():
+    for entry in CATALOG:
+        lowered = entry.prompt.casefold()
+        assert "gap only with a cited concrete violation" in lowered, entry.id
+        assert "satisfied only when the evidence shows the guaranteeing mechanism" in lowered, entry.id
+        assert "one sentence naming the missing evidence" in lowered, entry.id
+        assert "absence of code is unknown" in lowered, entry.id
+
+
+def test_resource_item_routes_code_signals():
+    import re
+
+    by_id = {entry.id: entry for entry in CATALOG}
+    for signal in ("tmp_path", "tempfile", "mkdtemp", "socket", "bind(",
+                   "PORT = 8080", "port=8080", "/tmp", "app.lock",
+                   "filelock", "flock"):
+        assert any(re.search(pattern, "probe " + signal + " probe")
+                   for pattern in by_id["RESOURCE-001"].text_patterns), signal
+
+
+def test_network_item_routes_code_signals():
+    import re
+
+    by_id = {entry.id: entry for entry in CATALOG}
+    for signal in ("httpx", "requests", "aiohttp", "respx", "responses",
+                   "pytest-socket", "socket.socket", "disable_socket",
+                   "vcr"):
+        assert any(re.search(pattern, "probe " + signal + " probe")
+                   for pattern in by_id["NETWORK-001"].text_patterns), signal
+
+
+def test_process_item_routes_code_signals():
+    import re
+
+    by_id = {entry.id: entry for entry in CATALOG}
+    for signal in ("subprocess", "asyncio.create_subprocess",
+                   "multiprocessing", "Popen", "os.fork",
+                   "worker.join(", "proc.terminate(", "proc.kill(",
+                   "proc.wait("):
+        assert any(re.search(pattern, "probe " + signal + " probe")
+                   for pattern in by_id["PROCESS-001"].text_patterns), signal
