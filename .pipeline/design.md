@@ -836,3 +836,20 @@ Files no task touches: `reports.py`, `history.py`, `agent_rules.py`, `doctor.py`
 The shared-file content appends these amendments to
 `docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` (M1–M12), plus pointer sections to the three
 earlier specs. They are summarized in §2 and repeated verbatim in the shared-file content.
+
+### A-user-1 (2026-09-24, user decision via controller): checklist item PARALLEL-001 "Parallel execution"
+Source: requirements §U.5 (added after this design was written). Binding for T3, T4 and T5.
+- **T4** adds canonical checklist entry `PARALLEL-001`, label "Parallel execution", to `src/ptest/checklist.py`. It is
+  additive to the catalog, to `docs/schemas/v1/agent-assessment.json` and to the drift guards. It is answered
+  **deterministically** in `deterministic_items.py` (no model call) from the project facts in §3.1/§3.2:
+  - satisfied: `parallel: N workers (xdist, --dist <mode>)`, or `inside vitest (its own workers)`;
+  - gap: parallel is configured but runs serially under ptest (P.4 reason plus fix);
+  - gap: not configured. Suggest `pytest-xdist` plus `-n auto` (or the vitest pool settings) only when the
+    parallel-safety items (FIX-002, DB-001, DB-002, CACHE-001, RESOURCE-001, NETWORK-001, PROCESS-001, TIME-001) have
+    no gap; otherwise the fix is "resolve the parallel-safety gaps first";
+  - unknown: only with a stated reason.
+  The item is ordered last in the catalog, so existing IDs and orders are unchanged.
+- **T3** renders the eight isolation items as a visible **"parallel safety"** group, followed by PARALLEL-001, in the
+  doctor terminal output and in `recommendations.md`.
+- **T5** wires the facts T4 needs, and its integration test asserts PARALLEL-001 through `cli.main` for a
+  persea-shaped fixture (4 xdist workers means satisfied) and for a serial-fallback fixture (gap with the reason).
