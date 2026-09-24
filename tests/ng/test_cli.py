@@ -46,8 +46,7 @@ def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeyp
 
     assert main(("init",)) == 0
     out = capsys.readouterr().out
-    assert "created" in out and ".ptest.toml" in out
-    assert "created:" not in out
+    assert "api   pytest" in out and "web   vitest" in out
     assert (tmp_path / ".ptest.toml").is_file()
     assert (api / ".ptest.toml").is_file()
     assert (web / ".ptest.toml").is_file()
@@ -310,9 +309,7 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
                         if item["area"] == "parallel")["state"] == "unknown"
     else:
         if command == "init":
-            import re
-
-            assert re.search(r"unchanged:?\s+\.ptest\.toml", captured.out)
+            assert "ptest already configured" in captured.out
             return
         expected = {
             "where": f"root: {root}", "register": "register: initialized",
@@ -512,10 +509,10 @@ def test_init_preview_creates_nothing_then_creation_preserves_existing_bytes(
             assert document.data["action"] == action
             assert document.data["exists"] is (action != "preview")
         else:
-            human_action = {"preview": "would create", "created": "created",
-                            "existing": "unchanged"}[action]
+            human_action = {"preview": "ptest init preview",
+                            "created": "ptest initialized",
+                            "existing": "ptest already configured"}[action]
             assert human_action in captured.out
-            assert ".ptest.toml" in captured.out
             assert f"{human_action}:" not in captured.out
         if action == "preview":
             assert not target.exists()
@@ -996,18 +993,18 @@ def test_human_init_renders_ordered_banner_matching_real_files(
     assert captured.err == ""
     assert f"ptest {C.PTEST_VERSION}" in captured.out
     assert tmp_path.name in captured.out
-    assert "https://github.com/Avocado-Blockchain-Services/ptest" in captured.out
     assert "\x1b" not in captured.out
     assert "ptest initialized" in captured.out
-    assert "┌" in captured.out and "┘" in captured.out
-    assert captured.out.index("Configuration") < captured.out.index("Guidance")
-    assert captured.out.index("Guidance") < captured.out.index("Next steps")
-    assert re.search(r"created:?\s+\.ptest\.toml", captured.out)
-    assert re.search(r"created\s+docs/ptest-agent\.md", captured.out)
-    assert ".claude/skills/ptest/SKILL.md" in captured.out
-    assert ".agents/skills/ptest/SKILL.md" in captured.out
+    assert "┌" not in captured.out
+    assert captured.out.index("config     created") < captured.out.index(
+        "guidance   created")
+    assert re.search(r"config +created +\.ptest\.toml", captured.out)
+    assert re.search(r"guidance +created +docs/ptest-agent\.md",
+                     captured.out)
+    assert "ptest skill for claude" in captured.out
+    assert "ptest skill for codex" in captured.out
+    assert ".claude/skills/ptest/SKILL.md" not in captured.out
     assert ".codex/skills/ptest/SKILL.md" not in captured.out
-    assert "ptest --full" in captured.out
     assert (tmp_path / ".agents/skills/ptest/SKILL.md").is_file()
     assert (tmp_path / ".claude/skills/ptest/SKILL.md").is_file()
 
@@ -1075,11 +1072,12 @@ def test_repeat_human_init_reports_already_configured(tmp_path, monkeypatch, cap
 
     assert "ptest already configured" in captured.out
     assert "ptest initialized" not in captured.out
-    assert re.search(r"unchanged:?\s+\.ptest\.toml", captured.out)
+    assert re.search(r"config +unchanged +\.ptest\.toml", captured.out)
     assert "already present" not in captured.out
-    for relative in ("docs/ptest-agent.md", "AGENTS.md",
-                     ".claude/skills/ptest/SKILL.md"):
-        assert re.search(rf"unchanged +{re.escape(relative)}", captured.out)
+    # File actions group by action: one unchanged line names every file.
+    assert re.search(
+        r"guidance +unchanged +docs/ptest-agent\.md, AGENTS\.md, "
+        r"ptest skill for claude", captured.out)
     assert {path: path.read_bytes() for path in tmp_path.rglob("*")
             if path.is_file()} == before
 
@@ -1656,11 +1654,15 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
     assert scans == [1, 1]
     assert "claude" in disclosure
     assert r"project\x1b[31m\nname" in disclosure
-    assert "bounded source" in disclosure
-    assert "existing account" in disclosure
-    assert "costs may apply" in disclosure
-    assert "cannot perfectly detect secrets" in disclosure
+    assert "gets bounded source excerpts from" in disclosure
+    assert "Provider costs may apply" in disclosure
+    assert "cannot perfectly detect secrets" not in disclosure
+    assert "Full disclosure: ptest doctor --help" in disclosure
     assert "--offline" in disclosure
+    assert "Run this review once? [y/N]:" in disclosure
+    head, _, _ = disclosure.partition("Run this review once?")
+    assert len([line for line in head.splitlines()
+                if line.strip()]) <= 4
     assert "\x1b" not in disclosure
     assert "optimization review is disabled" in (captured.err + captured.out).lower()
     assert "review not yet performed" in captured.out
@@ -1687,11 +1689,11 @@ def test_tty_review_disclosure_names_excluded_source_classes(
     assert main(("doctor",)) == 0
 
     disclosure = capsys.readouterr().err.lower()
-    assert "secrets/private files" in disclosure
-    assert "agent instructions/configuration" in disclosure
-    assert "dependency environments" in disclosure
-    assert "coverage/build outputs" in disclosure
-    assert "generated/minified files" in disclosure
+    assert "secrets, private files" in disclosure
+    assert "agent instructions" in disclosure
+    assert "dependency folders" in disclosure
+    assert "caches and build output are never sent" in disclosure
+    assert "provider costs may apply" in disclosure
 
 
 def test_review_disclosure_terminates_tty_spinner_line(
@@ -1881,13 +1883,11 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert all(item[-2:] == ("--model", "haiku") for item in argv_log)
 
     human = capsys.readouterr()
-    assert ". (unknown)" in human.out
-    assert "ptest: not runnable: no ptest configuration" in human.out
+    assert ".  unknown · 11 ok · 0 gap · 0 unknown" in human.out
+    assert "runs: no — no ptest configuration" in human.out
     assert "run ptest init from the repository root" in human.out
-    assert "Checklist review only:" in human.out
-    assert "(ptest cannot run this project yet)" in human.out
-    assert " of 11 checks confirmed from evidence" in human.out
-    assert "Execution verification: not run." in human.out
+    assert ("(checklist only: ptest cannot run this project yet)"
+            in human.out)
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "initialization-required" in report
     assert "ptest is not execution-ready" in report
@@ -1918,6 +1918,33 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert "provider" not in legacy.data
 
 
+def test_plan_item_reviews_never_falls_back_to_plain_planner(
+        tmp_path, monkeypatch):
+    """A planner that rejects ``answers=`` fails instead of silently
+    sending every item (TIMING and SELECT included) to the model."""
+    import sys
+    import types
+
+    from ptest import agent_assessment as assessment_module
+    from ptest import cli as cli_module
+
+    fake = types.ModuleType("ptest.deterministic_items")
+    fake.answers_for = lambda *args, **kwargs: {}
+    monkeypatch.setitem(sys.modules, "ptest.deterministic_items", fake)
+
+    def reject_answers(packet, answers=None):
+        # Like the pre-T4 planner: the plain call works, `answers=` does
+        # not. A fallback would swallow the TypeError and return here.
+        if answers is None:
+            return ()
+        raise TypeError("answers must be a mapping or None")
+
+    monkeypatch.setattr(assessment_module, "plan_item_reviews",
+                        reject_answers)
+    with pytest.raises(TypeError):
+        cli_module._plan_item_reviews(object(), None, None)
+
+
 def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
         tmp_path, monkeypatch, capsys):
     """All-skipped reviews produce a report with no disclosure or launch."""
@@ -1945,7 +1972,7 @@ def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
     _fake_qualified_profiles(monkeypatch)
     real_plan = AA.plan_item_reviews
 
-    def all_skipped(packet):
+    def all_skipped(packet, answers=None):
         return tuple(
             AA.ItemReview(item_id=review.item_id, label=review.label,
                           scope=review.scope, request=None,
@@ -2083,10 +2110,13 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     }
     assert document.data["schema"] == C.AGENT_ASSESSMENT_SCHEMA
     assert document.data["children"][0]["score"] == {
-        "satisfied": 0, "applicable": 11, "percent": 0,
+        "satisfied": 0, "applicable": 10, "percent": 0,
     }
+    na_rows = [row["id"] for row in document.data["children"][0]["rows"]
+               if row["status"] == "not-applicable"]
+    assert na_rows == ["SELECT-001"]
     for child in document.data["children"]:
-        assert child["execution"]["status"] == "caveat"
+        assert child["execution"]["status"] == "executable"
         assert all(row["label"] for row in child["rows"])
     assert "execution-not-run" in {
         item["code"] for item in document.data["limitations"]
@@ -3350,8 +3380,8 @@ def test_review_disclosure_keeps_first_sentence_without_counts(monkeypatch,
         adapter, _disclosure_resolution(), ask=False) is True
     captured = capsys.readouterr()
     assert captured.err.startswith(
-        "Model review disclosure: codex may receive bounded source text "
-        "from project project")
+        "Model review disclosure: codex gets bounded source excerpts "
+        "from project.")
 
 
 def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
@@ -3364,8 +3394,8 @@ def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
         concurrency=2, model="gpt-5.6-luna") is True
     captured = capsys.readouterr()
     assert captured.err.startswith("Model review disclosure: codex")
-    assert ("This review makes 11 model calls (2 at a time) with model "
-            "gpt-5.6-luna.") in captured.err
+    assert ("gets bounded source excerpts from project: 11 calls, "
+            "2 at a time, model gpt-5.6-luna.") in captured.err
 
 
 def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
@@ -3377,8 +3407,9 @@ def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
         adapter, _disclosure_resolution(), ask=False, calls=9,
         concurrency=4, model=None) is True
     captured = capsys.readouterr()
-    assert "with a model chosen after consent" in captured.err
-    assert "one extra call that sends only the model list" in captured.err
+    assert "model chosen from the provider list after consent" in (
+        captured.err)
+    assert "(one extra call sends only that list)" in captured.err
 
 
 # --- Round 15 twins: fenced provider replies, counted failure reasons --------

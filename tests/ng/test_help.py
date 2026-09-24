@@ -445,3 +445,35 @@ def test_help_documents_review_model_flags_per_item_review_and_canary(
     assert "--review-model" in init_help
     assert "--review-concurrency" in init_help
     assert "PTEST_REVIEW_MODEL" in init_help
+
+
+def test_doctor_help_carries_full_legal_disclosure_and_parallel_tier(
+        tmp_path, monkeypatch, capsys):
+    """The full legal text moved here from the pre-consent disclosure."""
+    _no_execution(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("help", "doctor")) == 0
+    doctor_help = " ".join(capsys.readouterr().out.split())
+    lowered = doctor_help.lower()
+    for marker in (
+        "full model review disclosure",
+        "may receive bounded source text",
+        "using your existing account",
+        "provider or account costs may apply",
+        "ptest cannot perfectly detect secrets in source",
+        "excluded from review: secrets/private files",
+        "agent instructions/configuration",
+        "dependency environments",
+        "caches",
+        "coverage/build outputs",
+        "generated/minified files",
+        ".ptest private runtime state",
+        "use --offline for the static doctor instead",
+        "parallel pytest",
+        "-n auto",
+        "ptest --workers",
+        "-n 0",
+        "coverage (--cov) under xdist is out of scope",
+    ):
+        assert marker.lower() in lowered, marker

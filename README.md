@@ -18,29 +18,40 @@ Choosing agents with
 review. See `ptest help doctor` for details; agents start at `ptest help agents`.
 
 `ptest init` reports per-project status: each configured project shows its
-runner and an execution verdict, and Next steps lists only commands the
-executability check verified for this repository. Projects that cannot run
-show the reason and the exact fix instead. Re-running init is idempotent
-and never rewrites user-edited guidance.
+runner, whether it runs, its parallel workers, and its setup, and the
+footer lists only actionable next steps (not runnable, parallel off,
+setup pending, smoke failed) plus one line to restart coding agents when
+guidance changed. Projects that cannot run show the reason and the exact
+fix instead. Re-running init is idempotent and never rewrites user-edited
+guidance.
 
-Pytest runs serially under ptest. When a project's pytest configuration
-enables xdist, `ptest init` writes `-n 0` into a new pytest config; an
-existing config is never rewritten and is reported as not runnable with
-the exact fix. The serial `-n 0` in `[runner] args` is the only allowed
-xdist control; never add `-n N`, `--dist`, `--tx`, or other parallel
-controls to ptest args. Vitest executes as one
-exclusive `vitest run` command through the project-local Vitest CLI and
-manages its own workers; declared `[setup]` (such as `npm ci`) runs first
-when its required paths or fingerprint are missing.
+Pytest runs in parallel under ptest when the project's checked-in pytest
+config enables xdist: `-n N` requests N workers, `-n auto` requests one
+worker per granted slot, and `ptest --workers W` caps the request. The
+scheduler grants the slots that are free; a smaller grant runs fewer
+workers and a single slot runs serially with a generated `-n 0`. When
+xdist cannot be verified (unsupported `--dist`, coverage `--cov`,
+unqualified pytest-xdist, or an unverifiable launcher), ptest falls back
+to serial and says why. `ptest init` writes `-n 0` only for config-level
+reasons; `-n 0` in `[runner] args` opts out of parallel runs. Coverage
+(`--cov`) under xdist is out of scope and always runs serially. Vitest
+executes as one exclusive `vitest run` command through the project-local
+Vitest CLI and manages its own workers; declared `[setup]` (such as
+`npm ci`) runs first when its required paths or fingerprint are missing.
 
 `ptest doctor` review sends one cheap-model call per checklist item after
-consent. The model is the cheapest adequate one: `--review-model` (or
-`PTEST_REVIEW_MODEL`) wins, otherwise claude uses its haiku alias and
-codex picks from its model list with one extra call that sends only the
-model list; the choice is cached per provider and CLI version.
-`--review-concurrency` (1-8, default 4) bounds parallel calls.
+consent; timing and selection items are answered from ptest's own facts
+with no model call. The model is the cheapest adequate one:
+`--review-model` (or `PTEST_REVIEW_MODEL`) wins, otherwise claude uses
+its haiku alias and codex picks from its model list with one extra call
+that sends only the model list; the choice is cached per provider and
+CLI version. `--review-concurrency` (1-8, default 4) bounds parallel
+calls. Before the prompt, ptest prints at most three short disclosure
+lines (what is sent, provider and model, call count, `--offline`); the
+full disclosure text lives in `ptest doctor --help`.
 `ptest doctor --offline` is static and sends nothing. Model citations live
-in `recommendations.md`; the terminal shows only the verdict per item.
+in `recommendations.md`; the terminal shows a compact checklist with a
+reason on every unknown row.
 
 For normal use, download a verified release archive and run `./install.sh`; see
 [docs/installation.md](docs/installation.md). The installer validates bundled

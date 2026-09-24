@@ -183,11 +183,13 @@ def test_init_persea_shaped_monorepo_reports_projects_and_fix(
 
     out = capsys.readouterr().out
     flat = " ".join(out.split())
-    assert "not runnable" in flat
-    assert "pytest addopts enable xdist, which ptest runs serially" in flat
-    assert ('add "-n", "0" to [runner] args in api/.ptest.toml') in out
-    assert "fix api:" in out
-    assert "ptest --full" not in out
+    # The parallel tier deleted the old not-runnable rule: ptest itself
+    # generates `-n 0` for serial xdist runs, so an xdist project stays
+    # runnable and init never tells the user to write `-n 0`.
+    assert "not runnable" not in flat
+    assert '"-n", "0"' not in out
+    assert "runs: yes · parallel: no" in out
+    assert "parallel: inside vitest" in out
 
 
 def test_doctor_review_runs_one_haiku_call_per_item(
@@ -206,20 +208,26 @@ def test_doctor_review_runs_one_haiku_call_per_item(
     assert main(argv) == 0
 
     launches = _read_launches(bindir)
-    assert len(launches) == len(CATALOG) == 11
-    assert {item["item"] for item in launches} == {
-        entry.id for entry in CATALOG}
+    # Deterministic answers take no model call; every other item takes
+    # exactly one provider request.
+    launched = {item["item"] for item in launches}
+    assert "TIMING-001" not in launched
+    assert "SELECT-001" not in launched
+    assert launched == {entry.id for entry in CATALOG} - {
+        "TIMING-001", "SELECT-001", "PARALLEL-001"}
+    assert len(launches) == len(launched) == 9
     assert all(item["argv"][-2:] == ["--model", "haiku"]
                for item in launches)
 
     human = capsys.readouterr()
-    assert ". (pytest)" in human.out
-    assert "ptest: ready" in human.out
+    assert ".  pytest · 9 ok · 1 gap · 1 unknown" in human.out
+    assert "runs: yes · parallel: no" in human.out
     for entry in CATALOG:
         assert entry.label in human.out
-    assert "Project | Execution" not in human.out
-    assert "of 11 checks confirmed from evidence" in human.out
-    assert "Execution verification: not run." in human.out
+    assert "✗ Test selection" in human.out
+    assert ("? Test timing  no timing history yet: "
+            "run ptest --full once") in human.out
+    assert "recommendations.md (created)" in human.out
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     for entry in CATALOG:
@@ -231,7 +239,9 @@ def test_doctor_review_runs_one_haiku_call_per_item(
     assert document.kind == "agent-assessment" and document.error is None
     child = document.data["children"][0]
     assert child["execution"] == {
-        "status": "executable", "detail": "ready", "fix": None,
+        "status": "caveat",
+        "detail": "parallel: no — xdist is not enabled in your pytest config",
+        "fix": None,
     }
     assert all(row["label"] for row in child["rows"])
     assert document.data["provider"]["profile"] == (
@@ -253,8 +263,8 @@ def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
                  "--allow-model-review")) == 0
 
     human = capsys.readouterr()
-    assert "unknown (review failed: provider exited with an error)" in (
-        human.out)
+    assert "? Test data factories" in human.out
+    assert "review failed: provider exited with an error" in human.out
     assert (root / "recommendations.md").is_file()
 
 
