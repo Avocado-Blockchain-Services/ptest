@@ -811,6 +811,12 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     assert ("? Test timing  no timing history yet: "
             "run ptest --full once") in human.out
     assert "✗ Test selection" in human.out
+    # PARALLEL-001: api configures xdist but opts out with -n 0, so the
+    # deterministic answer is a gap carrying the fallback reason and fix.
+    assert "✗ Parallel execution" in human.out
+    assert "parallel safety" in human.out
+    assert human.out.index("parallel safety") < human.out.index(
+        "✗ Parallel execution")
     unknown_lines = [line for line in human.out.splitlines()
                      if line.lstrip().startswith("? ")]
     assert unknown_lines
@@ -848,6 +854,11 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "parallel" in report
     assert "Reason:" in report
+    assert "## PARALLEL-001" in report
+    assert ("pytest configures xdist but api/.ptest.toml sets -n 0"
+            in report)
+    assert ('remove "-n", "0" from [runner] args in api/.ptest.toml '
+            "to run 4 workers" in report)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--assessment-json")) == 0
@@ -856,6 +867,45 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     assert document.kind == "agent-assessment" and document.error is None
     for child in document.data["children"]:
         assert "facts" not in child
+    by_scope = {child["scope"]: child
+                for child in document.data["children"]}
+    assert [row["id"] for row in by_scope["api"]["rows"]][-1] == (
+        "PARALLEL-001")
+    api_parallel = next(row for row in by_scope["api"]["rows"]
+                        if row["id"] == "PARALLEL-001")
+    assert api_parallel["status"] == "gap"
+    assert api_parallel["rationale"].startswith("Answered by ptest: ")
+    web_parallel = next(row for row in by_scope["web"]["rows"]
+                        if row["id"] == "PARALLEL-001")
+    assert web_parallel["status"] == "satisfied"
+
+
+def test_doctor_fresh_xdist_project_parallel_satisfied(
+        tmp_path, monkeypatch, capsys):
+    """Doctor on a qualified 4-worker project: satisfied, no model call."""
+    root = tmp_path / "fresh-doctor"
+    root.mkdir()
+    _write_fresh_xdist_project(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    capsys.readouterr()
+    bindir = tmp_path / "bin"
+    _prepare_review(monkeypatch, root, bindir)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+    human = capsys.readouterr()
+    assert "Parallel execution" in human.out
+    assert "✗ Parallel execution" not in human.out
+    assert "? Parallel execution" not in human.out
+
+    launches = _read_launches(bindir)
+    assert "PARALLEL-001" not in [entry["item"] for entry in launches]
+
+    report = (root / "recommendations.md").read_text(encoding="utf-8")
+    assert "## PARALLEL-001" in report
 
 
 # ---- (e) init on the same monorepo -------------------------------------------

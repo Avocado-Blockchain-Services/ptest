@@ -1883,7 +1883,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert all(item[-2:] == ("--model", "haiku") for item in argv_log)
 
     human = capsys.readouterr()
-    assert ".  unknown · 11 ok · 0 gap · 0 unknown" in human.out
+    assert ".  unknown · 11 ok · 0 gap · 1 unknown" in human.out
     assert "runs: no — no ptest configuration" in human.out
     assert "run ptest init from the repository root" in human.out
     assert ("(checklist only: ptest cannot run this project yet)"
@@ -1904,7 +1904,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
         "fix": "run ptest init from the repository root",
     }
     assert all(row["label"] for row in child["rows"])
-    assert child["score"]["applicable"] == 11
+    assert child["score"]["applicable"] == 12
     assert document.data["provider"]["profile"] == (
         "ptest-item-review-v1 model=haiku")
     blocker = next(item for item in document.data["limitations"]
@@ -1998,7 +1998,7 @@ def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
     assert document.kind == "agent-assessment"
     child = document.data["children"][0]
     assert [row["status"] for row in child["rows"]] == (
-        ["not-applicable"] * 11)
+        ["not-applicable"] * 12)
     assert child["score"] is None
     assert (root / "recommendations.md").is_file()
 
@@ -2110,7 +2110,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     }
     assert document.data["schema"] == C.AGENT_ASSESSMENT_SCHEMA
     assert document.data["children"][0]["score"] == {
-        "satisfied": 0, "applicable": 10, "percent": 0,
+        "satisfied": 0, "applicable": 11, "percent": 0,
     }
     na_rows = [row["id"] for row in document.data["children"][0]["rows"]
                if row["status"] == "not-applicable"]

@@ -1831,7 +1831,7 @@ def test_decoder_messages_never_echo_input():
 _AA_IDS = (
     "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
     "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-    "SELECT-001", "TIMING-001",
+    "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
 _AA_CITE = {"path": "src/example.py", "start_line": 3, "end_line": 9,
             "sha256": "ef" * 32}
@@ -1849,7 +1849,7 @@ def _aa_child(**overrides):
     rows = [_aa_row(row_id) for row_id in _AA_IDS]
     child = {"project_id": "ab" * 16, "scope": "child-a",
              "packet_sha256": "cd" * 32, "rows": rows,
-             "score": {"satisfied": 11, "applicable": 11, "percent": 100},
+             "score": {"satisfied": 12, "applicable": 12, "percent": 100},
              "findings": [], "limitations": []}
     child.update(overrides)
     return child

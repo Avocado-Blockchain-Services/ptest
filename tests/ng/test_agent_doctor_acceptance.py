@@ -438,7 +438,7 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     for child in public.data["children"]:
         assert [row["id"] for row in child["rows"]] == list(
             C.AGENT_ASSESSMENT_CHECKLIST_IDS)
-        assert child["score"] == {"satisfied": 0, "applicable": 11, "percent": 0}
+        assert child["score"] == {"satisfied": 0, "applicable": 12, "percent": 0}
         assert all(row["label"] for row in child["rows"])
         assert child["execution"]["status"] in ("executable", "caveat")
     assert public.data["publication"]["path"] == "recommendations.md"

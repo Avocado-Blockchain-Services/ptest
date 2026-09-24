@@ -148,7 +148,8 @@ def _full_run_summary(queue_s=1.0, setup_s=2.0, collection_s=3.0,
 def test_ids_are_frozen():
     from ptest import deterministic_items as DI
 
-    assert DI.DETERMINISTIC_ITEM_IDS == ("SELECT-001", "TIMING-001")
+    assert DI.DETERMINISTIC_ITEM_IDS == (
+        "SELECT-001", "TIMING-001", "PARALLEL-001")
 
 
 def test_selection_disabled_pytest_is_gap_with_cfg(tmp_path):
@@ -352,7 +353,7 @@ def test_answers_never_initialize_the_scheduler(tmp_path, monkeypatch):
 
     monkeypatch.setattr(scheduler, "initialize", _forbidden)
     answers = _answers_for(tmp_path)
-    assert set(answers) == {"SELECT-001", "TIMING-001"}
+    assert set(answers) == {"SELECT-001", "TIMING-001", "PARALLEL-001"}
 
 
 def test_answer_validation_rejects_bad_shapes():
@@ -393,3 +394,263 @@ def test_answer_reason_rejects_owned_prefix():
     with pytest.raises((TypeError, ValueError)):
         DI.DeterministicAnswer(item_id="TIMING-001", status="unknown",
                                reason="Answered by ptest: late.")
+
+
+# ---- PARALLEL-001 (T4b): answered from executability facts, no model call --
+
+_UV_LAUNCHER = ("uv", "run", "--locked", "--no-sync", "python")
+
+
+def _parallel_config(root=None, runner_kind=C.RunnerKind.PYTEST,
+                     launcher=_UV_LAUNCHER, args=(), **selection):
+    policy = {"enabled": False, "closed_inputs": False}
+    policy.update(selection)
+    checkout = None
+    if root is not None:
+        checkout = C.CheckoutIdentity(
+            project_id=CHILD_PID, checkout_id="cd" * 16, root=root)
+    return C.Config(
+        runner=C.RunnerConfig(
+            kind=runner_kind, launcher=launcher, args=args,
+            test_roots=("tests",),
+        ),
+        setup=None,
+        resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(**policy),
+        project_id=CHILD_PID,
+        checkout=checkout,
+    )
+
+
+def _stub_qualified_venv(root: Path) -> None:
+    packages = root / ".venv" / "lib" / "python3.12" / "site-packages"
+    dist_info = packages / "pytest_xdist-3.8.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.8.0\n",
+        encoding="utf-8",
+    )
+    (root / ".venv" / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\n"
+        "version = 3.12\n",
+        encoding="utf-8",
+    )
+
+
+def _parallel_answers_for(root: Path, *, addopts: str | None,
+                          config=None, files: dict[str, str] | None = None):
+    """answers_for over a tmp pytest project with real executability facts."""
+    from ptest import deterministic_items as DI
+
+    if addopts is not None:
+        (root / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\n"
+            f"addopts = '{addopts}'\n",
+            encoding="utf-8",
+        )
+    if config is None:
+        config = _parallel_config(root)
+    packet = _packet_for(root, files if files is not None else {
+        ".ptest.toml": "[selection]\\nenabled = false\\n"})
+    return DI.answers_for(_domain(root), _resolution(root, config), packet)
+
+
+def test_parallel_four_workers_is_satisfied(tmp_path):
+    _stub_qualified_venv(tmp_path)
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=loadgroup")
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "satisfied"
+    assert answer.reason == (
+        "pytest runs in parallel with 4 workers (xdist, --dist loadgroup)")
+    assert answer.evidence_paths == (".ptest.toml",)
+    assert answer.finding_summary is None
+    assert answer.finding_change is None
+
+
+def test_parallel_serial_fallback_is_gap_with_reason(tmp_path):
+    _stub_qualified_venv(tmp_path)
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=each")
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.reason == (
+        "pytest configures xdist but --dist each is not supported; "
+        "ptest runs serially")
+    assert answer.evidence_paths == (".ptest.toml",)
+    assert answer.finding_summary is not None
+    assert answer.finding_change is not None
+    assert "--dist each is not supported" in answer.finding_summary
+
+
+def test_parallel_n0_opt_out_is_gap_with_actionable_fix(tmp_path):
+    _stub_qualified_venv(tmp_path)
+    config = _parallel_config(tmp_path, args=("-n", "0"))
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=loadgroup", config=config)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.reason == (
+        "pytest configures xdist but .ptest.toml sets -n 0")
+    assert answer.finding_change == (
+        'remove "-n", "0" from [runner] args in .ptest.toml to run 4 workers')
+
+
+def test_parallel_not_configured_provisional_fix_is_safety_first(tmp_path):
+    answers = _parallel_answers_for(tmp_path, addopts=None)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.reason == "no parallel runner is configured for this project"
+    assert answer.evidence_paths == (".ptest.toml",)
+    assert answer.finding_change == "Resolve the parallel-safety gaps first."
+
+
+def test_parallel_suggestion_gated_on_safety_gaps(tmp_path):
+    from ptest import deterministic_items as DI
+
+    _stub_qualified_venv(tmp_path)
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[selection]\\nenabled = false\\n"})
+    domain, resolution = _domain(tmp_path), _resolution(
+        tmp_path, _parallel_config(tmp_path))
+    clean = DI.parallel_answer_for(
+        domain, resolution, packet, safety_gap=False)
+    assert clean.status == "gap"
+    assert clean.finding_change == (
+        "Add pytest-xdist to the project environment and request workers "
+        "with -n auto in the pytest configuration.")
+    blocked = DI.parallel_answer_for(
+        domain, resolution, packet, safety_gap=True)
+    assert blocked.finding_change == (
+        "Resolve the parallel-safety gaps first.")
+    assert DI.parallel_answer_for(
+        domain, resolution, packet, safety_gap=None) == blocked
+
+
+def test_parallel_vitest_is_satisfied(tmp_path):
+    from ptest import deterministic_items as DI
+
+    (tmp_path / "node_modules" / "vitest").mkdir(parents=True)
+    (tmp_path / "node_modules" / "vitest" / "vitest.mjs").write_text(
+        "export {};\n", encoding="utf-8")
+    config = _parallel_config(tmp_path, runner_kind=C.RunnerKind.VITEST,
+                             launcher=("node",))
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[runner]\\nkind = \"vitest\"\\n"})
+    answers = DI.answers_for(_domain(tmp_path), _resolution(tmp_path, config),
+                             packet)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "satisfied"
+    assert answer.reason == "tests run inside vitest with its own workers"
+
+
+def test_parallel_command_runner_is_unknown_with_reason(tmp_path):
+    from ptest import deterministic_items as DI
+
+    config = _parallel_config(tmp_path, runner_kind=C.RunnerKind.COMMAND,
+                             launcher=("sh",))
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[runner]\\nkind = \"command\"\\n"})
+    answers = DI.answers_for(_domain(tmp_path), _resolution(tmp_path, config),
+                             packet)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "unknown"
+    assert answer.reason == (
+        "ptest cannot tell whether this command runner parallelizes tests")
+
+
+def test_parallel_gap_finding_prose_is_trusted_plain_text(tmp_path):
+    _stub_qualified_venv(tmp_path)
+    fallback = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=each")["PARALLEL-001"]
+    missing = _parallel_answers_for(tmp_path, addopts=None)["PARALLEL-001"]
+    for answer in (fallback, missing):
+        assert C.aa_prose_is_untrusted(answer.finding_summary) is False
+        assert C.aa_prose_is_untrusted(answer.finding_change) is False
+        assert "`" not in answer.finding_summary + answer.finding_change
+        assert "|" not in answer.finding_summary + answer.finding_change
+
+
+def test_parallel_vitest_suggestion_variant_is_trusted():
+    from ptest import deterministic_items as DI
+
+    suggestion = DI.parallel_suggestion("vitest")
+    assert "vitest" in suggestion
+    assert C.aa_prose_is_untrusted(suggestion) is False
+
+
+def test_parallel_unreadable_facts_is_unknown_with_reason(tmp_path,
+                                                         monkeypatch):
+    from ptest import deterministic_items as DI
+    from ptest import executability as executability_api
+
+    def _boom(resolution):
+        raise RuntimeError("facts unavailable")
+
+    monkeypatch.setattr(executability_api, "check_resolution", _boom)
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[selection]\\nenabled = false\\n"})
+    answers = DI.answers_for(_domain(tmp_path),
+                             _resolution(tmp_path, _parallel_config(tmp_path)),
+                             packet)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "unknown"
+    assert answer.reason == ("ptest cannot read the parallel configuration "
+                             "for this project")
+
+
+def test_parallel_degrades_without_cfg_excerpt(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import deterministic_items as DI
+
+    _stub_qualified_venv(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4 --dist=loadgroup'\n",
+        encoding="utf-8",
+    )
+    packet = _packet_for(tmp_path, {
+        "tests/test_x.py": "def test_x():\n    assert True\n"})
+    assert ".ptest.toml" not in {excerpt.path for excerpt in packet.excerpts}
+    answers = DI.answers_for(_domain(tmp_path),
+                             _resolution(tmp_path,
+                                         _parallel_config(tmp_path)),
+                             packet)
+    assert answers["PARALLEL-001"].status == "satisfied"
+    assert answers["PARALLEL-001"].evidence_paths == ()
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    parallel = next(review for review in reviews
+                    if review.item_id == "PARALLEL-001")
+    assert parallel.request is None
+    assert parallel.answer is not None
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(row for row in child.rows if row.id == "PARALLEL-001")
+    assert row.status == "unknown"
+    assert "(the ptest config is not in the review evidence)" in row.rationale
+
+
+def test_parallel_answer_takes_no_model_call(tmp_path):
+    from ptest import agent_assessment as AA
+
+    _stub_qualified_venv(tmp_path)
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=loadgroup")
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[selection]\\nenabled = false\\n"})
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    parallel = next(review for review in reviews
+                    if review.item_id == "PARALLEL-001")
+    assert parallel.request is None
+    assert parallel.skip_reason is None
+    assert parallel.answer is answers["PARALLEL-001"]
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(row for row in child.rows if row.id == "PARALLEL-001")
+    assert row.status == "satisfied"
+    assert row.rationale.startswith("Answered by ptest: ")
+    assert [finding.id for finding in child.findings
+            if finding.id == "PARALLEL-001"] == []

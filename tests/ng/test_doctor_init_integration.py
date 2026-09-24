@@ -220,7 +220,7 @@ def test_doctor_review_runs_one_haiku_call_per_item(
                for item in launches)
 
     human = capsys.readouterr()
-    assert ".  pytest · 9 ok · 1 gap · 1 unknown" in human.out
+    assert ".  pytest · 9 ok · 2 gap · 1 unknown" in human.out
     assert "runs: yes · parallel: no" in human.out
     for entry in CATALOG:
         assert entry.label in human.out
@@ -232,6 +232,12 @@ def test_doctor_review_runs_one_haiku_call_per_item(
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     for entry in CATALOG:
         assert f"{entry.id} {entry.label}" in report
+    # The not-configured PARALLEL-001 fix is finalized after the model
+    # replies: no safety gap here, so the report carries the enabling
+    # suggestion (a no-op finalizer would leave the safety-first text).
+    assert ("Add pytest-xdist to the project environment and request "
+            "workers with -n auto in the pytest configuration.") in report
+    assert "Resolve the parallel-safety gaps first." not in report
 
     assert main((*argv, "--assessment-json")) == 0
     document = C.decode_public_document(

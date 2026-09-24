@@ -1,12 +1,22 @@
-"""Deterministic doctor answers for SELECT-001 and TIMING-001.
+"""Deterministic doctor answers for SELECT-001, TIMING-001, and PARALLEL-001.
 
-These two checklist items need no model call: SELECT-001 is answered from
-the child's own runner kind and ``[selection]`` policy, and TIMING-001 is
-answered from ptest's own run/timing history. History access is read-only
+These three checklist items need no model call: SELECT-001 is answered from
+the child's own runner kind and ``[selection]`` policy, TIMING-001 is
+answered from ptest's own run/timing history, and PARALLEL-001 is answered
+from the executability facts (runs, parallel workers and dist mode, or the
+serial-fallback reason). History access is read-only
 (``history.read_history`` and ``history.read_history_summaries`` only); the
 scheduler is never initialized. ``answers_for`` never raises: anything
 unresolvable yields ``{}`` or an ``unknown`` answer, and an uncitable
 answer degrades in ``agent_assessment.assemble_child``.
+
+PARALLEL-001 carries one provisional step: when no parallel runner is
+configured, the enabling suggestion is gated on the parallel-safety items
+(FIX-002, DB-001, DB-002, CACHE-001, RESOURCE-001, NETWORK-001,
+PROCESS-001, TIME-001), whose outcomes exist only after the model replies.
+``answers_for`` plans the safe provisional fix ("resolve the
+parallel-safety gaps first"); the doctor flow finalizes it with
+``parallel_answer_for`` once the sibling rows are assembled.
 """
 from __future__ import annotations
 
@@ -18,7 +28,22 @@ from pathlib import Path
 from . import contracts as C
 from . import history as history_api
 
-DETERMINISTIC_ITEM_IDS: tuple[str, ...] = ("SELECT-001", "TIMING-001")
+DETERMINISTIC_ITEM_IDS: tuple[str, ...] = (
+    "SELECT-001", "TIMING-001", "PARALLEL-001")
+
+#: Parallel-safety items gating the PARALLEL-001 enabling suggestion: the
+#: suggestion to add workers is offered only when none of these has a gap.
+PARALLEL_SAFETY_IDS: tuple[str, ...] = (
+    "FIX-002", "DB-001", "DB-002", "CACHE-001", "RESOURCE-001",
+    "NETWORK-001", "PROCESS-001", "TIME-001",
+)
+
+#: Exact executability text for "xdist not active" (the not-configured case).
+_NOT_CONFIGURED_PARALLEL = "no — xdist is not enabled in your pytest config"
+
+_NO_PREFIX = "no — "
+
+_SAFETY_FIRST_FIX = "Resolve the parallel-safety gaps first."
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
 
@@ -234,6 +259,128 @@ def _timing_answer(domain: C.DomainPaths, config: C.Config, resolution,
         evidence_paths=())
 
 
+def parallel_suggestion(runner: str) -> str:
+    """Enabling suggestion for the not-configured PARALLEL-001 gap."""
+    if runner == "vitest":
+        return ("Set the vitest pool options to run tests "
+                "with multiple workers.")
+    return ("Add pytest-xdist to the project environment and request "
+            "workers with -n auto in the pytest configuration.")
+
+
+def _parallel_unknown(runner: str) -> str:
+    if runner == "command":
+        return ("ptest cannot tell whether this command runner "
+                "parallelizes tests")
+    return "ptest cannot tell whether this project runs tests in parallel"
+
+
+def _parallel_facts(resolution: C.ConfigResolution,
+                    declaration: str) -> dict | None:
+    """Executability facts for one child, or None when unreadable."""
+    from . import executability as executability_api
+
+    try:
+        items = executability_api.check_resolution(resolution)
+    except Exception:
+        return None
+    for item in items:
+        if item.project == declaration:
+            try:
+                return item.facts()
+            except Exception:
+                return None
+    return None
+
+
+def _parallel_answer(facts: dict | None, runner: str,
+                     evidence: tuple[str, ...],
+                     safety_gap: bool | None) -> DeterministicAnswer:
+    """Build the PARALLEL-001 answer from one child's executability facts."""
+    if facts is None:
+        return DeterministicAnswer(
+            item_id="PARALLEL-001", status="unknown",
+            reason=("ptest cannot read the parallel configuration "
+                    "for this project"),
+            evidence_paths=())
+    parallel = facts.get("parallel")
+    short = facts.get("parallel_short")
+    if runner == "vitest":
+        if short == "inside vitest":
+            return DeterministicAnswer(
+                item_id="PARALLEL-001", status="satisfied",
+                reason="tests run inside vitest with its own workers",
+                evidence_paths=evidence)
+        return DeterministicAnswer(
+            item_id="PARALLEL-001", status="unknown",
+            reason=_parallel_unknown(runner),
+            evidence_paths=evidence)
+    if runner == "pytest":
+        if isinstance(short, str) and short != "no":
+            return DeterministicAnswer(
+                item_id="PARALLEL-001", status="satisfied",
+                reason=f"pytest runs in parallel with {parallel}",
+                evidence_paths=evidence)
+        if parallel == _NOT_CONFIGURED_PARALLEL:
+            change = (parallel_suggestion(runner)
+                      if safety_gap is False else _SAFETY_FIRST_FIX)
+            return DeterministicAnswer(
+                item_id="PARALLEL-001", status="gap",
+                reason="no parallel runner is configured for this project",
+                evidence_paths=evidence,
+                finding_summary=("No parallel runner is configured, so "
+                                 "tests run serially under ptest."),
+                finding_change=change)
+        if isinstance(parallel, str) and parallel.startswith(_NO_PREFIX):
+            serial_reason = parallel[len(_NO_PREFIX):]
+            fix = (facts.get("parallel_fix") or facts.get("runs_fix")
+                   or f"Clear the serial fallback in the pytest "
+                   f"configuration ({serial_reason}) so ptest runs with "
+                   f"xdist workers.")
+            return DeterministicAnswer(
+                item_id="PARALLEL-001", status="gap",
+                reason=f"pytest configures xdist but {serial_reason}",
+                evidence_paths=evidence,
+                finding_summary=("pytest configures xdist but ptest runs "
+                                 f"serially: {serial_reason}"),
+                finding_change=fix)
+        return DeterministicAnswer(
+            item_id="PARALLEL-001", status="unknown",
+            reason=_parallel_unknown(runner),
+            evidence_paths=evidence)
+    return DeterministicAnswer(
+        item_id="PARALLEL-001", status="unknown",
+        reason=_parallel_unknown(runner),
+        evidence_paths=evidence)
+
+
+def parallel_answer_for(domain: C.DomainPaths,
+                        resolution: C.ConfigResolution, packet, *,
+                        safety_gap: bool | None = None,
+                        ) -> DeterministicAnswer | None:
+    """Answer PARALLEL-001 for one packet; never raises.
+
+    Returns None when the packet's child config does not resolve. The
+    not-configured suggestion is gated on ``safety_gap`` (whether any
+    parallel-safety item has a gap); None plans the safe provisional fix.
+    Read-only: executability facts are read, never written, and the
+    scheduler is never touched.
+    """
+    try:
+        declaration = packet.declaration
+        config = _child_config(resolution, declaration)
+        if config is None:
+            return None
+        cfg = _cfg(declaration)
+        excerpt_paths = {excerpt.path for excerpt in packet.excerpts}
+        evidence = (cfg,) if cfg in excerpt_paths else ()
+        facts = _parallel_facts(resolution, declaration)
+        runner = config.runner.kind.value
+        return _parallel_answer(facts, runner, evidence, safety_gap)
+    except Exception:
+        return None
+
+
 def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
                  packet) -> dict[str, DeterministicAnswer]:
     declaration = packet.declaration
@@ -251,10 +398,14 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
             item_id="TIMING-001", status="unknown",
             reason="ptest history is unavailable, so timing cannot be read",
             evidence_paths=())
-    return {
+    parallel = parallel_answer_for(domain, resolution, packet)
+    answers = {
         "SELECT-001": _select_answer(config, cfg, evidence),
         "TIMING-001": timing,
     }
+    if parallel is not None:
+        answers["PARALLEL-001"] = parallel
+    return answers
 
 
 def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
@@ -262,8 +413,10 @@ def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
     """Answer the deterministic items for one packet; never raises.
 
     Returns ``{}`` when the packet's child config does not resolve, and an
-    ``unknown`` TIMING answer when history is unavailable. Read-only:
-    history is read, never written, and the scheduler is never touched.
+    ``unknown`` TIMING answer when history is unavailable. The PARALLEL-001
+    answer carries the safe provisional fix when no parallel runner is
+    configured (see ``parallel_answer_for``). Read-only: history is read,
+    never written, and the scheduler is never touched.
     """
     try:
         return _answers_for(domain, resolution, packet)
@@ -271,4 +424,6 @@ def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
         return {}
 
 
-__all__ = ["DETERMINISTIC_ITEM_IDS", "DeterministicAnswer", "answers_for"]
+__all__ = ["DETERMINISTIC_ITEM_IDS", "PARALLEL_SAFETY_IDS",
+           "DeterministicAnswer", "answers_for", "parallel_answer_for",
+           "parallel_suggestion"]

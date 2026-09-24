@@ -336,6 +336,27 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         scanner_codes=(),
         skip=None,
     ),
+    ChecklistEntry(
+        id="PARALLEL-001",
+        label="Parallel execution",
+        criterion="Tests run in parallel under ptest once the parallel-safety items allow it.",
+        evidence="Cite the pytest xdist configuration or the vitest pool settings.",
+        recommendation="Enable xdist workers or vitest pools only after the parallel-safety gaps are closed.",
+        example="A serial fallback names its reason and fix.",
+        verification="Scoped ptest shows the granted worker count and preserves neighbor records.",
+        recipe=None,
+        prompt=("Does this project run its tests in parallel under ptest? "
+                "Cite the pytest xdist worker configuration or the vitest "
+                "pool settings showing workers actually run. Mark N/A only "
+                "with evidence that no automated tests exist in scope. "
+                "Absence of such evidence is unknown, never N/A."),
+        path_patterns=(_PTEST_TOML, _MANIFEST),
+        text_patterns=(r"xdist|\bworkers\b|-n auto|numprocesses"
+                       r"|pool\s*:\s*['\"]?(?:threads|forks|vmThreads)",
+                       r"poolOptions|maxWorkers|minWorkers"),
+        scanner_codes=(),
+        skip=None,
+    ),
 )
 
 # Every item prompt carries the same evidence standard. Applied here (not

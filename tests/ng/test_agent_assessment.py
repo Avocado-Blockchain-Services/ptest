@@ -26,7 +26,7 @@ CHILD_PID = "ab" * 16
 EXPECTED_IDS = (
     "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
     "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-    "SELECT-001", "TIMING-001",
+    "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
 
 
@@ -242,7 +242,7 @@ def test_scoping_at_excluded_directory_does_not_bypass_exclusion(
     reviews = AA.plan_item_reviews(packet)
 
     assert packet.excerpts == ()
-    assert len(reviews) == 11
+    assert len(reviews) == 12
     assert all(b"EXCLUDED_SCOPE_SENTINEL_aa91" not in review.request
                for review in reviews if review.request is not None)
     assert packet.excluded_count > 0
@@ -274,7 +274,7 @@ def test_v2_full_child_packet_excludes_excluded_declaration_path(tmp_path):
     assert packet.file_count == 0
     assert packet.byte_count == 0
     assert packet.excluded_count == 1
-    assert len(reviews) == 11
+    assert len(reviews) == 12
     assert all(b"EXCLUDED_DECLARATION_SENTINEL_0f42" not in review.request
                for review in reviews if review.request is not None)
 
@@ -761,7 +761,7 @@ def test_score_floor_unknown_in_denominator_and_null(tmp_path):
             + tuple(row(i, "unknown") for i in ("FIX-002", "DB-001"))
             + tuple(row(i, "gap") for i in EXPECTED_IDS[3:]))
     result = AA.score(rows)
-    assert (result.satisfied, result.applicable, result.percent) == (1, 11, 9)
+    assert (result.satisfied, result.applicable, result.percent) == (1, 12, 8)
     na_rows = tuple(row(i, "not-applicable") for i in EXPECTED_IDS)
     assert AA.score(na_rows) is None
     assert AA.score(()) is None
@@ -1264,7 +1264,7 @@ def _pure_library_packet(tmp_path, extra=None):
     return _packet_for(tmp_path, files)
 
 
-def test_plan_item_reviews_returns_eleven_bounded_routed_reviews(tmp_path):
+def test_plan_item_reviews_returns_twelve_bounded_routed_reviews(tmp_path):
     import json
 
     from ptest import agent_assessment as AA
@@ -1272,7 +1272,7 @@ def test_plan_item_reviews_returns_eleven_bounded_routed_reviews(tmp_path):
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
-    assert len(reviews) == len(EXPECTED_IDS) == 11
+    assert len(reviews) == len(EXPECTED_IDS) == 12
     assert [review.item_id for review in reviews] == list(EXPECTED_IDS)
     for review in reviews:
         assert review.label.strip()
@@ -1534,7 +1534,7 @@ def test_plan_item_reviews_is_pure_without_filesystem(tmp_path, monkeypatch):
     monkeypatch.setattr("os.lstat", _boom)
     monkeypatch.setattr("os.stat", _boom)
     reviews = AA.plan_item_reviews(packet)
-    assert len(reviews) == 11
+    assert len(reviews) == 12
 
 
 # --- T4: one-row replies and child assembly -----------------------------------
@@ -1627,8 +1627,8 @@ def test_assemble_child_valid_replies_carry_labels_findings_and_score(tmp_path):
     assert [finding.id for finding in child.findings] == ["DB-002"]
     assert child.findings[0].recipe_id == recipes["DB-002"]
     assert child.score is not None
-    assert (child.score.satisfied, child.score.applicable) == (10, 11)
-    assert child.score.percent == (100 * 10) // 11
+    assert (child.score.satisfied, child.score.applicable) == (11, 12)
+    assert child.score.percent == (100 * 11) // 12
 
 
 def test_assemble_child_noop_fails_without_valid_assertion(tmp_path):
@@ -1733,7 +1733,7 @@ def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
             name, "unknown",
             AA.FAILED_PREFIX + "invalid reply: " + details[name])
         assert [r.status for r in child.rows if r.id != "FIX-001"] == [
-            "satisfied"] * 10
+            "satisfied"] * 11
 
 
 def test_assemble_child_str_replies_become_named_failures(tmp_path):
@@ -1853,7 +1853,7 @@ def test_assembled_child_as_public_dict_minus_execution_validates(tmp_path):
                       "error": None}).encode()
     document = C.decode_public_document(raw)
     assert document.kind == "agent-assessment"
-    assert len(document.data["children"][0]["rows"]) == 11
+    assert len(document.data["children"][0]["rows"]) == 12
 
 
 # --- T4: vendored real-reply regression ------------------------------------------
@@ -1906,7 +1906,13 @@ def _check_real_reply_regression(tmp_path, fixture_name,
     document = json.loads(
         (_FIXTURE_DIR / fixture_name).read_text(encoding="utf-8"))
     rows = document["data"]["children"][0]["rows"]
-    assert [row["id"] for row in rows] == list(EXPECTED_IDS)
+    # The vendored recordings predate PARALLEL-001: replay exactly the
+    # recorded rows, and pin the delta explicitly so future catalog growth
+    # revisits this instead of silently skipping the new item.
+    covered = [row["id"] for row in rows]
+    assert set(EXPECTED_IDS) - set(covered) == {"PARALLEL-001"}
+    assert covered == [row_id for row_id in EXPECTED_IDS
+                       if row_id in set(covered)]
     replies = []
     expected = []
     for row in rows:
@@ -1937,10 +1943,10 @@ def _check_real_reply_regression(tmp_path, fixture_name,
             all(cite["path"] in set(reviews[row["id"]].excerpt_paths)
                 for cite in row["evidence"])
             for row in rows), "every fixture citation must route in-subset"
-    ordered = tuple(reviews[row_id] for row_id in EXPECTED_IDS)
+    ordered = tuple(reviews[row_id] for row_id in covered)
     ordered_replies = tuple(
         replies[[row["id"] for row in rows].index(row_id)]
-        for row_id in EXPECTED_IDS)
+        for row_id in covered)
     child = AA.assemble_child(packet, ordered, ordered_replies)
     assert [row.status for row in child.rows] == expected
     assert child.score == AA.score(child.rows)
@@ -2053,16 +2059,16 @@ def test_plan_and_assemble_empty_packet(tmp_path):
     packet = _packet_for(tmp_path, {})
     assert packet.excerpts == ()
     reviews = AA.plan_item_reviews(packet)
-    assert len(reviews) == 11
+    assert len(reviews) == 12
     assert all(review.request is not None for review in reviews)
     replies = tuple(json.dumps({
         "status": "unknown", "rationale": "No evidence was admitted.",
         "evidence": [], "finding": None}).encode() for _ in reviews)
     child = AA.assemble_child(packet, reviews, replies)
-    assert [row.status for row in child.rows] == ["unknown"] * 11
+    assert [row.status for row in child.rows] == ["unknown"] * 12
     assert child.score is not None
     assert (child.score.satisfied, child.score.applicable,
-            child.score.percent) == (0, 11, 0)
+            child.score.percent) == (0, 12, 0)
 
 
 # --- Round 15 twins: fenced replies, specific reasons, empty files -----------
@@ -2456,7 +2462,7 @@ def test_plan_item_reviews_binds_deterministic_answers_without_calls(tmp_path):
     packet = _t4_packet(tmp_path)
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet, answers=_t4_answers())}
-    assert len(reviews) == 11
+    assert len(reviews) == 12
     for item_id in ("SELECT-001", "TIMING-001"):
         review = reviews[item_id]
         assert review.request is None
