@@ -2747,6 +2747,7 @@ def _validate_uninstall_payload(data: dict) -> None:
     for name in ("removed", "kept", "skipped"):
         _check_str_list(_need_list(result, name), f"uninstall.result.{name}")
     _need_bool(result, "nothing_to_remove")
+    _need_bool(result, "applied")
     if "self" not in data or not isinstance(data["self"], dict):
         raise _invalid("report-invalid", "uninstall.self must be an object")
     selfish = data["self"]
@@ -2754,6 +2755,7 @@ def _validate_uninstall_payload(data: dict) -> None:
     _need_str(selfish, "root", allow_none=True, allow_empty=True)
     _need_bool(selfish, "removed")
     _need_bool(selfish, "path_symlink_removed")
+    _check_str_list(_need_list(selfish, "kept"), "uninstall.self.kept")
 
 
 def _validate_register_payload(data: dict) -> None:
@@ -3438,12 +3440,14 @@ def _project_uninstall_payload(data: dict) -> dict:
             "kept": list(data["result"]["kept"]),
             "skipped": list(data["result"]["skipped"]),
             "nothing_to_remove": data["result"]["nothing_to_remove"],
+            "applied": data["result"]["applied"],
         },
         "self": {
             "requested": data["self"]["requested"],
             "root": data["self"]["root"],
             "removed": data["self"]["removed"],
             "path_symlink_removed": data["self"]["path_symlink_removed"],
+            "kept": list(data["self"]["kept"]),
         },
     }
 
@@ -4562,15 +4566,17 @@ PUBLIC_SCHEMAS: dict = {
                 "kept": {"type": "array", "items": {"type": "string"}},
                 "skipped": {"type": "array", "items": {"type": "string"}},
                 "nothing_to_remove": {"type": "boolean"},
+                "applied": {"type": "boolean"},
             }, "required": ["removed", "kept", "skipped",
-                            "nothing_to_remove"]},
+                            "nothing_to_remove", "applied"]},
             "self": {"type": "object", "properties": {
                 "requested": {"type": "boolean"},
                 "root": {"type": ["string", "null"]},
                 "removed": {"type": "boolean"},
                 "path_symlink_removed": {"type": "boolean"},
+                "kept": {"type": "array", "items": {"type": "string"}},
             }, "required": ["requested", "root", "removed",
-                            "path_symlink_removed"]},
+                            "path_symlink_removed", "kept"]},
         },
         "required": ["root", "dry_run", "plan", "result", "self"],
     }),

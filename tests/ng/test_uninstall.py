@@ -361,9 +361,10 @@ def test_unbalanced_markers_are_left_alone(case, tmp_path, monkeypatch, capsys):
     agents.write_text("# notes\n<!-- ptest-agent-rules:start -->\n", encoding="utf-8")
     monkeypatch.chdir(root)
 
+    # U4-4: unbalanced markers are reported/kept, exit stays 0.
     code = _uninstall(domain, "--yes")
     out = capsys.readouterr().out
-    assert code != 0
+    assert code == 0
     assert "skipped" in out
     assert agents.read_text(encoding="utf-8") == (
         "# notes\n<!-- ptest-agent-rules:start -->\n")
@@ -381,7 +382,8 @@ def test_duplicated_markers_are_left_alone(case, tmp_path, monkeypatch):
     agents.write_text(block + "\n" + block, encoding="utf-8")
     monkeypatch.chdir(root)
 
-    assert _uninstall(domain, "--yes") != 0
+    # U4-4: duplicated markers are reported/kept, exit stays 0.
+    assert _uninstall(domain, "--yes") == 0
     assert agents.read_text(encoding="utf-8") == block + "\n" + block
 
 
@@ -438,9 +440,10 @@ def test_symlinked_config_skill_docs_and_agent_file_are_left_alone(
     (root / "AGENTS.md").symlink_to(real_agents)
     monkeypatch.chdir(root)
 
+    # U4-4: symlinks are reported and left alone, exit stays 0.
     code = _uninstall(domain, "--yes")
     out = capsys.readouterr().out
-    assert code != 0
+    assert code == 0
     assert "skipped" in out
     assert (root / ".ptest.toml").is_symlink()
     assert real_config.read_bytes() == b"version = 1\n"
@@ -975,14 +978,14 @@ def test_json_plan_and_result_are_a_public_document(
     kinds = {entry["action"] for entry in data["plan"]}
     assert "remove" in kinds
     assert set(data["result"]) == {
-        "removed", "kept", "skipped", "nothing_to_remove"}
+        "removed", "kept", "skipped", "nothing_to_remove", "applied"}
     assert ".ptest.toml" in data["result"]["removed"]
     assert data["result"]["nothing_to_remove"] is False
     for entry in data["plan"]:
         assert set(entry) == {"action", "target", "detail"}
         assert entry["action"] in {"remove", "kept", "skipped"}
     assert set(data["self"]) == {
-        "requested", "root", "removed", "path_symlink_removed"}
+        "requested", "root", "removed", "path_symlink_removed", "kept"}
 
 
 def test_json_error_keeps_the_document_contract(
@@ -1049,9 +1052,10 @@ def test_hostile_monorepo_children_never_escape_the_root(
     evil.write_text("version = 1\n", encoding="utf-8")
     monkeypatch.chdir(root)
 
+    # U4-4: invalid children are reported as skipped, exit stays 0.
     code = _uninstall(domain, "--yes")
     captured = capsys.readouterr()
-    assert code != 0
+    assert code == 0
     assert "skipped" in captured.out
     assert evil.read_bytes() == b"version = 1\n"
     assert not (root / "api" / ".ptest.toml").exists()
@@ -1073,7 +1077,8 @@ def test_symlinked_child_dir_is_never_entered(case, tmp_path, monkeypatch):
     (root / "api").symlink_to(real, target_is_directory=True)
     monkeypatch.chdir(root)
 
-    assert _uninstall(domain, "--yes") != 0
+    # U4-4: the symlinked child is reported as skipped, exit stays 0.
+    assert _uninstall(domain, "--yes") == 0
     assert (real / ".ptest.toml").read_bytes() == b"version = 1\n"
 
 
@@ -1099,6 +1104,440 @@ def test_block_rewrite_fails_closed_on_plan_apply_race(
         uninstall_api.apply_repo(plan, domain)
     assert (root / "AGENTS.md").read_text(encoding="utf-8") == (
         "# notes\nconcurrent edit\n")
+
+
+# --- U4 audit findings ------------------------------------------------------
+
+def test_self_keeps_user_files_and_the_root(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-1 twin: a valid bundle plus Documents/thesis.tex.
+
+    Only installer-created entries go; the user file and the root stay.
+    """
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    docs = inst / "Documents"
+    docs.mkdir()
+    thesis = docs / "thesis.tex"
+    thesis.write_text("\\documentclass{article}\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    assert _uninstall(domain, "--self", "--yes") == 0
+    capsys.readouterr()
+    assert thesis.read_text(encoding="utf-8") == "\\documentclass{article}\n"
+    assert inst.is_dir()
+    assert not (inst / ".ptest-bundles").exists()
+    assert not (inst / "ptest").exists()
+
+
+def test_active_run_in_child_refuses_uninstall(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-2 twin: the active-run check covers every declared child id.
+
+    State is seeded via the real ``operations._checkout`` for a child
+    config, never a hand-built id.
+    """
+    from types import SimpleNamespace
+
+    from ptest import operations
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"api\"]\n", encoding="utf-8")
+    api = root / "api"
+    api.mkdir()
+    _v1(api)
+    child = operations._checkout(SimpleNamespace(
+        checkout=None, config_path=api / ".ptest.toml", project_id=PROJ))
+    assert child.checkout_id == _checkout_id(api)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="ee" * 16, checkout=child, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    monkeypatch.chdir(root)
+    before = _snapshot(root)
+
+    code = _uninstall(domain, "--yes")
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "active" in captured.err
+    assert _snapshot(root) == before
+    assert (root / ".ptest.toml").is_file()
+    assert (api / ".ptest.toml").is_file()
+
+
+def test_child_checkout_state_and_ledger_rows_removed(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-2 twin: each existing child id loses its state dir + ledger rows."""
+    from types import SimpleNamespace
+
+    from ptest import operations
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"api\"]\n", encoding="utf-8")
+    api = root / "api"
+    api.mkdir()
+    _v1(api)
+    child = operations._checkout(SimpleNamespace(
+        checkout=None, config_path=api / ".ptest.toml", project_id=PROJ))
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="ef" * 16, checkout=child, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(domain, ticket, owner) is True
+    before = case.snapshot(digest="11" * 32, compatibility="compat-v1")
+    after = case.snapshot(digest="22" * 32, compatibility="compat-v1")
+    plan = C.Plan(mode=C.Mode.FULL, execution="full",
+                  input_digest=after.digest,
+                  compatibility=after.compatibility)
+    result = case.result(sequence=1, plan=plan, input_before=before,
+                         input_after=after, policy_digest="33" * 32,
+                         project_id=child.project_id,
+                         checkout_id=child.checkout_id)
+    inventory = case.inventory(("tests/test_a.py",))
+    published = history_api.publish_outcome(domain, child, result, inventory)
+    assert published.committed is True
+    assert (domain.root / "checkouts" / child.checkout_id).is_dir()
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert not (domain.root / "checkouts" / child.checkout_id).exists()
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id"
+    ).fetchall())
+    assert child.checkout_id not in rows
+
+
+def test_json_with_skipped_symlink_is_one_document(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-3 twin: CLAUDE.md -> AGENTS.md symlink still yields one document."""
+    import json as json_stdlib
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    (root / "AGENTS.md").write_text("# Agent notes\n", encoding="utf-8")
+    (root / "CLAUDE.md").symlink_to(root / "AGENTS.md")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes", "--json") == 0
+    raw = capsys.readouterr().out
+    json_stdlib.loads(raw)
+    doc = C.decode_public_document(raw.encode("utf-8"))
+    assert doc.kind == "uninstall"
+    assert doc.error is None
+    assert any(entry["action"] == "skipped"
+               for entry in doc.data["plan"])
+
+
+def test_skipped_entries_exit_zero(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-4: skipped entries are informational; safe removals still exit 0."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    (root / "AGENTS.md").write_text(
+        "# notes\n<!-- ptest-agent-rules:start -->\nunbalanced\n",
+        encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "skipped" in out
+    assert not (root / ".ptest.toml").exists()
+    assert (root / "AGENTS.md").is_file()
+
+
+def test_no_artifacts_with_symlinked_guide_exits_zero(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-4: no ptest artifacts plus a symlinked CLAUDE.md exits 0."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    (root / "AGENTS.md").write_text("# Agent notes\n", encoding="utf-8")
+    (root / "CLAUDE.md").symlink_to(root / "AGENTS.md")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    assert "nothing to remove" in capsys.readouterr().out
+
+
+def test_forget_checkouts_refuses_live_rows_and_deletes_nothing(
+        case, tmp_path):
+    """U4-6 twin: one live row refuses the whole forget; nothing deleted."""
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    mine = _checkout(root)
+    foreign_root = domain.root / "foreign"
+    foreign_root.mkdir()
+    foreign = C.CheckoutIdentity(
+        project_id=OTHER_PROJ, checkout_id="00" * 16, root=foreign_root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="f0" * 16, checkout=mine, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="f1" * 16, checkout=foreign, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(domain, ticket, owner) is True
+
+    with pytest.raises(C.Problem) as caught:
+        scheduler.forget_checkouts(domain, [mine.checkout_id,
+                                            foreign.checkout_id])
+    assert caught.value.code == "active-run"
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id"
+    ).fetchall())
+    assert rows.get(mine.checkout_id, 0) >= 1
+    assert rows.get(foreign.checkout_id, 0) >= 1
+
+
+def test_forget_checkouts_deletes_only_terminal_rows(case, tmp_path):
+    """U4-6 twin: terminal rows for the ids go; foreign rows survive."""
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    mine = _checkout(root)
+    foreign_root = domain.root / "foreign"
+    foreign_root.mkdir()
+    foreign = C.CheckoutIdentity(
+        project_id=OTHER_PROJ, checkout_id="00" * 16, root=foreign_root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    for run_id, checkout in (("f2" * 16, mine), ("f3" * 16, foreign)):
+        ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+            run_id=run_id, checkout=checkout, owner=owner, slots=1,
+            exclusive=False, fixture=True))
+        assert scheduler.cancel_pending(domain, ticket, owner) is True
+
+    deleted = scheduler.forget_checkouts(domain, [mine.checkout_id])
+    assert deleted >= 1
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id"
+    ).fetchall())
+    assert mine.checkout_id not in rows
+    assert rows.get(foreign.checkout_id, 0) >= 1
+
+
+def test_dry_run_never_creates_or_writes_the_ledger(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-6 guard: planning opens the ledger read-only, or not at all."""
+    domain = case.domain()
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+
+    assert not domain.ledger.exists()
+    assert _uninstall(domain, "--dry-run") == 0
+    capsys.readouterr()
+    assert not domain.ledger.exists()
+
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="f4" * 16, checkout=_checkout(root), owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(domain, ticket, owner) is True
+    before = domain.ledger.read_bytes()
+    assert _uninstall(domain, "--dry-run") == 0
+    capsys.readouterr()
+    assert domain.ledger.read_bytes() == before
+
+
+def test_self_render_never_truncates_root_or_link(tmp_path, monkeypatch):
+    """U4-8: the install root and PATH link wrap instead of truncating."""
+    from ptest import uninstall as uninstall_api
+    _fake_home(tmp_path, monkeypatch)
+    long_root = Path("/tmp") / ("very-long-install-dir-name-" * 6)
+    long_link = Path("/tmp") / ("very-long-link-dir-name-" * 6) / "ptest"
+    plan = uninstall_api.RepoPlan(root=Path("/repo"),
+                                  checkout_id="ab" * 16, entries=())
+    self_plan = uninstall_api.SelfPlan(
+        requested=True, root=long_root, path_link=str(long_link))
+
+    out = uninstall_api.render_text(plan, width=40, self_plan=self_plan)
+    assert "…" not in out
+    joined = "".join(line.strip() for line in out.splitlines())
+    assert str(long_root) in joined
+    assert str(long_link) in joined
+
+
+def test_self_result_reports_kept_user_files(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-8/U4-1: leftover user files are reported as kept in text output."""
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    (inst / "Documents").mkdir()
+    (inst / "Documents" / "thesis.tex").write_text("x\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    assert _uninstall(domain, "--self", "--yes") == 0
+    out = capsys.readouterr().out
+    assert "Documents" in out and "kept" in out
+
+
+def test_plan_self_ignores_path_lookup_for_roots(tmp_path, monkeypatch):
+    """U4-7: a root reachable only via PATH is never planned."""
+    from ptest import uninstall as uninstall_api
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ptest").symlink_to(target)
+    monkeypatch.setenv("PATH", str(bindir))
+    stub = tmp_path / "argv-stub"
+    stub.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(stub)])
+    monkeypatch.setattr(
+        shutil, "which", lambda *args, **kwargs: str(bindir / "ptest"))
+
+    plan = uninstall_api.plan_self()
+    assert plan.root is None
+    assert plan.refused is None
+
+
+def test_plan_self_roots_come_only_from_binary_or_default(
+        tmp_path, monkeypatch):
+    """U4-7: PATH + the known launcher feed only the PATH-link check."""
+    from ptest import uninstall as uninstall_api
+    home = _fake_home(tmp_path, monkeypatch)
+    inst = home / ".local" / "ptest"
+    inst.mkdir(parents=True)
+    _install_fixture(inst)
+    other = tmp_path / "other-inst"
+    other.mkdir()
+    other_target = _install_fixture(other, bundle_id="8" * 8)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ptest").symlink_to(other_target)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(
+        shutil, "which", lambda *args, **kwargs: str(bindir / "ptest"))
+    launcher_dir = home / ".local" / "bin"
+    launcher_dir.mkdir(parents=True)
+    launcher = launcher_dir / "ptest"
+    launcher.symlink_to(inst / "ptest")
+    stub = tmp_path / "argv-stub"
+    stub.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(stub)])
+
+    plan = uninstall_api.plan_self()
+    assert plan.root == inst
+    assert plan.refused is None
+    assert plan.path_link == str(launcher)
+
+
+def test_json_self_requested_reflects_the_flag(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-5: self.requested is the real flag, asserted both ways."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes", "--json") == 0
+    plain = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert plain.data["self"]["requested"] is False
+
+    assert _uninstall(domain, "--self", "--yes", "--json") == 0
+    with_self = C.decode_public_document(
+        capsys.readouterr().out.encode("utf-8"))
+    assert with_self.data["self"]["requested"] is True
+
+
+def test_json_without_yes_returns_the_plan_without_prompt(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-9: --json without --yes/--dry-run never prompts.
+
+    Exactly one document: the success document with applied=false,
+    exit non-zero.
+    """
+    import json as json_stdlib
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("builtins.input",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("must never prompt")))
+
+    code = _uninstall(domain, "--json")
+    raw = capsys.readouterr().out
+    assert code != 0
+    json_stdlib.loads(raw)
+    doc = C.decode_public_document(raw.encode("utf-8"))
+    assert doc.error is None
+    assert doc.data["result"]["applied"] is False
+    assert any(entry["target"] == ".ptest.toml"
+               for entry in doc.data["plan"])
+    assert (root / ".ptest.toml").is_file()
+
+
+def test_self_refuses_when_a_bundle_entry_is_invalid(
+        case, tmp_path, monkeypatch, capsys):
+    """U4-1 twin: one bad .ptest-bundles entry refuses the whole --self."""
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    (inst / ".ptest-bundles" / "junk.txt").write_text("not a bundle\n",
+                                                     encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    code = _uninstall(domain, "--self", "--yes")
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "bundle" in captured.err
+    assert (inst / "ptest").is_symlink()
+    assert (inst / ".ptest-bundles" / "99999999").is_dir()
 
 
 

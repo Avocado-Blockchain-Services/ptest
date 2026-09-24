@@ -222,14 +222,20 @@ as kept (edited); symlinks, unbalanced marker blocks, and anything outside
 the repository root are never touched and reported as skipped.
 
 The full plan prints first, grouped by action (remove, kept (edited),
-skipped). On a TTY, uninstall asks once: `Remove these? [y/N]`.
-Non-interactive runs require --yes; without it the plan prints and the
-command exits non-zero. --dry-run prints the plan and changes nothing.
---json emits the versioned uninstall document. A second run reports
-nothing to remove and exits 0. --self also removes the local ptest
-installation (default ~/.local/ptest) when it looks like an install.sh
-layout, plus a PATH ptest symlink only when it resolves into that root;
-anything else is left alone. --self works outside any repository."""
+skipped). Skipped entries are informational and exit 0; only refusals
+(active run, missing --yes, failures) exit non-zero. On a TTY, uninstall
+asks once: `Remove these? [y/N]`. Non-interactive runs require --yes;
+without it the plan prints and the command exits non-zero. --dry-run
+prints the plan and changes nothing. --json emits the versioned
+uninstall document; without --yes it prints the plan document with
+applied=false and exits non-zero without prompting. A second run
+reports nothing to remove and exits 0. --self also removes the local
+ptest installation (default ~/.local/ptest) when it looks like an
+install.sh layout: only installer-created entries go (the bundle dirs,
+the installer symlink, leftover temp links), plus a PATH ptest symlink
+only when it resolves into that root. Anything else inside the root is
+kept and reported, and the root itself stays when it is not empty.
+--self works outside any repository."""
 
 _RUN = """Running tests: scoped iteration and the integrated full gate, from the repository root.
 

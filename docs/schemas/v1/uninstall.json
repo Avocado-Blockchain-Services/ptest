@@ -35,6 +35,9 @@
         },
         "result": {
           "properties": {
+            "applied": {
+              "type": "boolean"
+            },
             "kept": {
               "items": {
                 "type": "string"
@@ -61,7 +64,8 @@
             "removed",
             "kept",
             "skipped",
-            "nothing_to_remove"
+            "nothing_to_remove",
+            "applied"
           ],
           "type": "object"
         },
@@ -70,6 +74,12 @@
         },
         "self": {
           "properties": {
+            "kept": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "path_symlink_removed": {
               "type": "boolean"
             },
@@ -90,7 +100,8 @@
             "requested",
             "root",
             "removed",
-            "path_symlink_removed"
+            "path_symlink_removed",
+            "kept"
           ],
           "type": "object"
         }

@@ -70,5 +70,7 @@ setup records, scheduler rows). Files you edited are kept and reported;
 symlinks and anything outside the repository root are never touched. The
 plan prints first (grouped by action); a TTY is asked once, while
 non-interactive runs require `--yes` and `--dry-run` changes nothing.
-`ptest uninstall --self` also removes the local installation. See
+Skipped entries are informational and exit 0.
+`ptest uninstall --self` also removes the local installation (only
+installer-created entries; anything else inside the root is kept). See
 `ptest help uninstall` for details.

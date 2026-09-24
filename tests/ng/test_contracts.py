@@ -319,9 +319,9 @@ def _full_payloads():
             "plan": [{"action": "remove", "target": ".ptest.toml",
                       "detail": "ptest config"}],
             "result": {"removed": [".ptest.toml"], "kept": [], "skipped": [],
-                       "nothing_to_remove": False},
+                       "nothing_to_remove": False, "applied": True},
             "self": {"requested": False, "root": None, "removed": False,
-                     "path_symlink_removed": False},
+                     "path_symlink_removed": False, "kept": []},
         },
     }
 
@@ -379,9 +379,9 @@ def test_nine_public_documents_parse():
     assert set(projected.data) == {"root", "dry_run", "plan", "result", "self"}
     assert set(projected.data["plan"][0]) == {"action", "target", "detail"}
     assert set(projected.data["result"]) == {
-        "removed", "kept", "skipped", "nothing_to_remove"}
+        "removed", "kept", "skipped", "nothing_to_remove", "applied"}
     assert set(projected.data["self"]) == {
-        "requested", "root", "removed", "path_symlink_removed"}
+        "requested", "root", "removed", "path_symlink_removed", "kept"}
     history_doc = C.decode_public_document(
         C.encode_public_document("history", _full_payloads()["history"]))
     assert history_doc.data["summaries"][0]["run_id"] == RUN_ID
@@ -521,9 +521,9 @@ def test_generated_schema_files_match_frozen_shapes():
     assert uninstall["plan"]["items"]["properties"]["action"]["enum"] == [
         "remove", "kept", "skipped"]
     assert sorted(uninstall["result"]["required"]) == [
-        "kept", "nothing_to_remove", "removed", "skipped"]
+        "applied", "kept", "nothing_to_remove", "removed", "skipped"]
     assert sorted(uninstall["self"]["required"]) == [
-        "path_symlink_removed", "removed", "requested", "root"]
+        "kept", "path_symlink_removed", "removed", "requested", "root"]
 
 
 def test_workspace_aggregate_keeps_exact_v1_doctor_keys_and_enums(case, tmp_path):
