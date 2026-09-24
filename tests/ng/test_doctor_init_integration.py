@@ -182,7 +182,9 @@ def test_init_persea_shaped_monorepo_reports_projects_and_fix(
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
 
     out = capsys.readouterr().out
-    assert "not runnable: pytest addopts enable xdist" in out
+    flat = " ".join(out.split())
+    assert "not runnable" in flat
+    assert "pytest addopts enable xdist, which ptest runs serially" in flat
     assert ('add "-n", "0" to [runner] args in api/.ptest.toml') in out
     assert "fix api:" in out
     assert "ptest --full" not in out
