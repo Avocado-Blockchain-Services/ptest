@@ -833,8 +833,10 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
 
     counts = Counter(items)
     # Only planned provider requests take a call: deterministic answers
-    # (TIMING/SELECT) and deterministic skips never reach the provider.
-    assert set(counts) <= catalog_ids - {"TIMING-001", "SELECT-001"}
+    # (TIMING/SELECT/PARALLEL) and deterministic skips never reach the
+    # provider.
+    assert set(counts) <= catalog_ids - {
+        "TIMING-001", "SELECT-001", "PARALLEL-001"}
     # Web reviews every non-deterministic item (9); api skips the three
     # pure-library items without a model call (6). At most one call per
     # child.
@@ -906,6 +908,130 @@ def test_doctor_fresh_xdist_project_parallel_satisfied(
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "## PARALLEL-001" in report
+
+
+# ---- (d2) one safety gap keeps the safety-first parallel fix ------------------
+
+def _write_unconfigured_db_project(root: Path) -> None:
+    """Standalone pytest project: no xdist, database usage, one passing test.
+
+    Empty addopts means no parallel runner is configured, so PARALLEL-001
+    plans the safety-first provisional fix. The ``DATABASE_URL`` line
+    defeats the ``no-database`` skip, so DB-001/DB-002 go to the provider.
+    """
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n"
+        "addopts = ''\n",
+        encoding="utf-8",
+    )
+    (tests / "test_example.py").write_text(
+        "import os\n"
+        "\n"
+        "DATABASE_URL = os.environ.get(\n"
+        "    'DATABASE_URL', 'sqlite:///fallback.db')\n"
+        "\n"
+        "\n"
+        "def test_example():\n"
+        "    assert DATABASE_URL\n",
+        encoding="utf-8",
+    )
+
+
+def _install_fake_claude_with_db_gap(bindir: Path) -> None:
+    """Claude-shaped fake answering a DB-002 gap, satisfied elsewhere."""
+    script = "\n".join([
+        "#!" + sys.executable,
+        "import json, os, sys",
+        "here = os.path.dirname(os.path.abspath(sys.argv[0]))",
+        "if len(sys.argv) > 1 and sys.argv[1] == '--version':",
+        "    sys.stdout.write('claude-test 1.0\\n')",
+        "    sys.exit(0)",
+        "request = json.load(sys.stdin)",
+        "item_id = request['policy']['item']['id']",
+        "with open(os.path.join(here, 'argv.log'), 'a',",
+        "          encoding='utf-8') as handle:",
+        "    handle.write(json.dumps({'argv': sys.argv[1:],",
+        "                              'item': item_id}) + '\\n')",
+        "excerpts = request['excerpts']",
+        "if excerpts:",
+        "    first = excerpts[0]",
+        "    citation = {'path': first['path'],",
+        "                'start_line': first['start_line'],",
+        "                'end_line': first['end_line'],",
+        "                'sha256': first['sha256']}",
+        "    if item_id == 'DB-002':",
+        "        reply = {'status': 'gap',",
+        "                 'rationale': ('DB-002 shows the tests share one '",
+        "                               'database without isolation.'),",
+        "                 'evidence': [citation],",
+        "                 'finding': {",
+        "                     'summary': ('Tests share one database '",
+        "                                 'without isolation.'),",
+        "                     'suggested_change': ('Give each test its own '",
+        "                                          'isolated database.'),",
+        "                     'evidence': [citation]}}",
+        "    else:",
+        "        reply = {'status': 'satisfied',",
+        "                 'rationale': ('Reviewed ' + item_id + ' against '",
+        "                             'the cited excerpt lines.'),",
+        "                 'evidence': [citation],",
+        "                 'finding': None}",
+        "else:",
+        "    reply = {'status': 'unknown',",
+        "             'rationale': ('The bounded source evidence does not '",
+        "                         'establish this row.'),",
+        "             'evidence': [], 'finding': None}",
+        "envelope = {'type': 'result', 'subtype': 'success',",
+        "            'is_error': False, 'num_turns': 1,",
+        "            'permission_denials': [],",
+        "            'result': json.dumps(reply)}",
+        "sys.stdout.write(json.dumps(envelope))",
+        "",
+    ])
+    bindir.mkdir(exist_ok=True)
+    executable = bindir / "claude"
+    executable.write_text(script, encoding="utf-8")
+    executable.chmod(0o755)
+
+
+@needs_t4
+def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
+        tmp_path, monkeypatch, capsys):
+    """One safety gap (DB-002) keeps the safety-first parallel fix."""
+    root = tmp_path / "db-gap-doctor"
+    root.mkdir()
+    _write_unconfigured_db_project(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    capsys.readouterr()
+    bindir = tmp_path / "bin"
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    _install_fake_claude_with_db_gap(bindir)
+    monkeypatch.setenv(
+        "PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+    human = capsys.readouterr()
+    assert "✗ Database isolation" in human.out
+    assert "✗ Parallel execution" in human.out
+    assert "Resolve the parallel-safety gaps first." in human.out
+    assert "request workers with -n auto" not in human.out
+
+    launches = _read_launches(bindir)
+    items = [entry["item"] for entry in launches]
+    assert "DB-002" in items
+    assert "PARALLEL-001" not in items
+
+    report = (root / "recommendations.md").read_text(encoding="utf-8")
+    assert "## PARALLEL-001" in report
+    assert "Resolve the parallel-safety gaps first." in report
 
 
 # ---- (e) init on the same monorepo -------------------------------------------

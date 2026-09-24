@@ -571,12 +571,89 @@ def test_parallel_gap_finding_prose_is_trusted_plain_text(tmp_path):
         assert "|" not in answer.finding_summary + answer.finding_change
 
 
-def test_parallel_vitest_suggestion_variant_is_trusted():
+def test_parallel_missing_xdist_is_gap_with_environment_fix(tmp_path):
+    """Twin: no .venv plus ``-n 4`` is an environment gap, never a config fix."""
+    answers = _parallel_answers_for(tmp_path, addopts="-n 4")
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.reason == (
+        "pytest configures xdist but pytest-xdist is not installed in "
+        "the project environment yet; ptest runs serially until setup "
+        "installs it")
+    assert answer.finding_change == "install pytest-xdist 3.8.0"
+    assert "Clear the serial fallback" not in answer.finding_change
+    assert answer.finding_summary.count("ptest runs serially") == 1
+
+
+def test_parallel_missing_xdist_with_setup_names_setup_fix(tmp_path):
+    """With a setup argv, the environment fix names the project setup."""
+    from dataclasses import replace
+
+    setup = C.SetupConfig(
+        argv=("uv", "sync", "--locked"), required_paths=(".venv",),
+        network=False, lifecycle_scripts=False)
+    config = replace(_parallel_config(tmp_path), setup=setup)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4'\n",
+        encoding="utf-8",
+    )
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": "[selection]\\nenabled = false\\n"})
     from ptest import deterministic_items as DI
 
-    suggestion = DI.parallel_suggestion("vitest")
-    assert "vitest" in suggestion
-    assert C.aa_prose_is_untrusted(suggestion) is False
+    answer = DI.answers_for(_domain(tmp_path),
+                            _resolution(tmp_path, config),
+                            packet)["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.finding_change == (
+        "run the project setup (uv sync --locked) "
+        "so ptest can use pytest-xdist")
+    assert answer.finding_summary.count("ptest runs serially") == 1
+
+
+def test_parallel_unverifiable_launcher_is_gap_with_environment_fix(tmp_path):
+    """A bare launcher cannot verify xdist: environment fix, no dup phrase."""
+    config = _parallel_config(tmp_path, launcher=("python",))
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4", config=config)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert "cannot verify pytest-xdist" in answer.reason
+    assert answer.finding_change == "install pytest-xdist 3.8.0"
+    assert "Clear the serial fallback" not in answer.finding_change
+    assert answer.finding_summary.count("ptest runs serially") == 1
+
+
+def test_finalize_parallel_swaps_safety_first_when_clear(tmp_path):
+    from ptest import deterministic_items as DI
+
+    answer = _parallel_answers_for(tmp_path, addopts=None)["PARALLEL-001"]
+    assert answer.finding_change == "Resolve the parallel-safety gaps first."
+    final = DI.finalize_parallel(answer, False)
+    assert final.status == "gap"
+    assert final.reason == answer.reason
+    assert final.finding_change == (
+        "Add pytest-xdist to the project environment and request workers "
+        "with -n auto in the pytest configuration.")
+
+
+def test_finalize_parallel_keeps_safety_first_when_blocked(tmp_path):
+    from ptest import deterministic_items as DI
+
+    answer = _parallel_answers_for(tmp_path, addopts=None)["PARALLEL-001"]
+    assert DI.finalize_parallel(answer, True) == answer
+    assert DI.finalize_parallel(answer, None) == answer
+
+
+def test_finalize_parallel_leaves_other_fixes_alone(tmp_path):
+    from ptest import deterministic_items as DI
+
+    _stub_qualified_venv(tmp_path)
+    config = _parallel_config(tmp_path, args=("-n", "0"))
+    answer = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=loadgroup",
+        config=config)["PARALLEL-001"]
+    assert DI.finalize_parallel(answer, False) == answer
 
 
 def test_parallel_unreadable_facts_is_unknown_with_reason(tmp_path,
@@ -584,10 +661,10 @@ def test_parallel_unreadable_facts_is_unknown_with_reason(tmp_path,
     from ptest import deterministic_items as DI
     from ptest import executability as executability_api
 
-    def _boom(resolution):
+    def _boom(config, *, project="."):
         raise RuntimeError("facts unavailable")
 
-    monkeypatch.setattr(executability_api, "check_resolution", _boom)
+    monkeypatch.setattr(executability_api, "check_config", _boom)
     packet = _packet_for(tmp_path, {
         ".ptest.toml": "[selection]\\nenabled = false\\n"})
     answers = DI.answers_for(_domain(tmp_path),

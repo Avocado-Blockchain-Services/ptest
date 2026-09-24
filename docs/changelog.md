@@ -9,3 +9,6 @@
   no remote testing or provider API was added.
 - `ptest init` now anchors at the Git root, bootstraps bounded monorepo child
   configs, and can add opt-in repository-local agent skill references.
+- Doctor now reports parallel execution as checklist item PARALLEL-001
+  (checklist grows from 11 to 12 rows), answered deterministically from the
+  pytest-xdist configuration and gated on the parallel-safety items.

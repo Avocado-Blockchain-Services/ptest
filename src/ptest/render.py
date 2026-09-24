@@ -71,11 +71,9 @@ _ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z]+);")
 
 # Checklist rows rendered as a visible "parallel safety" group, with
 # PARALLEL-001 (added by the deterministic-items task) trailing it.
-_PARALLEL_SAFETY_IDS = frozenset({
-    "FIX-002", "DB-001", "DB-002", "CACHE-001",
-    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-})
-_PARALLEL_ITEM_ID = "PARALLEL-001"
+# Single-sourced from checklist (the canonical catalog owner).
+_PARALLEL_SAFETY_IDS = frozenset(checklist_api.PARALLEL_SAFETY_IDS)
+_PARALLEL_ITEM_ID = checklist_api.PARALLEL_ITEM_ID
 
 
 def _agent_assessment_prose(value: object) -> str:

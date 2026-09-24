@@ -3049,8 +3049,9 @@ def _check_aa_score(value: object, rows: list, ctx: str) -> None:
         raise _invalid("report-invalid", f"{ctx} must be an object")
     _check_required_keys(value, _AGENT_ASSESSMENT_SCORE_FIELDS, ctx)
     applicable = len(rows) - na_count
-    _check_int_field(value, "satisfied", ctx, lo=0, hi=12)
-    _check_int_field(value, "applicable", ctx, lo=1, hi=12)
+    bound = len(AGENT_ASSESSMENT_CHECKLIST_IDS)
+    _check_int_field(value, "satisfied", ctx, lo=0, hi=bound)
+    _check_int_field(value, "applicable", ctx, lo=1, hi=bound)
     _check_int_field(value, "percent", ctx, lo=0, hi=100)
     if (value["satisfied"] != satisfied
             or value["applicable"] != applicable
@@ -3103,8 +3104,9 @@ def _check_aa_child(item: object, ctx: str) -> None:
     rows = item["rows"]
     if (not isinstance(rows, list)
             or len(rows) != len(AGENT_ASSESSMENT_CHECKLIST_IDS)):
+        count = len(AGENT_ASSESSMENT_CHECKLIST_IDS)
         raise _invalid("report-invalid",
-                       f"{ctx}.rows must hold all 12 checklist rows")
+                       f"{ctx}.rows must hold all {count} checklist rows")
     for index, entry in enumerate(rows):
         _check_aa_row(entry, f"{ctx}.rows[{index}]", index)
     _check_aa_score(item["score"], rows, f"{ctx}.score")
@@ -4305,11 +4307,14 @@ def _aa_finding_schema() -> dict:
 
 
 def _aa_score_schema() -> dict:
+    bound = len(AGENT_ASSESSMENT_CHECKLIST_IDS)
     return {
         "type": ["object", "null"],
         "properties": {
-            "satisfied": {"type": "integer", "minimum": 0, "maximum": 12},
-            "applicable": {"type": "integer", "minimum": 1, "maximum": 12},
+            "satisfied": {"type": "integer", "minimum": 0,
+                          "maximum": bound},
+            "applicable": {"type": "integer", "minimum": 1,
+                           "maximum": bound},
             "percent": {"type": "integer", "minimum": 0, "maximum": 100},
         },
         "required": ["satisfied", "applicable", "percent"],

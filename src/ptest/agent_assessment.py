@@ -487,9 +487,10 @@ class Score:
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"score.{field} must be int")
-        if not 0 <= self.satisfied <= 12:
+        bound = len(C.AGENT_ASSESSMENT_CHECKLIST_IDS)
+        if not 0 <= self.satisfied <= bound:
             raise ValueError("score.satisfied is out of range")
-        if not 1 <= self.applicable <= 12:
+        if not 1 <= self.applicable <= bound:
             raise ValueError("score.applicable is out of range")
         if not 0 <= self.percent <= 100:
             raise ValueError("score.percent is out of range")

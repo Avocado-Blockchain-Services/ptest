@@ -1230,7 +1230,7 @@ def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
     The planned PARALLEL-001 answer carries the safe provisional fix
     when no parallel runner is configured; once the sibling rows are
     assembled their safety outcomes are known, so the answer is
-    recomputed with ``deterministic_items.parallel_answer_for`` and the
+    finalized with ``deterministic_items.finalize_parallel`` and the
     child is reassembled when it changed. Pure otherwise: no model call
     and no new provider request either way.
     """
@@ -1245,8 +1245,8 @@ def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
     statuses = {row.id: row.status for row in assessment.rows}
     safety_gap = any(statuses.get(item_id) == "gap"
                      for item_id in deterministic.PARALLEL_SAFETY_IDS)
-    final = deterministic.parallel_answer_for(
-        domain, resolution, packet, safety_gap=safety_gap)
+    final = deterministic.finalize_parallel(
+        reviews[index].answer, safety_gap)
     if final is None or final == reviews[index].answer:
         return assessment
     patched = (reviews[:index]

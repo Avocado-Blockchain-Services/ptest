@@ -135,3 +135,58 @@ def test_process_item_routes_code_signals():
                    "proc.wait("):
         assert any(re.search(pattern, "probe " + signal + " probe")
                    for pattern in by_id["PROCESS-001"].text_patterns), signal
+
+
+def test_parallel_ids_are_single_sourced():
+    """PARALLEL_SAFETY_IDS / PARALLEL_ITEM_ID live in checklist only."""
+    import pytest
+
+    from ptest import checklist as checklist_api
+    from ptest import deterministic_items as deterministic_api
+    from ptest import recommendations as recommendations_api
+    from ptest import render as render_api
+
+    assert checklist_api.PARALLEL_ITEM_ID == "PARALLEL-001"
+    assert tuple(checklist_api.PARALLEL_SAFETY_IDS) == (
+        "FIX-002", "DB-001", "DB-002", "CACHE-001", "RESOURCE-001",
+        "NETWORK-001", "PROCESS-001", "TIME-001",
+    )
+    assert set(deterministic_api.PARALLEL_SAFETY_IDS) == set(
+        checklist_api.PARALLEL_SAFETY_IDS)
+    assert set(render_api._PARALLEL_SAFETY_IDS) == set(
+        checklist_api.PARALLEL_SAFETY_IDS)
+    assert set(recommendations_api._PARALLEL_SAFETY_IDS) == set(
+        checklist_api.PARALLEL_SAFETY_IDS)
+    assert render_api._PARALLEL_ITEM_ID == checklist_api.PARALLEL_ITEM_ID
+    assert recommendations_api._PARALLEL_ITEM_ID == (
+        checklist_api.PARALLEL_ITEM_ID)
+    assert deterministic_api.DETERMINISTIC_ITEM_IDS[-1] == (
+        checklist_api.PARALLEL_ITEM_ID)
+    with pytest.raises(AttributeError):
+        render_api._PARALLEL_SAFETY_IDS.add("PARALLEL-001")
+
+
+def test_score_bounds_derive_from_checklist_length():
+    """Score bounds and the 'all N' row count follow the catalog length."""
+    import pytest
+
+    from ptest import agent_assessment as assessment_api
+    from ptest import checklist as checklist_api
+    from ptest import contracts as contracts_api
+
+    count = len(checklist_api.CATALOG)
+    assert count == 12
+    assert tuple(contracts_api.AGENT_ASSESSMENT_CHECKLIST_IDS) == tuple(
+        entry.id for entry in checklist_api.CATALOG)
+    full = assessment_api.Score(satisfied=count, applicable=count,
+                               percent=100)
+    assert (full.satisfied, full.applicable) == (count, count)
+    with pytest.raises(ValueError):
+        assessment_api.Score(satisfied=count + 1, applicable=count,
+                            percent=100)
+    with pytest.raises(ValueError):
+        assessment_api.Score(satisfied=count, applicable=count + 1,
+                            percent=100)
+    schema = contracts_api._aa_score_schema()
+    assert schema["properties"]["satisfied"]["maximum"] == count
+    assert schema["properties"]["applicable"]["maximum"] == count

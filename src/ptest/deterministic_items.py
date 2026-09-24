@@ -16,27 +16,21 @@ configured, the enabling suggestion is gated on the parallel-safety items
 PROCESS-001, TIME-001), whose outcomes exist only after the model replies.
 ``answers_for`` plans the safe provisional fix ("resolve the
 parallel-safety gaps first"); the doctor flow finalizes it with
-``parallel_answer_for`` once the sibling rows are assembled.
+``finalize_parallel`` once the sibling rows are assembled.
 """
 from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import contracts as C
 from . import history as history_api
+from .checklist import PARALLEL_ITEM_ID, PARALLEL_SAFETY_IDS
 
 DETERMINISTIC_ITEM_IDS: tuple[str, ...] = (
-    "SELECT-001", "TIMING-001", "PARALLEL-001")
-
-#: Parallel-safety items gating the PARALLEL-001 enabling suggestion: the
-#: suggestion to add workers is offered only when none of these has a gap.
-PARALLEL_SAFETY_IDS: tuple[str, ...] = (
-    "FIX-002", "DB-001", "DB-002", "CACHE-001", "RESOURCE-001",
-    "NETWORK-001", "PROCESS-001", "TIME-001",
-)
+    "SELECT-001", "TIMING-001", PARALLEL_ITEM_ID)
 
 #: Exact executability text for "xdist not active" (the not-configured case).
 _NOT_CONFIGURED_PARALLEL = "no — xdist is not enabled in your pytest config"
@@ -259,13 +253,39 @@ def _timing_answer(domain: C.DomainPaths, config: C.Config, resolution,
         evidence_paths=())
 
 
-def parallel_suggestion(runner: str) -> str:
+#: Serial-fallback reasons that come from the environment (xdist not
+#: installed yet, multiple installs, unqualified version, unverifiable
+#: launcher) rather than the pytest configuration. These get an
+#: environment fix, never a "clear the serial fallback" config fix.
+_ENVIRONMENT_PARALLEL_MARKERS: tuple[str, ...] = (
+    "pytest-xdist is not installed",
+    "more than one pytest-xdist",
+    "is not qualified",
+    "cannot verify pytest-xdist",
+)
+
+#: Trailing executability phrase stripped from the serial reason before
+#: the finding summary is built, so the summary names it once.
+_SERIAL_TAIL = "; ptest runs serially"
+
+
+def parallel_suggestion(runner: str = "pytest") -> str:
     """Enabling suggestion for the not-configured PARALLEL-001 gap."""
-    if runner == "vitest":
-        return ("Set the vitest pool options to run tests "
-                "with multiple workers.")
     return ("Add pytest-xdist to the project environment and request "
             "workers with -n auto in the pytest configuration.")
+
+
+def _parallel_environment_fix(facts: dict) -> str:
+    """Environment fix for an environment serial-fallback reason."""
+    from . import executability as executability_api
+
+    setup = facts.get("setup")
+    if isinstance(setup, str) and setup.strip():
+        return (f"run the project setup ({setup}) "
+                "so ptest can use pytest-xdist")
+    qualified = ", ".join(sorted(
+        executability_api.XDIST_QUALIFIED_VERSIONS))
+    return f"install pytest-xdist {qualified}"
 
 
 def _parallel_unknown(runner: str) -> str:
@@ -275,31 +295,13 @@ def _parallel_unknown(runner: str) -> str:
     return "ptest cannot tell whether this project runs tests in parallel"
 
 
-def _parallel_facts(resolution: C.ConfigResolution,
-                    declaration: str) -> dict | None:
-    """Executability facts for one child, or None when unreadable."""
-    from . import executability as executability_api
-
-    try:
-        items = executability_api.check_resolution(resolution)
-    except Exception:
-        return None
-    for item in items:
-        if item.project == declaration:
-            try:
-                return item.facts()
-            except Exception:
-                return None
-    return None
-
-
 def _parallel_answer(facts: dict | None, runner: str,
                      evidence: tuple[str, ...],
                      safety_gap: bool | None) -> DeterministicAnswer:
     """Build the PARALLEL-001 answer from one child's executability facts."""
     if facts is None:
         return DeterministicAnswer(
-            item_id="PARALLEL-001", status="unknown",
+            item_id=PARALLEL_ITEM_ID, status="unknown",
             reason=("ptest cannot read the parallel configuration "
                     "for this project"),
             evidence_paths=())
@@ -308,24 +310,24 @@ def _parallel_answer(facts: dict | None, runner: str,
     if runner == "vitest":
         if short == "inside vitest":
             return DeterministicAnswer(
-                item_id="PARALLEL-001", status="satisfied",
+                item_id=PARALLEL_ITEM_ID, status="satisfied",
                 reason="tests run inside vitest with its own workers",
                 evidence_paths=evidence)
         return DeterministicAnswer(
-            item_id="PARALLEL-001", status="unknown",
+            item_id=PARALLEL_ITEM_ID, status="unknown",
             reason=_parallel_unknown(runner),
             evidence_paths=evidence)
     if runner == "pytest":
         if isinstance(short, str) and short != "no":
             return DeterministicAnswer(
-                item_id="PARALLEL-001", status="satisfied",
+                item_id=PARALLEL_ITEM_ID, status="satisfied",
                 reason=f"pytest runs in parallel with {parallel}",
                 evidence_paths=evidence)
         if parallel == _NOT_CONFIGURED_PARALLEL:
             change = (parallel_suggestion(runner)
                       if safety_gap is False else _SAFETY_FIRST_FIX)
             return DeterministicAnswer(
-                item_id="PARALLEL-001", status="gap",
+                item_id=PARALLEL_ITEM_ID, status="gap",
                 reason="no parallel runner is configured for this project",
                 evidence_paths=evidence,
                 finding_summary=("No parallel runner is configured, so "
@@ -333,23 +335,29 @@ def _parallel_answer(facts: dict | None, runner: str,
                 finding_change=change)
         if isinstance(parallel, str) and parallel.startswith(_NO_PREFIX):
             serial_reason = parallel[len(_NO_PREFIX):]
-            fix = (facts.get("parallel_fix") or facts.get("runs_fix")
-                   or f"Clear the serial fallback in the pytest "
-                   f"configuration ({serial_reason}) so ptest runs with "
-                   f"xdist workers.")
+            serial_short = serial_reason.split(_SERIAL_TAIL)[0]
+            if any(marker in serial_reason
+                   for marker in _ENVIRONMENT_PARALLEL_MARKERS):
+                fix = (facts.get("parallel_fix")
+                       or _parallel_environment_fix(facts))
+            else:
+                fix = (facts.get("parallel_fix") or facts.get("runs_fix")
+                       or f"Clear the serial fallback in the pytest "
+                       f"configuration ({serial_reason}) so ptest runs with "
+                       f"xdist workers.")
             return DeterministicAnswer(
-                item_id="PARALLEL-001", status="gap",
+                item_id=PARALLEL_ITEM_ID, status="gap",
                 reason=f"pytest configures xdist but {serial_reason}",
                 evidence_paths=evidence,
                 finding_summary=("pytest configures xdist but ptest runs "
-                                 f"serially: {serial_reason}"),
+                                 f"serially: {serial_short}"),
                 finding_change=fix)
         return DeterministicAnswer(
-            item_id="PARALLEL-001", status="unknown",
+            item_id=PARALLEL_ITEM_ID, status="unknown",
             reason=_parallel_unknown(runner),
             evidence_paths=evidence)
     return DeterministicAnswer(
-        item_id="PARALLEL-001", status="unknown",
+        item_id=PARALLEL_ITEM_ID, status="unknown",
         reason=_parallel_unknown(runner),
         evidence_paths=evidence)
 
@@ -366,6 +374,8 @@ def parallel_answer_for(domain: C.DomainPaths,
     Read-only: executability facts are read, never written, and the
     scheduler is never touched.
     """
+    from . import executability as executability_api
+
     try:
         declaration = packet.declaration
         config = _child_config(resolution, declaration)
@@ -374,11 +384,31 @@ def parallel_answer_for(domain: C.DomainPaths,
         cfg = _cfg(declaration)
         excerpt_paths = {excerpt.path for excerpt in packet.excerpts}
         evidence = (cfg,) if cfg in excerpt_paths else ()
-        facts = _parallel_facts(resolution, declaration)
+        try:
+            facts = executability_api.check_config(
+                config, project=declaration).facts()
+        except Exception:
+            facts = None
         runner = config.runner.kind.value
         return _parallel_answer(facts, runner, evidence, safety_gap)
     except Exception:
         return None
+
+
+def finalize_parallel(answer: DeterministicAnswer | None,
+                      safety_gap: bool | None) -> DeterministicAnswer | None:
+    """Finalize a planned PARALLEL-001 answer against the safety outcomes.
+
+    The planned not-configured answer carries the safe provisional fix
+    ("resolve the parallel-safety gaps first"); when no safety item has a
+    gap, swap in the parallel enabling suggestion. Anything else (no
+    answer, another fix, an actual safety gap) passes through unchanged.
+    Pure: no executability re-read, no model call.
+    """
+    if (answer is not None and answer.finding_change == _SAFETY_FIRST_FIX
+            and safety_gap is False):
+        return replace(answer, finding_change=parallel_suggestion())
+    return answer
 
 
 def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
@@ -404,7 +434,7 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
         "TIMING-001": timing,
     }
     if parallel is not None:
-        answers["PARALLEL-001"] = parallel
+        answers[PARALLEL_ITEM_ID] = parallel
     return answers
 
 
@@ -426,4 +456,4 @@ def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
 
 __all__ = ["DETERMINISTIC_ITEM_IDS", "PARALLEL_SAFETY_IDS",
            "DeterministicAnswer", "answers_for", "parallel_answer_for",
-           "parallel_suggestion"]
+           "finalize_parallel", "parallel_suggestion"]

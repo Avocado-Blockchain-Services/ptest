@@ -368,6 +368,18 @@ CATALOG = tuple(
     for entry in CATALOG
 )
 
+#: Parallel-safety items gating the PARALLEL-001 enabling suggestion: the
+#: suggestion to add workers is offered only when none of these has a gap.
+#: Single source — deterministic_items, render, and recommendations import
+#: these names instead of keeping literal copies.
+PARALLEL_SAFETY_IDS: tuple[str, ...] = (
+    "FIX-002", "DB-001", "DB-002", "CACHE-001", "RESOURCE-001",
+    "NETWORK-001", "PROCESS-001", "TIME-001",
+)
+
+#: Checklist id of the parallel-execution item trailing the safety group.
+PARALLEL_ITEM_ID = "PARALLEL-001"
+
 
 def load_recipe(name: str) -> str:
     """Return one bounded packaged recipe; fail closed on unknown/missing data."""
@@ -390,4 +402,5 @@ def load_recipe(name: str) -> str:
 
 
 __all__ = ["CATALOG", "ChecklistEntry", "load_recipe", "TEST_DIR",
-           "TEST_FILE", "SRC_DIR"]
+           "TEST_FILE", "SRC_DIR", "PARALLEL_SAFETY_IDS",
+           "PARALLEL_ITEM_ID"]

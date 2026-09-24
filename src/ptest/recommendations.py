@@ -83,6 +83,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import checklist as checklist_api
 from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
 from .contracts import Problem
 from .project_facts import check_facts, long_lines
@@ -93,11 +94,9 @@ PTEST_ANSWER_PREFIX = "Answered by ptest: "
 
 # Checklist rows grouped under a visible "parallel safety" heading, with
 # PARALLEL-001 (added by the deterministic-items task) trailing them.
-_PARALLEL_SAFETY_IDS = frozenset({
-    "FIX-002", "DB-001", "DB-002", "CACHE-001",
-    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-})
-_PARALLEL_ITEM_ID = "PARALLEL-001"
+# Single-sourced from checklist (the canonical catalog owner).
+_PARALLEL_SAFETY_IDS = frozenset(checklist_api.PARALLEL_SAFETY_IDS)
+_PARALLEL_ITEM_ID = checklist_api.PARALLEL_ITEM_ID
 
 _PHASE = "publication"
 _REPORT_NAME = "recommendations.md"
