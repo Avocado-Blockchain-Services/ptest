@@ -582,7 +582,7 @@ def test_build_packets_skips_nonregular_and_invalid_utf8(tmp_path):
     assert packets[0].excluded_count >= 2
 
 
-def test_build_packets_rejects_invalid_utf8_cut_to_empty_and_keeps_empty_file(
+def test_build_packets_rejects_invalid_utf8_cut_to_empty_and_skips_empty_file(
         tmp_path, monkeypatch):
     from ptest import agent_assessment as AA
 
@@ -602,12 +602,13 @@ def test_build_packets_rejects_invalid_utf8_cut_to_empty_and_keeps_empty_file(
     packet = AA.build_packets(
         workspace, resolution, AA.EvidenceLimits(max_bytes_per_file=1))[0]
 
-    assert [excerpt.path for excerpt in packet.excerpts] == ["empty.py"]
-    assert packet.excerpts[0].text == ""
+    # A 0-byte file carries no evidence: it is excluded, never admitted
+    # with a line-1 bound over zero lines (which later fails as stale).
+    assert [excerpt.path for excerpt in packet.excerpts] == []
     assert not any(fact.ref_path == "pyproject.toml"
                    for fact in packet.dependencies)
-    assert packet.file_count == 1 and packet.byte_count == 0
-    assert packet.excluded_count == 0
+    assert packet.file_count == 0 and packet.byte_count == 0
+    assert packet.excluded_count == 1
     assert packet.truncated_count == 1
     assert len(reads) == 2
     assert sum(size for _, size, _ in reads) <= 2 * len(reads)
@@ -1702,14 +1703,36 @@ def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
                    "tests/test_db.py": "import sqlalchemy\ndef test_x():\n    assert True\n"})
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.item_id == "FIX-001")
-    for name, payload in _invalid_reply_cases(packet, target).items():
+    details = {
+        "not-json": "not JSON",
+        "extra-key": "carries an unknown field",
+        "missing-key": "missing 'finding'",
+        "outside-subset": (
+            "evidence[0] cites evidence outside the item subset"),
+        "gap-without-finding": "gap reply needs a finding",
+        "satisfied-with-finding": "non-gap reply must carry finding null",
+        "injected-failed-prefix": "rationale carries untrusted model content",
+        "untrusted-prose": "rationale carries untrusted model content",
+        "na-too-brief": "needs a specific not-applicable rationale",
+        "satisfied-no-citation": "needs at least one citation",
+        "unhashable-status-list": "has an unknown status",
+        "unhashable-status-dict": "has an unknown status",
+        "non-string-status-int": "has an unknown status",
+        "null-status": "has an unknown status",
+        "gap-with-list-finding": "gap reply needs a finding",
+        "gap-with-string-finding": "gap reply needs a finding",
+    }
+    cases = _invalid_reply_cases(packet, target)
+    assert set(cases) == set(details), "twin map must cover every case"
+    for name, payload in cases.items():
         replies = tuple(
             payload if review.item_id == "FIX-001"
             else _satisfied_reply(packet, review) for review in reviews)
         child = AA.assemble_child(packet, reviews, replies)
         row = next(r for r in child.rows if r.id == "FIX-001")
         assert (name, row.status, row.rationale) == (
-            name, "unknown", AA.FAILED_PREFIX + "invalid reply")
+            name, "unknown",
+            AA.FAILED_PREFIX + "invalid reply: " + details[name])
         assert [r.status for r in child.rows if r.id != "FIX-001"] == [
             "satisfied"] * 10
 
@@ -1965,7 +1988,8 @@ def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
     child = AA.assemble_child(packet, reviews, replies)
     row = next(r for r in child.rows if r.id == target.item_id)
     assert (row.status, row.rationale) == (
-        "unknown", AA.FAILED_PREFIX + "invalid reply")
+        "unknown", AA.FAILED_PREFIX + "invalid reply: "
+        "evidence[0] cites evidence outside the item subset")
 
 
 # --- T4: chain through the real provider launcher ---------------------------------
@@ -2041,3 +2065,166 @@ def test_plan_and_assemble_empty_packet(tmp_path):
     assert child.score is not None
     assert (child.score.satisfied, child.score.applicable,
             child.score.percent) == (0, 11, 0)
+
+
+# --- Round 15 twins: fenced replies, specific reasons, empty files -----------
+
+
+def _fenced(payload: bytes, *, tag: str = "json") -> bytes:
+    """Wrap a one-row payload the way Claude serves it: one markdown fence."""
+    return b"```" + tag.encode("utf-8") + b"\n" + payload + b"\n```"
+
+
+def test_fenced_valid_reply_is_accepted(tmp_path):
+    """A real-Claude-shaped fenced reply validates like its bare payload."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    bare = _satisfied_reply(packet, target)
+    for reply in (bare, _fenced(bare), _fenced(bare, tag=""),
+                  b"  \n" + _fenced(bare) + b"\n  "):
+        replies = tuple(
+            reply if review.item_id == target.item_id
+            else (None if review.request is None
+                  else _satisfied_reply(packet, review))
+            for review in reviews)
+        child = AA.assemble_child(packet, reviews, replies)
+        row = next(r for r in child.rows if r.id == target.item_id)
+        assert row.status == "satisfied", reply[:20]
+        assert row.evidence, reply[:20]
+
+
+def test_fence_with_prose_or_second_block_is_rejected(tmp_path):
+    """Prose outside the fence, or a second fenced block, stays invalid."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _satisfied_reply(packet, target)
+    bad = {
+        "fence-plus-prose": _fenced(good) + b"\nHope this helps.",
+        "prose-plus-fence": b"Here is the review:\n" + _fenced(good),
+        "two-blocks": _fenced(good) + b"\n" + _fenced(good),
+        "two-json-blocks": good + b"\n" + good,
+    }
+    for name, payload in bad.items():
+        replies = tuple(
+            payload if review.item_id == target.item_id
+            else (None if review.request is None
+                  else _satisfied_reply(packet, review))
+            for review in reviews)
+        child = AA.assemble_child(packet, reviews, replies)
+        row = next(r for r in child.rows if r.id == target.item_id)
+        assert (name, row.status, row.rationale) == (
+            name, "unknown", AA.FAILED_PREFIX + "invalid reply: not JSON")
+
+
+def test_fenced_reply_with_forbidden_keys_is_rejected(tmp_path):
+    """A fence does not smuggle unknown fields past validation."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good_path = target.excerpt_paths[0]
+    cite = _subset_citation(packet, good_path)
+    payload = _fenced(json.dumps(
+        {"status": "satisfied",
+         "rationale": "Rationale with enough substance here.",
+         "evidence": [cite], "finding": None,
+         "score": 1}).encode())
+    replies = tuple(
+        payload if review.item_id == target.item_id
+        else (None if review.request is None
+              else _satisfied_reply(packet, review))
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert (row.status, row.rationale) == (
+        "unknown",
+        AA.FAILED_PREFIX + "invalid reply: carries an unknown field")
+
+
+def test_invalid_replies_carry_specific_reasons(tmp_path):
+    """Validation failures name their reason after the failed prefix."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _satisfied_reply(packet, target)
+    assert AA.assemble_child(
+        packet, reviews,
+        tuple(good if review.item_id == target.item_id
+              else (None if review.request is None
+                    else _satisfied_reply(packet, review))
+              for review in reviews))
+    row = next(r for r in AA.assemble_child(
+        packet, reviews,
+        tuple(b"{nope" if review.item_id == target.item_id
+              else (None if review.request is None
+                    else _satisfied_reply(packet, review))
+              for review in reviews)).rows if r.id == target.item_id)
+    assert row.status == "unknown"
+    assert row.rationale == AA.FAILED_PREFIX + "invalid reply: not JSON"
+
+
+def test_empty_files_are_never_admitted(tmp_path):
+    """A 0-byte tests/__init__.py carries no evidence and stays out."""
+    from ptest import agent_assessment as AA
+
+    root = tmp_path / "proj"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "__init__.py").write_bytes(b"")
+    (root / "tests" / "test_demo.py").write_text(
+        "def test_demo():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n", encoding="utf-8")
+    workspace, resolution = _workspace(root)
+    packet = AA.build_packets(workspace, resolution)[0]
+    assert "tests/__init__.py" not in [e.path for e in packet.excerpts]
+    assert packet.excluded_count >= 1
+    assert all(e.text for e in packet.excerpts)
+
+
+def test_citation_to_empty_file_rejected_at_validation(tmp_path):
+    """An empty excerpt cannot back a citation: validation rejects it."""
+    import hashlib
+
+    import pytest
+
+    from ptest import agent_assessment as AA
+
+    empty = AA.SourceExcerpt(
+        path="tests/__init__.py", start_line=1, end_line=1,
+        sha256=hashlib.sha256(b"").hexdigest(), text="")
+    subset = {"tests/__init__.py": empty}
+    cite = {"path": "tests/__init__.py", "start_line": 1, "end_line": 1,
+            "sha256": hashlib.sha256(b"").hexdigest()}
+    with pytest.raises(C.Problem) as caught:
+        AA._bind_one_row_citations([cite], subset, "reply.evidence")
+    assert caught.value.code == "invalid-assessment"
+
+    packet = _pure_library_packet(
+        tmp_path, {"tests/__init__.py": ""})
+    assert "tests/__init__.py" not in [e.path for e in packet.excerpts]
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    stray = {"path": "tests/__init__.py", "start_line": 1, "end_line": 1,
+             "sha256": hashlib.sha256(b"").hexdigest()}
+    replies = tuple(
+        json.dumps({"status": "satisfied",
+                    "rationale": "Cites the empty init file.",
+                    "evidence": [stray],
+                    "finding": None}).encode()
+        if review.item_id == target.item_id
+        else (None if review.request is None
+              else _satisfied_reply(packet, review))
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert row.status == "unknown"
+    assert row.rationale.startswith(AA.FAILED_PREFIX + "invalid reply")
