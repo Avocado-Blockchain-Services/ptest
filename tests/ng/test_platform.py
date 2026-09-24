@@ -52,7 +52,8 @@ class _FakeSysctlByName:
         return self.result
 
 
-def test_domain_ignores_home_and_xdg(monkeypatch):
+def test_domain_ignores_home_and_xdg(monkeypatch, tmp_path):
+    _account_home(monkeypatch, _make_account_home(tmp_path))
     before = P.domain_paths(None)
     monkeypatch.setenv("HOME", "/unused/tui-home")
     monkeypatch.setenv("XDG_STATE_HOME", "/unused/tui-state")
