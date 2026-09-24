@@ -143,7 +143,7 @@ def test_xdist_activation_is_value_aware(tokens, active):
     (("-lx",), ("-lx",)),
     (("-xl",), ("-xl",)),
     (("-vk", "foo"), ("-vk",)),
-    (("-kfoo",), ("-kfoo",)),
+    (("-kfoo",), ("-k",)),
     (("-c", "other.ini"), ("-c",)),
     (("tests/test_a.py::test_x",), ("tests/test_a.py::test_x",)),
     (("--collect-only",), ("--collect-only",)),

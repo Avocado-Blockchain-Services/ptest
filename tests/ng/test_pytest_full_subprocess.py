@@ -180,6 +180,13 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
         "def pytest_collection_modifyitems(session, config, items):\n"
         "    yield\n"
     ),
+    # Collection-time hooks that can silently narrow a full run are
+    # checked exactly like modifyitems: accepted from a checkout
+    # conftest and recorded in the run label.
+    "def pytest_pycollect_makeitem():\n    pass\n",
+    "def pytest_collect_file():\n    pass\n",
+    "def pytest_collect_directory():\n    pass\n",
+    "def pytest_make_collect_report():\n    pass\n",
 ])
 def test_full_project_conftest_collection_hooks_run_labelled(case, hook_source):
     """Section F flips these twins: conftest collection hooks run labelled."""
@@ -558,6 +565,38 @@ def test_full_class_plugin_collection_hook_is_refused(case):
         "    @pytest.hookimpl\n"
         "    def pytest_collection_modifyitems(self, items):\n"
         "        items[:] = [item for item in items if 'test_b' not in item.nodeid]\n"
+        "def pytest_configure(config):\n"
+        "    config.pluginmanager.register(DropB(), 'drop-b')\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "a.marker").exists()
+    assert not (root / "b.marker").exists()
+
+
+def test_full_non_conftest_makeitem_hook_is_refused(case):
+    """A collection-time hook on a registered instance is not project-owned."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "class DropB:\n"
+        "    @pytest.hookimpl\n"
+        "    def pytest_pycollect_makeitem(self):\n"
+        "        return []\n"
         "def pytest_configure(config):\n"
         "    config.pluginmanager.register(DropB(), 'drop-b')\n")
     (root / "tests" / "test_native.py").write_text(

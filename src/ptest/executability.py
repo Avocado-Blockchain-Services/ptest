@@ -37,6 +37,8 @@ _SCOPED_REFUSED_HOOKS = frozenset({
 })
 _FULL_REFUSED_HOOKS = frozenset({
     "pytest_collection_modifyitems", "pytest_ignore_collect",
+    "pytest_pycollect_makeitem", "pytest_collect_file",
+    "pytest_collect_directory", "pytest_make_collect_report",
     "pytest_runtest_makereport", "pytest_report_teststatus",
     "pytest_sessionfinish",
 })
@@ -45,6 +47,8 @@ _FULL_REFUSED_HOOKS = frozenset({
 # label; the remaining full-only hooks stay refused.
 _FULL_COLLECTION_HOOKS = frozenset({
     "pytest_collection_modifyitems", "pytest_ignore_collect",
+    "pytest_pycollect_makeitem", "pytest_collect_file",
+    "pytest_collect_directory", "pytest_make_collect_report",
 })
 _HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
 _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")

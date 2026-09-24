@@ -1151,3 +1151,36 @@ def test_real_unsupported_runtime_is_refused_when_preprovisioned(case):
     assert b"unsupported-capability" in result.stderr
     assert not (root / "tests-ran").exists()
     _released(domain)
+
+
+def test_q_py_full_with_conftest_hook_runs_labelled(case):
+    """Advanced-profile full path twin: a conftest hook runs labelled."""
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", '
+        '"tests/__pycache__", "ptest-result-q-py-full-hook.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], '
+        'tests = ["tests/test_native.py"] }]\n'
+    )
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_pycollect_makeitem():\n    pass\n")
+    _commit_fixture(root)
+    completed = case.invoke(
+        domain, root, "--result-json", "ptest-result-q-py-full-hook.json", "--full", timeout=30)
+    data = _data(completed)
+    label = "full (project-filtered: conftest collection hook)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert label in completed.stderr.decode()
+    assert data["status"] == "passed"
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])

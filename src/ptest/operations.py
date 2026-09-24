@@ -1900,14 +1900,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # an automatic-mode plan handed to the basic adapter.
         plan = replace(plan, mode=C.Mode.FULL)
     # Section F: a full gate runs the project's own checked-in suite. The
-    # plan carries the static prediction; the run result and the human
-    # output carry the label built from the bridge-owned attempt report.
-    if native_pytest and plan.execution == "full":
-        predicted_filter = executability.full_project_filter_text(
-            checkout.root, config.runner.test_roots)
-        if predicted_filter is not None:
-            note = _reason("project-filtered", predicted_filter)
-            plan = replace(plan, reasons=plan.reasons + (note,))
+    # run result and the human output carry the label built from the
+    # bridge-owned attempt report; the static prediction stays out of the
+    # plan so it can never share the real label's code and wording.
     if advanced and plan.execution == "none":
         # A qualified automatic selection may prove that no test is affected.
         # This is a completed policy decision, not a native attempt: do not

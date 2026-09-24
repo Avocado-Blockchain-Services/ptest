@@ -6,7 +6,7 @@ import json
 import re
 
 from ptest import contracts as C
-from ptest.runtime.pytest_bridge import cluster_narrow_name
+from ptest.runtime.pytest_bridge import _VALUE_FLAG_LEADS, cluster_narrow_name
 
 
 _REMOTE_OPTIONS = {"--tx", "--px", "--rsyncdir"}
@@ -110,12 +110,23 @@ def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | No
 
 
 def _short_redirect_cluster(token: str) -> bool:
-    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster."""
+    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster.
+
+    Same cluster rule as the bridge: stop at the first value-taking
+    letter, so a ``k``/``m``-led cluster is never a redirect.
+    """
     if (not token.startswith("-") or token.startswith("--")
             or token.startswith("-W")):
         return False
-    short_options = token[1:]
-    return len(short_options) > 1 and ("c" in short_options or "o" in short_options)
+    body = token[1:]
+    if len(body) <= 1:
+        return False
+    for letter in body:
+        if letter in ("c", "o"):
+            return True
+        if letter in _VALUE_FLAG_LEADS:
+            return False
+    return False
 
 
 def _node_id_token(argv: tuple[str, ...], index: int) -> bool:

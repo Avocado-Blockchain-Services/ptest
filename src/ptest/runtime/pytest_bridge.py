@@ -172,12 +172,27 @@ _SAFE_STRICT_OVERRIDES = frozenset({
 
 
 def _short_redirect_cluster(token: str) -> bool:
-    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster."""
+    """Recognise value-taking ``-c``/``-o`` inside a short-option cluster.
+
+    The single cluster rule shared with :func:`cluster_narrow_name`:
+    the scan stops at the first value-taking letter, so a ``k``/``m``-led
+    cluster (``-kfoo``, ``-mnot_slow``) carries an attached expression and
+    is never a redirect, and a ``c``/``o`` after that letter is part of
+    the attached value. A ``c``/``o`` at or before it (``-co``, ``-vc``)
+    still redirects.
+    """
     if (not token.startswith("-") or token.startswith("--")
             or token.startswith("-W")):
         return False
-    short_options = token[1:]
-    return len(short_options) > 1 and ("c" in short_options or "o" in short_options)
+    body = token[1:]
+    if len(body) <= 1:
+        return False
+    for letter in body:
+        if letter in ("c", "o"):
+            return True
+        if letter in _VALUE_FLAG_LEADS:
+            return False
+    return False
 
 
 def _node_id_token(tokens: tuple[str, ...], index: int) -> bool:
@@ -758,9 +773,17 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
 
 # Full-only collection hooks are the project's own suite definition when
 # they live in a conftest.py under the admitted checkout (section F);
-# reporting hooks and non-conftest plugins stay refused.
+# reporting hooks and non-conftest plugins stay refused. The four
+# collection-time hooks below can silently narrow a full run (a
+# pytest_pycollect_makeitem returning [] drops tests with RC 0), so they
+# are checked exactly like modifyitems/ignore_collect: accepted and
+# recorded only from a checkout conftest, refused from other plugins
+# unless the module is approved (pytest_asyncio and anyio implement
+# pytest_pycollect_makeitem and stay approved).
 _FULL_COLLECTION_HOOKS = frozenset({
     "pytest_collection_modifyitems", "pytest_ignore_collect",
+    "pytest_pycollect_makeitem", "pytest_collect_file",
+    "pytest_collect_directory", "pytest_make_collect_report",
 })
 
 
@@ -831,7 +854,10 @@ class OwnedPlugin:
     def _project_conftest_hook(self, hook: str, implementation: Any) -> str | None:
         """Project-relative conftest path when a full-only collection hook is owned.
 
-        Only ``pytest_collection_modifyitems``/``pytest_ignore_collect``
+        Only the ``_FULL_COLLECTION_HOOKS`` collection hooks
+        (``pytest_collection_modifyitems``/``pytest_ignore_collect`` plus
+        the ``pytest_pycollect_makeitem``/``pytest_collect_file``/
+        ``pytest_collect_directory``/``pytest_make_collect_report`` family)
         defined in a ``conftest.py`` module under the admitted checkout
         count as the project's own suite definition. The plugin object must
         itself be that module (a registered class instance or any other
@@ -1003,6 +1029,8 @@ class OwnedPlugin:
                      "pytest_runtest_call", "pytest_pyfunc_call")
             if self.execution == "full":
                 hooks += ("pytest_collection_modifyitems", "pytest_ignore_collect",
+                          "pytest_pycollect_makeitem", "pytest_collect_file",
+                          "pytest_collect_directory", "pytest_make_collect_report",
                           "pytest_runtest_makereport", "pytest_report_teststatus",
                           "pytest_sessionfinish")
             loaded_plugins = [plugin for _, plugin in loaded]

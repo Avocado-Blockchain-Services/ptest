@@ -99,8 +99,10 @@ def test_xdist_addopts_full_run_is_project_filtered_with_label(case, monkeypatch
     assert data["mode"] == "full"
     assert any(reason["code"] == "project-filtered" and reason["message"] == label
                for reason in data["reasons"])
-    assert any(reason["code"] == "project-filtered" and reason["message"] == label
-               for reason in data["plan"]["reasons"])
+    # The static prediction stays out of the plan: only the bridge-owned
+    # run label may use the project-filtered code and wording.
+    assert not any(reason["code"] == "project-filtered"
+                   for reason in data["plan"]["reasons"])
 
 
 def test_full_run_refuses_pytest_addopts_from_environment(case, monkeypatch):

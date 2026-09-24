@@ -460,11 +460,8 @@ def _decode(binding: NativeReportBinding, raw: bytes) -> NativeTerminalReport:
             raise ValueError
     except (UnicodeDecodeError, ValueError, RecursionError):
         _reject()
-    # Reports written before the narrowing field existed stay admissible;
-    # they decode as unfiltered. Any other shape stays rejected.
-    if set(value) == _FIELDS:
-        value = dict(value, project_narrowing={
-            "narrowing": None, "conftest_hooks": [], "notes": []})
+    # The narrowing field is required: no legacy reports without it exist,
+    # so a missing field stays rejected instead of decoding as unfiltered.
     if set(value) != _FIELDS | {"project_narrowing"}:
         _reject()
     try:
@@ -553,9 +550,6 @@ def _decode_attempt(binding: NativeReportBinding, raw: bytes) -> NativeAttemptRe
             raise ValueError
     except (UnicodeDecodeError, ValueError, RecursionError):
         _reject()
-    if set(value) == _ATTEMPT_FIELDS:
-        value = dict(value, project_narrowing={
-            "narrowing": None, "conftest_hooks": [], "notes": []})
     if set(value) != _ATTEMPT_FIELDS | {"project_narrowing"}:
         _reject()
     try:

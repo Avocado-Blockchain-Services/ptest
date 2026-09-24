@@ -69,6 +69,8 @@ def _payload(**overrides):
         "native_exit_code": 0,
         "bridge_exit_code": 0,
         "problem": None,
+        "project_narrowing": {
+            "narrowing": None, "conftest_hooks": [], "notes": []},
     }
     value.update(overrides)
     return value
@@ -147,6 +149,9 @@ def test_allocate_report_binds_private_checkout_target_without_overwrite(case):
     lambda value: value.update(execution_mode="selected"),
     lambda value: value.update(effective_profile="basic_serial"),
     lambda value: value.update(native_exit_code=0, bridge_exit_code=1),
+    lambda value: value.pop("project_narrowing"),
+    lambda value: value.update(project_narrowing={
+        "narrowing": None, "conftest_hooks": []}),
 ])
 def test_consume_rejects_forged_or_incomplete_terminal_records(case, mutation):
     _, _, binding = _allocate(case)
@@ -440,6 +445,7 @@ def test_consume_attempt_report_does_not_trust_bridge_source_validity(case):
     lambda value: value["inventory"].update(version="9.1.0"),
     lambda value: value.pop("coverage"),
     lambda value: value.pop("reporters"),
+    lambda value: value.pop("project_narrowing"),
     lambda value: value["inventory"]["tests"].append(value["inventory"]["tests"][0].copy()),
 ])
 def test_consume_attempt_report_refuses_incomplete_or_ambiguous_evidence(case, mutation):
