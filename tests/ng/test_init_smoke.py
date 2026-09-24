@@ -464,12 +464,19 @@ def test_monorepo_reports_one_smoke_line_per_project(
     assert cli.main((
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--smoke")) == 0
-    # Nothing is executable here (api xdist, web setup missing): no run.
-    assert calls == []
+    # T2 owns xdist: api's xdist addopts fall back to a serial caveat
+    # (runnable with a clean candidate), while web is setup-owed and
+    # non-TTY --smoke never installs. So api executes exactly once and
+    # web skips with the working advice.
+    assert len(calls) == 1
+    assert tuple(calls[0][1].argv) == ("tests/test_api.py",)
+    assert calls[0][1].mode is C.Mode.SCOPED
+    assert calls[0][1].no_setup is True
     out = capsys.readouterr().out
     assert "  smoke      " in out
     block = out.split("  smoke      ")[1].split("\n\n")[0]
     assert "api" in block and "web" in block
+    assert "setup baseline not recorded" in block
 
 
 # --- real execution, in-process through the scoped runner --------------------
@@ -821,9 +828,11 @@ def test_executability_and_smoke_lines_agree_on_setup_project(
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--smoke")) == 0
     out = capsys.readouterr().out
-    # cli passes no facts until the wave-2 wiring: the notes fallback
-    # names the project and runner without a runs segment.
-    assert "  .  pytest" in out
+    # T5 wiring passes executability facts, so init renders the O.3
+    # project fact line (project, runner, runs fact) instead of the old
+    # notes fallback ("  .  pytest"). The agreement property is unchanged:
+    # the fact line names the same project/runner the caveat verdict covers.
+    assert re.search(r"^  \. +pytest  runs:", out, re.M)
     assert "–" in out
     assert "setup baseline not recorded" in out
 
