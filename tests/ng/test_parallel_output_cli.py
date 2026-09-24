@@ -6,15 +6,12 @@ of ptest modules. The only fakes are provider executables on a temporary
 ``stdin.isatty``/``input`` where a TTY is needed. No network, no real
 provider, no real claude/codex/opencode.
 
-Seam note: T5 is the wave-2 barrier task and only runs green on the
-merged world. Tests that need names T2-T4 create
+Seam note: the T1-T4 merges are all in, so every test runs unguarded
 (``executability.facts``/``parallel_request``, ``render_init_footer``,
-``deterministic_items``) are guarded by explicit ``pytest.mark.skipif``
-naming the missing merge piece; tests that drive real parallel xdist runs
-additionally need T1's bridge. Run-phase checkouts live under their
-fixture domain (the scheduler refuses escaping checkouts), and run phases
-point the config launcher at the test venv's own interpreter, which ships
-real xdist 3.8.0.
+``deterministic_items``, T1's bridge). Run-phase checkouts live under
+their fixture domain (the scheduler refuses escaping checkouts), and run
+phases point the config launcher at the test venv's own interpreter,
+which ships real xdist 3.8.0.
 """
 from __future__ import annotations
 
@@ -25,61 +22,13 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
+from ptest import agent_assessment as assessment
 from ptest import contracts as C
 from ptest import executability as exec_check
-from ptest import init_render
+from ptest import project_facts
+from ptest import render
 from ptest.cli import main
-
-
-def _t2_present() -> bool:
-    return hasattr(exec_check, "FACT_KEYS") and hasattr(
-        exec_check, "parallel_request")
-
-
-def _t3_present() -> bool:
-    return hasattr(init_render, "render_init_footer")
-
-
-def _t4_present() -> bool:
-    try:
-        __import__("ptest.deterministic_items")
-    except ImportError:
-        return False
-    import ptest.agent_assessment as assessment
-
-    try:
-        import inspect
-
-        return "answers" in inspect.signature(
-            assessment.plan_item_reviews).parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _t1_present() -> bool:
-    try:
-        from ptest.runtime import pytest_bridge as bridge
-    except ImportError:
-        return False
-    return hasattr(bridge, "QUALIFIED_XDIST_VERSIONS") and hasattr(
-        bridge, "PARALLEL_DIST_MODES")
-
-
-needs_t1_t2 = pytest.mark.skipif(
-    not (_t1_present() and _t2_present()),
-    reason="needs T1 bridge constants + T2 admission merge",
-)
-needs_t2 = pytest.mark.skipif(
-    not _t2_present(),
-    reason="needs T2 admission merge",
-)
-needs_t2_t3 = pytest.mark.skipif(
-    not (_t2_present() and _t3_present()),
-    reason="needs T2 facts + T3 renderers merge",
-)
-needs_t4 = pytest.mark.skipif(not _t4_present(), reason="needs T4 merge")
+from ptest.runtime import pytest_bridge as t1
 
 
 # ---- project fixtures -----------------------------------------------------
@@ -527,7 +476,6 @@ def test_child_assessment_data_carries_facts_and_json_drops_them():
 
 # ---- (a) parallel end to end -----------------------------------------------
 
-@needs_t2_t3
 def test_parallel_init_writes_no_serial_opt_out(case, tmp_path, monkeypatch,
                                                 capsys):
     """Init half of (a): fresh init writes no ``-n 0`` for xdist shape."""
@@ -547,7 +495,6 @@ def test_parallel_init_writes_no_serial_opt_out(case, tmp_path, monkeypatch,
     assert generated == []
 
 
-@needs_t2_t3
 def test_parallel_init_reports_four_workers(case, tmp_path, monkeypatch,
                                             capsys):
     """Init half of (a): the facts line once the launcher is verifiable.
@@ -579,7 +526,6 @@ def test_parallel_init_reports_four_workers(case, tmp_path, monkeypatch,
     assert generated == []
 
 
-@needs_t1_t2
 def test_parallel_end_to_end_four_workers_then_partial_grant(
         case, tmp_path, monkeypatch, capsys):
     import shutil
@@ -638,7 +584,6 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
 
 # ---- (b) fallback -----------------------------------------------------------
 
-@needs_t2_t3
 def test_dist_each_init_writes_serial_opt_out(case, tmp_path, monkeypatch,
                                               capsys):
     """Init half of (b): fresh init writes ``-n 0`` for `--dist each`."""
@@ -661,7 +606,6 @@ def test_dist_each_init_writes_serial_opt_out(case, tmp_path, monkeypatch,
     assert "parallel: no" in out
 
 
-@needs_t2
 def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
                                         capsys):
     """Run half of (b): the serial fallback passes `--full` serially."""
@@ -682,7 +626,6 @@ def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
 
 # ---- (c) Ctrl-C through the guard -------------------------------------------
 
-@needs_t1_t2
 def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     import select
 
@@ -801,8 +744,6 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
 
 # ---- (d) doctor on a persea-shaped monorepo ----------------------------------
 
-@needs_t2_t3
-@needs_t4
 def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     from ptest.checklist import CATALOG
 
@@ -1009,7 +950,6 @@ def _install_fake_claude_with_db_gap(bindir: Path) -> None:
     executable.chmod(0o755)
 
 
-@needs_t4
 def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
         tmp_path, monkeypatch, capsys):
     """One safety gap (DB-002) keeps the safety-first parallel fix."""
@@ -1049,7 +989,6 @@ def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
 
 # ---- (e) init on the same monorepo -------------------------------------------
 
-@needs_t2_t3
 def test_init_persea_shaped_monorepo_grouped_actions_and_restart(
         tmp_path, monkeypatch, capsys):
     root = tmp_path / "init-mono"
@@ -1073,7 +1012,6 @@ def test_init_persea_shaped_monorepo_grouped_actions_and_restart(
     assert "config     unchanged" in second
 
 
-@needs_t2_t3
 def test_init_fresh_xdist_project_writes_no_serial_opt_out(
         tmp_path, monkeypatch, capsys):
     """Init on a fresh xdist project: no `-n 0`, `4 workers` line.
@@ -1101,7 +1039,6 @@ def test_init_fresh_xdist_project_writes_no_serial_opt_out(
     assert out.count("Restart your coding agents") == 1
 
 
-@needs_t2_t3
 def test_init_smoke_block_prints_once(tmp_path, monkeypatch, capsys):
     """`ptest init --smoke` prints the smoke block exactly once.
 
@@ -1119,19 +1056,29 @@ def test_init_smoke_block_prints_once(tmp_path, monkeypatch, capsys):
     assert out.count("  smoke      ") == 1
 
 
+def test_init_footer_separated_by_one_blank_line(
+        tmp_path, monkeypatch, capsys):
+    """The init footer starts after exactly one blank line.
+
+    The file block ends, one blank line, then the footer (smoke /
+    next steps / restart line) — no jamming, no double gap.
+    """
+    root = tmp_path / "smoke-gap"
+    root.mkdir()
+    _write_fresh_xdist_project(root)
+    monkeypatch.chdir(root)
+
+    assert main(("init", "--smoke", "--no-doctor",
+                 "--agents", "none")) == 0
+    out = capsys.readouterr().out
+    assert out.count("  smoke      ") == 1
+    assert "\n\n  smoke      " in out
+    assert "\n\n\n  smoke      " not in out
+
+
 # ---- (f) mirror equality ------------------------------------------------------
 
 def test_mirror_equality_with_wave1_names():
-    if not _t2_present():
-        pytest.skip("needs T2 executability merge")
-    if not _t3_present():
-        pytest.skip("needs T3 project_facts merge")
-    if not _t4_present():
-        pytest.skip("needs T4 deterministic merge")
-    import ptest.agent_assessment as assessment
-    import ptest.project_facts as project_facts
-    import ptest.render as render
-
     assert project_facts.FACT_KEYS == exec_check.FACT_KEYS
     item = exec_check.Executability(
         project=".", runner="pytest", status="executable", caveats=(),
@@ -1139,10 +1086,6 @@ def test_mirror_equality_with_wave1_names():
     assert tuple(item.facts()) == project_facts.FACT_KEYS
     assert (render.PTEST_ANSWER_PREFIX
             == assessment.PTEST_ANSWER_PREFIX == "Answered by ptest: ")
-
-    if not _t1_present():
-        pytest.skip("needs T1 bridge merge for the bridge mirrors")
-    from ptest.runtime import pytest_bridge as t1
 
     assert (t1.QUALIFIED_XDIST_VERSIONS
             == exec_check.XDIST_QUALIFIED_VERSIONS)

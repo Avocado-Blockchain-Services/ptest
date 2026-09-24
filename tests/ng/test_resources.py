@@ -53,7 +53,8 @@ def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
     assert "opts out of the parallel tier" in guide
     assert "which ptest adds when the project enables xdist" not in guide
     assert "vitest run" in guide
-    assert "one cheap-model call per checklist item" in guide
+    assert ("one cheap-model call per checklist item that needs one"
+            in " ".join(guide.split()))
     assert "one database per worker per run" in guide
     assert "assessment authority only" in guide
     # The merge gate and graph refresh live only in the guide, not in skills.

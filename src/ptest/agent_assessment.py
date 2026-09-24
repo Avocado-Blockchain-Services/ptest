@@ -1014,19 +1014,24 @@ def _dependency_facts(names: set[str], prefix: str,
                 detail=f"Authoritative lock {hit[0]}; provenance lockfile, "
                        "content unexecuted."))
             continue
-        # Lock admission is not disk presence: a lock on disk but outside
-        # the packet is uninspectable, and only an absent lock is missing.
+        # Only the lock the ecosystem actually uses is reported: sibling
+        # locks are never listed as missing beside the one in use. Lock
+        # admission is not disk presence: a lock on disk but outside the
+        # packet is uninspectable, and only an absent lock is missing.
+        on_disk = sorted(name for name, kind in _LOCKS.items()
+                         if kind == want
+                         and _present_on_disk(child_root, name))
+        if on_disk:
+            facts.append(DependencyFact(
+                ecosystem=want, status="uninspectable", ref_path=None,
+                detail=f"{on_disk[0]} is present but was not admitted to "
+                       "the review packet."))
+            continue
         for lock in sorted(name for name, kind in _LOCKS.items()
                            if kind == want):
-            if _present_on_disk(child_root, lock):
-                facts.append(DependencyFact(
-                    ecosystem=want, status="uninspectable", ref_path=None,
-                    detail=f"{lock} is present but was not admitted to "
-                           "the review packet."))
-            else:
-                facts.append(DependencyFact(
-                    ecosystem=want, status="missing", ref_path=None,
-                    detail=f"{lock} is missing."))
+            facts.append(DependencyFact(
+                ecosystem=want, status="missing", ref_path=None,
+                detail=f"{lock} is missing."))
     if not seen_ecosystems:
         facts.append(DependencyFact(
             ecosystem="project", status="missing", ref_path=None,

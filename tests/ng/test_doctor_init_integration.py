@@ -313,3 +313,85 @@ def test_doctor_review_launches_nothing_before_consent(tmp_path, monkeypatch,
     captured = capsys.readouterr()
     assert not (bindir / "argv.log").exists()
     assert "review not yet performed" in captured.out
+
+
+def test_doctor_review_computes_executability_once(
+        tmp_path, monkeypatch, capsys):
+    """One executability pass per doctor run, shared by facts and answers.
+
+    The review flow shares a single ``check_resolution`` across the
+    execution/project facts and the deterministic answers (which reuse
+    the facts instead of calling ``check_config`` again per packet).
+    """
+    from ptest import executability as exec_module
+
+    root = tmp_path / "once"
+    root.mkdir()
+    _write_db_standalone_repo(root)
+    bindir = tmp_path / "bin"
+    _prepare_review(monkeypatch, root, bindir)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    resolutions = []
+    real_resolution = exec_module.check_resolution
+
+    def counting_resolution(resolution):
+        resolutions.append(1)
+        return real_resolution(resolution)
+
+    configs = []
+    real_config = exec_module.check_config
+
+    def counting_config(config, **kwargs):
+        configs.append(1)
+        return real_config(config, **kwargs)
+
+    monkeypatch.setattr(exec_module, "check_resolution", counting_resolution)
+    monkeypatch.setattr(exec_module, "check_config", counting_config)
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+    assert len(resolutions) == 1
+    assert len(configs) == 1
+
+
+def test_doctor_select_fix_states_serial_tradeoff_on_parallel_project(
+        tmp_path, monkeypatch, capsys):
+    """Twin: cli.main doctor on an xdist project never just orders --cov.
+
+    SELECT-001's fix on a parallel-active project states the serial
+    tradeoff plainly; telling the user to just add --cov would break
+    PARALLEL-001 (coverage runs serially under ptest).
+    """
+    root = tmp_path / "parallel-select"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
+    (root / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + "dd" * 16 + '"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        "args = []\n"
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    tests = root / "tests"
+    tests.mkdir()
+    (tests / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    _prepare_review(monkeypatch, root, bindir)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+
+    assert main(("doctor", "--reviewer", "claude",
+                 "--allow-model-review")) == 0
+
+    flat = " ".join(capsys.readouterr().out.split())
+    assert "add --cov" not in flat
+    assert "runs serially under ptest" in flat

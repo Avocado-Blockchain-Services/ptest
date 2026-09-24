@@ -27,6 +27,9 @@ STATUS_EXECUTABLE = "executable"
 STATUS_CAVEAT = "caveat"
 STATUS_NOT_EXECUTABLE = "not-executable"
 
+#: Exact executability text for "xdist not active" (the not-configured case).
+NOT_CONFIGURED_PARALLEL = "no — xdist is not enabled in your pytest config"
+
 _MAX_BYTES = 256 * 1024
 _MAX_CONFTEST_FILES = 64
 _MAX_WALK_ENTRIES = 2000
@@ -815,19 +818,6 @@ def full_project_filter_text(root: Path, test_roots: tuple[str, ...]) -> str | N
     return "full (project-filtered: " + "; ".join(parts) + ")"
 
 
-def full_project_filter_label(root: Path, test_roots: tuple[str, ...]) -> str | None:
-    """Init-time prediction of a project-filtered full gate, or None.
-
-    Static only: the bridge-owned attempt report decides the run label at
-    runtime, so this stays worded as a prediction (``expected: full
-    (project-filtered: ...)``).
-    """
-    text = full_project_filter_text(root, test_roots)
-    if text is None:
-        return None
-    return "expected: " + text
-
-
 # Stock vitest ``configDefaults.exclude``: a config that spreads it (the
 # common ``exclude: [...configDefaults.exclude, 'e2e/**']`` shape) lists no
 # literal for the spread, so the known defaults are always applied.
@@ -1389,7 +1379,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
             parallel_short = "no"
             parallel_fix = None
         else:
-            parallel = "no — xdist is not enabled in your pytest config"
+            parallel = NOT_CONFIGURED_PARALLEL
             parallel_short = "no"
             parallel_fix = None
         pairs = _scan_conftest_hooks(root, roots)

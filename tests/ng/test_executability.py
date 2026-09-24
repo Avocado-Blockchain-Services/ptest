@@ -1417,3 +1417,9 @@ def test_addopts_source_names_ini_family_file(tmp_path, name, text):
     """addopts_source reports the deciding INI-family file (DET3)."""
     _write(tmp_path / name, text)
     assert E.addopts_source(tmp_path) == name
+
+
+def test_full_project_filter_label_is_gone():
+    """Dead init-time prediction label stays deleted (no "expected:" text)."""
+    assert not hasattr(E, "full_project_filter_label")
+    assert "expected: " not in E.full_project_filter_text.__doc__

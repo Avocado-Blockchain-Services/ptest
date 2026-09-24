@@ -115,6 +115,42 @@ def test_doctor_help_documents_consented_review_and_per_provider_qualification(
     assert "separately consented" in agents_help.lower()
 
 
+def test_doctor_help_names_all_deterministic_items_as_model_free(
+        tmp_path, monkeypatch, capsys):
+    _no_execution(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("help", "doctor")) == 0
+    text = " ".join(capsys.readouterr().out.split()).lower()
+    assert ("timing, selection and parallel execution items are answered "
+            "from ptest's own facts" in text)
+
+
+def test_user_facing_text_has_no_banned_terms():
+    from importlib.resources import files
+    from pathlib import Path
+
+    from ptest import help as help_api
+
+    bodies = [help_api.overview()]
+    for topic in ("init", "register", "where", "status", "history", "plan",
+                  "doctor", "guide", "rules", "run", "agents"):
+        bodies.append(help_api.topic(topic))
+    bodies.append(files("ptest").joinpath(
+        "resources", "repository-agent-guide.md").read_text(
+            encoding="utf-8"))
+    bodies.append(files("ptest").joinpath(
+        "resources", "agent-guide.md").read_text(encoding="utf-8"))
+    root = Path(__file__).resolve().parent.parent.parent
+    bodies.append((root / "README.md").read_text(encoding="utf-8"))
+    for body in bodies:
+        assert body is not None
+        lowered = body.lower()
+        assert "fingerprint" not in lowered
+        assert "ready with caveats" not in lowered
+        assert "expected:" not in lowered
+
+
 def test_help_agents_is_self_contained_workflow(tmp_path, monkeypatch, capsys):
     _no_execution(monkeypatch)
     monkeypatch.chdir(tmp_path)

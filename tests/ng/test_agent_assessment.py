@@ -1811,8 +1811,24 @@ def test_dependency_facts_report_present_not_admitted_and_missing_locks(tmp_path
     assert any("uv.lock is present but was not admitted to the review packet"
                in fact.detail for fact in present)
     missing = by_eco.get(("python-lock", "missing"), [])
-    assert missing and all(fact.detail.endswith("is missing.")
-                           for fact in missing)
+    assert missing == []
+
+
+def test_dependency_facts_report_only_lock_in_use(tmp_path):
+    """A project using uv.lock reports only uv.lock, never its siblings.
+
+    poetry.lock and pdm.lock are not listed as missing when uv.lock is
+    the lock the ecosystem actually uses.
+    """
+    packet = _packet_for(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "uv.lock": "invalid \x00 binary\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    locks = [fact for fact in packet.dependencies
+             if fact.ecosystem == "python-lock"]
+    assert [fact.detail for fact in locks] == [
+        "uv.lock is present but was not admitted to the review packet."]
 
 
 # --- T4: public child dict minus execution validates ------------------------------

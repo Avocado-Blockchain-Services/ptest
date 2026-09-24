@@ -37,11 +37,12 @@ reasons; `-n 0` in `[runner] args` opts out of parallel runs. Coverage
 (`--cov`) under xdist is out of scope and always runs serially. Vitest
 executes as one exclusive `vitest run` command through the project-local
 Vitest CLI and manages its own workers; declared `[setup]` (such as
-`npm ci`) runs first when its required paths or fingerprint are missing.
+`npm ci`) runs first when its required paths are missing or the lockfile changed.
 
-`ptest doctor` review sends one cheap-model call per checklist item after
-consent; timing and selection items are answered from ptest's own facts
-with no model call. The model is the cheapest adequate one:
+`ptest doctor` review sends one cheap-model call per checklist item that
+needs one after consent; timing, selection and parallel execution items
+are answered from ptest's own facts with no model call. The model is the
+cheapest adequate one:
 `--review-model` (or `PTEST_REVIEW_MODEL`) wins, otherwise claude uses
 its haiku alias and codex picks from its model list with one extra call
 that sends only the model list; the choice is cached per provider and

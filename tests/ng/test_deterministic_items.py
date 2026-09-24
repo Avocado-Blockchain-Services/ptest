@@ -251,12 +251,62 @@ def test_select_gap_finding_prose_is_trusted_plain_text(tmp_path):
     assert "`" not in answer.finding_summary + answer.finding_change
 
 
+def test_select_fix_states_serial_tradeoff_when_parallel_active(tmp_path):
+    """SELECT-001 fix on a parallel-active project: tradeoff, no --cov order.
+
+    Following the fix must not break PARALLEL-001: under ptest --cov
+    forces serial runs, so the fix states the tradeoff plainly instead
+    of instructing the user to just add --cov.
+    """
+    from ptest import config as config_api
+    from ptest import deterministic_items as DI
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
+    (tmp_path / ".ptest.toml").write_text(
+        _v1_config_text(CHILD_PID, "pytest"), encoding="utf-8")
+    packet = _packet_for(tmp_path, None)
+    resolution = config_api.resolve_config(tmp_path)
+    answers = DI.answers_for(_domain(tmp_path), resolution, packet)
+    answer = answers["SELECT-001"]
+    assert answer.status == "gap"
+    assert "--cov" not in answer.finding_change
+    assert "runs serially under ptest" in answer.finding_change
+    assert "keep parallel runs" in answer.finding_change
+    assert "accept serial runs" in answer.finding_change
+
+
+def test_select_fix_keeps_cov_guidance_when_not_parallel(tmp_path):
+    """SELECT-001 fix without parallel still names the coverage first step."""
+    answers = _answers_for(tmp_path, _config(),
+                           {".ptest.toml": "[selection]\\nenabled = false\\n"})
+    answer = answers["SELECT-001"]
+    assert answer.status == "gap"
+    assert "--cov" in answer.finding_change
+
+
 def test_timing_without_history_is_unknown(tmp_path):
     answers = _answers_for(
         tmp_path, _config(), {".ptest.toml": "[selection]\nenabled = false\n"})
     answer = answers["TIMING-001"]
     assert answer.status == "unknown"
-    assert answer.reason == "no timing history yet: run ptest --full once"
+    assert answer.reason == ("no timing history yet: run ptest --full once "
+                             "for whole-run timing; per-test timings need "
+                             "the coverage/advanced profile")
+
+
+def test_timing_unknown_names_what_changes_the_answer(tmp_path):
+    """TIMING-001 unknown advice stays honest for basic pytest projects.
+
+    A bare "run ptest --full once" pretends one run settles timing;
+    per-test timings only arrive with the coverage/advanced profile.
+    """
+    answers = _answers_for(
+        tmp_path, _config(), {".ptest.toml": "[selection]\nenabled = false\n"})
+    answer = answers["TIMING-001"]
+    assert answer.status == "unknown"
+    assert "run ptest --full once" in answer.reason
+    assert "coverage/advanced profile" in answer.reason
 
 
 def test_timing_unreadable_history_is_unknown(tmp_path, monkeypatch):

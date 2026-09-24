@@ -1196,31 +1196,40 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
     return answer in {"y", "yes"}
 
 
-def _project_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
+def _resolution_items(resolution: C.ConfigResolution) -> tuple:
+    """One executability pass per doctor run, shared by facts and answers."""
+    return executability.check_resolution(resolution)
+
+
+def _project_facts(resolution: C.ConfigResolution,
+                   *, _items=None) -> dict[str, dict]:
     """Map each project declaration to its FACT_KEYS facts dict."""
-    return {item.project: item.facts()
-            for item in executability.check_resolution(resolution)}
+    items = _items if _items is not None else _resolution_items(resolution)
+    return {item.project: item.facts() for item in items}
 
 
-def _execution_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
+def _execution_facts(resolution: C.ConfigResolution,
+                     *, _items=None) -> dict[str, dict]:
     """Map each project to its public executability fact for review children."""
-    return {item.project: item.to_public()
-            for item in executability.check_resolution(resolution)}
+    items = _items if _items is not None else _resolution_items(resolution)
+    return {item.project: item.to_public() for item in items}
 
 
 def _plan_item_reviews(packet, domain: C.DomainPaths,
-                       resolution: C.ConfigResolution):
+                       resolution: C.ConfigResolution, *, facts=None):
     """Plan per-item reviews, answering deterministically where possible.
 
     Deterministic items (TIMING-001, SELECT-001, PARALLEL-001) are
     answered from ptest's own facts with no model call; every other item
     keeps its provider request. Fail-closed: deterministic answers are
     always applied, so the disclosed call count and the 'no model call'
-    promise stay exact.
+    promise stay exact. Callers that already hold this packet's
+    executability facts pass them in so the config is checked once.
     """
     from . import deterministic_items as deterministic
 
-    answers = deterministic.answers_for(domain, resolution, packet)
+    answers = deterministic.answers_for(domain, resolution, packet,
+                                        facts=facts)
     return agent_assessment.plan_item_reviews(packet, answers=answers)
 
 
@@ -1594,7 +1603,14 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             )
         config_identity = _review_config_identity(resolution, workspace)
         declaration_set = tuple(repo.declaration for repo in workspace.repositories)
-        plans = [_plan_item_reviews(packet, domain, resolution)
+        # One executability pass for the whole run: the stale-evidence
+        # check below raises when source or configuration changes during
+        # review, so these facts stay valid through publication.
+        review_items = _resolution_items(resolution)
+        review_fact_map = _project_facts(resolution, _items=review_items)
+        plans = [_plan_item_reviews(packet, domain, resolution,
+                                    facts=review_fact_map.get(
+                                        packet.declaration))
                  for packet in packets]
         ensure_deadline()
         calls = sum(1 for reviews in plans for review in reviews
@@ -1708,8 +1724,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 != tuple(packet.packet_sha256 for packet in packets)):
             raise _problem("stale-evidence", "source or configuration changed during review")
 
-        facts = _execution_facts(resolution)
-        project_facts = _project_facts(resolution)
+        facts = _execution_facts(resolution, _items=review_items)
+        project_facts = _project_facts(resolution, _items=review_items)
         child_data = []
         initialization_blocker = _initialization_required_limitation(resolution)
         for packet, assessment in zip(packets, assessments):
@@ -1874,7 +1890,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     result, rules, parsed=parsed, smoke=smoke_results,
                     plans=smoke_plans, facts=facts)
                 if footer:
-                    sys.stdout.write(footer)
+                    sys.stdout.write("\n" + footer)
             offer_review = (
                 parsed.doctor_request is True
                 or (parsed.doctor_request is None and not parsed.json

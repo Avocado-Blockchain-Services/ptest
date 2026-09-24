@@ -128,11 +128,14 @@ def test_repository_guide_states_assessment_only_authority():
 
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
+    flat = " ".join(guide.split())
     assert "assessment authority only" in guide
     assert "separate user instruction" in guide
     assert FAST_FORWARD_GATE_RULE in guide
     assert "Run `ptest --full` once after the integrated change" in guide
-    assert "one cheap-model call per checklist item" in guide
+    assert "one cheap-model call per checklist item that needs one" in flat
+    assert "timing, selection and parallel execution" in flat
+    assert "items skip the model" in flat
     assert "`ptest doctor --offline` is static" in guide
     assert len(guide.splitlines()) <= 45
 

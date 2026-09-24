@@ -14,11 +14,11 @@ of ptest args; `-n 0` in `[runner] args` opts out of the parallel tier.
 
 Vitest runs as one exclusive `vitest run` command and manages its own workers; ptest
 reports only its exit code. Declared `[setup]` (such as `npm ci`) runs first when
-required paths or the setup fingerprint are missing.
+required paths are missing or the lockfile changed.
 
-`ptest doctor` asks for consent before any model review, then sends
-one cheap-model call per checklist item; `ptest doctor --offline` is static only and
-sends nothing.
+`ptest doctor` asks for consent before any model review, then sends one cheap-model
+call per checklist item that needs one; timing, selection and parallel execution
+items skip the model. `ptest doctor --offline` is static only and sends nothing.
 
 Keep ordinary tests fast and deterministic. Prefer factories/builders for test records.
 Inspect tests above 0.5 seconds; optimize ordinary tests at 2 seconds and investigate

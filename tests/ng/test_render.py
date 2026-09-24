@@ -245,6 +245,31 @@ def test_agent_assessment_parallel_item_follows_safety_group():
     assert "→ Enable xdist." in text
 
 
+def test_agent_assessment_parallel_item_renders_after_safety_block():
+    """PARALLEL-001 sits on its own line after the safety grid, not in it."""
+    child = {
+        "scope": "api",
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "satisfied",
+                    label="Fixture state isolation"),
+            _aa_row("PARALLEL-001", "gap", label="Parallel execution",
+                    rationale="Serial fallback."),
+        ],
+        "findings": [{"id": "PARALLEL-001", "summary": "Runs serially.",
+                      "suggested_change": "Enable xdist.",
+                      "recipe_id": None,
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
+
+    assert "\n\n  ✗ Parallel execution\n" in text
+
+
 def test_agent_assessment_no_safety_header_without_safety_rows():
     child = {
         "scope": "api",
@@ -347,12 +372,38 @@ def test_agent_assessment_dependency_wording_passes_through_verbatim():
     assert "1 ok · 0 gap · 0 unknown   (partial evidence)" in text
     details = text[text.index("Dependencies:"):text.index("Report:")]
     assert ("uv.lock is present but was not admitted to the review packet"
-            in details)
+            in " ".join(details.split()))
     assert "package-lock.json is missing" in details
     assert text.index("api  pytest") < text.index("Dependencies:")
     assert (text.index("Dependencies:")
             < text.index("Report: recommendations.md (created)"))
     assert len(text.encode("utf-8")) <= 256 * 1024
+
+
+def test_agent_assessment_dependency_lines_wrap_to_width():
+    """Long dependency details wrap to the terminal width like the rest."""
+    child = {
+        "scope": "api",
+        "rows": [_aa_row("FIX-001", "satisfied",
+                         label="Test data factories")],
+        "findings": [],
+        "limitations": [
+            {"code": "dependency-missing",
+             "message": ("uv.lock is missing and so is every other lock "
+                         "file the ecosystem knows about, which is a very "
+                         "long detail that must not overflow the terminal"),
+             "paths": ["a/very/long/root/relative/path/that/keeps/going"]},
+        ],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=60)
+
+    details = text[text.index("Dependencies:"):text.index("Report:")]
+    assert "Dependencies:" in details
+    for line in details.splitlines():
+        assert len(line) <= 60, line
 
 
 def test_agent_assessment_header_names_runner_or_unknown():

@@ -96,7 +96,8 @@ def _agent_assessment_prose(value: object) -> str:
     return text.replace("|", "/").replace("`", "'")
 
 
-def _agent_dependency_detail_lines(children) -> list[str]:
+def _agent_dependency_detail_lines(children, width: int) -> list[str]:
+    """Dependency details wrapped to the terminal width like the rest."""
     statuses = {
         "dependency-missing": "missing",
         "dependency-unsupported": "unsupported",
@@ -116,8 +117,9 @@ def _agent_dependency_detail_lines(children) -> list[str]:
                 safe_paths = ", ".join(_agent_assessment_prose(path)
                                          for path in paths)
                 location = f" (root-relative paths: {safe_paths})"
-            lines.append(
-                f"- {scope}: {status} prerequisite: {detail}{location}")
+            lines.extend(wrap_words(
+                f"{scope}: {status} prerequisite: {detail}{location}",
+                width, indent="- ", hang="  "))
     return lines
 
 
@@ -460,7 +462,11 @@ def _block_lines(rows: list[dict], by_id: dict, icons: dict,
 
 
 def _assessment_item_lines(child, icons: dict, width: int) -> list[str]:
-    """Compact item lines with the parallel-safety group set apart."""
+    """Compact item lines with the parallel-safety group set apart.
+
+    PARALLEL-001 renders on its own line after the safety block, never
+    inside the safety grid.
+    """
     rows = child.get("rows", []) if isinstance(child, dict) else []
     if not isinstance(rows, list):
         rows = []
@@ -480,11 +486,15 @@ def _assessment_item_lines(child, icons: dict, width: int) -> list[str]:
     parallel = [row for row in rows
                 if row.get("id") == _PARALLEL_ITEM_ID]
     lines = _block_lines(main, by_id, icons, width)
-    if safety or parallel:
+    if safety:
         if lines:
             lines.append("")
         lines.append("  parallel safety")
-        lines.extend(_block_lines(safety + parallel, by_id, icons, width))
+        lines.extend(_block_lines(safety, by_id, icons, width))
+    if parallel:
+        if lines:
+            lines.append("")
+        lines.extend(_block_lines(parallel, by_id, icons, width))
     return lines
 
 
@@ -514,7 +524,7 @@ def render_agent_assessment(children, workspace, *, report_path: str,
         variable_sections.append(
             _assessment_item_lines(child, icons, resolved))
 
-    dependency_details = _agent_dependency_detail_lines(children)
+    dependency_details = _agent_dependency_detail_lines(children, resolved)
     trailer = (f"Report: {terminal_text(report_path)} "
                f"({terminal_text(publication_status)}) — citations, fixes "
                f"and verification steps.")

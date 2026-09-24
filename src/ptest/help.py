@@ -152,10 +152,11 @@ Notes:
   --prompt stay static and offline. --prompt grants assessment text only,
   never repair authority.
 
-  Each review makes one model call per checklist item (4 at a time by
-  default; --review-concurrency 1..8 bounds parallelism), skipping items
-  that do not apply without a call. Timing and selection items are
-  answered from ptest's own facts without a model call. The model is the
+  Each review makes one model call per checklist item that needs one
+  (4 at a time by default; --review-concurrency 1..8 bounds
+  parallelism), skipping items that do not apply without a call.
+  Timing, selection and parallel execution items are answered from
+  ptest's own facts with no model call. The model is the
   cheapest adequate one: --review-model (or PTEST_REVIEW_MODEL) wins,
   otherwise claude uses its haiku alias and codex picks from its model
   list with one extra call that sends only the model list; the choice is

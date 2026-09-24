@@ -28,12 +28,10 @@ from pathlib import Path
 from . import contracts as C
 from . import history as history_api
 from .checklist import PARALLEL_ITEM_ID, PARALLEL_SAFETY_IDS
+from .executability import NOT_CONFIGURED_PARALLEL
 
 DETERMINISTIC_ITEM_IDS: tuple[str, ...] = (
     "SELECT-001", "TIMING-001", PARALLEL_ITEM_ID)
-
-#: Exact executability text for "xdist not active" (the not-configured case).
-_NOT_CONFIGURED_PARALLEL = "no — xdist is not enabled in your pytest config"
 
 _NO_PREFIX = "no — "
 
@@ -127,7 +125,8 @@ def _checkout_identity(config: C.Config, resolution, declaration: str):
 
 
 def _select_answer(config: C.Config, cfg: str,
-                   evidence: tuple[str, ...]) -> DeterministicAnswer:
+                   evidence: tuple[str, ...], *,
+                   parallel_active: bool = False) -> DeterministicAnswer:
     runner = config.runner.kind.value
     if runner in ("vitest", "command"):
         return DeterministicAnswer(
@@ -145,7 +144,8 @@ def _select_answer(config: C.Config, cfg: str,
                 f"Selection is disabled in {cfg}, so every run executes "
                 "the full suite and scoped runs cannot narrow to changed "
                 "inputs."),
-            finding_change=_select_fix(config, cfg))
+            finding_change=_select_fix(config, cfg,
+                                       parallel_active=parallel_active))
     if not policy.closed_inputs or not policy.input_roots:
         return DeterministicAnswer(
             item_id="SELECT-001", status="gap",
@@ -154,7 +154,8 @@ def _select_answer(config: C.Config, cfg: str,
             finding_summary=(
                 f"Selection inputs are not declared closed in {cfg}, so "
                 "an unknown input cannot widen to the full suite."),
-            finding_change=_select_fix(config, cfg))
+            finding_change=_select_fix(config, cfg,
+                                       parallel_active=parallel_active))
     return DeterministicAnswer(
         item_id="SELECT-001", status="satisfied",
         reason=(f"selection is enabled with closed inputs "
@@ -164,8 +165,13 @@ def _select_answer(config: C.Config, cfg: str,
         evidence_paths=evidence)
 
 
-def _select_fix(config: C.Config, cfg: str) -> str:
-    """Concrete fix naming the closed-inputs policy (and coverage first)."""
+def _select_fix(config: C.Config, cfg: str, *,
+                parallel_active: bool = False) -> str:
+    """Concrete fix naming the closed-inputs policy (and coverage first).
+
+    When the parallel tier is active, coverage would serialize the run,
+    so the fix states that tradeoff instead of ordering ``--cov``.
+    """
     from .adapters import pytest as pytest_adapter
 
     try:
@@ -175,8 +181,13 @@ def _select_fix(config: C.Config, cfg: str) -> str:
     fix = (f"Enable selection with closed_inputs, input_roots, and "
            f"full_triggers in {cfg}.")
     if not qualified and config.runner.kind is C.RunnerKind.PYTEST:
-        fix += (" For pytest without the coverage catalog profile, first "
-                "add --cov and --cov-report to runner args.")
+        if parallel_active:
+            fix += (" Test selection needs the coverage profile, which "
+                    "runs serially under ptest; keep parallel runs and "
+                    "skip selection, or enable it and accept serial runs.")
+        else:
+            fix += (" For pytest without the coverage catalog profile, first "
+                    "add --cov and --cov-report to runner args.")
     return fix
 
 
@@ -249,7 +260,9 @@ def _timing_answer(domain: C.DomainPaths, config: C.Config, resolution,
             evidence_paths=())
     return DeterministicAnswer(
         item_id="TIMING-001", status="unknown",
-        reason="no timing history yet: run ptest --full once",
+        reason=("no timing history yet: run ptest --full once for "
+                "whole-run timing; per-test timings need the "
+                "coverage/advanced profile"),
         evidence_paths=())
 
 
@@ -342,7 +355,7 @@ def _parallel_answer(facts: dict | None, runner: str,
                 item_id=PARALLEL_ITEM_ID, status="satisfied",
                 reason=f"pytest runs in parallel with {parallel}",
                 evidence_paths=evidence)
-        if parallel == _NOT_CONFIGURED_PARALLEL:
+        if parallel == NOT_CONFIGURED_PARALLEL:
             return DeterministicAnswer(
                 item_id=PARALLEL_ITEM_ID, status="gap",
                 reason="no parallel runner is configured for this project",
@@ -410,6 +423,7 @@ def _addopts_source(config: C.Config, resolution,
 
 def parallel_answer_for(domain: C.DomainPaths,
                         resolution: C.ConfigResolution, packet,
+                        *, facts: dict | None = None,
                         ) -> DeterministicAnswer | None:
     """Answer PARALLEL-001 for one packet; never raises.
 
@@ -418,6 +432,8 @@ def parallel_answer_for(domain: C.DomainPaths,
     doctor flow finalizes it with ``finalize_parallel`` once the
     sibling safety outcomes are known. Read-only: executability facts
     are read, never written, and the scheduler is never touched.
+    Callers that already hold this packet's facts pass them in so the
+    config is checked once, not twice.
     """
     from . import executability as executability_api
 
@@ -429,11 +445,12 @@ def parallel_answer_for(domain: C.DomainPaths,
         cfg = _cfg(declaration)
         excerpt_paths = {excerpt.path for excerpt in packet.excerpts}
         evidence = (cfg,) if cfg in excerpt_paths else ()
-        try:
-            facts = executability_api.check_config(
-                config, project=declaration).facts()
-        except Exception:
-            facts = None
+        if facts is None:
+            try:
+                facts = executability_api.check_config(
+                    config, project=declaration).facts()
+            except Exception:
+                facts = None
         runner = config.runner.kind.value
         answer = _parallel_answer(facts, runner, evidence, cfg)
         if answer.status == "satisfied" and runner == "pytest" and evidence:
@@ -462,8 +479,31 @@ def finalize_parallel(answer: DeterministicAnswer | None,
     return answer
 
 
+def _packet_facts(config: C.Config, declaration: str) -> dict | None:
+    """One executability facts dict for a packet's child; None if unreadable."""
+    from . import executability as executability_api
+
+    try:
+        return executability_api.check_config(
+            config, project=declaration).facts()
+    except Exception:
+        return None
+
+
+def _packet_parallel_active(config: C.Config, declaration: str) -> bool:
+    """True when the child's pytest config activates the parallel tier."""
+    from . import executability as executability_api
+
+    try:
+        return bool(executability_api.parallel_request(
+            config, project=declaration).active)
+    except Exception:
+        return False
+
+
 def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
-                 packet) -> dict[str, DeterministicAnswer]:
+                 packet,
+                 facts: dict | None = None) -> dict[str, DeterministicAnswer]:
     declaration = packet.declaration
     config = _child_config(resolution, declaration)
     if config is None:
@@ -479,9 +519,13 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
             item_id="TIMING-001", status="unknown",
             reason="ptest history is unavailable, so timing cannot be read",
             evidence_paths=())
-    parallel = parallel_answer_for(domain, resolution, packet)
+    if facts is None:
+        facts = _packet_facts(config, declaration)
+    parallel = parallel_answer_for(domain, resolution, packet, facts=facts)
     answers = {
-        "SELECT-001": _select_answer(config, cfg, evidence),
+        "SELECT-001": _select_answer(
+            config, cfg, evidence,
+            parallel_active=_packet_parallel_active(config, declaration)),
         "TIMING-001": timing,
     }
     if parallel is not None:
@@ -490,17 +534,20 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
 
 
 def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
-                packet) -> dict[str, DeterministicAnswer]:
+                packet,
+                facts: dict | None = None) -> dict[str, DeterministicAnswer]:
     """Answer the deterministic items for one packet; never raises.
 
     Returns ``{}`` when the packet's child config does not resolve, and an
     ``unknown`` TIMING answer when history is unavailable. The PARALLEL-001
     answer carries the safe provisional fix when no parallel runner is
     configured (see ``parallel_answer_for``). Read-only: history is read,
-    never written, and the scheduler is never touched.
+    never written, and the scheduler is never touched. Callers that
+    already hold this packet's executability facts pass them in so the
+    config is checked once per packet.
     """
     try:
-        return _answers_for(domain, resolution, packet)
+        return _answers_for(domain, resolution, packet, facts)
     except Exception:
         return {}
 
