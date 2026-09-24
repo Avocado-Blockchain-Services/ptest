@@ -6,6 +6,7 @@ the typed capability boundary until the scheduler/guard orchestration lands.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -804,39 +805,76 @@ def _ask_init_setup(plan: init_smoke.SmokePlan) -> bool:
     return init_smoke.parse_consent(answer)
 
 
-def _init_smoke_text(parsed: ParsedArgs, cwd: Path) -> str:
+def _init_facts(cwd: Path) -> tuple:
+    """Best-effort FACT_KEYS dicts per project for the init renderers."""
+    try:
+        items = executability.check_resolution(
+            config_api.resolve_config(cwd))
+        return tuple(_executability_facts(item) for item in items)
+    except Exception:
+        # Facts never change init's configuration-based outcome: trouble
+        # resolving them renders the notes-only shape instead.
+        return ()
+
+
+def _render_init_text(result, rules, *, parsed: ParsedArgs,
+                      repo_name: str, facts: tuple) -> str:
+    """Render the init header through the new renderer when available."""
+    try:
+        parameters = inspect.signature(
+            init_render.render_init).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "facts" not in parameters:
+        return init_render.render_init(
+            result, rules, dry_run=parsed.dry_run, agents=parsed.agents,
+            repo_name=repo_name, color=sys.stdout.isatty())
+    return init_render.render_init(
+        result, rules, dry_run=parsed.dry_run, agents=parsed.agents,
+        repo_name=repo_name, color=sys.stdout.isatty(), facts=facts)
+
+
+def _render_init_footer_text(result, rules, *, parsed: ParsedArgs,
+                             smoke: tuple, plans: tuple,
+                             facts: tuple) -> str:
+    """Render the init footer (smoke, next steps, restart); "" when none."""
+    render_footer = getattr(init_render, "render_init_footer", None)
+    if render_footer is None:
+        return ""
+    try:
+        return render_footer(
+            result, rules, dry_run=parsed.dry_run, smoke=smoke,
+            plans=plans, facts=facts)
+    except Exception:
+        return ""
+
+
+def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
+                        domain) -> tuple:
     """One smoke run per project; never changes init's outcome or status.
 
     Dry runs, machine output, and explicit opt-out never execute. TTY init
     asks once; non-interactive init runs only with ``--smoke``. Owed setup
     never installs silently: TTY init offers to run it through ptest first,
-    and non-interactive init skips with the working advice.
+    and non-interactive init skips with the working advice. The caller
+    formats the results and feeds them to the init footer.
     """
     if parsed.dry_run or parsed.json or parsed.smoke is False:
-        return ""
-    try:
-        resolution = config_api.resolve_config(cwd)
-        domain = platform.domain_paths(parsed.fixture_domain)
-        plans = init_smoke.plan_resolution(resolution, domain)
-    except Exception:
-        # Smoke is best-effort confirmation: planning trouble never changes
-        # init's configuration-based outcome or exit status.
-        return ""
+        return ()
     if not plans:
-        return ""
+        return ()
     if parsed.smoke is True:
-        results = tuple(
+        return tuple(
             init_smoke.skip_result(plan, init_smoke.setup_advice(plan))
             if plan.skip_reason is None and plan.setup_argv is not None
             else init_smoke.run_plan(
                 domain, plan, fixture_domain=parsed.fixture_domain)
             for plan in plans
         )
-        return init_smoke.format_smoke(results)
     runnable = [plan for plan in plans if plan.skip_reason is None]
     if not runnable or not _interactive_review() \
             or not _ask_init_smoke(runnable):
-        return ""
+        return ()
     results = []
     for plan in plans:
         if plan.skip_reason is not None:
@@ -853,7 +891,7 @@ def _init_smoke_text(parsed: ParsedArgs, cwd: Path) -> str:
                     continue
             results.append(init_smoke.run_plan(
                 domain, plan, fixture_domain=parsed.fixture_domain))
-    return init_smoke.format_smoke(tuple(results))
+    return tuple(results)
 
 
 def _review_consent_problem() -> C.Problem:
@@ -1115,39 +1153,45 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
                               *, ask: bool = True, calls: int | None = None,
                               concurrency: int = 4,
                               model: str | None = None) -> bool:
+    """Short pre-consent disclosure: at most three lines, then the prompt.
+
+    Line 1 names the provider, the project, and the planned model calls;
+    lines 2-3 name the exclusions, the cost note, and the pointer to the
+    full legal text (``ptest doctor --help``) and the model-free static
+    review (``ptest doctor --offline``).
+    """
     if sys.stderr.isatty():
         # The collecting spinner line has no trailing newline; terminate
         # it before the consent text, as the success/error paths do.
         print(file=sys.stderr)
-    provider = render.terminal_text(adapter.name[:120])
-    project = render.terminal_text(resolution.root.name[:120])
-    disclosure = (
-        f"Model review disclosure: {provider} may receive bounded source text "
-        f"from project {project} using your existing account. Provider or "
-        "account costs may apply. ptest cannot perfectly detect secrets in "
-        "source. Excluded from review: secrets/private files, agent "
-        "instructions/configuration, dependency environments, caches, "
-        "coverage/build outputs, generated/minified files, and .ptest private "
-        "runtime state. Use --offline for the static doctor instead."
-    )
     if calls is not None:
         if isinstance(calls, bool) or not isinstance(calls, int) \
                 or calls < 0:
             raise TypeError("calls must be a nonnegative int or None")
         if isinstance(concurrency, bool) or not isinstance(concurrency, int):
             raise TypeError("concurrency must be int")
+    provider = render.terminal_text(adapter.name[:120])
+    project = render.terminal_text(resolution.root.name[:120])
+    if calls is None:
+        first = (f"Model review disclosure: {provider} gets bounded source "
+                 f"excerpts from {project}.")
+    else:
         chosen = (render.terminal_text(str(model)[:128])
                   if model else "")
-        if chosen:
-            disclosure += (
-                f" This review makes {calls} model calls "
-                f"({concurrency} at a time) with model {chosen}.")
-        else:
-            disclosure += (
-                f" This review makes {calls} model calls "
-                f"({concurrency} at a time) with a model chosen after "
-                "consent from the provider's model list (one extra call "
-                "that sends only the model list).")
+        tail = (f"model {chosen}."
+                if chosen else
+                "model chosen from the provider list after consent "
+                "(one extra call sends only that list).")
+        first = (f"Model review disclosure: {provider} gets bounded source "
+                 f"excerpts from {project}: {calls} calls, "
+                 f"{concurrency} at a time, {tail}")
+    disclosure = "\n".join((
+        first,
+        "Secrets, private files, agent instructions, dependency folders, "
+        "caches and build output are never sent. Provider costs may apply.",
+        "Full disclosure: ptest doctor --help. Static review without a "
+        "model: ptest doctor --offline.",
+    ))
     if not ask:
         print(disclosure, file=sys.stderr)
         return True
@@ -1163,10 +1207,59 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
     return answer in {"y", "yes"}
 
 
+def _executability_facts(item) -> dict:
+    """One frozen FACT_KEYS dict for a project, for init/doctor renderers.
+
+    Uses ``Executability.facts()`` once T2 lands; before that, builds the
+    same shape from the public verdict so doctor children already carry a
+    ``facts`` key the renderers can read.
+    """
+    facts = getattr(item, "facts", None)
+    if callable(facts):
+        return facts()
+    not_runnable = item.status == executability.STATUS_NOT_EXECUTABLE
+    return {"project": item.project, "runner": item.runner,
+            "runs": not not_runnable,
+            "runs_reason": item.reason if not_runnable else None,
+            "runs_fix": item.fix if not_runnable else None,
+            "parallel": None, "parallel_short": None, "parallel_fix": None,
+            "setup": None, "full_suite": None, "full_blocked": None}
+
+
+def _project_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
+    """Map each project declaration to its FACT_KEYS facts dict."""
+    return {item.project: _executability_facts(item)
+            for item in executability.check_resolution(resolution)}
+
+
 def _execution_facts(resolution: C.ConfigResolution) -> dict[str, dict]:
     """Map each project to its public executability fact for review children."""
     return {item.project: item.to_public()
             for item in executability.check_resolution(resolution)}
+
+
+def _plan_item_reviews(packet, domain: C.DomainPaths,
+                       resolution: C.ConfigResolution):
+    """Plan per-item reviews, answering deterministically where possible.
+
+    TIMING-001 and SELECT-001 (plus PARALLEL-001 once T4 lands) are
+    answered from ptest's own facts with no model call; every other item
+    keeps its provider request. Before the T4 merge this is the plain
+    planner.
+    """
+    try:
+        from . import deterministic_items as deterministic
+    except ImportError:
+        return agent_assessment.plan_item_reviews(packet)
+    try:
+        answers = deterministic.answers_for(domain, resolution, packet)
+    except Exception:
+        answers = None
+    try:
+        return agent_assessment.plan_item_reviews(
+            packet, answers=answers)
+    except TypeError:
+        return agent_assessment.plan_item_reviews(packet)
 
 
 def _review_failure_reason(result) -> str | None:
@@ -1397,7 +1490,8 @@ def _initialization_required_limitation(
 
 
 def _child_assessment_data(packet, assessment, limitations: list[dict], *,
-                         execution: dict | None = None) -> dict:
+                         execution: dict | None = None,
+                         facts: dict | None = None) -> dict:
     score = assessment.score
     child = {
         "project_id": assessment.project_id,
@@ -1432,6 +1526,12 @@ def _child_assessment_data(packet, assessment, limitations: list[dict], *,
     }
     if execution is not None:
         child["execution"] = execution
+    if facts is not None:
+        # Terminal/report-only project facts: the public validator
+        # tolerates the additive key and projection drops it from the
+        # JSON document, while the renderers read it for the per-project
+        # runs/parallel/setup lines (falling back to execution).
+        child["facts"] = facts
     return child
 
 
@@ -1501,7 +1601,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             )
         config_identity = _review_config_identity(resolution, workspace)
         declaration_set = tuple(repo.declaration for repo in workspace.repositories)
-        plans = [agent_assessment.plan_item_reviews(packet)
+        plans = [_plan_item_reviews(packet, domain, resolution)
                  for packet in packets]
         ensure_deadline()
         calls = sum(1 for reviews in plans for review in reviews
@@ -1616,6 +1716,10 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             raise _problem("stale-evidence", "source or configuration changed during review")
 
         facts = _execution_facts(resolution)
+        try:
+            project_facts = _project_facts(resolution)
+        except Exception:
+            project_facts = {}
         child_data = []
         initialization_blocker = _initialization_required_limitation(resolution)
         for packet, assessment in zip(packets, assessments):
@@ -1624,7 +1728,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 child_limitations.insert(0, dict(initialization_blocker))
             child_data.append(_child_assessment_data(
                 packet, assessment, child_limitations,
-                execution=facts.get(packet.declaration)))
+                execution=facts.get(packet.declaration),
+                facts=project_facts.get(packet.declaration)))
         limitations = _assessment_limitations(packets, top_level=True)
         if initialization_blocker is not None:
             limitations.insert(0, dict(initialization_blocker))
@@ -1750,19 +1855,39 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             if agents and not parsed.dry_run:
                 applied = agent_rules.apply(root, agents=agents)
             payload = C.serialize_init_result(result)
+            rules = applied if applied is not None else plan
             if parsed.json:
+                # Machine output stays byte-compatible: no facts, no footer.
                 sys.stdout.buffer.write(_document("init", payload))
             else:
-                sys.stdout.write(init_render.render_init(
-                    result, applied if applied is not None else plan,
-                    dry_run=parsed.dry_run, agents=agents,
-                    repo_name=root.name, color=sys.stdout.isatty()))
+                facts = () if parsed.dry_run else _init_facts(cwd)
+                sys.stdout.write(_render_init_text(
+                    result, rules, parsed=parsed, repo_name=root.name,
+                    facts=facts))
             if parsed.reveal_command:
                 print("unredacted-command-disclosure: explicit preview requested",
                       file=sys.stderr)
-            smoke_text = _init_smoke_text(parsed, cwd)
-            if smoke_text:
-                sys.stdout.write(smoke_text)
+            smoke_results: tuple = ()
+            smoke_plans: tuple = ()
+            if not parsed.dry_run and not parsed.json:
+                try:
+                    smoke_domain = platform.domain_paths(
+                        parsed.fixture_domain)
+                    smoke_plans = init_smoke.plan_resolution(
+                        config_api.resolve_config(cwd), smoke_domain)
+                except Exception:
+                    smoke_plans = ()
+                smoke_results = _init_smoke_results(
+                    parsed, cwd, smoke_plans, smoke_domain
+                    if smoke_plans else None)
+                smoke_text = init_smoke.format_smoke(smoke_results)
+                if smoke_text:
+                    sys.stdout.write(smoke_text)
+                footer = _render_init_footer_text(
+                    result, rules, parsed=parsed, smoke=smoke_results,
+                    plans=smoke_plans, facts=facts)
+                if footer:
+                    sys.stdout.write(footer)
             offer_review = (
                 parsed.doctor_request is True
                 or (parsed.doctor_request is None and not parsed.json

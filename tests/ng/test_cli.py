@@ -1656,11 +1656,15 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
     assert scans == [1, 1]
     assert "claude" in disclosure
     assert r"project\x1b[31m\nname" in disclosure
-    assert "bounded source" in disclosure
-    assert "existing account" in disclosure
-    assert "costs may apply" in disclosure
-    assert "cannot perfectly detect secrets" in disclosure
+    assert "gets bounded source excerpts from" in disclosure
+    assert "Provider costs may apply" in disclosure
+    assert "cannot perfectly detect secrets" not in disclosure
+    assert "Full disclosure: ptest doctor --help" in disclosure
     assert "--offline" in disclosure
+    assert "Run this review once? [y/N]:" in disclosure
+    head, _, _ = disclosure.partition("Run this review once?")
+    assert len([line for line in head.splitlines()
+                if line.strip()]) <= 4
     assert "\x1b" not in disclosure
     assert "optimization review is disabled" in (captured.err + captured.out).lower()
     assert "review not yet performed" in captured.out
@@ -1687,11 +1691,11 @@ def test_tty_review_disclosure_names_excluded_source_classes(
     assert main(("doctor",)) == 0
 
     disclosure = capsys.readouterr().err.lower()
-    assert "secrets/private files" in disclosure
-    assert "agent instructions/configuration" in disclosure
-    assert "dependency environments" in disclosure
-    assert "coverage/build outputs" in disclosure
-    assert "generated/minified files" in disclosure
+    assert "secrets, private files" in disclosure
+    assert "agent instructions" in disclosure
+    assert "dependency folders" in disclosure
+    assert "caches and build output are never sent" in disclosure
+    assert "provider costs may apply" in disclosure
 
 
 def test_review_disclosure_terminates_tty_spinner_line(
@@ -3350,8 +3354,8 @@ def test_review_disclosure_keeps_first_sentence_without_counts(monkeypatch,
         adapter, _disclosure_resolution(), ask=False) is True
     captured = capsys.readouterr()
     assert captured.err.startswith(
-        "Model review disclosure: codex may receive bounded source text "
-        "from project project")
+        "Model review disclosure: codex gets bounded source excerpts "
+        "from project.")
 
 
 def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
@@ -3364,8 +3368,8 @@ def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
         concurrency=2, model="gpt-5.6-luna") is True
     captured = capsys.readouterr()
     assert captured.err.startswith("Model review disclosure: codex")
-    assert ("This review makes 11 model calls (2 at a time) with model "
-            "gpt-5.6-luna.") in captured.err
+    assert ("gets bounded source excerpts from project: 11 calls, "
+            "2 at a time, model gpt-5.6-luna.") in captured.err
 
 
 def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
@@ -3377,8 +3381,9 @@ def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
         adapter, _disclosure_resolution(), ask=False, calls=9,
         concurrency=4, model=None) is True
     captured = capsys.readouterr()
-    assert "with a model chosen after consent" in captured.err
-    assert "one extra call that sends only the model list" in captured.err
+    assert "model chosen from the provider list after consent" in (
+        captured.err)
+    assert "(one extra call sends only that list)" in captured.err
 
 
 # --- Round 15 twins: fenced provider replies, counted failure reasons --------

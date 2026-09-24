@@ -154,12 +154,30 @@ Notes:
 
   Each review makes one model call per checklist item (4 at a time by
   default; --review-concurrency 1..8 bounds parallelism), skipping items
-  that do not apply without a call. The model is the cheapest adequate
-  one: --review-model (or PTEST_REVIEW_MODEL) wins, otherwise claude uses
-  its haiku alias and codex picks from its model list with one extra call
-  that sends only the model list; the choice is cached per provider and
-  CLI version. The tool-denial qualification must be re-run when the
-  chosen model changes. Citations are in recommendations.md.
+  that do not apply without a call. Timing and selection items are
+  answered from ptest's own facts without a model call. The model is the
+  cheapest adequate one: --review-model (or PTEST_REVIEW_MODEL) wins,
+  otherwise claude uses its haiku alias and codex picks from its model
+  list with one extra call that sends only the model list; the choice is
+  cached per provider and CLI version. The tool-denial qualification must
+  be re-run when the chosen model changes. Citations are in
+  recommendations.md.
+
+  Full model review disclosure: the selected provider may receive bounded
+  source text from the reviewed project using your existing account.
+  Provider or account costs may apply. ptest cannot perfectly detect
+  secrets in source. Excluded from review: secrets/private files, agent
+  instructions/configuration, dependency environments, caches,
+  coverage/build outputs, generated/minified files, and .ptest private
+  runtime state. Use --offline for the static doctor instead.
+
+  Parallel pytest: a pytest project whose checked-in config enables xdist
+  runs one worker per granted slot (``-n N`` requests N slots; ``-n auto``
+  requests the machine's slot count; ``ptest --workers W`` caps it). The
+  scheduler grants what is free and the run serializes with ``-n 0`` when
+  only one slot is granted or xdist cannot be verified; ``-n 0`` in
+  [runner] args opts out of parallel runs. Coverage (--cov) under xdist
+  is out of scope and always runs serially.
 
   --probe requires --scope and a single-project v1 configuration, cannot
   combine output modes or static scan limits, and probe options require
