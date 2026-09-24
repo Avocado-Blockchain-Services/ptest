@@ -135,7 +135,7 @@ def _write_pytest_project(root: Path, *, addopts: str,
         "\n"
         "import pytest\n"
         "\n"
-        "MARKERS = os.environ.get('PTEST_T5_MARKERS', '')\n"
+        "MARKERS = os.environ.get('T5_WORKER_MARKERS', '')\n"
         "\n"
         "\n"
         "def _record(name):\n"
@@ -167,6 +167,11 @@ def _write_pytest_project(root: Path, *, addopts: str,
         "\n"
         "def test_plain_two():\n"
         "    _record('plain_two')\n"
+        "    assert True\n"
+        "\n"
+        "\n"
+        "def test_plain_three():\n"
+        "    _record('plain_three')\n"
         "    assert True\n",
         encoding="utf-8",
     )
@@ -586,7 +591,9 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
     _write_pytest_project(
         root, addopts='-n 4 --dist=loadgroup -m "not slow"',
         launcher=[sys.executable], args=[])
-    markers = root / "markers"
+    # Markers live outside the checkout: test output inside it would trip
+    # ptest's changed-during-run detection.
+    markers = tmp_path / "full-markers"
     markers.mkdir()
 
     monkeypatch.chdir(root)
@@ -594,7 +601,7 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
     capsys.readouterr()
     _commit(root)
 
-    env = {"PTEST_T5_MARKERS": str(markers)}
+    env = {"T5_WORKER_MARKERS": str(markers)}
     full = case.invoke(domain_full, root, "--full",
                        env=env, timeout=60)
     assert full.code == 0, full.stderr.decode()
@@ -618,10 +625,11 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
         root, root2,
         ignore=shutil.ignore_patterns(
             "markers", "__pycache__", ".pytest_cache"))
-    (root2 / "markers").mkdir()
+    markers2 = tmp_path / "partial-markers"
+    markers2.mkdir()
     partial = case.invoke(
         domain_partial, root2, "--full",
-        env={"PTEST_T5_MARKERS": str(root2 / "markers")}, timeout=60)
+        env={"T5_WORKER_MARKERS": str(markers2)}, timeout=60)
     assert partial.result is not None
     assert partial.result["data"]["granted_workers"] == 2
     assert ("parallel-workers: 2 xdist workers (4 requested, 2 granted)"
@@ -690,7 +698,7 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     sleeper.write_text(
         "import os, time\n"
         "\n"
-        "MARKERS = os.environ.get('PTEST_T5_MARKERS', '')\n"
+        "MARKERS = os.environ.get('T5_WORKER_MARKERS', '')\n"
         "\n"
         "\n"
         "def _mark(name):\n"
@@ -732,7 +740,7 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     _commit(root)
 
     child_env = {key: value for key, value in os.environ.items()}
-    child_env["PTEST_T5_MARKERS"] = str(markers)
+    child_env["T5_WORKER_MARKERS"] = str(markers)
     proc = subprocess.Popen(
         [sys.executable, "-m", "ptest", "--fixture-domain",
          str(domain.root), "--full"],

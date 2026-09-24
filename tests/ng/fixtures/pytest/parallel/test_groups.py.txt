@@ -1,0 +1,51 @@
+"""Persea-shaped parallel fixture tests (checked in for T1 twin (h))."""
+
+import os
+
+import pytest
+
+MARKERS = os.environ.get("PTEST_PARALLEL_MARKERS", "")
+
+
+def _record(name):
+    if MARKERS:
+        with open(os.path.join(MARKERS, "workers.log"), "a",
+                  encoding="utf-8") as handle:
+            handle.write(
+                os.environ.get("PYTEST_XDIST_WORKER", "-") + ":"
+                + os.environ.get("PTEST_WORKER_ID", "-") + ":"
+                + os.environ.get("PTEST_RESOURCE_PREFIX", "-") + ":"
+                + name + "\n")
+
+
+@pytest.mark.xdist_group("alpha")
+def test_alpha_one():
+    _record("alpha_one")
+    assert True
+
+
+@pytest.mark.xdist_group("alpha")
+def test_alpha_two():
+    _record("alpha_two")
+    assert True
+
+
+def test_plain_one():
+    _record("plain_one")
+    assert True
+
+
+def test_plain_two():
+    _record("plain_two")
+    assert True
+
+
+def test_plain_three():
+    _record("plain_three")
+    assert True
+
+
+@pytest.mark.slow
+def test_slow_one():
+    _record("slow_one")
+    assert True

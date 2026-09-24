@@ -1,0 +1,643 @@
+"""Real-xdist subprocess twins for the parallel pytest bridge (T1).
+
+Each twin runs ``src/ptest/runtime/pytest_bridge.py`` directly as a
+subprocess (``sys.executable``, scrubbed env, ``PTEST_BRIDGE_PROTOCOL``,
+the adapter-to-bridge env, a private 0700 report dir with a valid report
+binding) against real pytest-xdist 3.8.0 from the test environment, then
+parses the JSON report and the ``ptest-bridge-refusal`` stderr marker.
+Every twin carries an explicit timeout of at most 60 s.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from typing import NamedTuple
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BRIDGE = REPO_ROOT / "src" / "ptest" / "runtime" / "pytest_bridge.py"
+PROTOCOL = REPO_ROOT / "src" / "ptest" / "runtime" / "protocol-v1.json"
+PARALLEL_FIXTURES = Path(__file__).parent / "fixtures" / "pytest" / "parallel"
+
+WORKERS = 4
+
+# Control variables the harness purges so a twin never inherits
+# orchestrator state (mirrors the serial twins' scrub list, extended
+# with the parallel identity variables the bridge itself manages).
+_SCRUB = (
+    "PYTEST_ADDOPTS", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "PTEST_EXECUTION", "PTEST_RUN_ID", "PTEST_GRANT_NONCE",
+    "PTEST_PYTEST_REPORT_PATH", "PTEST_PYTEST_ATTEMPT",
+    "PTEST_PYTEST_EXECUTION", "PTEST_PYTEST_CHECKOUT_ROOT",
+    "PTEST_PYTEST_CONFIG_PATH", "PTEST_GRANT_WORKERS", "PTEST_WORKER_ID",
+    "PTEST_RESOURCE_PREFIX", "PTEST_CHECKOUT_ID", "PTEST_PYTEST_PROFILE",
+    "PTEST_PYTEST_SELECTED_FILES", "PTEST_TEST_ROOTS",
+    "PTEST_PARALLEL_MARKERS", "T5_WORKER_MARKERS",
+    "PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID",
+    "PYTEST_XDIST_WORKER_COUNT",
+)
+
+_REFUSAL_PREFIX = "ptest-bridge-refusal: "
+
+
+def _hex(n: int) -> str:
+    return secrets.token_hex(n // 2)
+
+
+class TwinResult(NamedTuple):
+    code: int
+    stdout: bytes
+    stderr: bytes
+    report: dict | None
+    refusals: list[dict]
+
+
+def _refusals(stderr: bytes) -> list[dict]:
+    found = []
+    for line in stderr.decode(errors="replace").splitlines():
+        if line.startswith(_REFUSAL_PREFIX):
+            try:
+                found.append(json.loads(line[len(_REFUSAL_PREFIX):]))
+            except ValueError:
+                pass
+    return found
+
+
+def _run_bridge(root: Path, argv: list[str], *, execution: str,
+                workers: int = WORKERS, extra_env: dict | None = None,
+                timeout: float = 60) -> TwinResult:
+    """Run the bridge file directly with a valid executor binding."""
+    assert timeout <= 60
+    root = root.resolve()
+    reports = root / "reports"
+    reports.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(reports, 0o700)
+    markers = root / "markers"
+    markers.mkdir(exist_ok=True)
+    run_id = _hex(32)
+    nonce = _hex(64)
+    attempt = "a001"
+    report_path = reports / f"native-{attempt}-{run_id}.json"
+
+    child_env = {
+        key: value for key, value in os.environ.items()
+        if key not in _SCRUB
+    }
+    child_env.update({
+        "PTEST_BRIDGE_PROTOCOL": str(PROTOCOL),
+        "PTEST_GRANT_WORKERS": str(workers),
+        "PTEST_WORKER_ID": "w000",
+        "PTEST_RESOURCE_PREFIX": f"pt_abcd1234_{run_id}_{attempt}_w000",
+        "PTEST_EXECUTION": execution,
+        "PTEST_TEST_ROOTS": '["tests"]' if execution == "full" else "[]",
+        "PTEST_PYTEST_CHECKOUT_ROOT": str(root),
+        "PTEST_PYTEST_CONFIG_PATH": "",
+        "PTEST_PYTEST_REPORT_PATH": str(report_path),
+        "PTEST_RUN_ID": run_id,
+        "PTEST_GRANT_NONCE": nonce,
+        "PTEST_PYTEST_ATTEMPT": attempt,
+        "PTEST_PYTEST_EXECUTION": execution,
+        "PTEST_PARALLEL_MARKERS": str(markers),
+    })
+    for key, value in (extra_env or {}).items():
+        child_env[key] = value
+
+    completed = subprocess.run(
+        [sys.executable, str(BRIDGE), *argv],
+        cwd=str(root), env=child_env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True, timeout=timeout, check=False,
+    )
+    report = None
+    if report_path.exists():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    return TwinResult(
+        code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        report=report,
+        refusals=_refusals(completed.stderr),
+    )
+
+
+def _write(root: Path, relpath: str, body: str) -> None:
+    path = root / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+_IDENTITY_TEST = (
+    "import os\n"
+    "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
+    "def _record(name):\n"
+    "    with open(os.path.join(MARKERS, 'workers.log'), 'a',"
+    " encoding='utf-8') as handle:\n"
+    "        handle.write(os.environ.get('PYTEST_XDIST_WORKER', '-') + ':'\n"
+    "            + os.environ.get('PTEST_WORKER_ID', '-') + ':'\n"
+    "            + os.environ.get('PTEST_RESOURCE_PREFIX', '-') + ':'\n"
+    "            + name + '\\n')\n"
+)
+
+
+def _identity_tests(count: int) -> str:
+    body = _IDENTITY_TEST
+    for index in range(count):
+        body += (
+            f"\ndef test_identity_{index:02d}():\n"
+            f"    _record('identity_{index:02d}')\n"
+            "    assert True\n"
+        )
+    return body
+
+
+def _worker_lines(root: Path) -> list[tuple[str, str, str, str]]:
+    lines = (root / "markers" / "workers.log").read_text(
+        encoding="utf-8").splitlines()
+    return [tuple(line.split(":")) for line in lines]  # type: ignore[misc]
+
+
+def _materialize_persea_fixture(root: Path) -> None:
+    shutil.copyfile(PARALLEL_FIXTURES / "pyproject.toml.txt",
+                    root / "pyproject.toml")
+    shutil.copyfile(PARALLEL_FIXTURES / "conftest.py.txt",
+                    root / "conftest.py")
+    tests = root / "tests"
+    tests.mkdir(exist_ok=True)
+    shutil.copyfile(PARALLEL_FIXTURES / "test_groups.py.txt",
+                    tests / "test_groups.py")
+
+
+def test_parallel_pass_four_workers_observed(tmp_path):
+    """Twin (a): a 4-worker pass completes with per-worker identity."""
+    root = tmp_path / "pass"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(8))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+
+    lines = _worker_lines(root)
+    assert len(lines) == 8
+    xdist_workers = {line[0] for line in lines}
+    ptest_workers = {line[1] for line in lines}
+    prefixes = {line[2] for line in lines}
+    assert xdist_workers == {"gw0", "gw1", "gw2", "gw3"}
+    assert ptest_workers == {"w000", "w001", "w002", "w003"}
+    assert len(prefixes) == 4
+    for xdist_id, ptest_id, prefix, _ in lines:
+        number = int(xdist_id[2:])
+        assert ptest_id == f"w{number:03d}"
+        assert prefix.startswith("pt_") and prefix.endswith(ptest_id)
+
+
+def test_parallel_fail_reports_native_failure(tmp_path):
+    """Twin (b): a 4-worker failure is complete with native-failure."""
+    root = tmp_path / "fail"
+    root.mkdir()
+    _write(root, "tests/test_bad.py",
+           _IDENTITY_TEST
+           + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_bad.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 1, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 1
+    assert twin.report["problem"] == "native-failure"
+
+
+def test_parallel_worker_crash_is_never_a_pass(tmp_path):
+    """Twin (c): a SIGKILLed worker means incomplete or failed, never 0."""
+    root = tmp_path / "crash"
+    root.mkdir()
+    _write(root, "tests/test_crash.py",
+           "import os, signal\n"
+           + _IDENTITY_TEST
+           + "\ndef test_kill_worker():\n"
+           "    _record('kill')\n"
+           "    os.kill(os.getpid(), signal.SIGKILL)\n"
+           + "\ndef test_ok():\n    _record('ok')\n    assert True\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_crash.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code != 0
+    assert twin.report is None or (
+        twin.report["terminal_complete"] is False
+        or twin.report.get("native_exit_code") not in (None, 0))
+
+
+def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path):
+    """Twin (d): loadgroup runs each xdist_group on one worker."""
+    root = tmp_path / "loadgroup"
+    root.mkdir()
+    body = _IDENTITY_TEST
+    for name in ("g1_a", "g1_b"):
+        body += (f"\nimport pytest\n@pytest.mark.xdist_group('g1')\n"
+                 f"def test_{name}():\n    _record('{name}')\n    assert True\n")
+    for name in ("g2_a", "g2_b"):
+        body += (f"\nimport pytest\n@pytest.mark.xdist_group('g2')\n"
+                 f"def test_{name}():\n    _record('{name}')\n    assert True\n")
+    for name in ("plain_a", "plain_b"):
+        body += (f"\ndef test_{name}():\n    _record('{name}')\n"
+                 "    assert True\n")
+    _write(root, "tests/test_groups.py", body)
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q", "-p", "no:cacheprovider",
+               "tests/test_groups.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    lines = _worker_lines(root)
+    assert len(lines) == 6
+    by_test = {line[3]: line[1] for line in lines}
+    assert by_test["g1_a"] == by_test["g1_b"]
+    assert by_test["g2_a"] == by_test["g2_b"]
+
+
+def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
+    """Twin (e): SIGINT the bridge session; exit fast, nothing survives."""
+    root = (tmp_path / "interrupt").resolve()
+    root.mkdir()
+    body = (
+        "import os, time\n"
+        "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
+        "def _mark(name):\n"
+        "    with open(os.path.join(MARKERS, name), 'w',"
+        " encoding='utf-8') as handle:\n"
+        "        handle.write('started\\n')\n")
+    for name in ("a", "b", "c", "d"):
+        body += (f"\ndef test_sleep_{name}():\n    _mark('{name}')\n"
+                 "    time.sleep(30)\n")
+    _write(root, "tests/test_sleep.py", body)
+
+    reports = root / "reports"
+    reports.mkdir(mode=0o700)
+    run_id = _hex(32)
+    report_path = reports / f"native-a001-{run_id}.json"
+    child_env = {
+        key: value for key, value in os.environ.items()
+        if key not in _SCRUB
+    }
+    child_env.update({
+        "PTEST_BRIDGE_PROTOCOL": str(PROTOCOL),
+        "PTEST_GRANT_WORKERS": str(WORKERS),
+        "PTEST_WORKER_ID": "w000",
+        "PTEST_RESOURCE_PREFIX": f"pt_abcd1234_{run_id}_a001_w000",
+        "PTEST_EXECUTION": "scoped",
+        "PTEST_TEST_ROOTS": "[]",
+        "PTEST_PYTEST_CHECKOUT_ROOT": str(root),
+        "PTEST_PYTEST_CONFIG_PATH": "",
+        "PTEST_PYTEST_REPORT_PATH": str(report_path),
+        "PTEST_RUN_ID": run_id,
+        "PTEST_GRANT_NONCE": _hex(64),
+        "PTEST_PYTEST_ATTEMPT": "a001",
+        "PTEST_PYTEST_EXECUTION": "scoped",
+        "PTEST_PARALLEL_MARKERS": str(root / "markers"),
+    })
+    (root / "markers").mkdir(exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, str(BRIDGE), "-n", "4", "--dist", "load", "-q",
+         "-p", "no:cacheprovider", "tests/test_sleep.py"],
+        cwd=str(root), env=child_env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True)
+    try:
+        markers = root / "markers"
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if all((markers / name).exists() for name in "abcd"):
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        assert all((markers / name).exists() for name in "abcd"), \
+            "workers never started"
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGINT)
+        assert proc.wait(timeout=15) != 0
+        gone_by = time.monotonic() + 10
+        while time.monotonic() < gone_by:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            pytest.fail("bridge session survived SIGINT")
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            proc.wait(timeout=10)
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def test_parallel_worker_deselect_runs_labelled(tmp_path):
+    """Twin (f1): a worker-only modifyitems deselect runs labelled."""
+    root = tmp_path / "deselect"
+    root.mkdir()
+    _write(root, "tests/sub/conftest.py",
+           "def pytest_collection_modifyitems(items):\n"
+           "    items[:] = [item for item in items"
+           " if 'test_drop' not in item.nodeid]\n")
+    _write(root, "tests/sub/test_mixed.py",
+           _IDENTITY_TEST
+           + "\ndef test_keep():\n    _record('keep')\n    assert True\n"
+           + "\ndef test_drop():\n    _record('drop')\n    assert True\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    narrowing = twin.report["project_narrowing"]
+    assert "tests/sub/conftest.py" in narrowing["conftest_hooks"]
+    lines = _worker_lines(root)
+    assert [line[3] for line in lines] == ["keep"]
+
+
+def test_parallel_collection_finish_drop_is_refused(tmp_path):
+    """Twin (f2): a collection_finish drop after the inventory is refused."""
+    root = tmp_path / "drop"
+    root.mkdir()
+    _write(root, "tests/sub/conftest.py",
+           "def pytest_collection_finish(session):\n"
+           "    del session.items[0]\n")
+    _write(root, "tests/sub/test_mixed.py",
+           _IDENTITY_TEST
+           + "\ndef test_first():\n    _record('first')\n    assert True\n"
+           + "\ndef test_second():\n    _record('second')\n    assert True\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("full pytest run left collected items unrun" in refusal.get(
+        "message", "") for refusal in twin.refusals)
+
+
+def test_parallel_sessionfinish_forgery_is_refused(tmp_path):
+    """Twin (g1): a controller sessionfinish forcing exit 0 is refused."""
+    root = tmp_path / "forgery"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "import pytest\n"
+           "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+           "def pytest_sessionfinish(session, exitstatus):\n"
+           "    result = yield\n"
+           "    session.exitstatus = 0\n"
+           "    return result\n")
+    _write(root, "tests/test_forged.py",
+           _IDENTITY_TEST
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("native exit hides observed test failures" in refusal.get(
+        "message", "") for refusal in twin.refusals)
+
+
+def test_parallel_worker_makereport_rewrite_is_refused(tmp_path):
+    """Twin (g2): a worker-only makereport hiding failures is refused.
+
+    The worker refuses mid-collection, so its channel dies without a
+    record; the controller fails closed. The native code is preserved
+    (worker internal error), never remapped to a pass.
+    """
+    root = tmp_path / "makereport"
+    root.mkdir()
+    _write(root, "tests/sub/conftest.py",
+           "import pytest\n"
+           "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+           "def pytest_runtest_makereport(item, call):\n"
+           "    report = yield\n"
+           "    if report.failed:\n"
+           "        report.outcome = 'passed'\n"
+           "    return report\n")
+    _write(root, "tests/sub/test_hidden.py",
+           _IDENTITY_TEST
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code != 0
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert twin.refusals
+
+
+def test_parallel_persea_shaped_four_workers(tmp_path):
+    """Twin (h): the persea-shaped fixture runs 4 workers, labelled."""
+    root = tmp_path / "persea"
+    root.mkdir()
+    _materialize_persea_fixture(root)
+
+    twin = _run_bridge(
+        root, ["-q", "-p", "no:cacheprovider", "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    narrowing = twin.report["project_narrowing"]
+    assert narrowing["narrowing"] == "-m not slow"
+    assert "conftest.py" in narrowing["conftest_hooks"]
+    lines = _worker_lines(root)
+    assert len(lines) == 5
+    assert {line[3] for line in lines} == {
+        "alpha_one", "alpha_two", "plain_one", "plain_two", "plain_three"}
+    assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
+    assert {line[1] for line in lines} == {
+        "w000", "w001", "w002", "w003"}
+    by_test = {line[3]: line[1] for line in lines}
+    assert by_test["alpha_one"] == by_test["alpha_two"]
+
+
+def test_parallel_unqualified_xdist_refused_before_collection(tmp_path):
+    """Twin (i): a stub xdist 0.0.0 refuses before any test collects."""
+    root = tmp_path / "stubxdist"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(2))
+    stub = root / "stub"
+    dist_info = stub / "pytest_xdist-0.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 0.0.0\n",
+        encoding="utf-8")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_ok.py"],
+        execution="scoped", timeout=60,
+        extra_env={"PYTHONPATH": str(stub)})
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest-xdist 0.0.0 is not qualified for parallel runs"
+               in refusal.get("message", "") for refusal in twin.refusals)
+    # Refused before collection: no test ever ran.
+    assert not (root / "markers" / "workers.log").exists()
+
+
+def test_parallel_unsupported_dist_each_is_refused(tmp_path):
+    """Twin (j1): --dist each falls closed with a plain reason."""
+    root = tmp_path / "each"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(2))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "each", "-q", "-p", "no:cacheprovider",
+               "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest xdist --dist each is not supported in parallel runs"
+               in refusal.get("message", "") for refusal in twin.refusals)
+
+
+def test_parallel_remote_tx_is_refused(tmp_path):
+    """Twin (j2): a remote --tx transport fails closed with a plain reason."""
+    root = tmp_path / "remotetx"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(2))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--tx", "ssh=user@example.test", "-q",
+               "-p", "no:cacheprovider", "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert twin.refusals
+
+
+def test_parallel_foreign_scheduler_hook_is_refused(tmp_path):
+    """Twin (k): a non-xdist scheduler hook is not owned by the grant."""
+    root = tmp_path / "scheduler"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "def pytest_xdist_make_scheduler(config, log):\n"
+           "    return None\n")
+    _write(root, "tests/test_ok.py", _identity_tests(2))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("unqualified xdist scheduling or crash hook"
+               in refusal.get("message", "") for refusal in twin.refusals)
+
+
+def test_parallel_empty_collection_is_exit_five(tmp_path):
+    """Twin (l): an empty node collection gives derived status 5."""
+    root = tmp_path / "empty"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(2))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "-m", "nomatch_xyz", "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 5, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 5
+
+
+def test_parallel_differing_collections_are_refused(tmp_path):
+    """Twin (m): workers collecting different tests fail closed."""
+    root = tmp_path / "differ"
+    root.mkdir()
+    _write(root, "conftest.py",
+           "import os\n"
+           "def pytest_collection_modifyitems(items):\n"
+           "    if os.environ.get('PYTEST_XDIST_WORKER') == 'gw0':\n"
+           "        items[:] = [item for item in items"
+           " if 'test_a' not in item.nodeid]\n")
+    _write(root, "tests/test_both.py",
+           _IDENTITY_TEST
+           + "\ndef test_a():\n    _record('a')\n    assert True\n"
+           + "\ndef test_b():\n    _record('b')\n    assert True\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_both.py"],
+        execution="scoped", timeout=60)
+
+    # The scheduler aborts with a collection error (native 1), which the
+    # bridge preserves while refusing: never a pass.
+    assert twin.code != 0
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("parallel workers collected different tests" in refusal.get(
+        "message", "") for refusal in twin.refusals)

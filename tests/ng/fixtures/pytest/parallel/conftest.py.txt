@@ -1,0 +1,14 @@
+"""Persea-shaped parallel fixture conftest (checked in for T1 twin (h)).
+
+Both hooks are the project's own suite definition: ``pytest_configure_node``
+is controller configuration for xdist workers, and the collection hook is a
+no-op label so the run reports this file in ``conftest_hooks``.
+"""
+
+
+def pytest_configure_node(node):
+    return None
+
+
+def pytest_collection_modifyitems(items):
+    return None
