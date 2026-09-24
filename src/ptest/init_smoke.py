@@ -63,6 +63,7 @@ class SmokeResult:
     exit_code: int | None  # set for failed runs only
     lines: tuple[str, ...]  # first useful lines for failed runs
     reason: str | None  # set for skipped runs only
+    setup_argv: tuple[str, ...] | None = None  # setup owed at skip time
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +255,8 @@ def skip_result(plan: SmokePlan, reason: str) -> SmokeResult:
     return SmokeResult(
         project=plan.project, status=STATUS_SKIPPED,
         command=display_command(plan.project, plan.candidate),
-        duration_s=None, exit_code=None, lines=(), reason=reason)
+        duration_s=None, exit_code=None, lines=(), reason=reason,
+        setup_argv=plan.setup_argv)
 
 
 def run_setup(domain: C.DomainPaths, plan: SmokePlan, *,
@@ -340,25 +342,39 @@ def run_plan(domain: C.DomainPaths, plan: SmokePlan, *,
         lines=_useful_lines(result), reason=None)
 
 
-def format_smoke(results: tuple[SmokeResult, ...]) -> str:
-    """Render one bounded ``Smoke`` section; every field is sanitized."""
+def _smoke_cell(item: SmokeResult) -> str:
+    """One compact cell per smoke result; every field is sanitized."""
+    plain = "NO_COLOR" in os.environ
+    project = terminal_text(item.project)
+    if item.status == STATUS_PASSED:
+        duration = (f"{item.duration_s:.1f}s"
+                    if isinstance(item.duration_s, (int, float)) else "?")
+        mark = "[ok]" if plain else "✓"
+        return f"{project} {mark} {duration}"
+    if item.status == STATUS_FAILED:
+        mark = "[fail]" if plain else "✗"
+        return f"{project} {mark} exit {item.exit_code}"
+    return f"{project} – {terminal_text(item.reason or 'skipped')}"
+
+
+def format_smoke(results: tuple[SmokeResult, ...], *,
+                 width: int | None = None) -> str:
+    """Render one compact ``smoke`` row; ``""`` when empty.
+
+    The row shares the file-action grid (``  smoke      <cells>``) so it
+    aligns with the grouped file lines; cells share one line (wrapped
+    between cells only); each failed cell contributes at most
+    ``_MAX_LINES`` indented detail lines below.
+    """
+    from .project_facts import wrap_atoms
     if not results:
         return ""
-    lines = ["Smoke"]
+    cells = [_smoke_cell(item) for item in results]
+    indent = f"  {'smoke':<10} "
+    lines = list(wrap_atoms(cells, width, indent=indent,
+                            hang=" " * len(indent), sep="   "))
     for item in results:
-        if item.status == STATUS_PASSED:
-            duration = (f"{item.duration_s:.1f}s"
-                        if isinstance(item.duration_s, (int, float)) else "?")
-            lines.append(
-                f"  passed: {terminal_text(item.command)} ({duration})")
-        elif item.status == STATUS_FAILED:
-            lines.append(
-                f"  failed: {terminal_text(item.command)} "
-                f"(exit {item.exit_code})")
+        if item.status == STATUS_FAILED:
             for detail in item.lines[:_MAX_LINES]:
-                lines.append(f"    {terminal_text(detail)}")
-        else:
-            lines.append(
-                f"  skipped: {terminal_text(item.command)} "
-                f"({terminal_text(item.reason or 'skipped')})")
+                lines.append(f"  {terminal_text(detail)}")
     return "\n".join(lines) + "\n"

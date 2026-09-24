@@ -85,6 +85,19 @@ from pathlib import Path
 
 from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
 from .contracts import Problem
+from .project_facts import check_facts, long_lines
+
+# Literal mirror of agent_assessment.PTEST_ANSWER_PREFIX (T3 never imports
+# it). Rows carrying it were answered without a model call.
+PTEST_ANSWER_PREFIX = "Answered by ptest: "
+
+# Checklist rows grouped under a visible "parallel safety" heading, with
+# PARALLEL-001 (added by the deterministic-items task) trailing them.
+_PARALLEL_SAFETY_IDS = frozenset({
+    "FIX-002", "DB-001", "DB-002", "CACHE-001",
+    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+})
+_PARALLEL_ITEM_ID = "PARALLEL-001"
 
 _PHASE = "publication"
 _REPORT_NAME = "recommendations.md"
@@ -489,6 +502,9 @@ def _normalize_run(run: object) -> dict:
             "findings": _finding_map(entry.get("findings", [])),
             "limitations": _normalize_limitations(entry.get("limitations", [])),
             "execution": _check_execution(entry.get("execution")),
+            # Invalid or empty facts fall back to execution downstream.
+            "facts": (check_facts(entry.get("facts")) or None)
+            if "facts" in entry else None,
         })
     return {"provider": {"name": name, "cli_version": cli_version,
                          "profile": profile},
@@ -553,21 +569,33 @@ def _score_text(rows: list) -> str:
     return f"{satisfied} of {applicable} checks confirmed from evidence"
 
 
-def _execution_fact_text(execution) -> str:
-    """One-line execution fact opening each project section."""
+def _fact_bullets(child: dict) -> list[str]:
+    """Plain-language fact bullets; execution fallback when facts invalid."""
+    facts = child.get("facts")
+    if facts:
+        # Facts arrive validated, but they still carry untrusted
+        # config-derived prose: clean every bullet so it cannot alter
+        # the Markdown structure (links, tags, code spans, headings).
+        return [f"- {_clean(line, field='facts')}"
+                for line in long_lines(facts)]
+    execution = child.get("execution")
     if execution is None:
-        return "not recorded"
-    detail = _clean(execution["detail"], field="execution",
-                    max_chars=512)
-    if execution["status"] == "executable":
-        return "ready"
-    if execution["status"] == "caveat":
-        return f"ready with caveats: {detail}"
+        return ["- runs: not recorded"]
+    detail = _clean(execution["detail"], field="execution", max_chars=512)
     fix = execution["fix"]
-    if fix is None:
-        return f"not runnable: {detail}"
-    return (f"not runnable: {detail} — fix: "
-            f"{_clean(fix, field='execution', max_chars=512)}")
+    if execution["status"] == "not-executable":
+        if fix is None:
+            return [f"- runs: no — {detail}"]
+        return [f"- runs: no — {detail} → "
+                f"{_clean(fix, field='execution', max_chars=512)}"]
+    return ["- runs: yes"]
+
+
+def _parallel_safety_heading() -> str:
+    return ("## Parallel safety\n\n"
+            "Isolation checks that decide whether tests can run side by "
+            "side; PARALLEL-001 below rolls them up into the parallel "
+            "verdict.\n")
 
 
 def _verify_block(scope: str, root_label: str) -> str:
@@ -633,6 +661,17 @@ def _dropped_line(row: dict) -> str | None:
     return f"{dropped} invalid {noun} dropped."
 
 
+def _strip_answer_prefix(rationale: str) -> tuple[str, bool]:
+    """Rationale without its review-flow prefix; bool is answered by ptest."""
+    if rationale.startswith(PTEST_ANSWER_PREFIX):
+        return rationale[len(PTEST_ANSWER_PREFIX):], True
+    if rationale.startswith(FAILED_PREFIX):
+        return ("review failed: " + rationale[len(FAILED_PREFIX):]), False
+    if rationale.startswith(SKIP_PREFIX):
+        return rationale[len(SKIP_PREFIX):], False
+    return rationale, False
+
+
 def _status_section(row: dict) -> str:
     """Compact report section for one non-gap row."""
     status = row["status"]
@@ -646,20 +685,27 @@ def _status_section(row: dict) -> str:
         lines.append("Status: satisfied.")
         lines.append("")
     elif status == "unknown":
-        if rationale.startswith(FAILED_PREFIX):
-            reason = rationale[len(FAILED_PREFIX):]
-            lines.append(f"Status: unknown (review failed: {reason}).")
-            lines.append("")
-        else:
-            lines.append("Status: unknown.")
-            lines.append("")
-            lines.append(f"Rationale: {rationale}")
+        reason, by_ptest = _strip_answer_prefix(rationale)
+        lines.append("Status: unknown.")
+        lines.append("")
+        lines.append(f"Reason: {reason}")
+        lines.append("")
+        if by_ptest:
+            lines.append("(answered by ptest without a model call)")
             lines.append("")
     elif rationale.startswith(SKIP_PREFIX):
         reason = rationale[len(SKIP_PREFIX):]
         lines.append("Status: not applicable (skipped without a model call).")
         lines.append("")
         lines.append(f"Reason: {reason}")
+        lines.append("")
+    elif rationale.startswith(PTEST_ANSWER_PREFIX):
+        reason = rationale[len(PTEST_ANSWER_PREFIX):]
+        lines.append("Status: not applicable.")
+        lines.append("")
+        lines.append(f"Reason: {reason}")
+        lines.append("")
+        lines.append("(answered by ptest without a model call)")
         lines.append("")
     else:
         lines.append("Status: not applicable.")
@@ -802,7 +848,7 @@ def render_recommendations(run: object) -> bytes:
     for child in children:
         out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")
-        out.append(f"Execution: {_execution_fact_text(child.get('execution'))}.")
+        out.extend(_fact_bullets(child))
         out.append("")
         out.append(f"Packet: {child['packet_sha256']}. Checklist: "
                    f"{_score_text(child['rows'])}.")
@@ -826,15 +872,36 @@ def render_recommendations(run: object) -> bytes:
             for limitation in scope_limitations:
                 out.append(_limitation_line(limitation))
             out.append("")
-        for row in child["rows"]:
+        # Partition rows the same way the terminal renderer does: main
+        # rows first, then the eight isolation items as a visible
+        # "parallel safety" group with PARALLEL-001 trailing it. Never
+        # group by first-seen order: catalog order puts SELECT-001 and
+        # TIMING-001 before the safety rows, and they are not isolation
+        # checks.
+        def _emit(row: dict) -> None:
             if row["status"] != "gap":
                 out.append(_status_section(row))
                 out.append("")
-                continue
+                return
             out.append(_finding_section(
                 row, child["findings"].get(row["id"]), child["scope"],
                 root_label="repository root"))
             out.append("")
+
+        main = [row for row in child["rows"]
+                if row["id"] not in _PARALLEL_SAFETY_IDS
+                and row["id"] != _PARALLEL_ITEM_ID]
+        safety = [row for row in child["rows"]
+                  if row["id"] in _PARALLEL_SAFETY_IDS]
+        parallel = [row for row in child["rows"]
+                    if row["id"] == _PARALLEL_ITEM_ID]
+        for row in main:
+            _emit(row)
+        if safety or parallel:
+            out.append(_parallel_safety_heading())
+            out.append("")
+            for row in safety + parallel:
+                _emit(row)
     out.append(_sentinel_section(children))
     out.append("## Parallel permutations beyond current ptest")
     out.append("")

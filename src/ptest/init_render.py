@@ -1,35 +1,30 @@
-"""Pure terminal renderer for successful ``ptest init``.
+"""Pure terminal renderer for ``ptest init``.
 
-Consumes completed init/rules records only: one bounded string is returned
-and no file is ever read. The versioned JSON document is untouched; this
-renderer serves human terminals exclusively.
+Consumes completed init/rules records plus plain project-facts dicts
+(``project_facts.FACT_KEYS``). One bounded string is returned and no file
+is ever read. The versioned JSON document is untouched; this renderer
+serves human terminals exclusively.
 """
 from __future__ import annotations
 
 import os
-import textwrap
 import unicodedata
+from collections.abc import Mapping, Sequence
 
 from . import contracts as C
+from .project_facts import (
+    check_facts,
+    detail_atoms,
+    detail_lines,
+    summary_atoms,
+    terminal_width,
+    wrap_atoms,
+    wrap_words,
+)
 from .render import terminal_text
 
-_WIDTH = 64
-_INNER = _WIDTH - 4
-_ENTRY_INDENT = "  "
-_ACTION_WIDTH = 15
 _MAX_BODY_LINES = 200
 _CONFIG_NAME = ".ptest.toml"
-
-_HINTS = {
-    "codex": ("Codex detects repository skills automatically; restart Codex "
-              "or run /skills if ptest is not visible."),
-    "claude": ("Claude loads repository skills at startup; restart or refresh "
-               "the skill list if ptest is not visible."),
-    "opencode": ("OpenCode loads repository skills at startup; restart if "
-                 "ptest is not visible."),
-    "gemini": ("Gemini loads repository skills at startup; restart if ptest "
-               "is not visible."),
-}
 
 _WORDMARK = (
     "██████╗ ████████╗███████╗███████╗████████╗",
@@ -39,10 +34,20 @@ _WORDMARK = (
     "██║        ██║   ███████╗███████║   ██║",
     "╚═╝        ╚═╝   ╚══════╝╚══════╝   ╚═╝",
 )
-_GITHUB_URL = "https://github.com/Avocado-Blockchain-Services/ptest"
 _REPO_MAX_COLUMNS = 80
 _COLOR_START = "\x1b[1;36m"
 _COLOR_STOP = "\x1b[0m"
+
+# Repository skill paths mapped to their agent label.
+_SKILL_AGENTS = (
+    (".claude/skills/ptest/SKILL.md", "claude"),
+    (".agents/skills/ptest/SKILL.md", "codex"),
+    (".opencode/skills/ptest/SKILL.md", "opencode"),
+    (".gemini/skills/ptest/SKILL.md", "gemini"),
+)
+
+_RESTART_NEW = "Restart your coding agents to load the new ptest skill."
+_RESTART_UPDATED = "Restart your coding agents to load the updated ptest skill."
 
 
 def _display_width(text: str) -> int:
@@ -86,10 +91,6 @@ def _banner_lines(repo_name: object, color: bool) -> list[str]:
     stop = _COLOR_STOP if use_color else ""
     lines = [f"{start}{row}{stop}" for row in _WORDMARK]
     lines.append(f"ptest {C.PTEST_VERSION}")
-    bound = _bound_repo_name(repo_name)
-    if bound:
-        lines.append(bound)
-    lines.append(_GITHUB_URL)
     return lines
 
 
@@ -101,36 +102,6 @@ def _human_action(action: str) -> str:
     if action in ("existing", "already present"):
         return "unchanged"
     return action
-
-
-def _wrapped(text: str, *, indent: str = "", subsequent: str | None = None) -> list[str]:
-    width = _INNER - len(indent)
-    chunks = textwrap.wrap(
-        text, width=width, break_long_words=True, break_on_hyphens=False,
-        replace_whitespace=False, drop_whitespace=True,
-    )
-    if not chunks:
-        return [indent.rstrip()]
-    lines = [indent + chunks[0]]
-    pad = subsequent if subsequent is not None else indent
-    lines.extend(pad + chunk for chunk in chunks[1:])
-    return lines
-
-
-def _entry(action: str, target: str) -> list[str]:
-    head = f"{action:<{_ACTION_WIDTH}} "
-    first_width = _INNER - len(_ENTRY_INDENT) - len(head)
-    chunks = textwrap.wrap(
-        target, width=first_width, break_long_words=True,
-        break_on_hyphens=False, replace_whitespace=False,
-        drop_whitespace=True,
-    )
-    if not chunks:
-        chunks = [""]
-    lines = [_ENTRY_INDENT + head + chunks[0]]
-    pad = _ENTRY_INDENT + " " * len(head)
-    lines.extend(pad + chunk for chunk in chunks[1:])
-    return lines
 
 
 def _header(result: C.InitResult, rules: object, dry_run: bool) -> str:
@@ -145,10 +116,13 @@ def _header(result: C.InitResult, rules: object, dry_run: bool) -> str:
     return "ptest already configured"
 
 
-_NOTE_SEP = " · "
-_RUN_PREFIX = "run: "
-_NOT_RUNNABLE_PREFIX = "not runnable: "
-_FIX_SEP = " — fix: "
+def _header_line(result: C.InitResult, rules: object, dry_run: bool,
+                 repo_name: str) -> str:
+    phrase = _header(result, rules, dry_run)
+    bound = _bound_repo_name(repo_name)
+    if bound:
+        return f"{phrase} · {bound}"
+    return phrase
 
 
 def _synthesized_root_action(result: C.InitResult) -> str:
@@ -159,260 +133,262 @@ def _synthesized_root_action(result: C.InitResult) -> str:
     return "unchanged"
 
 
-def _config_records(result: C.InitResult) -> list:
-    """Non-note config records in detail order (already sanitized)."""
-    records = []
+def _skill_label(target: str) -> str | None:
+    for suffix, agent in _SKILL_AGENTS:
+        if target == suffix or target.endswith("/" + suffix):
+            return f"ptest skill for {agent}"
+    return None
+
+
+def _is_skill_target(target: str) -> bool:
+    return _skill_label(target) is not None
+
+
+def _file_groups(result: C.InitResult, rules: object,
+                 ) -> list[tuple[str, str, list[str]]]:
+    """(source, action, targets) groups in first-appearance order."""
+    groups: list[tuple[str, str, list[str]]] = []
+    index: dict[tuple[str, str], int] = {}
+
+    def add(source: str, action: str, target: str) -> None:
+        key = (source, action)
+        slot = index.get(key)
+        if slot is None:
+            index[key] = len(groups)
+            groups.append((source, action, [target]))
+        elif target not in groups[slot][2]:
+            groups[slot][2].append(target)
+
     for item in result.details:
         if item.source != "config":
             continue
-        if _clean(item.action) == "note":
+        action = _human_action(_clean(item.action))
+        if action == "note":
             continue
-        records.append((_human_action(_clean(item.action)), _clean(item.target)))
-    return records
-
-
-def _config_lines(result: C.InitResult) -> list[str]:
-    # Each config record renders once as ``<action> <path>`` relative to
-    # the repository root; the absolute typed target stays in the frozen
-    # JSON document. The root line is synthesized from the result action
-    # only when no detail record names it, so it always appears exactly
-    # once and never in the historical ``created: .ptest.toml`` shape.
-    # A child with a Projects entry renders on its status line instead
-    # (``api  pytest  ready  (created api/.ptest.toml)``), so its config
-    # action appears exactly once and never duplicates across sections.
-    records = _config_records(result)
-    projects, _, others = _split_notes(result)
-    noted = {project for project, _, _ in projects if project != "."}
-    lines: list[str] = []
-    if not any(target == _CONFIG_NAME for _, target in records):
-        lines.extend(_entry(_synthesized_root_action(result), _CONFIG_NAME))
-    for action, target in records:
-        if any(target == f"{project}/{_CONFIG_NAME}" for project in noted):
-            continue
-        lines.extend(_entry(action, target))
-    for target in others:
-        lines.extend(_entry("note", target))
-    return lines
-
-
-def _split_notes(result: C.InitResult) -> tuple[list, list, list]:
-    """Split executability notes into project, run, and other notes.
-
-    Returns ``(projects, runs, others)`` where projects holds
-    ``(project, runner, verdict)`` triples, runs holds verified command
-    strings, and others holds sanitized free-form note targets.
-    """
-    projects: list = []
-    runs: list = []
-    others: list = []
-    for item in result.details:
-        if item.source != "config" or _clean(item.action) != "note":
-            continue
-        target = _clean(item.target)
-        if target.startswith(_RUN_PREFIX):
-            runs.append(target[len(_RUN_PREFIX):])
-            continue
-        parts = target.split(_NOTE_SEP, 2)
-        if len(parts) == 3 and all(part for part in parts):
-            projects.append((parts[0], parts[1], parts[2]))
-        else:
-            others.append(target)
-    return projects, runs, others
-
-
-_CAVEATS_PREFIX = "ready with caveats:"
-_BULLET_PREFIX = "    - "
-_BULLET_CONT = "      "
-
-
-def _split_caveats(rest: str) -> list[str]:
-    """Recover the structured caveat list from a joined verdict string.
-
-    Caveats are a list joined with the ``"; "`` separator, but one caveat
-    — the project-filtered label ``expected: full (project-filtered:
-    ...; ...)`` — is itself a parenthesized unit whose inner parts use the
-    same characters. Split only at depth zero so the label stays one
-    bullet and ordinary ``c1; c2`` caveats still split.
-    """
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for char in rest:
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth = max(0, depth - 1)
-        if char == ";" and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    parts.append("".join(current))
-    if depth != 0:
-        # An unclosed "(" merged the following caveats into one bullet;
-        # treat the unbalanced line as its own caveats with a plain split.
-        parts = rest.split(";")
-    return [part.strip() for part in parts if part.strip()]
-
-
-def _split_verdict(verdict: str) -> tuple[str, list[str]]:
-    """Split a project verdict into a short head plus one bullet per detail.
-
-    ``ready with caveats: c1; c2`` becomes the head ``ready with caveats``
-    with one bullet per caveat; ``not runnable: reason — fix: fix`` becomes
-    the head ``not runnable`` with reason and fix bullets. Anything else
-    renders as a single head line, so an unknown verdict never loses text.
-    """
-    if verdict == "ready":
-        return "ready", []
-    if verdict.startswith(_CAVEATS_PREFIX):
-        rest = verdict[len(_CAVEATS_PREFIX):].strip()
-        return "ready with caveats", _split_caveats(rest)
-    if verdict.startswith(_NOT_RUNNABLE_PREFIX):
-        rest = verdict[len(_NOT_RUNNABLE_PREFIX):]
-        if _FIX_SEP in rest:
-            reason, fix = rest.split(_FIX_SEP, 1)
-            bullets = [reason.strip(), f"fix: {fix.strip()}"]
-        else:
-            bullets = [rest.strip()]
-        return "not runnable", [part for part in bullets if part]
-    return verdict, []
-
-
-def _bullet_lines(text: str) -> list[str]:
-    """One caveat as a wrapped bullet; every row fits the box width."""
-    width = _INNER - len(_BULLET_PREFIX)
-    chunks = textwrap.wrap(
-        text, width=width, break_long_words=True, break_on_hyphens=False,
-        replace_whitespace=False, drop_whitespace=True,
-    )
-    if not chunks:
-        return []
-    return [_BULLET_PREFIX + chunks[0]] + [
-        _BULLET_CONT + chunk for chunk in chunks[1:]]
-
-
-def _project_lines(result: C.InitResult) -> list[str]:
-    projects, _, _ = _split_notes(result)
-    if not projects:
-        return []
-    records = _config_records(result)
-    lines: list[str] = []
-    for project, runner, verdict in projects:
-        head, bullets = _split_verdict(verdict)
-        suffix = ""
-        if project != ".":
-            actions = [f"({action} {target})" for action, target in records
-                       if target == f"{project}/{_CONFIG_NAME}"]
-            if actions:
-                suffix = "  " + "  ".join(actions)
-        lines.extend(_wrapped(f"{project}  {runner}  {head}{suffix}",
-                              indent=_ENTRY_INDENT))
-        for bullet in bullets:
-            lines.extend(_bullet_lines(bullet))
-    return lines
-
-
-def _fix_for_verdict(verdict: str) -> str | None:
-    if not verdict.startswith(_NOT_RUNNABLE_PREFIX):
-        return None
-    rest = verdict[len(_NOT_RUNNABLE_PREFIX):]
-    if _FIX_SEP not in rest:
-        return None
-    return rest.split(_FIX_SEP, 1)[1] or None
-
-
-def _guidance_lines(rules: object) -> list[str]:
+        add("config", action, _clean(item.target))
+    if not any(target == _CONFIG_NAME
+               for _, _, targets in groups for target in targets):
+        groups.insert(0, ("config", _synthesized_root_action(result),
+                          [_CONFIG_NAME]))
     details = tuple(getattr(rules, "details", None) or ())
-    lines: list[str] = []
     for item in details:
         if getattr(item, "source", None) != "guidance":
             continue
-        action = _clean(getattr(item, "action", ""))
+        action = _human_action(_clean(getattr(item, "action", "")))
         target = _clean(getattr(item, "target", ""))
         if action == "note":
-            lines.extend(_wrapped(f"note: {target}", indent=_ENTRY_INDENT))
-        else:
-            lines.extend(_entry(_human_action(action), target))
-    if not lines:
+            continue
+        add("guidance", action, _skill_label(target) or target)
+    if not groups:
         for action in getattr(rules, "actions", ()):
-            lines.extend(_wrapped(_clean(action), indent=_ENTRY_INDENT))
+            add("guidance", _human_action(_clean(action)), "")
+    return groups
+
+
+def _file_lines(result: C.InitResult, rules: object, width: int) -> list[str]:
+    lines: list[str] = []
+    last_source: str | None = None
+    for source, action, targets in _file_groups(result, rules):
+        shown_source = "" if source == last_source else source
+        last_source = source
+        shown = [target for target in targets if target]
+        if not shown:
+            lines.append(f"  {shown_source:<10} {action}")
+            continue
+        prefix = f"{shown_source:<10} {action:<10} "
+        hang = " " * len(prefix)
+        lines.extend(wrap_atoms(shown, width, indent="  " + prefix,
+                                hang="  " + hang, sep=", "))
     return lines
 
 
-def _warning_lines(result: C.InitResult) -> list[str]:
+def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
+    """(project, runner) pairs from init notes, in note order."""
+    projects: list[tuple[str, str]] = []
+    for item in result.details:
+        if item.source != "config" or _clean(item.action) != "note":
+            continue
+        parts = _clean(item.target).split(" · ", 2)
+        if len(parts) == 3 and parts[0] and parts[1]:
+            projects.append((parts[0], parts[1]))
+    return projects
+
+
+def _project_fact_lines(facts: Mapping[str, object], width: int,
+                        name_width: int = 6) -> list[str]:
+    project = terminal_text(facts.get("project", "."))
+    runner = terminal_text(facts.get("runner", "unknown"))
+    prefix = f"  {project:<{name_width}}{runner}  "
+    hang = " " * len(prefix)
+    atoms = [terminal_text(atom) for atom in summary_atoms(facts)]
+    lines = wrap_atoms(atoms, width, indent=prefix, hang=hang)
+    for detail in detail_lines(facts):
+        atoms = [terminal_text(atom) for atom in detail_atoms(detail)]
+        lines.extend(wrap_atoms(atoms, width, indent=hang, hang=hang,
+                                sep=" "))
+    return lines
+
+
+def _project_lines(result: C.InitResult,
+                   facts: Sequence[Mapping[str, object]],
+                   width: int) -> list[str]:
+    validated = [check_facts(item) for item in facts]
+    validated = [item for item in validated if item is not None]
+    if validated:
+        longest = max(len(terminal_text(item.get("project", ".")))
+                      for item in validated)
+        name_width = max(6, longest + 2)
+        lines: list[str] = []
+        for item in validated:
+            lines.extend(_project_fact_lines(item, width, name_width))
+        return lines
+    return [f"  {terminal_text(project)}  {terminal_text(runner)}"
+            for project, runner in _note_projects(result)]
+
+
+def _warning_lines(result: C.InitResult, width: int) -> list[str]:
     lines: list[str] = []
     for warning in result.warnings:
         code = _clean(getattr(warning, "code", ""))
         message = _clean(getattr(warning, "message", ""))
-        lines.extend(_wrapped(f"{code}: {message}", indent=_ENTRY_INDENT))
+        lines.extend(wrap_words(f"{code}: {message}", width, indent="  ",
+                                hang="    "))
     return lines
-
-
-def _next_lines(result: C.InitResult, agents: tuple[str, ...]) -> list[str]:
-    # Next steps list only verified commands: the ``run: `` notes from the
-    # executability check, then the exact fix for each project that is not
-    # runnable, then the unchanged agent restart hints. Nothing is invented:
-    # ``ptest --full`` appears only when a run note verifies it.
-    projects, runs, _ = _split_notes(result)
-    steps: list[str] = list(runs)
-    for project, _, verdict in projects:
-        fix = _fix_for_verdict(verdict)
-        if fix is not None:
-            steps.append(f"fix {project}: {fix}")
-    for agent in dict.fromkeys(agents):
-        hint = _HINTS.get(agent)
-        if hint is not None:
-            steps.append(hint)
-    return [item for line in steps for item in _wrapped(line)]
 
 
 def render_init(result: C.InitResult, rules: object = None, *,
                 dry_run: bool = False,
                 agents: tuple[str, ...] = (),
                 repo_name: str = "",
-                color: bool = False) -> str:
-    """Render one bounded banner for a successful init; never reads files.
+                color: bool = False,
+                facts: Sequence[Mapping[str, object]] = (),
+                width: int | None = None) -> str:
+    """Render the init summary: wordmark, header, projects, files, warnings.
 
-    The human banner begins with the PTEST wordmark, ``ptest <version>``,
-    the caller-supplied repository display name, and the canonical project
-    URL, followed by the existing configuration box. ANSI color appears on
-    the wordmark only when ``color`` is true and ``NO_COLOR`` is absent;
-    the non-TTY caller passes ``color=False``.
+    No smoke and no next steps; those belong to :func:`render_init_footer`.
+    ANSI color appears on the wordmark only when ``color`` is true and
+    ``NO_COLOR`` is absent.
     """
     if not isinstance(result, C.InitResult):
         raise TypeError("render_init requires InitResult")
-    body: list[str] = []
-    body.append("Configuration")
-    body.extend(_config_lines(result))
-    projects = _project_lines(result)
-    if projects:
-        body.append("Projects")
-        body.extend(projects)
-    if rules is not None:
-        guidance = _guidance_lines(rules)
-        if guidance:
-            body.append("Guidance")
-            body.extend(guidance)
-    if result.warnings:
-        body.append("Warnings")
-        body.extend(_warning_lines(result))
-    body.append("Next steps")
-    body.extend(_next_lines(result, tuple(agents)))
-    if len(body) > _MAX_BODY_LINES:
-        omitted = len(body) - _MAX_BODY_LINES
-        body = body[:_MAX_BODY_LINES] + [
-            f"... [truncated: {omitted} more lines omitted]"]
-
-    top = "┌" + "─" * (_WIDTH - 2) + "┐"
-    middle = "├" + "─" * (_WIDTH - 2) + "┤"
-    bottom = "└" + "─" * (_WIDTH - 2) + "┘"
-
-    def row(text: str) -> str:
-        return "│ " + text.ljust(_INNER) + " │"
-
+    resolved = terminal_width(width)
     lines = _banner_lines(repo_name, color)
-    lines += ["", top, row(_clean(_header(result, rules, dry_run))), middle]
-    lines.extend(row(line) for line in body)
-    lines.append(bottom)
+    lines.append(_header_line(result, rules, dry_run, repo_name))
+    blocks: list[list[str]] = []
+    projects = _project_lines(result, facts, resolved)
+    if projects:
+        blocks.append(projects)
+    if rules is not None:
+        files = _file_lines(result, rules, resolved)
+        if files:
+            blocks.append(files)
+    if result.warnings:
+        blocks.append(_warning_lines(result, resolved))
+    for block in blocks:
+        lines.append("")
+        lines.extend(block)
+    if len(lines) > _MAX_BODY_LINES:
+        omitted = len(lines) - _MAX_BODY_LINES
+        lines = lines[:_MAX_BODY_LINES] + [
+            f"... [truncated: {omitted} more lines omitted]"]
+    return "\n".join(lines) + "\n"
+
+
+def _next_steps(facts: Sequence[Mapping[str, object]], smoke: Sequence[object],
+                plans: Sequence[object], width: int) -> list[str]:
+    del width  # steps are single unbreakable lines; atoms never split.
+    steps: list[str] = []
+    passed = {getattr(item, "project", None) for item in smoke
+              if getattr(item, "status", None) == "passed"}
+    for item in facts:
+        valid = check_facts(item)
+        if valid is None:
+            continue
+        project = str(valid.get("project", "."))
+        if not valid.get("runs"):
+            fix = valid.get("runs_fix")
+            if isinstance(fix, str) and fix:
+                steps.append(f"{project}  not runnable → {fix}")
+            continue
+        parallel_fix = valid.get("parallel_fix")
+        if isinstance(parallel_fix, str) and parallel_fix:
+            steps.append(f"{project}  parallel off → {parallel_fix}")
+    for plan in plans:
+        setup_argv = getattr(plan, "setup_argv", None)
+        if not setup_argv:
+            continue
+        project = str(getattr(plan, "project", "."))
+        if project in passed:
+            continue
+        candidate = getattr(plan, "candidate", None)
+        try:
+            from .init_smoke import display_command
+            command = display_command(project, candidate)
+        except Exception:
+            command = f"ptest {project}" if project != "." else "ptest"
+        setup = " ".join(str(part) for part in setup_argv)
+        steps.append(f"{project}  setup pending → run: {command} "
+                     f"(runs {setup} first)")
+    for item in smoke:
+        if getattr(item, "status", None) == "failed":
+            project = terminal_text(getattr(item, "project", "."))
+            steps.append(f"{project}  smoke failed → "
+                         f"see the runner output above")
+    return [terminal_text(step) for step in steps]
+
+
+def _restart_line(result: C.InitResult, rules: object,
+                  dry_run: bool) -> str | None:
+    if dry_run or result.action is C.InitAction.PREVIEW:
+        return None
+    details = tuple(getattr(rules, "details", None) or ())
+    actions = [_human_action(_clean(getattr(item, "action", "")))
+               for item in details
+               if getattr(item, "source", None) == "guidance"
+               and _is_skill_target(_clean(getattr(item, "target", "")))]
+    actions = [action for action in actions
+               if action in ("created", "updated")]
+    if not actions:
+        return None
+    if all(action == "updated" for action in actions):
+        return _RESTART_UPDATED
+    return _RESTART_NEW
+
+
+def render_init_footer(result: C.InitResult, rules: object = None, *,
+                       dry_run: bool = False,
+                       smoke: Sequence[object] = (),
+                       plans: Sequence[object] = (),
+                       facts: Sequence[Mapping[str, object]] = (),
+                       width: int | None = None) -> str:
+    """Render smoke, actionable next steps, and at most one restart line.
+
+    Returns ``""`` when there is nothing to say.
+    """
+    if not isinstance(result, C.InitResult):
+        raise TypeError("render_init_footer requires InitResult")
+    from .init_smoke import SmokeResult, format_smoke
+    resolved = terminal_width(width)
+    lines: list[str] = []
+    smoke_items = tuple(smoke)
+    if smoke_items:
+        for item in smoke_items:
+            if not isinstance(item, SmokeResult):
+                raise TypeError("render_init_footer smoke requires "
+                                "SmokeResult rows")
+        block = format_smoke(smoke_items, width=resolved)
+        if block:
+            lines.append(block.rstrip("\n"))
+    steps = _next_steps(facts, smoke_items, tuple(plans), resolved)
+    if steps:
+        if lines:
+            lines.append("")
+        lines.extend(f"  {step}" for step in steps)
+    restart = _restart_line(result, rules, dry_run)
+    if restart is not None:
+        if lines:
+            lines.append("")
+        lines.append(restart)
+    if not lines:
+        return ""
     return "\n".join(lines) + "\n"

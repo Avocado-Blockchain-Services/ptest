@@ -1,43 +1,18 @@
-"""Init render v2: per-project status and verified next steps.
+"""Init render redesign: terminal-width layout, facts, compact footer.
 
-The renderer consumes completed init/rules objects only and never touches
-the filesystem. Project status arrives as executability notes in
-``InitResult.details`` (``action="note"``, ``source="config"``):
-
-- project note: ``"<project> · <runner> · <verdict>"``
-- run note: ``"run: <verified command>"``
+The renderer consumes completed init/rules objects plus plain facts dicts
+and never touches the filesystem.
 """
 from __future__ import annotations
 
 import re
-import unicodedata
 from pathlib import Path
+from types import SimpleNamespace
 
-from ptest import agent_rules, contracts as C
-from ptest.init_render import render_init
+from ptest import contracts as C
+from ptest.init_render import render_init, render_init_footer
 
-_WORDMARK_LINES = (
-    "██████╗ ████████╗███████╗███████╗████████╗",
-    "██╔══██╗╚══██╔══╝██╔════╝██╔════╝╚══██╔══╝",
-    "██████╔╝   ██║   █████╗  ███████╗   ██║",
-    "██╔═══╝    ██║   ██╔══╝  ╚════██║   ██║",
-    "██║        ██║   ███████╗███████║   ██║",
-    "╚═╝        ╚═╝   ╚══════╝╚══════╝   ╚═╝",
-)
 _GITHUB_URL = "https://github.com/Avocado-Blockchain-Services/ptest"
-
-
-def _dwidth(text: str) -> int:
-    total = 0
-    for char in text:
-        if unicodedata.combining(char):
-            continue
-        total += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-    return total
-
-
-def _strip_ansi(text: str) -> str:
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _result(action=C.InitAction.CREATED, target=Path("/repo/.ptest.toml"),
@@ -54,419 +29,366 @@ def _note(target):
     return C.ActionRecord(target=target, action="note", source="config")
 
 
-def _cell(line: str) -> str:
-    cell = line.strip()
-    if cell.startswith("│"):
-        cell = cell[1:]
-    if cell.endswith("│"):
-        cell = cell[:-1]
-    return cell
+def _rules(*details):
+    return SimpleNamespace(details=tuple(details), changed=True)
 
 
-def _root_config_lines(text: str):
-    # The stable contract is the cell content; the box borders are stripped
-    # before matching, mirroring how a terminal reader sees the row.
-    found = []
-    for line in text.splitlines():
-        match = re.match(
-            r"\s*(created|updated|unchanged|would create)\s+\.ptest\.toml\s*$",
-            _cell(line))
-        if match:
-            found.append(match.group(1))
-    return found
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-def test_created_banner_has_box_wordmark_and_ordered_sections(tmp_path):
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-    ))
-    rules = agent_rules.apply(tmp_path)
-    text = render_init(result, rules, agents=())
-
-    assert "ptest initialized" in text
-    assert "┌" in text and "┘" in text
-    config_at = text.index("Configuration")
-    guidance_at = text.index("Guidance")
-    next_at = text.index("Next steps")
-    assert config_at < guidance_at < next_at
-    assert _root_config_lines(text) == ["created"]
-    assert ": .ptest.toml" not in text
+def _api_facts(**overrides):
+    facts = {
+        "project": "api", "runner": "pytest", "runs": True,
+        "runs_reason": None, "runs_fix": None,
+        "parallel": "4 workers (xdist, --dist loadgroup)",
+        "parallel_short": "4 workers", "parallel_fix": None,
+        "setup": "uv sync --locked",
+        "full_suite": 'your pytest config: -m "not extended_migration"',
+        "full_blocked": None,
+    }
+    facts.update(overrides)
+    return facts
 
 
-def test_preview_header_uses_would_verbs_and_never_created(tmp_path):
-    result = _result(action=C.InitAction.PREVIEW,
-                     target=Path("/repo/.ptest.toml"), exists=False,
-                     details=(_detail(".ptest.toml", "would create", "config"),))
-    plan = agent_rules.preview(tmp_path)
-    text = render_init(result, plan, dry_run=True, agents=())
-
-    assert "ptest init preview" in text
-    assert "would create" in text
-    assert "created:" not in text
-    assert "updated" not in text
-
-
-def test_repeat_init_reports_unchanged_config_and_guidance_paths(tmp_path):
-    agent_rules.apply(tmp_path)
-    unchanged = agent_rules.apply(tmp_path)
-    assert unchanged.changed is False
-    result = _result(action=C.InitAction.EXISTING, warnings=())
-    text = render_init(result, unchanged, agents=())
-
-    assert "ptest already configured" in text
-    assert "ptest initialized\n" not in text
-    assert _root_config_lines(text) == ["unchanged"]
-    assert "already present" not in text
-    assert re.search(r"unchanged +docs/ptest-agent\.md", text)
-    assert re.search(r"unchanged +AGENTS\.md", text)
+def _web_facts(**overrides):
+    facts = {
+        "project": "web", "runner": "vitest", "runs": True,
+        "runs_reason": None, "runs_fix": None,
+        "parallel": "inside vitest (its own workers)",
+        "parallel_short": "inside vitest", "parallel_fix": None,
+        "setup": "npm ci", "full_suite": None, "full_blocked": None,
+    }
+    facts.update(overrides)
+    return facts
 
 
-def test_existing_standalone_with_empty_details_synthesizes_root_once():
-    result = _result(action=C.InitAction.EXISTING, warnings=())
-    text = render_init(result, None, agents=())
-
-    assert _root_config_lines(text) == ["unchanged"]
+# --- header ---------------------------------------------------------------
 
 
-def test_invalid_existing_config_renders_attention_header(tmp_path):
-    warnings = (C.Reason(code="invalid-config",
-                         message="existing project configuration could not be used",
-                         paths=()),)
+def test_header_phrases_with_repo():
+    cases = [
+        (C.InitAction.CREATED, True, False, "ptest initialized · shop"),
+        (C.InitAction.PREVIEW, False, True, "ptest init preview · shop"),
+        (C.InitAction.EXISTING, True, False, "ptest already configured · shop"),
+    ]
+    for action, exists, dry_run, phrase in cases:
+        result = _result(action=action, exists=exists)
+        text = render_init(result, None, dry_run=dry_run, repo_name="shop",
+                           width=80)
+        assert phrase in text.splitlines()
+    warnings = (C.Reason(code="scan-limit", message="m"),)
     result = _result(action=C.InitAction.EXISTING, warnings=warnings)
-    text = render_init(result, None, agents=())
-
-    assert "attention" in text.lower()
-    assert "ptest initialized" not in text
-    assert "ptest already configured" not in text
-    assert "invalid-config" in text
+    text = render_init(result, None, repo_name="shop", width=80)
+    assert "ptest init needs attention · shop" in text.splitlines()
 
 
-def test_renderer_never_reads_files_and_bounds_hostile_values():
-    evil = "bad\x1b[2J\r\n\x00net" + "界" * 2000
-    warnings = (C.Reason(code="invalid-config", message=evil, paths=()),)
-    result = _result(action=C.InitAction.EXISTING, warnings=warnings,
-                     details=(_detail(evil, "created", "config"),))
-    text = render_init(result, None, agents=("codex",))
-
-    assert "\x1b" not in text and "\r" not in text and "\x00" not in text
-    assert "[truncated]" in text
-    assert len(text.encode("utf-8")) < 32768
+def test_header_without_repo_is_phrase_alone():
+    result = _result()
+    text = render_init(result, None, width=80)
+    assert "ptest initialized" in text.splitlines()
 
 
-def test_renderer_reports_exact_per_child_config_actions():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _detail("api/.ptest.toml", "created", "config"),
+def test_only_wordmark_and_version_precede_header():
+    result = _result()
+    text = render_init(result, None, repo_name="shop", width=80)
+    lines = text.splitlines()
+    header_at = lines.index("ptest initialized · shop")
+    assert header_at == 7  # 6 wordmark lines + ptest <version>
+    assert lines[6].startswith("ptest ")
+    assert "┌" not in text and "│" not in text and "┘" not in text
+
+
+def test_no_fixed_box_characters():
+    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
+    text = render_init(result, _rules(), width=80)
+    assert "┌" not in text and "┐" not in text and "└" not in text
+    assert "┤" not in text and "├" not in text
+
+
+# --- golden persea shape ---------------------------------------------------
+
+
+def _persea_result():
+    return _result(details=(
+        _detail(".ptest.toml", "already present", "config"),
+        _detail("api/.ptest.toml", "already present", "config"),
         _detail("web/.ptest.toml", "already present", "config"),
     ))
-    text = render_init(result, None, agents=())
-
-    assert "created" in text and "unchanged" in text
-    assert "already present" not in text
-    assert "api/.ptest.toml" in text
-    assert re.search(r"unchanged +web/\.ptest\.toml", text)
-    # No invented next steps: without executability notes there are no
-    # verified commands, so neither a child scope nor the full gate appears.
-    assert "ptest api/tests/" not in text
-    assert "ptest --full" not in text
 
 
-def test_project_with_caveats_renders_once_with_bullet_lines():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _detail("api/.ptest.toml", "created", "config"),
-        _note("api · pytest · ready with caveats: first caveat; second caveat"),
-        _note("run: ptest api/tests/test_a.py"),
-    ))
-    text = render_init(result, None, agents=())
-
-    # The child config action rides the project line, exactly once.
-    assert text.count("(created api/.ptest.toml)") == 1
-    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
-    assert "api  pytest  ready with caveats" in projects
-    assert "(created api/.ptest.toml)" in projects
-    assert "- first caveat" in projects
-    assert "- second caveat" in projects
+def _persea_rules():
+    return _rules(
+        _detail("docs/ptest-agent.md", "created", "guidance"),
+        _detail(".claude/skills/ptest/SKILL.md", "created", "guidance"),
+        _detail(".agents/skills/ptest/SKILL.md", "created", "guidance"),
+        _detail(".opencode/skills/ptest/SKILL.md", "created", "guidance"),
+        _detail(".gemini/skills/ptest/SKILL.md", "created", "guidance"),
+        _detail("AGENTS.md", "updated", "guidance"),
+        _detail("CLAUDE.md", "updated", "guidance"),
+    )
 
 
-def test_long_caveat_wraps_as_own_bullet_with_intact_head():
-    caveat = ("setup runs when required paths or its fingerprint are missing: "
-              "uv sync --locked --extra-index-url https://example.test/simple")
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note(f"api · pytest · ready with caveats: {caveat}"),
-    ))
-    text = render_init(result, None, agents=())
+def test_golden_persea_shape_at_width_80():
+    """Exact O.3 target shape at width 80 (spec requirements O.3).
 
-    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
-    assert "api  pytest  ready with caveats" in projects
-    # Every drawn row keeps the 64-column box geometry.
-    for line in text.splitlines():
-        stripped = _strip_ansi(line)
-        if stripped and stripped[0] in "┌├└│":
-            assert _dwidth(stripped) == 64
+    Only the wordmark and the version line precede the header. There
+    are no section headings; blocks are separated by blank lines; the
+    smoke row aligns with the file-action grid; the repeated guidance
+    group leaves its label blank. The long guidance line wraps between
+    atoms: it cannot fit 80 columns without breaking an atom.
+    """
+    from ptest import init_smoke
 
+    text = render_init(_persea_result(), _persea_rules(), repo_name="shop",
+                       facts=(_api_facts(), _web_facts()), width=80)
+    lines = text.splitlines()
+    assert lines[6] == f"ptest {C.PTEST_VERSION}"
+    assert lines[7] == "ptest initialized · shop"
+    body = "\n".join(lines[7:]) + "\n"
+    assert body == (
+        "ptest initialized · shop\n"
+        "\n"
+        "  api   pytest  runs: yes · parallel: 4 workers · setup: uv sync --locked\n"
+        "                full suite = your pytest config: -m \"not extended_migration\"\n"
+        "  web   vitest  runs: yes · parallel: inside vitest · setup: npm ci\n"
+        "\n"
+        "  config     unchanged  .ptest.toml, api/.ptest.toml, web/.ptest.toml\n"
+        "  guidance   created    docs/ptest-agent.md, ptest skill for claude\n"
+        "                        ptest skill for codex, ptest skill for opencode\n"
+        "                        ptest skill for gemini\n"
+        "             updated    AGENTS.md, CLAUDE.md\n"
+    )
+    assert "Projects" not in lines
+    assert "ready with caveats" not in text
+    assert "expected:" not in text
+    assert "fingerprint" not in text
 
-def test_not_runnable_project_shows_reason_and_fix_bullets():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note("api · pytest · not runnable: pytest addopts enable xdist, "
-              "which ptest runs serially — fix: add \"-n\", \"0\" to [runner] "
-              "args in api/.ptest.toml"),
-        _note("run: ptest web/src/a.test.ts"),
-    ))
-    text = render_init(result, None, agents=())
-
-    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
-    assert "api  pytest  not runnable" in projects
-    assert "- pytest addopts enable xdist" in projects
-    # The verified fix still reaches Next steps exactly once.
-    assert text.count("fix api:") == 1
-
-
-def test_projects_section_renders_notes_in_section_order():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _detail("api/.ptest.toml", "created", "config"),
-        _note("api · pytest · ready"),
-        _note("run: ptest api/tests/test_api.py"),
-    ))
-    text = render_init(result, None, agents=())
-
-    config_at = text.index("Configuration")
-    projects_at = text.index("Projects")
-    next_at = text.index("Next steps")
-    assert config_at < projects_at < next_at
-    assert "api" in text and "pytest" in text and "ready" in text
-    assert "ptest api/tests/test_api.py" in text
-
-
-def test_next_steps_lists_verified_commands_and_fixes_only():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _detail("api/.ptest.toml", "created", "config"),
-        _note("api · pytest · not runnable: pytest addopts enable xdist, "
-              "which ptest runs serially — fix: add \"-n\", \"0\" to [runner] "
-              "args in api/.ptest.toml"),
-        _note("web · vitest · ready with caveats: exclusive: Vitest runs as "
-              "one command and manages its own workers"),
-        _note("run: ptest web/src/a.test.ts"),
-    ))
-    text = render_init(result, None, agents=())
-
-    assert "ptest web/src/a.test.ts" in text
-    assert "fix api:" in text
-    assert "add \"-n\", \"0\" to [runner] args in api/.ptest.toml" in text
-    # The generic full-gate line appears only with a verified run note.
-    assert "run the integrated gate" not in text
+    smoke = (
+        init_smoke.SmokeResult(project="api", status="passed",
+                               command="ptest api/x.py", duration_s=2.2,
+                               exit_code=None, lines=(), reason=None),
+        init_smoke.SmokeResult(project="web", status="passed",
+                               command="ptest web/a.test.ts", duration_s=1.8,
+                               exit_code=None, lines=(), reason=None),
+    )
+    footer = render_init_footer(_persea_result(), _persea_rules(), smoke=smoke,
+                                facts=(_api_facts(), _web_facts()), width=80)
+    assert footer == (
+        "  smoke      api ✓ 2.2s   web ✓ 1.8s\n"
+        "\n"
+        "Restart your coding agents to load the new ptest skill.\n"
+    )
+    assert "Next steps" not in footer
+    combined = text + "\n" + footer
+    assert "  smoke      api ✓ 2.2s   web ✓ 1.8s\n" in combined
+    assert combined.endswith(
+        "Restart your coding agents to load the new ptest skill.\n")
 
 
-def test_next_steps_shows_full_gate_only_with_verified_run_note():
-    without = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note(". · pytest · ready"),
-    ))
-    assert "ptest --full" not in render_init(without, None, agents=())
-
-    with_full = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note(". · pytest · ready"),
-        _note("run: ptest --full"),
-    ))
-    assert "ptest --full" in render_init(with_full, None, agents=())
+# --- restart line ----------------------------------------------------------
 
 
-def test_other_config_notes_render_unchanged():
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note("declared child 'web' has no configuration"),
-    ))
-    text = render_init(result, None, agents=())
-
-    assert "declared child" in text
-    assert "Projects" not in text
-
-
-def test_hostile_project_note_is_escaped_and_bounded():
-    evil = "bad\x1b[2J\r\n\x00\x07\u202e" + "界" * 2000
-    result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note(f"{evil} · pytest · ready"),
-        _note("run: ptest tests/test_x.py"),
-    ))
-    text = render_init(result, None, agents=())
-
-    assert "\x1b" not in text and "\r" not in text and "\x00" not in text
-    assert "\u202e" not in text
-    assert "[truncated]" in text
-    # The box geometry is unchanged: every drawn row is 64 chars wide.
-    for line in text.splitlines():
-        stripped = _strip_ansi(line)
-        if stripped and stripped[0] in "┌├└│":
-            assert len(stripped) == 64
-    assert len(text.encode("utf-8")) < 32768
+def test_no_restart_on_rerun_with_all_guidance_unchanged():
+    result = _result(action=C.InitAction.EXISTING)
+    rules = _rules(
+        _detail("docs/ptest-agent.md", "already present", "guidance"),
+        _detail(".claude/skills/ptest/SKILL.md", "already present", "guidance"),
+    )
+    footer = render_init_footer(result, rules, width=80)
+    assert "Restart your coding agents" not in footer
 
 
-def test_renderer_never_claims_unselected_providers(tmp_path):
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    rules = agent_rules.apply(tmp_path)
-    text = render_init(result, rules, agents=())
-
-    assert ".claude" not in text
-    assert ".agents" not in text
-
-
-def test_codex_hint_names_restart_or_skills_command():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=("codex",))
-
-    assert "/skills" in text or "restart" in text.lower()
+def test_restart_updated_wording_when_every_skill_updated():
+    result = _result()
+    rules = _rules(
+        _detail(".claude/skills/ptest/SKILL.md", "updated", "guidance"),
+        _detail(".agents/skills/ptest/SKILL.md", "updated", "guidance"),
+    )
+    footer = render_init_footer(result, rules, width=80)
+    assert footer.count("Restart your coding agents") == 1
+    assert "updated ptest skill" in footer
 
 
-def test_plain_output_shows_wordmark_version_repo_and_url():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name="my-repo")
-
-    for line in _WORDMARK_LINES:
-        assert line in text
-    assert f"ptest {C.PTEST_VERSION}" in text
-    assert "my-repo" in text
-    assert _GITHUB_URL in text
-    assert "\x1b" not in text
+def test_no_restart_for_preview():
+    result = _result(action=C.InitAction.PREVIEW, exists=False)
+    rules = _rules(
+        _detail(".claude/skills/ptest/SKILL.md", "would create", "guidance"),
+    )
+    footer = render_init_footer(result, rules, dry_run=True, width=80)
+    assert "Restart your coding agents" not in footer
 
 
-def test_wordmark_precedes_version_repo_url_and_box():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name="my-repo")
-
-    wordmark_at = text.index(_WORDMARK_LINES[0])
-    version_at = text.index(f"ptest {C.PTEST_VERSION}")
-    repo_at = text.index("my-repo")
-    url_at = text.index(_GITHUB_URL)
-    box_at = text.index("┌")
-    assert wordmark_at < version_at < repo_at < url_at < box_at
-    assert text.startswith(_WORDMARK_LINES[0])
+def test_no_restart_without_rules():
+    assert "Restart" not in render_init_footer(_result(), None, width=80)
 
 
-def test_default_output_has_no_ansi_and_omits_empty_repo():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None)
-
-    assert "\x1b" not in text
-    assert f"ptest {C.PTEST_VERSION}" in text
-    assert _GITHUB_URL in text
-    assert "None" not in text
+# --- next steps ------------------------------------------------------------
 
 
-def test_no_color_suppresses_explicit_color(monkeypatch):
-    monkeypatch.setenv("NO_COLOR", "1")
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name="my-repo", color=True)
-
-    assert "\x1b" not in text
-    for line in _WORDMARK_LINES:
-        assert line in text
+def test_no_next_steps_when_nothing_actionable():
+    footer = render_init_footer(_result(), None,
+                                facts=(_api_facts(), _web_facts()), width=80)
+    assert footer == ""
 
 
-def test_explicit_color_keeps_identical_glyphs(monkeypatch):
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    colored = render_init(result, None, agents=(), repo_name="my-repo", color=True)
-    plain = render_init(result, None, agents=(), repo_name="my-repo", color=False)
+def test_each_next_step_kind():
+    from ptest import init_smoke
+    from ptest.init_smoke import SmokePlan
 
-    assert "\x1b[" in colored
+    facts = (
+        _api_facts(runs=False, runs_reason="no tests found",
+                   runs_fix="add a test file", parallel=None,
+                   parallel_short=None, parallel_fix=None),
+        _web_facts(parallel="no — --dist each is not supported; ptest runs "
+                            "serially",
+                   parallel_short="no",
+                   parallel_fix="use --dist loadgroup in your pytest addopts"),
+    )
+    smoke = (
+        init_smoke.SmokeResult(project="web", status="failed",
+                               command="ptest web/a.test.ts", duration_s=None,
+                               exit_code=1, lines=("boom",), reason=None),
+    )
+    plans = (
+        SmokePlan(project="api", config=None, candidate="tests/test_a.py",
+                  skip_reason=None, setup_argv=("uv", "sync")),
+    )
+    footer = render_init_footer(_result(), None, smoke=smoke, plans=plans,
+                                facts=facts, width=80)
+    assert "api  not runnable → add a test file" in footer
+    assert ("web  parallel off → use --dist loadgroup in your pytest "
+            "addopts") in footer
+    assert ("api  setup pending → run: ptest api/tests/test_a.py "
+            "(runs uv sync first)") in footer
+    assert "web  smoke failed → see the runner output above" in footer
+
+
+def test_setup_pending_skipped_for_passed_smoke():
+    from ptest import init_smoke
+    from ptest.init_smoke import SmokePlan
+
+    smoke = (
+        init_smoke.SmokeResult(project="api", status="passed",
+                               command="ptest api/x.py", duration_s=1.0,
+                               exit_code=None, lines=(), reason=None),
+    )
+    plans = (
+        SmokePlan(project="api", config=None, candidate="tests/test_a.py",
+                  skip_reason=None, setup_argv=("uv", "sync")),
+    )
+    footer = render_init_footer(_result(), None, smoke=smoke, plans=plans,
+                                facts=(_api_facts(),), width=80)
+    assert "setup pending" not in footer
+
+
+# --- widths, atoms, color ---------------------------------------------------
+
+
+def test_width_clamp_and_atom_integrity():
+    facts = (_api_facts(setup="uv sync --locked --extra test --reinstall"),)
+    for width in (60, 110):
+        text = render_init(_result(), None, facts=facts, width=width)
+        for line in text.splitlines():
+            if "uv sync" in line:
+                assert "uv sync --locked --extra test --reinstall" in line
+        footer = render_init_footer(
+            _result(), None, facts=(_api_facts(
+                runs=False, runs_reason="r", runs_fix="fix it now"),),
+            width=width)
+        assert "api  not runnable → fix it now" in footer
+
+
+def test_no_ansi_under_no_color_or_without_color_flag(monkeypatch):
+    result = _result()
+    plain = render_init(result, None, repo_name="shop", width=80)
     assert "\x1b" not in plain
-    assert _strip_ansi(colored) == plain
+    colored = render_init(result, None, repo_name="shop", width=80, color=True)
+    assert "\x1b[1;36m" in colored
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in render_init(result, None, repo_name="shop",
+                                     width=80, color=True)
+    assert _GITHUB_URL not in plain
 
 
-def test_hostile_repo_name_cannot_alter_terminal():
-    evil = "bad\x1b[2J\r\n\x00\u202e" + "界" * 2000
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name=evil)
-
-    assert "\x1b" not in text
-    assert "\r" not in text
-    assert "\x00" not in text
-    assert "\u202e" not in text
-    repo_lines = [line for line in text.splitlines() if "bad" in line]
-    assert len(repo_lines) == 1
-    assert _dwidth(repo_lines[0]) <= 80
-    assert len(text.encode("utf-8")) < 32768
-
-
-def test_long_repo_name_bounded_to_80_columns():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name="x" * 500)
-
-    candidates = [line for line in text.splitlines() if "x" * 10 in line]
-    assert len(candidates) == 1
-    assert _dwidth(candidates[0]) <= 80
-
-
-def test_no_row_or_box_overflow():
-    result = _result(details=(_detail(".ptest.toml", "created", "config"),))
-    text = render_init(result, None, agents=(), repo_name="my-repo")
-
-    for line in text.splitlines():
-        stripped = _strip_ansi(line)
-        if stripped and stripped[0] in "┌├└│":
-            assert _dwidth(stripped) == 64
-    for line in _WORDMARK_LINES:
-        assert _dwidth(line) <= 64
-    for line in text.splitlines():
-        assert _dwidth(_strip_ansi(line)) <= 80
-
-
-def test_preview_and_existing_layout_preserved_with_banner(tmp_path):
-    preview = _result(action=C.InitAction.PREVIEW,
-                      target=Path("/repo/.ptest.toml"), exists=False,
-                      details=(_detail(".ptest.toml", "would create", "config"),))
-    plan = agent_rules.preview(tmp_path)
-    preview_text = render_init(preview, plan, dry_run=True, agents=(),
-                               repo_name="my-repo")
-
-    assert _WORDMARK_LINES[0] in preview_text
-    assert "ptest init preview" in preview_text
-    assert "would create" in preview_text
-    assert "created:" not in preview_text
-
-    agent_rules.apply(tmp_path)
-    unchanged = agent_rules.apply(tmp_path)
-    existing = _result(action=C.InitAction.EXISTING, warnings=())
-    existing_text = render_init(existing, unchanged, agents=(),
-                                repo_name="my-repo")
-
-    assert _WORDMARK_LINES[0] in existing_text
-    assert "ptest already configured" in existing_text
-    assert _root_config_lines(existing_text) == ["unchanged"]
-    assert "already present" not in existing_text
-    assert re.search(r"unchanged +docs/ptest-agent\.md", existing_text)
-
-
-def test_persea_shaped_label_renders_as_single_bullet():
-    """Round 14: the project-filtered label never splits at its inner '; '."""
-    label = ("expected: full (project-filtered: -m not extended_migration; "
-             "conftest collection hook; conftest sessionfinish hook)")
+def test_render_init_without_facts_uses_note_projects():
     result = _result(details=(
-        _detail(".ptest.toml", "created", "config"),
-        _note(f"api · pytest · ready with caveats: {label}"),
+        _note("api · pytest · ready"),
+        _note(". · vitest · ready"),
     ))
-    text = render_init(result, None, agents=())
-
-    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
-    assert "api  pytest  ready with caveats" in projects
-    bullets = [_cell(line).lstrip() for line in projects.splitlines()
-               if _cell(line).lstrip().startswith("- ")]
-    # The label's inner separators are not caveat boundaries: the whole
-    # label stays one bullet (today it splits into three).
-    assert len(bullets) == 1
-    assert bullets[0].startswith("- expected: full (project-filtered:")
-    # The wrapped continuation still carries the full label text in order.
-    assert label in " ".join(projects.replace("│", " ").split())
+    text = render_init(result, None, repo_name="shop", width=80)
+    assert "ptest initialized · shop" in text.splitlines()
+    assert "  api  pytest" in text
+    assert "  .  vitest" in text
+    assert "runs:" not in text
 
 
-def test_unbalanced_paren_caveat_splits_as_own_caveats():
-    """Round 16: an unclosed '(' never merges the following caveats."""
-    from ptest.init_render import _split_caveats
-    assert _split_caveats("c1 (unbalanced; c2") == ["c1 (unbalanced", "c2"]
-    assert _split_caveats("c1); c2") == ["c1)", "c2"]
+def test_warnings_rendered_and_generic_run_notes_dropped():
+    warnings = (C.Reason(code="scan-limit", message="old keys kept"),)
+    result = _result(warnings=warnings, details=(
+        _note("run: ptest --full"),
+        _note("api · pytest · ready"),
+    ))
+    text = render_init(result, None, facts=(_api_facts(),), width=80)
+    assert "scan-limit: old keys kept" in text
+    assert "run: ptest --full" not in text
+    assert "Next steps" not in text
+
+
+def test_not_runnable_project_line():
+    facts = (_api_facts(runs=False, runs_reason="no tests found",
+                        runs_fix="add a test file", parallel=None,
+                        parallel_short=None, parallel_fix=None,
+                        full_blocked='test_roots is "."',
+                        full_suite=None),)
+    text = render_init(_result(), None, facts=facts, width=80)
+    assert "runs: no — no tests found → add a test file" in text
+    assert 'full suite: not available — test_roots is "."' in text
+
+
+def test_long_project_names_keep_runner_gap_and_align():
+    """Project names longer than 6 chars keep a gap before the runner."""
+    facts = (_api_facts(project="services/api"),
+             _web_facts(project="frontend"))
+    for width in (60, 110):
+        text = render_init(_result(), None, facts=facts, width=width)
+        lines = text.splitlines()
+        api_line = next(line for line in lines
+                        if "services/api" in line and "pytest" in line)
+        fe_line = next(line for line in lines
+                       if "frontend" in line and "vitest" in line)
+        assert "services/apipytest" not in text
+        assert "frontendvitest" not in text
+        assert "services/api  pytest" in api_line
+        assert "  vitest" in fe_line
+        assert api_line.index("pytest") == fe_line.index("vitest")
+
+
+def test_render_init_rejects_wrong_types():
+    try:
+        render_init("nope", None)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected TypeError")
+    try:
+        render_init_footer("nope", None)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected TypeError")
+
+
+def test_hostile_fact_characters_never_reach_terminal_raw():
+    """C1 CSI and bidi overrides from config-derived facts stay inert.
+
+    check_facts rejects them, so the terminal never sees the raw
+    characters; even a hostile-but-printable payload keeps its text
+    visible without emitting control characters.
+    """
+    bidi = chr(0x202E)
+    csi = chr(0x9B)
+    facts = (_api_facts(setup="uv sync " + bidi + "KCOL" + csi + "31m"),)
+    text = render_init(_result(), None, facts=facts, width=80)
+    assert bidi not in text
+    assert csi not in text
