@@ -40,12 +40,13 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import contracts as C
 from .checklist import CATALOG as _CHECKLIST_CATALOG
+from .deterministic_items import DeterministicAnswer
 from .checklist import SRC_DIR as _GENERIC_SRC_DIR_PATTERN
 from .checklist import TEST_DIR as _GENERIC_TEST_DIR_PATTERN
 from .checklist import TEST_FILE as _GENERIC_TEST_FILE_PATTERN
@@ -1419,6 +1420,7 @@ ITEM_MAX_FILES = 24
 ITEM_MAX_BYTES = 256 * 1024
 SKIP_PREFIX = "Skipped without a model call: "
 FAILED_PREFIX = "Review failed: "
+PTEST_ANSWER_PREFIX = "Answered by ptest: "
 
 _ONE_ROW_PROSE_MAX_BYTES = 2048
 _ONE_ROW_EVIDENCE_MAX = 16
@@ -1501,19 +1503,24 @@ _ITEM_INSTRUCTION = (
     "satisfied only with cited evidence that the criterion holds, gap only "
     "with cited evidence plus a finding, not-applicable only with a "
     "specific rationale citing affirmative excerpt evidence that the item "
-    "cannot apply, and unknown otherwise. A gap requires a finding object; "
+    "cannot apply, and unknown otherwise. Return gap only with a cited "
+    "concrete violation; return satisfied only when the evidence shows the "
+    "guaranteeing mechanism (for example a session-wide network block or "
+    "per-worker port allocation); otherwise return unknown with one "
+    "sentence naming the missing evidence. Absence of code is unknown, "
+    "never a guess. A gap requires a finding object; "
     "any other status requires finding null. A not-applicable rationale "
     "needs at least 24 non-whitespace characters. Prose fields are plain "
     "text only: no Markdown, backticks, pipe characters, links, HTML, "
     "headings, percent figures, execution claims, or test-run claims. Never "
-    "start the rationale with 'Skipped without a model call: ' or 'Review "
-    "failed: '; those prefixes are ptest-owned."
+    "start the rationale with 'Skipped without a model call: ', 'Review "
+    "failed: ', or 'Answered by ptest: '; those prefixes are ptest-owned."
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ItemReview:
-    """One planned per-item review: a skip or one provider request."""
+    """One planned per-item review: a skip, an answer, or one request."""
 
     item_id: str
     label: str
@@ -1522,6 +1529,7 @@ class ItemReview:
     schema: bytes
     excerpt_paths: tuple[str, ...]
     skip_reason: str | None
+    answer: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id:
@@ -1549,8 +1557,15 @@ class ItemReview:
                 not isinstance(self.skip_reason, str)
                 or not self.skip_reason):
             raise TypeError("review.skip_reason must be str or None")
-        if (self.request is None) != (self.skip_reason is not None):
-            raise ValueError("review must be either skipped or requested")
+        if self.answer is not None and not isinstance(
+                self.answer, DeterministicAnswer):
+            raise TypeError("review.answer must be DeterministicAnswer or None")
+        set_count = ((self.request is not None)
+                     + (self.skip_reason is not None)
+                     + (self.answer is not None))
+        if set_count != 1:
+            raise ValueError(
+                "review must set exactly one of request, skip_reason, answer")
 
 
 def one_row_schema() -> bytes:
@@ -1612,12 +1627,56 @@ _GENERIC_PATH_PATTERN_STRINGS = frozenset({
     _GENERIC_SRC_DIR_PATTERN})
 
 
+_CONFTEST_PATH_RE = re.compile(r"(?:^|/)conftest\.py$")
+_TEST_DIR_RE = re.compile(_GENERIC_TEST_DIR_PATTERN)
+_TEST_FILE_RE = re.compile(_GENERIC_TEST_FILE_PATTERN)
+_FIXTURE_DEF_RE = re.compile(
+    r"@pytest\.fixture(?:\([^)]*\))?\s*\ndef[ \t]+([A-Za-z_]\w*)[ \t]*\(")
+_TEST_PARAMS_RE = re.compile(
+    r"^[ \t]*def[ \t]+test_\w*[ \t]*\(([^)]*)\)", re.MULTILINE)
+
+
+def _fixture_first_paths(routed: list[SourceExcerpt]) -> list[SourceExcerpt]:
+    """Rank conftest fixture definitions used by routed tests first.
+
+    A conftest excerpt that defines a fixture whose name appears as a
+    parameter in the item's routed test excerpts outranks every other
+    signal, so the guaranteeing mechanism (not just the use site) is
+    always in the review subset.
+    """
+    params: set[str] = set()
+    for excerpt in routed:
+        if not (_TEST_FILE_RE.search(excerpt.path)
+                or _TEST_DIR_RE.search(excerpt.path)):
+            continue
+        for match in _TEST_PARAMS_RE.finditer(excerpt.text):
+            for chunk in match.group(1).split(","):
+                name = chunk.strip().split(":")[0].split("=")[0].strip()
+                name = name.lstrip("*")
+                if name.isidentifier():
+                    params.add(name)
+    if not params:
+        return routed
+    first: list[SourceExcerpt] = []
+    rest: list[SourceExcerpt] = []
+    for excerpt in routed:
+        if (_CONFTEST_PATH_RE.search(excerpt.path)
+                and "@pytest.fixture" in excerpt.text
+                and any(name in params
+                        for name in _FIXTURE_DEF_RE.findall(excerpt.text))):
+            first.append(excerpt)
+        else:
+            rest.append(excerpt)
+    return first + rest
+
+
 def _route_excerpts(packet: EvidencePacket, entry,
                     code_index: dict[str, frozenset]) -> list[SourceExcerpt]:
     """Route the item's evidence subset, ranked before capping.
 
     Eligibility is unchanged: a path-pattern, text-pattern, or scanner-code
-    hit admits the excerpt. Rank order is scanner-code hits first, then
+    hit admits the excerpt. Rank order is conftest excerpts defining a
+    fixture used by the routed tests first, then scanner-code hits, then
     text-pattern hits, then item-specific path matches (conftest,
     fixture/factory, db/migration/cache names, manifests, .ptest.toml),
     then generic test/src directory matches. Packet order is kept within
@@ -1645,9 +1704,10 @@ def _route_excerpts(packet: EvidencePacket, entry,
                        excerpt))
     # Stable sort: packet order is kept within each rank.
     ranked.sort(key=lambda item: item[0])
+    ordered = _fixture_first_paths([excerpt for _, excerpt in ranked])
     routed: list[SourceExcerpt] = []
     total = 0
-    for _, excerpt in ranked:
+    for excerpt in ordered:
         if len(routed) >= ITEM_MAX_FILES:
             break
         size = len(excerpt.text.encode("utf-8"))
@@ -1698,7 +1758,19 @@ def _encode_item_request(packet: EvidencePacket, entry, routed,
 
 def _plan_one(packet: EvidencePacket, entry,
               code_index: dict[str, frozenset],
-              schema_bytes: bytes) -> ItemReview:
+              schema_bytes: bytes,
+              answers: Mapping[str, object] | None = None) -> ItemReview:
+    if answers is not None:
+        answer = answers.get(entry.id)
+        if answer is not None:
+            if not isinstance(answer, DeterministicAnswer):
+                raise TypeError("answers entries must be DeterministicAnswer")
+            if answer.item_id != entry.id:
+                raise ValueError("answer item_id does not match its entry")
+            return ItemReview(item_id=entry.id, label=entry.label,
+                              scope=packet.scope, request=None,
+                              schema=schema_bytes, excerpt_paths=(),
+                              skip_reason=None, answer=answer)
     routed = _route_excerpts(packet, entry, code_index)
     reason = _skip_reason(packet, entry, code_index)
     if reason is not None:
@@ -1716,21 +1788,26 @@ def _plan_one(packet: EvidencePacket, entry,
                       skip_reason=None)
 
 
-def plan_item_reviews(packet: EvidencePacket) -> tuple[ItemReview, ...]:
+def plan_item_reviews(packet: EvidencePacket,
+                      answers: Mapping[str, object] | None = None
+                      ) -> tuple[ItemReview, ...]:
     """Plan one review per catalog item, in catalog order.
 
     Pure: no filesystem, no subprocess, no model. Each review is either a
-    deterministic skip (no model call) or one bounded provider request
-    carrying only that item's routed evidence subset.
+    deterministic skip (no model call), a deterministic answer (no model
+    call), or one bounded provider request carrying only that item's
+    routed evidence subset.
     """
     if not isinstance(packet, EvidencePacket):
         raise TypeError("packet must be EvidencePacket")
+    if answers is not None and not isinstance(answers, Mapping):
+        raise TypeError("answers must be a mapping or None")
     from . import doctor as doctor_api
 
     code_index = {excerpt.path: doctor_api.match_rules(excerpt.text)
                   for excerpt in packet.excerpts}
     schema_bytes = one_row_schema()
-    return tuple(_plan_one(packet, entry, code_index, schema_bytes)
+    return tuple(_plan_one(packet, entry, code_index, schema_bytes, answers)
                  for entry in _CHECKLIST_CATALOG)
 
 
@@ -1879,7 +1956,8 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
         raise _invalid_reply("reply has an unknown status")
     rationale = _check_one_row_prose(document["rationale"],
                                      "reply.rationale")
-    if rationale.startswith((SKIP_PREFIX, FAILED_PREFIX)):
+    if rationale.startswith((SKIP_PREFIX, FAILED_PREFIX,
+                             PTEST_ANSWER_PREFIX)):
         raise _invalid_reply("reply carries a ptest-owned prefix")
     evidence, dropped = _bind_one_row_citations(document["evidence"],
                                                 subset, "reply.evidence")
@@ -1929,14 +2007,54 @@ def _skip_child_row(packet: EvidencePacket, entry,
                          label=entry.label)
 
 
+def _answer_child_row(packet: EvidencePacket, entry,
+                      answer: DeterministicAnswer) -> tuple:
+    """Build the model-free row (and gap finding) for a deterministic answer.
+
+    The rationale carries the ptest-owned prefix with whole-excerpt
+    citations. A satisfied, gap, or not-applicable answer with no citable
+    excerpt degrades to unknown naming the missing review evidence.
+    """
+    known = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    citations: list[Citation] = []
+    missing = False
+    for path in answer.evidence_paths:
+        excerpt = known.get(path)
+        if excerpt is None:
+            missing = True
+            break
+        citations.append(Citation(path=excerpt.path,
+                                  start_line=excerpt.start_line,
+                                  end_line=excerpt.end_line,
+                                  sha256=excerpt.sha256))
+    if answer.status in ("satisfied", "gap", "not-applicable") and (
+            missing or not citations):
+        return (AssessmentRow(
+            id=entry.id, status="unknown",
+            rationale=(PTEST_ANSWER_PREFIX + answer.reason
+                       + " (the ptest config is not in the review "
+                       "evidence)"),
+            evidence=(), label=entry.label), None)
+    row = AssessmentRow(id=entry.id, status=answer.status,
+                        rationale=PTEST_ANSWER_PREFIX + answer.reason,
+                        evidence=tuple(citations), label=entry.label)
+    finding = None
+    if answer.status == "gap":
+        finding = Finding(id=entry.id, summary=answer.finding_summary,
+                          suggested_change=answer.finding_change,
+                          recipe_id=None, evidence=tuple(citations))
+    return row, finding
+
+
 def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
                    replies: tuple[bytes | str | None, ...]) -> ChildAssessment:
     """Assemble one child assessment from per-item replies.
 
     ``replies`` align with ``reviews``: bytes hold a normalized provider
-    payload, str holds a failure reason, and None marks a skipped review.
-    A failing reply becomes an ``unknown`` row; only misaligned inputs
-    raise, plus stale-evidence when the reviews belong to another packet.
+    payload, str holds a failure reason, and None marks a skipped or
+    deterministically answered review. A failing reply becomes an
+    ``unknown`` row; only misaligned inputs raise, plus stale-evidence
+    when the reviews belong to another packet.
     """
     if not isinstance(packet, EvidencePacket):
         raise TypeError("packet must be EvidencePacket")
@@ -1960,6 +2078,14 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
     findings: list[Finding] = []
     for review, reply in zip(reviews, replies):
         entry = _CATALOG_BY_ID[review.item_id]
+        if review.answer is not None:
+            if reply is not None:
+                raise ValueError("answered reviews take no reply")
+            row, finding = _answer_child_row(packet, entry, review.answer)
+            rows.append(row)
+            if finding is not None:
+                findings.append(finding)
+            continue
         if review.request is None:
             if reply is not None:
                 raise ValueError("skipped reviews take no reply")
@@ -2029,4 +2155,5 @@ __all__ = [
     "MAX_FILES_PER_CHILD", "MAX_BYTES_PER_CHILD", "MAX_BYTES_PER_FILE",
     "MAX_PROMPT_BYTES",
     "ITEM_MAX_FILES", "ITEM_MAX_BYTES", "SKIP_PREFIX", "FAILED_PREFIX",
+    "PTEST_ANSWER_PREFIX",
 ]

@@ -709,3 +709,106 @@ def test_additive_dropped_citations_row_validates_and_projects_away():
     row = document.data["children"][0]["rows"][0]
     assert "dropped_citations" not in row
     assert row["status"] == "satisfied"
+
+
+def _t4_packet(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import doctor
+
+    files = {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        ".ptest.toml": "[selection]\nenabled = false\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    }
+    for rel, text in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    domain = C.DomainPaths(
+        root=tmp_path, machine_config=tmp_path / ".ptest" / "config.toml",
+        ledger=tmp_path / ".ptest" / "ledger",
+        marker=tmp_path / ".ptest" / "marker",
+        fixture=True, domain_id=None)
+    config = C.Config(
+        runner=C.RunnerConfig(kind=C.RunnerKind.PYTEST, launcher=("uv",),
+                              test_roots=("tests",)),
+        setup=None, resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
+        project_id=CHILD_PID)
+    resolution = C.ConfigResolution(root=tmp_path, path=None, config=config,
+                                    monorepo=None, provenance=(), warnings=(),
+                                    problem=None)
+    workspace = doctor.inspect_workspace(
+        domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
+    assert len(packets) == 1
+    return packets[0]
+
+
+def _t4_public_child(assessment):
+    return {
+        "project_id": assessment.project_id,
+        "scope": assessment.scope,
+        "packet_sha256": assessment.packet_sha256,
+        "rows": [{
+            "id": row.id, "status": row.status, "rationale": row.rationale,
+            "evidence": [{
+                "path": item.path, "start_line": item.start_line,
+                "end_line": item.end_line, "sha256": item.sha256,
+            } for item in row.evidence],
+        } for row in assessment.rows],
+        "score": (None if assessment.score is None else {
+            "satisfied": assessment.score.satisfied,
+            "applicable": assessment.score.applicable,
+            "percent": assessment.score.percent,
+        }),
+        "findings": [{
+            "id": item.id, "summary": item.summary,
+            "suggested_change": item.suggested_change,
+            "recipe_id": item.recipe_id,
+            "evidence": [{
+                "path": cite.path, "start_line": cite.start_line,
+                "end_line": cite.end_line, "sha256": cite.sha256,
+            } for cite in item.evidence],
+        } for item in assessment.findings],
+        "limitations": [],
+    }
+
+
+def test_deterministic_gap_and_satisfied_rows_validate(tmp_path):
+    """A child holding a deterministic gap + satisfied row validates."""
+    from ptest import agent_assessment as AA
+    from ptest import deterministic_items as DI
+
+    packet = _t4_packet(tmp_path)
+    answers = {
+        "SELECT-001": DI.DeterministicAnswer(
+            item_id="SELECT-001", status="gap",
+            reason="selection is disabled in .ptest.toml",
+            evidence_paths=(".ptest.toml",),
+            finding_summary=("Selection is disabled in .ptest.toml, so every "
+                             "run executes the full suite."),
+            finding_change=("Enable selection with closed inputs, input "
+                            "roots, and full triggers in .ptest.toml.")),
+        "TIMING-001": DI.DeterministicAnswer(
+            item_id="TIMING-001", status="satisfied",
+            reason=("ptest recorded per-test timings for 3 tests in the last "
+                    "clean full run; 1 take over 3 s (slowest 3.5 s)"),
+            evidence_paths=(".ptest.toml",)),
+    }
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    assessment = AA.assemble_child(packet, reviews, replies)
+    payload = _payload(children=[_t4_public_child(assessment)])
+    doc = C.decode_public_document(
+        C.encode_public_document("agent-assessment", payload))
+    assert doc.error is None
+    rows = {row["id"]: row for row in doc.data["children"][0]["rows"]}
+    assert rows["SELECT-001"]["status"] == "gap"
+    assert rows["SELECT-001"]["rationale"].startswith("Answered by ptest: ")
+    assert rows["TIMING-001"]["status"] == "satisfied"
+    findings = doc.data["children"][0]["findings"]
+    assert [finding["id"] for finding in findings] == ["SELECT-001"]
+    assert findings[0]["recipe_id"] is None

@@ -14,7 +14,7 @@ deterministic ``skip`` rule (``no-database`` | ``no-cache`` | None).
 from __future__ import annotations
 
 import importlib.resources
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # NOTE: ptest.contracts derives its checklist constants from CATALOG below,
 # so this module must not import contracts at top level (import cycle).
@@ -35,6 +35,16 @@ TEST_DIR = r"(?i)(?:^|/)(?:tests?|__tests__)(?:/|$)"
 TEST_FILE = r"(?i)(?:^|/)test_[^/]*\.py$|[^/]*_test\.py$|\.test\.|\.spec\."
 SRC_DIR = r"(?:^|/)src(?:/|$)"
 _CONFTEST = r"(?:^|/)conftest\.py$"
+
+# Evidence standard shared by every item prompt: a gap needs a cited
+# concrete violation, satisfied needs the guaranteeing mechanism, and
+# anything less is unknown with the missing evidence named.
+_PROMPT_STANDARD = (
+    " Return gap only with a cited concrete violation; return satisfied "
+    "only when the evidence shows the guaranteeing mechanism; otherwise "
+    "return unknown with one sentence naming the missing evidence. "
+    "Absence of code is unknown, never a guess."
+)
 _MANIFEST = (r"(?i)(?:^|/)(?:pyproject\.toml|package\.json|requirements"
              r"(?:[^/]*)?\.txt|uv\.lock|poetry\.lock|pdm\.lock|Cargo\.toml"
              r"|go\.mod|setup\.py|setup\.cfg|pytest\.ini|tox\.ini)$")
@@ -199,8 +209,12 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"\bopen\s*\(", r"Path\s*\(",
-                       r"tmp_path|tmpdir|TemporaryDirectory|mkstemp|mkdtemp",
-                       r"port\s*=\s*\d|bind\s*\(|listen\s*\(|socket"),
+                       r"tmp_path|tmpdir|TemporaryDirectory|tempfile"
+                       r"|mkstemp|mkdtemp",
+                       r"(?i)PORT\s*=\s*\d|port\s*=\s*\d|bind\s*\("
+                       r"|listen\s*\(|socket",
+                       r"/tmp",
+                       r"\.lock\b|filelock|flock"),
         scanner_codes=("resource.fixed-name", "network.fixed-port"),
         skip=None,
     ),
@@ -221,8 +235,11 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML),
         text_patterns=(r"https?://",
-                       r"requests\.|httpx\.|urllib|aiohttp|axios"
-                       r"|\bfetch\s*\(|socket",),
+                       r"\brequests\b|\bhttpx\b|urllib|\baiohttp\b|axios"
+                       r"|\bfetch\s*\(|socket",
+                       r"\brespx\b|\bresponses\b|pytest[-_]socket"
+                       r"|socket\.socket|disable_socket|block_network"
+                       r"|deny_network|\bvcr\b",),
         scanner_codes=("network.live-target",),
         skip=None,
     ),
@@ -241,8 +258,12 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "of such evidence is unknown, never N/A."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
-        text_patterns=(r"subprocess|Popen|multiprocessing|start_new_session"
-                       r"|setsid|detach|fork\s*\(|spawn|workers|lifecycle",),
+        text_patterns=(r"subprocess|asyncio\.create_subprocess|Popen"
+                       r"|multiprocessing|start_new_session"
+                       r"|setsid|detach|fork\s*\(|os\.fork|spawn|workers"
+                       r"|lifecycle",
+                       r"\.join\s*\(|\.terminate\s*\(|\.kill\s*\("
+                       r"|\.wait\s*\(",),
         scanner_codes=("process.detached-child",),
         skip=None,
     ),
@@ -315,6 +336,15 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         scanner_codes=(),
         skip=None,
     ),
+)
+
+# Every item prompt carries the same evidence standard. Applied here (not
+# repeated in each literal) so no item can miss it: gap needs a cited
+# concrete violation, satisfied needs the guaranteeing mechanism, and
+# anything less is unknown naming the missing evidence.
+CATALOG = tuple(
+    replace(entry, prompt=entry.prompt + _PROMPT_STANDARD)
+    for entry in CATALOG
 )
 
 

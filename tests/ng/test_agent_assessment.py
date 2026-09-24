@@ -2415,3 +2415,272 @@ def test_unknown_row_without_citation_demand_keeps_valid_only(tmp_path):
     assert len(row.evidence) == 1
     assert row.dropped_citations == 1
     assert not row.rationale.startswith(AA.FAILED_PREFIX)
+
+
+# --- T4 wave: deterministic answers, prompts, code-signal routing -------------
+
+def _t4_packet(tmp_path):
+    return _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        ".ptest.toml": "[selection]\nenabled = false\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+
+
+def _t4_answers():
+    from ptest import deterministic_items as DI
+
+    return {
+        "SELECT-001": DI.DeterministicAnswer(
+            item_id="SELECT-001", status="gap",
+            reason="selection is disabled in .ptest.toml",
+            evidence_paths=(".ptest.toml",),
+            finding_summary="Selection is disabled, so scoped runs cannot narrow.",
+            finding_change="Enable selection with closed inputs in .ptest.toml."),
+        "TIMING-001": DI.DeterministicAnswer(
+            item_id="TIMING-001", status="satisfied",
+            reason="ptest recorded per-test timings for 2 tests in the last clean full run; 0 take over 3 s (slowest 0.4 s)",
+            evidence_paths=(".ptest.toml",)),
+    }
+
+
+def test_ptest_answer_prefix_is_frozen_literal():
+    from ptest import agent_assessment as AA
+
+    assert AA.PTEST_ANSWER_PREFIX == "Answered by ptest: "
+
+
+def test_plan_item_reviews_binds_deterministic_answers_without_calls(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _t4_packet(tmp_path)
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet, answers=_t4_answers())}
+    assert len(reviews) == 11
+    for item_id in ("SELECT-001", "TIMING-001"):
+        review = reviews[item_id]
+        assert review.request is None
+        assert review.skip_reason is None
+        assert review.answer is not None
+        assert review.answer.item_id == item_id
+    assert all(review.request is not None
+               for item_id, review in reviews.items()
+               if item_id not in ("SELECT-001", "TIMING-001",
+                                  "DB-001", "DB-002", "CACHE-001"))
+
+
+def test_item_review_requires_exactly_one_of_request_skip_answer(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _t4_packet(tmp_path)
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    sample = reviews["TIME-001"]
+    with __import__("pytest").raises((TypeError, ValueError)):
+        AA.ItemReview(item_id=sample.item_id, label=sample.label,
+                      scope=sample.scope, request=sample.request,
+                      schema=sample.schema,
+                      excerpt_paths=sample.excerpt_paths,
+                      skip_reason="both set", answer=None)
+
+
+def test_assemble_child_builds_deterministic_gap_and_satisfied(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _t4_packet(tmp_path)
+    answers = _t4_answers()
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    by_id = {row.id: row for row in child.rows}
+    gap = by_id["SELECT-001"]
+    assert gap.status == "gap"
+    assert gap.rationale == (
+        AA.PTEST_ANSWER_PREFIX + "selection is disabled in .ptest.toml")
+    assert len(gap.evidence) == 1
+    assert gap.evidence[0].path == ".ptest.toml"
+    excerpt = next(e for e in packet.excerpts if e.path == ".ptest.toml")
+    assert gap.evidence[0].start_line == excerpt.start_line
+    assert gap.evidence[0].end_line == excerpt.end_line
+    assert [finding.id for finding in child.findings] == ["SELECT-001"]
+    assert child.findings[0].recipe_id is None
+    assert child.findings[0].summary == answers["SELECT-001"].finding_summary
+    satisfied = by_id["TIMING-001"]
+    assert satisfied.status == "satisfied"
+    assert satisfied.rationale.startswith(AA.PTEST_ANSWER_PREFIX)
+    assert satisfied.evidence[0].path == ".ptest.toml"
+
+
+def test_assemble_child_rejects_reply_for_answered_review(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _t4_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet, answers=_t4_answers())
+    replies = tuple(
+        b"{}" if review.answer is not None else None
+        if review.request is None else "failure"
+        for review in reviews)
+    with __import__("pytest").raises(ValueError):
+        AA.assemble_child(packet, reviews, replies)
+
+
+def test_assemble_child_degrades_uncitable_answer_to_unknown(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import deterministic_items as DI
+
+    packet = _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_pure.py": "def test_pure():\n    assert True\n",
+    })
+    assert ".ptest.toml" not in {e.path for e in packet.excerpts}
+    answers = {"SELECT-001": DI.DeterministicAnswer(
+        item_id="SELECT-001", status="gap",
+        reason="selection is disabled in .ptest.toml",
+        evidence_paths=(".ptest.toml",),
+        finding_summary="Selection is disabled, so scoped runs cannot narrow.",
+        finding_change="Enable selection with closed inputs in .ptest.toml.")}
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == "SELECT-001")
+    assert row.status == "unknown"
+    assert row.rationale == (
+        AA.PTEST_ANSWER_PREFIX + "selection is disabled in .ptest.toml"
+        + " (the ptest config is not in the review evidence)")
+    assert row.evidence == ()
+    assert [finding.id for finding in child.findings] == []
+
+
+def test_model_reply_with_ptest_prefix_is_rejected(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    reply = _one_row_bytes(
+        packet, target, status="satisfied",
+        paths=[target.excerpt_paths[0]],
+        rationale=AA.PTEST_ANSWER_PREFIX + "the excerpts show the mechanism.")
+    child = AA.assemble_child(
+        packet, reviews,
+        tuple(reply if r is target else (None if r.request is None else "down")
+              for r in reviews))
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert row.status == "unknown"
+    assert row.rationale.startswith(AA.FAILED_PREFIX)
+
+
+def test_item_instruction_pins_gap_satisfied_unknown_standard():
+    from ptest import agent_assessment as AA
+
+    instruction = AA._ITEM_INSTRUCTION.casefold()
+    assert "gap only with a cited concrete violation" in instruction
+    assert "satisfied only when the evidence shows the guaranteeing mechanism" in instruction
+    assert "otherwise" in instruction and "unknown" in instruction
+    assert "missing evidence" in instruction
+    assert "absence of code is unknown" in instruction
+    assert "answered by ptest" in instruction
+
+
+@pytest.mark.parametrize("signal", [
+    "tmp_path", "tempfile", "mkdtemp", "socket", "bind(",
+    "PORT = 8080", "port=8080", "/tmp", "app.lock", "filelock", "flock",
+])
+def test_resource_signals_route_to_resource_item(tmp_path, signal):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_res.py": f"def test_x():\n    assert {signal!r} != ''\n",
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert "tests/test_res.py" in reviews["RESOURCE-001"].excerpt_paths
+
+
+@pytest.mark.parametrize("signal", [
+    "httpx", "requests", "aiohttp", "respx", "responses",
+    "pytest-socket", "socket.socket", "disable_socket", "vcr",
+])
+def test_network_signals_route_to_network_item(tmp_path, signal):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_net.py": f"def test_x():\n    assert {signal!r} != ''\n",
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert "tests/test_net.py" in reviews["NETWORK-001"].excerpt_paths
+
+
+@pytest.mark.parametrize("signal", [
+    "subprocess", "asyncio.create_subprocess", "multiprocessing", "Popen",
+    "os.fork", ".join(", ".terminate(", ".kill(", ".wait(",
+])
+def test_process_signals_route_to_process_item(tmp_path, signal):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_proc.py": f"def test_x():\n    assert {signal!r} != ''\n",
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    assert "tests/test_proc.py" in reviews["PROCESS-001"].excerpt_paths
+
+
+def test_conftest_fixture_defining_used_fixture_ranks_first(tmp_path):
+    """A referenced conftest fixture outranks a scanner hit."""
+    from ptest import agent_assessment as AA
+
+    packet = _packet_in_root(tmp_path, {
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "conftest.py": ("import pytest\n\n\n@pytest.fixture\n"
+                        "def owned_tmp(tmp_path):\n    return tmp_path\n"),
+        "tests/test_res.py": ("def test_x(owned_tmp):\n"
+                              "    assert str(owned_tmp) != ''\n"
+                              "    assert 'tmp_path' != ''\n"),
+    })
+    reviews = {review.item_id: review
+               for review in AA.plan_item_reviews(packet)}
+    paths = reviews["RESOURCE-001"].excerpt_paths
+    assert "conftest.py" in paths
+    assert "tests/test_res.py" in paths
+    assert paths.index("conftest.py") < paths.index("tests/test_res.py")
+
+
+def test_plan_item_reviews_rejects_mismatched_answer_id(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _t4_packet(tmp_path)
+    swapped = dict(_t4_answers())
+    swapped["SELECT-001"] = _t4_answers()["TIMING-001"]
+    with __import__("pytest").raises(ValueError):
+        AA.plan_item_reviews(packet, answers=swapped)
+
+
+def test_assemble_child_degrades_answer_without_evidence_paths(tmp_path):
+    """A satisfied answer with no citable excerpt degrades to unknown."""
+    from ptest import agent_assessment as AA
+    from ptest import deterministic_items as DI
+
+    packet = _t4_packet(tmp_path)
+    answers = {"TIMING-001": DI.DeterministicAnswer(
+        item_id="TIMING-001", status="satisfied",
+        reason="ptest recorded per-test timings for 2 tests in the last clean full run; 0 take over 3 s (slowest 0.4 s)",
+        evidence_paths=())}
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    row = next(r for r in child.rows if r.id == "TIMING-001")
+    assert row.status == "unknown"
+    assert row.rationale.endswith(
+        "(the ptest config is not in the review evidence)")
+    assert row.evidence == ()
