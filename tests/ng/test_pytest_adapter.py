@@ -305,6 +305,7 @@ _HOOK_NAMES = ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                "pytest_collect_directory", "pytest_make_collect_report",
                "pytest_collection_finish",
                "pytest_runtest_makereport", "pytest_report_teststatus",
+               "pytest_runtest_logreport", "pytest_collectreport",
                "pytest_sessionfinish")
 
 
@@ -795,6 +796,7 @@ def test_full_bridge_accepts_trusted_effective_root_paths(bridge_env, monkeypatc
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect",
                                    "pytest_collection_finish",
                                    "pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_runtest_logreport", "pytest_collectreport",
                                    "pytest_sessionfinish"])
 def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
     function = SimpleNamespace(__module__="project.conftest")
@@ -806,7 +808,7 @@ def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
                                              "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
-                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+                                             "pytest_report_teststatus", "pytest_runtest_logreport", "pytest_collectreport", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = manager
     with pytest.raises(pytest.UsageError, match="execution hook"):
@@ -814,6 +816,7 @@ def test_full_bridge_refuses_wrapper_full_only_external_hooks(bridge_env, hook):
 
 
 @pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_runtest_makereport",
+                                   "pytest_runtest_logreport", "pytest_collectreport",
                                    "pytest_sessionfinish"])
 def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
     implementation = SimpleNamespace(
@@ -827,7 +830,7 @@ def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
                                              "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
-                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+                                             "pytest_report_teststatus", "pytest_runtest_logreport", "pytest_collectreport", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = late_manager
     with pytest.raises(pytest.UsageError, match="execution hook"):
@@ -839,6 +842,7 @@ def test_full_bridge_refuses_aliased_and_late_full_only_hooks(bridge_env, hook):
                                    "pytest_collect_directory", "pytest_make_collect_report",
                                    "pytest_collection_finish",
                                    "pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_runtest_logreport", "pytest_collectreport",
                                    "pytest_sessionfinish"])
 def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
     implementation = SimpleNamespace(plugin=object(), function=SimpleNamespace(__module__="project.conftest"))
@@ -848,7 +852,7 @@ def test_full_bridge_refuses_full_only_external_hooks(bridge_env, hook):
                                 for name in ("pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
                                              "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
                                              "pytest_collection_modifyitems", "pytest_ignore_collect", "pytest_pycollect_makeitem", "pytest_collect_file", "pytest_collect_directory", "pytest_make_collect_report", "pytest_collection_finish", "pytest_runtest_makereport",
-                                             "pytest_report_teststatus", "pytest_sessionfinish")}),
+                                             "pytest_report_teststatus", "pytest_runtest_logreport", "pytest_collectreport", "pytest_sessionfinish")}),
     )
     config = _native_config(); config.pluginmanager = manager
     with pytest.raises(pytest.UsageError, match="execution hook"):
@@ -1044,14 +1048,16 @@ def test_full_bridge_reconciliation_ignores_parallel_controllers(bridge_env):
     assert owned.full_unrun_items() == ()
 
 
-@pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus"])
+@pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus",
+                                   "pytest_runtest_logreport", "pytest_collectreport"])
 def test_full_bridge_refuses_reporting_hooks_even_from_project_conftest(
         bridge_env, tmp_path, monkeypatch, hook):
     """Section F flips collection hooks plus a conftest sessionfinish only.
 
-    The reporting hooks (makereport/teststatus) stay refused from anywhere;
-    sessionfinish is project-owned from a checkout conftest (see the round
-    14 acceptance test above) and non-conftest sessionfinish stays refused.
+    The reporting hooks (makereport/teststatus/logreport/collectreport) stay
+    refused from anywhere; sessionfinish is project-owned from a checkout
+    conftest (see the round 14 acceptance test above) and non-conftest
+    sessionfinish stays refused.
     """
     monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
     conftest = tmp_path / "conftest.py"
@@ -1328,6 +1334,32 @@ def test_full_bridge_accepts_approved_collection_finish_hook_module(bridge_env, 
     )
     config = _native_config(); config.pluginmanager = manager
     pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("module", ["pytest_asyncio.plugin", "pytest_timeout",
+                                    "anyio.pytest_plugin"])
+@pytest.mark.parametrize("hook", ["pytest_runtest_logreport", "pytest_collectreport"])
+def test_full_bridge_accepts_approved_reporting_hook_module(bridge_env, module, hook):
+    """Round 18: approved modules stay allowed on the new reporting hooks."""
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("approved", plugin),),
+        [_hookimpl(hook, module, plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_runtest_logreport", "pytest_collectreport"])
+def test_scoped_bridge_allows_reporting_hooks_as_documented_limit(bridge_env, hook):
+    """Round 18: scoped mode still allows these hooks (known §F limit)."""
+    plugin = _module("conftest")
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl(hook, "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
 
 
 def test_full_preparation_accepts_value_led_cluster():

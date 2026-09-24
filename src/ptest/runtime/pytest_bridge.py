@@ -796,7 +796,10 @@ _FULL_COLLECTION_HOOKS = frozenset({
 # expected status from the bridge's own outcome counts and refuses a
 # native exit of 0/5 while failures were observed. A sessionfinish from
 # any other plugin, and pytest_runtest_makereport /
-# pytest_report_teststatus from anywhere, stay refused.
+# pytest_report_teststatus / pytest_runtest_logreport / pytest_collectreport
+# from anywhere, stay refused (a logreport/collectreport wrapper can rewrite
+# reports before any counter sees them; scoped mode still allows them as a
+# known limit).
 _FULL_SESSIONFINISH_HOOKS = frozenset({
     "pytest_sessionfinish",
 })
@@ -897,7 +900,8 @@ class OwnedPlugin:
         hook function must be defined in it (a re-exported import is
         refused). Hooks from installed plugins, conftests outside the
         checkout, and the reporting hooks (``pytest_runtest_makereport``/
-        ``pytest_report_teststatus``) stay refused. Missing file evidence
+        ``pytest_report_teststatus``/``pytest_runtest_logreport``/
+        ``pytest_collectreport``) stay refused. Missing file evidence
         fails closed. Returns None when the hook is not project-owned.
         """
         if (self.execution != "full"
@@ -1075,6 +1079,7 @@ class OwnedPlugin:
                           "pytest_collect_directory", "pytest_make_collect_report",
                           "pytest_collection_finish",
                           "pytest_runtest_makereport", "pytest_report_teststatus",
+                          "pytest_runtest_logreport", "pytest_collectreport",
                           "pytest_sessionfinish")
             loaded_plugins = [plugin for _, plugin in loaded]
             for hook in hooks:
@@ -1301,7 +1306,8 @@ class OwnedPlugin:
         Only the failure-hiding direction refuses: a native 0 or 5 while
         failures were seen is incomplete, never PASSED. Anything else
         (including a native failure the bridge did not observe, which in
-        scoped mode a conftest pytest_runtest_makereport may have produced)
+        scoped mode a conftest pytest_runtest_makereport /
+        pytest_runtest_logreport / pytest_collectreport rewrite may have produced)
         passes through with its own code.
         """
         return self.derived_status() == 1 and native_exit in (0, 5)
@@ -1756,7 +1762,8 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         # pytest_unconfigure, config.add_cleanup) hid the failure: refuse
         # as incomplete. Interrupted (2), internal-error (3) and usage (4)
         # exits keep their own codes, as do native failures the bridge did
-        # not observe (scoped conftest pytest_runtest_makereport is a known
+        # not observe (a scoped conftest pytest_runtest_makereport /
+        # pytest_runtest_logreport / pytest_collectreport rewrite is a known
         # limit, recorded in the section F docs).
         if not plugin.refused and plugin.hides_failure(native_exit):
             plugin.refused = True

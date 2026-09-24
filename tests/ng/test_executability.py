@@ -197,6 +197,20 @@ def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
         " or configure a command profile")
 
 
+@pytest.mark.parametrize("hook", ["pytest_runtest_logreport", "pytest_collectreport"])
+def test_reporting_hook_conftest_makes_full_unavailable(tmp_path, hook):
+    """Round 18: static prediction mirrors the bridge refusal for these hooks."""
+    _write(tmp_path / "tests" / "conftest.py",
+           "def %s(*args):\n    return None\n" % hook)
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "ptest --full unavailable: tests/conftest.py defines %s" % hook,)
+    assert result.full is False
+
+
 def test_dot_test_root_is_caveat_without_full(tmp_path):
     (tmp_path / "tests").mkdir()
 

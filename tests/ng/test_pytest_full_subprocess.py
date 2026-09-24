@@ -234,6 +234,26 @@ def test_full_project_conftest_collection_hooks_run_labelled(case, hook_source):
         "def pytest_report_teststatus(report):\n"
         "    yield\n"
     ),
+    # Round 18: a wrapper logreport can flip failures to passed before any
+    # counter sees them; refused in full mode like makereport/teststatus.
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    if report.failed:\n"
+        "        report.outcome = \"passed\"\n"
+        "    return (yield)\n"
+    ),
+    # Round 18: a wrapper collectreport can hide a failing-import module's
+    # collection error; refused in full mode.
+    (
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True)\n"
+        "def pytest_collectreport(report):\n"
+        "    report.outcome = \"passed\"\n"
+        "    report.result = []\n"
+        "    return (yield)\n"
+    ),
     # Round 14: plain, wrapper, and specname-aliased sessionfinish forms
     # defined in the checkout conftest are project-owned and allowed (see
     # test_full_conftest_sessionfinish_cleanup_runs_labelled); only

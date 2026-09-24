@@ -31,12 +31,14 @@ _MAX_CONFTEST_FILES = 64
 _MAX_WALK_ENTRIES = 2000
 _SKIP_DIRS = frozenset({"node_modules", ".venv", "venv", "__pycache__"})
 
-# Section F known limit (round 16): scoped mode allows a conftest
-# pytest_runtest_makereport, which can flip individual outcomes before the
-# bridge's own logreport counting sees them. The outcome reconciliation in
-# pytest_bridge refuses a native exit that hides an observed failure, but
-# a rewritten report is never observed as failed. Full mode refuses
-# pytest_runtest_makereport outright (see _FULL_REFUSED_HOOKS).
+# Section F known limit (round 16, extended round 18): scoped mode allows
+# a conftest pytest_runtest_makereport, pytest_runtest_logreport, or
+# pytest_collectreport, which can flip individual outcomes (or hide a
+# collection error) before the bridge's own logreport counting sees them.
+# The outcome reconciliation in pytest_bridge refuses a native exit that
+# hides an observed failure, but a rewritten report is never observed as
+# failed. Full mode refuses all four reporting hooks outright
+# (see _FULL_REFUSED_HOOKS).
 _SCOPED_REFUSED_HOOKS = frozenset({
     "pytest_cmdline_main", "pytest_collection", "pytest_runtestloop",
     "pytest_runtest_protocol", "pytest_runtest_call", "pytest_pyfunc_call",
@@ -47,6 +49,7 @@ _FULL_REFUSED_HOOKS = frozenset({
     "pytest_collect_directory", "pytest_make_collect_report",
     "pytest_collection_finish",
     "pytest_runtest_makereport", "pytest_report_teststatus",
+    "pytest_runtest_logreport", "pytest_collectreport",
     "pytest_sessionfinish",
 })
 # Section F: conftest.py collection hooks are the project's own suite
