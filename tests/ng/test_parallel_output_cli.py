@@ -1226,12 +1226,15 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     parallel = api_rows["PARALLEL-001"]
     assert parallel["status"] == "satisfied"
     assert "4 workers" in parallel["rationale"]
-    assert len(parallel["evidence"]) == 1
+    assert len(parallel["evidence"]) == 2
     assert parallel["evidence"][0]["path"] == "api/.ptest.toml"
     runner_lines = (
         parallel["evidence"][0]["start_line"],
         parallel["evidence"][0]["end_line"])
     assert runner_lines == (3, 10)
+    assert parallel["evidence"][1]["path"] == "api/pyproject.toml"
+    assert (parallel["evidence"][1]["start_line"],
+            parallel["evidence"][1]["end_line"]) == (2, 2)
     selection = api_rows["SELECT-001"]
     assert selection["status"] == "gap"
     assert len(selection["evidence"]) == 1
@@ -1245,7 +1248,11 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     assert api_rows["TIMING-001"]["status"] == "unknown"
     assert "no timing history yet" in api_rows["TIMING-001"]["rationale"]
     # Web (vitest): no automatic selection, so n/a by design, still cited.
+    # The n/a is justified by kind = "vitest" in [runner], not [selection].
     web_rows = {row["id"]: row for row in by_scope["web"]["rows"]}
     assert web_rows["SELECT-001"]["status"] == "not-applicable"
-    assert web_rows["SELECT-001"]["evidence"]
+    assert len(web_rows["SELECT-001"]["evidence"]) == 1
+    assert web_rows["SELECT-001"]["evidence"][0]["path"] == "web/.ptest.toml"
+    assert (web_rows["SELECT-001"]["evidence"][0]["start_line"],
+            web_rows["SELECT-001"]["evidence"][0]["end_line"]) == (3, 10)
     assert web_rows["PARALLEL-001"]["status"] == "satisfied"

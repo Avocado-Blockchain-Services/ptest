@@ -2021,12 +2021,23 @@ def _skip_child_row(packet: EvidencePacket, entry,
 #: The row citation narrows to that section's lines (carrying the excerpt
 #: SHA-256 identity, as model sub-range citations do). TIMING-001 answers
 #: from run history, not config, so it keeps the whole excerpt.
+#: A not-applicable SELECT-001 (vitest/command has no test selection)
+#: cites ``runner`` instead — see ``_answer_child_row``.
 _DETERMINISTIC_CONFIG_SECTION = {
     "SELECT-001": "selection",
     "PARALLEL-001": "runner",
 }
 
 _SECTION_HEADER_RE = re.compile(r"\[([A-Za-z0-9_.-]+)\]")
+
+#: Basenames that can carry the pytest ``addopts`` entry a satisfied
+#: PARALLEL-001 answer cites (pytest's own config-file precedence order).
+_ADDOPTS_BASENAMES = frozenset({
+    "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini",
+    "pyproject.toml", "tox.ini", "setup.cfg",
+})
+
+_ADDOPTS_KEY_RE = re.compile(r"\s*addopts\s*[:=]", re.IGNORECASE)
 
 
 def _config_section_span(text: str, section: str) -> tuple[int, int] | None:
@@ -2055,19 +2066,74 @@ def _config_section_span(text: str, section: str) -> tuple[int, int] | None:
     return (start, len(lines) or 1)
 
 
+_QUOTED_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def _unquoted(line: str) -> str:
+    """``line`` with single/double-quoted segments removed (bracket scan)."""
+    return _QUOTED_RE.sub("", line)
+
+
+def _bracket_depth(line: str) -> int:
+    """Net ``[]{}()`` depth of ``line`` outside quoted segments."""
+    bare = _unquoted(line)
+    return (bare.count("[") + bare.count("{") + bare.count("(")
+            - bare.count("]") - bare.count("}")
+            - bare.count(")"))
+
+
+def _continues(line: str) -> bool:
+    """True when ``line`` is a nonempty indented continuation line."""
+    return bool(line.strip()) and line[:1] in (" ", "\t")
+
+
+def _addopts_span(text: str) -> tuple[int, int] | None:
+    """Return the 1-based line span of the ``addopts`` entry in ``text``.
+
+    The span starts at the ``addopts =``/``addopts:`` line and extends
+    through continuation lines: indented lines (INI continuations, values
+    on the next line) and lines while a bracket opened on the entry stays
+    unbalanced (multiline TOML arrays). None when no addopts entry is
+    present.
+    """
+    lines = text.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines, 1):
+        if _ADDOPTS_KEY_RE.match(line):
+            start = index
+            break
+    if start is None:
+        return None
+    depth = 0
+    end = start
+    for index in range(start, len(lines) + 1):
+        depth += _bracket_depth(lines[index - 1])
+        end = index
+        following = lines[index] if index < len(lines) else ""
+        if depth <= 0 and not _continues(following):
+            break
+    return (start, end)
+
+
 def _answer_child_row(packet: EvidencePacket, entry,
                       answer: DeterministicAnswer) -> tuple:
     """Build the model-free row (and gap finding) for a deterministic answer.
 
     The rationale carries the ptest-owned prefix with excerpt citations;
-    a ``.ptest.toml`` citation narrows to the item's config section lines.
-    A satisfied, gap, or not-applicable answer with no citable excerpt
-    degrades to unknown naming the missing review evidence.
+    a ``.ptest.toml`` citation narrows to the item's config section lines
+    (``[runner]`` for a not-applicable SELECT-001, whose rationale is
+    justified by the runner kind), and a satisfied PARALLEL-001 addopts
+    citation narrows to the addopts entry lines. A satisfied, gap, or
+    not-applicable answer with no citable excerpt degrades to unknown
+    naming the missing review evidence.
     """
     known = {excerpt.path: excerpt for excerpt in packet.excerpts}
     citations: list[Citation] = []
     missing = False
-    section = _DETERMINISTIC_CONFIG_SECTION.get(entry.id)
+    if entry.id == "SELECT-001" and answer.status == "not-applicable":
+        section = "runner"
+    else:
+        section = _DETERMINISTIC_CONFIG_SECTION.get(entry.id)
     for path in answer.evidence_paths:
         excerpt = known.get(path)
         if excerpt is None:
@@ -2077,6 +2143,12 @@ def _answer_child_row(packet: EvidencePacket, entry,
         if (section is not None
                 and path.rsplit("/", 1)[-1] == ".ptest.toml"):
             span = _config_section_span(excerpt.text, section)
+            if span is not None:
+                offset = excerpt.start_line - 1
+                start, end = span[0] + offset, span[1] + offset
+        elif (entry.id == "PARALLEL-001"
+                and path.rsplit("/", 1)[-1] in _ADDOPTS_BASENAMES):
+            span = _addopts_span(excerpt.text)
             if span is not None:
                 offset = excerpt.start_line - 1
                 start, end = span[0] + offset, span[1] + offset

@@ -380,6 +380,34 @@ def _parallel_answer(facts: dict | None, runner: str,
         evidence_paths=evidence)
 
 
+def _addopts_source(config: C.Config, resolution,
+                      declaration: str) -> str | None:
+    """Packet-relative addopts file behind a satisfied pytest parallel fact.
+
+    Mirrors ``executability._project_root`` without side effects; the
+    returned path carries the packet's declaration prefix (or none at the
+    root). None when no config file defines the addopts the facts came
+    from. Read-only: never raises.
+    """
+    from . import executability as executability_api
+
+    try:
+        if config.config_path is not None:
+            root = config.config_path.parent
+        elif config.checkout is not None:
+            root = config.checkout.root
+        elif declaration == ".":
+            root = Path(resolution.root)
+        else:
+            root = Path(resolution.root) / declaration
+        source = executability_api.addopts_source(root)
+    except Exception:
+        return None
+    if source is None:
+        return None
+    return source if declaration == "." else f"{declaration}/{source}"
+
+
 def parallel_answer_for(domain: C.DomainPaths,
                         resolution: C.ConfigResolution, packet,
                         ) -> DeterministicAnswer | None:
@@ -407,7 +435,13 @@ def parallel_answer_for(domain: C.DomainPaths,
         except Exception:
             facts = None
         runner = config.runner.kind.value
-        return _parallel_answer(facts, runner, evidence, cfg)
+        answer = _parallel_answer(facts, runner, evidence, cfg)
+        if answer.status == "satisfied" and runner == "pytest" and evidence:
+            source = _addopts_source(config, resolution, declaration)
+            if source is not None and source in excerpt_paths:
+                answer = replace(
+                    answer, evidence_paths=answer.evidence_paths + (source,))
+        return answer
     except Exception:
         return None
 

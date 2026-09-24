@@ -463,7 +463,7 @@ def test_parallel_four_workers_is_satisfied(tmp_path):
     assert answer.status == "satisfied"
     assert answer.reason == (
         "pytest runs in parallel with 4 workers (xdist, --dist loadgroup)")
-    assert answer.evidence_paths == (".ptest.toml",)
+    assert answer.evidence_paths == (".ptest.toml", "pyproject.toml")
     assert answer.finding_summary is None
     assert answer.finding_change is None
 
@@ -777,6 +777,9 @@ _DET1_CONFIG_TEXT = (
 # 1-based spans inside _DET1_CONFIG_TEXT.
 _DET1_RUNNER_SPAN = (3, 10)
 _DET1_SELECTION_SPAN = (11, 12)
+# 1-based span of the addopts entry in the helper-written pyproject.toml
+# ("[tool.pytest.ini_options]\naddopts = '...'\n").
+_DET1_ADDOPTS_SPAN = (2, 2)
 
 
 def test_det1_ptest_toml_is_tier_zero_like_manifests():
@@ -834,7 +837,7 @@ def test_det1_packet_budget_accounting_holds(tmp_path):
 
 
 def test_det1_rows_cite_exact_config_ranges_with_valid_identities(tmp_path):
-    """Parallel ✓ cites [runner]; selection gap cites [selection] (DET1)."""
+    """Parallel ✓ cites [runner] + addopts; selection gap cites [selection]."""
     from ptest import agent_assessment as AA
 
     _stub_qualified_venv(tmp_path)
@@ -864,11 +867,17 @@ def test_det1_rows_cite_exact_config_ranges_with_valid_identities(tmp_path):
     assert parallel.status == "satisfied"
     assert "(the ptest config is not in the review evidence)" not in (
         parallel.rationale)
-    assert len(parallel.evidence) == 1
+    assert len(parallel.evidence) == 2
     assert parallel.evidence[0].path == ".ptest.toml"
     assert (parallel.evidence[0].start_line,
             parallel.evidence[0].end_line) == _DET1_RUNNER_SPAN
     assert parallel.evidence[0].sha256 == excerpt.sha256
+    addopts_excerpt = next(
+        e for e in packet.excerpts if e.path == "pyproject.toml")
+    assert parallel.evidence[1].path == "pyproject.toml"
+    assert (parallel.evidence[1].start_line,
+            parallel.evidence[1].end_line) == _DET1_ADDOPTS_SPAN
+    assert parallel.evidence[1].sha256 == addopts_excerpt.sha256
     selection = by_id["SELECT-001"]
     assert selection.status == "gap"
     assert "(the ptest config is not in the review evidence)" not in (

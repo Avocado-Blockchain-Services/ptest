@@ -224,23 +224,27 @@ def _toml_pytest_addopts(raw: bytes) -> tuple[str, ...]:
     return _split_addopts(section["addopts"])
 
 
-def _pytest_addopts(root: Path) -> tuple[str, ...]:
-    """First pytest section wins: pytest.toml, pytest.ini, pyproject, tox.ini, setup.cfg.
+def _pytest_addopts_with_source(root: Path) -> tuple[str | None, tuple[str, ...]]:
+    """Checked-in addopts plus the deciding file (same walk as pytest).
 
-    Mirrors pytest 9's ``findpaths`` order (``pytest.toml``/``.pytest.toml``
-    first, then ``pytest.ini``/``.pytest.ini``): the first file carrying
-    pytest configuration decides the checked-in addopts.
+    First pytest section wins: pytest.toml, pytest.ini, pyproject, tox.ini,
+    setup.cfg. Mirrors pytest 9's ``findpaths`` order
+    (``pytest.toml``/``.pytest.toml`` first, then ``pytest.ini``/``.pytest.ini``):
+    the first file carrying pytest configuration decides the checked-in
+    addopts. The source is the filename only when that file defines a
+    nonempty addopts; otherwise None.
     """
     for name in ("pytest.toml", ".pytest.toml"):
         raw = _read(root, name)
         if raw is not None:
-            return _toml_pytest_addopts(raw) or ()
+            tokens = _toml_pytest_addopts(raw) or ()
+            return (name if tokens else None, tokens)
     for name, section in (("pytest.ini", "pytest"), (".pytest.ini", "pytest")):
         raw = _read(root, name)
         if raw is not None:
             found = _ini_addopts(raw, section)
             if found is not None:
-                return found
+                return (name if found else None, found)
     raw = _read(root, "pyproject.toml")
     if raw is not None:
         try:
@@ -253,21 +257,38 @@ def _pytest_addopts(root: Path) -> tuple[str, ...]:
                 section = tool["pytest"]
                 ini_options = section.get("ini_options", {})
                 if isinstance(ini_options, dict) and "addopts" in ini_options:
-                    return _split_addopts(ini_options["addopts"])
+                    tokens = _split_addopts(ini_options["addopts"])
+                    return ("pyproject.toml" if tokens else None, tokens)
                 if "addopts" in section:
-                    return _split_addopts(section["addopts"])
-                return ()
+                    tokens = _split_addopts(section["addopts"])
+                    return ("pyproject.toml" if tokens else None, tokens)
+                return (None, ())
     raw = _read(root, "tox.ini")
     if raw is not None:
         found = _ini_addopts(raw, "pytest")
         if found is not None:
-            return found
+            return ("tox.ini" if found else None, found)
     raw = _read(root, "setup.cfg")
     if raw is not None:
         found = _ini_addopts(raw, "tool:pytest")
         if found is not None:
-            return found
-    return ()
+            return ("setup.cfg" if found else None, found)
+    return (None, ())
+
+
+def _pytest_addopts(root: Path) -> tuple[str, ...]:
+    """Checked-in addopts; first pytest section wins (see above)."""
+    return _pytest_addopts_with_source(root)[1]
+
+
+def addopts_source(root: Path) -> str | None:
+    """Filename (relative to ``root``) whose addopts decided the tokens.
+
+    None when no pytest config file defines a nonempty addopts. The
+    satisfied parallel answer cites this file's addopts entry alongside
+    the ``[runner]`` section (which proves there is no ``-n 0`` opt-out).
+    """
+    return _pytest_addopts_with_source(root)[0]
 
 
 def _has_no_xdist(tokens: tuple[str, ...]) -> bool:
