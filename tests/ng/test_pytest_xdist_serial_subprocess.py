@@ -41,12 +41,20 @@ def test_xdist_addopts_init_serial_then_scoped_run(case, monkeypatch):
     monkeypatch.chdir(root)
     assert cli.main(("init", "--no-doctor", "--agents", "none")) == 0
     generated = tomllib.loads((root / ".ptest.toml").read_text())["runner"]["args"]
-    assert generated == ["-n", "0"]
+    # Environment fallbacks are reported, never written: the fake xdist
+    # plugin has no verifiable install, so init leaves args empty and the
+    # adapter generates -n 0 itself for the serial run.
+    assert generated == []
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    # The test extra installs real xdist: without autoload disabled its
+    # entry point would register the PYTHONPATH-shadowed fake module twice.
+    # The explicit -p xdist.plugin still loads the fake plugin, which is
+    # what this twin exercises.
     scoped = case.invoke(domain, root, "--", "tests/test_sample.py",
-                         env={"PYTHONPATH": env["PYTHONPATH"]}, timeout=15)
+                         env={"PYTHONPATH": env["PYTHONPATH"],
+                              "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}, timeout=15)
 
     assert scoped.code == 0, scoped.stderr.decode()
     assert b"1 deselected" in scoped.stdout
@@ -88,7 +96,8 @@ def test_xdist_addopts_full_run_is_project_filtered_with_label(case, monkeypatch
     env = dict(os.environ)
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
     full = case.invoke(domain, root, "--full",
-                       env={"PYTHONPATH": env["PYTHONPATH"]}, timeout=60)
+                       env={"PYTHONPATH": env["PYTHONPATH"],
+                            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}, timeout=60)
 
     assert full.code == 0, full.stderr.decode()
     assert b"1 deselected" in full.stdout
@@ -121,6 +130,7 @@ def test_full_run_refuses_pytest_addopts_from_environment(case, monkeypatch):
     env = dict(os.environ)
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTEST_ADDOPTS"] = "-m slow"
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     full = case.invoke(domain, root, "--full", env=env, timeout=60)
 
     assert full.code == 4

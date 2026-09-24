@@ -1074,3 +1074,112 @@ def test_manifest_trailing_bytes_cannot_authorize_repository_work(harness):
     assert h.finish()[0] == 70
     assert not h.marker.exists()
     assert h.row()["guard_pid"] is None
+
+
+# --- Parallel tier (T2): xdist-style fanout leaves no live survivors ---
+
+_FANOUT_SCRIPT = ";".join([
+    "import json, os, socket, subprocess, sys",
+    "ready, marker = sys.argv[1:3]",
+    "kids = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])"
+    " for _ in range(4)]",
+    "open(marker + '.pids', 'w').write('\\n'.join(str(kid.pid) for kid in kids))",
+    "peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+    "peer.connect(ready)",
+    "peer.sendall(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp(),"
+    " 'mode': 'fanout'}).encode() + b'\\n')",
+    "peer.recv(1)",
+])
+
+
+def _fanout(harness, **manifest_overrides):
+    h = harness()
+    h.ready = h.listener("r")
+    ready_path = str(h.domain.root / (h.root.name + "r"))
+    prepared = C.PreparedRun(
+        argv=(sys.executable, "-c", _FANOUT_SCRIPT, ready_path, str(h.marker)),
+        cwd=h.root)
+    h.manifest = replace(h.manifest, attempts=(prepared,),
+                         attempt_ids=("a001",), **manifest_overrides)
+    return h
+
+
+def _no_live_process(pid):
+    """True once pid is gone or an un-reaped zombie (dead either way).
+
+    The harness makes the test process a subreaper, so group-killed
+    grandchildren reparent here as zombies until reaped. A zombie holds no
+    resources and can never run again; reap ours so the group probe below
+    observes the empty group.
+    """
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    try:
+        status = proc.status()
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.AccessDenied:
+        return False
+    if status != psutil.STATUS_ZOMBIE:
+        return False
+    try:
+        ours = proc.ppid() == os.getpid()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return True
+    if ours:
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, ProcessLookupError, PermissionError, OSError):
+            pass
+    return True
+
+
+def _fanout_pids(h):
+    pids = [int(line) for line in
+            (h.marker.parent / (h.marker.name + ".pids")).read_text().split()]
+    assert len(pids) == 4
+    return pids
+
+
+def _assert_fanout_dead(h, info):
+    watched = _fanout_pids(h) + [info["pid"]]
+    deadline = time.monotonic() + 10
+    while True:
+        alive = [pid for pid in watched if not _no_live_process(pid)]
+        if not alive:
+            return
+        assert time.monotonic() < deadline, f"fanout survivors: {alive}"
+        time.sleep(0.05)
+
+
+def _assert_fanout_group_gone(info):
+    # After the guard driver itself has exited and every fanout pid is
+    # reaped, no process group member may remain.
+    with pytest.raises(ProcessLookupError):
+        os.killpg(info["pgid"], 0)
+
+
+def test_fanout_children_leave_no_survivors_on_timeout(harness):
+    h = _fanout(harness, attempt_timeout_s=1)
+    h.start()
+    _, info = h.running()[0]
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    facts = [f.payload for f in h.frames if f.kind == "runner-facts"]
+    assert facts[0]["problem"]["code"] == "execution-timeout"
+    _assert_fanout_dead(h, info)
+    _assert_fanout_group_gone(info)
+
+
+def test_fanout_children_leave_no_survivors_on_cancel(harness):
+    h = _fanout(harness)
+    h.start(stage="drain")
+    _, info = h.running()[0]
+    h.control.sendall(_cancel(h.manifest))
+    gate = h.at_barrier()
+    _assert_fanout_dead(h, info)
+    gate.sendall(b"g")
+    assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
+    assert h.frames[-1].kind == "draining"
+    _assert_fanout_group_gone(info)

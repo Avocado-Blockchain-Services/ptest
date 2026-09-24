@@ -159,6 +159,7 @@ REASON_CODES = frozenset({
     "already-exists", "invalid-bound", "execution-timeout",
     "attempt-decision-timeout", "selection-shadow-quarantine",
     "probe-no-conflict-observed", "probe-conflict-observed",
+    "parallel-workers",
 })
 
 FINDING_CODES = frozenset({

@@ -12,7 +12,7 @@ import re
 import secrets
 import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import contracts as C
@@ -686,11 +686,13 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         locked = _native_present(root, "uv.lock")
         launcher = ("uv", "run", "--locked", "--no-sync", "python") \
             if locked else ("python",)
-        # Static pytest config that activates xdist runs serially under
-        # ptest: neutralize it with "-n 0", preserving every other addopts
-        # element natively. Projects without xdist keep empty args.
-        if _executability.pytest_xdist_active(root):
-            args = ("-n", "0")
+        # A fresh pytest config serializes xdist only for config-level
+        # parallel-tier fallbacks (unsupported --dist, --cov,
+        # --maxprocesses): neutralize those with "-n 0". Environment
+        # reasons (missing/unqualified xdist) can change with uv sync, so
+        # they are reported, never written. Qualified projects keep empty
+        # args and run workers per granted slot.
+        _serial_fallback = _executability.pytest_xdist_active(root)
         setup = None
         if locked:
             setup = C.SetupConfig(
@@ -734,6 +736,11 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         ),
         project_id=secrets.token_hex(16), config_path=target,
     )
+    if kind is C.RunnerKind.PYTEST and _serial_fallback:
+        probe = replace(config, runner=replace(config.runner, args=()))
+        if _executability.parallel_request(probe).config_level:
+            config = replace(
+                config, runner=replace(config.runner, args=("-n", "0")))
     return config
 
 

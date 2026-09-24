@@ -19,7 +19,8 @@ from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
 from .runtime.pytest_bridge import (
-    full_ini_refusal_name, full_narrowing_text, full_redirect_name,
+    cluster_narrow_name, full_ini_refusal_name, full_narrowing_text,
+    full_redirect_name, full_refusal_name,
 )
 
 STATUS_EXECUTABLE = "executable"
@@ -75,6 +76,26 @@ _HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
 _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
 _VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
 
+FACT_KEYS: tuple[str, ...] = (
+    "project", "runner", "runs", "runs_reason", "runs_fix",
+    "parallel", "parallel_short", "parallel_fix",
+    "setup", "full_suite", "full_blocked",
+)
+
+XDIST_QUALIFIED_VERSIONS = frozenset({"3.8.0"})
+XDIST_DIST_MODES = frozenset({"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
+
+# Mirror of pytest_bridge._FULL_VALUE_FILTERS (the bridge stays the source
+# of truth at runtime; this is the static prediction for full_suite parts).
+_FULL_VALUE_FILTERS = frozenset({
+    "-k", "--keyword", "-m", "--markexpr", "--deselect",
+    "--ignore", "--ignore-glob", "--maxfail",
+})
+_REMOTE_XDIST_OPTIONS = frozenset({"--tx", "--rsyncdir", "--px"})
+_DECLARED_DIST_MODES = XDIST_DIST_MODES | frozenset({"no"})
+_XDIST_AUTO_VALUES = frozenset({"auto", "logical"})
+
+
 @dataclass(frozen=True, slots=True)
 class Executability:
     project: str
@@ -85,13 +106,23 @@ class Executability:
     fix: str | None
     full: bool
     example: str | None
+    # Parallel tier, setup, and full-suite facts (plain project facts for
+    # init/doctor renderers). Appended after the existing fields so
+    # positional constructors keep working.
+    parallel: str | None = None
+    parallel_short: str | None = None
+    parallel_fix: str | None = None
+    setup: str | None = None
+    full_suite: str | None = None
+    full_blocked: str | None = None
 
     def verdict(self) -> str:
         if self.status == STATUS_NOT_EXECUTABLE:
-            return f"not runnable: {self.reason} — fix: {self.fix}"
-        if self.status == STATUS_CAVEAT:
-            return "ready with caveats: " + "; ".join(self.caveats)
-        return "ready"
+            return f"runs: no — {self.reason} → {self.fix}"
+        text = "runs: yes"
+        for caveat in self.caveats:
+            text += "; " + caveat
+        return text
 
     def to_public(self) -> dict:
         if self.status == STATUS_NOT_EXECUTABLE:
@@ -100,6 +131,27 @@ class Executability:
             detail = "; ".join(self.caveats) or "ready"
         return {"status": self.status, "detail": detail,
                 "fix": self.fix if self.status == STATUS_NOT_EXECUTABLE else None}
+
+    def facts(self) -> dict:
+        not_runnable = self.status == STATUS_NOT_EXECUTABLE
+        return {"project": self.project, "runner": self.runner,
+                "runs": not not_runnable,
+                "runs_reason": self.reason if not_runnable else None,
+                "runs_fix": self.fix if not_runnable else None,
+                "parallel": self.parallel, "parallel_short": self.parallel_short,
+                "parallel_fix": self.parallel_fix, "setup": self.setup,
+                "full_suite": self.full_suite, "full_blocked": self.full_blocked}
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelRequest:
+    active: bool
+    workers: int | None
+    auto: bool
+    dist: str
+    reason: str | None
+    config_level: bool
+    runs: bool
 
 
 def _cfg(project: str) -> str:
@@ -284,6 +336,272 @@ def _xdist_active(tokens: tuple[str, ...]) -> bool:
 def pytest_xdist_active(root: Path) -> bool:
     """Shared init/executability predicate for static xdist activation."""
     return _xdist_active(_pytest_addopts(root))
+
+
+def _has_remote_xdist(tokens: tuple[str, ...]) -> bool:
+    """True when addopts request remote/rsync workers (never runnable)."""
+    return any(token.split("=", 1)[0] in _REMOTE_XDIST_OPTIONS for token in tokens)
+
+
+def _declared_dist(tokens: tuple[str, ...]) -> str | None:
+    """Last declared ``--dist`` value, or None when unspecified."""
+    dist: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--dist" and index + 1 < len(tokens):
+            dist = tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith("--dist="):
+            dist = token.partition("=")[2]
+            index += 1
+            continue
+        index += 1
+    return dist
+
+
+def _worker_selection(tokens: tuple[str, ...]) -> tuple[int | None, bool]:
+    """Last non-zero ``-n``/``--numprocesses`` selection: ``(N, auto)``.
+
+    Zeros serialize xdist (matching :func:`_xdist_active`) and are skipped;
+    ``(None, False)`` means no usable worker count was declared.
+    """
+    workers: int | None = None
+    auto = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token in ("-n", "--numprocesses"):
+            if nxt is not None:
+                if nxt in _XDIST_AUTO_VALUES:
+                    workers, auto = None, True
+                elif nxt != "0":
+                    try:
+                        workers, auto = int(nxt), False
+                    except ValueError:
+                        pass
+            index += 2
+            continue
+        if token.startswith("--numprocesses="):
+            value = token.partition("=")[2]
+            if value in _XDIST_AUTO_VALUES:
+                workers, auto = None, True
+            elif value != "0":
+                try:
+                    workers, auto = int(value), False
+                except ValueError:
+                    pass
+            index += 1
+            continue
+        match = _SHORT_N_RE.match(token)
+        if match:
+            rest = token[token.index("n", 1) + 1:]
+            if rest in _XDIST_AUTO_VALUES:
+                workers, auto = None, True
+            elif rest not in ("", "0"):
+                try:
+                    workers, auto = int(rest), False
+                except ValueError:
+                    pass
+            index += 1
+            continue
+        index += 1
+    return workers, auto
+
+
+def _has_cov(tokens: tuple[str, ...]) -> bool:
+    """True for a ``--cov``/``--cov=`` spelling (``--cov-report`` alone excluded)."""
+    return any(token == "--cov" or token.startswith("--cov=") for token in tokens)
+
+
+def _has_maxprocesses(tokens: tuple[str, ...]) -> bool:
+    return any(token.split("=", 1)[0] == "--maxprocesses" for token in tokens)
+
+
+def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]:
+    """Probe the qualified xdist install for ``config``'s launcher.
+
+    Returns ``(version, None)`` when exactly one ``pytest_xdist`` dist-info
+    is found, else ``(None, reason)`` with an R6/R7/R8 fallback text.
+    Static and bounded: directory listings only, symlinks never followed.
+    """
+    launcher = tuple(config.runner.launcher)
+    name = Path(launcher[-1]).name if launcher else ""
+    reason = (
+        f"ptest cannot verify pytest-xdist for launcher {name}; "
+        "use an absolute interpreter or a uv launcher to run in parallel")
+    root = _project_root(config, ".")
+    venv: Path | None = None
+    if launcher == ("uv", "run", "--locked", "--no-sync", "python"):
+        venv = root / ".venv"
+    elif (len(launcher) == 7
+            and launcher[:4] == ("uv", "run", "--locked", "--no-sync")
+            and launcher[4] == "--project"
+            and Path(launcher[5]).is_absolute()
+            and launcher[6] == "python"):
+        venv = Path(launcher[5]) / ".venv"
+    elif len(launcher) == 1 and Path(launcher[0]).is_absolute():
+        candidate = Path(launcher[0]).parent.parent
+        try:
+            stamp = os.lstat(candidate / "pyvenv.cfg")
+        except OSError:
+            return None, reason
+        if not stat.S_ISREG(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+            return None, reason
+        venv = candidate
+    else:
+        return None, reason
+    try:
+        with os.scandir(venv / "lib") as lib_scan:
+            lib_entries = sorted(lib_scan, key=lambda entry: entry.name)
+    except OSError:
+        return None, (
+            "pytest-xdist is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+    try:
+        lib_stamp = os.lstat(venv / "lib")
+    except OSError:
+        return None, (
+            "pytest-xdist is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+    if not stat.S_ISDIR(lib_stamp.st_mode) or stat.S_ISLNK(lib_stamp.st_mode):
+        return None, (
+            "pytest-xdist is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+    hits: list[str] = []
+    examined = 0
+    for entry in lib_entries:
+        if not entry.name.startswith("python3."):
+            continue
+        if examined >= 8:
+            break
+        examined += 1
+        try:
+            stamp = os.lstat(entry.path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
+            continue
+        try:
+            with os.scandir(Path(entry.path) / "site-packages") as site_entries:
+                names = sorted(item.name for item in site_entries)
+        except OSError:
+            continue
+        for item_name in names:
+            if not (item_name.startswith("pytest_xdist-")
+                    and item_name.endswith(".dist-info")):
+                continue
+            try:
+                item_stamp = os.lstat(Path(entry.path) / "site-packages" / item_name)
+            except OSError:
+                continue
+            if stat.S_ISDIR(item_stamp.st_mode) and not stat.S_ISLNK(item_stamp.st_mode):
+                hits.append(item_name)
+    if not hits:
+        return None, (
+            "pytest-xdist is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+    if len(hits) > 1:
+        return None, (
+            "more than one pytest-xdist install in the project environment; "
+            "ptest runs serially")
+    return hits[0][len("pytest_xdist-"):-len(".dist-info")], None
+
+
+def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest:
+    """Qualify ``config``'s checked-in pytest config for the parallel tier.
+
+    Config-level reasons (unsupported ``--dist``, ``--cov``,
+    ``--maxprocesses``) can be written into ``.ptest.toml`` as ``-n 0``;
+    environment reasons never can. Precedence is R1 through R9, then the
+    ptest-args ``-n 0`` opt-out row.
+    """
+    root = _project_root(config, project)
+    tokens = _pytest_addopts(root)
+    active = _xdist_active(tokens)
+    declared = _declared_dist(tokens)
+    dist = declared if declared not in (None, "no") else "load"
+    workers, auto = _worker_selection(tokens)
+    runner_args = tuple(config.runner.args) + tuple(config.runner.full_args)
+    if _has_remote_xdist(tokens):
+        return ParallelRequest(
+            active, workers, auto, dist,
+            "remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+            False, False)
+    if not active:
+        return ParallelRequest(False, None, False, dist, None, False, True)
+    if declared is not None and declared not in _DECLARED_DIST_MODES:
+        return ParallelRequest(
+            active, workers, auto, dist,
+            f"--dist {declared} is not supported; ptest runs serially",
+            True, True)
+    if _has_cov(tokens) or _has_cov(runner_args):
+        return ParallelRequest(
+            active, workers, auto, dist,
+            "coverage (--cov) under xdist is out of scope; ptest runs serially",
+            True, True)
+    if _has_maxprocesses(tokens):
+        return ParallelRequest(
+            active, workers, auto, dist,
+            "--maxprocesses is not supported; ptest runs serially",
+            True, True)
+    if (workers is not None and workers <= 1) or (workers is None and not auto):
+        return ParallelRequest(
+            active, workers, auto, dist,
+            "your pytest config asks for 1 worker", False, True)
+    version, problem = xdist_environment_version(config)
+    if problem is not None:
+        return ParallelRequest(active, workers, auto, dist, problem, False, True)
+    if version not in XDIST_QUALIFIED_VERSIONS:
+        return ParallelRequest(
+            active, workers, auto, dist,
+            f"pytest-xdist {version} is not qualified (ptest supports 3.8.0); "
+            "ptest runs serially",
+            False, True)
+    if _has_serial_spelling(runner_args):
+        cfg = _cfg(project)
+        return ParallelRequest(
+            active, workers, auto, dist, f"{cfg} sets -n 0", False, True)
+    return ParallelRequest(active, workers, auto, dist, None, False, True)
+
+
+def _narrowing_parts(tokens: tuple[str, ...]) -> tuple[tuple[str, str | None], ...]:
+    """Allowlisted narrowing as ``(option, value)`` pairs (``value`` None when bare).
+
+    Mirrors the ``pytest_bridge.full_narrowing_text`` scan token for token;
+    joining with ``"; "`` as ``"option value"`` reproduces its text exactly.
+    """
+    parts: list[tuple[str, str | None]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (full_refusal_name(tokens, index) is None
+                or full_redirect_name(tokens, index) is not None
+                or full_ini_refusal_name(tokens, index) is not None):
+            index += 1
+            continue
+        option = token.split("=", 1)[0]
+        if ("=" not in token
+                and (option in _FULL_VALUE_FILTERS
+                     or (cluster_narrow_name(token) is not None
+                         and token[-1:] in ("k", "m")))
+                and index + 1 < len(tokens)):
+            parts.append((token, tokens[index + 1]))
+            index += 2
+            continue
+        parts.append((token, None))
+        index += 1
+    return tuple(parts)
+
+
+def _render_narrowing_part(option: str, value: str | None) -> str:
+    if value is None:
+        return option
+    if any(char.isspace() for char in value):
+        return f'{option} "{value}"'
+    return f"{option} {value}"
 
 
 def _has_serial_spelling(argv: tuple[str, ...]) -> bool:
@@ -1017,16 +1335,42 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 fix=f"remove {bad} from [runner] args in {cfg}",
                 full=False, example=example)
         addopts = _pytest_addopts(root)
-        active = _xdist_active(addopts)
-        serial = _has_serial_spelling(
-            tuple(config.runner.args) + tuple(config.runner.full_args))
-        if active and not serial:
+        tier = parallel_request(config, project=project)
+        if tier.reason is not None and not tier.runs:
             return Executability(
                 project=project, runner=kind.value,
                 status=STATUS_NOT_EXECUTABLE, caveats=(),
-                reason="pytest addopts enable xdist, which ptest runs serially",
-                fix=f'add "-n", "0" to [runner] args in {cfg}',
-                full=False, example=example)
+                reason=tier.reason,
+                fix="remove --tx, --rsyncdir and --px from your pytest addopts",
+                full=False, example=example,
+                parallel=f"no — {tier.reason}", parallel_short="no")
+        if tier.active and tier.reason is None:
+            if tier.auto:
+                parallel = ("one worker per granted slot "
+                            f"(xdist -n auto, --dist {tier.dist})")
+                parallel_short = "auto"
+            else:
+                parallel = f"{tier.workers} workers (xdist, --dist {tier.dist})"
+                parallel_short = f"{tier.workers} workers"
+            parallel_fix = None
+        elif tier.active and tier.reason == f"{cfg} sets -n 0":
+            parallel = f"no — {tier.reason}"
+            parallel_short = "no"
+            if tier.auto:
+                parallel_fix = (
+                    f'remove "-n", "0" from [runner] args in {cfg} to run in parallel')
+            else:
+                parallel_fix = (
+                    f'remove "-n", "0" from [runner] args in {cfg} '
+                    f"to run {tier.workers} workers")
+        elif tier.active:
+            parallel = f"no — {tier.reason}"
+            parallel_short = "no"
+            parallel_fix = None
+        else:
+            parallel = "no — xdist is not enabled in your pytest config"
+            parallel_short = "no"
+            parallel_fix = None
         pairs = _scan_conftest_hooks(root, roots)
         for rel, hook in pairs:
             if hook in _SCOPED_REFUSED_HOOKS:
@@ -1037,47 +1381,56 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                     fix=f"move {hook} out of conftest.py into an installed plugin,"
                         " or configure a command profile",
                     full=False, example=example)
-        caveats: list[str] = []
         full = True
-        if active and serial:
-            caveats.append("serial: xdist disabled under ptest (-n 0)")
+        unavailable: list[str] = []
         if "." in roots:
-            caveats.append('ptest --full unavailable: test_roots is "."')
+            unavailable.append('test_roots is "."')
             full = False
         redirects = _redirect_tokens(addopts)
         if redirects:
-            caveats.append(
-                "ptest --full unavailable: pytest addopts redirect native configuration ("
+            unavailable.append(
+                "pytest addopts redirect native configuration ("
                 + " ".join(redirects) + ")")
             full = False
         refused = _refused_ini_narrowing(addopts)
         if refused:
-            caveats.append(
-                "ptest --full unavailable: pytest addopts narrow or observe the suite ("
+            unavailable.append(
+                "pytest addopts narrow or observe the suite ("
                 + " ".join(refused) + ")")
             full = False
-        # No prediction when the addopts themselves refuse the full run:
-        # labelling a run that cannot start would contradict the caveat.
-        label = None if (redirects or refused) else full_project_filter_label(root, roots)
-        if label is not None:
-            caveats.append(label)
         for rel, hook in pairs:
             if hook in _FULL_REFUSED_HOOKS and hook not in _FULL_COLLECTION_HOOKS \
                     and hook not in _FULL_SESSIONFINISH_HOOKS:
-                caveats.append(f"ptest --full unavailable: {rel} defines {hook}")
+                unavailable.append(f"{rel} defines {hook}")
                 full = False
                 break
-        if config.setup is not None:
-            caveats.append(
-                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
-        if caveats:
-            return Executability(
-                project=project, runner=kind.value, status=STATUS_CAVEAT,
-                caveats=tuple(caveats), reason=None, fix=None,
-                full=full, example=example)
+        full_suite: str | None = None
+        full_blocked: str | None = None
+        if full:
+            parts = [_render_narrowing_part(option, value)
+                     for option, value in _narrowing_parts(addopts)]
+            if any(hook in _FULL_COLLECTION_HOOKS or hook in _FULL_SESSIONFINISH_HOOKS
+                   for _, hook in pairs):
+                parts.append("conftest.py hooks")
+            if parts:
+                full_suite = "your pytest config: " + ", ".join(parts)
+        else:
+            full_blocked = unavailable[0] if unavailable else None
+        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        caveats: list[str] = [f"parallel: {parallel}"]
+        if setup is not None:
+            caveats.append(f"setup: {setup} (ptest runs it when needed)")
+        if full_suite is not None:
+            caveats.append(f"full suite = {full_suite}")
+        elif full_blocked is not None:
+            caveats.append(f"full suite: not available — {full_blocked}")
         return Executability(
-            project=project, runner=kind.value, status=STATUS_EXECUTABLE,
-            caveats=(), reason=None, fix=None, full=True, example=example)
+            project=project, runner=kind.value, status=STATUS_CAVEAT,
+            caveats=tuple(caveats), reason=None, fix=None,
+            full=full, example=example,
+            parallel=parallel, parallel_short=parallel_short,
+            parallel_fix=parallel_fix, setup=setup,
+            full_suite=full_suite, full_blocked=full_blocked)
 
     if kind is C.RunnerKind.VITEST:
         launcher = config.runner.launcher
@@ -1098,24 +1451,33 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 fix='install dependencies, or declare [setup] argv = ["npm", "ci"]'
                     f' in {cfg}',
                 full=False, example=example)
-        caveats = ["exclusive: Vitest runs as one command and manages its own workers"]
-        if config.setup is not None:
-            caveats.append(
-                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
+        parallel = "inside vitest (its own workers)"
+        parallel_short = "inside vitest"
+        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        caveats = [f"parallel: {parallel}"]
+        if setup is not None:
+            caveats.append(f"setup: {setup} (ptest runs it when needed)")
         return Executability(
             project=project, runner=kind.value, status=STATUS_CAVEAT,
             caveats=tuple(caveats), reason=None, fix=None,
-            full=True, example=example)
+            full=True, example=example,
+            parallel=parallel, parallel_short=parallel_short,
+            parallel_fix=None, setup=setup,
+            full_suite=None, full_blocked=None)
 
     if kind is C.RunnerKind.COMMAND:
-        caveats = ["exclusive: runs as one literal command"]
-        if config.setup is not None:
-            caveats.append(
-                "setup runs when required paths or its fingerprint are missing: " + " ".join(config.setup.argv))
+        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        caveats = []
+        if setup is not None:
+            caveats.append(f"setup: {setup} (ptest runs it when needed)")
         return Executability(
-            project=project, runner=kind.value, status=STATUS_CAVEAT,
+            project=project, runner=kind.value,
+            status=STATUS_CAVEAT if caveats else STATUS_EXECUTABLE,
             caveats=tuple(caveats), reason=None, fix=None,
-            full=True, example=example)
+            full=True, example=example,
+            parallel=None, parallel_short=None,
+            parallel_fix=None, setup=setup,
+            full_suite=None, full_blocked=None)
 
     return Executability(
         project=project, runner=kind.value, status=STATUS_NOT_EXECUTABLE,

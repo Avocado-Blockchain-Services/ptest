@@ -40,14 +40,17 @@ def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
     assert "ptest api/" in guide
     assert "Run `ptest --full` once after the integrated change" in guide
     assert "-n 0" in guide
-    # Serial-xdist accuracy: init writes `-n 0` only into new configs;
-    # existing configs are reported, never rewritten or auto-fixed, and
-    # the serial `-n 0` is the only xdist control an agent may add.
-    assert "writes `-n 0` into a new pytest config" in guide
-    assert "never rewritten" in guide
-    assert "not runnable" in guide
-    assert "only allowed xdist control" in guide
-    assert "Never add `-n N`, `--dist`, `--tx`" in guide
+    # Parallel-tier accuracy: qualified projects run workers in parallel;
+    # init writes `-n 0` only into new configs for static fallbacks, never
+    # rewrites an existing config, and `-n 0` is an opt-out, not the only
+    # allowed xdist control.
+    assert "run xdist in parallel under ptest" in guide
+    assert "run serially with ptest's" in guide
+    assert "writes `-n 0` into a new config only for static" in guide
+    assert "never rewrites an existing config" in guide
+    assert "only allowed xdist control" not in guide
+    assert "Keep `-n N`, `--dist`, `--tx` out" in guide
+    assert "opts out of the parallel tier" in guide
     assert "which ptest adds when the project enables xdist" not in guide
     assert "vitest run" in guide
     assert "one cheap-model call per checklist item" in guide
