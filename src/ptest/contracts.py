@@ -891,6 +891,7 @@ class AttemptEvidence:
     terminal_complete: bool
     parallel_identity: bool
     runtime_identity: str | None
+    project_filter_label: str | None = None
 
     def __post_init__(self) -> None:
         _check_str("evidence.attempt_id", self.attempt_id)
@@ -910,6 +911,9 @@ class AttemptEvidence:
             _check_bool("evidence.parallel_identity", self.parallel_identity))
         if self.runtime_identity is not None:
             _check_hex("evidence.runtime_identity", self.runtime_identity, 64)
+        if self.project_filter_label is not None:
+            _check_str("evidence.project_filter_label", self.project_filter_label,
+                       max_len=2048)
 
 
 @dataclass(frozen=True, kw_only=True)

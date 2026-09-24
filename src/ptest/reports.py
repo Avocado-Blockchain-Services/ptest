@@ -157,6 +157,63 @@ class NativeReportBinding:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ProjectNarrowing:
+    """Bridge-owned record of allowed full-mode narrowing.
+
+    The single source of truth behind the ``full (project-filtered: ...)``
+    label: the effective checked-in narrowing text, every accepted
+    conftest-hook file, and non-default collection ini/conftest notes.
+    """
+
+    narrowing: str | None = None
+    conftest_hooks: tuple = ()
+    notes: tuple = ()
+
+    def __post_init__(self) -> None:
+        if self.narrowing is not None:
+            if not isinstance(self.narrowing, str) or not self.narrowing:
+                raise TypeError("project narrowing text must be a nonempty string or None")
+            if len(self.narrowing) > 1024:
+                raise ValueError("project narrowing text exceeds its bound")
+        for name in ("conftest_hooks", "notes"):
+            items = getattr(self, name)
+            if not isinstance(items, (list, tuple)):
+                raise TypeError(f"project narrowing {name} must be a list or tuple")
+            if (len(items) > 64
+                    or any(not isinstance(item, str) or not item or len(item) > 512
+                           for item in items)):
+                raise ValueError(f"project narrowing {name} exceeds its bound")
+            for item in items:
+                if "\\" in item or item.startswith("/") or item == ".." \
+                        or item.startswith("../") or "\x00" in item:
+                    raise ValueError(f"project narrowing {name} carries an unsafe path")
+            object.__setattr__(self, name, tuple(items))
+
+
+def _check_narrowing(value: object) -> ProjectNarrowing:
+    if isinstance(value, ProjectNarrowing):
+        return value
+    if not isinstance(value, dict) or set(value) != {"narrowing", "conftest_hooks", "notes"}:
+        raise TypeError("project narrowing must carry exactly its three fields")
+    return ProjectNarrowing(**value)
+
+
+def project_filter_label(narrowing: ProjectNarrowing) -> str | None:
+    """Render the run label from the bridge-owned narrowing report, if any."""
+    if not isinstance(narrowing, ProjectNarrowing):
+        raise TypeError("project filter label needs a ProjectNarrowing report")
+    parts: list[str] = []
+    if narrowing.narrowing:
+        parts.append(narrowing.narrowing)
+    if narrowing.conftest_hooks:
+        parts.append("conftest collection hook")
+    parts.extend(narrowing.notes)
+    if not parts:
+        return None
+    return "full (project-filtered: " + "; ".join(parts) + ")"
+
+
+@dataclass(frozen=True, kw_only=True)
 class NativeTerminalReport:
     """The complete, private terminal record admitted by :func:`consume_report`."""
 
@@ -172,8 +229,13 @@ class NativeTerminalReport:
     native_exit_code: int | None
     bridge_exit_code: int
     problem: str | None = None
+    project_narrowing: ProjectNarrowing = field(
+        default_factory=lambda: ProjectNarrowing(
+            narrowing=None, conftest_hooks=(), notes=()))
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "project_narrowing",
+                           _check_narrowing(self.project_narrowing))
         if type(self.protocol) is not int or self.protocol != PROTOCOL_VERSION:
             raise TypeError("terminal report has an unsupported protocol")
         object.__setattr__(self, "run_id", _check_hex(self.run_id, _RUN_ID_RE))
@@ -398,7 +460,12 @@ def _decode(binding: NativeReportBinding, raw: bytes) -> NativeTerminalReport:
             raise ValueError
     except (UnicodeDecodeError, ValueError, RecursionError):
         _reject()
-    if set(value) != _FIELDS:
+    # Reports written before the narrowing field existed stay admissible;
+    # they decode as unfiltered. Any other shape stays rejected.
+    if set(value) == _FIELDS:
+        value = dict(value, project_narrowing={
+            "narrowing": None, "conftest_hooks": [], "notes": []})
+    if set(value) != _FIELDS | {"project_narrowing"}:
         _reject()
     try:
         report = NativeTerminalReport(**value)
@@ -486,10 +553,15 @@ def _decode_attempt(binding: NativeReportBinding, raw: bytes) -> NativeAttemptRe
             raise ValueError
     except (UnicodeDecodeError, ValueError, RecursionError):
         _reject()
-    if set(value) != _ATTEMPT_FIELDS:
+    if set(value) == _ATTEMPT_FIELDS:
+        value = dict(value, project_narrowing={
+            "narrowing": None, "conftest_hooks": [], "notes": []})
+    if set(value) != _ATTEMPT_FIELDS | {"project_narrowing"}:
         _reject()
     try:
-        terminal = _decode(binding, json.dumps({key: value[key] for key in _FIELDS},
+        terminal_fields = {key: value[key] for key in _FIELDS} | {
+            "project_narrowing": value["project_narrowing"]}
+        terminal = _decode(binding, json.dumps(terminal_fields,
                                                separators=(",", ":")).encode())
     except (TypeError, ValueError, C.Problem):
         _reject()
@@ -608,6 +680,7 @@ def consume_attempt_report(binding: NativeReportBinding) -> C.AttemptEvidence:
             parallel_identity=(len(report.workers) > 1 and
                                len({worker for worker, _ in report.workers}) == len(report.workers)),
             runtime_identity=report.runtime_identity,
+            project_filter_label=project_filter_label(terminal.project_narrowing),
         )
     except (TypeError, ValueError):
         _reject()

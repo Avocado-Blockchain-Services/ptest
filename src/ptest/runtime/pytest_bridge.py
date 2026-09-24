@@ -14,6 +14,7 @@ import re
 import shlex
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 
@@ -242,6 +243,26 @@ def full_redirect_name(tokens: tuple[str, ...], index: int) -> str | None:
     return None
 
 
+# Section F MEDIUM allowlist: the only narrowing spellings a project's own
+# checked-in configuration may contribute to a full run. Everything else
+# that narrows or observes instead of running (``--co``, ``--lf``, ``--sw``,
+# ``--testmon``, ``--setup-only``, ``--fixtures``, ``--markers``,
+# ``--cache-show``, ``-h``, ``-V``) stays refused even from checked-in
+# configuration. Short clusters (``-vx``, ``-vk EXPR``) narrow only through
+# ``x``/``k``/``m``, which are all allowlisted, so they stay allowed.
+_FULL_INI_ALLOWED = frozenset({
+    "-k", "--keyword", "-m", "--markexpr", "--deselect",
+    "--ignore", "--ignore-glob", "--maxfail", "-x", "--exitfirst",
+})
+
+# Effective pytest option attributes a checked-in allowlisted spelling may
+# supply. ``pyargs`` is intentionally absent: it redirects native
+# configuration and is never project-owned narrowing.
+_FULL_INI_ALLOWED_ATTRS = frozenset({
+    "keyword", "markexpr", "deselect", "ignore", "ignore_glob", "maxfail",
+})
+
+
 # Narrowing filters whose expression arrives as the next token, so the run
 # label can record the filter with its value (``-m not slow``).
 _FULL_VALUE_FILTERS = frozenset({
@@ -250,19 +271,37 @@ _FULL_VALUE_FILTERS = frozenset({
 })
 
 
+def full_ini_refusal_name(tokens: tuple[str, ...], index: int) -> str | None:
+    """Display name when full mode refuses ``tokens[index]`` from checked-in config.
+
+    Redirects are excluded here (they stay refused but are reported
+    separately); only non-allowlisted narrowing/observation spellings are
+    named. Returns None when the token is project-owned in this position.
+    """
+    if full_redirect_name(tokens, index) is not None:
+        return None
+    refusal = full_refusal_name(tokens, index)
+    if refusal is None:
+        return None
+    if refusal in _FULL_INI_ALLOWED or cluster_narrow_name(tokens[index]) is not None:
+        return None
+    return refusal
+
+
 def full_narrowing_text(tokens: tuple[str, ...]) -> str | None:
     """Render checked-in narrowing filters for the full-mode project label.
 
     Only tokens the full gate allows from checked-in configuration are
-    rendered; redirects are excluded (they stay refused). Returns None when
-    no narrowing filter is present.
+    rendered; redirects and non-allowlisted narrowing are excluded (they
+    stay refused). Returns None when no narrowing filter is present.
     """
     parts: list[str] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if (full_refusal_name(tokens, index) is None
-                or full_redirect_name(tokens, index) is not None):
+                or full_redirect_name(tokens, index) is not None
+                or full_ini_refusal_name(tokens, index) is not None):
             index += 1
             continue
         option = token.split("=", 1)[0]
@@ -333,6 +372,62 @@ def _flag_supplies(tokens: tuple[str, ...], attr: str) -> bool:
         if (attr == "maxfail" and cluster_narrow_name(token) is not None
                 and "x" in token):
             return True
+    return False
+
+
+def _ini_flag_values(tokens: tuple[str, ...], attr: str) -> list[str]:
+    """Raw values the checked-in tokens supply for a narrowing attribute.
+
+    Mirrors the spellings :func:`_flag_supplies` classifies (``--flag=value``,
+    ``--flag value``, attached ``-kEXPR``/``-mEXPR``, trailing-``k``/``m``
+    clusters, ``-x``/``--exitfirst`` counting as maxfail 1) so the effective
+    option value can be compared against its checked-in source instead of
+    its spelling. A conftest ``pytest_configure`` mutation therefore fails
+    closed instead of passing on another spelling of the same flag.
+    """
+    flags = _NARROWING_ATTR_FLAGS.get(attr, ())
+    short = {"keyword": "k", "markexpr": "m"}.get(attr)
+    out: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        option = token.split("=", 1)[0]
+        if "=" in token and option in flags:
+            out.append(token.split("=", 1)[1])
+        elif (short is not None and token.startswith("-" + short)
+                and len(token) > 2 and not token.startswith("--")):
+            out.append(token[2:])
+        elif option in flags:
+            if attr == "maxfail" and option in ("-x", "--exitfirst"):
+                out.append("1")
+            elif index + 1 < len(tokens):
+                out.append(tokens[index + 1])
+        elif (short is not None
+                and cluster_narrow_name(token) is not None
+                and token.endswith(short)):
+            if index + 1 < len(tokens):
+                out.append(tokens[index + 1])
+        elif (attr == "maxfail" and cluster_narrow_name(token) is not None
+                and "x" in token):
+            out.append("1")
+        index += 1
+    return out
+
+
+def _ini_value_matches(name: str, value: Any, tokens: tuple[str, ...]) -> bool:
+    """True when the effective narrowing option equals its checked-in source."""
+    raw = _ini_flag_values(tokens, name)
+    if name in ("keyword", "markexpr"):
+        return isinstance(value, str) and value in raw
+    if name == "maxfail":
+        try:
+            return int(value) in [int(item) for item in raw]
+        except (TypeError, ValueError):
+            return False
+    if name in ("deselect", "ignore", "ignore_glob"):
+        if not isinstance(value, (list, tuple)):
+            return False
+        return sorted(str(item) for item in value) == sorted(raw)
     return False
 
 
@@ -426,12 +521,16 @@ def _reject_full_addopts(tokens: tuple[str, ...]) -> None:
 def _reject_full_ini_addopts(tokens: tuple[str, ...]) -> None:
     """Refuse checked-in addopts that redirect native configuration.
 
-    Plain narrowing filters (``-k``/``-m``/``--deselect``/``-x``/``--maxfail``
-    and friends) are the project's own suite definition in this position:
-    they are allowed and recorded in the run label instead of refused.
+    Only the allowlisted narrowing filters (``-k``/``-m``/``--deselect``/
+    ``--ignore``/``--ignore-glob``/``-x``/``--exitfirst``/``--maxfail``) are
+    the project's own suite definition in this position: they are allowed
+    and recorded in the run label instead of refused. Everything else that
+    narrows or observes stays refused.
     """
     for index in range(len(tokens)):
         if full_redirect_name(tokens, index) is not None:
+            _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
+        if full_ini_refusal_name(tokens, index) is not None:
             _fail("full pytest plans cannot accept addopts narrowing or configuration redirects")
 
 
@@ -559,9 +658,15 @@ def _report_binding() -> tuple[Path, dict[str, str]] | None:
     }
 
 
+def _empty_narrowing() -> dict[str, Any]:
+    """Blank bridge-owned narrowing report for unfiltered or refused runs."""
+    return {"narrowing": None, "conftest_hooks": [], "notes": []}
+
+
 def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
                   native_exit: int | None, bridge_exit: int,
-                  complete: bool, problem: str | None) -> None:
+                  complete: bool, problem: str | None,
+                  project_narrowing: dict[str, Any] | None = None) -> None:
     payload = {
         "protocol": 1,
         **identity,
@@ -572,6 +677,8 @@ def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
         "native_exit_code": native_exit,
         "bridge_exit_code": bridge_exit,
         "problem": problem,
+        "project_narrowing": project_narrowing if isinstance(project_narrowing, dict)
+        else _empty_narrowing(),
     }
     raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
     max_bytes, _, _, _ = _report_limits()
@@ -597,7 +704,8 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
                           inventory: list[dict[str, object]],
                           workers: list[dict[str, str]], coverage_complete: bool,
                           reporters_complete: bool,
-                          inventory_complete: bool | None = None) -> None:
+                          inventory_complete: bool | None = None,
+                          project_narrowing: dict[str, Any] | None = None) -> None:
     payload = {
         "protocol": 1, **identity, "runner": "pytest",
         "observed_runtime_version": runtime,
@@ -605,6 +713,8 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
         "native_exit_code": native_exit if complete else None,
         "bridge_exit_code": bridge_exit,
         "problem": problem,
+        "project_narrowing": project_narrowing if isinstance(project_narrowing, dict)
+        else _empty_narrowing(),
         "runtime_identity": runtime_identity,
         "runtime_facts": runtime_facts,
         "inventory": {
@@ -687,6 +797,9 @@ class OwnedPlugin:
         self.roots = roots
         self.refused = False
         self._config: Any | None = None
+        # The bridge-owned record of allowed full-mode narrowing. The run
+        # label is built from this report, never from a static prediction.
+        self._narrowing_report: dict[str, Any] | None = None
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -694,41 +807,134 @@ class OwnedPlugin:
         _refusal_marker("native-config-invalid", message)
         raise UsageError(f"native-config-invalid: {message}")
 
-    def _project_conftest_hook(self, hook: str, implementation: Any) -> bool:
-        """True when a full-only collection hook is project-owned.
-
-        Only ``pytest_collection_modifyitems``/``pytest_ignore_collect``
-        implemented in a ``conftest.py`` under the admitted checkout count
-        as the project's own suite definition. Hooks from installed
-        plugins, conftests outside the checkout, and reporting hooks stay
-        refused. Missing file evidence fails closed.
-        """
-        if self.execution != "full" or hook not in _FULL_COLLECTION_HOOKS:
-            return False
-        plugin = getattr(implementation, "plugin", None)
+    def _conftest_relpath(self, plugin: Any) -> str | None:
+        """Project-relative path when ``plugin`` is a conftest module in the checkout."""
+        if not isinstance(plugin, ModuleType):
+            return None
         path = getattr(plugin, "__file__", None)
-        if path is None:
-            function = getattr(implementation, "function", None)
-            code = getattr(function, "__code__", None)
-            path = getattr(code, "co_filename", None)
         if not isinstance(path, str) or not path:
-            return False
+            return None
         try:
             candidate = os.path.realpath(path)
             expected = os.path.realpath(self.checkout_root) if self.checkout_root else ""
         except (OSError, ValueError):
-            return False
+            return None
         if not expected or os.path.basename(candidate) != "conftest.py":
-            return False
+            return None
         try:
-            return os.path.commonpath((expected, candidate)) == expected
+            if os.path.commonpath((expected, candidate)) != expected:
+                return None
         except ValueError:
-            return False
+            return None
+        return os.path.relpath(candidate, expected).replace(os.sep, "/")
+
+    def _project_conftest_hook(self, hook: str, implementation: Any) -> str | None:
+        """Project-relative conftest path when a full-only collection hook is owned.
+
+        Only ``pytest_collection_modifyitems``/``pytest_ignore_collect``
+        defined in a ``conftest.py`` module under the admitted checkout
+        count as the project's own suite definition. The plugin object must
+        itself be that module (a registered class instance or any other
+        object is refused even when its code lives in a conftest), and the
+        hook function must be defined in it (a re-exported import is
+        refused). Hooks from installed plugins, conftests outside the
+        checkout, and reporting hooks stay refused. Missing file evidence
+        fails closed. Returns None when the hook is not project-owned.
+        """
+        if self.execution != "full" or hook not in _FULL_COLLECTION_HOOKS:
+            return None
+        plugin = getattr(implementation, "plugin", None)
+        relpath = self._conftest_relpath(plugin)
+        if relpath is None:
+            return None
+        function = getattr(implementation, "function", None)
+        if getattr(function, "__module__", None) != getattr(plugin, "__name__", None):
+            return None
+        return relpath
+
+    def _full_narrowing_report(self, config: Any, accepted_hooks: list[str],
+                               loaded: list[Any]) -> dict[str, Any]:
+        """Report exactly what full mode allowed into the attempt report.
+
+        The single source of truth behind the ``full (project-filtered:
+        ...)`` label: the effective checked-in narrowing text, every
+        accepted conftest-hook file, and non-default collection ini/conftest
+        narrowing (``norecursedirs``/``python_files``/``python_functions``,
+        ``collect_ignore``/``collect_ignore_glob``). Only reached after
+        every refusal gate above passed, so everything reported here was
+        allowed.
+        """
+        try:
+            ini_tokens = _checked_in_addopts(config)
+        except BridgeRefusal:
+            ini_tokens = ()
+        notes = self._full_notes(config, loaded)
+        return {
+            "narrowing": full_narrowing_text(ini_tokens),
+            "conftest_hooks": sorted(set(accepted_hooks)),
+            "notes": notes,
+        }
+
+    def _full_notes(self, config: Any, loaded: list[Any]) -> list[str]:
+        """Non-default collection narrowing notes for the project label."""
+        notes: list[str] = []
+        for name in ("norecursedirs", "python_files", "python_functions"):
+            try:
+                effective = config.getini(name)
+            except (AttributeError, ValueError, TypeError):
+                continue
+            try:
+                default = config._parser._inidict[name][2]
+            except (AttributeError, KeyError, IndexError, TypeError):
+                continue
+            try:
+                same = list(effective or []) == list(default or [])
+            except TypeError:
+                continue
+            if not same:
+                try:
+                    text = " ".join(str(item) for item in (effective or []))
+                except TypeError:
+                    text = ""
+                notes.append((f"{name}={text}"[:200] or f"{name} (project)"))
+        for plugin in loaded:
+            relpath = self._conftest_relpath(plugin)
+            if relpath is None:
+                continue
+            for attr in ("collect_ignore", "collect_ignore_glob"):
+                ignored = getattr(plugin, attr, [])
+                if isinstance(ignored, str):
+                    ignored = [ignored]
+                if (isinstance(ignored, (list, tuple)) and len(ignored) <= 64
+                        and any(isinstance(item, str) and item for item in ignored)):
+                    notes.append(f"{attr} in {relpath}")
+        return sorted(set(notes))[:64]
+
+    def allowed_narrowing(self) -> dict[str, Any]:
+        """Bridge-owned narrowing report for the attempt writer (never None)."""
+        report = self._narrowing_report
+        if not isinstance(report, dict):
+            return {"narrowing": None, "conftest_hooks": [], "notes": []}
+        narrowing = report.get("narrowing")
+        hooks = report.get("conftest_hooks")
+        notes = report.get("notes")
+        return {
+            "narrowing": narrowing if isinstance(narrowing, str) else None,
+            "conftest_hooks": [item for item in hooks
+                               if isinstance(item, str)] if isinstance(hooks, list) else [],
+            "notes": [item for item in notes
+                      if isinstance(item, str)] if isinstance(notes, list) else [],
+        }
 
     def _validate(self, config: Any, *, generated: bool) -> None:
         self._config = config
         option = config.option
         manager = getattr(config, "pluginmanager", None)
+        # Project-owned hook files accepted below; the narrowing report at
+        # the end of the full branch records them even when no plugin
+        # manager is present (checked-in ini narrowing still applies).
+        accepted_hooks: list[str] = []
+        loaded_plugins: list[Any] = []
         if manager is not None:
             try:
                 loaded = manager.list_name_plugin()
@@ -799,6 +1005,7 @@ class OwnedPlugin:
                 hooks += ("pytest_collection_modifyitems", "pytest_ignore_collect",
                           "pytest_runtest_makereport", "pytest_report_teststatus",
                           "pytest_sessionfinish")
+            loaded_plugins = [plugin for _, plugin in loaded]
             for hook in hooks:
                 for implementation in getattr(manager.hook, hook).get_hookimpls():
                     if implementation.plugin is self:
@@ -811,7 +1018,9 @@ class OwnedPlugin:
                     if any(str(module) == prefix or str(module).startswith(prefix + ".")
                            for prefix in getattr(self, "_approved_hook_modules", ())):
                         continue
-                    if self._project_conftest_hook(hook, implementation):
+                    owned = self._project_conftest_hook(hook, implementation)
+                    if owned is not None:
+                        accepted_hooks.append(owned)
                         continue
                     self._refuse("unqualified pytest execution hook is not owned by the serial grant")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
@@ -872,11 +1081,18 @@ class OwnedPlugin:
             except BridgeRefusal as refusal:
                 self._refuse(refusal.message)
             for name in narrowing:
-                if not getattr(option, name, None):
+                effective = getattr(option, name, None)
+                if not effective:
                     continue
                 if _flag_supplies(invocation_tokens, name):
                     self._refuse("full pytest plans cannot narrow the inventory")
-                if name != "pyargs" and _flag_supplies(ini_tokens, name):
+                # Checked-in narrowing is project-owned only when the
+                # effective value equals its checked-in source: a conftest
+                # mutation of the same spelling fails closed instead of
+                # passing on the ini label.
+                if (name in _FULL_INI_ALLOWED_ATTRS
+                        and _flag_supplies(ini_tokens, name)
+                        and _ini_value_matches(name, effective, ini_tokens)):
                     continue
                 self._refuse("full pytest plans cannot narrow the inventory")
             invocation = getattr(getattr(config, "invocation_params", None), "args", ())
@@ -901,6 +1117,10 @@ class OwnedPlugin:
             _validate_full_roots(roots)
             if config.args != list(roots):
                 self._refuse("full pytest inventory differs from configured roots")
+            # Every full gate above passed: record what was allowed. The run
+            # label is built from this report, never from a static scan.
+            self._narrowing_report = self._full_narrowing_report(
+                config, accepted_hooks, loaded_plugins)
 
     def pytest_cmdline_main(self, config: Any) -> Any:
         """Wrap before xdist replaces explicit tx with local popen transports."""
@@ -1267,6 +1487,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     bridge_exit = 70
     complete = False
     problem: str | None = None
+    narrowing_report = _empty_narrowing()
     advanced_plugin: AdvancedPlugin | None = None
     advanced_runtime_identity = hashlib.sha256(b"unavailable").hexdigest()
     advanced_runtime_facts: dict[str, object] = {}
@@ -1350,6 +1571,8 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             problem = "bridge-refused"
             bridge_exit = 4 if native_exit == 0 else native_exit
             return bridge_exit
+        # The label source of truth: what the bridge actually allowed.
+        narrowing_report = plugin.allowed_narrowing()
         if advanced_plugin is not None:
             advanced_plugin.finalize_evidence()
             advanced_runtime_facts = advanced_plugin._terminal_runtime_facts or {}
@@ -1391,12 +1614,14 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                         coverage_complete=bool(advanced_plugin is not None and advanced_plugin.coverage_complete),
                         reporters_complete=bool(advanced_plugin is not None and advanced_plugin.reporters_complete),
                         inventory_complete=bool(advanced_plugin is not None and advanced_plugin.collection_complete),
+                        project_narrowing=narrowing_report,
                     )
                 else:
                     _write_report(binding[0], binding[1], runtime=runtime,
                                   native_exit=native_exit if complete else None,
                                   bridge_exit=bridge_exit, complete=complete,
-                                  problem=problem)
+                                  problem=problem,
+                                  project_narrowing=narrowing_report)
             except BridgeRefusal:
                 # A descriptor/size refusal is an authenticated bridge
                 # refusal and must escape so the caller cannot mistake a

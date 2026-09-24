@@ -503,3 +503,312 @@ def test_git_full_over_budget_fixture_is_incomplete_with_scan_limit(case):
     # The unchanged unknown-input first gate refuses before launching the
     # child, so the test body cannot create its marker.
     assert not (root / "body.marker").exists()
+
+
+def _full_project_toml(root, project_id):
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"a.marker\", \"b.marker\", \"legacy.marker\",\n"
+        "\"mig.marker\", \"ignored.marker\", \"body.marker\"]\n")
+
+
+def test_full_deep_conftest_hook_runs_labelled(case):
+    """Section F HIGH(a): a hook below the static scan depth still labels."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    deep = root / "tests" / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [item for item in items if 'test_b' not in item.nodeid]\n")
+    (deep / "test_deep.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = "full (project-filtered: conftest collection hook)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "b.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
+
+
+def test_full_class_plugin_collection_hook_is_refused(case):
+    """Section F HIGH(b): a hook on a registered instance is not project-owned."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "class DropB:\n"
+        "    @pytest.hookimpl\n"
+        "    def pytest_collection_modifyitems(self, items):\n"
+        "        items[:] = [item for item in items if 'test_b' not in item.nodeid]\n"
+        "def pytest_configure(config):\n"
+        "    config.pluginmanager.register(DropB(), 'drop-b')\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "a.marker").exists()
+    assert not (root / "b.marker").exists()
+
+
+def test_full_pytest_toml_addopts_runs_labelled(case):
+    """Section F HIGH(c): pytest 9 reads pytest.toml first; its filters label."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fast():\n    Path('a.marker').write_text('ran')\n"
+        "def test_slow():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.toml").write_text("[pytest]\naddopts = [\"-k\", \"not slow\"]\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = "full (project-filtered: -k not slow)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "b.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
+
+
+def test_full_reexported_collection_hook_is_refused(case):
+    """Section F HIGH: a hook imported into conftest is not defined there."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "hook_impl.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [item for item in items if 'test_b' not in item.nodeid]\n")
+    (root / "tests" / "conftest.py").write_text(
+        "from hook_impl import pytest_collection_modifyitems\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "a.marker").exists()
+    assert not (root / "b.marker").exists()
+
+
+def test_full_ini_collect_only_is_refused(case):
+    """Section F MEDIUM: --co from ini runs nothing and must stay refused."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\naddopts = --co\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "a.marker").exists()
+    assert not (root / "b.marker").exists()
+
+
+def test_full_ini_last_failed_is_refused(case):
+    """Section F MEDIUM: --lf from ini is cache-state dependent, stays refused."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\naddopts = --lf\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+
+
+def test_full_conftest_option_mutation_is_refused(case):
+    """Section F LOW: mutating config.option.markexpr is not the ini value."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_configure(config):\n"
+        "    config.option.markexpr = 'slow'\n")
+    (root / "tests" / "test_native.py").write_text(
+        "import pytest\n"
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "@pytest.mark.slow\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text(
+        "[pytest]\nmarkers = slow: a slow test\naddopts = -m 'not slow'\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "a.marker").exists()
+    assert not (root / "b.marker").exists()
+
+
+def test_full_persea_shaped_suite_runs_with_combined_label(case):
+    """Section F: ini -m plus a conftest hook label exactly like persea api."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [item for item in items if 'test_legacy' not in item.nodeid]\n")
+    (root / "tests" / "test_native.py").write_text(
+        "import pytest\n"
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_legacy():\n    Path('legacy.marker').write_text('ran')\n"
+        "@pytest.mark.extended_migration\n"
+        "def test_mig():\n    Path('mig.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text(
+        "[pytest]\nmarkers = extended_migration: a migration test\n"
+        "addopts = -m 'not extended_migration'\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = "full (project-filtered: -m not extended_migration; conftest collection hook)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "legacy.marker").exists()
+    assert not (root / "mig.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
+
+
+def test_full_ini_python_files_runs_labelled(case):
+    """Section F NOTE: non-default ini discovery narrowing is never silent."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "check_a.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n")
+    (root / "tests" / "test_unmatched.py").write_text(
+        "from pathlib import Path\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    (root / "pytest.ini").write_text("[pytest]\npython_files = check_*.py\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert "project-filtered" in completed.stderr.decode()
+    assert "python_files=check_*.py" in completed.stderr.decode()
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "b.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered"
+               and "python_files=check_*.py" in reason["message"]
+               for reason in data["reasons"])
+
+
+def test_full_conftest_collect_ignore_runs_labelled(case):
+    """Section F NOTE: conftest collect_ignore narrowing is never silent."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "collect_ignore = ['test_ignored.py']\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n")
+    (root / "tests" / "test_ignored.py").write_text(
+        "from pathlib import Path\n"
+        "def test_ignored():\n    Path('ignored.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert "project-filtered" in completed.stderr.decode()
+    assert "collect_ignore in tests/conftest.py" in completed.stderr.decode()
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "ignored.marker").exists()
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered"
+               and "collect_ignore in tests/conftest.py" in reason["message"]
+               for reason in data["reasons"])

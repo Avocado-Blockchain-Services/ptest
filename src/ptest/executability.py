@@ -19,7 +19,7 @@ from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
 from .runtime.pytest_bridge import (
-    full_narrowing_text, full_redirect_name,
+    full_ini_refusal_name, full_narrowing_text, full_redirect_name,
 )
 
 STATUS_EXECUTABLE = "executable"
@@ -127,13 +127,43 @@ def _split_addopts(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _toml_pytest_addopts(raw: bytes) -> tuple[str, ...]:
+    """addopts from a ``pytest.toml``/``.pytest.toml`` ``[pytest]`` table.
+
+    A present file always wins (pytest 9 treats even an empty
+    ``pytest.toml`` as its configuration source), yielding no addopts when
+    it defines none. A malformed file yields no prediction: the native run
+    refuses it at runtime.
+    """
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+        return ()
+    if not isinstance(parsed, dict):
+        return ()
+    section = parsed.get("pytest", {})
+    if not isinstance(section, dict) or "addopts" not in section:
+        return ()
+    return _split_addopts(section["addopts"])
+
+
 def _pytest_addopts(root: Path) -> tuple[str, ...]:
-    """First pytest section wins: pytest.ini, pyproject, tox.ini, setup.cfg."""
-    raw = _read(root, "pytest.ini")
-    if raw is not None:
-        found = _ini_addopts(raw, "pytest")
-        if found is not None:
-            return found
+    """First pytest section wins: pytest.toml, pytest.ini, pyproject, tox.ini, setup.cfg.
+
+    Mirrors pytest 9's ``findpaths`` order (``pytest.toml``/``.pytest.toml``
+    first, then ``pytest.ini``/``.pytest.ini``): the first file carrying
+    pytest configuration decides the checked-in addopts.
+    """
+    for name in ("pytest.toml", ".pytest.toml"):
+        raw = _read(root, name)
+        if raw is not None:
+            return _toml_pytest_addopts(raw) or ()
+    for name, section in (("pytest.ini", "pytest"), (".pytest.ini", "pytest")):
+        raw = _read(root, name)
+        if raw is not None:
+            found = _ini_addopts(raw, section)
+            if found is not None:
+                return found
     raw = _read(root, "pyproject.toml")
     if raw is not None:
         try:
@@ -388,12 +418,22 @@ def _redirect_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(found)
 
 
-def full_project_filter_label(root: Path, test_roots: tuple[str, ...]) -> str | None:
-    """Label a project-filtered full gate, or None when unfiltered.
+def _refused_ini_narrowing(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """Checked-in narrowing spellings the full gate refuses, in file order."""
+    found: list[str] = []
+    for index in range(len(tokens)):
+        refusal = full_ini_refusal_name(tokens, index)
+        if refusal is not None and refusal not in found:
+            found.append(refusal)
+    return tuple(found)
 
-    The label records narrowing from the project's checked-in pytest
-    configuration (addopts marker/keyword filters) and its ``conftest.py``
-    collection hooks, for example
+
+def full_project_filter_text(root: Path, test_roots: tuple[str, ...]) -> str | None:
+    """Bare project-filtered text, or None when the static scan sees none.
+
+    The text records narrowing from the project's checked-in pytest
+    configuration (allowlisted addopts marker/keyword filters) and its
+    ``conftest.py`` collection hooks, for example
     ``full (project-filtered: -m not slow; conftest collection hook)``.
     """
     parts: list[str] = []
@@ -406,6 +446,19 @@ def full_project_filter_label(root: Path, test_roots: tuple[str, ...]) -> str | 
     if not parts:
         return None
     return "full (project-filtered: " + "; ".join(parts) + ")"
+
+
+def full_project_filter_label(root: Path, test_roots: tuple[str, ...]) -> str | None:
+    """Init-time prediction of a project-filtered full gate, or None.
+
+    Static only: the bridge-owned attempt report decides the run label at
+    runtime, so this stays worded as a prediction (``expected: full
+    (project-filtered: ...)``).
+    """
+    text = full_project_filter_text(root, test_roots)
+    if text is None:
+        return None
+    return "expected: " + text
 
 
 # Stock vitest ``configDefaults.exclude``: a config that spreads it (the
@@ -919,7 +972,15 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 "ptest --full unavailable: pytest addopts redirect native configuration ("
                 + " ".join(redirects) + ")")
             full = False
-        label = full_project_filter_label(root, roots)
+        refused = _refused_ini_narrowing(addopts)
+        if refused:
+            caveats.append(
+                "ptest --full unavailable: pytest addopts narrow or observe the suite ("
+                + " ".join(refused) + ")")
+            full = False
+        # No prediction when the addopts themselves refuse the full run:
+        # labelling a run that cannot start would contradict the caveat.
+        label = None if (redirects or refused) else full_project_filter_label(root, roots)
         if label is not None:
             caveats.append(label)
         for rel, hook in pairs:

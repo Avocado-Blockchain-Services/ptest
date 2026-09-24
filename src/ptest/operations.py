@@ -1899,15 +1899,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # An unqualified repeat automatic request is a basic full gate, not
         # an automatic-mode plan handed to the basic adapter.
         plan = replace(plan, mode=C.Mode.FULL)
-    # Section F: a full gate runs the project's own checked-in suite. When
-    # checked-in configuration narrows it, the run result and the human
-    # output carry the project-filtered label instead of refusing.
-    project_filter_label = None
+    # Section F: a full gate runs the project's own checked-in suite. The
+    # plan carries the static prediction; the run result and the human
+    # output carry the label built from the bridge-owned attempt report.
     if native_pytest and plan.execution == "full":
-        project_filter_label = executability.full_project_filter_label(
+        predicted_filter = executability.full_project_filter_text(
             checkout.root, config.runner.test_roots)
-        if project_filter_label is not None:
-            note = _reason("project-filtered", project_filter_label)
+        if predicted_filter is not None:
+            note = _reason("project-filtered", predicted_filter)
             plan = replace(plan, reasons=plan.reasons + (note,))
     if advanced and plan.execution == "none":
         # A qualified automatic selection may prove that no test is affected.
@@ -2183,8 +2182,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
             and (continued_handoff or stopped_handoff or cancelled_handoff
                  or setup_handoff)
             and frames.draining and frames.eof)
-        reasons = (() if project_filter_label is None
-                   else (_reason("project-filtered", project_filter_label),))
+        # Section F: the run label comes from the bridge-owned attempt
+        # report consumed below, never from the static prediction above.
+        reasons: tuple = ()
         incomplete = not protocol_valid or stopped_at_gate or cancelled_handoff
         if incomplete:
             if not protocol_valid:
@@ -2301,6 +2301,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             time.monotonic() - finalization_started)))
         consumed_report = False
         native_evidence: C.AttemptEvidence | None = None
+        native_report: reports.NativeTerminalReport | None = None
         report_reason: C.Reason | None = None
         if native_runner and not setup_failed:
             try:
@@ -2461,6 +2462,29 @@ def execute(domain: C.DomainPaths, config: C.Config,
                                                inventory_complete=False)
                                        for item in result.attempts),
                     )
+            # Section F "never silent": a narrowed full run is always
+            # labelled. The label is built from the bridge-owned report;
+            # allowed narrowing with no label means the run is incomplete,
+            # never PASSED.
+            if native_pytest and plan.execution == "full" and not setup_failed:
+                bridge_label = None
+                if advanced:
+                    if native_evidence is not None and report_reason is None:
+                        bridge_label = native_evidence.project_filter_label
+                elif (consumed_report and report_reason is None
+                        and native_report is not None):
+                    bridge_label = reports.project_filter_label(
+                        native_report.project_narrowing)
+                if bridge_label is not None:
+                    result = replace(result, reasons=result.reasons + (
+                        _reason("project-filtered", bridge_label),))
+                elif (result.status is C.Status.PASSED
+                        and executability.full_project_filter_text(
+                            checkout.root, config.runner.test_roots) is not None):
+                    result = _incomplete(result, _reason(
+                        "report-invalid",
+                        "bridge allowed project narrowing but reported "
+                        "no project filter label"))
 
         # Every real advanced attempt is a private history event, including a
         # native failure or a refused/malformed report. Promotion is possible

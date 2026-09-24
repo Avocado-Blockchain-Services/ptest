@@ -694,19 +694,60 @@ def test_full_bridge_rejects_redirect_controls_from_ini(bridge_env, value):
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
 
 
-@pytest.mark.parametrize("value", [["-k", "hidden"], ["-x"], ["--deselect=tests/a.py::test_x"],
-                                    ["-m", "not slow"], ["--maxfail=3"],
-                                    ["--maxfail", "0"]])
-def test_full_bridge_accepts_narrowing_filters_from_checked_in_ini(bridge_env, value):
+@pytest.mark.parametrize("value,options,labelled", [
+    (["-k", "hidden"], {"keyword": "hidden"}, True),
+    (["-x"], {"maxfail": 1}, True),
+    (["--deselect=tests/a.py::test_x"], {"deselect": ["tests/a.py::test_x"]}, True),
+    (["-m", "not slow"], {"markexpr": "not slow"}, True),
+    (["--maxfail=3"], {"maxfail": 3}, True),
+    # --maxfail 0 narrows nothing, so it passes with no label to record.
+    (["--maxfail", "0"], {"maxfail": 0}, False),
+])
+def test_full_bridge_accepts_narrowing_filters_from_checked_in_ini(
+        bridge_env, value, options, labelled):
     """Section F: checked-in addopts narrowing is allowed in full mode.
 
-    The filter is recorded in the run label; the bridge only refuses
-    invocation-time narrowing (argv, environment) and config redirects.
+    The filter is recorded in the run label only when the effective option
+    value equals its checked-in source; the bridge refuses invocation-time
+    narrowing (argv, environment) and config redirects.
     """
+    config = _native_config(**options)
+    config.getini = lambda name: value if name == "addopts" else []
+
+    plugin = pytest_bridge.OwnedPlugin(1)
+    next(plugin.pytest_cmdline_main(config))
+    assert (plugin.allowed_narrowing()["narrowing"] is not None) == labelled
+
+
+@pytest.mark.parametrize("value", [["--co"], ["--collect-only"], ["--lf"],
+                                    ["--last-failed"], ["--sw"], ["--stepwise"],
+                                    ["--testmon"], ["--setup-only"], ["--setup-plan"],
+                                    ["--fixtures"], ["--markers"], ["--cache-show"],
+                                    ["-h"], ["-V"]])
+def test_full_bridge_refuses_observation_controls_from_checked_in_ini(
+        bridge_env, value):
+    """Section F MEDIUM: only the allowlisted filters come from ini."""
     config = _native_config()
     config.getini = lambda name: value if name == "addopts" else []
 
-    next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
+    with pytest.raises(pytest.UsageError, match="full pytest plans"):
+        next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
+
+
+@pytest.mark.parametrize("value,options", [
+    (["-k", "hidden"], {"keyword": "other"}),
+    (["-m", "not slow"], {"markexpr": "slow"}),
+    (["--deselect=tests/a.py::test_x"], {"deselect": ["tests/a.py::test_x",
+                                                      "tests/a.py::test_y"]}),
+    (["-x"], {"maxfail": 3}),
+])
+def test_full_bridge_refuses_mutated_narrowing_values(bridge_env, value, options):
+    """Section F LOW: the effective value must equal its checked-in source."""
+    config = _native_config(**options)
+    config.getini = lambda name: value if name == "addopts" else []
+
+    with pytest.raises(pytest.UsageError, match="cannot narrow the inventory"):
+        next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(config))
 
 
 @pytest.mark.parametrize("value", ["-W error::DeprecationWarning",
@@ -847,6 +888,66 @@ def test_full_bridge_refuses_collection_hook_from_conftest_outside_root(
 
     with pytest.raises(pytest.UsageError, match="execution hook"):
         pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect"])
+def test_full_bridge_refuses_collection_hook_on_registered_instance(
+        bridge_env, tmp_path, monkeypatch, hook):
+    """Section F HIGH: the plugin object must itself be the conftest module."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "tests" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    conftest.write_text("class Drop:\n    pass\n")
+
+    def function(items):
+        raise AssertionError("hookimpl must not run in a static check")
+    function.__module__ = "conftest"
+    manager = _loaded_manager(
+        (("drop", SimpleNamespace()),),
+        [(hook, SimpleNamespace(plugin=SimpleNamespace(), function=function))],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_ignore_collect"])
+def test_full_bridge_refuses_reexported_collection_hook(
+        bridge_env, tmp_path, monkeypatch, hook):
+    """Section F HIGH: the hook function must be defined in the conftest."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "tests" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    conftest.write_text("from hook_impl import %s\n" % hook)
+    plugin = _conftest_plugin(conftest)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl(hook, "hook_impl", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="execution hook"):
+        pytest_bridge.OwnedPlugin(1).pytest_configure(config)
+
+
+def test_full_bridge_reports_accepted_hook_files(bridge_env, tmp_path, monkeypatch):
+    """Section F HIGH: the bridge report names each accepted hook file."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "tests" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    conftest.write_text("def pytest_collection_modifyitems(items):\n    return None\n")
+    plugin = _conftest_plugin(conftest)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl("pytest_collection_modifyitems", "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    owned = pytest_bridge.OwnedPlugin(1)
+    owned.pytest_configure(config)
+
+    assert owned.allowed_narrowing()["conftest_hooks"] == ["tests/conftest.py"]
 
 
 @pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus",

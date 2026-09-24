@@ -179,7 +179,7 @@ def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.full is True
-    assert result.caveats == ("full (project-filtered: -vx)",)
+    assert result.caveats == ("expected: full (project-filtered: -vx)",)
     assert "ptest --full" in E.commands((result,))
 
 
@@ -217,7 +217,7 @@ def test_narrowing_addopts_are_project_filtered_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "full (project-filtered: -m not slow)",)
+        "expected: full (project-filtered: -m not slow)",)
     assert result.full is True
 
 
@@ -231,7 +231,7 @@ def test_maxfail_nonzero_is_project_filtered_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "full (project-filtered: --maxfail=3)",)
+        "expected: full (project-filtered: --maxfail=3)",)
     assert result.full is True
 
 
@@ -257,7 +257,7 @@ def test_collection_hook_is_project_filtered_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "full (project-filtered: conftest collection hook)",)
+        "expected: full (project-filtered: conftest collection hook)",)
     assert result.full is True
 
 
@@ -273,7 +273,7 @@ def test_persea_shaped_addopts_are_project_filtered_full_with_serial_caveat(tmp_
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
         "serial: xdist disabled under ptest (-n 0)",
-        "full (project-filtered: -m not slow)")
+        "expected: full (project-filtered: -m not slow)")
     assert result.full is True
 
 
@@ -286,6 +286,46 @@ def test_maxfail_zero_is_not_narrowing():
     assert full_narrowing_text(("--maxfail=3",)) == "--maxfail=3"
     assert full_narrowing_text(("--maxfail", "3")) == "--maxfail 3"
     assert full_narrowing_text(("--maxfail=0", "-m", "not slow")) == "-m not slow"
+
+
+def test_pytest_toml_addopts_are_project_filtered_full(tmp_path):
+    """Section F HIGH: pytest 9 reads pytest.toml first, statically too."""
+    _write(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "expected: full (project-filtered: -k not slow)",)
+    assert result.full is True
+
+
+def test_pytest_toml_wins_over_pytest_ini(tmp_path):
+    """Section F HIGH: the first config file in pytest 9 order decides."""
+    _write(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
+    _write(tmp_path / "pytest.ini", '[pytest]\naddopts = "-m \'not fast\'"\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.caveats == (
+        "expected: full (project-filtered: -k not slow)",)
+    assert result.full is True
+
+
+@pytest.mark.parametrize("addopts", ["--co", "--lf"])
+def test_non_allowlisted_ini_narrowing_makes_full_unavailable(tmp_path, addopts):
+    """Section F MEDIUM: observation controls predict a refused full run."""
+    _write(tmp_path / "pytest.ini", "[pytest]\naddopts = %s\n" % addopts)
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "ptest --full unavailable: pytest addopts narrow or observe the suite (%s)" % addopts,)
+    assert result.full is False
 
 
 def test_full_refused_conftest_hook_is_caveat_without_full(tmp_path):
