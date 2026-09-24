@@ -573,7 +573,11 @@ def _fact_bullets(child: dict) -> list[str]:
     """Plain-language fact bullets; execution fallback when facts invalid."""
     facts = child.get("facts")
     if facts:
-        return [f"- {line}" for line in long_lines(facts)]
+        # Facts arrive validated, but they still carry untrusted
+        # config-derived prose: clean every bullet so it cannot alter
+        # the Markdown structure (links, tags, code spans, headings).
+        return [f"- {_clean(line, field='facts')}"
+                for line in long_lines(facts)]
     execution = child.get("execution")
     if execution is None:
         return ["- runs: not recorded"]
@@ -868,21 +872,36 @@ def render_recommendations(run: object) -> bytes:
             for limitation in scope_limitations:
                 out.append(_limitation_line(limitation))
             out.append("")
-        safety_open = False
-        for row in child["rows"]:
-            if (row["id"] in _PARALLEL_SAFETY_IDS
-                    or row["id"] == _PARALLEL_ITEM_ID) and not safety_open:
-                out.append(_parallel_safety_heading())
-                out.append("")
-                safety_open = True
+        # Partition rows the same way the terminal renderer does: main
+        # rows first, then the eight isolation items as a visible
+        # "parallel safety" group with PARALLEL-001 trailing it. Never
+        # group by first-seen order: catalog order puts SELECT-001 and
+        # TIMING-001 before the safety rows, and they are not isolation
+        # checks.
+        def _emit(row: dict) -> None:
             if row["status"] != "gap":
                 out.append(_status_section(row))
                 out.append("")
-                continue
+                return
             out.append(_finding_section(
                 row, child["findings"].get(row["id"]), child["scope"],
                 root_label="repository root"))
             out.append("")
+
+        main = [row for row in child["rows"]
+                if row["id"] not in _PARALLEL_SAFETY_IDS
+                and row["id"] != _PARALLEL_ITEM_ID]
+        safety = [row for row in child["rows"]
+                  if row["id"] in _PARALLEL_SAFETY_IDS]
+        parallel = [row for row in child["rows"]
+                    if row["id"] == _PARALLEL_ITEM_ID]
+        for row in main:
+            _emit(row)
+        if safety or parallel:
+            out.append(_parallel_safety_heading())
+            out.append("")
+            for row in safety + parallel:
+                _emit(row)
     out.append(_sentinel_section(children))
     out.append("## Parallel permutations beyond current ptest")
     out.append("")

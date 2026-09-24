@@ -57,7 +57,7 @@ def _web_facts(**overrides):
         "runs_reason": None, "runs_fix": None,
         "parallel": "inside vitest (its own workers)",
         "parallel_short": "inside vitest", "parallel_fix": None,
-        "setup": None, "full_suite": None, "full_blocked": None,
+        "setup": "npm ci", "full_suite": None, "full_blocked": None,
     }
     facts.update(overrides)
     return facts
@@ -130,36 +130,36 @@ def _persea_rules():
 
 
 def test_golden_persea_shape_at_width_80():
+    """Exact O.3 target shape at width 80 (spec requirements O.3).
+
+    Only the wordmark and the version line precede the header. There
+    are no section headings; blocks are separated by blank lines; the
+    smoke row aligns with the file-action grid; the repeated guidance
+    group leaves its label blank. The long guidance line wraps between
+    atoms: it cannot fit 80 columns without breaking an atom.
+    """
     from ptest import init_smoke
 
     text = render_init(_persea_result(), _persea_rules(), repo_name="shop",
                        facts=(_api_facts(), _web_facts()), width=80)
     lines = text.splitlines()
-    assert "ptest initialized · shop" in lines
-    assert "Projects" in lines
-    api_line = next(line for line in lines if "api  pytest" in line)
-    assert "runs: yes" in api_line
-    assert "parallel: 4 workers" in api_line
-    assert "setup: uv sync --locked" in api_line
-    web_line = next(line for line in lines if "web  vitest" in line)
-    assert "parallel: inside vitest" in web_line
-    assert "setup:" not in web_line
-    assert any("full suite = your pytest config:" in line for line in lines)
-    config_line = next(line for line in lines
-                       if line.strip().startswith("config"))
-    assert "unchanged" in config_line
-    assert ".ptest.toml" in config_line and "api/.ptest.toml" in config_line
-    assert sum(1 for line in lines
-               if line.strip().startswith("config")) == 1
-    assert "docs/ptest-agent.md" in text
-    assert "ptest skill for claude" in text
-    assert "ptest skill for codex" in text
-    assert "ptest skill for opencode" in text
-    assert "ptest skill for gemini" in text
-    assert sum(1 for line in lines
-               if line.strip().startswith("guidance   created")) == 1
-    updated = next(line for line in lines if "updated" in line)
-    assert "AGENTS.md" in updated and "CLAUDE.md" in updated
+    assert lines[6] == f"ptest {C.PTEST_VERSION}"
+    assert lines[7] == "ptest initialized · shop"
+    body = "\n".join(lines[7:]) + "\n"
+    assert body == (
+        "ptest initialized · shop\n"
+        "\n"
+        "  api   pytest  runs: yes · parallel: 4 workers · setup: uv sync --locked\n"
+        "                full suite = your pytest config: -m \"not extended_migration\"\n"
+        "  web   vitest  runs: yes · parallel: inside vitest · setup: npm ci\n"
+        "\n"
+        "  config     unchanged  .ptest.toml, api/.ptest.toml, web/.ptest.toml\n"
+        "  guidance   created    docs/ptest-agent.md, ptest skill for claude\n"
+        "                        ptest skill for codex, ptest skill for opencode\n"
+        "                        ptest skill for gemini\n"
+        "             updated    AGENTS.md, CLAUDE.md\n"
+    )
+    assert "Projects" not in lines
     assert "ready with caveats" not in text
     assert "expected:" not in text
     assert "fingerprint" not in text
@@ -174,16 +174,16 @@ def test_golden_persea_shape_at_width_80():
     )
     footer = render_init_footer(_persea_result(), _persea_rules(), smoke=smoke,
                                 facts=(_api_facts(), _web_facts()), width=80)
-    smoke_lines = [line for line in footer.splitlines()
-                   if line.startswith("Smoke:")]
-    assert len(smoke_lines) == 1
-    assert "api ✓ 2.2s" in smoke_lines[0]
-    assert "web ✓ 1.8s" in smoke_lines[0]
+    assert footer == (
+        "  smoke      api ✓ 2.2s   web ✓ 1.8s\n"
+        "\n"
+        "Restart your coding agents to load the new ptest skill.\n"
+    )
     assert "Next steps" not in footer
-    restarts = [line for line in footer.splitlines()
-                if line.startswith("Restart your coding agents")]
-    assert restarts == ["Restart your coding agents to load the new "
-                        "ptest skill."]
+    combined = text + "\n" + footer
+    assert "  smoke      api ✓ 2.2s   web ✓ 1.8s\n" in combined
+    assert combined.endswith(
+        "Restart your coding agents to load the new ptest skill.\n")
 
 
 # --- restart line ----------------------------------------------------------
@@ -359,3 +359,18 @@ def test_render_init_rejects_wrong_types():
         pass
     else:
         raise AssertionError("expected TypeError")
+
+
+def test_hostile_fact_characters_never_reach_terminal_raw():
+    """C1 CSI and bidi overrides from config-derived facts stay inert.
+
+    check_facts rejects them, so the terminal never sees the raw
+    characters; even a hostile-but-printable payload keeps its text
+    visible without emitting control characters.
+    """
+    bidi = chr(0x202E)
+    csi = chr(0x9B)
+    facts = (_api_facts(setup="uv sync " + bidi + "KCOL" + csi + "31m"),)
+    text = render_init(_result(), None, facts=facts, width=80)
+    assert bidi not in text
+    assert csi not in text

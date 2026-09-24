@@ -42,7 +42,11 @@ def _is_clean_text(value: object, *, allow_empty: bool = False) -> bool:
         return False
     if len(value.encode("utf-8")) > 512:
         return False
-    return not any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+    # isprintable rejects C0 controls, DEL, C1 controls (U+0080–U+009F,
+    # e.g. the single-byte CSI), bidi overrides and other format
+    # characters, so config-derived facts cannot carry terminal escapes
+    # or display-spoofing characters past validation.
+    return value.isprintable()
 
 
 def check_facts(value: object) -> dict | None:
@@ -110,6 +114,26 @@ def detail_lines(facts: Mapping[str, object]) -> list[str]:
     if isinstance(blocked, str) and blocked:
         return [f"full suite: not available — {blocked}"]
     return []
+
+
+def detail_atoms(detail: str) -> list[str]:
+    """Split one detail line into unbreakable atoms at ', ' boundaries.
+
+    ``full suite = a, b`` becomes ``["full suite = a,", "b"]`` so both
+    terminal renderers wrap the same fact between atoms — never inside
+    a quoted command — with a shared implementation. Anything else is
+    already one atom.
+    """
+    if detail.startswith("full suite = ") and ", " in detail:
+        head, rest = detail.split(" = ", 1)
+        parts = rest.split(", ")
+        atoms = []
+        for index, part in enumerate(parts):
+            prefix = f"{head} = " if index == 0 else ""
+            suffix = "," if index < len(parts) - 1 else ""
+            atoms.append(f"{prefix}{part}{suffix}")
+        return atoms
+    return [detail]
 
 
 def long_lines(facts: Mapping[str, object]) -> list[str]:

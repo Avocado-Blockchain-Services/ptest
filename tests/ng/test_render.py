@@ -142,22 +142,32 @@ def test_agent_assessment_golden_o4_shape_at_width_90():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert ("api  pytest · 5 ok · 1 gap · 5 unknown"
-            "   (partial evidence)") in text
-    assert "  parallel safety" in text
-    assert ("? Network isolation  The tests use httpx but no socket block "
-            "was cited.") in text
-    assert "? Child processes  no subprocess usage in" in text
+    # Exact O.4 target block: header at column 0, facts indented 2, a
+    # blank line, aligned satisfied columns, every item row indented 2
+    # with gap detail at 6, then the trailer.
+    assert text == (
+        "api  pytest · 5 ok · 1 gap · 5 unknown   (partial evidence)\n"
+        "  runs: yes · parallel: 4 workers · setup: uv sync --locked\n"
+        "  full suite = your pytest config: -m \"not slow\"\n"
+        "\n"
+        "  ✓ Test data factories  ✓ Test selection\n"
+        "  ? Test timing  no timing history yet: run ptest --full once\n"
+        "\n"
+        "  parallel safety\n"
+        "  ✓ Fixture state isolation (1 citation dropped)  ✓ Database setup reuse\n"
+        "  ✓ Cache isolation\n"
+        "  ✗ Files and ports\n"
+        "      Writes reach /tmp directly.\n"
+        "      → Allocate an owned temp root.\n"
+        "  ? Network isolation  The tests use httpx but no socket block was cited.\n"
+        "  ? Child processes  no subprocess usage in the admitted excerpts\n"
+        "  ? Deterministic time  review failed: timed out\n"
+        "  ? Database isolation  Row DB-002 judged unknown against excerpts.\n"
+        "\n"
+        "Report: recommendations.md (created) — citations, fixes and "
+        "verification steps.\n"
+    )
     assert "Answered by ptest" not in text
-    assert "? Deterministic time  review failed: timed out" in text
-    assert ("? Test timing  no timing history yet: run ptest --full "
-            "once") in text
-    assert "✗ Files and ports" in text
-    assert "→ Allocate an owned temp root." in text
-    assert "(1 citation dropped)" in text
-    # satisfied main rows lead, then the safety group with its gap row
-    assert text.index("✓ Test data factories") < text.index("parallel safety")
-    assert text.index("parallel safety") < text.index("✗ Files and ports")
 
 
 def test_agent_assessment_falls_back_to_execution_without_facts():
@@ -1027,9 +1037,48 @@ def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
     line = next(item for item in text.splitlines()
-                if item.startswith("– Database isolation"))
+                if item.startswith("  – Database isolation"))
     assert line.endswith("…")
     assert "[truncated]" not in line
     import re
 
     assert re.fullmatch(r"token\d{3}", line[:-1].rsplit(" ", 1)[-1])
+
+
+def test_hostile_fact_characters_never_reach_doctor_raw():
+    """C1 CSI and bidi overrides from config-derived facts stay inert."""
+    bidi = chr(0x202E)
+    csi = chr(0x9B)
+    child = {
+        "scope": "api",
+        "facts": _aa_facts(setup="uv sync " + bidi + "KCOL" + csi + "31m"),
+        "rows": [_aa_row("FIX-001", "satisfied", label="ok")],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
+    assert bidi not in text
+    assert csi not in text
+
+
+def test_doctor_full_suite_breaks_between_atoms_at_width_60():
+    """The persea full-suite fact wraps at ', ' boundaries, never mid-command."""
+    child = {
+        "scope": "api",
+        "facts": _aa_facts(
+            full_suite='your pytest config: -m "not extended_migration", '
+                       "conftest.py hooks"),
+        "rows": [_aa_row("FIX-001", "satisfied", label="ok")],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=60)
+    lines = text.splitlines()
+    assert '  full suite = your pytest config: -m "not extended_migration",' \
+        in lines
+    assert "  conftest.py hooks" in lines
+    assert not any(line.endswith('-m "not') for line in lines)

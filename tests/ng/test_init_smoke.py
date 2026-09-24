@@ -201,7 +201,7 @@ def test_non_tty_smoke_flag_runs_and_reports_passed(
     assert calls[0][1].mode is C.Mode.SCOPED
     assert tuple(calls[0][1].argv) == ("tests/test_tiny.py",)
     out = capsys.readouterr().out
-    assert "Smoke:" in out
+    assert "  smoke      " in out
     assert re.search(r"\. (✓|\[ok\]) ", out)
 
 
@@ -361,7 +361,7 @@ def test_missing_setup_skips_with_exact_command(
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--smoke")) == 0
     out = capsys.readouterr().out
-    assert "Smoke:" in out
+    assert "  smoke      " in out
     assert "setup baseline not recorded" in out
     assert "npm ci" in out
 
@@ -415,7 +415,7 @@ def test_hostile_names_are_sanitized_in_smoke_output():
     assert "\x1b" not in text
     assert "\nforged" not in text
     assert "\u202e" not in text
-    assert "Smoke" in text
+    assert "  smoke      " in text
 
 
 def test_monorepo_reports_one_smoke_line_per_project(
@@ -467,8 +467,8 @@ def test_monorepo_reports_one_smoke_line_per_project(
     # Nothing is executable here (api xdist, web setup missing): no run.
     assert calls == []
     out = capsys.readouterr().out
-    assert "Smoke:" in out
-    block = out.split("Smoke:")[1].split("\n\n")[0]
+    assert "  smoke      " in out
+    block = out.split("  smoke      ")[1].split("\n\n")[0]
     assert "api" in block and "web" in block
 
 
@@ -696,7 +696,7 @@ def test_tty_setup_no_skips_without_running(
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--no-doctor")) == 0
     out = capsys.readouterr().out
-    assert "Smoke" in out
+    assert "  smoke      " in out
     assert "–" in out
     assert "setup baseline not recorded" in out
     assert "runs npm ci first" in out
@@ -756,7 +756,7 @@ def test_non_tty_setup_missing_skips_with_working_advice(
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--smoke")) == 0
     out = capsys.readouterr().out
-    assert "Smoke" in out
+    assert "  smoke      " in out
     assert "–" in out
     assert ("setup baseline not recorded; run: ptest tests/a.test.ts "
             "(runs npm ci first)") in out
@@ -1008,7 +1008,7 @@ def test_monorepo_preflight_problem_skips_every_project(
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--smoke")) == 0
     out = capsys.readouterr().out
-    assert "Smoke" in out
+    assert "  smoke      " in out
     assert "–" in out
     assert "synthetic preflight refusal" in out
 
@@ -1128,7 +1128,7 @@ def test_format_smoke_compact_cells_share_one_line():
             duration_s=1.8, exit_code=None, lines=(), reason=None),
     )
     text = init_smoke.format_smoke(results, width=80)
-    assert text.startswith("Smoke: api ✓ 2.2s · web ✓ 1.8s")
+    assert text.startswith("  smoke      api ✓ 2.2s   web ✓ 1.8s")
     assert text.endswith("\n")
 
 
@@ -1149,7 +1149,7 @@ def test_format_smoke_failed_cell_and_capped_details():
     )
     text = init_smoke.format_smoke(results, width=80)
     first, *rest = text.splitlines()
-    assert first == "Smoke: api ✗ exit 1"
+    assert first == "  smoke      api ✗ exit 1"
     assert rest == [f"  line {n}" for n in range(5)]
 
 
@@ -1163,14 +1163,14 @@ def test_format_smoke_skipped_cell_and_no_color(monkeypatch):
             reason="no fixture-free smoke candidate under tests"),
     )
     text = init_smoke.format_smoke(results, width=80)
-    assert text == ("Smoke: api – no fixture-free smoke candidate "
+    assert text == ("  smoke      api – no fixture-free smoke candidate "
                     "under tests\n")
     monkeypatch.setenv("NO_COLOR", "1")
     passed = (init_smoke.SmokeResult(
         project="api", status="passed", command="ptest api/x.py",
         duration_s=1.0, exit_code=None, lines=(), reason=None),)
     assert init_smoke.format_smoke(passed, width=80) == \
-        "Smoke: api [ok] 1.0s\n"
+        "  smoke      api [ok] 1.0s\n"
 
 
 def test_skip_result_carries_setup_argv():

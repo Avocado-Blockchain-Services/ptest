@@ -1433,3 +1433,44 @@ def test_render_without_dropped_counts_names_no_drops():
 
     out = render_recommendations(_run()).decode("utf-8")
     assert "invalid citation" not in out
+
+
+def test_fact_bullets_neutralize_markdown_injection():
+    """Config-derived facts cannot alter recommendations.md structure."""
+    from ptest.recommendations import render_recommendations
+
+    facts = {
+        "project": "api", "runner": "pytest", "runs": True,
+        "setup": "uv sync <img src=x onerror=alert(1)> `x` | y",
+        "full_suite": 'your config -m "a [b](http://e.vil)"',
+    }
+    out = render_recommendations(
+        _run(children=[_child(rows=_mixed_rows(), facts=facts)])).decode(
+        "utf-8")
+    assert "<img" not in out
+    assert "onerror=alert(1)" not in out
+    assert "`x`" not in out
+    assert "http://e.vil" not in out
+    assert "[b](" not in out
+
+
+def test_parallel_safety_group_holds_only_isolation_then_parallel():
+    """Full catalog order: SELECT/TIMING stay out of the safety group."""
+    from ptest.recommendations import render_recommendations
+
+    safety = ("FIX-002", "DB-001", "DB-002", "CACHE-001",
+              "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001")
+    rows = [_row(row_id, "satisfied") for row_id in CHECKLIST_IDS]
+    rows.append(_row("PARALLEL-001", "satisfied"))
+    out = render_recommendations(
+        _run(children=[_child(rows=rows, findings=[])])).decode("utf-8")
+    safety_at = out.index("## Parallel safety")
+    parallel_at = out.index("## PARALLEL-001")
+    # SELECT-001 and TIMING-001 are not isolation checks: they precede it
+    assert out.index("## SELECT-001") < safety_at
+    assert out.index("## TIMING-001") < safety_at
+    # the eight isolation items sit between the heading and PARALLEL-001
+    for row_id in safety:
+        assert safety_at < out.index("## " + row_id) < parallel_at
+    # no main row leaks into the group
+    assert out.index("## FIX-001") < safety_at

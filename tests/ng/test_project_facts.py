@@ -48,6 +48,29 @@ def test_check_facts_valid_and_invalid():
     assert PF.check_facts({"project": "", "runs": True}) is None
 
 
+def test_check_facts_rejects_c1_controls_and_bidi_overrides():
+    """Terminal-escape and display-spoofing characters fail validation.
+
+    C1 controls (U+0080–U+009F, e.g. the single-byte CSI U+009B) and
+    bidi overrides (U+202E) survive the old C0/DEL-only check but are
+    not printable, so facts carrying them are invalid.
+    """
+    base = {"project": "api", "runner": "pytest", "runs": True}
+    bidi = chr(0x202E)  # right-to-left override: display spoofing
+    csi = chr(0x9B)  # single-byte CSI: terminal escape injection
+    assert PF.check_facts(
+        {**base, "setup": "uv sync " + bidi + "KCOL"}) is None
+    assert PF.check_facts(
+        {**base, "setup": "uv sync " + csi + "31m"}) is None
+    assert PF.check_facts(
+        {**base, "full_suite": "suite " + bidi + " reversed"}) is None
+    assert PF.check_facts({**base, "setup": "uv sync"}) is None
+    # printable Unicode prose (em dash, arrow, middle dot) still passes
+    assert PF.check_facts(
+        {**base, "runs": False, "runs_reason": "no tests — empty",
+         "runs_fix": "add a test → run"}) is not None
+
+
 def test_summary_atoms():
     facts = {"project": "api", "runner": "pytest", "runs": True,
              "parallel_short": "4 workers", "setup": "uv sync --locked"}

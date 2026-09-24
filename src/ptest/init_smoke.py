@@ -359,16 +359,20 @@ def _smoke_cell(item: SmokeResult) -> str:
 
 def format_smoke(results: tuple[SmokeResult, ...], *,
                  width: int | None = None) -> str:
-    """Render one compact ``Smoke:`` block; ``""`` when empty.
+    """Render one compact ``smoke`` row; ``""`` when empty.
 
-    Cells share one line (wrapped between cells only); each failed cell
-    contributes at most ``_MAX_LINES`` indented detail lines below.
+    The row shares the file-action grid (``  smoke      <cells>``) so it
+    aligns with the grouped file lines; cells share one line (wrapped
+    between cells only); each failed cell contributes at most
+    ``_MAX_LINES`` indented detail lines below.
     """
     from .project_facts import wrap_atoms
     if not results:
         return ""
     cells = [_smoke_cell(item) for item in results]
-    lines = list(wrap_atoms(cells, width, indent="Smoke: ", hang="  "))
+    indent = f"  {'smoke':<10} "
+    lines = list(wrap_atoms(cells, width, indent=indent,
+                            hang=" " * len(indent), sep="   "))
     for item in results:
         if item.status == STATUS_FAILED:
             for detail in item.lines[:_MAX_LINES]:

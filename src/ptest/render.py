@@ -12,6 +12,7 @@ from . import contracts as C
 from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
 from .project_facts import (
     check_facts,
+    detail_atoms,
     detail_lines,
     summary_atoms,
     terminal_width,
@@ -249,9 +250,13 @@ def _child_fact_lines(child, width: int) -> tuple[list[str], bool]:
     if facts is None:
         atoms, not_runnable = _fallback_atoms(child)
         return wrap_atoms(atoms, width, indent="  ", hang="    "), not_runnable
-    lines = wrap_atoms(summary_atoms(facts), width, indent="  ", hang="    ")
+    atoms = [_agent_assessment_prose(atom) for atom in summary_atoms(facts)]
+    lines = wrap_atoms(atoms, width, indent="  ", hang="    ")
     for detail in detail_lines(facts):
-        lines.extend(wrap_words(detail, width, indent="    ", hang="    "))
+        atoms = [_agent_assessment_prose(atom)
+                 for atom in detail_atoms(detail)]
+        lines.extend(wrap_atoms(atoms, width, indent="  ", hang="  ",
+                                sep=" "))
     return lines, not facts.get("runs", True)
 
 
@@ -368,10 +373,38 @@ def _row_label(row: dict) -> str:
     return label or "unknown"
 
 
+def _satisfied_columns(cells: list[str], width: int) -> list[str]:
+    """Pack ``✓ Label`` cells into width-fitting aligned columns.
+
+    Every cell is padded to the common column width so cells in one
+    column start at the same offset; only the last cell on a line is
+    left unpadded (no trailing whitespace). Oversize cells overflow
+    rather than split, like every other atom.
+    """
+    if not cells:
+        return []
+    column = max(len(cell) for cell in cells)
+
+    def render(chunk: list[str]) -> str:
+        return ("  " + "  ".join(
+            item.ljust(column) for item in chunk)).rstrip()
+
+    lines: list[str] = []
+    chunk: list[str] = []
+    for cell in cells:
+        if chunk and len(render([*chunk, cell])) > width:
+            lines.append(render(chunk))
+            chunk = []
+        chunk.append(cell)
+    if chunk:
+        lines.append(render(chunk))
+    return lines
+
+
 def _gap_lines(row: dict, by_id: dict, icons: dict, width: int) -> list[str]:
     """One gap line plus the wrapped finding detail under it."""
     label = _row_label(row)
-    lines = [f"{icons['gap']} {label}{_dropped_suffix(row)}"]
+    lines = [f"  {icons['gap']} {label}{_dropped_suffix(row)}"]
     finding = by_id.get(row.get("id"))
     if finding is None:
         lines.append("      no finding recorded; see recommendations.md.")
@@ -399,8 +432,7 @@ def _block_lines(rows: list[dict], by_id: dict, icons: dict,
                  for row in rows if row.get("status") == "satisfied"]
     lines = []
     if satisfied:
-        lines.extend(wrap_atoms(satisfied, width, indent="  ", hang="  ",
-                                sep="  "))
+        lines.extend(_satisfied_columns(satisfied, width))
     for row in rows:
         status = row.get("status")
         if status == "satisfied":
@@ -409,19 +441,19 @@ def _block_lines(rows: list[dict], by_id: dict, icons: dict,
         if status == "gap":
             lines.extend(_gap_lines(row, by_id, icons, width))
         elif status == "unknown":
-            head = f"{icons['unknown']} {label}  "
+            head = f"  {icons['unknown']} {label}  "
             reason = _unknown_reason(row, width, head)
             lines.append(f"{head}{reason}{_dropped_suffix(row)}"
                          if reason else f"{head.rstrip()}"
                          f"{_dropped_suffix(row)}")
         elif status == "not-applicable":
-            head = f"{icons['not-applicable']} {label}  "
+            head = f"  {icons['not-applicable']} {label}  "
             reason = _na_reason(row, width, head)
             lines.append(f"{head}{reason}{_dropped_suffix(row)}"
                          if reason else f"{head.rstrip()}"
                          f"{_dropped_suffix(row)}")
         else:
-            head = f"{icons['unknown']} {label}  "
+            head = f"  {icons['unknown']} {label}  "
             reason = _unknown_reason(row, width, head)
             lines.append(f"{head}{reason}{_dropped_suffix(row)}"
                          if reason else f"{head.rstrip()}"
@@ -492,14 +524,15 @@ def render_agent_assessment(children, workspace, *, report_path: str,
     # and dependency lines share whatever the byte bound leaves over, split
     # evenly per project so one verbose child cannot crowd out the rest.
     # Sections join with "\n\n" and the output ends with "\n". The spare
-    # byte per project below is the "\n" joining a head to its kept items.
+    # two bytes per project below are the blank line joining a head to
+    # its kept items.
     section_count = (len(head_sections) + (1 if dependency_details else 0)
                      + 1)
     fixed = (sum(len(section.encode("utf-8")) for section in head_sections)
              + len(trailer.encode("utf-8"))
              + 2 * (section_count - 1) + 1)
     variable_budget = (_AGENT_ASSESSMENT_MAX_BYTES - fixed
-                       - len(head_sections))
+                       - 2 * len(head_sections))
     siblings = max(1, len(variable_sections))
     sections = []
     for head, item_lines in zip(head_sections, variable_sections):
@@ -507,7 +540,8 @@ def render_agent_assessment(children, workspace, *, report_path: str,
             item_lines, max(0, variable_budget) // siblings,
             lambda count: f"  [{count} findings omitted; "
                           "see recommendations.md]")
-        sections.append(head if not kept else "\n".join((head, *kept)))
+        # A blank line separates the fact lines from the item verdicts.
+        sections.append(head if not kept else "\n".join((head, "", *kept)))
     if dependency_details:
         committed = (sum(len(section.encode("utf-8")) for section in sections)
                      + len(trailer.encode("utf-8"))

@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from . import contracts as C
 from .project_facts import (
     check_facts,
+    detail_atoms,
     detail_lines,
     summary_atoms,
     terminal_width,
@@ -186,12 +187,15 @@ def _file_groups(result: C.InitResult, rules: object,
 
 def _file_lines(result: C.InitResult, rules: object, width: int) -> list[str]:
     lines: list[str] = []
+    last_source: str | None = None
     for source, action, targets in _file_groups(result, rules):
+        shown_source = "" if source == last_source else source
+        last_source = source
         shown = [target for target in targets if target]
         if not shown:
-            lines.append(f"{source:<10} {action}")
+            lines.append(f"  {shown_source:<10} {action}")
             continue
-        prefix = f"{source:<10} {action:<10} "
+        prefix = f"{shown_source:<10} {action:<10} "
         hang = " " * len(prefix)
         lines.extend(wrap_atoms(shown, width, indent="  " + prefix,
                                 hang="  " + hang, sep=", "))
@@ -213,18 +217,14 @@ def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
 def _project_fact_lines(facts: Mapping[str, object], width: int) -> list[str]:
     project = terminal_text(facts.get("project", "."))
     runner = terminal_text(facts.get("runner", "unknown"))
-    prefix = f"  {project}  {runner}  "
+    prefix = f"  {project:<6}{runner}  "
     hang = " " * len(prefix)
-    lines = wrap_atoms(summary_atoms(facts), width, indent=prefix, hang=hang)
+    atoms = [terminal_text(atom) for atom in summary_atoms(facts)]
+    lines = wrap_atoms(atoms, width, indent=prefix, hang=hang)
     for detail in detail_lines(facts):
-        if ", " in detail and detail.startswith("full suite = "):
-            head, rest = detail.split(" = ", 1)
-            parts = rest.split(", ")
-            atoms = [f"{head} = {parts[0]}"] + parts[1:]
-            lines.extend(wrap_atoms(atoms, width, indent=hang, hang=hang,
-                                    sep=", "))
-        else:
-            lines.extend(wrap_words(detail, width, indent=hang, hang=hang))
+        atoms = [terminal_text(atom) for atom in detail_atoms(detail)]
+        lines.extend(wrap_atoms(atoms, width, indent=hang, hang=hang,
+                                sep=" "))
     return lines
 
 
@@ -270,22 +270,19 @@ def render_init(result: C.InitResult, rules: object = None, *,
     resolved = terminal_width(width)
     lines = _banner_lines(repo_name, color)
     lines.append(_header_line(result, rules, dry_run, repo_name))
-    body: list[str] = []
+    blocks: list[list[str]] = []
     projects = _project_lines(result, facts, resolved)
     if projects:
-        body.append("Projects")
-        body.extend(projects)
+        blocks.append(projects)
     if rules is not None:
         files = _file_lines(result, rules, resolved)
         if files:
-            body.append("Files")
-            body.extend(files)
+            blocks.append(files)
     if result.warnings:
-        body.append("Warnings")
-        body.extend(_warning_lines(result, resolved))
-    if body:
+        blocks.append(_warning_lines(result, resolved))
+    for block in blocks:
         lines.append("")
-        lines.extend(body)
+        lines.extend(block)
     if len(lines) > _MAX_BODY_LINES:
         omitted = len(lines) - _MAX_BODY_LINES
         lines = lines[:_MAX_BODY_LINES] + [
@@ -382,7 +379,6 @@ def render_init_footer(result: C.InitResult, rules: object = None, *,
     if steps:
         if lines:
             lines.append("")
-        lines.append("Next steps")
         lines.extend(f"  {step}" for step in steps)
     restart = _restart_line(result, rules, dry_run)
     if restart is not None:
