@@ -1961,6 +1961,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
     # worker count: an explicit -n N requests N, -n auto requests the
     # machine's max slots, both capped by ptest --workers. [runner] workers
     # is ignored for pytest xdist. Anything else requests one slot.
+    # Config -n N is unbounded, but the command summary and admission
+    # contracts cap workers/slots at 64, so the request is clamped to that
+    # ceiling before _summary/AdmissionRequest; the scheduler still grants
+    # min(requested, max_slots).
     # Scoped caller arguments join the runner args before admission (the
     # adapter binds them into the same native argv), so the tier sees the
     # same effective args the adapter will: a caller -n 0 serializes.
@@ -1982,6 +1986,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             requested_slots = 1
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
+        requested_slots = min(requested_slots, 64)
     else:
         requested_slots = 1 if (native_pytest and not advanced) else min(
             config.runner.workers,

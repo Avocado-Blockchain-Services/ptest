@@ -1275,6 +1275,26 @@ def test_parallel_request_workers_cap_limits_request(case):
             if code == "parallel-workers"] == []
 
 
+def test_parallel_oversized_request_caps_at_contract_ceiling(case):
+    """-n 100 is capped to 64 before summary/admission (no ValueError).
+
+    The scheduler then grants min(64, max_slots); the partial-grant reason
+    reports the capped request.
+    """
+    from ptest import executability as E
+
+    domain = case.domain(slots=2, jobs=2)
+    config = _xdist_project(case, domain, addopts="-n 100")
+    assert E.parallel_request(config).reason is None
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.granted_workers == 2
+    assert result.command.workers == 64
+    assert ("parallel-workers", "2 xdist workers (64 requested, 2 granted)") in (
+        _reason_messages(result))
+
+
 def test_caller_serial_spelling_keeps_qualified_project_serial(case):
     """A caller -n 0 serializes like a configured one (no admission error)."""
     domain = case.domain()
