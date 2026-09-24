@@ -10,6 +10,14 @@ import re
 from . import checklist as checklist_api
 from . import contracts as C
 from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
+from .project_facts import (
+    check_facts,
+    detail_lines,
+    summary_atoms,
+    terminal_width,
+    wrap_atoms,
+    wrap_words,
+)
 
 _STATIC_FINDINGS_CAVEAT = (
     "Static findings are hypotheses. No findings does not certify parallel safety. "
@@ -54,10 +62,19 @@ _AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
 # every project header, score line and the trailer are always kept.
 _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES = 512
 
-# Review-flow rationale prefixes live with the frozen interface in
-# agent_assessment; this module only reads them.
-_NA_REASON_MAX_CHARS = 160
+# Literal mirror of agent_assessment.PTEST_ANSWER_PREFIX (T3 never imports
+# it; T5 asserts equality). This module only reads the review-flow
+# rationale prefixes.
+PTEST_ANSWER_PREFIX = "Answered by ptest: "
 _ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z]+);")
+
+# Checklist rows rendered as a visible "parallel safety" group, with
+# PARALLEL-001 (added by the deterministic-items task) trailing it.
+_PARALLEL_SAFETY_IDS = frozenset({
+    "FIX-002", "DB-001", "DB-002", "CACHE-001",
+    "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
+})
+_PARALLEL_ITEM_ID = "PARALLEL-001"
 
 
 def _agent_assessment_prose(value: object) -> str:
@@ -199,38 +216,47 @@ def _assessment_runner(scope: str, workspace) -> str:
     return config.runner.kind.value
 
 
-def _execution_verdict_text(execution) -> str | None:
-    """Verdict for one public ``execution`` fact, or None when absent."""
-    if not isinstance(execution, dict):
+def _child_facts(child) -> dict | None:
+    """Validated facts dict for one child, or None to use ``execution``."""
+    if not isinstance(child, dict):
         return None
+    return check_facts(child.get("facts")) or None
+
+
+def _fallback_atoms(child) -> tuple[list[str], bool]:
+    """Summary atoms from ``child["execution"]``; bool is not-runnable."""
+    execution = child.get("execution") if isinstance(child, dict) else None
+    if not isinstance(execution, dict):
+        return ["runs: yes"], False
     status = execution.get("status")
     raw_detail = execution.get("detail", "")
     detail = _agent_assessment_prose(
         raw_detail if isinstance(raw_detail, str) else "")
-    if status == "executable":
-        return "ready"
-    if status == "caveat":
-        if detail:
-            return f"ready with caveats: {detail}"
-        return "ready with caveats"
+    raw_fix = execution.get("fix", "")
+    fix = _agent_assessment_prose(raw_fix if isinstance(raw_fix, str) else "")
     if status == "not-executable":
-        raw_fix = execution.get("fix", "")
-        fix = _agent_assessment_prose(
-            raw_fix if isinstance(raw_fix, str) else "")
         if fix:
-            return f"not runnable: {detail} — fix: {fix}"
-        return f"not runnable: {detail}"
-    return None
+            return [f"runs: no — {detail} → {fix}"], True
+        if detail:
+            return [f"runs: no — {detail}"], True
+        return ["runs: no"], True
+    return ["runs: yes"], False
 
 
-def _assessment_score_line(child) -> str:
-    """Score wording shared by every project block."""
-    rows = child.get("rows", []) if isinstance(child, dict) else []
-    if not isinstance(rows, list):
-        rows = []
-    not_applicable = sum(1 for row in rows
-                         if isinstance(row, dict)
-                         and row.get("status") == "not-applicable")
+def _child_fact_lines(child, width: int) -> tuple[list[str], bool]:
+    """Indented fact lines for one child; bool is not-runnable."""
+    facts = _child_facts(child)
+    if facts is None:
+        atoms, not_runnable = _fallback_atoms(child)
+        return wrap_atoms(atoms, width, indent="  ", hang="    "), not_runnable
+    lines = wrap_atoms(summary_atoms(facts), width, indent="  ", hang="    ")
+    for detail in detail_lines(facts):
+        lines.extend(wrap_words(detail, width, indent="    ", hang="    "))
+    return lines, not facts.get("runs", True)
+
+
+def _child_limitation_suffix(child) -> tuple[bool, bool]:
+    """(partial_evidence, not_runnable_from_execution)."""
     limitations = (child.get("limitations", [])
                    if isinstance(child, dict) else [])
     if not isinstance(limitations, list):
@@ -238,25 +264,40 @@ def _assessment_score_line(child) -> str:
     partial = any(isinstance(item, dict)
                   and item.get("code") == "partial-evidence"
                   for item in limitations)
-    suffix = ""
-    if not_applicable:
-        suffix += f"; {not_applicable} not applicable"
-    if partial:
-        suffix += "; partial evidence"
-    score = child.get("score") if isinstance(child, dict) else None
-    applicable = (score.get("applicable") if isinstance(score, dict)
-                  else None)
-    if (not isinstance(applicable, int) or isinstance(applicable, bool)
-            or applicable <= 0):
-        return "no applicable checks" + suffix
-    satisfied = score.get("satisfied", 0)
-    base = f"{satisfied} of {applicable} checks confirmed from evidence"
     execution = child.get("execution") if isinstance(child, dict) else None
-    if (isinstance(execution, dict)
-            and execution.get("status") == "not-executable"):
-        base = ("Checklist review only: " + base +
-                " (ptest cannot run this project yet)")
-    return base + suffix
+    not_runnable = (isinstance(execution, dict)
+                    and execution.get("status") == "not-executable")
+    return partial, not_runnable
+
+
+def _assessment_head_line(child, runner: str) -> str:
+    """Score header: scope, runner, ok/gap/unknown/n-a counts, suffixes."""
+    rows = child.get("rows", []) if isinstance(child, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    counts = {"satisfied": 0, "gap": 0, "unknown": 0, "not-applicable": 0}
+    for row in rows:
+        status = row.get("status") if isinstance(row, dict) else None
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts["unknown"] += 1
+    scope = (child.get("scope", "unknown")
+             if isinstance(child, dict) else "unknown")
+    head = (f"{terminal_text(scope)}  {terminal_text(runner)} · "
+            f"{counts['satisfied']} ok · {counts['gap']} gap · "
+            f"{counts['unknown']} unknown")
+    if counts["not-applicable"]:
+        head += f" · {counts['not-applicable']} n/a"
+    partial, _ = _child_limitation_suffix(child)
+    facts = _child_facts(child)
+    not_runnable = (not facts.get("runs", True)) if facts is not None else \
+        _fallback_atoms(child)[1]
+    if partial:
+        head += "   (partial evidence)"
+    if not_runnable:
+        head += ("   (checklist only: ptest cannot run this project yet)")
+    return head
 
 
 def _dropped_suffix(row: dict) -> str:
@@ -275,11 +316,125 @@ def _dropped_suffix(row: dict) -> str:
     return f" ({dropped} {noun} dropped)"
 
 
-def _assessment_item_lines(child, icons: dict) -> list[str]:
-    """One icon line per checklist item with its finding under each gap."""
+_FIRST_SENTENCE_RE = re.compile(r"[.?!](?=\s|$)")
+
+
+def _first_sentence(text: str) -> str:
+    """The model's first sentence, or the whole stripped text."""
+    match = _FIRST_SENTENCE_RE.search(text.strip())
+    if match is None:
+        return text.strip()
+    return text[:match.end()].strip()
+
+
+def _unknown_reason(row: dict, width: int, head: str) -> str:
+    """Short reason for one unknown row, word-cut to fit the line."""
+    rationale = row.get("rationale", "")
+    if not isinstance(rationale, str):
+        rationale = ""
+    if rationale.startswith(PTEST_ANSWER_PREFIX):
+        reason = _agent_assessment_prose(rationale[len(PTEST_ANSWER_PREFIX):])
+    elif rationale.startswith(FAILED_PREFIX):
+        reason = _agent_assessment_prose(
+            "review failed: " + rationale[len(FAILED_PREFIX):])
+    else:
+        reason = _first_sentence(_agent_assessment_prose(rationale))
+    room = width - len(head)
+    if room < 1:
+        return ""
+    return _truncate_words(reason, room)
+
+
+def _na_reason(row: dict, width: int, head: str) -> str:
+    """Short reason for one n/a row, word-cut to fit the line."""
+    rationale = row.get("rationale", "")
+    if not isinstance(rationale, str):
+        rationale = ""
+    for prefix in (SKIP_PREFIX, PTEST_ANSWER_PREFIX):
+        if rationale.startswith(prefix):
+            rationale = rationale[len(prefix):]
+            break
+    reason = _agent_assessment_prose(rationale)
+    room = width - len(head)
+    if room < 1:
+        return ""
+    return _truncate_words(reason, room)
+
+
+def _row_label(row: dict) -> str:
+    raw_label = row.get("label") or row.get("id")
+    label = _agent_assessment_prose(
+        raw_label if isinstance(raw_label, str) else "")
+    return label or "unknown"
+
+
+def _gap_lines(row: dict, by_id: dict, icons: dict, width: int) -> list[str]:
+    """One gap line plus the wrapped finding detail under it."""
+    label = _row_label(row)
+    lines = [f"{icons['gap']} {label}{_dropped_suffix(row)}"]
+    finding = by_id.get(row.get("id"))
+    if finding is None:
+        lines.append("      no finding recorded; see recommendations.md.")
+        return lines
+    summary = _agent_assessment_prose(finding.get("summary", ""))
+    change = _agent_assessment_prose(finding.get("suggested_change", ""))
+    if summary:
+        capped = _truncate_utf8_bytes(
+            summary, _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES)
+        lines.extend(wrap_words(capped, width, indent="      ",
+                                hang="      "))
+    if change:
+        capped = _truncate_utf8_bytes(
+            f"→ {change}", _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES)
+        lines.extend(wrap_words(capped, width, indent="      ",
+                                hang="      "))
+    return lines
+
+
+def _block_lines(rows: list[dict], by_id: dict, icons: dict,
+                 width: int) -> list[str]:
+    """Item lines for one group: satisfied columns, then one line per row."""
+    satisfied = [f"{icons['satisfied']} {_row_label(row)}"
+                 f"{_dropped_suffix(row)}"
+                 for row in rows if row.get("status") == "satisfied"]
+    lines = []
+    if satisfied:
+        lines.extend(wrap_atoms(satisfied, width, indent="  ", hang="  ",
+                                sep="  "))
+    for row in rows:
+        status = row.get("status")
+        if status == "satisfied":
+            continue
+        label = _row_label(row)
+        if status == "gap":
+            lines.extend(_gap_lines(row, by_id, icons, width))
+        elif status == "unknown":
+            head = f"{icons['unknown']} {label}  "
+            reason = _unknown_reason(row, width, head)
+            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
+                         if reason else f"{head.rstrip()}"
+                         f"{_dropped_suffix(row)}")
+        elif status == "not-applicable":
+            head = f"{icons['not-applicable']} {label}  "
+            reason = _na_reason(row, width, head)
+            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
+                         if reason else f"{head.rstrip()}"
+                         f"{_dropped_suffix(row)}")
+        else:
+            head = f"{icons['unknown']} {label}  "
+            reason = _unknown_reason(row, width, head)
+            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
+                         if reason else f"{head.rstrip()}"
+                         f"{_dropped_suffix(row)}")
+    return lines
+
+
+def _assessment_item_lines(child, icons: dict, width: int) -> list[str]:
+    """Compact item lines with the parallel-safety group set apart."""
     rows = child.get("rows", []) if isinstance(child, dict) else []
     if not isinstance(rows, list):
         rows = []
+    rows = [row for row in rows if isinstance(row, dict)]
     findings = child.get("findings", []) if isinstance(child, dict) else []
     by_id = {}
     if isinstance(findings, list):
@@ -287,75 +442,34 @@ def _assessment_item_lines(child, icons: dict) -> list[str]:
             if (isinstance(finding, dict)
                     and finding.get("id") not in by_id):
                 by_id[finding["id"]] = finding
-    lines = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        raw_label = row.get("label") or row.get("id")
-        label = _agent_assessment_prose(
-            raw_label if isinstance(raw_label, str) else "")
-        if not label:
-            label = "unknown"
-        status = row.get("status")
-        icon = icons.get(status, icons["unknown"])
-        if status == "satisfied":
-            suffix = _dropped_suffix(row)
-            if suffix:
-                lines.append(f"{icon} {label} — satisfied{suffix}")
-            else:
-                lines.append(f"{icon} {label}")
-        elif status == "gap":
-            lines.append(f"{icon} {label}{_dropped_suffix(row)}")
-            finding = by_id.get(row.get("id"))
-            if finding is None:
-                lines.append("  finding: no finding recorded; "
-                             "see recommendations.md.")
-            else:
-                summary = _agent_assessment_prose(
-                    finding.get("summary", ""))
-                change = _agent_assessment_prose(
-                    finding.get("suggested_change", ""))
-                lines.append(_truncate_utf8_bytes(
-                    f"  finding: {summary} Suggested change: {change}",
-                    _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES))
-        elif status == "unknown":
-            rationale = row.get("rationale", "")
-            if (isinstance(rationale, str)
-                    and rationale.startswith(FAILED_PREFIX)):
-                reason = _agent_assessment_prose(
-                    rationale[len(FAILED_PREFIX):])
-                lines.append(f"{icon} {label} — unknown "
-                             f"(review failed: {reason})"
-                             f"{_dropped_suffix(row)}")
-            else:
-                lines.append(f"{icon} {label} — unknown"
-                             f"{_dropped_suffix(row)}")
-        elif status == "not-applicable":
-            rationale = row.get("rationale", "")
-            if not isinstance(rationale, str):
-                rationale = ""
-            if rationale.startswith(SKIP_PREFIX):
-                rationale = rationale[len(SKIP_PREFIX):]
-            reason = _truncate_words(
-                _agent_assessment_prose(rationale), _NA_REASON_MAX_CHARS)
-            lines.append(f"{icon} {label} — n/a: {reason}"
-                         f"{_dropped_suffix(row)}")
-        else:
-            lines.append(f"{icons['unknown']} {label} — unknown"
-                         f"{_dropped_suffix(row)}")
+    main = [row for row in rows
+            if row.get("id") not in _PARALLEL_SAFETY_IDS
+            and row.get("id") != _PARALLEL_ITEM_ID]
+    safety = [row for row in rows
+              if row.get("id") in _PARALLEL_SAFETY_IDS]
+    parallel = [row for row in rows
+                if row.get("id") == _PARALLEL_ITEM_ID]
+    lines = _block_lines(main, by_id, icons, width)
+    if safety or parallel:
+        if lines:
+            lines.append("")
+        lines.append("  parallel safety")
+        lines.extend(_block_lines(safety + parallel, by_id, icons, width))
     return lines
 
 
 def render_agent_assessment(children, workspace, *, report_path: str,
-                            publication_status: str) -> str:
+                            publication_status: str,
+                            width: int | None = None) -> str:
     """Render one headed block per project with item verdicts and findings.
 
-    Each block carries the deterministic executability verdict, the
-    evidence-worded score, and one icon line per checklist item. Findings
-    sit directly under their gap line; citations live only in
+    Each block carries a score header, plain-language fact lines, and the
+    compact item verdicts. Findings sit directly under their gap line and
+    every unknown carries its short reason; citations live only in
     ``recommendations.md``. Terminal output never carries Markdown tables
     or HTML entities.
     """
+    resolved = terminal_width(width)
     icons = _assessment_icons()
     head_sections = []
     variable_sections = []
@@ -363,22 +477,17 @@ def render_agent_assessment(children, workspace, *, report_path: str,
         scope = (child.get("scope", "unknown")
                  if isinstance(child, dict) else "unknown")
         runner = _assessment_runner(scope, workspace)
-        head = [f"{terminal_text(scope)} ({terminal_text(runner)})"]
-        verdict = _execution_verdict_text(
-            child.get("execution") if isinstance(child, dict) else None)
-        if verdict is not None:
-            head.append(f"ptest: {verdict}")
-        head.append(_assessment_score_line(child))
+        fact_lines, _ = _child_fact_lines(child, resolved)
+        head = [_assessment_head_line(child, runner)]
+        head.extend(fact_lines)
         head_sections.append("\n".join(head))
-        variable_sections.append(_assessment_item_lines(child, icons))
+        variable_sections.append(
+            _assessment_item_lines(child, icons, resolved))
 
     dependency_details = _agent_dependency_detail_lines(children)
-    trailer = "\n".join((
-        f"Report: {terminal_text(report_path)} "
-        f"({terminal_text(publication_status)}). Citations, suggested "
-        "changes and verification steps are there.",
-        "Execution verification: not run.",
-    ))
+    trailer = (f"Report: {terminal_text(report_path)} "
+               f"({terminal_text(publication_status)}) — citations, fixes "
+               f"and verification steps.")
     # Headers, score lines and the trailer are mandatory: the variable item
     # and dependency lines share whatever the byte bound leaves over, split
     # evenly per project so one verbose child cannot crowd out the rest.

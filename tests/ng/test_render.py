@@ -40,23 +40,33 @@ def _aa_row(row_id, status, label=None, rationale=None, evidence="default"):
     return row
 
 
-def test_agent_assessment_renders_project_block_with_execution_score_and_items():
+def _aa_facts(**overrides):
+    facts = {
+        "project": "api", "runner": "pytest", "runs": True,
+        "runs_reason": None, "runs_fix": None,
+        "parallel": "4 workers (xdist, --dist loadgroup)",
+        "parallel_short": "4 workers", "parallel_fix": None,
+        "setup": "uv sync --locked",
+        "full_suite": 'your pytest config: -m "not slow"',
+        "full_blocked": None,
+    }
+    facts.update(overrides)
+    return facts
+
+
+def test_agent_assessment_renders_score_header_facts_and_items():
     child = {
         "scope": "api",
-        "execution": {"status": "executable", "detail": "ready",
-                     "fix": None},
-        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
+        "facts": _aa_facts(),
         "rows": [
             _aa_row("FIX-001", "satisfied", label="Test data factories"),
             _aa_row("FIX-002", "gap", label="Fixture state isolation",
                     rationale="Shares module-global state between tests."),
-            _aa_row("DB-001", "unknown",
+            _aa_row("CACHE-001", "unknown",
                     rationale="Review failed: timed out"),
-            _aa_row("DB-002", "not-applicable", label="Database isolation",
-                    rationale=("Skipped without a model call: no database "
-                               "library in pyproject.toml and no database "
-                               "configuration or usage in the admitted "
-                               "evidence.")),
+            _aa_row("SELECT-001", "not-applicable", label="Test selection",
+                    rationale=("Skipped without a model call: no selection "
+                               "for this runner.")),
         ],
         "findings": [{"id": "FIX-002",
                       "summary": "Share one module-global fixture.",
@@ -68,91 +78,96 @@ def test_agent_assessment_renders_project_block_with_execution_score_and_items()
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
-    assert "api (pytest)" in text
-    assert "ptest: ready" in text
-    assert "1 of 3 checks confirmed from evidence; 1 not applicable" in text
+    assert "api  pytest · 1 ok · 1 gap · 1 unknown · 1 n/a" in text
+    assert "  runs: yes · parallel: 4 workers · setup: uv sync" in text
+    assert 'full suite = your pytest config: -m "not slow"' in text
     assert "✓ Test data factories" in text
+    assert "— satisfied" not in text
     assert "✗ Fixture state isolation" in text
-    assert ("  finding: Share one module-global fixture. Suggested change: "
-            "Build a per-test factory.") in text
-    assert "? DB-001 — unknown (review failed: timed out)" in text
-    assert ("– Database isolation — n/a: no database library in "
-            "pyproject.toml and no database configuration or usage in the "
-            "admitted evidence.") in text
+    assert "      Share one module-global fixture." in text
+    assert "      → Build a per-test factory." in text
+    assert "? CACHE-001  review failed: timed out" in text
+    assert ("– Test selection  no selection "
+            "for this runner.") in text
     assert "Skipped without a model call" not in text
     assert "test_example" not in text
-    assert "recommendations.md" in text
-    assert "Execution verification: not run." in text
+    assert ("Report: recommendations.md (created) — citations, fixes and "
+            "verification steps.") in text
     assert "Project |" not in text
     for leaked in ("&#", "&lt;", "&gt;", "&amp;"):
         assert leaked not in text
 
 
-def test_agent_assessment_reports_caveat_verdict():
+def test_agent_assessment_golden_o4_shape_at_width_90():
+    """Spec O.4 example: 5 ok, 1 gap, 5 unknown, partial evidence."""
     child = {
-        "scope": "web",
-        "execution": {
-            "status": "caveat",
-            "detail": ("exclusive: Vitest runs as one command and manages "
-                       "its own workers"),
-            "fix": None,
-        },
-        "score": {"satisfied": 2, "applicable": 2, "percent": 100},
+        "scope": "api",
+        "facts": _aa_facts(),
         "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
             _aa_row("SELECT-001", "satisfied", label="Test selection"),
-            _aa_row("TIMING-001", "satisfied", label="Test timing"),
+            _aa_row("FIX-002", "satisfied", label="Fixture state isolation"),
+            _aa_row("DB-001", "satisfied", label="Database setup reuse"),
+            _aa_row("CACHE-001", "satisfied", label="Cache isolation"),
+            _aa_row("RESOURCE-001", "gap", label="Files and ports",
+                    rationale="Writes outside the owned temp root."),
+            _aa_row("NETWORK-001", "unknown", label="Network isolation",
+                    rationale=("The tests use httpx but no socket block was "
+                               "cited. More evidence is needed.")),
+            _aa_row("PROCESS-001", "unknown", label="Child processes",
+                    rationale=("Answered by ptest: no subprocess usage in "
+                               "the admitted excerpts")),
+            _aa_row("TIME-001", "unknown", label="Deterministic time",
+                    rationale="Review failed: timed out"),
+            _aa_row("DB-002", "unknown", label="Database isolation",
+                    rationale="Row DB-002 judged unknown against excerpts."),
+            _aa_row("TIMING-001", "unknown", label="Test timing",
+                    rationale=("Answered by ptest: no timing history yet: "
+                               "run ptest --full once")),
         ],
-        "findings": [],
-        "limitations": [],
+        "findings": [{"id": "RESOURCE-001",
+                      "summary": "Writes reach /tmp directly.",
+                      "suggested_change": "Allocate an owned temp root.",
+                      "recipe_id": None,
+                      "evidence": [_aa_citation()]}],
+        "limitations": [{"code": "partial-evidence",
+                         "message": "Bounded evidence was omitted.",
+                         "paths": []}],
     }
+    child["rows"][2]["dropped_citations"] = 1
 
     text = render_agent_assessment(
-        [child], _aa_workspace(declaration="web", runner="vitest"),
-        report_path="recommendations.md", publication_status="created")
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
 
-    assert "web (vitest)" in text
-    assert ("ptest: ready with caveats: exclusive: Vitest runs as one "
-            "command and manages its own workers") in text
-    assert "2 of 2 checks confirmed from evidence" in text
+    assert ("api  pytest · 5 ok · 1 gap · 5 unknown"
+            "   (partial evidence)") in text
+    assert "  parallel safety" in text
+    assert ("? Network isolation  The tests use httpx but no socket block "
+            "was cited.") in text
+    assert "? Child processes  no subprocess usage in" in text
+    assert "Answered by ptest" not in text
+    assert "? Deterministic time  review failed: timed out" in text
+    assert ("? Test timing  no timing history yet: run ptest --full "
+            "once") in text
+    assert "✗ Files and ports" in text
+    assert "→ Allocate an owned temp root." in text
+    assert "(1 citation dropped)" in text
+    # satisfied main rows lead, then the safety group with its gap row
+    assert text.index("✓ Test data factories") < text.index("parallel safety")
+    assert text.index("parallel safety") < text.index("✗ Files and ports")
 
 
-def test_agent_assessment_not_executable_uses_checklist_only_score_line():
+def test_agent_assessment_falls_back_to_execution_without_facts():
     child = {
         "scope": "api",
         "execution": {
             "status": "not-executable",
-            "detail": "pytest addopts enable xdist, which ptest runs serially",
-            "fix": 'add "-n", "0" to [runner] args in api/.ptest.toml',
+            "detail": "no tests found",
+            "fix": "add a test file",
         },
-        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
-        "rows": [
-            _aa_row("FIX-001", "satisfied", label="Test data factories"),
-            _aa_row("FIX-002", "gap", label="Fixture state isolation"),
-            _aa_row("DB-001", "unknown",
-                    rationale="Row DB-001 judged unknown."),
-        ],
-        "findings": [],
-        "limitations": [],
-    }
-
-    text = render_agent_assessment(
-        [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
-
-    assert ("ptest: not runnable: pytest addopts enable xdist, which ptest "
-            "runs serially — fix: ") in text
-    assert 'add "-n", "0" to [runner] args in api/.ptest.toml' in text
-    assert ("Checklist review only: 1 of 3 checks confirmed from evidence "
-            "(ptest cannot run this project yet)") in text
-    assert "no finding recorded; see recommendations.md" in text
-
-
-def test_agent_assessment_omits_execution_without_facts_and_falls_back_to_ids():
-    child = {
-        "scope": "api",
-        "score": None,
         "rows": [
             _aa_row("FIX-001", "satisfied"),
             _aa_row("DB-001", "unknown",
@@ -164,23 +179,23 @@ def test_agent_assessment_omits_execution_without_facts_and_falls_back_to_ids():
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
-    assert "api (pytest)" in text
-    assert "ptest:" not in text
-    assert "no applicable checks" in text
+    assert "api  pytest · 1 ok · 0 gap · 1 unknown" in text
+    assert "runs: no — no tests found → add a test file" in text
+    assert "checklist only: ptest cannot run this project yet" in text
     assert "✓ FIX-001" in text
-    assert "? DB-001 — unknown" in text
+    assert "? DB-001  Row DB-001 judged unknown." in text
     assert "(review failed" not in text
 
 
-def test_agent_assessment_bounds_skip_reasons_to_160_chars():
+def test_agent_assessment_unknown_model_uses_first_sentence():
     child = {
         "scope": "api",
-        "score": None,
         "rows": [
-            _aa_row("DB-002", "not-applicable", label="Database isolation",
-                    rationale="Skipped without a model call: " + "x" * 200),
+            _aa_row("DB-001", "unknown",
+                    rationale=("First finding sentence. Second sentence "
+                               "with detail.")),
         ],
         "findings": [],
         "limitations": [],
@@ -188,25 +203,64 @@ def test_agent_assessment_bounds_skip_reasons_to_160_chars():
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
-    line = next(line for line in text.splitlines() if "n/a:" in line)
-    # Spaceless text has no word boundary: hard cut plus the marker,
-    # still within the 160-char bound.
-    assert line == "– Database isolation — n/a: " + "x" * 159 + "…"
+    assert "? DB-001  First finding sentence." in text
+    assert "Second sentence" not in text
+
+
+def test_agent_assessment_parallel_item_follows_safety_group():
+    child = {
+        "scope": "api",
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "satisfied",
+                    label="Fixture state isolation"),
+            _aa_row("PARALLEL-001", "gap", label="Parallel execution",
+                    rationale="Serial fallback."),
+        ],
+        "findings": [{"id": "PARALLEL-001", "summary": "Runs serially.",
+                      "suggested_change": "Enable xdist.",
+                      "recipe_id": None,
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
+
+    assert "  parallel safety" in text
+    assert text.index("parallel safety") < text.index("✗ Parallel execution")
+    assert "→ Enable xdist." in text
+
+
+def test_agent_assessment_no_safety_header_without_safety_rows():
+    child = {
+        "scope": "api",
+        "rows": [_aa_row("FIX-001", "satisfied",
+                         label="Test data factories")],
+        "findings": [],
+        "limitations": [],
+    }
+
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
+
+    assert "parallel safety" not in text
 
 
 def test_agent_assessment_no_color_uses_bracket_icons(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     child = {
         "scope": "api",
-        "score": {"satisfied": 1, "applicable": 3, "percent": 33},
         "rows": [
             _aa_row("FIX-001", "satisfied", label="Test data factories"),
             _aa_row("FIX-002", "gap", label="Fixture state isolation"),
             _aa_row("DB-001", "unknown",
                     rationale="Review failed: timed out"),
-            _aa_row("DB-002", "not-applicable", label="Database isolation",
+            _aa_row("SELECT-001", "not-applicable", label="Test selection",
                     rationale="Skipped without a model call: no cache."),
         ],
         "findings": [],
@@ -215,12 +269,12 @@ def test_agent_assessment_no_color_uses_bracket_icons(monkeypatch):
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
     assert "[ok] Test data factories" in text
     assert "[gap] Fixture state isolation" in text
-    assert "[?] DB-001 — unknown (review failed: timed out)" in text
-    assert "[n/a] Database isolation — n/a:" in text
+    assert "[?] DB-001  review failed: timed out" in text
+    assert "[n/a] Test selection  no cache." in text
     assert "✓" not in text
     assert "✗" not in text
     assert "–" not in text
@@ -233,10 +287,9 @@ def test_agent_assessment_neutralizes_hostile_model_text():
                "&#40;45%&#41; &amp; done")
     child = {
         "scope": "api",
-        "score": {"satisfied": 0, "applicable": 1, "percent": 0},
-        "rows": [_aa_row("FIX-002", "gap", label="Fixture | `isolation`",
+        "rows": [_aa_row("RESOURCE-001", "gap", label="Fixture | `isolation`",
                          rationale="gap", evidence=[])],
-        "findings": [{"id": "FIX-002", "summary": summary,
+        "findings": [{"id": "RESOURCE-001", "summary": summary,
                       "suggested_change": "Apply the packaged recipe.",
                       "recipe_id": "factories",
                       "evidence": [_aa_citation()]}],
@@ -245,7 +298,7 @@ def test_agent_assessment_neutralizes_hostile_model_text():
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
     assert "alert(1)" in text
     assert "details" in text
@@ -260,7 +313,6 @@ def test_agent_assessment_neutralizes_hostile_model_text():
 def test_agent_assessment_dependency_wording_passes_through_verbatim():
     child = {
         "scope": "api",
-        "score": {"satisfied": 1, "applicable": 1, "percent": 100},
         "rows": [_aa_row("FIX-001", "satisfied",
                          label="Test data factories")],
         "findings": [],
@@ -280,20 +332,16 @@ def test_agent_assessment_dependency_wording_passes_through_verbatim():
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
+        publication_status="created", width=90)
 
-    assert "1 of 1 checks confirmed from evidence; partial evidence" in text
+    assert "1 ok · 0 gap · 0 unknown   (partial evidence)" in text
     details = text[text.index("Dependencies:"):text.index("Report:")]
     assert ("uv.lock is present but was not admitted to the review packet"
             in details)
     assert "package-lock.json is missing" in details
-    assert text.index("api (pytest)") < text.index("Dependencies:")
+    assert text.index("api  pytest") < text.index("Dependencies:")
     assert (text.index("Dependencies:")
-            < text.index("Report: recommendations.md (created). Citations, "
-                         "suggested changes and verification steps are "
-                         "there."))
-    assert (text.index("Report:") <
-            text.index("Execution verification: not run."))
+            < text.index("Report: recommendations.md (created)"))
     assert len(text.encode("utf-8")) <= 256 * 1024
 
 
@@ -304,19 +352,20 @@ def test_agent_assessment_header_names_runner_or_unknown():
             selection=SimpleNamespace(enabled=True)),
         config_problem=None),))
     child = {
-        "scope": ".", "score": None, "rows": [], "findings": [],
+        "scope": ".", "rows": [], "findings": [],
         "limitations": [],
     }
 
     text = render_agent_assessment(
         [child], standalone, report_path="recommendations.md",
-        publication_status="created")
-    assert ". (pytest)" in text
+        publication_status="created", width=90)
+    assert ".  pytest · 0 ok · 0 gap · 0 unknown" in text
 
     mismatched = render_agent_assessment(
         [{**child, "scope": "other"}], _aa_workspace(),
-        report_path="recommendations.md", publication_status="created")
-    assert "other (unknown)" in mismatched
+        report_path="recommendations.md", publication_status="created",
+        width=90)
+    assert "other  unknown · 0 ok" in mismatched
 
 
 def test_agent_assessment_output_bounded_and_lists_every_scope():
@@ -335,9 +384,8 @@ def test_agent_assessment_output_bounded_and_lists_every_scope():
     )
     children = [{
         "scope": f"child-{index:03d}",
-        "execution": {"status": "executable", "detail": "ready",
-                     "fix": None},
-        "score": {"satisfied": 11, "applicable": 11, "percent": 100},
+        "facts": {"project": f"child-{index:03d}", "runner": "pytest",
+                  "runs": True},
         "rows": [_aa_row(row_id, "satisfied", label=label)
                  for row_id, label in ids_labels],
         "findings": [],
@@ -346,14 +394,15 @@ def test_agent_assessment_output_bounded_and_lists_every_scope():
 
     text = render_agent_assessment(
         children, SimpleNamespace(repositories=()),
-        report_path="recommendations.md", publication_status="created")
+        report_path="recommendations.md", publication_status="created",
+        width=90)
 
     assert len(text.encode("utf-8")) <= 256 * 1024
     for index in range(256):
-        assert f"child-{index:03d} (unknown)" in text
-    assert text.count("11 of 11 checks confirmed from evidence") == 256
+        assert f"child-{index:03d}  unknown · 11 ok" in text
+    assert text.count("11 ok · 0 gap · 0 unknown") == 256
     assert "recommendations.md" in text
-    assert text.rstrip().endswith("Execution verification: not run.")
+    assert text.rstrip().endswith("and verification steps.")
 
 
 def test_agent_assessment_oversized_input_keeps_every_scope_and_trailer():
@@ -362,9 +411,8 @@ def test_agent_assessment_oversized_input_keeps_every_scope_and_trailer():
                "SELECT-001", "TIMING-001")
     children = [{
         "scope": f"proj-{index:03d}",
-        "execution": {"status": "executable", "detail": "ready",
-                      "fix": None},
-        "score": {"satisfied": 0, "applicable": 11, "percent": 0},
+        "facts": {"project": f"proj-{index:03d}", "runner": "pytest",
+                  "runs": True},
         "rows": [_aa_row(row_id, "gap") for row_id in gap_ids],
         "findings": [{"id": row_id, "summary": "s" * 1024,
                       "suggested_change": "c" * 1024} for row_id in gap_ids],
@@ -373,15 +421,15 @@ def test_agent_assessment_oversized_input_keeps_every_scope_and_trailer():
 
     text = render_agent_assessment(
         children, SimpleNamespace(repositories=()),
-        report_path="recommendations.md", publication_status="created")
+        report_path="recommendations.md", publication_status="created",
+        width=90)
 
     assert len(text.encode("utf-8")) <= 256 * 1024
     for index in range(60):
-        assert f"proj-{index:03d} (unknown)" in text
-    assert text.count("0 of 11 checks confirmed from evidence") == 60
+        assert f"proj-{index:03d}  unknown · 0 ok · 11 gap" in text
     assert "findings omitted; see recommendations.md" in text
     assert "recommendations.md" in text
-    assert text.rstrip().endswith("Execution verification: not run.")
+    assert text.rstrip().endswith("and verification steps.")
 
 
 def test_render_json_uses_shared_descriptor_and_never_exposes_argv():
@@ -888,12 +936,14 @@ def test_finding_line_truncates_at_word_boundary_with_ellipsis():
     }
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
-    line = next(item for item in text.splitlines()
-                if item.startswith("  finding:"))
-    assert "[truncated]" not in line
-    assert line.endswith("…")
-    assert len(line.encode("utf-8")) <= 512
+        publication_status="created", width=90)
+    wrapped = [item for item in text.splitlines()
+               if item.startswith("      word")]
+    assert wrapped
+    assert "[truncated]" not in "".join(wrapped)
+    content = " ".join(item.strip() for item in wrapped)
+    assert len(content.encode("utf-8")) <= 512
+    line = content
     # Word-boundary cut: the token before the ellipsis is a whole source word
     # (a mid-word cut would leave a fragment like "wor").
     import re
@@ -936,10 +986,9 @@ def test_assessment_item_line_shows_dropped_citations():
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    assert ("✓ Database isolation — satisfied "
-            "(2 citations dropped)") in text
+    assert "✓ Database isolation (2 citations dropped)" in text
     assert "✓ Plain label" in text
-    assert "Plain label —" not in text
+    assert "— satisfied" not in text
 
 
 def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
@@ -956,7 +1005,7 @@ def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    assert ("[ok] Database isolation — satisfied "
+    assert ("[ok] Database isolation "
             "(1 citation dropped)") in text
     assert "✓" not in text
 
@@ -976,8 +1025,9 @@ def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
     }
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created")
-    line = next(item for item in text.splitlines() if "n/a:" in item)
+        publication_status="created", width=90)
+    line = next(item for item in text.splitlines()
+                if item.startswith("– Database isolation"))
     assert line.endswith("…")
     assert "[truncated]" not in line
     import re

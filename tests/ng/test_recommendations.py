@@ -107,7 +107,8 @@ LABELS = {
 
 
 def _child(rows=None, findings=None, scope="child-a",
-           packet_sha=PACKET_SHA, project_id=PROJECT_ID, execution=None):
+           packet_sha=PACKET_SHA, project_id=PROJECT_ID, execution=None,
+           facts=None):
     rows = _mixed_rows() if rows is None else rows
     if findings is None:
         findings = [_finding("FIX-002")]
@@ -117,7 +118,23 @@ def _child(rows=None, findings=None, scope="child-a",
              "findings": findings, "limitations": []}
     if execution is not None:
         child["execution"] = execution
+    if facts is not None:
+        child["facts"] = facts
     return child
+
+
+def _api_facts(**overrides):
+    facts = {
+        "project": "api", "runner": "pytest", "runs": True,
+        "runs_reason": None, "runs_fix": None,
+        "parallel": "4 workers (xdist, --dist loadgroup)",
+        "parallel_short": "4 workers", "parallel_fix": None,
+        "setup": "uv sync --locked",
+        "full_suite": 'your pytest config: -m "not slow"',
+        "full_blocked": None,
+    }
+    facts.update(overrides)
+    return facts
 
 
 def _run(children=None, provider=None, limitations=None):
@@ -247,36 +264,43 @@ def test_render_gap_heading_carries_id_and_label():
     assert "## FIX-002 Fixture state isolation" in out
 
 
-def test_render_project_section_starts_with_execution_fact():
+def test_render_project_section_starts_with_plain_language_facts():
     from ptest.recommendations import render_recommendations
-    execution = {
-        "status": "caveat",
-        "detail": ("exclusive: Vitest runs as one command and manages "
-                   "its own workers"),
-        "fix": None,
-    }
     out = render_recommendations(
-        _run(children=[_child(execution=execution)])).decode("utf-8")
+        _run(children=[_child(facts=_api_facts())])).decode("utf-8")
     scope_at = out.index("## Scope child-a")
-    execution_at = out.index(
-        "Execution: ready with caveats: exclusive: Vitest runs as one "
-        "command and manages its own workers.")
+    runs_at = out.index("- runs: yes")
     packet_at = out.index("Packet:")
-    assert scope_at < execution_at < packet_at
+    assert scope_at < runs_at < packet_at
+    assert "- parallel: 4 workers (xdist, --dist loadgroup)" in out
+    assert "- setup: uv sync --locked (ptest runs it when needed)" in out
+    assert '- full suite = your pytest config: -m "not slow"' in out
+    assert "Execution:" not in out
 
-    blocked = _child(execution={
-        "status": "not-executable",
-        "detail": "pytest addopts enable xdist, which ptest runs serially",
-        "fix": 'add "-n", "0" to [runner] args in api/.ptest.toml',
-    })
+    blocked = _child(
+        execution={
+            "status": "not-executable",
+            "detail": "no tests found",
+            "fix": "add a test file",
+        },
+        facts={"project": "api", "runner": "pytest", "runs": "yes",
+               "bogus": True},
+    )
     blocked_out = render_recommendations(
         _run(children=[blocked])).decode("utf-8")
-    assert ("Execution: not runnable: pytest addopts enable xdist, which "
-            "ptest runs serially — fix: ") in blocked_out
-    assert 'add "-n", "0" to [runner] args in api/.ptest.toml' in blocked_out
+    assert "- runs: no — no tests found → add a test file" in blocked_out
+
+    fallback = _child(execution={
+        "status": "not-executable",
+        "detail": "no tests found",
+        "fix": "add a test file",
+    })
+    fallback_out = render_recommendations(
+        _run(children=[fallback])).decode("utf-8")
+    assert "- runs: no — no tests found → add a test file" in fallback_out
 
     unrecorded = render_recommendations(_run()).decode("utf-8")
-    assert "Execution: not recorded." in unrecorded
+    assert "- runs: not recorded" in unrecorded
 
 
 def test_render_skip_and_failed_rows_use_report_wording():
@@ -294,8 +318,34 @@ def test_render_skip_and_failed_rows_use_report_wording():
                 ("FIX-001", "DB-001", "DB-002"))
     out = render_recommendations(
         _run(children=[_child(rows=rows)])).decode("utf-8")
-    assert "unknown (review failed: timed out)" in out
+    assert "Status: unknown.\n\nReason: review failed: timed out" in out
     assert "not applicable (skipped without a model call)" in out
+
+
+def test_render_unknown_rows_report_reason_and_ptest_note():
+    from ptest.recommendations import render_recommendations
+    rows = [_row("DB-001", "unknown",
+                 rationale=("Answered by ptest: no timing history yet: "
+                            "run ptest --full once"), evidence=[])]
+    rows += [_row(row_id, "satisfied") for row_id in CHECKLIST_IDS
+             if row_id != "DB-001"]
+    out = render_recommendations(
+        _run(children=[_child(rows=rows, findings=[])])).decode("utf-8")
+    assert ("Reason: no timing history yet: run ptest --full once") in out
+    assert "Answered by ptest" not in out
+    assert "(answered by ptest without a model call)" in out
+
+
+def test_render_parallel_safety_group_before_parallel_item():
+    from ptest.recommendations import render_recommendations
+    rows = [_row("FIX-001", "satisfied")]
+    rows += [_row("PARALLEL-001", "gap", rationale="Serial fallback.",
+                  evidence=[_citation()])]
+    findings = [_finding("PARALLEL-001", recipe=None)]
+    out = render_recommendations(
+        _run(children=[_child(rows=rows, findings=findings)])).decode("utf-8")
+    assert "## Parallel safety" in out
+    assert out.index("## Parallel safety") < out.index("## PARALLEL-001")
 
 
 def test_render_rejects_bad_label_and_execution_shapes():
