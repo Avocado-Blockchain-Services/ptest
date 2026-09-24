@@ -1353,3 +1353,33 @@ def test_render_still_rejects_non_normalized_limitation_paths(path):
                   "paths": [path]}
     with pytest.raises(Problem, match="report-invalid"):
         render_recommendations(_run(limitations=[limitation]))
+
+
+# --- Round 17 twins: dropped-citation counts surfaced per item --------------
+
+
+def test_render_surfaces_dropped_citation_count_per_item():
+    from ptest.recommendations import render_recommendations
+
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], dropped_citations=2)
+    out = render_recommendations(_run(children=[_child(rows=rows)])).decode(
+        "utf-8")
+    assert "2 invalid citations dropped" in out
+
+
+def test_render_singular_dropped_citation_count():
+    from ptest.recommendations import render_recommendations
+
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], dropped_citations=1)
+    out = render_recommendations(_run(children=[_child(rows=rows)])).decode(
+        "utf-8")
+    assert "1 invalid citation dropped" in out
+
+
+def test_render_without_dropped_counts_names_no_drops():
+    from ptest.recommendations import render_recommendations
+
+    out = render_recommendations(_run()).decode("utf-8")
+    assert "invalid citation" not in out

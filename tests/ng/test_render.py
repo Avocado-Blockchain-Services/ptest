@@ -191,7 +191,9 @@ def test_agent_assessment_bounds_skip_reasons_to_160_chars():
         publication_status="created")
 
     line = next(line for line in text.splitlines() if "n/a:" in line)
-    assert line == "– Database isolation — n/a: " + "x" * 160
+    # Spaceless text has no word boundary: hard cut plus the marker,
+    # still within the 160-char bound.
+    assert line == "– Database isolation — n/a: " + "x" * 159 + "…"
 
 
 def test_agent_assessment_no_color_uses_bracket_icons(monkeypatch):
@@ -864,3 +866,60 @@ def test_assessment_prompt_preserves_direct_report_callers_and_copies_readiness(
     assert [item["area"] for item in context["readiness"]] == [
         "execution", "parallel", "selection", "timing"]
     assert context["readiness"][2]["state"] == "blocked"
+
+
+# --- Round 17 twins: word-boundary truncation with ellipsis -----------------
+
+
+def test_finding_line_truncates_at_word_boundary_with_ellipsis():
+    from ptest.render import render_agent_assessment
+
+    words = " ".join(f"word{i:03d}" for i in range(200))
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 0, "applicable": 1, "percent": 0},
+        "rows": [_aa_row("FIX-002", "gap", label="Fixture state isolation",
+                         rationale="Shares state.")],
+        "findings": [{"id": "FIX-002", "summary": words,
+                      "suggested_change": "Apply the packaged recipe.",
+                      "recipe_id": "factories",
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+    line = next(item for item in text.splitlines()
+                if item.startswith("  finding:"))
+    assert "[truncated]" not in line
+    assert line.endswith("…")
+    assert len(line.encode("utf-8")) <= 512
+    # Word-boundary cut: the token before the ellipsis is a whole source word
+    # (a mid-word cut would leave a fragment like "wor").
+    import re
+
+    assert re.fullmatch(r"word\d{3}", line[:-1].rsplit(" ", 1)[-1])
+
+
+def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
+    from ptest.render import render_agent_assessment
+
+    rationale = " ".join(f"token{i:03d}" for i in range(100))
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 0, "applicable": 0, "percent": 0},
+        "rows": [_aa_row("DB-002", "not-applicable",
+                         label="Database isolation", rationale=rationale,
+                         evidence=[])],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created")
+    line = next(item for item in text.splitlines() if "n/a:" in item)
+    assert line.endswith("…")
+    assert "[truncated]" not in line
+    import re
+
+    assert re.fullmatch(r"token\d{3}", line[:-1].rsplit(" ", 1)[-1])

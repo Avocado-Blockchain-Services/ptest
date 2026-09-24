@@ -1707,14 +1707,13 @@ def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
         "not-json": "not JSON",
         "extra-key": "carries an unknown field",
         "missing-key": "missing 'finding'",
-        "outside-subset": (
-            "evidence[0] cites evidence outside the item subset"),
+        "outside-subset": "no valid citations",
         "gap-without-finding": "gap reply needs a finding",
         "satisfied-with-finding": "non-gap reply must carry finding null",
         "injected-failed-prefix": "rationale carries untrusted model content",
         "untrusted-prose": "rationale carries untrusted model content",
         "na-too-brief": "needs a specific not-applicable rationale",
-        "satisfied-no-citation": "needs at least one citation",
+        "satisfied-no-citation": "no valid citations",
         "unhashable-status-list": "has an unknown status",
         "unhashable-status-dict": "has an unknown status",
         "non-string-status-int": "has an unknown status",
@@ -1988,8 +1987,7 @@ def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
     child = AA.assemble_child(packet, reviews, replies)
     row = next(r for r in child.rows if r.id == target.item_id)
     assert (row.status, row.rationale) == (
-        "unknown", AA.FAILED_PREFIX + "invalid reply: "
-        "evidence[0] cites evidence outside the item subset")
+        "unknown", AA.FAILED_PREFIX + "invalid reply: no valid citations")
 
 
 # --- T4: chain through the real provider launcher ---------------------------------
@@ -2214,3 +2212,206 @@ def test_citation_to_empty_file_excluded_at_admission(tmp_path):
     row = next(r for r in child.rows if r.id == target.item_id)
     assert row.status == "unknown"
     assert row.rationale.startswith(AA.FAILED_PREFIX + "invalid reply")
+
+
+# --- Round 17 twins: backtick normalization, per-citation drops ------------
+
+
+def _r17_reply(packet, review, *, rationale, evidence, status="satisfied",
+               finding=None):
+    return json.dumps({"status": status, "rationale": rationale,
+                       "evidence": evidence, "finding": finding}).encode()
+
+
+def _r17_assemble(packet, reviews, target, payload):
+    from ptest import agent_assessment as AA
+
+    child = AA.assemble_child(
+        packet, reviews,
+        tuple(payload if review.item_id == target.item_id
+              else (None if review.request is None
+                    else _satisfied_reply(packet, review))
+              for review in reviews))
+    return next(r for r in child.rows if r.id == target.item_id)
+
+
+def test_backtick_prose_passes_and_is_stored_without_backticks(tmp_path):
+    """Inline code like `db_session` normalizes to plain text, not a failure."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="The db_session fixture from `db_session` "
+                             "isolates each test with a savepoint rollback.",
+                   evidence=[good]))
+    assert row.status == "satisfied"
+    assert "`" not in row.rationale
+    assert "db_session" in row.rationale
+    assert row.dropped_citations == 0
+
+
+def test_command_shape_after_backtick_strip_stays_rejected(tmp_path):
+    """Stripping backticks must not launder a command shape like `pytest -x`."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="Run `pytest -x` to confirm the isolation.",
+                   evidence=[good]))
+    assert row.status == "unknown"
+    assert row.rationale == (
+        AA.FAILED_PREFIX + "invalid reply: "
+        "rationale carries untrusted model content")
+
+
+def test_link_after_backtick_strip_stays_rejected(tmp_path):
+    """A Markdown link stays rejected with or without backticks nearby."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="See `db_session` and [docs](https://invalid.test/x).",
+                   evidence=[good]))
+    assert row.status == "unknown"
+    assert row.rationale == (
+        AA.FAILED_PREFIX + "invalid reply: "
+        "rationale carries untrusted model content")
+
+
+def test_mixed_citations_keep_valid_and_count_dropped(tmp_path):
+    """One valid citation among invalid ones keeps the row, minus the bad."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    excerpt = next(e for e in packet.excerpts
+                   if e.path == target.excerpt_paths[0])
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    stale = dict(good, sha256="0" * 64)
+    escaped = dict(good, start_line=excerpt.start_line,
+                   end_line=excerpt.end_line + 50)
+    outside = {"path": "elsewhere/missing.py", "start_line": 1,
+               "end_line": 1, "sha256": "0" * 64}
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="Kept by the one valid citation.",
+                   evidence=[stale, good, escaped, outside]))
+    assert row.status == "satisfied"
+    assert [(c.path, c.start_line, c.end_line, c.sha256)
+            for c in row.evidence] == [
+        (good["path"], good["start_line"], good["end_line"],
+         good["sha256"])]
+    assert row.dropped_citations == 3
+
+
+def test_all_invalid_citations_fail_with_no_valid_citations(tmp_path):
+    """A row whose status needs evidence but keeps none fails as failed."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    outside = {"path": "elsewhere/missing.py", "start_line": 1,
+               "end_line": 1, "sha256": "0" * 64}
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="Every citation misses the subset.",
+                   evidence=[outside]))
+    assert row.status == "unknown"
+    assert row.rationale == (
+        AA.FAILED_PREFIX + "invalid reply: no valid citations")
+
+
+def test_finding_citations_drop_independently(tmp_path):
+    """A gap keeps its row when the finding holds one valid citation."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    stale = dict(good, sha256="0" * 64)
+    outside = {"path": "elsewhere/missing.py", "start_line": 1,
+               "end_line": 1, "sha256": "0" * 64}
+    child = AA.assemble_child(
+        packet, reviews,
+        tuple(_r17_reply(
+            packet, target,
+            rationale="The teardown drops shared records without an owner.",
+            evidence=[good], status="gap",
+            finding={"summary": "Unowned teardown removes shared records.",
+                     "suggested_change": "Remove only the owned namespace.",
+                     "evidence": [outside, good, stale]})
+        if review.item_id == target.item_id
+        else (None if review.request is None
+              else _satisfied_reply(packet, review))
+        for review in reviews))
+    row = next(r for r in child.rows if r.id == target.item_id)
+    assert row.status == "gap"
+    assert row.dropped_citations == 2
+    finding = next(f for f in child.findings if f.id == target.item_id)
+    assert [(c.path, c.start_line, c.end_line) for c in finding.evidence] == [
+        (good["path"], good["start_line"], good["end_line"])]
+
+
+def test_finding_without_any_valid_citation_fails_item(tmp_path):
+    """A gap whose finding loses every citation fails like a bad row."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    outside = {"path": "elsewhere/missing.py", "start_line": 1,
+               "end_line": 1, "sha256": "0" * 64}
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target,
+                   rationale="The teardown drops shared records without an owner.",
+                   evidence=[good], status="gap",
+                   finding={"summary": "Unowned teardown removes shared records.",
+                            "suggested_change": "Remove only the owned namespace.",
+                            "evidence": [outside]}))
+    assert row.status == "unknown"
+    assert row.rationale == (
+        AA.FAILED_PREFIX + "invalid reply: "
+        "finding has no valid citations")
+
+
+def test_unknown_row_without_citation_demand_keeps_valid_only(tmp_path):
+    """Unknown needs no citations, so drops never fail it."""
+    from ptest import agent_assessment as AA
+
+    packet = _pure_library_packet(tmp_path)
+    reviews = AA.plan_item_reviews(packet)
+    target = next(r for r in reviews if r.request is not None)
+    good = _subset_citation(packet, target.excerpt_paths[0])
+    outside = {"path": "elsewhere/missing.py", "start_line": 1,
+               "end_line": 1, "sha256": "0" * 64}
+    row = _r17_assemble(
+        packet, reviews, target,
+        _r17_reply(packet, target, status="unknown",
+                   rationale="The admitted excerpts say nothing either way.",
+                   evidence=[outside, good]))
+    assert row.status == "unknown"
+    assert len(row.evidence) == 1
+    assert row.dropped_citations == 1
+    assert not row.rationale.startswith(AA.FAILED_PREFIX)

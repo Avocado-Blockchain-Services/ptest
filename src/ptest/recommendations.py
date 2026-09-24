@@ -399,9 +399,15 @@ def _check_rows(rows: object) -> list:
                        min_items=0)
         for citation in item["evidence"]:
             _citation_text(citation)
+        dropped = item.get("dropped_citations", 0)
+        if (isinstance(dropped, bool) or not isinstance(dropped, int)
+                or dropped < 0):
+            _fail("report-invalid",
+                  f"row {row_id!r} has an invalid dropped_citations count")
         checked.append({"id": row_id, "status": status,
                         "rationale": rationale,
                         "evidence": list(item["evidence"]),
+                        "dropped_citations": dropped,
                         "label": _check_label(item.get("label"),
                                              row_id=row_id)})
     return checked
@@ -618,11 +624,24 @@ def _item_heading(row: dict) -> str:
     return f"## {row_id}"
 
 
+def _dropped_line(row: dict) -> str | None:
+    """One report line naming the item's dropped invalid-citation count."""
+    dropped = row.get("dropped_citations", 0)
+    if not dropped:
+        return None
+    noun = "citation" if dropped == 1 else "citations"
+    return f"{dropped} invalid {noun} dropped."
+
+
 def _status_section(row: dict) -> str:
     """Compact report section for one non-gap row."""
     status = row["status"]
     rationale = row["rationale"]
     lines = [_item_heading(row), ""]
+    dropped = _dropped_line(row)
+    if dropped is not None:
+        lines.append(dropped)
+        lines.append("")
     if status == "satisfied":
         lines.append("Status: satisfied.")
         lines.append("")
@@ -662,6 +681,10 @@ def _finding_section(row: dict, finding: dict | None, scope: str,
                      root_label: str) -> str:
     row_id = row["id"]
     lines = [_item_heading(row), ""]
+    dropped = _dropped_line(row)
+    if dropped is not None:
+        lines.append(dropped)
+        lines.append("")
     citations = row["evidence"] if finding is None else finding["evidence"]
     if finding is None:
         lines.append(f"Reviewer conclusion: gap recorded for `{row_id}` with "

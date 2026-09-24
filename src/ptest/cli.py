@@ -1406,6 +1406,10 @@ def _child_assessment_data(packet, assessment, limitations: list[dict], *,
         "rows": [{
             "id": row.id, "status": row.status,
             "rationale": row.rationale, "label": row.label,
+            # Additive report-only count: the public validator accepts it
+            # and projection drops it from the JSON document, while the
+            # raw child data still carries it to recommendations.md.
+            "dropped_citations": row.dropped_citations,
             "evidence": [{
                 "path": item.path, "start_line": item.start_line,
                 "end_line": item.end_line, "sha256": item.sha256,

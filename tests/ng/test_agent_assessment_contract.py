@@ -695,3 +695,17 @@ def test_reject_execution_claims_with_or_without_library_names(field, value):
     payload = _payload(children=[_child(findings=[finding])])
     with pytest.raises(Problem, match="report-invalid"):
         C.decode_public_document(_hostile(payload))
+
+
+# --- Round 17 twins: additive dropped-citation count ------------------------
+
+
+def test_additive_dropped_citations_row_validates_and_projects_away():
+    """A row carrying dropped_citations validates; projection drops it."""
+    rows = _mixed_rows()
+    rows[0] = dict(rows[0], dropped_citations=2)
+    payload = _payload(children=[_child(rows=rows)])
+    document = C.decode_public_document(_hostile(payload))
+    row = document.data["children"][0]["rows"][0]
+    assert "dropped_citations" not in row
+    assert row["status"] == "satisfied"
