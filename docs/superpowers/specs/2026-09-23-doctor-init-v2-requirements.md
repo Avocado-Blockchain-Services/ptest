@@ -132,6 +132,10 @@ refuse `--full` for such projects.
   `pytest_report_teststatus`, `pytest_runtest_logreport`, `pytest_collectreport`) from any plugin that is not
   `_pytest.*`, the bridge itself, or an approved module.
 
+Guarantee boundary: ptest guarantees labelled inventory narrowing and unforged pytest reports and exit status. Project code
+that replaces test bodies (for example `item.runtest = ...`) or monkeypatches pytest or bridge internals is outside that
+guarantee; it is indistinguishable from editing the tests themselves.
+
 ## D. Constraints
 
 - Follow `secure-by-spec` and `audit-spec`. All tests go through `ptest` only. Tasks never launch real
