@@ -1559,6 +1559,14 @@ def _child_assessment_data(packet, assessment, limitations: list[dict], *,
     return child
 
 
+def _state_anchor(root: Path) -> Path:
+    """Anchor the inside-checkout refusal on the Git repository root."""
+    try:
+        return config_api.repository_root(root)
+    except C.Problem:
+        return root
+
+
 def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                        domain: C.DomainPaths, *, adapter, interactive: bool,
                        preconsented: bool = False) -> bool:
@@ -1568,7 +1576,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
     closed. One focused model call runs per (project, checklist item);
     deterministically skipped items take no call.
     """
-    platform.validate_state_outside_checkout(domain, resolution.root)
+    platform.validate_state_outside_checkout(domain, _state_anchor(resolution.root))
     started = time.monotonic()
     deadline = started + _REVIEW_TOTAL_TIMEOUT_S
     limits = _doctor_limits(parsed)
@@ -2154,8 +2162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolution = config_api.resolve_config(Path.cwd())
         if resolution.monorepo is not None:
             from . import monorepo
-            children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             domain = platform.domain_paths(parsed.fixture_domain)
+            platform.validate_state_outside_checkout(
+                domain, _state_anchor(resolution.root))
+            children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             if parsed.full:
                 def run_full(child):
                     result = operations.execute(

@@ -260,7 +260,95 @@ def test_state_directory_inside_checkout_refuses_before_admission(
     captured = capsys.readouterr()
     assert "unsafe-path" in captured.err
     assert "PTEST_STATE_DIR must be outside the repository" in captured.err
-    assert "70" not in captured.err
+    assert not state.exists()
+
+
+def _write_marker_command_project(root, index=0):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + f"{index:032x}" + '"\n'
+        "[runner]\nkind = \"command\"\n"
+        f"launcher = {json.dumps([sys.executable, str(root / 'run.py')])}\n"
+        "args = []\nfull_args = []\nworkers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8")
+    (root / "run.py").write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('ran').write_text('executed')\n",
+        encoding="utf-8")
+
+
+def _write_monorepo(root, declarations=("a", "b")):
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = "
+        + json.dumps(list(declarations)) + "\n",
+        encoding="utf-8")
+    for index, child in enumerate(declarations):
+        _write_marker_command_project(root / child, index)
+
+
+def test_state_directory_at_monorepo_root_refuses_before_any_child_runs(
+        account, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_monorepo(root)
+    _git_init_fixture(root)
+    state = root / ".ptest-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    monkeypatch.chdir(root)
+
+    assert main(("--full",)) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert "PTEST_STATE_DIR must be outside the repository" in captured.err
+    assert not state.exists()
+    assert not (root / "a" / "ran").exists()
+    assert not (root / "b" / "ran").exists()
+
+
+def test_state_directory_inside_later_child_refuses_before_first_child_runs(
+        account, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_monorepo(root)
+    _git_init_fixture(root)
+    state = root / "b" / ".ptest-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    monkeypatch.chdir(root)
+
+    assert main(("--full",)) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert "PTEST_STATE_DIR must be outside the repository" in captured.err
+    assert not state.exists()
+    assert not (root / "a" / "ran").exists()
+    assert not (root / "b" / "ran").exists()
+
+
+def test_state_directory_at_git_root_refuses_nested_config(
+        account, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    _write_trivial_command_project(sub)
+    _git_init_fixture(root)
+    state = root / ".ptest-state"
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    domain = platform.domain_paths(None)
+    config = config_api.resolve_config(sub).config
+    assert config is not None
+
+    with pytest.raises(C.Problem) as caught:
+        operations.execute(domain, config, C.RunRequest(mode=C.Mode.FULL))
+    assert caught.value.code == "unsafe-path"
+    assert "PTEST_STATE_DIR must be outside the repository" in caught.value.message
+    assert not state.exists()
+
+    monkeypatch.chdir(sub)
+    assert main(("--full",)) == 2
+    captured = capsys.readouterr()
+    assert "unsafe-path" in captured.err
+    assert "PTEST_STATE_DIR must be outside the repository" in captured.err
     assert not state.exists()
 
 

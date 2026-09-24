@@ -100,6 +100,18 @@ def _checkout(config: C.Config) -> C.CheckoutIdentity:
                               checkout_id=checkout_id, root=root)
 
 
+def _state_anchor(checkout: C.CheckoutIdentity) -> Path:
+    """Anchor the inside-checkout refusal on the Git repository root.
+
+    A nested config (or monorepo child) must still refuse state anywhere
+    inside the repository, not just inside its own config directory.
+    """
+    try:
+        return config_api.repository_root(checkout.root)
+    except C.Problem:
+        return checkout.root
+
+
 def _project_root(config: C.Config) -> Path:
     return _checkout(config).root
 
@@ -1378,7 +1390,6 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                        "shadow requires a qualified pytest selection profile")
     adapter = adapter_for(config.runner.kind)
     checkout = _checkout(config)
-    platform.validate_state_outside_checkout(domain, checkout.root)
     history_view = history.read_history(domain, checkout)
     catalog = adapter.qualified_profile(config)
     stored = history.read_qualified_profile(domain, checkout, config.runner.kind)
@@ -1834,6 +1845,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise TypeError("execute requires DomainPaths and Config")
     if not isinstance(request, C.RunRequest):
         raise TypeError("execute requires RunRequest")
+    try:
+        checkout: C.CheckoutIdentity | None = _checkout(config)
+    except C.Problem:
+        # A rootless config keeps the historical dispatch precedence below
+        # (capability/mode errors first); the state check needs a root.
+        checkout = None
+    if checkout is not None:
+        # State inside the repository would count ledger/history writes as
+        # source changes (and land the secret input key in the working tree);
+        # refuse once, before shadow/probe/setup dispatch and any bootstrap.
+        platform.validate_state_outside_checkout(domain, _state_anchor(checkout))
     if request.shadow:
         return _execute_shadow(domain, config, request)
     if request.probe is not None or request.mode is C.Mode.PROBE:
@@ -1846,10 +1868,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             and (catalog_profile is None or config.config_path is None)):
         raise _problem("unsupported-capability",
                        "pytest automatic selection requires a qualified profile")
-    checkout = _checkout(config)
-    # State inside the checkout would count ledger/history writes as source
-    # changes; refuse before admission (and before any state bootstrap).
-    platform.validate_state_outside_checkout(domain, checkout.root)
+    if checkout is None:
+        checkout = _checkout(config)
     needs_history = native_runner and (
         request.mode is C.Mode.AUTOMATIC or catalog_profile is not None)
     if needs_history:
