@@ -435,7 +435,8 @@ def _guidance_entries(root: Path) -> list[PlanEntry]:
             continue
         managed = raw in (agent_rules._provider_text(provider),
                           agent_rules._legacy_provider_text(provider),
-                          agent_rules._previous_provider_text(provider))
+                          agent_rules._previous_provider_text(provider),
+                          agent_rules._pre_gate_provider_text(provider))
         if managed:
             entries.append(PlanEntry(
                 REMOVE, rel, "managed skill", "unlink", rel=rel, expect=raw))
@@ -832,8 +833,13 @@ def _truncate(text: str, width: int) -> str:
 
 def render_text(plan: RepoPlan, *, applied: Applied | None = None,
                dry_run: bool = False, width: int | None = None,
-               self_plan: SelfPlan | None = None) -> str:
-    """Plain grouped plan/result rendering for human terminals."""
+               self_plan: SelfPlan | None = None,
+               summary_only: bool = False) -> str:
+    """Plain grouped plan/result rendering for human terminals.
+
+    ``summary_only`` (with ``applied``) emits just the trailing summary
+    line, for callers that already printed the plan before consent.
+    """
     term = terminal_width(width)
     header = ("ptest uninstall preview (dry run, changes nothing)"
               if dry_run else "ptest uninstall plan")
@@ -868,16 +874,18 @@ def render_text(plan: RepoPlan, *, applied: Applied | None = None,
     removes = [entry for entry in plan.entries if entry.action == REMOVE]
     self_removes = (self_plan is not None and self_plan.requested
                     and self_plan.root is not None)
-    if applied is not None:
-        if not removes and not self_removes:
-            lines.append("nothing to remove")
-        else:
-            lines.append(
-                f"removed {len(applied.removed)}, kept {len(applied.kept)}, "
+    if not removes and not self_removes:
+        tail: str | None = "nothing to remove"
+    elif applied is not None:
+        tail = (f"removed {len(applied.removed)}, kept {len(applied.kept)}, "
                 f"skipped {len(applied.skipped)}")
     else:
-        if not removes and not self_removes:
-            lines.append("nothing to remove")
+        tail = None
+    if summary_only:
+        assert applied is not None and tail is not None
+        return tail + "\n"
+    if tail is not None:
+        lines.append(tail)
     return "\n".join(lines) + "\n"
 
 

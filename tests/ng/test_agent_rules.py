@@ -663,6 +663,49 @@ def test_previous_managed_skill_upgrades_in_place(tmp_path):
     assert repeat.changed is False
 
 
+def test_pre_gate_managed_skill_upgrades_in_place(tmp_path):
+    """The long skill shipped before the fast-forward-gate lines upgrades too.
+
+    Exact bytes of ``8cd2b54:src/ptest/agent_rules.py`` `_provider_text`
+    ("claude"): the long template without the merge-gate/graph tail.
+    """
+    from ptest.agent_rules import _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    pre_gate = (
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read the repository-root guide\n"
+        "`docs/ptest-agent.md`. That path is relative to the repository root,\n"
+        "not to this skill directory.\n"
+        "\n"
+        "Run every test command through `ptest` from the repository root (the\n"
+        "directory containing the root `.ptest.toml`). Never invoke pytest,\n"
+        "Vitest, or another runner directly.\n"
+        "\n"
+        "During iteration run the smallest relevant scope, such as\n"
+        "`ptest tests/<chosen-test>.py`. In a monorepo, prefix the scope with\n"
+        "its declared child, such as `ptest api/tests/<chosen-test>.py`; child\n"
+        "`.ptest.toml` files remain authoritative. Run the root full gate\n"
+        "`ptest --full` once after the integrated change.\n"
+    ).encode("utf-8")
+    (target / "SKILL.md").write_bytes(pre_gate)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
 def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
     import hashlib
 
@@ -705,6 +748,56 @@ def test_previous_hashes_cover_main_pre_change_guide():
     current = rules_module._guide()
     assert hashlib.sha256(current).hexdigest() not in rules_module._PREVIOUS_GUIDE_SHA256S
     assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"
+
+
+def test_every_shipped_guide_version_hashes_into_previous_set():
+    """Every guide version ever shipped on this branch must upgrade, not conflict.
+
+    Walks `git log` for the bundled resource and requires each historical
+    version's sha256 to classify as managed: either in
+    `_PREVIOUS_GUIDE_SHA256S` or byte-identical to the current guide.
+    (`ptest init` writes the resource bytes verbatim, so each shipped
+    version is exactly what some repo holds.) Skips with a clear reason
+    when git history is unavailable.
+    """
+    import hashlib
+    import subprocess
+
+    import ptest.agent_rules as rules_module
+
+    anchor = Path(__file__).resolve().parent
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=anchor, capture_output=True, text=True,
+            check=True).stdout.strip()
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--",
+             "src/ptest/resources/repository-agent-guide.md"],
+            cwd=toplevel, capture_output=True, text=True,
+            check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("git history for the guide resource is unavailable")
+    if not commits:
+        pytest.skip("git history for the guide resource is unavailable")
+    current = rules_module._guide()
+    current_hash = hashlib.sha256(current).hexdigest()
+    allowed = set(rules_module._PREVIOUS_GUIDE_SHA256S) | {current_hash}
+    missing = []
+    for commit in commits:
+        try:
+            raw = subprocess.run(
+                ["git", "show",
+                 f"{commit}:src/ptest/resources/repository-agent-guide.md"],
+                cwd=toplevel, capture_output=True, check=True).stdout
+        except subprocess.CalledProcessError:
+            pytest.skip(f"git history for the guide resource is unreadable at {commit}")
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest not in allowed:
+            missing.append(f"{commit[:7]} {digest}")
+    assert not missing, (
+        "shipped guide versions missing from _PREVIOUS_GUIDE_SHA256S: "
+        + ", ".join(missing))
 
 
 def test_init_upgrades_old_guide_in_place(tmp_path, monkeypatch):

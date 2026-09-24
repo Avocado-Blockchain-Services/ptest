@@ -1873,7 +1873,9 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                 sys.stdout.write(uninstall_api.render_text(
                     plan, dry_run=True, self_plan=self_plan))
             return 0
-        if not parsed.json:
+        if not parsed.json and not parsed.uninstall_yes:
+            # `--yes` prints only the result below; anything else shows
+            # the plan once here (dry-run/preview/consent paths).
             sys.stdout.write(uninstall_api.render_text(
                 plan, self_plan=self_plan))
         if removals or self_work:
@@ -1900,8 +1902,15 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                     self_link_removed=self_link_removed),
                 domain=domain))
         else:
-            sys.stdout.write(uninstall_api.render_text(
-                plan, applied=applied, self_plan=self_plan))
+            if parsed.uninstall_yes:
+                sys.stdout.write(uninstall_api.render_text(
+                    plan, applied=applied, self_plan=self_plan))
+            else:
+                # The plan was already printed before consent; follow it
+                # with only the one summary line.
+                sys.stdout.write(uninstall_api.render_text(
+                    plan, applied=applied, self_plan=self_plan,
+                    summary_only=True))
             if self_removed:
                 print("ptest was uninstalled")
         if self_removed and parsed.json:

@@ -16,7 +16,7 @@ Repo-local (anchored at `config.repository_root`, the same Git-root anchor
   Configs are always removed, even user-tuned — the spec says so.
 - Guidance (all detection reused from `agent_rules`, never duplicated):
   - `docs/ptest-agent.md` — managed iff bytes equal `agent_rules._guide()`
-    (current) or sha256 equals `agent_rules._BASE_GUIDE_SHA256` (previous).
+    (current) or sha256 equals `agent_rules._PREVIOUS_GUIDE_SHA256S` (previous).
   - Blocks in `AGENTS.md`, `CLAUDE.md` (spec) and `GEMINI.md` (same init
     mechanism — init appends to any pre-existing one, so round-trip needs it).
   - Skills `.claude|.agents|.opencode|.gemini/skills/ptest/SKILL.md` plus the
@@ -56,7 +56,7 @@ checkout and can never match another checkout.
 
 ## 3. Managed-detection reuse from `agent_rules`
 
-`_guide`, `_BASE_GUIDE_SHA256`, `_provider_target` (+ the three exact skill
+`_guide`, `_PREVIOUS_GUIDE_SHA256S`, `_provider_target` (+ the three exact skill
 templates), `_block`, `_MARKER_START/_END`, `_managed_state` (raises on
 unbalanced/duplicated markers → file untouched + reported), and `_replace`
 for the atomic block rewrite (temp file + rename in the same directory,

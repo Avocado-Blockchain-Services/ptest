@@ -240,6 +240,40 @@ def test_previous_managed_guide_is_removed_by_uninstall(
     assert not (guide_dir / "ptest-agent.md").exists()
 
 
+def test_released_3f399fb_guide_is_upgraded_by_init_and_removed_by_uninstall(
+        case, tmp_path, monkeypatch, capsys):
+    """Twin: a repo holding the 3f399fb guide upgrades cleanly, then uninstalls fully.
+
+    Uses the real `_PREVIOUS_GUIDE_SHA256S` (no monkeypatch): the fixture
+    bytes must hash to the registered 22babcd6… digest, `init` must upgrade
+    them in place (no already-exists), and `uninstall --yes` must remove
+    the upgraded guide.
+    """
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    fixture = (Path(__file__).resolve().parent / "fixtures" / "previous-guides"
+               / "3f399fb-ptest-agent.md")
+    old = fixture.read_bytes()
+    assert hashlib.sha256(old).hexdigest() == (
+        "22babcd66d575ec65c481c747a8527b9b2ad0b8f206f8d83c0dafa8254c4691c")
+    guide_dir = root / "docs"
+    guide_dir.mkdir()
+    (guide_dir / "ptest-agent.md").write_bytes(old)
+    monkeypatch.chdir(root)
+
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    init_out = capsys.readouterr().out
+    assert "already" not in init_out
+    assert (guide_dir / "ptest-agent.md").read_bytes() == agent_rules._guide()
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "edited" not in out
+    assert not (guide_dir / "ptest-agent.md").exists()
+
+
 def test_unmanaged_skill_content_is_kept(case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
     root = tmp_path / "repo"
@@ -256,6 +290,45 @@ def test_unmanaged_skill_content_is_kept(case, tmp_path, monkeypatch, capsys):
     assert "kept (edited)" in out
     assert foreign.read_text(encoding="utf-8") == "# user skill\n"
     assert not (root / ".ptest.toml").exists()
+
+
+def test_pre_gate_skill_managed_bytes_are_removed(
+        case, tmp_path, monkeypatch, capsys):
+    """Twin: the long pre-fast-forward-gate skill uninstalls as managed."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    skill = root / ".claude" / "skills" / "ptest" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read the repository-root guide\n"
+        "`docs/ptest-agent.md`. That path is relative to the repository root,\n"
+        "not to this skill directory.\n"
+        "\n"
+        "Run every test command through `ptest` from the repository root (the\n"
+        "directory containing the root `.ptest.toml`). Never invoke pytest,\n"
+        "Vitest, or another runner directly.\n"
+        "\n"
+        "During iteration run the smallest relevant scope, such as\n"
+        "`ptest tests/<chosen-test>.py`. In a monorepo, prefix the scope with\n"
+        "its declared child, such as `ptest api/tests/<chosen-test>.py`; child\n"
+        "`.ptest.toml` files remain authoritative. Run the root full gate\n"
+        "`ptest --full` once after the integrated change.\n".encode("utf-8"))
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "edited" not in out
+    assert not skill.exists()
 
 
 def test_legacy_codex_skill_managed_bytes_are_removed(
@@ -436,6 +509,48 @@ def test_tty_accept_removes(case, tmp_path, monkeypatch, capsys):
     assert _uninstall(domain) == 0
     capsys.readouterr()
     assert not (root / ".ptest.toml").exists()
+
+
+def test_yes_prints_only_the_result_once(case, tmp_path, monkeypatch, capsys):
+    """`--yes` prints the result (plan + summary) exactly once, no pre-plan."""
+    import re
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "ptest uninstall plan" not in out
+    assert out.count("ptest uninstall result") == 1
+    assert out.count("remove:") == 1
+    assert re.search(r"removed \d+, kept \d+, skipped \d+", out) is not None
+
+
+def test_interactive_yes_prints_plan_once_then_summary(
+        case, tmp_path, monkeypatch, capsys):
+    """TTY accept prints the plan once, then only the summary line."""
+    import re
+
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    _tty(monkeypatch, "y")
+
+    assert _uninstall(domain) == 0
+    out = capsys.readouterr().out
+    assert out.count("ptest uninstall plan") == 1
+    assert "ptest uninstall result" not in out
+    assert out.count("remove:") == 1
+    assert re.search(r"removed \d+, kept \d+, skipped \d+", out) is not None
 
 
 def test_non_tty_without_yes_shows_plan_and_changes_nothing(
