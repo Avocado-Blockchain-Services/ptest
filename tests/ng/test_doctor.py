@@ -857,14 +857,14 @@ def _workspace_resolution(root: Path) -> C.ConfigResolution:
     return config_api.resolve_config(root)
 
 
-def test_checklist_catalog_has_eleven_ordered_rows_with_required_fields():
+def test_checklist_catalog_has_twelve_ordered_rows_with_required_fields():
     """A duplicated or reordered renderer list would drift from the worksheet."""
     from ptest import checklist
 
     assert [entry.id for entry in checklist.CATALOG] == [
         "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
         "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-        "SELECT-001", "TIMING-001",
+        "SELECT-001", "TIMING-001", "PARALLEL-001",
     ]
     for entry in checklist.CATALOG:
         assert entry.criterion and entry.evidence
@@ -873,6 +873,7 @@ def test_checklist_catalog_has_eleven_ordered_rows_with_required_fields():
     assert checklist.CATALOG[4].recipe == "cache"
     assert checklist.CATALOG[9].recipe is None
     assert checklist.CATALOG[10].recipe is None
+    assert checklist.CATALOG[11].recipe is None
 
 
 def test_checklist_recipe_loading_is_bounded_and_fails_closed(tmp_path):

@@ -25,6 +25,7 @@ EXPECTED = (
     ("TIME-001", "Deterministic time", "time-network", None),
     ("SELECT-001", "Test selection", None, None),
     ("TIMING-001", "Test timing", None, None),
+    ("PARALLEL-001", "Parallel execution", None, None),
 )
 
 EXPECTED_FIELD_ORDER = (
@@ -35,7 +36,7 @@ EXPECTED_FIELD_ORDER = (
 
 
 def test_catalog_ids_labels_recipes_and_skip_rules():
-    assert len(CATALOG) == 11
+    assert len(CATALOG) == 12
     assert [entry.id for entry in CATALOG] == [row[0] for row in EXPECTED]
     assert [entry.label for entry in CATALOG] == [row[1] for row in EXPECTED]
     assert [entry.recipe for entry in CATALOG] == [row[2] for row in EXPECTED]

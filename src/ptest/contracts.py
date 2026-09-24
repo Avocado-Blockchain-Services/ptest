@@ -3049,8 +3049,8 @@ def _check_aa_score(value: object, rows: list, ctx: str) -> None:
         raise _invalid("report-invalid", f"{ctx} must be an object")
     _check_required_keys(value, _AGENT_ASSESSMENT_SCORE_FIELDS, ctx)
     applicable = len(rows) - na_count
-    _check_int_field(value, "satisfied", ctx, lo=0, hi=11)
-    _check_int_field(value, "applicable", ctx, lo=1, hi=11)
+    _check_int_field(value, "satisfied", ctx, lo=0, hi=12)
+    _check_int_field(value, "applicable", ctx, lo=1, hi=12)
     _check_int_field(value, "percent", ctx, lo=0, hi=100)
     if (value["satisfied"] != satisfied
             or value["applicable"] != applicable
@@ -3104,7 +3104,7 @@ def _check_aa_child(item: object, ctx: str) -> None:
     if (not isinstance(rows, list)
             or len(rows) != len(AGENT_ASSESSMENT_CHECKLIST_IDS)):
         raise _invalid("report-invalid",
-                       f"{ctx}.rows must hold all 11 checklist rows")
+                       f"{ctx}.rows must hold all 12 checklist rows")
     for index, entry in enumerate(rows):
         _check_aa_row(entry, f"{ctx}.rows[{index}]", index)
     _check_aa_score(item["score"], rows, f"{ctx}.score")
@@ -4308,8 +4308,8 @@ def _aa_score_schema() -> dict:
     return {
         "type": ["object", "null"],
         "properties": {
-            "satisfied": {"type": "integer", "minimum": 0, "maximum": 11},
-            "applicable": {"type": "integer", "minimum": 1, "maximum": 11},
+            "satisfied": {"type": "integer", "minimum": 0, "maximum": 12},
+            "applicable": {"type": "integer", "minimum": 1, "maximum": 12},
             "percent": {"type": "integer", "minimum": 0, "maximum": 100},
         },
         "required": ["satisfied", "applicable", "percent"],
@@ -4340,7 +4340,7 @@ def _aa_child_schema() -> dict:
             "packet_sha256": {"type": "string",
                               "pattern": "^[0-9a-f]{64}$"},
             "rows": {"type": "array", "items": _aa_row_schema(),
-                     "minItems": 11, "maxItems": 11},
+                     "minItems": 12, "maxItems": 12},
             "score": _aa_score_schema(),
             "findings": {"type": "array", "items": _aa_finding_schema()},
             "limitations": {"type": "array",

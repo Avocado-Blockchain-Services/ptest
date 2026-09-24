@@ -25,7 +25,7 @@ PUB_SHA = "12" * 32
 EXPECTED_IDS = (
     "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
     "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-    "SELECT-001", "TIMING-001",
+    "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
 
 # Golden bytes recorded before the registry extension (RED baseline).
@@ -57,7 +57,7 @@ RECIPES = {
     "CACHE-001": "cache", "RESOURCE-001": "files-ports",
     "NETWORK-001": "time-network", "PROCESS-001": "processes",
     "TIME-001": "time-network", "SELECT-001": None,
-    "TIMING-001": None,
+    "TIMING-001": None, "PARALLEL-001": None,
 }
 
 
@@ -103,7 +103,7 @@ def _child(rows=None, findings=None, score="compute", limitations=(),
         na_count = sum(1 for row in rows
                        if row["status"] == "not-applicable")
         satisfied = sum(1 for row in rows if row["status"] == "satisfied")
-        score = _score(satisfied, 11 - na_count)
+        score = _score(satisfied, 12 - na_count)
     return {"project_id": project_id, "scope": scope,
             "packet_sha256": packet_sha256, "rows": rows, "score": score,
             "findings": findings, "limitations": list(limitations)}
@@ -176,8 +176,8 @@ def test_success_round_trip_projects_exact_keys():
         "findings", "limitations",
     }
     assert [row["id"] for row in child["rows"]] == list(EXPECTED_IDS)
-    assert child["score"] == {"satisfied": 8, "applicable": 10,
-                              "percent": 80}
+    assert child["score"] == {"satisfied": 9, "applicable": 11,
+                              "percent": 81}
     assert [finding["id"] for finding in child["findings"]] == ["FIX-002"]
     assert doc.data["children"][1]["score"] is None
     assert doc.data["children"][1]["findings"] == []
@@ -191,13 +191,13 @@ def test_percent_uses_integer_floor():
     rows += [_row(row_id, "gap") for row_id in EXPECTED_IDS[3:]]
     findings = [_finding(row_id) for row_id in EXPECTED_IDS[3:]]
     child = _child(rows=rows, findings=findings,
-                   score={"satisfied": 1, "applicable": 11,
-                          "percent": 9})
+                   score={"satisfied": 1, "applicable": 12,
+                          "percent": 8})
     doc = C.decode_public_document(
         C.encode_public_document("agent-assessment", _payload(
             children=[child])))
     assert doc.data["children"][0]["score"] == {
-        "satisfied": 1, "applicable": 11, "percent": 9}
+        "satisfied": 1, "applicable": 12, "percent": 8}
 
 
 def test_error_documents_carry_null_payload():
@@ -531,7 +531,7 @@ def test_projection_drops_additive_unknowns():
     rendered = C.encode_public_document("agent-assessment", doc.data)
     assert sentinel.encode() not in rendered
     assert doc.data["children"][0]["score"] == {
-        "satisfied": 8, "applicable": 10, "percent": 80}
+        "satisfied": 9, "applicable": 11, "percent": 81}
 
 
 def test_schema_descriptor_matches_generated_file():
@@ -795,6 +795,13 @@ def test_deterministic_gap_and_satisfied_rows_validate(tmp_path):
             reason=("ptest recorded per-test timings for 3 tests in the last "
                     "clean full run; 1 take over 3 s (slowest 3.5 s)"),
             evidence_paths=(".ptest.toml",)),
+        "PARALLEL-001": DI.DeterministicAnswer(
+            item_id="PARALLEL-001", status="gap",
+            reason="no parallel runner is configured for this project",
+            evidence_paths=(".ptest.toml",),
+            finding_summary=("No parallel runner is configured, so tests "
+                             "run serially under ptest."),
+            finding_change="Resolve the parallel-safety gaps first."),
     }
     reviews = AA.plan_item_reviews(packet, answers=answers)
     replies = tuple(
@@ -809,6 +816,10 @@ def test_deterministic_gap_and_satisfied_rows_validate(tmp_path):
     assert rows["SELECT-001"]["status"] == "gap"
     assert rows["SELECT-001"]["rationale"].startswith("Answered by ptest: ")
     assert rows["TIMING-001"]["status"] == "satisfied"
+    assert rows["PARALLEL-001"]["status"] == "gap"
+    assert rows["PARALLEL-001"]["rationale"].startswith("Answered by ptest: ")
     findings = doc.data["children"][0]["findings"]
-    assert [finding["id"] for finding in findings] == ["SELECT-001"]
+    assert [finding["id"] for finding in findings] == [
+        "SELECT-001", "PARALLEL-001"]
     assert findings[0]["recipe_id"] is None
+    assert findings[1]["recipe_id"] is None

@@ -1212,16 +1212,47 @@ def _plan_item_reviews(packet, domain: C.DomainPaths,
                        resolution: C.ConfigResolution):
     """Plan per-item reviews, answering deterministically where possible.
 
-    Deterministic items (TIMING-001, SELECT-001) are answered from
-    ptest's own facts with no model call; every other item keeps its
-    provider request. Fail-closed: deterministic answers are always
-    applied, so the disclosed call count and the 'no model call'
+    Deterministic items (TIMING-001, SELECT-001, PARALLEL-001) are
+    answered from ptest's own facts with no model call; every other item
+    keeps its provider request. Fail-closed: deterministic answers are
+    always applied, so the disclosed call count and the 'no model call'
     promise stay exact.
     """
     from . import deterministic_items as deterministic
 
     answers = deterministic.answers_for(domain, resolution, packet)
     return agent_assessment.plan_item_reviews(packet, answers=answers)
+
+
+def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
+    """Assemble one child, finalizing the PARALLEL-001 safety gating.
+
+    The planned PARALLEL-001 answer carries the safe provisional fix
+    when no parallel runner is configured; once the sibling rows are
+    assembled their safety outcomes are known, so the answer is
+    recomputed with ``deterministic_items.parallel_answer_for`` and the
+    child is reassembled when it changed. Pure otherwise: no model call
+    and no new provider request either way.
+    """
+    from . import deterministic_items as deterministic
+
+    assessment = agent_assessment.assemble_child(packet, reviews, replies)
+    index = next((position for position, review in enumerate(reviews)
+                  if review.item_id == "PARALLEL-001"
+                  and review.answer is not None), None)
+    if index is None:
+        return assessment
+    statuses = {row.id: row.status for row in assessment.rows}
+    safety_gap = any(statuses.get(item_id) == "gap"
+                     for item_id in deterministic.PARALLEL_SAFETY_IDS)
+    final = deterministic.parallel_answer_for(
+        domain, resolution, packet, safety_gap=safety_gap)
+    if final is None or final == reviews[index].answer:
+        return assessment
+    patched = (reviews[:index]
+               + (replace(reviews[index], answer=final),)
+               + reviews[index + 1:])
+    return agent_assessment.assemble_child(packet, patched, replies)
 
 
 def _review_failure_reason(result) -> str | None:
@@ -1632,8 +1663,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             progress("validating", adapter.name, packet.scope,
                      time.monotonic() - started)
             ensure_deadline()
-            assessments.append(agent_assessment.assemble_child(
-                packet, reviews, tuple(replies)))
+            assessments.append(_assemble_with_parallel(
+                packet, reviews, tuple(replies), domain, resolution))
             ensure_deadline()
 
         reviewed_rows = [(review, row)

@@ -487,9 +487,9 @@ class Score:
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"score.{field} must be int")
-        if not 0 <= self.satisfied <= 11:
+        if not 0 <= self.satisfied <= 12:
             raise ValueError("score.satisfied is out of range")
-        if not 1 <= self.applicable <= 11:
+        if not 1 <= self.applicable <= 12:
             raise ValueError("score.applicable is out of range")
         if not 0 <= self.percent <= 100:
             raise ValueError("score.percent is out of range")

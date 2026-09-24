@@ -356,5 +356,5 @@ def test_installed_ptest_package_exposes_doctor_checklist_resources():
     assert [entry.id for entry in checklist.CATALOG] == [
         "FIX-001", "FIX-002", "DB-001", "DB-002", "CACHE-001",
         "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
-        "SELECT-001", "TIMING-001",
+        "SELECT-001", "TIMING-001", "PARALLEL-001",
     ]

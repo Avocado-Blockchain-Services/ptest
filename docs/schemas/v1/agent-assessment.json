@@ -86,7 +86,8 @@
                         "PROCESS-001",
                         "TIME-001",
                         "SELECT-001",
-                        "TIMING-001"
+                        "TIMING-001",
+                        "PARALLEL-001"
                       ],
                       "type": "string"
                     },
@@ -207,7 +208,8 @@
                         "PROCESS-001",
                         "TIME-001",
                         "SELECT-001",
-                        "TIMING-001"
+                        "TIMING-001",
+                        "PARALLEL-001"
                       ],
                       "type": "string"
                     },
@@ -237,8 +239,8 @@
                   ],
                   "type": "object"
                 },
-                "maxItems": 11,
-                "minItems": 11,
+                "maxItems": 12,
+                "minItems": 12,
                 "type": "array"
               },
               "scope": {
@@ -247,7 +249,7 @@
               "score": {
                 "properties": {
                   "applicable": {
-                    "maximum": 11,
+                    "maximum": 12,
                     "minimum": 1,
                     "type": "integer"
                   },
@@ -257,7 +259,7 @@
                     "type": "integer"
                   },
                   "satisfied": {
-                    "maximum": 11,
+                    "maximum": 12,
                     "minimum": 0,
                     "type": "integer"
                   }
