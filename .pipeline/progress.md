@@ -30,3 +30,7 @@
 - 2026-09-24T02:35:38Z [controller] persea doctor quality: codex api Database isolation SATISFIED (DB-002 false positive fixed); haiku ~50% item validation failures (backticks, citation ranges/stale). fix17 brief ready (after fix16).
 - 2026-09-24T02:55:09Z [controller] fix16 7f147a8 (bridge-derived verdict; muse full gate 3267 passed). fix16 audit + fix17 (ptest-r17) in parallel.
 - 2026-09-24T02:58:45Z [controller] fix16 audit BLOCK (logreport/collectreport wrapper rewrite). Decision: refuse in full, document for scoped. fix18 on chain (parallel to fix17).
+- 2026-09-24T03:08:42Z [controller] fix18 8ca2de9 APPROVED. §F boundary sentence added. r17 merged (non-ff). fix17 audit next.
+- 2026-09-24T03:10:21Z [controller] fix17 audit APPROVE WITH CHANGES (2 LOW). fix19 launched.
+- 2026-09-24T03:14:07Z [controller] fix19 c75fb70 reviewed by controller (display-only, exactly per audit). Final full gate.
+- 2026-09-24T03:24:14Z [controller] FINAL: chain c75fb70 ptest --full 3305 passed/32 skipped exit 0. persea: init smoke passes api+web after advised setup; api --full offered (labelled); real doctor claude exit0 (4/21 items failed validation), codex exit0 (1/22); codex api Database isolation SATISFIED (DB-002 false positive gone). graphify updated. Task worktrees removed.
