@@ -177,8 +177,9 @@ def _config_lines(result: C.InitResult) -> list[str]:
     # JSON document. The root line is synthesized from the result action
     # only when no detail record names it, so it always appears exactly
     # once and never in the historical ``created: .ptest.toml`` shape.
-    # A child with a Projects entry renders only there (as its status
-    # line), so its config action never duplicates across sections.
+    # A child with a Projects entry renders on its status line instead
+    # (``api  pytest  ready  (created api/.ptest.toml)``), so its config
+    # action appears exactly once and never duplicates across sections.
     records = _config_records(result)
     projects, _, others = _split_notes(result)
     noted = {project for project, _, _ in projects if project != "."}
@@ -266,10 +267,17 @@ def _project_lines(result: C.InitResult) -> list[str]:
     projects, _, _ = _split_notes(result)
     if not projects:
         return []
+    records = _config_records(result)
     lines: list[str] = []
     for project, runner, verdict in projects:
         head, bullets = _split_verdict(verdict)
-        lines.extend(_wrapped(f"{project}  {runner}  {head}",
+        suffix = ""
+        if project != ".":
+            actions = [f"({action} {target})" for action, target in records
+                       if target == f"{project}/{_CONFIG_NAME}"]
+            if actions:
+                suffix = "  " + "  ".join(actions)
+        lines.extend(_wrapped(f"{project}  {runner}  {head}{suffix}",
                               indent=_ENTRY_INDENT))
         for bullet in bullets:
             lines.extend(_bullet_lines(bullet))

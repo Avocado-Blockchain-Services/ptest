@@ -12,14 +12,14 @@ import shlex
 import stat
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from . import contracts as C
 from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
 from .runtime.pytest_bridge import (
-    full_narrowing_text, full_redirect_name, full_refusal_name,
+    full_narrowing_text, full_redirect_name,
 )
 
 STATUS_EXECUTABLE = "executable"
@@ -261,8 +261,20 @@ def _unowned_token(argv: tuple[str, ...]) -> str | None:
     return None
 
 
-def iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
-    """Yield project-relative files, sorted, bounded, skipping owned dirs."""
+def iter_files(root: Path, start: Path, depth: int, budget: list,
+               visited: set[str] | None = None) -> object:
+    """Yield project-relative files, sorted, bounded, skipping owned dirs.
+
+    ``visited`` is a shared set of normalized directory paths already
+    walked: when overlapping bases (``src/`` plus the repository root)
+    share one set, each directory is entered once and the shared budget
+    is not charged twice for the same files.
+    """
+    if visited is not None:
+        key = os.path.normpath(os.fspath(start))
+        if key in visited:
+            return
+        visited.add(key)
     try:
         entries = sorted(os.scandir(start), key=lambda entry: entry.name)
     except OSError:
@@ -276,16 +288,20 @@ def iter_files(root: Path, start: Path, depth: int, budget: list) -> object:
             continue
         if name in _SKIP_DIRS or name.startswith("."):
             continue
-        budget[0] -= 1
-        if budget[0] < 0:
-            return
         try:
             is_dir = entry.is_dir(follow_symlinks=False)
         except OSError:
             continue
+        if is_dir and visited is not None \
+                and os.path.normpath(entry.path) in visited:
+            continue
+        budget[0] -= 1
+        if budget[0] < 0:
+            return
         if is_dir:
             if depth > 0:
-                yield from iter_files(root, Path(entry.path), depth - 1, budget)
+                yield from iter_files(
+                    root, Path(entry.path), depth - 1, budget, visited)
         else:
             try:
                 rel = Path(entry.path).relative_to(root)
@@ -356,20 +372,6 @@ def _scan_conftest_hooks(root: Path, test_roots: tuple[str, ...]) -> list[tuple[
             if hook in _SCOPED_REFUSED_HOOKS or hook in _FULL_REFUSED_HOOKS:
                 pairs.append((rel, hook))
     return pairs
-
-
-def _narrowing_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
-    """Full-mode narrowing/redirect names, derived from the bridge.
-
-    Each name comes from the bridge's own full-mode classifier, so init
-    never prints a ``run:`` command the bridge would refuse.
-    """
-    found: list[str] = []
-    for index in range(len(tokens)):
-        refusal = full_refusal_name(tokens, index)
-        if refusal is not None and refusal not in found:
-            found.append(refusal)
-    return tuple(found)
 
 
 def _redirect_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
@@ -519,7 +521,7 @@ def _js_tokens(text: str) -> list:
                     break
                 j += 1
             i = j
-        elif ch in "{}[]():,":
+        elif ch in "{}[]():,=":
             last = ("punct", ch)
             tokens.append(last)
             i += 1
@@ -535,49 +537,53 @@ def _js_tokens(text: str) -> list:
     return tokens
 
 
+def _is_key(token: tuple, *names: str) -> bool:
+    """True for an ident or quoted-string object key with one of ``names``."""
+    return token[0] in ("ident", "string") and token[1] in names
+
+
 def _test_block_arrays(text: str) -> tuple[list[str], list[str]]:
-    """Literal ``exclude``/``include`` strings from the ``test: {...}`` block.
+    """Literal ``exclude``/``include`` strings from every ``test: {...}`` block.
 
     Only keys one level inside ``test:`` are read, so nested ``include``
     arrays (coverage, typecheck) are ignored along with every non-literal
-    value. Unknown or absent blocks yield empty lists.
+    value. Keys may be quoted (``"test"``, ``'exclude'``). Unknown or
+    absent blocks yield empty lists.
     """
     tokens = _js_tokens(text)
     n = len(tokens)
-    index = 0
-    while index + 2 < n:
-        if tokens[index] == ("ident", "test") \
-                and tokens[index + 1] == ("punct", ":") \
-                and tokens[index + 2] == ("punct", "{"):
-            break
-        index += 1
-    else:
-        return [], []
     excludes: list[str] = []
     includes: list[str] = []
-    depth = 1
-    index += 3
-    while index < n and depth > 0:
-        token = tokens[index]
-        if token == ("punct", "{"):
-            depth += 1
-        elif token == ("punct", "}"):
-            depth -= 1
-        elif depth == 1 and token in (("ident", "exclude"), ("ident", "include")) \
-                and index + 2 < n \
+    index = 0
+    while index + 2 < n:
+        if _is_key(tokens[index], "test") \
                 and tokens[index + 1] == ("punct", ":") \
-                and tokens[index + 2] == ("punct", "["):
-            target = excludes if token[1] == "exclude" else includes
-            brackets = 1
+                and tokens[index + 2] == ("punct", "{"):
+            depth = 1
             index += 3
-            while index < n and brackets > 0:
-                item = tokens[index]
-                if item == ("punct", "["):
-                    brackets += 1
-                elif item == ("punct", "]"):
-                    brackets -= 1
-                elif item[0] == "string" and brackets >= 1:
-                    target.append(item[1])
+            while index < n and depth > 0:
+                token = tokens[index]
+                if token == ("punct", "{"):
+                    depth += 1
+                elif token == ("punct", "}"):
+                    depth -= 1
+                elif depth == 1 and _is_key(token, "exclude", "include") \
+                        and index + 2 < n \
+                        and tokens[index + 1] == ("punct", ":") \
+                        and tokens[index + 2] == ("punct", "["):
+                    target = excludes if token[1] == "exclude" else includes
+                    brackets = 1
+                    index += 3
+                    while index < n and brackets > 0:
+                        item = tokens[index]
+                        if item == ("punct", "["):
+                            brackets += 1
+                        elif item == ("punct", "]"):
+                            brackets -= 1
+                        elif item[0] == "string" and brackets >= 1:
+                            target.append(item[1])
+                        index += 1
+                    continue
                 index += 1
             continue
         index += 1
@@ -605,48 +611,149 @@ def _playwright_test_dir(root: Path) -> str:
     return "e2e"
 
 
+_EXTGLOB_MARKERS = ("?(", "*(", "+(", "@(", "!(")
+
+
+def _has_extglob(pattern: str) -> bool:
+    """True when the glob uses extglob groups vitest supports natively.
+
+    The static matcher cannot evaluate these, so the caller treats the
+    pattern as unknown: an unknown include accepts, an unknown exclude
+    is ignored.
+    """
+    return any(marker in pattern for marker in _EXTGLOB_MARKERS)
+
+
 def _expand_braces(pattern: str) -> list[str]:
-    """Expand one ``{a,b}`` group; deeper nesting is out of scope."""
+    """Expand every ``{a,b}`` group, including nested ones.
+
+    Unbalanced braces and singletons (``{a}``) are left literal.
+    """
     start = pattern.find("{")
-    end = pattern.find("}", start + 1) if start >= 0 else -1
-    if start < 0 or end < 0:
+    if start < 0:
         return [pattern]
-    return [pattern[:start] + part + pattern[end + 1:]
-            for part in pattern[start + 1:end].split(",")]
+    depth = 0
+    end = -1
+    for pos in range(start, len(pattern)):
+        if pattern[pos] == "{":
+            depth += 1
+        elif pattern[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                end = pos
+                break
+    if end < 0:
+        return [pattern]
+    parts: list[str] = []
+    current: list[str] = []
+    nested = 0
+    for char in pattern[start + 1:end]:
+        if char == "{":
+            nested += 1
+        elif char == "}":
+            nested -= 1
+        if char == "," and nested == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    if len(parts) == 1:
+        return [pattern]
+    expanded: list[str] = []
+    for part in parts:
+        expanded.extend(
+            _expand_braces(pattern[:start] + part + pattern[end + 1:]))
+    return expanded
+
+
+def _glob_to_regex(pattern: str) -> str:
+    """Translate one brace-free glob to an anchored regex.
+
+    ``**/`` is zero or more directories, ``**`` is anything, ``*`` never
+    crosses ``/``, ``?`` is one non-separator, and ``[...]`` classes pass
+    through (``[!...]`` becomes negation).
+    """
+    out: list[str] = ["^"]
+    index, end = 0, len(pattern)
+    while index < end:
+        char = pattern[index]
+        if char == "*":
+            if pattern[index:index + 3] == "**/":
+                out.append("(?:[^/]+/)*")
+                index += 3
+            elif pattern[index:index + 2] == "**":
+                out.append(".*")
+                index += 2
+            else:
+                out.append("[^/]*")
+                index += 1
+        elif char == "?":
+            out.append("[^/]")
+            index += 1
+        elif char == "[":
+            close = pattern.find("]", index + 1)
+            if close < 0:
+                out.append(re.escape(char))
+                index += 1
+            else:
+                body = pattern[index + 1:close]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                out.append("[" + body + "]")
+                index = close + 1
+        else:
+            out.append(re.escape(char))
+            index += 1
+    out.append("$")
+    return "".join(out)
 
 
 def _glob_match(pattern: str, rel: str) -> bool:
-    """Match one config glob against a project-relative posix path."""
+    """Match one config glob against a project-relative posix path.
+
+    Anchored, so ``e2e/**`` never matches ``src/e2e/x.spec.ts``. Patterns
+    with extglob groups are unknown here and never match; the candidate
+    filter decides (unknown include accepts, unknown exclude is ignored).
+    """
     cleaned = pattern.strip().removeprefix("./")
     if not cleaned or cleaned == "**":
         return bool(cleaned)
-    path = PurePosixPath(rel)
     for expanded in _expand_braces(cleaned):
-        if path.match(expanded):
-            return True
-        # Unlike pathlib, glob ``**/`` also matches zero directories, so
-        # ``src/**/*.test.ts`` covers ``src/a.test.ts`` as vitest does.
-        if "**/" in expanded and path.match(expanded.replace("**/", "")):
+        if _has_extglob(expanded):
+            continue
+        if re.match(_glob_to_regex(expanded), rel):
             return True
     return False
 
 
-def _vitest_filters(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """``(excludes, includes)`` globs for one project root."""
+def _vitest_filters(root: Path) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """``(excludes, includes, test_dir)`` for one project root.
+
+    When a ``vitest.config.*`` file is present, ``vite.config.*`` files
+    are ignored: vitest resolves its ``test`` section from the vitest
+    config alone. The Playwright ``testDir`` is returned separately and
+    excluded with a plain prefix check, never as a glob.
+    """
     excludes = list(_VITEST_DEFAULT_EXCLUDE)
     includes: list[str] = []
+    raws: list[tuple[str, bytes]] = []
     for name in _VITEST_CONFIG_NAMES:
         raw = _read(root, name)
         if raw is None:
             continue
+        raws.append((name, raw))
+    if any(name.startswith("vitest.config") for name, _ in raws):
+        raws = [(name, raw) for name, raw in raws
+                if name.startswith("vitest.config")]
+    for _, raw in raws:
         try:
             found, wanted = _test_block_arrays(raw.decode("utf-8"))
         except UnicodeDecodeError:
             continue
         excludes.extend(found)
         includes.extend(wanted)
-    excludes.append(_playwright_test_dir(root).rstrip("/") + "/**")
-    return tuple(excludes), tuple(includes)
+    return tuple(excludes), tuple(includes), _playwright_test_dir(root)
 
 
 def _imports_playwright(root: Path, rel: str) -> bool:
@@ -663,11 +770,17 @@ def _imports_playwright(root: Path, rel: str) -> bool:
 
 
 def _is_vitest_candidate(root: Path, rel: str, excludes: tuple[str, ...],
-                         includes: tuple[str, ...]) -> bool:
+                         includes: tuple[str, ...], test_dir: str) -> bool:
     if not _VITEST_TEST_RE.search(Path(rel).name):
         return False
-    if includes and not any(_glob_match(pattern, rel) for pattern in includes):
+    if rel == test_dir or rel.startswith(test_dir + "/"):
         return False
+    if includes:
+        known = [pattern for pattern in includes
+                 if not _has_extglob(pattern)]
+        if len(known) == len(includes) \
+                and not any(_glob_match(pattern, rel) for pattern in known):
+            return False
     if any(_glob_match(pattern, rel) for pattern in excludes):
         return False
     return not _imports_playwright(root, rel)
@@ -707,6 +820,7 @@ def iter_candidates(root: Path, test_root: str, kind: C.RunnerKind,
     """
     filters = _vitest_filters(root) if kind is C.RunnerKind.VITEST else None
     seen: set[str] = set()
+    visited: set[str] = set()
     for base in _walk_bases(root, test_root):
         try:
             stamp = os.lstat(base)
@@ -714,7 +828,7 @@ def iter_candidates(root: Path, test_root: str, kind: C.RunnerKind,
             continue
         if not stat.S_ISDIR(stamp.st_mode) or stat.S_ISLNK(stamp.st_mode):
             continue
-        for rel in iter_files(root, base, 6, budget):
+        for rel in iter_files(root, base, 6, budget, visited):
             if rel in seen:
                 continue
             seen.add(rel)

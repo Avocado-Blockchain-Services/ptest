@@ -150,15 +150,24 @@ def test_xdist_activation_is_value_aware(tokens, active):
     (("--exitfirst",), ("--exitfirst",)),
     (("-q",), ()),
 ])
-def test_narrowing_tokens_match_bridge_full_refusals(tokens, expected):
-    assert E._narrowing_tokens(tokens) == expected
+def test_full_tokens_match_bridge_full_refusals(tokens, expected):
+    """Behavior pins retargeted to the live bridge (was _narrowing_tokens)."""
+    from ptest.runtime.pytest_bridge import full_refusal_name
+
+    assert tuple(
+        name for index in range(len(tokens))
+        if (name := full_refusal_name(tokens, index)) is not None
+    ) == expected
 
 
 @pytest.mark.parametrize("tokens", [
     ("-rxXs",), ("-rsx",), ("-vrx",), ("-ra",), ("-rA",),
 ])
-def test_report_char_clusters_are_not_narrowing(tokens):
-    assert E._narrowing_tokens(tokens) == ()
+def test_report_char_clusters_are_not_full_refusals(tokens):
+    """Behavior pins retargeted to the live bridge (was _narrowing_tokens)."""
+    from ptest.runtime.pytest_bridge import full_refusal_name
+
+    assert full_refusal_name(tokens, 0) is None
 
 
 def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
@@ -269,11 +278,14 @@ def test_persea_shaped_addopts_are_project_filtered_full_with_serial_caveat(tmp_
 
 
 def test_maxfail_zero_is_not_narrowing():
-    assert E._narrowing_tokens(("--maxfail=0",)) == ()
-    assert E._narrowing_tokens(("--maxfail", "0")) == ()
-    assert E._narrowing_tokens(("--maxfail=3",)) == ("--maxfail",)
-    assert E._narrowing_tokens(("--maxfail", "3")) == ("--maxfail",)
-    assert E._narrowing_tokens(("--maxfail=0", "-m", "not slow")) == ("-m",)
+    """Behavior pins retargeted to the live bridge (was _narrowing_tokens)."""
+    from ptest.runtime.pytest_bridge import full_narrowing_text
+
+    assert full_narrowing_text(("--maxfail=0",)) is None
+    assert full_narrowing_text(("--maxfail", "0")) is None
+    assert full_narrowing_text(("--maxfail=3",)) == "--maxfail=3"
+    assert full_narrowing_text(("--maxfail", "3")) == "--maxfail 3"
+    assert full_narrowing_text(("--maxfail=0", "-m", "not slow")) == "-m not slow"
 
 
 def test_full_refused_conftest_hook_is_caveat_without_full(tmp_path):
@@ -621,3 +633,191 @@ def test_vitest_example_ignores_non_literal_config_parts(tmp_path):
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
     assert result.example == "src/a.test.ts"
+
+
+# --- Round 8 audit twins: anchored glob matching ---------------------------
+
+
+def _write_vitest_config(tmp_path, *, test_body):
+    _write(tmp_path / "vitest.config.ts",
+           "import { defineConfig, configDefaults } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           "  test: {\n" + test_body + "\n"
+           "  },\n"
+           "});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+
+def _vitest_unit(tmp_path, rel):
+    _write(tmp_path / rel,
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+
+
+def test_glob_match_is_left_anchored():
+    assert E._glob_match("src/**/*.test.ts", "src/a.test.ts")
+    assert E._glob_match("src/**/*.test.ts", "src/a/b/c/d.test.ts")
+    assert E._glob_match("e2e/**", "e2e/a/b.spec.ts")
+    assert not E._glob_match("src/**/*.test.ts", "packages/x/src/a.test.ts")
+    assert not E._glob_match("e2e/**", "src/e2e/x.spec.ts")
+
+
+def test_glob_include_reaches_deep_nested_files(tmp_path):
+    """Repro 1: include src/**/*.test.ts plus a deep test gives an example."""
+    _write_vitest_config(tmp_path, test_body="    include: ['src/**/*.test.ts'],")
+    _vitest_unit(tmp_path, "src/a/b/deep.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a/b/deep.test.ts"
+
+
+def test_glob_exclude_reaches_deep_nested_files(tmp_path):
+    """Repro 2: exclude e2e/** hides a deep spec that only imports fixtures."""
+    _write_vitest_config(
+        tmp_path,
+        test_body="    exclude: [...configDefaults.exclude, 'e2e/**'],")
+    _write(tmp_path / "e2e" / "auth" / "login.spec.ts",
+           "import { helper } from '../fixtures';\n"
+           "test('flow', () => {});\n")
+    _vitest_unit(tmp_path, "z.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "z.test.ts"
+
+
+def test_glob_include_does_not_match_nested_project_prefix(tmp_path):
+    _write_vitest_config(tmp_path, test_body="    include: ['src/**/*.test.ts'],")
+    _vitest_unit(tmp_path, "packages/x/src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example is None
+
+
+def test_glob_exclude_does_not_match_nested_e2e_dir(tmp_path):
+    _write_vitest_config(
+        tmp_path,
+        test_body="    exclude: [...configDefaults.exclude, 'e2e/**'],")
+    _vitest_unit(tmp_path, "src/e2e/x.spec.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/e2e/x.spec.ts"
+
+
+def test_glob_extglob_include_accepts(tmp_path):
+    _write_vitest_config(
+        tmp_path, test_body="    include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_glob_extglob_exclude_is_ignored(tmp_path):
+    _write_vitest_config(tmp_path, test_body="    exclude: ['src/*.?(c|m)ts'],")
+    _vitest_unit(tmp_path, "src/a.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.test.ts"
+
+
+def test_glob_expands_every_brace_group(tmp_path):
+    _write_vitest_config(
+        tmp_path, test_body="    include: ['**/*.{test,spec}.{ts,js}'],")
+    _write(tmp_path / "src" / "a.spec.js",
+           "import { it } from 'vitest';\n"
+           "it('works', () => {});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "src/a.spec.js"
+
+
+def test_static_reader_accepts_quoted_test_keys(tmp_path):
+    _write(tmp_path / "vitest.config.ts",
+           "import { defineConfig } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           '  "test": {\n'
+           '    "include": [\'src/**/*.test.ts\'],\n'
+           "  },\n"
+           "});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    # Deep path: the default e2e/** testDir glob misses it until the glob
+    # fix, so only the quoted include can hide this file.
+    _write(tmp_path / "e2e" / "auth" / "agents.spec.ts",
+           "import { it } from 'vitest';\n"
+           "it('flow', () => {});\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example is None
+
+
+def test_static_reader_reads_every_test_block(tmp_path):
+    _write(tmp_path / "vitest.config.ts",
+           "import { defineConfig } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           "  test: { exclude: ['dist/**'] },\n"
+           "});\n"
+           "export const extra = defineConfig({\n"
+           "  test: { include: ['src/**/*.test.ts'] },\n"
+           "});\n")
+    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    # Deep path: only the second block's include can hide this file.
+    _write(tmp_path / "e2e" / "auth" / "agents.spec.ts",
+           "import { it } from 'vitest';\n"
+           "it('flow', () => {});\n")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example is None
+
+
+def test_vitest_config_wins_over_vite_config(tmp_path):
+    # lib/ is outside both src/** and the Playwright testDir, so only the
+    # vite.config include can hide it when configs are wrongly merged.
+    _write(tmp_path / "vite.config.ts",
+           "import { defineConfig } from 'vitest/config';\n"
+           "export default defineConfig({\n"
+           "  test: { include: ['src/**/*.test.ts'] },\n"
+           "});\n")
+    _write_vitest_config(
+        tmp_path,
+        test_body="    exclude: [...configDefaults.exclude, 'e2e/**'],")
+    _vitest_unit(tmp_path, "lib/b.test.ts")
+
+    result = E.check_config(_vitest_dot_config(tmp_path), project=".")
+
+    assert result.example == "lib/b.test.ts"
+
+
+def test_dot_root_walk_dedupes_priority_bases(tmp_path):
+    """Priority bases (src/) are not re-walked by the trailing root walk."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.test.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "def test_b():\n    assert True\n", encoding="utf-8")
+    config = _config(tmp_path, test_roots=(".",))
+
+    budget = [10]
+    found = list(E.iter_candidates(
+        tmp_path, ".", C.RunnerKind.PYTEST, budget))
+
+    assert found == ["tests/test_b.py"]
+    assert budget == [7]
+
+
+def test_js_lexer_skips_regex_after_equals():
+    tokens = E._js_tokens("const re = /a{b/; test: { include: ['x'] };")
+
+    # The regex body never lexes; the only brace is the test: block's.
+    assert ("ident", "a") not in tokens
+    assert ("ident", "b") not in tokens
+    assert tokens.count(("punct", "{")) == 1

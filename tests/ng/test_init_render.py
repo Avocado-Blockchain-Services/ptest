@@ -180,10 +180,11 @@ def test_project_with_caveats_renders_once_with_bullet_lines():
     ))
     text = render_init(result, None, agents=())
 
-    # The child config action no longer duplicates the Projects entry.
-    assert "api/.ptest.toml" not in text
+    # The child config action rides the project line, exactly once.
+    assert text.count("(created api/.ptest.toml)") == 1
     projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
     assert "api  pytest  ready with caveats" in projects
+    assert "(created api/.ptest.toml)" in projects
     assert "- first caveat" in projects
     assert "- second caveat" in projects
 

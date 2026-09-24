@@ -1019,9 +1019,9 @@ def test_candidate_scan_uses_shared_walker_and_bounded_reader(
     walker_calls = []
     real_iter = exec_check.iter_files
 
-    def spy_iter(root, start, depth, budget):
+    def spy_iter(root, start, depth, budget, *args):
         walker_calls.append((str(start), depth))
-        yield from real_iter(root, start, depth, budget)
+        yield from real_iter(root, start, depth, budget, *args)
 
     reader_calls = []
     real_read = files_module.read_regular
@@ -1037,3 +1037,30 @@ def test_candidate_scan_uses_shared_walker_and_bounded_reader(
         tmp_path, C.RunnerKind.PYTEST, ("tests",)) == "tests/test_a.py"
     assert walker_calls
     assert any(call.endswith("test_a.py") for call in reader_calls)
+
+
+def test_smoke_skips_deeply_excluded_e2e_spec(tmp_path):
+    """Repro 2 (smoke half): exclude e2e/** hides a deep fixture-only spec."""
+    from ptest import init_smoke
+
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { defineConfig, configDefaults } from 'vitest/config';\n"
+        "export default defineConfig({\n"
+        "  test: {\n"
+        "    exclude: [...configDefaults.exclude, 'e2e/**'],\n"
+        "  },\n"
+        "});\n", encoding="utf-8")
+    e2e = tmp_path / "e2e" / "auth"
+    e2e.mkdir(parents=True)
+    (e2e / "login.spec.ts").write_text(
+        "import { helper } from '../fixtures';\n"
+        "test('flow', () => {});\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.test.ts").write_text(
+        "import { it } from 'vitest';\n"
+        "it('works', () => {});\n"
+        "// padding to sort after the e2e spec by size\n" * 4, encoding="utf-8")
+
+    assert init_smoke.choose_candidate(
+        tmp_path, C.RunnerKind.VITEST, (".",)) == "src/a.test.ts"
