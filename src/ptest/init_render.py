@@ -214,10 +214,11 @@ def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
     return projects
 
 
-def _project_fact_lines(facts: Mapping[str, object], width: int) -> list[str]:
+def _project_fact_lines(facts: Mapping[str, object], width: int,
+                        name_width: int = 6) -> list[str]:
     project = terminal_text(facts.get("project", "."))
     runner = terminal_text(facts.get("runner", "unknown"))
-    prefix = f"  {project:<6}{runner}  "
+    prefix = f"  {project:<{name_width}}{runner}  "
     hang = " " * len(prefix)
     atoms = [terminal_text(atom) for atom in summary_atoms(facts)]
     lines = wrap_atoms(atoms, width, indent=prefix, hang=hang)
@@ -234,9 +235,12 @@ def _project_lines(result: C.InitResult,
     validated = [check_facts(item) for item in facts]
     validated = [item for item in validated if item is not None]
     if validated:
+        longest = max(len(terminal_text(item.get("project", ".")))
+                      for item in validated)
+        name_width = max(6, longest + 2)
         lines: list[str] = []
         for item in validated:
-            lines.extend(_project_fact_lines(item, width))
+            lines.extend(_project_fact_lines(item, width, name_width))
         return lines
     return [f"  {terminal_text(project)}  {terminal_text(runner)}"
             for project, runner in _note_projects(result)]

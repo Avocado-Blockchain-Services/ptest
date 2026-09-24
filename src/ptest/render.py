@@ -255,7 +255,7 @@ def _child_fact_lines(child, width: int) -> tuple[list[str], bool]:
     for detail in detail_lines(facts):
         atoms = [_agent_assessment_prose(atom)
                  for atom in detail_atoms(detail)]
-        lines.extend(wrap_atoms(atoms, width, indent="  ", hang="  ",
+        lines.extend(wrap_atoms(atoms, width, indent="  ", hang="    ",
                                 sep=" "))
     return lines, not facts.get("runs", True)
 

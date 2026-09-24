@@ -1080,5 +1080,5 @@ def test_doctor_full_suite_breaks_between_atoms_at_width_60():
     lines = text.splitlines()
     assert '  full suite = your pytest config: -m "not extended_migration",' \
         in lines
-    assert "  conftest.py hooks" in lines
+    assert "    conftest.py hooks" in lines
     assert not any(line.endswith('-m "not') for line in lines)

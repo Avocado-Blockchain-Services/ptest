@@ -346,6 +346,24 @@ def test_not_runnable_project_line():
     assert 'full suite: not available — test_roots is "."' in text
 
 
+def test_long_project_names_keep_runner_gap_and_align():
+    """Project names longer than 6 chars keep a gap before the runner."""
+    facts = (_api_facts(project="services/api"),
+             _web_facts(project="frontend"))
+    for width in (60, 110):
+        text = render_init(_result(), None, facts=facts, width=width)
+        lines = text.splitlines()
+        api_line = next(line for line in lines
+                        if "services/api" in line and "pytest" in line)
+        fe_line = next(line for line in lines
+                       if "frontend" in line and "vitest" in line)
+        assert "services/apipytest" not in text
+        assert "frontendvitest" not in text
+        assert "services/api  pytest" in api_line
+        assert "  vitest" in fe_line
+        assert api_line.index("pytest") == fe_line.index("vitest")
+
+
 def test_render_init_rejects_wrong_types():
     try:
         render_init("nope", None)
