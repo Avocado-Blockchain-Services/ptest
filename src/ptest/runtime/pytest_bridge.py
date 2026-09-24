@@ -789,6 +789,16 @@ _FULL_COLLECTION_HOOKS = frozenset({
     "pytest_collection_finish",
 })
 
+# A conftest.py cleanup hook is the project's own teardown definition when
+# it lives under the admitted checkout (section F, same ownership rule as
+# the collection hooks): accepted and recorded in the run label, provided
+# the exitstatus guard below proves it did not change the outcome. A
+# sessionfinish from any other plugin, and pytest_runtest_makereport /
+# pytest_report_teststatus from anywhere, stay refused.
+_FULL_SESSIONFINISH_HOOKS = frozenset({
+    "pytest_sessionfinish",
+})
+
 
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
 # additive under the basic-serial grant. anyio arrives transitively with
@@ -861,23 +871,27 @@ class OwnedPlugin:
         return os.path.relpath(candidate, expected).replace(os.sep, "/")
 
     def _project_conftest_hook(self, hook: str, implementation: Any) -> str | None:
-        """Project-relative conftest path when a full-only collection hook is owned.
+        """Project-relative conftest path when a full-only hook is owned.
 
         Only the ``_FULL_COLLECTION_HOOKS`` collection hooks
         (``pytest_collection_modifyitems``/``pytest_ignore_collect`` plus
         the ``pytest_pycollect_makeitem``/``pytest_collect_file``/
         ``pytest_collect_directory``/``pytest_make_collect_report``/
-        ``pytest_collection_finish`` family)
+        ``pytest_collection_finish`` family) and the
+        ``_FULL_SESSIONFINISH_HOOKS`` cleanup hook (``pytest_sessionfinish``)
         defined in a ``conftest.py`` module under the admitted checkout
         count as the project's own suite definition. The plugin object must
         itself be that module (a registered class instance or any other
         object is refused even when its code lives in a conftest), and the
         hook function must be defined in it (a re-exported import is
         refused). Hooks from installed plugins, conftests outside the
-        checkout, and reporting hooks stay refused. Missing file evidence
+        checkout, and the reporting hooks (``pytest_runtest_makereport``/
+        ``pytest_report_teststatus``) stay refused. Missing file evidence
         fails closed. Returns None when the hook is not project-owned.
         """
-        if self.execution != "full" or hook not in _FULL_COLLECTION_HOOKS:
+        if (self.execution != "full"
+                or (hook not in _FULL_COLLECTION_HOOKS
+                    and hook not in _FULL_SESSIONFINISH_HOOKS)):
             return None
         plugin = getattr(implementation, "plugin", None)
         relpath = self._conftest_relpath(plugin)
@@ -889,13 +903,15 @@ class OwnedPlugin:
         return relpath
 
     def _full_narrowing_report(self, config: Any, accepted_hooks: list[str],
+                               accepted_sessionfinish: list[str],
                                loaded: list[Any]) -> dict[str, Any]:
         """Report exactly what full mode allowed into the attempt report.
 
         The single source of truth behind the ``full (project-filtered:
         ...)`` label: the effective checked-in narrowing text, every
-        accepted conftest-hook file, and non-default collection ini/conftest
-        narrowing (``norecursedirs``/``python_files``/``python_functions``,
+        accepted conftest-hook file, an accepted conftest sessionfinish
+        hook, and non-default collection ini/conftest narrowing
+        (``norecursedirs``/``python_files``/``python_functions``,
         ``collect_ignore``/``collect_ignore_glob``). Only reached after
         every refusal gate above passed, so everything reported here was
         allowed.
@@ -905,6 +921,8 @@ class OwnedPlugin:
         except BridgeRefusal:
             ini_tokens = ()
         notes = self._full_notes(config, loaded)
+        if accepted_sessionfinish:
+            notes = sorted(set(notes) | {"conftest sessionfinish hook"})[:64]
         return {
             "narrowing": full_narrowing_text(ini_tokens),
             "conftest_hooks": sorted(set(accepted_hooks)),
@@ -969,7 +987,10 @@ class OwnedPlugin:
         # Project-owned hook files accepted below; the narrowing report at
         # the end of the full branch records them even when no plugin
         # manager is present (checked-in ini narrowing still applies).
+        # Sessionfinish hooks are tracked separately so the run label can
+        # name them apart from the collection hooks.
         accepted_hooks: list[str] = []
+        accepted_sessionfinish: list[str] = []
         loaded_plugins: list[Any] = []
         if manager is not None:
             try:
@@ -1059,7 +1080,10 @@ class OwnedPlugin:
                         continue
                     owned = self._project_conftest_hook(hook, implementation)
                     if owned is not None:
-                        accepted_hooks.append(owned)
+                        if hook in _FULL_SESSIONFINISH_HOOKS:
+                            accepted_sessionfinish.append(owned)
+                        else:
+                            accepted_hooks.append(owned)
                         continue
                     self._refuse("unqualified pytest execution hook is not owned by the serial grant")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
@@ -1159,7 +1183,8 @@ class OwnedPlugin:
             # Every full gate above passed: record what was allowed. The run
             # label is built from this report, never from a static scan.
             self._narrowing_report = self._full_narrowing_report(
-                config, accepted_hooks, loaded_plugins)
+                config, accepted_hooks, accepted_sessionfinish,
+                loaded_plugins)
 
     def pytest_cmdline_main(self, config: Any) -> Any:
         """Wrap before xdist replaces explicit tx with local popen transports."""
@@ -1234,6 +1259,23 @@ class OwnedPlugin:
         """Check per-item registrations at the test-body execution boundary."""
         self._validate(item.config, generated=True)
         return (yield)
+
+    def pytest_sessionfinish(self, session: Any, exitstatus: Any) -> Any:
+        """Prove a conftest sessionfinish did not change the native outcome.
+
+        Full mode only: registered tryfirst, so the pre-yield capture runs
+        before every other sessionfinish implementation and the post-yield
+        comparison runs after all of them. A rewritten exitstatus is a
+        bridge refusal (an incomplete report), never a silent verdict
+        change. The collected-vs-run reconciliation above still applies.
+        """
+        before = getattr(session, "exitstatus", exitstatus)
+        result = yield
+        if self.execution == "full":
+            after = getattr(session, "exitstatus", exitstatus)
+            if after != before:
+                self._refuse("full pytest sessionfinish changed the native outcome")
+        return result
 
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
@@ -1628,6 +1670,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtestloop)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtest_protocol)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtest_call)
+        pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_sessionfinish)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(plugin_type.pytest_xdist_setupnodes)
         if profile == "advanced":
             pytest.hookimpl(tryfirst=True)(AdvancedPlugin.pytest_runtest_logreport)

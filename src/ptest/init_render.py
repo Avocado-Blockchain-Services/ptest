@@ -225,6 +225,32 @@ _BULLET_PREFIX = "    - "
 _BULLET_CONT = "      "
 
 
+def _split_caveats(rest: str) -> list[str]:
+    """Recover the structured caveat list from a joined verdict string.
+
+    Caveats are a list joined with the ``"; "`` separator, but one caveat
+    — the project-filtered label ``expected: full (project-filtered:
+    ...; ...)`` — is itself a parenthesized unit whose inner parts use the
+    same characters. Split only at depth zero so the label stays one
+    bullet and ordinary ``c1; c2`` caveats still split.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in rest:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if char == ";" and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def _split_verdict(verdict: str) -> tuple[str, list[str]]:
     """Split a project verdict into a short head plus one bullet per detail.
 
@@ -237,8 +263,7 @@ def _split_verdict(verdict: str) -> tuple[str, list[str]]:
         return "ready", []
     if verdict.startswith(_CAVEATS_PREFIX):
         rest = verdict[len(_CAVEATS_PREFIX):].strip()
-        bullets = [part.strip() for part in rest.split(";")]
-        return "ready with caveats", [part for part in bullets if part]
+        return "ready with caveats", _split_caveats(rest)
     if verdict.startswith(_NOT_RUNNABLE_PREFIX):
         rest = verdict[len(_NOT_RUNNABLE_PREFIX):]
         if _FIX_SEP in rest:

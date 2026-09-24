@@ -1044,11 +1044,15 @@ def test_full_bridge_reconciliation_ignores_parallel_controllers(bridge_env):
     assert owned.full_unrun_items() == ()
 
 
-@pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus",
-                                   "pytest_sessionfinish"])
+@pytest.mark.parametrize("hook", ["pytest_runtest_makereport", "pytest_report_teststatus"])
 def test_full_bridge_refuses_reporting_hooks_even_from_project_conftest(
         bridge_env, tmp_path, monkeypatch, hook):
-    """Section F flips collection hooks only; reporting hooks stay refused."""
+    """Section F flips collection hooks plus a conftest sessionfinish only.
+
+    The reporting hooks (makereport/teststatus) stay refused from anywhere;
+    sessionfinish is project-owned from a checkout conftest (see the round
+    14 acceptance test above) and non-conftest sessionfinish stays refused.
+    """
     monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
     conftest = tmp_path / "conftest.py"
     conftest.write_text("def %s(*args):\n    return None\n" % hook)
@@ -1343,3 +1347,49 @@ def test_full_bridge_accepts_report_char_addopts(bridge_env, monkeypatch, value)
 def test_full_preparation_accepts_report_char_clusters(args):
     """Static admission agrees with the bridge on report-char clusters."""
     prepare(_config(args=args), _plan(), _grant(), _attempt())
+
+
+def test_full_bridge_accepts_sessionfinish_from_project_conftest(
+        bridge_env, tmp_path, monkeypatch):
+    """Round 14: a conftest sessionfinish is project-owned in full mode."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    conftest = tmp_path / "tests" / "conftest.py"
+    conftest.parent.mkdir(parents=True)
+    conftest.write_text("def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+    plugin = _conftest_plugin(conftest)
+    manager = _loaded_manager(
+        (("conftest", plugin),),
+        [_hookimpl("pytest_sessionfinish", "conftest", plugin)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+
+    owned = pytest_bridge.OwnedPlugin(1)
+    owned.pytest_configure(config)
+
+    assert owned.allowed_narrowing()["conftest_hooks"] == []
+    assert "conftest sessionfinish hook" in owned.allowed_narrowing()["notes"]
+
+
+def test_full_bridge_sessionfinish_guard_passes_when_exitstatus_unchanged(bridge_env):
+    """Round 14: a cleanup-only sessionfinish keeps the native outcome."""
+    owned = pytest_bridge.OwnedPlugin(1)
+    session = SimpleNamespace(exitstatus=0)
+
+    _drive_wrapper(owned.pytest_sessionfinish(session, 0))
+
+    assert owned.refused is False
+
+
+def test_full_bridge_sessionfinish_guard_refuses_changed_exitstatus(bridge_env):
+    """Round 14: a sessionfinish that rewrites the outcome is refused."""
+    owned = pytest_bridge.OwnedPlugin(1)
+    reads = iter((1, 0))
+
+    class _Session:
+        @property
+        def exitstatus(self):
+            return next(reads)
+
+    with pytest.raises(pytest.UsageError, match="sessionfinish"):
+        _drive_wrapper(owned.pytest_sessionfinish(_Session(), 1))
+    assert owned.refused is True

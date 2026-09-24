@@ -234,22 +234,10 @@ def test_full_project_conftest_collection_hooks_run_labelled(case, hook_source):
         "def pytest_report_teststatus(report):\n"
         "    yield\n"
     ),
-    "def pytest_sessionfinish(session, exitstatus):\n    pass\n",
-    (
-        "import pytest\n"
-        "@pytest.hookimpl(wrapper=True)\n"
-        "def pytest_sessionfinish(session, exitstatus):\n"
-        "    yield\n"
-    ),
-    # Only pytest_-prefixed names take effect as specname aliases: pytest's
-    # plugin manager ignores marked non-pytest_ attributes before consulting
-    # the marker, so this alias must keep its pytest_ prefix to be live.
-    (
-        "import pytest\n"
-        "@pytest.hookimpl(specname='pytest_sessionfinish')\n"
-        "def pytest_aliased_observer(session, exitstatus):\n"
-        "    pass\n"
-    ),
+    # Round 14: plain, wrapper, and specname-aliased sessionfinish forms
+    # defined in the checkout conftest are project-owned and allowed (see
+    # test_full_conftest_sessionfinish_cleanup_runs_labelled); only
+    # sessionfinish on a registered instance stays refused below.
     (
         "import pytest\n"
         "class Late:\n"
@@ -521,7 +509,7 @@ def _full_project_toml(root, project_id):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"a.marker\", \"b.marker\", \"legacy.marker\",\n"
-        "\"mig.marker\", \"ignored.marker\", \"body.marker\"]\n")
+        "\"mig.marker\", \"ignored.marker\", \"body.marker\", \"cleanup.marker\"]\n")
 
 
 def test_full_deep_conftest_hook_runs_labelled(case):
@@ -762,8 +750,11 @@ def test_full_persea_shaped_suite_runs_with_combined_label(case):
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
     (root / "tests").mkdir()
     (root / "tests" / "conftest.py").write_text(
+        "from pathlib import Path\n"
         "def pytest_collection_modifyitems(items):\n"
-        "    items[:] = [item for item in items if 'test_legacy' not in item.nodeid]\n")
+        "    items[:] = [item for item in items if 'test_legacy' not in item.nodeid]\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    Path('cleanup.marker').write_text('done')\n")
     (root / "tests" / "test_native.py").write_text(
         "import pytest\n"
         "from pathlib import Path\n"
@@ -779,11 +770,13 @@ def test_full_persea_shaped_suite_runs_with_combined_label(case):
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
-    label = "full (project-filtered: -m not extended_migration; conftest collection hook)"
+    label = ("full (project-filtered: -m not extended_migration; "
+             "conftest collection hook; conftest sessionfinish hook)")
     assert completed.code == 0, completed.stderr.decode()
     assert b"ptest-bridge-refusal" not in completed.stderr
     assert label in completed.stderr.decode()
     assert (root / "a.marker").read_text() == "ran"
+    assert (root / "cleanup.marker").read_text() == "done"
     assert not (root / "legacy.marker").exists()
     assert not (root / "mig.marker").exists()
     assert completed.result is not None
@@ -984,3 +977,95 @@ def test_full_maxfail_stop_after_failure_stays_failure(case):
     assert data["runner_exit_code"] == 1
     assert data["exit_origin"] == "runner"
     assert not (root / "b.marker").exists()
+
+
+def test_full_conftest_sessionfinish_cleanup_runs_labelled(case):
+    """Round 14: a cleanup-only conftest sessionfinish runs labelled and passes."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "from pathlib import Path\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    Path('cleanup.marker').write_text('done')\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"body.marker\", \"cleanup.marker\"]\n")
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    label = "full (project-filtered: conftest sessionfinish hook)"
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert label in completed.stderr.decode()
+    assert (root / "body.marker").read_text() == "ran"
+    assert (root / "cleanup.marker").read_text() == "done"
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert any(reason["code"] == "project-filtered" and reason["message"] == label
+               for reason in data["reasons"])
+
+
+def test_full_sessionfinish_exitstatus_rewrite_is_refused(case):
+    """Round 14: a sessionfinish that clears a failure outcome is refused."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    session.exitstatus = 0\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = [\"fail.marker\"]\n")
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_non_conftest_plugin_sessionfinish_is_refused(case):
+    """Round 14: a sessionfinish from a non-conftest plugin stays refused."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "session_helper.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    return None\n")
+    (root / "tests" / "conftest.py").write_text('pytest_plugins = "session_helper"\n')
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_body():\n    Path('body.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert not (root / "body.marker").exists()

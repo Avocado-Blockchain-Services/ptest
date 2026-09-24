@@ -441,3 +441,25 @@ def test_preview_and_existing_layout_preserved_with_banner(tmp_path):
     assert _root_config_lines(existing_text) == ["unchanged"]
     assert "already present" not in existing_text
     assert re.search(r"unchanged +docs/ptest-agent\.md", existing_text)
+
+
+def test_persea_shaped_label_renders_as_single_bullet():
+    """Round 14: the project-filtered label never splits at its inner '; '."""
+    label = ("expected: full (project-filtered: -m not extended_migration; "
+             "conftest collection hook; conftest sessionfinish hook)")
+    result = _result(details=(
+        _detail(".ptest.toml", "created", "config"),
+        _note(f"api · pytest · ready with caveats: {label}"),
+    ))
+    text = render_init(result, None, agents=())
+
+    projects = text.split("Projects", 1)[1].split("Next steps", 1)[0]
+    assert "api  pytest  ready with caveats" in projects
+    bullets = [_cell(line).lstrip() for line in projects.splitlines()
+               if _cell(line).lstrip().startswith("- ")]
+    # The label's inner separators are not caveat boundaries: the whole
+    # label stays one bullet (today it splits into three).
+    assert len(bullets) == 1
+    assert bullets[0].startswith("- expected: full (project-filtered:")
+    # The wrapped continuation still carries the full label text in order.
+    assert label in " ".join(projects.replace("│", " ").split())

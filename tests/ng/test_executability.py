@@ -328,7 +328,8 @@ def test_non_allowlisted_ini_narrowing_makes_full_unavailable(tmp_path, addopts)
     assert result.full is False
 
 
-def test_full_refused_conftest_hook_is_caveat_without_full(tmp_path):
+def test_conftest_sessionfinish_is_project_filtered_full(tmp_path):
+    """Round 14: a conftest sessionfinish is allowed and labelled, like persea api."""
     _write(tmp_path / "tests" / "conftest.py",
            "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
 
@@ -336,8 +337,27 @@ def test_full_refused_conftest_hook_is_caveat_without_full(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "ptest --full unavailable: tests/conftest.py defines pytest_sessionfinish",)
-    assert result.full is False
+        "expected: full (project-filtered: conftest sessionfinish hook)",)
+    assert result.full is True
+
+
+def test_persea_shaped_static_prediction_combines_narrowing_and_hooks(tmp_path):
+    """Round 14: the persea api shape predicts one combined label in init."""
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\n'
+           'addopts = \'-m "not extended_migration"\'\n')
+    _write(tmp_path / "tests" / "conftest.py",
+           "def pytest_collection_modifyitems(items):\n    return None\n"
+           "\n"
+           "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "expected: full (project-filtered: -m not extended_migration; "
+        "conftest collection hook; conftest sessionfinish hook)",)
+    assert result.full is True
 
 
 def test_vitest_bad_launcher_is_not_executable(tmp_path):

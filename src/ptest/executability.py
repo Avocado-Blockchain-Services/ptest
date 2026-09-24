@@ -52,6 +52,13 @@ _FULL_COLLECTION_HOOKS = frozenset({
     "pytest_collect_directory", "pytest_make_collect_report",
     "pytest_collection_finish",
 })
+# Section F round 14: a conftest.py sessionfinish cleanup hook is allowed
+# in full mode under the same ownership rule and recorded in the run
+# label. Mirrors ``pytest_bridge._FULL_SESSIONFINISH_HOOKS``; the bridge
+# stays the source of truth at runtime, this is the static prediction.
+_FULL_SESSIONFINISH_HOOKS = frozenset({
+    "pytest_sessionfinish",
+})
 _HOOK_RE = re.compile(r"^(?:async\s+)?def\s+(pytest_[a-z_]+)\s*\(")
 _SHORT_N_RE = re.compile(r"^-[qvxslhVfd]*n")
 _VITEST_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$")
@@ -438,8 +445,9 @@ def full_project_filter_text(root: Path, test_roots: tuple[str, ...]) -> str | N
     """Bare project-filtered text, or None when the static scan sees none.
 
     The text records narrowing from the project's checked-in pytest
-    configuration (allowlisted addopts marker/keyword filters) and its
-    ``conftest.py`` collection hooks, for example
+    configuration (allowlisted addopts marker/keyword filters), its
+    ``conftest.py`` collection hooks, and an accepted ``conftest.py``
+    sessionfinish cleanup hook, for example
     ``full (project-filtered: -m not slow; conftest collection hook)``.
     """
     parts: list[str] = []
@@ -449,6 +457,8 @@ def full_project_filter_text(root: Path, test_roots: tuple[str, ...]) -> str | N
     pairs = _scan_conftest_hooks(root, test_roots)
     if any(hook in _FULL_COLLECTION_HOOKS for _, hook in pairs):
         parts.append("conftest collection hook")
+    if any(hook in _FULL_SESSIONFINISH_HOOKS for _, hook in pairs):
+        parts.append("conftest sessionfinish hook")
     if not parts:
         return None
     return "full (project-filtered: " + "; ".join(parts) + ")"
@@ -1040,7 +1050,8 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
         if label is not None:
             caveats.append(label)
         for rel, hook in pairs:
-            if hook in _FULL_REFUSED_HOOKS and hook not in _FULL_COLLECTION_HOOKS:
+            if hook in _FULL_REFUSED_HOOKS and hook not in _FULL_COLLECTION_HOOKS \
+                    and hook not in _FULL_SESSIONFINISH_HOOKS:
                 caveats.append(f"ptest --full unavailable: {rel} defines {hook}")
                 full = False
                 break
