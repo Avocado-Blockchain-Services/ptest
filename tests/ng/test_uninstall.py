@@ -1139,6 +1139,72 @@ def test_self_keeps_user_files_and_the_root(
     assert not (inst / "ptest").exists()
 
 
+def test_self_symlinked_home_still_removes_public_and_launcher_links(
+        case, tmp_path, monkeypatch, capsys):
+    """U5-5 twin: the passwd home sits behind a symlink.
+
+    The default install root must be compared realpath-to-realpath, or
+    neither `<root>/ptest` nor the launcher link resolves inside it.
+    """
+    real = tmp_path / "real-home"
+    real.mkdir()
+    home = tmp_path / "home"
+    home.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(
+        pwd, "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=str(home)))
+    inst = home / ".local" / "ptest"
+    target = _install_fixture(inst)
+    bindir = home / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "ptest").symlink_to(target)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(
+        shutil, "which", lambda *args, **kwargs: str(bindir / "ptest"))
+    monkeypatch.setattr(sys, "argv", ["ptest", "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    domain = case.domain()
+
+    assert _uninstall(domain, "--self", "--yes") == 0
+    capsys.readouterr()
+    assert not os.path.lexists(inst / "ptest")
+    assert not os.path.lexists(bindir / "ptest")
+    assert not (real / ".local" / "ptest").exists()
+
+
+def test_tty_self_consent_lists_kept_user_files(
+        case, tmp_path, monkeypatch, capsys):
+    """U5-3 twin: the interactive summary path shows --self kept files.
+
+    A TTY `y` (no `--yes`) prints the plan before consent and only the
+    summary after; the kept `Documents/thesis.tex` must be listed.
+    """
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    thesis = inst / "Documents" / "thesis.tex"
+    thesis.parent.mkdir()
+    thesis.write_text("\\documentclass{article}\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    _tty(monkeypatch, "y")
+
+    assert _uninstall(domain, "--self") == 0
+    out = capsys.readouterr().out
+    assert "Documents" in out
+    assert "kept user file" in out
+    assert thesis.read_text(encoding="utf-8") == "\\documentclass{article}\n"
+
+
 def test_active_run_in_child_refuses_uninstall(
         case, tmp_path, monkeypatch, capsys):
     """U4-2 twin: the active-run check covers every declared child id.
@@ -1340,6 +1406,84 @@ def test_forget_checkouts_deletes_only_terminal_rows(case, tmp_path):
     ).fetchall())
     assert mine.checkout_id not in rows
     assert rows.get(foreign.checkout_id, 0) >= 1
+
+
+def test_forget_checkouts_recovers_rebooted_rows_then_uninstall_applies(
+        case, tmp_path, monkeypatch):
+    """U5-1 twin: a row from a previous boot is recovered, not live.
+
+    After a simulated reboot the queued row is terminal, so the locked
+    forget succeeds and the uninstall applies.
+    """
+    monkeypatch.setattr(platform_api, "boot_identity", lambda: "boot-a")
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    mine = _checkout(root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="e1" * 16, checkout=mine, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    (domain.root / "checkouts" / mine.checkout_id).mkdir(parents=True)
+    monkeypatch.setattr(platform_api, "boot_identity", lambda: "boot-b")
+
+    assert scheduler.forget_checkouts(domain, [mine.checkout_id]) >= 1
+    monkeypatch.chdir(root)
+    assert _uninstall(domain, "--yes") == 0
+    assert not (domain.root / "checkouts" / mine.checkout_id).exists()
+
+
+def test_apply_refuses_row_inserted_after_plan_for_child_without_ledger_rows(
+        case, tmp_path, monkeypatch):
+    """U5-2 twin: the locked forget covers every planned id.
+
+    A child state dir exists with no ledger rows at plan time; a live
+    row inserted between plan and apply still refuses, and the dir
+    stays intact.
+    """
+    from types import SimpleNamespace
+
+    from ptest import operations
+    from ptest import uninstall as uninstall_api
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"api\"]\n", encoding="utf-8")
+    api = root / "api"
+    api.mkdir()
+    _v1(api)
+    child = operations._checkout(SimpleNamespace(
+        checkout=None, config_path=api / ".ptest.toml", project_id=PROJ))
+    assert child.checkout_id == _checkout_id(api)
+    child_dir = domain.root / "checkouts" / child.checkout_id
+    child_dir.mkdir(parents=True)
+    plan = uninstall_api.plan_repo(root, domain)
+    assert child.checkout_id in plan.checkout_ids
+    assert not any(entry.kind == "ledger" and entry.scope == child.checkout_id
+                   for entry in plan.entries)
+    calls: list = []
+    real_forget = scheduler.forget_checkouts
+
+    def _spy(dom, ids):
+        calls.append(list(ids))
+        return real_forget(dom, ids)
+
+    monkeypatch.setattr(scheduler, "forget_checkouts", _spy)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="e2" * 16, checkout=child, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    with pytest.raises(C.Problem) as caught:
+        uninstall_api.apply_repo(plan, domain)
+    assert caught.value.code == "active-run"
+    assert calls and calls[0] == list(plan.checkout_ids)
+    assert child_dir.is_dir()
 
 
 def test_dry_run_never_creates_or_writes_the_ledger(

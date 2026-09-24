@@ -49,10 +49,21 @@ Machine-level (`platform.domain_paths`, normal or `--fixture-domain`):
 
 `checkout_id = sha256(realpath(repo_root))[:32]` — the exact formula in both
 `cli._checkout` and `history._validated_checkout_root`, so uninstall, history
-and operations agree. `project_id` comes from the parsed root (v1) config;
-monorepo children share the `checkout_id` (root-derived), and the ledger has
-no `project_id` column, so one `checkout_id`-scoped delete covers the whole
-checkout and can never match another checkout.
+and operations agree. `project_id` comes from the parsed root (v1) config.
+The planned id set is the root id plus one id per declared monorepo child
+that exists: `sha256(realpath(<repo>/<child>))` each (the same formula runs
+use, via `operations._checkout`), so every id is rooted at this checkout and
+can never match another checkout. The ledger has no `project_id` column.
+
+At plan time the active-run check is read-only (`scheduler.reconcile`) for a
+friendly early refusal. At apply time every planned id goes unconditionally
+to `scheduler.forget_checkouts`, which runs boot recovery + reconciliation
+under `BEGIN IMMEDIATE` and then refuses (`active-run`, deleting nothing)
+when any non-terminal row remains for those ids; otherwise it deletes the
+terminal rows for those ids and returns the count. State dirs are removed
+only after that locked forget returns, so a run admitted between plan and
+apply still refuses first. With no rows the forget deletes nothing and
+returns 0, and a missing ledger is tolerated as zero rows.
 
 ## 3. Managed-detection reuse from `agent_rules`
 

@@ -554,20 +554,16 @@ def _prune_skill_dirs(root: Path, rel: str) -> None:
 def apply_repo(plan: RepoPlan, domain: C.DomainPaths) -> Applied:
     """Execute a plan with per-file re-verification; fail closed per entry."""
     ids = list(plan.checkout_ids) or [plan.checkout_id]
-    if any(cid in _active_checkout_ids(domain) for cid in ids):
-        raise _problem("active-run",
-                       "a ptest run for this checkout is active; refusing to uninstall")
-    ledger_ids = [entry.scope or plan.checkout_id for entry in plan.entries
-                  if entry.kind == "ledger" and entry.action == REMOVE]
-    if ledger_ids:
-        # Scheduler-owned delete under its own lock, before state dirs go.
-        try:
-            scheduler.forget_checkouts(domain, ledger_ids)
-        except C.Problem as exc:
-            if exc.code == "state-unavailable" and _lstat(domain.ledger) is None:
-                pass
-            else:
-                raise
+    # Scheduler-owned locked check-and-delete for every planned id, before
+    # state dirs go. A run admitted after planning still refuses first; with
+    # no rows this deletes nothing and returns 0.
+    try:
+        scheduler.forget_checkouts(domain, ids)
+    except C.Problem as exc:
+        if exc.code == "state-unavailable" and _lstat(domain.ledger) is None:
+            pass
+        else:
+            raise
     removed: list[str] = []
     kept: list[str] = []
     skipped: list[str] = []
@@ -811,7 +807,9 @@ def plan_self() -> SelfPlan:
         root = _root_from_binary(source)
         if root is not None and root not in candidates:
             candidates.append(root)
-    default = _default_install_root()
+    # Realpath the default so link checks compare like with like: the
+    # passwd home may itself sit behind a symlink.
+    default = Path(os.path.realpath(_default_install_root()))
     if default not in candidates:
         candidates.append(default)
     existing: list[Path] = []
@@ -961,7 +959,8 @@ def render_text(plan: RepoPlan, *, applied: Applied | None = None,
     """Plain grouped plan/result rendering for human terminals.
 
     ``summary_only`` (with ``applied``) emits just the trailing summary
-    line, for callers that already printed the plan before consent.
+    line plus any ``--self`` kept lines, for callers that already
+    printed the plan before consent.
     """
     term = terminal_width(width)
     header = ("ptest uninstall preview (dry run, changes nothing)"
@@ -1017,7 +1016,10 @@ def render_text(plan: RepoPlan, *, applied: Applied | None = None,
         tail = None
     if summary_only:
         assert applied is not None and tail is not None
-        return tail + "\n"
+        out = tail + "\n"
+        for name in self_kept:
+            out += f"    {terminal_text(name)} (kept user file)\n"
+        return out
     if tail is not None:
         lines.append(tail)
     return "\n".join(lines) + "\n"

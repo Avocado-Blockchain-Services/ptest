@@ -1306,6 +1306,9 @@ def forget_checkouts(domain: DomainPaths, ids) -> int:
     ok = False
     try:
         _begin(conn)
+        now = _now()
+        _recover_boot_locked(conn, now)
+        _reconcile_locked(conn, now)
         marks = ",".join("?" for _ in wanted)
         rows = conn.execute(
             f"SELECT checkout_id, state FROM jobs WHERE checkout_id IN ({marks})",

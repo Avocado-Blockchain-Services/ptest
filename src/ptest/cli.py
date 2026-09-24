@@ -1922,9 +1922,10 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                     self_kept=self_result.kept))
             else:
                 # The plan was already printed before consent; follow it
-                # with only the one summary line.
+                # with only the summary line plus any --self kept files.
                 sys.stdout.write(uninstall_api.render_text(
                     plan, applied=applied, self_plan=self_plan,
+                    self_kept=self_result.kept,
                     summary_only=True))
             if self_removed:
                 print("ptest was uninstalled")
