@@ -35,32 +35,33 @@ def test_verdict_and_public_shapes():
     ready = E.Executability(
         project=".", runner="pytest", status=E.STATUS_EXECUTABLE,
         caveats=(), reason=None, fix=None, full=True, example="tests/test_a.py")
-    assert ready.verdict() == "ready"
+    assert ready.verdict() == "runs: yes"
     assert ready.to_public() == {"status": "executable", "detail": "ready", "fix": None}
 
     caveat = E.Executability(
         project=".", runner="pytest", status=E.STATUS_CAVEAT,
-        caveats=("serial: xdist disabled under ptest (-n 0)", "second caveat"),
+        caveats=("parallel: 4 workers (xdist, --dist load)", "second caveat"),
         reason=None, fix=None, full=True, example=None)
     assert caveat.verdict() == (
-        "ready with caveats: serial: xdist disabled under ptest (-n 0); second caveat")
+        "runs: yes; parallel: 4 workers (xdist, --dist load); second caveat")
     assert caveat.to_public() == {
         "status": "caveat",
-        "detail": "serial: xdist disabled under ptest (-n 0); second caveat",
+        "detail": "parallel: 4 workers (xdist, --dist load); second caveat",
         "fix": None}
 
     blocked = E.Executability(
         project="api", runner="pytest", status=E.STATUS_NOT_EXECUTABLE,
-        caveats=(), reason="pytest addopts enable xdist, which ptest runs serially",
-        fix='add "-n", "0" to [runner] args in api/.ptest.toml',
-        full=True, example=None)
+        caveats=(),
+        reason="remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+        fix="remove --tx, --rsyncdir and --px from your pytest addopts",
+        full=False, example=None)
     assert blocked.verdict() == (
-        "not runnable: pytest addopts enable xdist, which ptest runs serially"
-        ' — fix: add "-n", "0" to [runner] args in api/.ptest.toml')
+        "runs: no — remote xdist workers (--tx, --rsyncdir, --px) are not supported"
+        " → remove --tx, --rsyncdir and --px from your pytest addopts")
     assert blocked.to_public() == {
         "status": "not-executable",
-        "detail": "pytest addopts enable xdist, which ptest runs serially",
-        "fix": 'add "-n", "0" to [runner] args in api/.ptest.toml'}
+        "detail": "remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+        "fix": "remove --tx, --rsyncdir and --px from your pytest addopts"}
 
 
 def test_pytest_launcher_must_be_supported(tmp_path):
@@ -83,16 +84,18 @@ def test_runner_parallel_control_is_not_executable(tmp_path):
     assert result.fix == "remove -n from [runner] args in .ptest.toml"
 
 
-def test_xdist_addopts_without_serial_is_not_executable(tmp_path):
+def test_xdist_addopts_without_serial_is_runnable_with_parallel_fallback(tmp_path):
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.status == E.STATUS_NOT_EXECUTABLE
+    assert result.status == E.STATUS_CAVEAT
     assert result.runner == "pytest"
-    assert result.reason == "pytest addopts enable xdist, which ptest runs serially"
-    assert result.fix == 'add "-n", "0" to [runner] args in .ptest.toml'
+    assert result.parallel == (
+        "no — ptest cannot verify pytest-xdist for launcher python; "
+        "use an absolute interpreter or a uv launcher to run in parallel")
+    assert result.full is True
 
 
 def test_xdist_addopts_with_serial_is_caveat(tmp_path):
@@ -102,7 +105,9 @@ def test_xdist_addopts_with_serial_is_caveat(tmp_path):
     result = E.check_config(_config(tmp_path, args=("-n", "0")), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == ("serial: xdist disabled under ptest (-n 0)",)
+    assert result.caveats == (
+        "parallel: no — ptest cannot verify pytest-xdist for launcher python; "
+        "use an absolute interpreter or a uv launcher to run in parallel",)
     assert result.full is True
 
 
@@ -113,7 +118,9 @@ def test_no_xdist_suppresses_activation(tmp_path):
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.status == E.STATUS_EXECUTABLE
+    assert result.status == E.STATUS_CAVEAT
+    assert result.caveats == (
+        "parallel: no — xdist is not enabled in your pytest config",)
     assert result.full is True
 
 
@@ -179,7 +186,10 @@ def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.full is True
-    assert result.caveats == ("expected: full (project-filtered: -vx)",)
+    assert result.full_suite == "your pytest config: -vx"
+    assert result.caveats == (
+        "parallel: no — xdist is not enabled in your pytest config",
+        "full suite = your pytest config: -vx")
     assert "ptest --full" in E.commands((result,))
 
 
@@ -206,8 +216,10 @@ def test_reporting_hook_conftest_makes_full_unavailable(tmp_path, hook):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.full_blocked == "tests/conftest.py defines %s" % hook
     assert result.caveats == (
-        "ptest --full unavailable: tests/conftest.py defines %s" % hook,)
+        "parallel: no — xdist is not enabled in your pytest config",
+        "full suite: not available — tests/conftest.py defines %s" % hook)
     assert result.full is False
 
 
@@ -217,7 +229,10 @@ def test_dot_test_root_is_caveat_without_full(tmp_path):
     result = E.check_config(_config(tmp_path, test_roots=(".",)), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == ('ptest --full unavailable: test_roots is "."',)
+    assert result.full_blocked == 'test_roots is "."'
+    assert result.caveats == (
+        "parallel: no — xdist is not enabled in your pytest config",
+        'full suite: not available — test_roots is "."')
     assert result.full is False
 
 
@@ -230,8 +245,10 @@ def test_narrowing_addopts_are_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.full_suite == 'your pytest config: -m "not slow"'
     assert result.caveats == (
-        "expected: full (project-filtered: -m not slow)",)
+        "parallel: no — xdist is not enabled in your pytest config",
+        'full suite = your pytest config: -m "not slow"')
     assert result.full is True
 
 
@@ -244,8 +261,10 @@ def test_maxfail_nonzero_is_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.full_suite == "your pytest config: --maxfail=3"
     assert result.caveats == (
-        "expected: full (project-filtered: --maxfail=3)",)
+        "parallel: no — xdist is not enabled in your pytest config",
+        "full suite = your pytest config: --maxfail=3")
     assert result.full is True
 
 
@@ -257,8 +276,10 @@ def test_redirect_addopts_stay_unavailable(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.full_blocked == "pytest addopts redirect native configuration (-c)"
     assert result.caveats == (
-        "ptest --full unavailable: pytest addopts redirect native configuration (-c)",)
+        "parallel: no — xdist is not enabled in your pytest config",
+        "full suite: not available — pytest addopts redirect native configuration (-c)")
     assert result.full is False
 
 
@@ -270,8 +291,10 @@ def test_collection_hook_is_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.full_suite == "your pytest config: conftest.py hooks"
     assert result.caveats == (
-        "expected: full (project-filtered: conftest collection hook)",)
+        "parallel: no — xdist is not enabled in your pytest config",
+        "full suite = your pytest config: conftest.py hooks")
     assert result.full is True
 
 
@@ -285,9 +308,10 @@ def test_persea_shaped_addopts_are_project_filtered_full_with_serial_caveat(tmp_
     result = E.check_config(_config(tmp_path, args=("-n", "0")), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == (
-        "serial: xdist disabled under ptest (-n 0)",
-        "expected: full (project-filtered: -m not slow)")
+    assert result.parallel == (
+        "no — ptest cannot verify pytest-xdist for launcher python; "
+        "use an absolute interpreter or a uv launcher to run in parallel")
+    assert result.full_suite == 'your pytest config: -m "not slow"'
     assert result.full is True
 
 
@@ -310,8 +334,7 @@ def test_pytest_toml_addopts_are_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == (
-        "expected: full (project-filtered: -k not slow)",)
+    assert result.full_suite == 'your pytest config: -k "not slow"'
     assert result.full is True
 
 
@@ -323,8 +346,7 @@ def test_pytest_toml_wins_over_pytest_ini(tmp_path):
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.caveats == (
-        "expected: full (project-filtered: -k not slow)",)
+    assert result.full_suite == 'your pytest config: -k "not slow"'
     assert result.full is True
 
 
@@ -337,8 +359,8 @@ def test_non_allowlisted_ini_narrowing_makes_full_unavailable(tmp_path, addopts)
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == (
-        "ptest --full unavailable: pytest addopts narrow or observe the suite (%s)" % addopts,)
+    assert result.full_blocked == (
+        "pytest addopts narrow or observe the suite (%s)" % addopts)
     assert result.full is False
 
 
@@ -350,8 +372,7 @@ def test_conftest_sessionfinish_is_project_filtered_full(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == (
-        "expected: full (project-filtered: conftest sessionfinish hook)",)
+    assert result.full_suite == "your pytest config: conftest.py hooks"
     assert result.full is True
 
 
@@ -368,9 +389,8 @@ def test_persea_shaped_static_prediction_combines_narrowing_and_hooks(tmp_path):
     result = E.check_config(_config(tmp_path), project=".")
 
     assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == (
-        "expected: full (project-filtered: -m not extended_migration; "
-        "conftest collection hook; conftest sessionfinish hook)",)
+    assert result.full_suite == (
+        'your pytest config: -m "not extended_migration", conftest.py hooks')
     assert result.full is True
 
 
@@ -404,20 +424,23 @@ def test_vitest_is_executable_with_exclusive_caveat(tmp_path):
         project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.parallel == "inside vitest (its own workers)"
+    assert result.parallel_short == "inside vitest"
     assert result.caveats == (
-        "exclusive: Vitest runs as one command and manages its own workers",)
+        "parallel: inside vitest (its own workers)",)
     assert result.full is True
 
 
-def test_command_is_executable_with_exclusive_caveat(tmp_path):
+def test_command_without_setup_is_executable(tmp_path):
     result = E.check_config(
         _config(tmp_path, kind=C.RunnerKind.COMMAND,
                 launcher=("python", "run.py"), test_roots=(".",)),
         project=".")
 
-    assert result.status == E.STATUS_CAVEAT
-    assert result.caveats == ("exclusive: runs as one literal command",)
+    assert result.status == E.STATUS_EXECUTABLE
+    assert result.caveats == ()
     assert result.full is True
+    assert result.verdict() == "runs: yes"
 
 
 @pytest.mark.parametrize("kind", [C.RunnerKind.GO, C.RunnerKind.CARGO])
@@ -445,9 +468,10 @@ def test_declared_setup_is_caveat_even_when_paths_present(tmp_path):
     result = E.check_config(_config(tmp_path, setup=setup), project=".")
 
     assert result.status == E.STATUS_CAVEAT
+    assert result.setup == "uv sync --locked"
     assert result.caveats == (
-        "setup runs when required paths or its fingerprint are missing: "
-        "uv sync --locked",)
+        "parallel: no — xdist is not enabled in your pytest config",
+        "setup: uv sync --locked (ptest runs it when needed)",)
     assert result.full is True
 
 
@@ -465,8 +489,8 @@ def test_missing_setup_path_is_trailing_caveat(tmp_path):
 
     assert result.status == E.STATUS_CAVEAT
     assert result.caveats == (
-        "exclusive: Vitest runs as one command and manages its own workers",
-        "setup runs when required paths or its fingerprint are missing: npm ci")
+        "parallel: inside vitest (its own workers)",
+        "setup: npm ci (ptest runs it when needed)")
 
 
 def test_example_prefers_first_pytest_test_file(tmp_path):
@@ -476,7 +500,7 @@ def test_example_prefers_first_pytest_test_file(tmp_path):
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.status == E.STATUS_EXECUTABLE
+    assert result.status == E.STATUS_CAVEAT
     assert result.example == "tests/test_a.py"
 
 
@@ -523,7 +547,7 @@ def test_check_resolution_standalone(tmp_path):
 
     assert items.project == "."
     assert items.runner == "pytest"
-    assert items.status == E.STATUS_EXECUTABLE
+    assert items.status == E.STATUS_CAVEAT
 
 
 def test_check_resolution_reports_missing_child(tmp_path):
@@ -586,7 +610,7 @@ def test_check_never_starts_a_subprocess_or_imports_project_code(tmp_path, monke
 
     result = E.check_config(_config(tmp_path), project=".")
 
-    assert result.status == E.STATUS_NOT_EXECUTABLE
+    assert result.status == E.STATUS_CAVEAT
     source = Path(E.__file__).read_text(encoding="utf-8")
     assert "import subprocess" not in source
     assert "from subprocess" not in source
@@ -973,3 +997,412 @@ def test_vitest_globs_compiled_once_per_filters_call(tmp_path, monkeypatch):
         assert E._is_vitest_candidate(
             tmp_path, "src/a.test.ts", excludes, includes, test_dir)
     assert len(calls) == compiled_at_filter
+
+
+# --- Parallel tier (T2): facts, ParallelRequest, fallback table ---
+
+_UV = ("uv", "run", "--locked", "--no-sync", "python")
+
+
+def _uv(tmp_path, **kwargs):
+    kwargs.setdefault("launcher", _UV)
+    return _config(tmp_path, **kwargs)
+
+
+def _stub_venv(root, *, version="3.8.0", extra=(), pythons=("python3.12",)):
+    venv = root / ".venv"
+    venv.mkdir(parents=True, exist_ok=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    for py in pythons:
+        site = venv / "lib" / py / "site-packages"
+        site.mkdir(parents=True, exist_ok=True)
+        (site / f"pytest_xdist-{version}.dist-info").mkdir(exist_ok=True)
+        for name in extra:
+            (site / name).mkdir(exist_ok=True)
+    return venv
+
+
+def test_fact_keys_exact_order():
+    assert E.FACT_KEYS == (
+        "project", "runner", "runs", "runs_reason", "runs_fix",
+        "parallel", "parallel_short", "parallel_fix",
+        "setup", "full_suite", "full_blocked",
+    )
+
+
+def test_mirror_constants_have_frozen_values():
+    # T1 owns pytest_bridge.QUALIFIED_XDIST_VERSIONS / PARALLEL_DIST_MODES
+    # (absent at this base); T5 asserts the cross-module equality post-merge.
+    assert E.XDIST_QUALIFIED_VERSIONS == frozenset({"3.8.0"})
+    assert E.XDIST_DIST_MODES == frozenset(
+        {"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
+
+
+def test_facts_shape_runs_and_key_order():
+    item = E.Executability(
+        project="api", runner="pytest", status=E.STATUS_CAVEAT,
+        caveats=("parallel: 4 workers",), reason=None, fix=None,
+        full=True, example=None,
+        parallel="4 workers (xdist, --dist loadgroup)",
+        parallel_short="4 workers")
+    facts = item.facts()
+    assert tuple(facts) == E.FACT_KEYS
+    assert facts["project"] == "api"
+    assert facts["runner"] == "pytest"
+    assert facts["runs"] is True
+    assert facts["runs_reason"] is None
+    assert facts["runs_fix"] is None
+    assert facts["parallel"] == "4 workers (xdist, --dist loadgroup)"
+    assert facts["parallel_short"] == "4 workers"
+    assert facts["parallel_fix"] is None
+
+
+def test_facts_reason_and_fix_only_when_not_runnable():
+    item = E.Executability(
+        project="api", runner="pytest", status=E.STATUS_NOT_EXECUTABLE,
+        caveats=(), reason="remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+        fix="remove --tx, --rsyncdir and --px from your pytest addopts",
+        full=False, example=None,
+        parallel="no — remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+        parallel_short="no")
+    facts = item.facts()
+    assert facts["runs"] is False
+    assert facts["runs_reason"] == item.reason
+    assert facts["runs_fix"] == item.fix
+
+
+def test_verdict_runs_wording():
+    blocked = E.Executability(
+        project="api", runner="pytest", status=E.STATUS_NOT_EXECUTABLE,
+        caveats=(), reason="R", fix="F", full=False, example=None)
+    assert blocked.verdict() == "runs: no — R → F"
+    assert blocked.to_public() == {"status": "not-executable", "detail": "R", "fix": "F"}
+
+    item = E.Executability(
+        project=".", runner="pytest", status=E.STATUS_CAVEAT,
+        caveats=("parallel: 4 workers",
+                 "setup: uv sync --locked (ptest runs it when needed)",
+                 "full suite = your pytest config: -m \"not slow\""),
+        reason=None, fix=None, full=True, example=None)
+    assert item.verdict() == (
+        "runs: yes; parallel: 4 workers; "
+        "setup: uv sync --locked (ptest runs it when needed); "
+        "full suite = your pytest config: -m \"not slow\"")
+    assert item.to_public() == {
+        "status": "caveat",
+        "detail": ("parallel: 4 workers; "
+                   "setup: uv sync --locked (ptest runs it when needed); "
+                   "full suite = your pytest config: -m \"not slow\""),
+        "fix": None}
+
+
+def test_parallel_qualified_n_workers(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+    assert result.parallel == "4 workers (xdist, --dist loadgroup)"
+    assert result.parallel_short == "4 workers"
+    assert result.parallel_fix is None
+
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert (req.active, req.workers, req.auto, req.dist) == (True, 4, False, "loadgroup")
+    assert req.reason is None and req.config_level is False and req.runs is True
+
+
+def test_parallel_auto_workers(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "--numprocesses=auto"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+    assert result.parallel == "one worker per granted slot (xdist -n auto, --dist load)"
+    assert result.parallel_short == "auto"
+    assert result.parallel_fix is None
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.workers is None and req.auto is True and req.reason is None
+
+
+def test_parallel_dist_no_maps_to_load(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 2 --dist=no"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+    assert result.parallel == "2 workers (xdist, --dist load)"
+
+
+def test_parallel_inactive_text(tmp_path):
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.parallel == "no — xdist is not enabled in your pytest config"
+    assert result.parallel_short == "no"
+    assert result.parallel_fix is None
+    req = E.parallel_request(_config(tmp_path), project=".")
+    assert req.active is False and req.reason is None and req.runs is True
+
+
+def test_parallel_vitest_and_command_texts(tmp_path):
+    entry = tmp_path / "node_modules" / "vitest" / "vitest.mjs"
+    _write(entry, "export {};\n")
+    vitest = E.check_config(
+        _config(tmp_path, kind=C.RunnerKind.VITEST, launcher=("node",)),
+        project=".")
+    assert vitest.parallel == "inside vitest (its own workers)"
+    assert vitest.parallel_short == "inside vitest"
+    assert vitest.parallel_fix is None
+
+    command = E.check_config(
+        _config(tmp_path, kind=C.RunnerKind.COMMAND,
+                launcher=("python", "run.py"), test_roots=(".",)),
+        project=".")
+    assert command.parallel is None
+    assert command.parallel_short is None
+
+
+def test_parallel_remote_is_not_runnable(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4 --tx popen"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+
+    assert result.status == E.STATUS_NOT_EXECUTABLE
+    assert result.reason == "remote xdist workers (--tx, --rsyncdir, --px) are not supported"
+    assert result.fix == "remove --tx, --rsyncdir and --px from your pytest addopts"
+    assert result.parallel == (
+        "no — remote xdist workers (--tx, --rsyncdir, --px) are not supported")
+    assert result.parallel_short == "no"
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.runs is False and req.config_level is False
+
+
+@pytest.mark.parametrize("addopts,reason,config_level", [
+    ("-n 4 --dist=each",
+     "--dist each is not supported; ptest runs serially", True),
+    ("-n 4 --cov",
+     "coverage (--cov) under xdist is out of scope; ptest runs serially", True),
+    ("-n 4 --maxprocesses=2",
+     "--maxprocesses is not supported; ptest runs serially", True),
+    ("-n 1",
+     "your pytest config asks for 1 worker", False),
+    ("-n 4",
+     "pytest-xdist is not installed in the project environment yet; "
+     "ptest runs serially until setup installs it", False),
+])
+def test_parallel_fallback_rows(tmp_path, addopts, reason, config_level):
+    _write(tmp_path / "pyproject.toml",
+           "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+
+    assert result.status == E.STATUS_CAVEAT
+    assert result.parallel == "no — %s" % reason
+    assert result.parallel_short == "no"
+    assert result.parallel_fix is None
+    assert result.verdict().startswith("runs: yes; parallel: no — ")
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.reason == reason
+    assert req.config_level is config_level
+    assert req.runs is True
+
+
+def test_parallel_cov_in_runner_args_falls_back(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+
+    result = E.check_config(
+        _uv(tmp_path, full_args=("--cov",)), project=".")
+
+    assert result.parallel == (
+        "no — coverage (--cov) under xdist is out of scope; ptest runs serially")
+
+
+def test_parallel_duplicate_dist_info_falls_back(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+    _stub_venv(tmp_path, extra=("pytest_xdist-3.8.0-2.dist-info",))
+
+    result = E.check_config(_uv(tmp_path), project=".")
+
+    assert result.parallel == (
+        "no — more than one pytest-xdist install in the project environment; "
+        "ptest runs serially")
+
+
+def test_parallel_unqualified_version_falls_back(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+    _stub_venv(tmp_path, version="4.0.0")
+
+    result = E.check_config(_uv(tmp_path), project=".")
+
+    assert result.parallel == (
+        "no — pytest-xdist 4.0.0 is not qualified (ptest supports 3.8.0); "
+        "ptest runs serially")
+
+
+def test_parallel_unverifiable_launcher_falls_back(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.parallel == (
+        "no — ptest cannot verify pytest-xdist for launcher python; "
+        "use an absolute interpreter or a uv launcher to run in parallel")
+
+
+def test_parallel_ptest_n0_row_with_fix(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path, args=("-n", "0")), project=".")
+
+    assert result.parallel == "no — .ptest.toml sets -n 0"
+    assert result.parallel_short == "no"
+    assert result.parallel_fix == (
+        'remove "-n", "0" from [runner] args in .ptest.toml to run 4 workers')
+
+
+def test_parallel_ptest_n0_row_auto_fix(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n auto"\n')
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path, args=("-n", "0")), project="api")
+
+    assert result.parallel == "no — api/.ptest.toml sets -n 0"
+    assert result.parallel_fix == (
+        'remove "-n", "0" from [runner] args in api/.ptest.toml to run in parallel')
+
+
+@pytest.mark.parametrize("addopts,reason", [
+    ("--tx popen --dist=each --cov --maxprocesses=2 -n 4",
+     "remote xdist workers (--tx, --rsyncdir, --px) are not supported"),
+    ("--dist=each --cov --maxprocesses=2 -n 4",
+     "--dist each is not supported; ptest runs serially"),
+    ("--cov --maxprocesses=2 -n 4",
+     "coverage (--cov) under xdist is out of scope; ptest runs serially"),
+    ("--maxprocesses=2 -n 4", "--maxprocesses is not supported; ptest runs serially"),
+    ("-n 1 --dist=load", "your pytest config asks for 1 worker"),
+])
+def test_parallel_fallback_precedence(tmp_path, addopts, reason):
+    _write(tmp_path / "pyproject.toml",
+           "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts)
+
+    req = E.parallel_request(_uv(tmp_path), project=".")
+
+    assert req.reason == reason
+
+
+def test_xdist_environment_version_shapes(tmp_path):
+    version, problem = E.xdist_environment_version(_uv(tmp_path))
+    assert version is None
+    assert problem == ("pytest-xdist is not installed in the project environment yet; "
+                       "ptest runs serially until setup installs it")
+
+    _stub_venv(tmp_path)
+    assert E.xdist_environment_version(_uv(tmp_path)) == ("3.8.0", None)
+
+    version, problem = E.xdist_environment_version(_config(tmp_path))
+    assert version is None and "launcher python" in problem
+
+
+def test_absolute_interpreter_requires_pyvenv_cfg(tmp_path):
+    venv = tmp_path / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    launcher = (str(venv / "bin" / "python"),)
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+
+    _, problem = E.xdist_environment_version(_config(tmp_path, launcher=launcher))
+    assert problem is not None and "launcher python" in problem
+
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "pytest_xdist-3.8.0.dist-info").mkdir()
+    assert E.xdist_environment_version(_config(tmp_path, launcher=launcher)) == ("3.8.0", None)
+
+
+def test_persea_shape_parallel_and_full_suite(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\n'
+           'addopts = \'-n 4 --dist=loadgroup -m "not extended_migration"\'\n')
+    _write(tmp_path / "tests" / "conftest.py",
+           "def pytest_collection_modifyitems(items):\n    return None\n"
+           "\n"
+           "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+    _stub_venv(tmp_path)
+
+    result = E.check_config(_uv(tmp_path), project=".")
+
+    assert result.parallel_short == "4 workers"
+    assert result.parallel == "4 workers (xdist, --dist loadgroup)"
+    assert result.full is True
+    assert result.full_suite == (
+        'your pytest config: -m "not extended_migration", conftest.py hooks')
+    assert result.full_blocked is None
+    assert result.verdict() == (
+        "runs: yes; parallel: 4 workers (xdist, --dist loadgroup); "
+        "full suite = your pytest config: "
+        '-m "not extended_migration", conftest.py hooks')
+
+
+def test_full_suite_quotes_values_with_whitespace(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = \'-m "not slow"\'\n')
+    (tmp_path / "tests").mkdir()
+
+    result = E.check_config(_config(tmp_path), project=".")
+
+    assert result.full_suite == 'your pytest config: -m "not slow"'
+
+
+def test_narrowing_parts_match_bridge_text():
+    from ptest.runtime.pytest_bridge import full_narrowing_text
+
+    cases = [
+        ("-m", "not slow"), ("-k", "not slow"), ("--maxfail=3",),
+        ("-n", "4", "--dist=loadgroup", "-m", "not slow"),
+        ("-vx",), ("--maxfail", "3"),
+    ]
+    for tokens in cases:
+        parts = E._narrowing_parts(tokens)
+        rendered = "; ".join(
+            option if value is None else f"{option} {value}"
+            for option, value in parts)
+        assert rendered == full_narrowing_text(tokens)
+
+
+def test_full_blocked_is_first_unavailable_suffix(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-c other.ini"\n')
+
+    result = E.check_config(_config(tmp_path, test_roots=(".",)), project=".")
+
+    assert result.full is False
+    assert result.full_blocked == 'test_roots is "."'
+    assert result.full_suite is None
+
+
+def test_setup_field_and_caveat_line(tmp_path):
+    setup = C.SetupConfig(argv=("uv", "sync", "--locked"),
+                          required_paths=("tests",),
+                          network=False, lifecycle_scripts=False)
+    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+
+    result = E.check_config(_config(tmp_path, setup=setup), project=".")
+
+    assert result.setup == "uv sync --locked"
+    assert result.caveats == (
+        "parallel: no — xdist is not enabled in your pytest config",
+        "setup: uv sync --locked (ptest runs it when needed)")
+    assert result.verdict() == (
+        "runs: yes; parallel: no — xdist is not enabled in your pytest config; "
+        "setup: uv sync --locked (ptest runs it when needed)")

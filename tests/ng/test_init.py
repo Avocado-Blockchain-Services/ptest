@@ -465,10 +465,12 @@ def test_monorepo_dry_run_reports_would_create_without_writing(tmp_path):
         ".ptest.toml", "api/.ptest.toml", "web/.ptest.toml"]
     notes = [item for item in result.details if item.action == "note"]
     assert [(item.target, item.action, item.source) for item in notes] == [
-        ("api · pytest · ready with caveats: "
-         'ptest --full unavailable: test_roots is "."', "note", "config"),
-        ("web · pytest · ready with caveats: "
-         'ptest --full unavailable: test_roots is "."', "note", "config"),
+        ("api · pytest · runs: yes; "
+         "parallel: no — xdist is not enabled in your pytest config; "
+         'full suite: not available — test_roots is "."', "note", "config"),
+        ("web · pytest · runs: yes; "
+         "parallel: no — xdist is not enabled in your pytest config; "
+         'full suite: not available — test_roots is "."', "note", "config"),
     ]
     assert not (tmp_path / ".ptest.toml").exists()
     assert not (tmp_path / "api" / ".ptest.toml").exists()
@@ -593,8 +595,9 @@ def test_single_init_details_carry_root_config_action(tmp_path):
 
     assert [(item.target, item.action, item.source) for item in created.details] == [
         (".ptest.toml", "created", "config"),
-        (". · pytest · ready with caveats: "
-         'ptest --full unavailable: test_roots is "."', "note", "config"),
+        (". · pytest · runs: yes; "
+         "parallel: no — xdist is not enabled in your pytest config; "
+         'full suite: not available — test_roots is "."', "note", "config"),
     ]
     case_preview = tmp_path / "case-preview"
     case_preview.mkdir()
@@ -602,8 +605,9 @@ def test_single_init_details_carry_root_config_action(tmp_path):
                            _options(runner=RunnerKind.PYTEST, dry_run=True))
     assert [(item.target, item.action, item.source) for item in preview.details] == [
         (".ptest.toml", "would create", "config"),
-        (". · pytest · ready with caveats: "
-         'ptest --full unavailable: test_roots is "."', "note", "config"),
+        (". · pytest · runs: yes; "
+         "parallel: no — xdist is not enabled in your pytest config; "
+         'full suite: not available — test_roots is "."', "note", "config"),
     ]
     assert not (case_preview / ".ptest.toml").exists()
 
@@ -618,7 +622,7 @@ def test_existing_invalid_config_keeps_warnings_for_attention_header(tmp_path):
     assert result.details == ()
 
 
-def test_standalone_xdist_init_reports_serial_caveat_and_run_notes(tmp_path):
+def test_standalone_xdist_init_reports_parallel_fallback_and_run_notes(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         '[tool.pytest.ini_options]\naddopts = "-n 4"\n', encoding="utf-8")
     tests = tmp_path / "tests"
@@ -630,8 +634,10 @@ def test_standalone_xdist_init_reports_serial_caveat_and_run_notes(tmp_path):
     assert result.action is InitAction.CREATED
     assert [(item.target, item.action, item.source) for item in result.details] == [
         (".ptest.toml", "created", "config"),
-        (". · pytest · ready with caveats: "
-         "serial: xdist disabled under ptest (-n 0)", "note", "config"),
+        (". · pytest · runs: yes; parallel: no — "
+         "ptest cannot verify pytest-xdist for launcher python; "
+         "use an absolute interpreter or a uv launcher to run in parallel",
+         "note", "config"),
         ("run: ptest tests/test_a.py", "note", "config"),
         ("run: ptest --full", "note", "config"),
     ]
@@ -686,15 +692,18 @@ def test_existing_persea_shaped_monorepo_reports_per_project_notes(tmp_path):
         (".ptest.toml", "already present", "config"),
         ("api/.ptest.toml", "already present", "config"),
         ("web/.ptest.toml", "already present", "config"),
-        ("api · pytest · not runnable: "
-         "pytest addopts enable xdist, which ptest runs serially"
-         ' — fix: add "-n", "0" to [runner] args in api/.ptest.toml',
+        ("api · pytest · runs: yes; parallel: no — "
+         "ptest cannot verify pytest-xdist for launcher python; "
+         "use an absolute interpreter or a uv launcher to run in parallel; "
+         "full suite = your pytest config: "
+         '-m "not slow", conftest.py hooks',
          "note", "config"),
-        ("web · vitest · ready with caveats: "
-         "exclusive: Vitest runs as one command and manages its own workers; "
-         "setup runs when required paths or its fingerprint are missing: npm ci",
+        ("web · vitest · runs: yes; "
+         "parallel: inside vitest (its own workers); "
+         "setup: npm ci (ptest runs it when needed)",
          "note", "config"),
         ("run: ptest web/tests/a.test.ts", "note", "config"),
+        ("run: ptest --full", "note", "config"),
     ]
 
 

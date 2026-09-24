@@ -1899,3 +1899,22 @@ def test_cancel_pending_registration_interleave_rechecks_state_after_lock(
         assert _sql(domain, "SELECT guard_pid,nonce FROM jobs WHERE run_id=?",
                     (grant.run_id,)) == [(None, None)]
     assert entered == [True]
+
+
+def test_partial_parallel_grant_and_queued_request(case, world):
+    """A 4-slot request on a 2-slot machine grants 2; on a busy 4-slot
+    machine the next 4-slot request queues instead of over-granting."""
+    domain = case.domain(slots=2, jobs=2)
+    ticket = enqueue(domain, _request(case, domain, "parallel", slots=4))
+    grant = poll(domain, ticket).grant
+    assert grant is not None
+    assert grant.slots == 2
+
+    busy = case.domain(slots=4, jobs=4)
+    first = enqueue(busy, _request(case, busy, "first", slots=4))
+    assert poll(busy, first).grant is not None
+    assert register_guard(busy, poll(busy, first).grant, world.guard)
+    second = enqueue(busy, _request(case, busy, "second", slots=4))
+    queued = poll(busy, second)
+    assert queued.grant is None
+    assert queued.state is C.LeaseState.QUEUED

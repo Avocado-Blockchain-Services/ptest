@@ -175,6 +175,37 @@ def _project_root(config: C.Config) -> Path:
     raise _problem("native-config-invalid", "pytest configuration has no project root")
 
 
+def _serial_suffix(config: C.Config) -> tuple[str, ...]:
+    """``("-n", "0")`` when an xdist-active project runs serially.
+
+    ptest generates the serial spelling itself whenever the checked-in
+    pytest config activates xdist and the ptest args carry no serial
+    spelling of their own.
+    """
+    # Local import: executability imports this module for admission gates.
+    from ptest import executability as _executability
+    request = _executability.parallel_request(config)
+    ptest_args = tuple(config.runner.args) + tuple(config.runner.full_args)
+    if request.active and not _executability._has_serial_spelling(ptest_args):
+        return ("-n", "0")
+    return ()
+
+
+def _parallel_suffix(config: C.Config, slots: int) -> tuple[str, ...]:
+    """Owned ``-n <granted>`` for a qualified parallel grant.
+
+    A grant above one slot requires the checked-in config and the project
+    environment to qualify for the parallel tier; otherwise admission is
+    invalid and the bridge (which re-verifies everything) would refuse.
+    """
+    from ptest import executability as _executability
+    request = _executability.parallel_request(config)
+    if not request.active or request.reason is not None:
+        raise _problem("admission-invalid",
+                       "pytest parallel execution requires a qualified xdist request")
+    return ("-n", str(slots))
+
+
 def _bridge_path() -> Path:
     """The guard executes this trusted file with the project interpreter."""
     return Path(__file__).parents[1] / "runtime" / "pytest_bridge.py"
@@ -230,7 +261,10 @@ def inspect_capability(config: C.Config) -> C.Capability:
         message=("pytest scoped/full basic-serial is conditional on the provisioned native tuple, "
                  "exact hook policy, comparable bounded Git content and exact checkout-root native "
                  "cache placement; non-Git, nested/custom-cache or over-budget evidence makes full "
-                 "incomplete/70; inventory/counts/full gates remain unavailable"),
+                 "incomplete/70; inventory/counts/full gates remain unavailable; "
+                 "the parallel tier runs qualified xdist projects with one worker "
+                 "per granted slot (-n <granted>), unqualified projects run serially "
+                 "with a generated -n 0"),
     ), C.Reason(
         code="unsupported-capability",
         message=("declared setup executes under the guard with its configured network and lifecycle-script "
@@ -283,8 +317,6 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
     expected_mode = C.Mode.FULL if plan.execution == "full" else C.Mode.SCOPED
     if plan.mode is not expected_mode:
         raise _problem("native-config-invalid", "pytest plan mode does not match execution mode")
-    if grant.slots != 1:
-        raise _problem("admission-invalid", "pytest basic-serial execution requires one slot")
     if plan.execution == "full" and plan.files:
         raise _problem("native-config-invalid", "pytest full plans cannot carry scoped files")
     if plan.execution == "full":
@@ -302,9 +334,17 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
     else:
         native += plan.files
 
-    generated: tuple[str, ...] = ()
+    if grant.slots >= 2:
+        suffix = _parallel_suffix(config, grant.slots)
+        generated: tuple[str, ...] = ("pytest-xdist.workers=%d" % grant.slots,)
+    elif grant.slots == 1:
+        suffix = _serial_suffix(config)
+        generated = ()
+    else:
+        raise _problem("admission-invalid", "pytest admission grant carries no worker slot")
     if plan.execution == "full":
         native += config.runner.test_roots
+    native += suffix
     argv = config.runner.launcher + (str(_bridge_path()),) + native
     execution = C.ExecutionTier.BASIC_SERIAL
     limitations = (() if plan.execution == "scoped" else (C.Reason(
@@ -378,6 +418,8 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
     generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
     if grant.slots > 1:
         native += ("-n", str(grant.slots))
+    elif grant.slots == 1:
+        native += _serial_suffix(config)
     argv = tuple(config.runner.launcher) + (str(_bridge_path()),) + native
     env = [
         ("PTEST_BRIDGE_PROTOCOL", str(Path(__file__).parents[1] / "runtime" / "protocol-v1.json")),

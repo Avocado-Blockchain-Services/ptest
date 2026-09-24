@@ -64,6 +64,28 @@ def _reason(code: str, message: str) -> C.Reason:
     return C.Reason(code=code, message=message)
 
 
+def _parallel_worker_reason(tier, requested: int, granted: int) -> C.Reason | None:
+    """Additive ``parallel-workers`` reason for native pytest xdist runs.
+
+    Emitted only when the scheduler grants fewer slots than the parallel
+    tier requested, or when an xdist-active project runs serially because
+    of a tier fallback. ``tier`` is the ``executability.parallel_request``
+    for the run config (None for non-pytest runners).
+    """
+    if tier is None:
+        return None
+    if granted < requested:
+        if granted >= 2:
+            return _reason(
+                "parallel-workers",
+                f"{granted} xdist workers ({requested} requested, {granted} granted)")
+        return _reason(
+            "parallel-workers", f"serial ({requested} requested, 1 granted)")
+    if granted == 1 and tier.active and tier.reason is not None and tier.runs:
+        return _reason("parallel-workers", f"serial: {tier.reason}")
+    return None
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1935,10 +1957,41 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         "advanced no-tests-needed history could not be committed"),
             ))
     # The command summary is redacted and never includes token values.
-    requested_slots = 1 if (native_pytest and not advanced) else min(
-        config.runner.workers,
-        config.runner.workers if request.workers is None else request.workers,
-    )
+    # A qualified xdist pytest project (basic profile) requests its own
+    # worker count: an explicit -n N requests N, -n auto requests the
+    # machine's max slots, both capped by ptest --workers. [runner] workers
+    # is ignored for pytest xdist. Anything else requests one slot.
+    # Config -n N is unbounded, but the command summary and admission
+    # contracts cap workers/slots at 64, so the request is clamped to that
+    # ceiling before _summary/AdmissionRequest; the scheduler still grants
+    # min(requested, max_slots).
+    # Scoped caller arguments join the runner args before admission (the
+    # adapter binds them into the same native argv), so the tier sees the
+    # same effective args the adapter will: a caller -n 0 serializes.
+    tier_config = config
+    if plan.execution == "scoped" and request.argv:
+        tier_config = replace(
+            config, runner=replace(
+                config.runner,
+                args=tuple(config.runner.args) + tuple(request.argv)))
+    tier = (executability.parallel_request(tier_config)
+            if native_pytest else None)
+    if (tier is not None and not advanced
+            and tier.active and tier.reason is None):
+        if tier.auto:
+            requested_slots = scheduler.effective_limits(domain).max_slots
+        elif tier.workers is not None:
+            requested_slots = tier.workers
+        else:
+            requested_slots = 1
+        if request.workers is not None:
+            requested_slots = min(requested_slots, request.workers)
+        requested_slots = min(requested_slots, 64)
+    else:
+        requested_slots = 1 if (native_pytest and not advanced) else min(
+            config.runner.workers,
+            config.runner.workers if request.workers is None else request.workers,
+        )
     if advanced and not support.parallel_identity:
         requested_slots = 1
     command = _summary(config, plan, request, requested_slots)
@@ -2132,6 +2185,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # registration wins the CAS, cancellation deliberately retains the
             # live lease for scheduler recovery instead of guessing release.
             reasons = (_reason("state-unavailable", "guard execution could not be completed"),)
+            parallel_reason = _parallel_worker_reason(
+                tier, requested_slots, grant.slots)
+            if parallel_reason is not None:
+                reasons += (parallel_reason,)
             try:
                 scheduler.cancel_pending(domain, ticket, owner)
             except C.Problem:
@@ -2236,6 +2293,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
                      (None if execution_not_run else C.Timings(
                          execution_s=execution_elapsed))),
         )
+        parallel_reason = _parallel_worker_reason(
+            tier, requested_slots, grant.slots)
+        if parallel_reason is not None:
+            reasons += (parallel_reason,)
         result = _result(run_id=run_id, checkout=checkout, request=request,
                          plan=plan, command=command, status=status,
                          phase="complete", started=started,

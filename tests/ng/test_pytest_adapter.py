@@ -108,7 +108,7 @@ def test_non_interpreter_launcher_is_rejected_before_bridge_execution():
         prepare(_config(runner=runner), _plan(), _grant(1), _attempt(1))
 
 
-def test_parallel_grant_is_refused_for_basic_serial_profile():
+def test_parallel_grant_is_refused_without_qualified_request():
     with pytest.raises(C.Problem, match="admission-invalid"):
         prepare(_config(workers=2), _plan(), _grant(2), _attempt(2))
 
@@ -1436,3 +1436,98 @@ def test_full_bridge_derives_no_tests_and_clean_pass(bridge_env):
     owned.pytest_collectreport(SimpleNamespace(failed=True))
     assert owned.derived_status() == 1
     assert owned.hides_failure(0) is True
+
+
+# --- Parallel tier (T2): owned -n generation ---
+
+_UV_LAUNCHER = ("uv", "run", "--locked", "--no-sync", "python")
+
+
+def _parallel_project(tmp_path, *, addopts="-n 4 --dist=loadgroup",
+                      args=(), full_args=(), workers=1):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts,
+        encoding="utf-8")
+    venv = tmp_path / ".venv"
+    venv.mkdir(parents=True, exist_ok=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "pytest_xdist-3.8.0.dist-info").mkdir(exist_ok=True)
+    return C.Config(
+        runner=C.RunnerConfig(
+            kind=C.RunnerKind.PYTEST, launcher=_UV_LAUNCHER,
+            args=args, full_args=full_args,
+            test_roots=("tests",), workers=workers,
+        ),
+        setup=None,
+        resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
+        project_id="ab" * 16,
+        config_path=tmp_path / ".ptest.toml",
+    )
+
+
+def test_parallel_grant_emits_owned_n_argv_env_and_summary(tmp_path):
+    config = _parallel_project(tmp_path)
+
+    prepared = prepare(config, _plan(), _grant(4), _attempt(4))
+
+    assert prepared.argv[-2:] == ("-n", "4")
+    assert prepared.argv[-3] == "tests"
+    env = dict(prepared.env_updates)
+    assert env["PTEST_GRANT_WORKERS"] == "4"
+    assert prepared.summary.workers == 4
+    assert prepared.summary.generated_options == ("pytest-xdist.workers=4",)
+    assert prepared.capability.execution is C.ExecutionTier.BASIC_SERIAL
+
+
+def test_serial_generates_n0_for_xdist_active_project(tmp_path):
+    config = _parallel_project(
+        tmp_path, args=(), full_args=(),
+        addopts="-n 4 --dist=loadgroup")
+    config = replace(config, runner=replace(
+        config.runner, launcher=("python",)))
+
+    prepared = prepare(config, _plan(), _grant(1), _attempt(1))
+
+    assert prepared.argv[-2:] == ("-n", "0")
+    assert prepared.summary.generated_options == ()
+    assert dict(prepared.env_updates)["PTEST_GRANT_WORKERS"] == "1"
+
+
+def test_serial_without_xdist_has_no_generated_n():
+    prepared = prepare(_config(workers=1), _plan(), _grant(1), _attempt(1))
+
+    assert "-n" not in prepared.argv
+    assert prepared.summary.generated_options == ()
+
+
+def test_serial_with_own_n0_keeps_single_spelling(tmp_path):
+    config = _parallel_project(tmp_path, args=("-n", "0"))
+
+    prepared = prepare(config, _plan(), _grant(1), _attempt(1))
+
+    assert prepared.argv.count("-n") == 1
+    assert tuple(prepared.argv[-3:]) == ("-n", "0", "tests")
+
+
+def test_prepare_advanced_generates_n0_for_xdist_active(tmp_path):
+    from ptest.adapters.pytest import prepare_advanced
+
+    config = _parallel_project(
+        tmp_path, args=(), full_args=(),
+        addopts="-n 4 --dist=loadgroup")
+    config = replace(config, runner=replace(
+        config.runner, launcher=("python",)))
+
+    prepared = prepare_advanced(config, _plan(), _grant(1), _attempt(1))
+
+    assert prepared.argv[-2:] == ("-n", "0")
+
+
+def test_inspect_capability_mentions_parallel_tier():
+    capability = inspect_capability(_config())
+
+    assert capability.execution is C.ExecutionTier.BASIC_SERIAL
+    assert any("parallel tier" in item.message for item in capability.limitations)

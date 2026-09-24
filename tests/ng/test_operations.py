@@ -1173,3 +1173,172 @@ def test_setup_only_record_failure_raises_problem(case, tmp_path, monkeypatch):
         operations.run_setup_only(domain, config, queue_timeout_s=5)
     assert excinfo.value.code == "state-unavailable"
     assert _stored_setup_fingerprint(domain, config) is None
+
+
+# --- Parallel tier (T2): slot requests and parallel-workers reasons ---
+
+def _xdist_project(case, domain, *, addopts):
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
+        'project_id = "', 1
+    )[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "def test_body():\n    assert True\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts,
+        encoding="utf-8")
+    config = (
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        "args = []\n"
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n'
+    )
+    (root / ".ptest.toml").write_text(config, encoding="utf-8")
+    resolved = config_api.resolve_config(root).config
+    assert resolved is not None
+    return resolved
+
+
+def _reason_messages(result):
+    return [(reason.code, reason.message) for reason in result.reasons]
+
+
+def test_parallel_partial_grant_reports_requested_and_granted(case):
+    """4 requested, 2 granted: result carries the exact partial message.
+
+    Only merge-stable fields are pinned (workers, generated options, the
+    reason); the run outcome itself belongs to the bridge (T1) and its
+    integration test (T5).
+    """
+    from ptest import executability as E
+
+    domain = case.domain(slots=2, jobs=2)
+    config = _xdist_project(case, domain, addopts="-n 4")
+    assert E.parallel_request(config).reason is None
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.granted_workers == 2
+    assert result.command.workers == 4
+    # Generated -n lives in the adapter argv (covered in test_pytest_adapter);
+    # the operations command summary only records the requested worker count.
+    assert list(result.command.generated_options) == []
+    assert ("parallel-workers", "2 xdist workers (4 requested, 2 granted)") in (
+        _reason_messages(result))
+
+
+def test_parallel_serial_fallback_reports_serial_reason(case):
+    domain = case.domain()
+    config = _xdist_project(case, domain, addopts="-n 4 --dist=each")
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.status == C.Status.PASSED
+    assert result.granted_workers == 1
+    assert result.command.workers == 1
+    assert ("parallel-workers",
+            "serial: --dist each is not supported; ptest runs serially") in (
+        _reason_messages(result))
+
+
+def test_parallel_auto_requests_machine_slots(case):
+    """-n auto resolves to the machine's max slots with no partial reason."""
+    domain = case.domain(slots=2, jobs=2)
+    config = _xdist_project(case, domain, addopts="--numprocesses=auto")
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.granted_workers == 2
+    assert result.command.workers == 2
+    assert [code for code, _ in _reason_messages(result)
+            if code == "parallel-workers"] == []
+
+
+def test_parallel_request_workers_cap_limits_request(case):
+    """ptest --workers caps the requested count before admission."""
+    domain = case.domain(slots=4, jobs=4)
+    config = _xdist_project(case, domain, addopts="-n 4")
+
+    result = operations.execute(
+        domain, config, C.RunRequest(mode=C.Mode.SCOPED, workers=2))
+
+    assert result.granted_workers == 2
+    assert result.command.workers == 2
+    assert [code for code, _ in _reason_messages(result)
+            if code == "parallel-workers"] == []
+
+
+def test_parallel_oversized_request_caps_at_contract_ceiling(case):
+    """-n 100 is capped to 64 before summary/admission (no ValueError).
+
+    The scheduler then grants min(64, max_slots); the partial-grant reason
+    reports the capped request.
+    """
+    from ptest import executability as E
+
+    domain = case.domain(slots=2, jobs=2)
+    config = _xdist_project(case, domain, addopts="-n 100")
+    assert E.parallel_request(config).reason is None
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.granted_workers == 2
+    assert result.command.workers == 64
+    assert ("parallel-workers", "2 xdist workers (64 requested, 2 granted)") in (
+        _reason_messages(result))
+
+
+def test_caller_serial_spelling_keeps_qualified_project_serial(case):
+    """A caller -n 0 serializes like a configured one (no admission error)."""
+    domain = case.domain()
+    config = _xdist_project(case, domain, addopts="-n 4")
+
+    result = operations.execute(
+        domain, config, C.RunRequest(mode=C.Mode.SCOPED, argv=("-n", "0")))
+
+    assert result.status == C.Status.PASSED
+    assert result.granted_workers == 1
+    assert result.command.workers == 1
+    assert ("parallel-workers", "serial: .ptest.toml sets -n 0") in (
+        _reason_messages(result))
+
+
+def test_parallel_worker_reason_messages():
+    from types import SimpleNamespace
+
+    assert operations._parallel_worker_reason(None, 4, 2) is None
+    qualified = SimpleNamespace(active=True, reason=None, runs=True)
+    assert operations._parallel_worker_reason(qualified, 4, 4) is None
+    assert operations._parallel_worker_reason(qualified, 1, 1) is None
+
+    reason = operations._parallel_worker_reason(qualified, 4, 2)
+    assert (reason.code, reason.message) == (
+        "parallel-workers", "2 xdist workers (4 requested, 2 granted)")
+
+    reason = operations._parallel_worker_reason(qualified, 4, 1)
+    assert (reason.code, reason.message) == (
+        "parallel-workers", "serial (4 requested, 1 granted)")
+
+    fallback = SimpleNamespace(
+        active=True,
+        reason="--dist each is not supported; ptest runs serially", runs=True)
+    reason = operations._parallel_worker_reason(fallback, 1, 1)
+    assert (reason.code, reason.message) == (
+        "parallel-workers",
+        "serial: --dist each is not supported; ptest runs serially")
+
+    remote = SimpleNamespace(
+        active=True,
+        reason="remote xdist workers (--tx, --rsyncdir, --px) are not supported",
+        runs=False)
+    assert operations._parallel_worker_reason(remote, 1, 1) is None
+
+    inactive = SimpleNamespace(active=False, reason=None, runs=True)
+    assert operations._parallel_worker_reason(inactive, 1, 1) is None
