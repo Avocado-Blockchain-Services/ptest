@@ -3379,3 +3379,173 @@ def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
     captured = capsys.readouterr()
     assert "with a model chosen after consent" in captured.err
     assert "one extra call that sends only the model list" in captured.err
+
+
+# --- Round 15 twins: fenced provider replies, counted failure reasons --------
+
+
+def _fenced_item_launches(launches, *, pid=5000):
+    """Answer every item with a Claude-shaped fenced one-row reply."""
+    from ptest.agent_providers import ProviderResult
+
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None, progress=None):
+        results = []
+        for request, schema in requests:
+            body = json.loads(request)
+            launches.append((adapter.name, body["packet"]["declaration"]))
+            bare = _one_row_reply(request)
+            fenced = b"```json\n" + bare + b"\n```"
+            results.append(ProviderResult(
+                provider=adapter.name, ok=True, assessment=fenced, error="",
+                exit_code=0, timed_out=False, cancelled=False,
+                truncated=False, pid=pid + len(launches),
+                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+            if on_done is not None:
+                on_done(len(results) - 1, results[-1])
+        return tuple(results)
+
+    return launch_many
+
+
+def test_fenced_item_replies_review_and_publish(case, tmp_path, monkeypatch,
+                                                capsys):
+    """Claude fenced replies validate, so review publishes instead of failing."""
+    import sys
+
+    domain = case.domain()
+    root = case.project(domain)
+    _review_project(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    launches = []
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _fenced_item_launches(launches))
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.kind == "agent-assessment"
+    assert launches
+    assert (root / "recommendations.md").is_file()
+
+
+def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
+                                                  capsys):
+    """An all-failed review names each distinct reason with its count."""
+    import sys
+    from ptest.agent_providers import ProviderResult
+
+    domain = case.domain()
+    root = case.project(domain)
+    _review_project(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None, progress=None):
+        results = []
+        for index, (request, schema) in enumerate(requests):
+            if index % 3 == 0:
+                results.append(ProviderResult(
+                    provider=adapter.name, ok=False, assessment=b"",
+                    error="timeout", exit_code=None, timed_out=True,
+                    cancelled=False, truncated=False, pid=6100 + index,
+                    argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+            else:
+                results.append(ProviderResult(
+                    provider=adapter.name, ok=False, assessment=b"",
+                    error="invalid-assessment", exit_code=1, timed_out=False,
+                    cancelled=False, truncated=False, pid=6100 + index,
+                    argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+        return tuple(results)
+
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews", launch_many)
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 2
+
+    captured = capsys.readouterr()
+    failure_document = C.decode_public_document(captured.out)
+    assert failure_document.data is None
+    assert failure_document.error.code == "provider-failed"
+    message = failure_document.error.message
+    assert "did not return a valid assessment" in message
+    assert "timed out" in message
+    assert "invalid reply" in message
+    assert "×" in message
+
+
+def test_empty_init_file_reviews_and_publishes(case, tmp_path, monkeypatch,
+                                               capsys):
+    """A project with an empty tests/__init__.py still reviews and publishes."""
+    import sys
+
+    domain = case.domain()
+    root = case.project(domain)
+    _review_project(root)
+    for child in ("api", "web"):
+        tests_dir = root / child / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        (tests_dir / "__init__.py").write_bytes(b"")
+        (tests_dir / "test_example.py").write_text(
+            "def test_example():\n    assert True\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
+                       str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    launches = []
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        _ok_item_launches(launches, pid=6200))
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--assessment-json")) == 0
+
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.kind == "agent-assessment"
+    assert document.data["publication"]["status"] == "created"
+    assert (root / "recommendations.md").is_file()
+
+
+def test_summarize_review_failures_orders_counts_and_bounds_reasons():
+    """Validation details aggregate as counted, most-common-first reasons."""
+    from ptest import agent_assessment as AA
+    from ptest.cli import _summarize_review_failures
+
+    def row(reason):
+        return (None, type("Row", (), {
+            "rationale": AA.FAILED_PREFIX + reason})())
+
+    summary = _summarize_review_failures(
+        [row("invalid reply: not JSON")] * 11)
+    assert summary == "11 × invalid reply: not JSON"
+
+    summary = _summarize_review_failures(
+        [row("timed out")] * 2 + [row("invalid reply: not JSON")] * 3
+        + [row("invalid reply: carries an unknown field")])
+    assert summary == ("3 × invalid reply: not JSON; 2 × timed out; "
+                       "1 × invalid reply: carries an unknown field")
+
+    long_reason = "invalid reply: " + "x" * 500
+    summary = _summarize_review_failures([row(long_reason)])
+    assert len(summary) <= 140
+    assert summary.startswith("1 × invalid reply: x")
+
+    many = [row(f"reason-{index}") for index in range(10)]
+    summary = _summarize_review_failures(many)
+    assert "+5 more reasons" in summary

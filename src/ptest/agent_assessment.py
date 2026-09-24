@@ -1225,6 +1225,12 @@ def _admit_candidate(state: _AdmissionState, child_root: Path, rel: str,
     if was_cut and raw and not chunk:
         state.truncated += 1
         return True
+    if not chunk:
+        # A 0-byte file carries no evidence: never admit it with a line-1
+        # bound over zero lines (which later fails as stale evidence);
+        # count it as excluded instead.
+        state.skipped += 1
+        return True
     if state.byte_count + len(chunk) > limits.max_bytes_per_child:
         state.truncated += 1
         return True
@@ -1735,6 +1741,46 @@ def _invalid_reply(message: str) -> C.Problem:
                      phase=_PHASE, retryable=False)
 
 
+# One enclosing markdown fence (``` with an optional json tag) around an
+# otherwise valid one-row reply: this is the shape Claude serves, so it is
+# unwrapped before JSON parsing. Only surrounding whitespace may sit
+# outside the fence; prose, a second block, or backticks inside the JSON
+# leave the text untouched so validation still rejects it as non-JSON.
+_FENCE_RE = re.compile(
+    r"\A[ \t\r\n]*```[ \t]*(?:[Jj][Ss][Oo][Nn])?[ \t]*\r?\n"
+    r"(.*?)\r?\n[ \t]*```[ \t\r\n]*\Z",
+    re.DOTALL,
+)
+
+
+def _unwrap_single_fence(text: str) -> str:
+    """Unwrap exactly one enclosing fence, else return the text unchanged."""
+    match = _FENCE_RE.match(text)
+    if match is None:
+        return text
+    inner = match.group(1)
+    if "```" in inner:
+        return text
+    return inner
+
+
+# Leading reply markers stripped to compress a validation message down to
+# its distinguishing detail for per-item failure rows ("reply is not
+# JSON" becomes "not JSON"). Order matters: "reply is " precedes "reply ".
+_REPLY_DETAIL_PREFIXES = ("reply is ", "reply ", "reply.")
+
+# A specific validation detail never costs a row more than this many chars.
+_INVALID_REASON_MAX_CHARS = 160
+
+
+def _short_reply_detail(message: str) -> str:
+    """Compress a one-row validation message to its distinguishing detail."""
+    for prefix in _REPLY_DETAIL_PREFIXES:
+        if message.startswith(prefix):
+            return message[len(prefix):]
+    return message
+
+
 def _check_one_row_prose(text: object, ctx: str) -> str:
     if not isinstance(text, str) or not text:
         raise _invalid_reply(f"{ctx} must be nonempty prose")
@@ -1770,6 +1816,8 @@ def _bind_one_row_citations(items: object, subset: dict, ctx: str) -> tuple:
                 f"{entry_ctx} cites evidence outside the item subset")
         if citation.sha256 != excerpt.sha256:
             raise _invalid_reply(f"{entry_ctx} citation identity is stale")
+        if not excerpt.text:
+            raise _invalid_reply(f"{entry_ctx} cites an empty excerpt")
         if not (excerpt.start_line <= citation.start_line
                 <= citation.end_line <= excerpt.end_line):
             raise _invalid_reply(
@@ -1786,6 +1834,7 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
         text = reply.decode("utf-8")
     except UnicodeDecodeError:
         raise _invalid_reply("reply is not valid UTF-8") from None
+    text = _unwrap_single_fence(text)
     try:
         document = json.loads(text)
     except (RecursionError, ValueError):
@@ -1893,9 +1942,19 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
         subset = {path: known[path] for path in review.excerpt_paths}
         try:
             row, finding = _validate_one_row(bytes(reply), subset, entry)
-        except (C.Problem, TypeError, ValueError):
+        except C.Problem as exc:
             # Untrusted model shapes must never abort the child assembly:
-            # any validation failure becomes an unknown row.
+            # any validation failure becomes an unknown row carrying its
+            # specific reason for the terminal and report rows.
+            detail = _short_reply_detail(exc.message)
+            if len(detail) > _INVALID_REASON_MAX_CHARS:
+                detail = detail[:_INVALID_REASON_MAX_CHARS]
+            row = AssessmentRow(id=entry.id, status="unknown",
+                                rationale=(FAILED_PREFIX + "invalid reply: "
+                                           + detail),
+                                evidence=(), label=entry.label)
+            finding = None
+        except (TypeError, ValueError):
             row = AssessmentRow(id=entry.id, status="unknown",
                                 rationale=FAILED_PREFIX + "invalid reply",
                                 evidence=(), label=entry.label)

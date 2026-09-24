@@ -1192,6 +1192,37 @@ def _review_failure_reason(result) -> str | None:
     return "provider exited with an error"
 
 
+# An all-failed review names only this many distinct reasons, most common
+# first, each reason capped so the provider-failed message stays small.
+_FAILURE_SUMMARY_MAX_REASONS = 5
+_FAILURE_REASON_MAX_CHARS = 120
+
+
+def _summarize_review_failures(reviewed_rows) -> str:
+    """Count distinct per-item failure reasons, most common first.
+
+    Reasons are ptest-owned validation/provider strings, but each is
+    still bounded and passed through terminal_text so the aggregate
+    message stays inert and small.
+    """
+    counts: dict[str, int] = {}
+    for _, row in reviewed_rows:
+        rationale = row.rationale
+        if rationale.startswith(agent_assessment.FAILED_PREFIX):
+            reason = rationale[len(agent_assessment.FAILED_PREFIX):]
+        else:
+            reason = rationale
+        reason = render.terminal_text(reason[:_FAILURE_REASON_MAX_CHARS])
+        counts[reason] = counts.get(reason, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    shown = ranked[:_FAILURE_SUMMARY_MAX_REASONS]
+    parts = [f"{count} × {reason}" for reason, count in shown]
+    extra = len(ranked) - len(shown)
+    if extra:
+        parts.append(f"+{extra} more reason{'s' if extra != 1 else ''}")
+    return "; ".join(parts)
+
+
 def _review_profile(model: str | None) -> str:
     """Provider profile naming the per-item review and its model."""
     profile = f"ptest-item-review-v1 model={model or 'provider-default'}"
@@ -1545,8 +1576,10 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                          if review.request is not None]
         if reviewed_rows and all(row.rationale.startswith(
                 agent_assessment.FAILED_PREFIX) for _, row in reviewed_rows):
-            raise _problem("provider-failed",
-                           "review provider did not return a valid assessment")
+            raise _problem(
+                "provider-failed",
+                "review provider did not return a valid assessment: "
+                + _summarize_review_failures(reviewed_rows))
 
         # Re-resolve config and source packets immediately before publication.
         progress("validating", adapter.name, resolution.root.name,
