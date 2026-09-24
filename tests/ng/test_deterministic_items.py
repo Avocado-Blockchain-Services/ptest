@@ -506,25 +506,18 @@ def test_parallel_not_configured_provisional_fix_is_safety_first(tmp_path):
 
 
 def test_parallel_suggestion_gated_on_safety_gaps(tmp_path):
+    """The safety gating lives in finalize_parallel, not the planned answer."""
     from ptest import deterministic_items as DI
 
-    _stub_qualified_venv(tmp_path)
-    packet = _packet_for(tmp_path, {
-        ".ptest.toml": "[selection]\\nenabled = false\\n"})
-    domain, resolution = _domain(tmp_path), _resolution(
-        tmp_path, _parallel_config(tmp_path))
-    clean = DI.parallel_answer_for(
-        domain, resolution, packet, safety_gap=False)
-    assert clean.status == "gap"
-    assert clean.finding_change == (
-        "Add pytest-xdist to the project environment and request workers "
-        "with -n auto in the pytest configuration.")
-    blocked = DI.parallel_answer_for(
-        domain, resolution, packet, safety_gap=True)
-    assert blocked.finding_change == (
+    planned = _parallel_answers_for(tmp_path, addopts=None)["PARALLEL-001"]
+    assert planned.status == "gap"
+    assert planned.finding_change == (
         "Resolve the parallel-safety gaps first.")
-    assert DI.parallel_answer_for(
-        domain, resolution, packet, safety_gap=None) == blocked
+    clean = DI.finalize_parallel(planned, False)
+    assert clean.status == "gap"
+    assert clean.finding_change == DI.parallel_suggestion()
+    assert DI.finalize_parallel(planned, True) == planned
+    assert DI.finalize_parallel(planned, None) == planned
 
 
 def test_parallel_vitest_is_satisfied(tmp_path):
@@ -612,14 +605,47 @@ def test_parallel_missing_xdist_with_setup_names_setup_fix(tmp_path):
 
 
 def test_parallel_unverifiable_launcher_is_gap_with_environment_fix(tmp_path):
-    """A bare launcher cannot verify xdist: environment fix, no dup phrase."""
+    """A bare launcher cannot verify xdist: launcher fix, no dup phrase."""
     config = _parallel_config(tmp_path, launcher=("python",))
     answers = _parallel_answers_for(
         tmp_path, addopts="-n 4", config=config)
     answer = answers["PARALLEL-001"]
     assert answer.status == "gap"
     assert "cannot verify pytest-xdist" in answer.reason
+    assert answer.finding_change == (
+        'set [runner] launcher to an absolute interpreter or '
+        '["uv", "run", "--locked", "--no-sync", "python"] in .ptest.toml')
+    assert "Clear the serial fallback" not in answer.finding_change
+    assert answer.finding_summary.count("ptest runs serially") == 1
+
+
+def test_parallel_unqualified_xdist_is_gap_with_install_fix(tmp_path):
+    """Twin: unqualified xdist + setup present still names the install fix."""
+    from dataclasses import replace
+
+    packages = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+    dist_info = packages / "pytest_xdist-3.7.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.7.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text(
+        "home = /usr/bin\ninclude-system-site-packages = false\n"
+        "version = 3.12\n",
+        encoding="utf-8",
+    )
+    setup = C.SetupConfig(
+        argv=("uv", "sync", "--locked"), required_paths=(".venv",),
+        network=False, lifecycle_scripts=False)
+    config = replace(_parallel_config(tmp_path), setup=setup)
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4", config=config)
+    answer = answers["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert "is not qualified" in answer.reason
     assert answer.finding_change == "install pytest-xdist 3.8.0"
+    assert "run the project setup" not in answer.finding_change
     assert "Clear the serial fallback" not in answer.finding_change
     assert answer.finding_summary.count("ptest runs serially") == 1
 

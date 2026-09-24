@@ -1224,7 +1224,7 @@ def _plan_item_reviews(packet, domain: C.DomainPaths,
     return agent_assessment.plan_item_reviews(packet, answers=answers)
 
 
-def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
+def _assemble_with_parallel(packet, reviews, replies):
     """Assemble one child, finalizing the PARALLEL-001 safety gating.
 
     The planned PARALLEL-001 answer carries the safe provisional fix
@@ -1238,7 +1238,7 @@ def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
 
     assessment = agent_assessment.assemble_child(packet, reviews, replies)
     index = next((position for position, review in enumerate(reviews)
-                  if review.item_id == "PARALLEL-001"
+                  if review.item_id == deterministic.PARALLEL_ITEM_ID
                   and review.answer is not None), None)
     if index is None:
         return assessment
@@ -1247,7 +1247,7 @@ def _assemble_with_parallel(packet, reviews, replies, domain, resolution):
                      for item_id in deterministic.PARALLEL_SAFETY_IDS)
     final = deterministic.finalize_parallel(
         reviews[index].answer, safety_gap)
-    if final is None or final == reviews[index].answer:
+    if final == reviews[index].answer:
         return assessment
     patched = (reviews[:index]
                + (replace(reviews[index], answer=final),)
@@ -1664,7 +1664,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                      time.monotonic() - started)
             ensure_deadline()
             assessments.append(_assemble_with_parallel(
-                packet, reviews, tuple(replies), domain, resolution))
+                packet, reviews, tuple(replies)))
             ensure_deadline()
 
         reviewed_rows = [(review, row)

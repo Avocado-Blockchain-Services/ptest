@@ -190,3 +190,6 @@ def test_score_bounds_derive_from_checklist_length():
     schema = contracts_api._aa_score_schema()
     assert schema["properties"]["satisfied"]["maximum"] == count
     assert schema["properties"]["applicable"]["maximum"] == count
+    child = contracts_api._aa_child_schema()
+    assert child["properties"]["rows"]["minItems"] == count
+    assert child["properties"]["rows"]["maxItems"] == count

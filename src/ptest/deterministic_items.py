@@ -269,22 +269,35 @@ _ENVIRONMENT_PARALLEL_MARKERS: tuple[str, ...] = (
 _SERIAL_TAIL = "; ptest runs serially"
 
 
-def parallel_suggestion(runner: str = "pytest") -> str:
+def parallel_suggestion() -> str:
     """Enabling suggestion for the not-configured PARALLEL-001 gap."""
     return ("Add pytest-xdist to the project environment and request "
             "workers with -n auto in the pytest configuration.")
 
 
-def _parallel_environment_fix(facts: dict) -> str:
-    """Environment fix for an environment serial-fallback reason."""
+def _parallel_environment_fix(facts: dict, serial_reason: str,
+                              cfg: str) -> str:
+    """Environment fix for an environment serial-fallback reason.
+
+    The fix follows the reason: an unverifiable launcher names the
+    ``[runner] launcher`` setting, an unqualified xdist names the
+    qualified install, and a missing or duplicated install keeps the
+    setup/install fix.
+    """
     from . import executability as executability_api
 
+    if "cannot verify pytest-xdist" in serial_reason:
+        return ("set [runner] launcher to an absolute interpreter or "
+                '["uv", "run", "--locked", "--no-sync", "python"] '
+                f"in {cfg}")
+    qualified = ", ".join(sorted(
+        executability_api.XDIST_QUALIFIED_VERSIONS))
+    if "is not qualified" in serial_reason:
+        return f"install pytest-xdist {qualified}"
     setup = facts.get("setup")
     if isinstance(setup, str) and setup.strip():
         return (f"run the project setup ({setup}) "
                 "so ptest can use pytest-xdist")
-    qualified = ", ".join(sorted(
-        executability_api.XDIST_QUALIFIED_VERSIONS))
     return f"install pytest-xdist {qualified}"
 
 
@@ -297,8 +310,14 @@ def _parallel_unknown(runner: str) -> str:
 
 def _parallel_answer(facts: dict | None, runner: str,
                      evidence: tuple[str, ...],
-                     safety_gap: bool | None) -> DeterministicAnswer:
-    """Build the PARALLEL-001 answer from one child's executability facts."""
+                     cfg: str) -> DeterministicAnswer:
+    """Build the PARALLEL-001 answer from one child's executability facts.
+
+    The not-configured answer always plans the safe provisional fix
+    ("resolve the parallel-safety gaps first"); the doctor flow swaps
+    in the enabling suggestion with ``finalize_parallel`` once the
+    sibling safety outcomes are known.
+    """
     if facts is None:
         return DeterministicAnswer(
             item_id=PARALLEL_ITEM_ID, status="unknown",
@@ -324,22 +343,21 @@ def _parallel_answer(facts: dict | None, runner: str,
                 reason=f"pytest runs in parallel with {parallel}",
                 evidence_paths=evidence)
         if parallel == _NOT_CONFIGURED_PARALLEL:
-            change = (parallel_suggestion(runner)
-                      if safety_gap is False else _SAFETY_FIRST_FIX)
             return DeterministicAnswer(
                 item_id=PARALLEL_ITEM_ID, status="gap",
                 reason="no parallel runner is configured for this project",
                 evidence_paths=evidence,
                 finding_summary=("No parallel runner is configured, so "
                                  "tests run serially under ptest."),
-                finding_change=change)
+                finding_change=_SAFETY_FIRST_FIX)
         if isinstance(parallel, str) and parallel.startswith(_NO_PREFIX):
             serial_reason = parallel[len(_NO_PREFIX):]
             serial_short = serial_reason.split(_SERIAL_TAIL)[0]
             if any(marker in serial_reason
                    for marker in _ENVIRONMENT_PARALLEL_MARKERS):
                 fix = (facts.get("parallel_fix")
-                       or _parallel_environment_fix(facts))
+                       or _parallel_environment_fix(
+                           facts, serial_reason, cfg))
             else:
                 fix = (facts.get("parallel_fix") or facts.get("runs_fix")
                        or f"Clear the serial fallback in the pytest "
@@ -363,16 +381,15 @@ def _parallel_answer(facts: dict | None, runner: str,
 
 
 def parallel_answer_for(domain: C.DomainPaths,
-                        resolution: C.ConfigResolution, packet, *,
-                        safety_gap: bool | None = None,
+                        resolution: C.ConfigResolution, packet,
                         ) -> DeterministicAnswer | None:
     """Answer PARALLEL-001 for one packet; never raises.
 
     Returns None when the packet's child config does not resolve. The
-    not-configured suggestion is gated on ``safety_gap`` (whether any
-    parallel-safety item has a gap); None plans the safe provisional fix.
-    Read-only: executability facts are read, never written, and the
-    scheduler is never touched.
+    not-configured answer always plans the safe provisional fix; the
+    doctor flow finalizes it with ``finalize_parallel`` once the
+    sibling safety outcomes are known. Read-only: executability facts
+    are read, never written, and the scheduler is never touched.
     """
     from . import executability as executability_api
 
@@ -390,7 +407,7 @@ def parallel_answer_for(domain: C.DomainPaths,
         except Exception:
             facts = None
         runner = config.runner.kind.value
-        return _parallel_answer(facts, runner, evidence, safety_gap)
+        return _parallel_answer(facts, runner, evidence, cfg)
     except Exception:
         return None
 
