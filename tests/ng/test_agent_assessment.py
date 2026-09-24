@@ -2190,23 +2190,9 @@ def test_empty_files_are_never_admitted(tmp_path):
     assert all(e.text for e in packet.excerpts)
 
 
-def test_citation_to_empty_file_rejected_at_validation(tmp_path):
-    """An empty excerpt cannot back a citation: validation rejects it."""
-    import hashlib
-
-    import pytest
-
+def test_citation_to_empty_file_excluded_at_admission(tmp_path):
+    """An empty file never enters the excerpt subset, so citing it is invalid."""
     from ptest import agent_assessment as AA
-
-    empty = AA.SourceExcerpt(
-        path="tests/__init__.py", start_line=1, end_line=1,
-        sha256=hashlib.sha256(b"").hexdigest(), text="")
-    subset = {"tests/__init__.py": empty}
-    cite = {"path": "tests/__init__.py", "start_line": 1, "end_line": 1,
-            "sha256": hashlib.sha256(b"").hexdigest()}
-    with pytest.raises(C.Problem) as caught:
-        AA._bind_one_row_citations([cite], subset, "reply.evidence")
-    assert caught.value.code == "invalid-assessment"
 
     packet = _pure_library_packet(
         tmp_path, {"tests/__init__.py": ""})

@@ -1184,3 +1184,142 @@ def test_q_py_full_with_conftest_hook_runs_labelled(case):
     assert data["status"] == "passed"
     assert any(reason["code"] == "project-filtered" and reason["message"] == label
                for reason in data["reasons"])
+
+
+def _round16_scoped_failing(project_root):
+    (project_root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+
+
+def _round16_scoped_refused(result, root):
+    assert result.code == 4, result.stderr.decode()
+    assert b"ptest-bridge-refusal" in result.stderr
+    data = _data(result)
+    assert data["status"] == "incomplete"
+    assert data["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_real_scoped_sessionfinish_exit_call_forces_zero_is_refused(case):
+    """Round 16 (sf_exit): pytest.exit(returncode=0) in sessionfinish hides nothing."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    pytest.exit('forced', returncode=0)\n"))
+    _round16_scoped_failing(root)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    _round16_scoped_refused(result, root)
+
+
+def test_real_scoped_sessionfinish_wrapper_rewrite_is_refused(case):
+    """Round 16 (sf_wraptf): a tryfirst wrapper clearing exitstatus hides nothing."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    result = yield\n"
+        "    session.exitstatus = 0\n"
+        "    return result\n"))
+    _round16_scoped_failing(root)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    _round16_scoped_refused(result, root)
+
+
+def test_real_scoped_sessionfinish_old_wrapper_rewrite_is_refused(case):
+    """Round 16 (sf_oldwrap): a hookwrapper clearing exitstatus hides nothing."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "import pytest\n"
+        "@pytest.hookimpl(hookwrapper=True, tryfirst=True)\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    outcome = yield\n"
+        "    session.exitstatus = 0\n"))
+    _round16_scoped_failing(root)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    _round16_scoped_refused(result, root)
+
+
+def test_real_scoped_unconfigure_exitstatus_reset_is_refused(case):
+    """Round 16 (unconf_set): pytest_unconfigure clearing exitstatus hides nothing."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "SEEN = {}\n"
+        "def pytest_sessionstart(session):\n"
+        "    SEEN['session'] = session\n"
+        "def pytest_unconfigure(config):\n"
+        "    SEEN['session'].exitstatus = 0\n"))
+    _round16_scoped_failing(root)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    _round16_scoped_refused(result, root)
+
+
+def test_real_scoped_add_cleanup_exitstatus_reset_is_refused(case):
+    """Round 16 (cleanup_set): config.add_cleanup clearing exitstatus hides nothing."""
+    domain = case.domain()
+    root = _project(case, domain, conftest=(
+        "def pytest_sessionstart(session):\n"
+        "    session.config.add_cleanup(lambda: setattr(session, 'exitstatus', 0))\n"))
+    _round16_scoped_failing(root)
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    _round16_scoped_refused(result, root)
+
+
+def test_real_scoped_xfail_and_skip_stay_passing(case):
+    """Round 16: outcome counting leaves xfail/skip green (exit 0)."""
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "tests" / "test_native.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.xfail(reason='known', strict=False)\n"
+        "def test_known():\n    assert False\n"
+        "@pytest.mark.skip(reason='skipped')\n"
+        "def test_skipped():\n    assert False\n"
+        "def test_ok():\n    assert True\n")
+    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    assert result.code == 0, result.stderr.decode()
+    assert b"ptest-bridge-refusal" not in result.stderr
+    data = _data(result)
+    assert data["status"] == "passed"
+    assert data["runner_exit_code"] == 0
+    assert data["exit_origin"] == "runner"
+    _no_claims(data)
+    _released(domain)
+
+
+def test_real_scoped_deselect_all_exit_five_passes_through(case):
+    """Round 16: exit 5 (nothing collected) keeps its native outcome."""
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "tests" / "test_native.py").write_text(
+        "def test_only():\n    assert True\n")
+    result = case.invoke(domain, root, "--", "tests",
+                         "--deselect", "tests/test_native.py::test_only", timeout=10)
+    assert result.code == 5, result.stderr.decode()
+    assert b"ptest-bridge-refusal" not in result.stderr
+    data = _data(result)
+    assert data["runner_exit_code"] == 5
+    assert data["exit_origin"] == "runner"
+    _released(domain)
+
+
+def test_real_scoped_maxfail_stop_after_failure_stays_failure(case):
+    """Round 16: -x stopping after a failure stays a native failure."""
+    domain = case.domain()
+    root = _project(case, domain)
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    assert False\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    result = case.invoke(domain, root, "--", "tests", "-x", timeout=10)
+    assert result.code == 1, result.stderr.decode()
+    assert b"ptest-bridge-refusal" not in result.stderr
+    data = _data(result)
+    assert data["status"] == "failed"
+    assert data["runner_exit_code"] == 1
+    assert data["exit_origin"] == "runner"
+    assert not (root / "b.marker").exists()
+    _released(domain)

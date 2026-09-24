@@ -463,3 +463,10 @@ def test_persea_shaped_label_renders_as_single_bullet():
     assert bullets[0].startswith("- expected: full (project-filtered:")
     # The wrapped continuation still carries the full label text in order.
     assert label in " ".join(projects.replace("│", " ").split())
+
+
+def test_unbalanced_paren_caveat_splits_as_own_caveats():
+    """Round 16: an unclosed '(' never merges the following caveats."""
+    from ptest.init_render import _split_caveats
+    assert _split_caveats("c1 (unbalanced; c2") == ["c1 (unbalanced", "c2"]
+    assert _split_caveats("c1); c2") == ["c1)", "c2"]

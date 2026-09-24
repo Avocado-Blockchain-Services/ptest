@@ -791,9 +791,11 @@ _FULL_COLLECTION_HOOKS = frozenset({
 
 # A conftest.py cleanup hook is the project's own teardown definition when
 # it lives under the admitted checkout (section F, same ownership rule as
-# the collection hooks): accepted and recorded in the run label, provided
-# the exitstatus guard below proves it did not change the outcome. A
-# sessionfinish from any other plugin, and pytest_runtest_makereport /
+# the collection hooks): accepted and recorded in the run label. An
+# exitstatus rewrite inside it cannot hide a failure: run() derives the
+# expected status from the bridge's own outcome counts and refuses a
+# native exit of 0/5 while failures were observed. A sessionfinish from
+# any other plugin, and pytest_runtest_makereport /
 # pytest_report_teststatus from anywhere, stay refused.
 _FULL_SESSIONFINISH_HOOKS = frozenset({
     "pytest_sessionfinish",
@@ -842,6 +844,15 @@ class OwnedPlugin:
         # an unrun collected item is incomplete, never PASSED.
         self._collected: tuple[str, ...] | None = None
         self._protocol_seen: set[str] = set()
+        # Round 16: the bridge counts native outcomes itself instead of
+        # trusting pytest's returned exit code. Failed/errored runtest
+        # reports (every phase), failed collection reports, and the
+        # collected count feed derived_status(); run() refuses a native
+        # exit that hides an observed failure (exitstatus rewrites in
+        # sessionfinish/unconfigure/cleanups, pytest.exit(..., 0)).
+        self._report_failures = 0
+        self._collection_errors = 0
+        self._testscollected: int | None = None
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -1202,6 +1213,8 @@ class OwnedPlugin:
     def pytest_collection_finish(self, session: Any) -> Any:
         """Check collection-loaded conftests before entering test execution."""
         result = yield
+        collected = getattr(session, "testscollected", None)
+        self._testscollected = collected if isinstance(collected, int) else None
         self._validate(session.config, generated=True)
         return result
 
@@ -1246,6 +1259,53 @@ class OwnedPlugin:
         return tuple(nodeid for nodeid in self._collected
                      if nodeid not in self._protocol_seen)
 
+    def _note_native_report(self, report: Any) -> None:
+        """Count one failed/errored native report for the exit reconciliation.
+
+        Every setup/call/teardown phase counts: a failed report is a test
+        failure or an error, while skips (including xfail) never set the
+        failed flag and stay green.
+        """
+        if bool(getattr(report, "failed", False)):
+            self._report_failures += 1
+
+    def pytest_runtest_logreport(self, report: Any) -> None:
+        """Observe every native test report; the verdict never trusts pytest's code."""
+        self._note_native_report(report)
+
+    def pytest_collectreport(self, report: Any) -> None:
+        """Observe native collection errors; they fail the run like test failures."""
+        if bool(getattr(report, "failed", False)):
+            self._collection_errors += 1
+
+    def derived_status(self) -> int | None:
+        """Native exit status derived from observed outcomes, not the returned code.
+
+        1 when any runtest/collect report failed or errored, 5 when nothing
+        was collected, 0 when collected tests ran clean, None when
+        collection never reported (usage errors before collection keep
+        their own codes). Interrupted (2), internal-error (3) and usage
+        (4) exits always keep their own codes in run().
+        """
+        if self._report_failures or self._collection_errors:
+            return 1
+        if self._testscollected == 0:
+            return 5
+        if isinstance(self._testscollected, int) and self._testscollected > 0:
+            return 0
+        return None
+
+    def hides_failure(self, native_exit: int | None) -> bool:
+        """True when ``native_exit`` hides an observed failure (refuse it).
+
+        Only the failure-hiding direction refuses: a native 0 or 5 while
+        failures were seen is incomplete, never PASSED. Anything else
+        (including a native failure the bridge did not observe, which in
+        scoped mode a conftest pytest_runtest_makereport may have produced)
+        passes through with its own code.
+        """
+        return self.derived_status() == 1 and native_exit in (0, 5)
+
     def pytest_runtest_protocol(self, item: Any, nextitem: Any) -> Any:
         """Check execution hooks before each item can replace its protocol."""
         if self.execution == "full":
@@ -1259,23 +1319,6 @@ class OwnedPlugin:
         """Check per-item registrations at the test-body execution boundary."""
         self._validate(item.config, generated=True)
         return (yield)
-
-    def pytest_sessionfinish(self, session: Any, exitstatus: Any) -> Any:
-        """Prove a conftest sessionfinish did not change the native outcome.
-
-        Full mode only: registered tryfirst, so the pre-yield capture runs
-        before every other sessionfinish implementation and the post-yield
-        comparison runs after all of them. A rewritten exitstatus is a
-        bridge refusal (an incomplete report), never a silent verdict
-        change. The collected-vs-run reconciliation above still applies.
-        """
-        before = getattr(session, "exitstatus", exitstatus)
-        result = yield
-        if self.execution == "full":
-            after = getattr(session, "exitstatus", exitstatus)
-            if after != before:
-                self._refuse("full pytest sessionfinish changed the native outcome")
-        return result
 
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
@@ -1504,6 +1547,8 @@ class AdvancedPlugin(OwnedPlugin):
                 "setup_s": None, "call_s": None, "teardown_s": None,
             }
         self.collection_complete = True
+        collected = getattr(session, "testscollected", None)
+        self._testscollected = collected if isinstance(collected, int) else None
         # Collection can register ordinary pytest lifecycle plugins after
         # session start. This is the last pre-execution point, so refresh the
         # authenticated baseline here.
@@ -1514,6 +1559,7 @@ class AdvancedPlugin(OwnedPlugin):
 
     def pytest_runtest_logreport(self, report: Any) -> None:
         self._terminal_observed = True
+        self._note_native_report(report)
         nodeid = str(getattr(report, "nodeid", ""))
         item = self.inventory.get(nodeid)
         if item is None:
@@ -1670,10 +1716,14 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtestloop)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtest_protocol)
         pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_runtest_call)
-        pytest.hookimpl(wrapper=True, tryfirst=True)(plugin_type.pytest_sessionfinish)
+        # Round 16 outcome counting (both modes): the bridge observes every
+        # runtest/collect report itself. For the advanced profile
+        # plugin_type resolves these to the AdvancedPlugin overrides, which
+        # share the same counting helper.
+        pytest.hookimpl(tryfirst=True)(plugin_type.pytest_runtest_logreport)
+        pytest.hookimpl(tryfirst=True)(plugin_type.pytest_collectreport)
         pytest.hookimpl(tryfirst=True, optionalhook=True)(plugin_type.pytest_xdist_setupnodes)
         if profile == "advanced":
-            pytest.hookimpl(tryfirst=True)(AdvancedPlugin.pytest_runtest_logreport)
             pytest.hookimpl(tryfirst=True, optionalhook=True)(AdvancedPlugin.pytest_xdist_node_collection_finished)
         plugin = (plugin_type(workers, execution, roots, runtime)
                   if profile == "advanced"
@@ -1699,9 +1749,22 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             plugin.refused = True
             _refusal_marker("native-config-invalid",
                             "full pytest run left collected items unrun")
+        # Round 16 outcome reconciliation (both modes): the verdict follows
+        # the bridge's own outcome counts, not pytest's returned code. A
+        # native 0 or 5 while failures were observed means an exitstatus
+        # rewrite (sessionfinish wrapper/hookwrapper, pytest.exit(..., 0),
+        # pytest_unconfigure, config.add_cleanup) hid the failure: refuse
+        # as incomplete. Interrupted (2), internal-error (3) and usage (4)
+        # exits keep their own codes, as do native failures the bridge did
+        # not observe (scoped conftest pytest_runtest_makereport is a known
+        # limit, recorded in the section F docs).
+        if not plugin.refused and plugin.hides_failure(native_exit):
+            plugin.refused = True
+            _refusal_marker("native-config-invalid",
+                            "native exit hides observed test failures")
         if plugin.refused:
             problem = "bridge-refused"
-            bridge_exit = 4 if native_exit == 0 else native_exit
+            bridge_exit = 4 if native_exit in (0, 5) else native_exit
             return bridge_exit
         # The label source of truth: what the bridge actually allowed.
         narrowing_report = plugin.allowed_narrowing()

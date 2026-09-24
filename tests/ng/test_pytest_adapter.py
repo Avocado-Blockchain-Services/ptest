@@ -1370,26 +1370,37 @@ def test_full_bridge_accepts_sessionfinish_from_project_conftest(
     assert "conftest sessionfinish hook" in owned.allowed_narrowing()["notes"]
 
 
-def test_full_bridge_sessionfinish_guard_passes_when_exitstatus_unchanged(bridge_env):
-    """Round 14: a cleanup-only sessionfinish keeps the native outcome."""
+def test_full_bridge_counts_observed_failure_despite_native_zero(bridge_env):
+    """Round 16: outcome counting derives failure even when native says 0."""
     owned = pytest_bridge.OwnedPlugin(1)
-    session = SimpleNamespace(exitstatus=0)
+    owned._testscollected = 1
 
-    _drive_wrapper(owned.pytest_sessionfinish(session, 0))
+    assert owned.hides_failure(1) is False
+    assert owned.hides_failure(0) is False
 
-    assert owned.refused is False
+    owned._note_native_report(SimpleNamespace(failed=True, when="call"))
+
+    assert owned.derived_status() == 1
+    assert owned.hides_failure(0) is True
+    assert owned.hides_failure(5) is True
+    assert owned.hides_failure(1) is False
+    assert owned.hides_failure(2) is False
 
 
-def test_full_bridge_sessionfinish_guard_refuses_changed_exitstatus(bridge_env):
-    """Round 14: a sessionfinish that rewrites the outcome is refused."""
+def test_full_bridge_derives_no_tests_and_clean_pass(bridge_env):
+    """Round 16: zero collected derives 5; clean collected derives 0."""
     owned = pytest_bridge.OwnedPlugin(1)
-    reads = iter((1, 0))
 
-    class _Session:
-        @property
-        def exitstatus(self):
-            return next(reads)
+    assert owned.derived_status() is None
 
-    with pytest.raises(pytest.UsageError, match="sessionfinish"):
-        _drive_wrapper(owned.pytest_sessionfinish(_Session(), 1))
-    assert owned.refused is True
+    owned._testscollected = 0
+    assert owned.derived_status() == 5
+    assert owned.hides_failure(5) is False
+
+    owned._testscollected = 2
+    assert owned.derived_status() == 0
+    assert owned.hides_failure(0) is False
+
+    owned.pytest_collectreport(SimpleNamespace(failed=True))
+    assert owned.derived_status() == 1
+    assert owned.hides_failure(0) is True

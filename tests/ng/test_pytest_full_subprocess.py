@@ -1069,3 +1069,202 @@ def test_full_non_conftest_plugin_sessionfinish_is_refused(case):
     assert completed.result["data"]["status"] == "incomplete"
     assert completed.result["data"]["exit_origin"] == "ptest"
     assert not (root / "body.marker").exists()
+
+
+def _round16_failing_toml(root, project_id, markers=("fail.marker",)):
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n[runner]\n"
+        "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
+        "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
+        "lifecycle = \"cooperative-process-group\"\n"
+        "[selection]\nnon_input_outputs = " + json.dumps(list(markers)) + "\n")
+
+
+def test_full_sessionfinish_exit_call_forces_zero_is_refused(case):
+    """Round 16 (sf_exit): pytest.exit(returncode=0) in sessionfinish hides nothing."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    pytest.exit('forced', returncode=0)\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    _round16_failing_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_sessionfinish_wrapper_rewrite_is_refused(case):
+    """Round 16 (sf_wraptf): a tryfirst wrapper clearing exitstatus hides nothing."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    result = yield\n"
+        "    session.exitstatus = 0\n"
+        "    return result\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    _round16_failing_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_sessionfinish_old_wrapper_rewrite_is_refused(case):
+    """Round 16 (sf_oldwrap): a hookwrapper clearing exitstatus hides nothing."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.hookimpl(hookwrapper=True, tryfirst=True)\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    outcome = yield\n"
+        "    session.exitstatus = 0\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    _round16_failing_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_unconfigure_exitstatus_reset_is_refused(case):
+    """Round 16 (unconf_set): pytest_unconfigure clearing exitstatus hides nothing."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "SEEN = {}\n"
+        "def pytest_sessionstart(session):\n"
+        "    SEEN['session'] = session\n"
+        "def pytest_unconfigure(config):\n"
+        "    SEEN['session'].exitstatus = 0\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    _round16_failing_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_add_cleanup_exitstatus_reset_is_refused(case):
+    """Round 16 (cleanup_set): config.add_cleanup clearing exitstatus hides nothing."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_sessionstart(session):\n"
+        "    session.config.add_cleanup(lambda: setattr(session, 'exitstatus', 0))\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
+        "    assert False\n")
+    _round16_failing_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 4, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" in completed.stderr
+    assert completed.result is not None
+    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["exit_origin"] == "ptest"
+    assert (root / "fail.marker").read_text() == "ran"
+
+
+def test_full_xfail_and_skip_stay_passing(case):
+    """Round 16: outcome counting leaves xfail/skip green (exit 0)."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.xfail(reason='known', strict=False)\n"
+        "def test_known():\n    assert False\n"
+        "@pytest.mark.skip(reason='skipped')\n"
+        "def test_skipped():\n    assert False\n"
+        "def test_ok():\n    assert True\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "passed"
+    assert data["runner_exit_code"] == 0
+    assert data["exit_origin"] == "runner"
+
+
+def test_full_keyboard_interrupt_stays_runner_failure(case):
+    """Round 16: a KeyboardInterrupt keeps its native exit 2 (failed, runner)."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    (root / "tests").mkdir()
+    (root / "tests" / "test_native.py").write_text(
+        "def test_interrupted():\n    raise KeyboardInterrupt\n")
+    _full_project_toml(root, project_id)
+    _commit_fixture(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
+    assert completed.code == 2, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert completed.result is not None
+    data = completed.result["data"]
+    assert data["status"] == "failed"
+    assert data["runner_exit_code"] == 2
+    assert data["exit_origin"] == "runner"

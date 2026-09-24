@@ -124,6 +124,10 @@ refuse `--full` for such projects.
   skips from empty parametrize, skip marks added in hooks, `pytest.skip` in setup, `xfail` — are ordinary pytest
   outcomes, visible in pytest's summary, not project filters. `xfail`-strict manipulation needs
   `pytest_runtest_makereport`, which stays refused in full mode.
+- Known limit (round 16): scoped mode still allows a conftest `pytest_runtest_makereport`, which can flip
+  individual outcomes before the bridge's own report counting sees them. The bridge refuses a native exit that
+  hides an *observed* failure, but a rewritten report is never observed as failed, so a scoped makereport flip
+  stays undetected by design.
 
 ## D. Constraints
 

@@ -1816,8 +1816,6 @@ def _bind_one_row_citations(items: object, subset: dict, ctx: str) -> tuple:
                 f"{entry_ctx} cites evidence outside the item subset")
         if citation.sha256 != excerpt.sha256:
             raise _invalid_reply(f"{entry_ctx} citation identity is stale")
-        if not excerpt.text:
-            raise _invalid_reply(f"{entry_ctx} cites an empty excerpt")
         if not (excerpt.start_line <= citation.start_line
                 <= citation.end_line <= excerpt.end_line):
             raise _invalid_reply(

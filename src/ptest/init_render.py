@@ -248,6 +248,10 @@ def _split_caveats(rest: str) -> list[str]:
         else:
             current.append(char)
     parts.append("".join(current))
+    if depth != 0:
+        # An unclosed "(" merged the following caveats into one bullet;
+        # treat the unbalanced line as its own caveats with a plain split.
+        parts = rest.split(";")
     return [part.strip() for part in parts if part.strip()]
 
 
