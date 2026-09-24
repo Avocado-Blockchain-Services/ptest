@@ -6,6 +6,7 @@ the target interpreter need only provide pytest itself.
 """
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import importlib.metadata
@@ -67,6 +68,10 @@ _BRIDGE_HOOK_MARKS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("pytest_xdist_setupnodes", {"tryfirst": True, "optionalhook": True}),
     ("pytest_xdist_node_collection_finished", {"tryfirst": True, "optionalhook": True}),
     ("pytest_testnodedown", {"tryfirst": True, "optionalhook": True}),
+    # Controller-side per-worker identity before boot. Marked trylast so it
+    # runs after any project configure_node and re-asserts the gateway-bound
+    # values; optionalhook because the spec only exists when xdist does.
+    ("pytest_configure_node", {"trylast": True, "optionalhook": True}),
 )
 
 
@@ -148,6 +153,38 @@ def _workers() -> int:
     if workers < 1 or workers > 64:
         _fail("invalid granted worker count")
     return workers
+
+
+def _claim_import_time_worker_identity() -> None:
+    """Publish the per-worker ptest identity before conftest import.
+
+    xdist sets ``PYTEST_XDIST_WORKER=gwK`` in each worker's environment
+    before ``_prepareconfig``; ``-p`` plugins (this module) import before
+    the initial conftests, so deriving the slot here makes
+    ``PTEST_WORKER_ID``/``PTEST_RESOURCE_PREFIX`` distinct at conftest
+    import time instead of only from ``pytest_configure`` onward. The
+    controller never carries ``PYTEST_XDIST_WORKER`` and non-worker
+    processes carry none either, so both no-op here. Anything anomalous
+    (missing grant, out-of-range slot, unexpected prefix shape) leaves the
+    inherited environment untouched; the worker bootstrap denies it.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    match = re.fullmatch(r"gw([0-9]+)", worker) if isinstance(worker, str) else None
+    if match is None:
+        return
+    try:
+        workers = int(os.environ.get("PTEST_GRANT_WORKERS") or "")
+    except ValueError:
+        return
+    slot_number = int(match.group(1))
+    if workers < 1 or workers > 64 or slot_number >= workers:
+        return
+    slot = f"w{slot_number:03d}"
+    prefix = os.environ.get("PTEST_RESOURCE_PREFIX", "")
+    if not isinstance(prefix, str) or not prefix.endswith("w000"):
+        return
+    os.environ["PTEST_WORKER_ID"] = slot
+    os.environ["PTEST_RESOURCE_PREFIX"] = prefix[:-len("w000")] + slot
 
 
 def _python_version() -> None:
@@ -853,6 +890,23 @@ _FULL_SESSIONFINISH_HOOKS = frozenset({
     "pytest_sessionfinish",
 })
 
+# Report-transport and node-lifecycle hooks the parallel full-mode
+# reconciliation trusts. A non-xdist implementation of any of them can
+# forge the controller/worker record (rewritten outcomes, shortened
+# collections, dropped node-down events), so all stay refused on both
+# sides -- except a checkout conftest's ``pytest_configure_node``, which is
+# project-owned worker configuration and is recorded like the collection
+# hooks. A wrapper/hookwrapper ``pytest_configure_node`` stays refused: it
+# could rewrite the per-worker identity after the bridge publishes it.
+_PARALLEL_TRANSPORT_HOOKS = (
+    "pytest_report_to_serializable",
+    "pytest_report_from_serializable",
+    "pytest_xdist_node_collection_finished",
+    "pytest_testnodedown",
+    "pytest_testnodeready",
+    "pytest_configure_node",
+)
+
 
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
 # additive under the basic-serial grant. anyio arrives transitively with
@@ -1042,6 +1096,46 @@ class OwnedPlugin:
                 if module.split(".", 1)[0] == "xdist":
                     continue
                 self._refuse("unqualified xdist scheduling or crash hook is not owned by the parallel grant")
+
+    def _validate_parallel_transport_hooks(self, manager: Any,
+                                           accepted_hooks: list[str]) -> None:
+        """Refuse unowned report-transport hooks in parallel full mode.
+
+        Runs on the controller and on every worker: ``pytest_configure_node``
+        from a checkout conftest is project-owned worker configuration
+        (plain implementations only, recorded like the collection hooks);
+        every other non-xdist/``_pytest``/bridge implementation of the
+        transport hooks forges the records the reconciliation trusts and is
+        refused, conftests included.
+        """
+        for name in _PARALLEL_TRANSPORT_HOOKS:
+            hook = getattr(manager.hook, name, None)
+            if hook is None:
+                continue
+            for implementation in hook.get_hookimpls():
+                if implementation.plugin is self:
+                    continue
+                if self._is_bridge_worker_impl(implementation):
+                    continue
+                module = str(getattr(implementation.function, "__module__", "") or "")
+                if module.split(".", 1)[0] == "xdist" or module.startswith("_pytest."):
+                    continue
+                if name == "pytest_configure_node":
+                    if (getattr(implementation, "wrapper", False)
+                            or getattr(implementation, "hookwrapper", False)):
+                        self._refuse(
+                            "unqualified pytest execution hook is not owned by the parallel grant"
+                            f" ({name} wrapper from {module})")
+                    owned = self._conftest_owner_path(implementation)
+                    if owned is None:
+                        self._refuse(
+                            "unqualified pytest execution hook is not owned by the parallel grant"
+                            f" ({name} from {module})")
+                    accepted_hooks.append(owned)
+                    continue
+                self._refuse(
+                    "unqualified pytest report-transport hook is not owned by the parallel grant"
+                    f" ({name} from {module})")
 
     @staticmethod
     def _is_bridge_worker_impl(implementation: Any) -> bool:
@@ -1323,6 +1417,8 @@ class OwnedPlugin:
                         f" ({hook} from {module_name})")
             if parallel_controller:
                 self._validate_parallel_controller_hooks(manager, accepted_hooks)
+            if parallel and self.execution == "full":
+                self._validate_parallel_transport_hooks(manager, accepted_hooks)
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
         try:
@@ -1441,6 +1537,55 @@ class OwnedPlugin:
 
     def pytest_configure(self, config: Any) -> None:
         self._validate(config, generated=True)
+        if self.workers >= 2 and not self._worker_side(config):
+            self._verify_bridge_module_identity()
+
+    def _verify_bridge_module_identity(self) -> None:
+        """Refuse a shadowed ``pytest_bridge`` plugin module on the controller.
+
+        ``-p pytest_bridge`` resolves by module name: with the bridge
+        directory ahead of the checkout on ``sys.path`` the resolved module
+        must be the file beside ``PTEST_BRIDGE_PROTOCOL``. A checkout-root
+        or installed impostor fails closed here, before any worker boots.
+        """
+        descriptor = os.environ.get("PTEST_BRIDGE_PROTOCOL", "")
+        expected = os.path.realpath(os.path.join(
+            os.path.dirname(os.path.abspath(descriptor)), "pytest_bridge.py")) if descriptor else ""
+        module = sys.modules.get("pytest_bridge")
+        path = getattr(module, "__file__", None)
+        if (not expected or not isinstance(path, str) or not path
+                or os.path.realpath(path) != expected):
+            self._refuse("parallel bridge module identity is not qualified")
+
+    def pytest_configure_node(self, node: Any) -> None:
+        """Publish the per-worker ptest identity before the worker boots.
+
+        Controller side only: xdist calls this hook once per gateway before
+        the worker's environment is frozen into ``workerinput``. The slot
+        derives from the gateway id (already qualified by
+        ``pytest_xdist_setupnodes``), so project code cannot promote itself
+        to another slot; the worker bootstrap treats these keys as
+        authoritative, and the import-time claim makes them visible to
+        conftest import-time code even earlier.
+        """
+        if self.workers < 2:
+            return
+        worker = getattr(getattr(node, "gateway", None), "id", None)
+        match = re.fullmatch(r"gw([0-9]+)", worker) if isinstance(worker, str) else None
+        if match is None or int(match.group(1)) >= self.workers:
+            self._refuse("native parallel worker identity is malformed")
+        slot = f"w{int(match.group(1)):03d}"
+        prefix = os.environ.get("PTEST_RESOURCE_PREFIX", "")
+        if not isinstance(prefix, str) or not prefix.endswith("w000"):
+            self._refuse("native parallel worker identity is malformed")
+        try:
+            workerinput = node.workerinput
+        except AttributeError:
+            self._refuse("native parallel worker identity is malformed")
+        if not isinstance(workerinput, dict):
+            self._refuse("native parallel worker identity is malformed")
+        workerinput["ptest_worker_id"] = slot
+        workerinput["ptest_resource_prefix"] = prefix[:-len("w000")] + slot
 
     def pytest_collection(self, session: Any) -> Any:
         """Check again after configure hooks, before collecting test modules."""
@@ -1626,13 +1771,22 @@ class OwnedPlugin:
         self._node_collections[worker] = collected
 
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
-        """Record a worker going down, with its bridge record when sent."""
+        """Record a worker going down, with its bridge record when sent.
+
+        The record is deep-copied: a shallow copy would leave the record's
+        lists shared with the sender, letting controller-side code rewrite
+        the drop flag or the label evidence after the fact.
+        """
         worker = getattr(getattr(node, "gateway", None), "id", None)
         if not isinstance(worker, str) or not re.fullmatch(r"gw[0-9]+", worker):
             self._refuse("native parallel worker identity is malformed")
         output = getattr(node, "workeroutput", None)
-        self._node_down[worker] = (
-            error, dict(output) if isinstance(output, dict) else None)
+        record = output.get("ptest_bridge") if isinstance(output, dict) else None
+        try:
+            record = copy.deepcopy(record)
+        except Exception:
+            self._refuse("a parallel worker was not observed by the bridge")
+        self._node_down[worker] = (error, record)
 
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
@@ -1994,10 +2148,9 @@ def _reconcile_parallel(plugin: OwnedPlugin, workers: int,
         return "a parallel worker was not observed by the bridge"
     records: dict[str, Any] = {}
     for worker in expected:
-        error, output = plugin._node_down[worker]
+        error, record = plugin._node_down[worker]
         if error is not None:
             return "a parallel worker was not observed by the bridge"
-        record = output.get("ptest_bridge") if isinstance(output, dict) else None
         if not _valid_worker_record(record, worker):
             return "a parallel worker was not observed by the bridge"
         records[worker] = record
@@ -2009,6 +2162,13 @@ def _reconcile_parallel(plugin: OwnedPlugin, workers: int,
             return "full pytest run left collected items unrun"
         if any(nodeid not in plugin._reported_nodeids for nodeid in first):
             return "full pytest run left collected items unrun"
+        worker_protocol = sum(records[worker]["protocol_seen"] for worker in expected)
+        if worker_protocol < len(first):
+            return "full pytest run left collected items unrun"
+    worker_failures = sum(records[worker]["failures"] + records[worker]["collection_errors"]
+                          for worker in expected)
+    if worker_failures > plugin._report_failures + plugin._collection_errors:
+        return "native exit hides observed test failures"
     if (plugin._report_failures or plugin._collection_errors) and native_exit in (0, 5):
         return "native exit hides observed test failures"
     return None
@@ -2019,8 +2179,7 @@ def _parallel_narrowing_report(plugin: OwnedPlugin) -> dict[str, Any]:
     base = plugin.allowed_narrowing()
     hooks = set(base["conftest_hooks"])
     notes = set(base["notes"])
-    for _, output in plugin._node_down.values():
-        record = output.get("ptest_bridge") if isinstance(output, dict) else None
+    for _, record in plugin._node_down.values():
         if isinstance(record, dict):
             hooks.update(item for item in record.get("conftest_hooks", [])
                          if isinstance(item, str))
@@ -2086,11 +2245,14 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             # Parallel pre-flight, before pytest.main: qualify the xdist
             # install, expose this bridge on the workers' sys.path (frozen
             # by xdist at import), and load the worker half everywhere.
+            # The bridge directory goes AHEAD of the checkout: ``-p
+            # pytest_bridge`` resolves by module name, and a checkout-root
+            # or installed impostor must never win that lookup.
             version = _xdist_version()
             if version not in QUALIFIED_XDIST_VERSIONS:
                 _fail(f"pytest-xdist {version} is not qualified for parallel runs",
                       "unsupported-capability")
-            sys.path.append(str(Path(__file__).resolve().parent))
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
             native_argv = [*_WORKER_CONTROLS, *argv]
         else:
             native_argv = list(argv)
@@ -2282,11 +2444,18 @@ def _worker_bootstrap(config: Any) -> OwnedPlugin | None:
     if not expected or os.path.realpath(__file__) != expected:
         _deny("a parallel worker was not observed by the bridge")
     slot = f"w{int(match.group(1)):03d}"
-    prefix = os.environ.get("PTEST_RESOURCE_PREFIX", "")
-    if not prefix.endswith("w000"):
+    # Per-worker identity published by the controller's pytest_configure_node
+    # before boot. The slot must equal the gateway-derived slot (project
+    # code cannot promote itself), and the prefix must carry that slot; the
+    # values are then authoritative for this worker's environment, including
+    # conftest import-time code that ran before this bootstrap.
+    claimed_id = workerinput.get("ptest_worker_id")
+    claimed_prefix = workerinput.get("ptest_resource_prefix")
+    if (claimed_id != slot or not isinstance(claimed_prefix, str)
+            or not claimed_prefix.endswith(slot)):
         _deny("a parallel worker was not observed by the bridge")
-    os.environ["PTEST_WORKER_ID"] = slot
-    os.environ["PTEST_RESOURCE_PREFIX"] = prefix[:-len("w000")] + slot
+    os.environ["PTEST_WORKER_ID"] = claimed_id
+    os.environ["PTEST_RESOURCE_PREFIX"] = claimed_prefix
     _worker_plugin = OwnedPlugin(workers)
     _worker_config = config
     return _worker_plugin
@@ -2394,6 +2563,10 @@ def pytest_sessionfinish(session: Any) -> None:
 # module unmarked, which is fine because such a process can never register
 # it as a plugin. The hooks self-gate on ``workerinput``.
 if __name__ != "__main__":
+    # ``-p`` plugins import before the initial conftests: claiming the
+    # per-worker identity here (a no-op outside xdist workers) is what makes
+    # it visible to conftest import-time code.
+    _claim_import_time_worker_identity()
     try:
         _mark_bridge_hooks(sys.modules[__name__])
     except ImportError:

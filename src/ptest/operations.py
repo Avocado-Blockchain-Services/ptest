@@ -2261,7 +2261,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 reasons += (_reason("missing-executable", "runner could not be launched"),)
             else:
                 incomplete = True
-                reasons += (_reason("state-unavailable", "guard execution failed or exceeded its deadline"),)
+                reasons += (_reason(guard_problem.code, guard_problem.message),)
         elif ((raw is None and not stopped_at_gate)
               or (raw_guard != 0 and signals.number is None)):
             incomplete = True
