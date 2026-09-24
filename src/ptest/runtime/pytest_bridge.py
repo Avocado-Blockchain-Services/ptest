@@ -2165,9 +2165,16 @@ def _reconcile_parallel(plugin: OwnedPlugin, workers: int,
         worker_protocol = sum(records[worker]["protocol_seen"] for worker in expected)
         if worker_protocol < len(first):
             return "full pytest run left collected items unrun"
-    worker_failures = sum(records[worker]["failures"] + records[worker]["collection_errors"]
-                          for worker in expected)
-    if worker_failures > plugin._report_failures + plugin._collection_errors:
+    # Runtest failures are observed once per executing worker and reported
+    # once per test, so they reconcile by sum. Collection errors are
+    # collected by every worker but deduped by xdist (dsession, by
+    # longrepr) into a single controller error, so they reconcile by
+    # existence: any worker error requires a controller-side error.
+    worker_runtest_failures = sum(records[worker]["failures"] for worker in expected)
+    if worker_runtest_failures > plugin._report_failures:
+        return "native exit hides observed test failures"
+    if (any(records[worker]["collection_errors"] for worker in expected)
+            and not plugin._collection_errors):
         return "native exit hides observed test failures"
     if (plugin._report_failures or plugin._collection_errors) and native_exit in (0, 5):
         return "native exit hides observed test failures"
@@ -2248,6 +2255,13 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             # The bridge directory goes AHEAD of the checkout: ``-p
             # pytest_bridge`` resolves by module name, and a checkout-root
             # or installed impostor must never win that lookup.
+            # An inherited xdist worker environment must not leak onto the
+            # controller: the ``-p`` import below would otherwise claim a
+            # worker identity here and the valid run would be refused.
+            # Workers get their identity from xdist itself, after spawn.
+            for var in ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID",
+                        "PYTEST_XDIST_WORKER_COUNT"):
+                os.environ.pop(var, None)
             version = _xdist_version()
             if version not in QUALIFIED_XDIST_VERSIONS:
                 _fail(f"pytest-xdist {version} is not qualified for parallel runs",
@@ -2565,8 +2579,12 @@ def pytest_sessionfinish(session: Any) -> None:
 if __name__ != "__main__":
     # ``-p`` plugins import before the initial conftests: claiming the
     # per-worker identity here (a no-op outside xdist workers) is what makes
-    # it visible to conftest import-time code.
-    _claim_import_time_worker_identity()
+    # it visible to conftest import-time code. Only the ``-p
+    # pytest_bridge`` worker-half import may claim: importing this file by
+    # its package path (ptest.runtime.pytest_bridge, as the ptest CLI does
+    # via adapters/pytest.py) must leave os.environ untouched.
+    if __name__ == "pytest_bridge":
+        _claim_import_time_worker_identity()
     try:
         _mark_bridge_hooks(sys.modules[__name__])
     except ImportError:

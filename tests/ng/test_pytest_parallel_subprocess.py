@@ -9,6 +9,7 @@ Every twin carries an explicit timeout of at most 60 s.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -895,3 +896,95 @@ def test_parallel_collection_shortening_is_refused(tmp_path):
     assert twin.report["problem"] == "bridge-refused"
     assert any("pytest_xdist_node_collection_finished" in refusal.get(
         "message", "") for refusal in twin.refusals)
+
+
+def test_parallel_collection_error_is_complete_full(tmp_path):
+    """Twin (q1): a broken import under xdist completes, full mode.
+
+    Every worker collects the full suite, so each records one collection
+    error while xdist dedups to a single controller error. The summed
+    per-worker count (4) must not be compared against the deduped
+    controller count (1): the run is a complete native failure.
+    """
+    root = tmp_path / "collfull"
+    root.mkdir()
+    _write(root, "tests/test_broken.py", "import nonexistent_module_xyz\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code != 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == twin.code
+    assert twin.report["problem"] == "native-failure"
+
+
+def test_parallel_collection_error_is_complete_scoped(tmp_path):
+    """Twin (q2): a broken import under xdist completes, scoped mode."""
+    root = tmp_path / "collscoped"
+    root.mkdir()
+    _write(root, "tests/test_broken.py", "import nonexistent_module_xyz\n")
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_broken.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code != 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == twin.code
+    assert twin.report["problem"] == "native-failure"
+
+
+def test_parallel_inherited_xdist_worker_env_still_completes(tmp_path):
+    """Twin (r): an inherited PYTEST_XDIST_WORKER does not refuse a pass.
+
+    The controller must scrub the xdist worker variables before
+    pytest.main; otherwise the ``-p`` import claims a worker identity on
+    the controller and the valid run is refused.
+    """
+    root = tmp_path / "inherited"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(4))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests/test_ok.py"],
+        execution="scoped", timeout=60,
+        extra_env={"PYTEST_XDIST_WORKER": "gw1"})
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+
+
+def test_package_import_leaves_environ_unchanged(monkeypatch):
+    """Twin (s): importing ptest.runtime.pytest_bridge mutates no environ.
+
+    The import-time worker-identity claim runs only for the ``-p``
+    worker-half import (``__name__ == "pytest_bridge"``); a package
+    import — as done by the ptest CLI via adapters/pytest.py — must
+    leave os.environ untouched even with a worker-shaped environment.
+    """
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    monkeypatch.setenv("PTEST_GRANT_WORKERS", str(WORKERS))
+    monkeypatch.setenv("PTEST_RESOURCE_PREFIX",
+                       "pt_abcd1234_deadbeef_a001_w000")
+    monkeypatch.delenv("PTEST_WORKER_ID", raising=False)
+    before = dict(os.environ)
+    name = "ptest.runtime.pytest_bridge"
+    saved = sys.modules.pop(name, None)
+    try:
+        module = importlib.import_module(name)
+    finally:
+        sys.modules.pop(name, None)
+        if saved is not None:
+            sys.modules[name] = saved
+    assert module.__file__ == str(BRIDGE), module.__file__
+    assert dict(os.environ) == before
