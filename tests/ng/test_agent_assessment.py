@@ -1243,8 +1243,8 @@ def test_build_packets_admits_manifests_then_test_config_then_tests(tmp_path):
     conftest = next(e for e in packet.excerpts
                     if e.path == "api/tests/conftest.py")
     assert (conftest.start_line, conftest.end_line) == (1, 500)
-    assert paths[:3] == ["api/pyproject.toml", "api/uv.lock",
-                         "api/tests/conftest.py"]
+    assert paths[:4] == ["api/.ptest.toml", "api/pyproject.toml",
+                         "api/uv.lock", "api/tests/conftest.py"]
 
     reviews = AA.plan_item_reviews(packet)
     assert [review.item_id for review in reviews] == list(EXPECTED_IDS)

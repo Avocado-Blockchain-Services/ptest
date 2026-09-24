@@ -757,3 +757,127 @@ def test_parallel_answer_takes_no_model_call(tmp_path):
     assert row.rationale.startswith("Answered by ptest: ")
     assert [finding.id for finding in child.findings
             if finding.id == "PARALLEL-001"] == []
+
+
+# --- DET1: child .ptest.toml is tier-0 evidence with exact citations ---------
+
+_DET1_CONFIG_TEXT = (
+    'version = 1\nproject_id = "abababababababababababababababab"\n'
+    "[runner]\n"
+    'kind = "pytest"\n'
+    'launcher = ["uv", "run", "--locked", "--no-sync", "python"]\n'
+    "args = []\n"
+    "full_args = []\n"
+    'test_roots = ["tests"]\n'
+    "workers = 1\n"
+    'lifecycle = "cooperative-process-group"\n'
+    "[selection]\n"
+    "enabled = false\n"
+)
+# 1-based spans inside _DET1_CONFIG_TEXT.
+_DET1_RUNNER_SPAN = (3, 10)
+_DET1_SELECTION_SPAN = (11, 12)
+
+
+def test_det1_ptest_toml_is_tier_zero_like_manifests():
+    from ptest import agent_assessment as AA
+
+    assert AA._admission_tier(".ptest.toml") == 0
+    assert AA._admission_tier("api/.ptest.toml") == 5
+
+
+def test_det1_ptest_toml_survives_packet_pressure(tmp_path):
+    """70 test files must not starve the child .ptest.toml (DET1)."""
+    from ptest import agent_assessment as AA
+
+    files = {
+        ".ptest.toml": _DET1_CONFIG_TEXT,
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+    }
+    for index in range(70):
+        files[f"tests/test_{index:02d}.py"] = (
+            f"def test_{index:02d}():\n    assert True\n")
+    packet = _packet_for(tmp_path, files)
+    assert ".ptest.toml" in {excerpt.path for excerpt in packet.excerpts}
+
+
+def test_det1_private_ptest_state_is_never_admitted(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": _DET1_CONFIG_TEXT,
+        "tests/test_x.py": "def test_x():\n    assert True\n",
+        ".ptest/ledger/SENTINEL": "PRIVATE_STATE_SENTINEL_DET1\n",
+        ".ptest/history.json": "PRIVATE_STATE_SENTINEL_DET1\n",
+    })
+    paths = {excerpt.path for excerpt in packet.excerpts}
+    assert not any(path.startswith(".ptest/") for path in paths)
+    assert all("PRIVATE_STATE_SENTINEL_DET1" not in excerpt.text
+               for excerpt in packet.excerpts)
+    assert ".ptest.toml" in paths
+
+
+def test_det1_packet_budget_accounting_holds(tmp_path):
+    from ptest import agent_assessment as AA
+
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": _DET1_CONFIG_TEXT,
+        "pyproject.toml": "[project]\nname = 'demo'\n",
+        "tests/test_x.py": "def test_x():\n    assert True\n",
+    })
+    assert packet.file_count == len(packet.excerpts)
+    assert packet.byte_count == sum(
+        len(excerpt.text.encode("utf-8")) for excerpt in packet.excerpts)
+    assert packet.file_count <= AA.MAX_FILES_PER_CHILD
+    assert packet.byte_count <= AA.MAX_BYTES_PER_CHILD
+    assert packet.excluded_count >= 0 and packet.truncated_count >= 0
+
+
+def test_det1_rows_cite_exact_config_ranges_with_valid_identities(tmp_path):
+    """Parallel ✓ cites [runner]; selection gap cites [selection] (DET1)."""
+    from ptest import agent_assessment as AA
+
+    _stub_qualified_venv(tmp_path)
+    answers = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --dist=loadgroup",
+        config=_parallel_config(tmp_path),
+        files={".ptest.toml": _DET1_CONFIG_TEXT,
+               "tests/test_x.py": "def test_x():\n    assert True\n"})
+    assert answers["SELECT-001"].status == "gap"
+    assert answers["PARALLEL-001"].status == "satisfied"
+    packet = _packet_for(tmp_path, {
+        ".ptest.toml": _DET1_CONFIG_TEXT,
+        "tests/test_x.py": "def test_x():\n    assert True\n"})
+    # Re-answer against the assembled packet so rows bind real excerpts.
+    from ptest import deterministic_items as DI
+    answers = DI.answers_for(_domain(tmp_path),
+                             _resolution(tmp_path, _parallel_config(tmp_path)),
+                             packet)
+    reviews = AA.plan_item_reviews(packet, answers=answers)
+    replies = tuple(
+        None if review.request is None else "synthetic provider failure"
+        for review in reviews)
+    child = AA.assemble_child(packet, reviews, replies)
+    excerpt = next(e for e in packet.excerpts if e.path == ".ptest.toml")
+    by_id = {row.id: row for row in child.rows}
+    parallel = by_id["PARALLEL-001"]
+    assert parallel.status == "satisfied"
+    assert "(the ptest config is not in the review evidence)" not in (
+        parallel.rationale)
+    assert len(parallel.evidence) == 1
+    assert parallel.evidence[0].path == ".ptest.toml"
+    assert (parallel.evidence[0].start_line,
+            parallel.evidence[0].end_line) == _DET1_RUNNER_SPAN
+    assert parallel.evidence[0].sha256 == excerpt.sha256
+    selection = by_id["SELECT-001"]
+    assert selection.status == "gap"
+    assert "(the ptest config is not in the review evidence)" not in (
+        selection.rationale)
+    assert len(selection.evidence) == 1
+    assert (selection.evidence[0].start_line,
+            selection.evidence[0].end_line) == _DET1_SELECTION_SPAN
+    assert selection.evidence[0].sha256 == excerpt.sha256
+    assert [finding.id for finding in child.findings] == ["SELECT-001"]
+    timing = by_id["TIMING-001"]
+    assert timing.status == "unknown"
+    assert "no timing history yet" in timing.rationale

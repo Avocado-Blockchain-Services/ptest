@@ -123,14 +123,17 @@ _UNSUPPORTED_MARKERS = frozenset({
     "setup.py", "setup.cfg",
 })
 
-# Evidence admission tiers: manifests and locks first so the file cap can
-# never starve test configuration, then test configuration before test
-# files, then CI, then imported source, then everything else.
+# Evidence admission tiers: manifests, locks, and the child's own
+# checked-in ptest config first so the file cap can never starve test
+# configuration, then test configuration before test files, then CI,
+# then imported source, then everything else. The private ``.ptest/``
+# runtime state stays excluded (see ``_EXCLUDED_DIRS``); only the
+# checked-in ``.ptest.toml`` is tier 0.
 _TIER0_BASENAMES = frozenset({
     "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "setup.py",
     "requirements.txt", "uv.lock", "poetry.lock", "pdm.lock",
     "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock",
-    "go.sum",
+    "go.sum", ".ptest.toml",
 })
 _TIER1_BASENAMES = frozenset({
     "conftest.py", "pytest.ini", "tox.ini", "setup.cfg",
@@ -158,8 +161,9 @@ def _admission_tier(path: str, tier4: frozenset = frozenset()) -> int:
     base = path.rsplit("/", 1)[-1]
     if base in _TIER0_BASENAMES or fnmatch.fnmatchcase(
             base, "requirements*.txt"):
-        # Design §3.5 admits only child-root manifests and locks to tier 0;
-        # nested ones rank last so they cannot starve test configuration.
+        # Design §3.5 admits only child-root manifests, locks, and the
+        # checked-in ptest config to tier 0; nested ones rank last so
+        # they cannot starve test configuration.
         return 0 if "/" not in path else 5
     if base in _TIER1_BASENAMES or base.startswith(_TIER1_PREFIXES):
         return 1
@@ -1584,10 +1588,15 @@ def _child_relative(path: str, declaration: str) -> str:
 
 
 def _manifest_excerpts(packet: EvidencePacket) -> list[SourceExcerpt]:
-    """Admitted tier-0 manifest excerpts, in packet order."""
+    """Admitted tier-0 dependency-manifest excerpts, in packet order.
+
+    The checked-in ``.ptest.toml`` is tier-0 evidence but not a
+    dependency manifest, so library skip gates never consult it.
+    """
     return [excerpt for excerpt in packet.excerpts
             if _admission_tier(
-                _child_relative(excerpt.path, packet.declaration)) == 0]
+                _child_relative(excerpt.path, packet.declaration)) == 0
+            and excerpt.path.rsplit("/", 1)[-1] != ".ptest.toml"]
 
 
 def _skip_reason(packet: EvidencePacket, entry,
@@ -2008,25 +2017,72 @@ def _skip_child_row(packet: EvidencePacket, entry,
                          label=entry.label)
 
 
+#: Deterministic item to the ``.ptest.toml`` section its answer cites.
+#: The row citation narrows to that section's lines (carrying the excerpt
+#: SHA-256 identity, as model sub-range citations do). TIMING-001 answers
+#: from run history, not config, so it keeps the whole excerpt.
+_DETERMINISTIC_CONFIG_SECTION = {
+    "SELECT-001": "selection",
+    "PARALLEL-001": "runner",
+}
+
+_SECTION_HEADER_RE = re.compile(r"\[([A-Za-z0-9_.-]+)\]")
+
+
+def _config_section_span(text: str, section: str) -> tuple[int, int] | None:
+    """Return the 1-based line span of ``[section]`` in TOML ``text``.
+
+    Returns None when the section header is absent. A header-looking line
+    carrying ``=`` is a value, never a section boundary.
+    """
+    start: int | None = None
+    lines = text.splitlines()
+    for index, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if "=" in stripped:
+            continue
+        match = _SECTION_HEADER_RE.fullmatch(stripped)
+        if match is None:
+            continue
+        name = match.group(1)
+        if start is None:
+            if name == section:
+                start = index
+        elif name != section and not name.startswith(section + "."):
+            return (start, index - 1)
+    if start is None:
+        return None
+    return (start, len(lines) or 1)
+
+
 def _answer_child_row(packet: EvidencePacket, entry,
                       answer: DeterministicAnswer) -> tuple:
     """Build the model-free row (and gap finding) for a deterministic answer.
 
-    The rationale carries the ptest-owned prefix with whole-excerpt
-    citations. A satisfied, gap, or not-applicable answer with no citable
-    excerpt degrades to unknown naming the missing review evidence.
+    The rationale carries the ptest-owned prefix with excerpt citations;
+    a ``.ptest.toml`` citation narrows to the item's config section lines.
+    A satisfied, gap, or not-applicable answer with no citable excerpt
+    degrades to unknown naming the missing review evidence.
     """
     known = {excerpt.path: excerpt for excerpt in packet.excerpts}
     citations: list[Citation] = []
     missing = False
+    section = _DETERMINISTIC_CONFIG_SECTION.get(entry.id)
     for path in answer.evidence_paths:
         excerpt = known.get(path)
         if excerpt is None:
             missing = True
             break
+        start, end = excerpt.start_line, excerpt.end_line
+        if (section is not None
+                and path.rsplit("/", 1)[-1] == ".ptest.toml"):
+            span = _config_section_span(excerpt.text, section)
+            if span is not None:
+                offset = excerpt.start_line - 1
+                start, end = span[0] + offset, span[1] + offset
         citations.append(Citation(path=excerpt.path,
-                                  start_line=excerpt.start_line,
-                                  end_line=excerpt.end_line,
+                                  start_line=start,
+                                  end_line=end,
                                   sha256=excerpt.sha256))
     if answer.status in ("satisfied", "gap", "not-applicable") and (
             missing or not citations):
