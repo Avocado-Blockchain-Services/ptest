@@ -324,6 +324,7 @@ def _full_payloads():
                        "nothing_to_remove": False, "applied": True},
             "self": {"requested": False, "root": None, "removed": False,
                      "path_symlink_removed": False, "kept": []},
+            "domain_root": "/state/coordination", "domain_from_env": True,
         },
     }
 
@@ -368,6 +369,8 @@ def test_nine_public_documents_parse():
     assert uninstall_doc.data["result"]["removed"] == [".ptest.toml"]
     assert uninstall_doc.data["result"]["nothing_to_remove"] is False
     assert uninstall_doc.data["self"]["requested"] is False
+    assert uninstall_doc.data["domain_root"] == "/state/coordination"
+    assert uninstall_doc.data["domain_from_env"] is True
     hostile_uninstall = dict(
         _full_payloads()["uninstall"], root="/repo", extra_field="dropped",
         plan=[dict(_full_payloads()["uninstall"]["plan"][0],
@@ -378,7 +381,9 @@ def test_nine_public_documents_parse():
                   extra_field="dropped"))
     projected = C.decode_public_document(
         C.encode_public_document("uninstall", hostile_uninstall))
-    assert set(projected.data) == {"root", "dry_run", "plan", "result", "self"}
+    assert set(projected.data) == {
+        "root", "dry_run", "plan", "result", "self",
+        "domain_root", "domain_from_env"}
     assert set(projected.data["plan"][0]) == {"action", "target", "detail"}
     assert set(projected.data["result"]) == {
         "removed", "kept", "skipped", "nothing_to_remove", "applied"}
@@ -526,6 +531,8 @@ def test_generated_schema_files_match_frozen_shapes():
         "applied", "kept", "nothing_to_remove", "removed", "skipped"]
     assert sorted(uninstall["self"]["required"]) == [
         "kept", "path_symlink_removed", "removed", "requested", "root"]
+    assert uninstall["domain_root"]["type"] == ["string", "null"]
+    assert uninstall["domain_from_env"]["type"] == "boolean"
 
 
 def test_workspace_aggregate_keeps_exact_v1_doctor_keys_and_enums(case, tmp_path):
@@ -1468,7 +1475,8 @@ _PUBLIC_DATA_KEYS = {
                "limitations"},
     "register": {"root", "initialized", "proposed_runner", "commands",
                  "required_actions", "warnings"},
-    "uninstall": {"root", "dry_run", "plan", "result", "self"},
+    "uninstall": {"root", "dry_run", "plan", "result", "self",
+                  "domain_root", "domain_from_env"},
 }
 
 

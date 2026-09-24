@@ -3,6 +3,15 @@
   "properties": {
     "data": {
       "properties": {
+        "domain_from_env": {
+          "type": "boolean"
+        },
+        "domain_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dry_run": {
           "type": "boolean"
         },

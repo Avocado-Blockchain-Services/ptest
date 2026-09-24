@@ -240,7 +240,10 @@ install.sh layout: only installer-created entries go (the bundle dirs,
 the installer symlink, leftover temp links), plus a PATH ptest symlink
 only when it resolves into that root. Anything else inside the root is
 kept and reported, and the root itself stays when it is not empty.
---self works outside any repository."""
+--self works outside any repository. Run uninstall with the same
+PTEST_STATE_DIR used for runs, so it inspects the same machine-state
+location; the plan names that location as `state: ...`, with
+(PTEST_STATE_DIR) appended when the variable selected it."""
 
 _RUN = """Running tests: scoped iteration and the integrated full gate, from the repository root.
 

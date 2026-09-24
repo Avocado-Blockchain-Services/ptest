@@ -82,7 +82,9 @@ setup records, scheduler rows). Files you edited are kept and reported;
 symlinks and anything outside the repository root are never touched. The
 plan prints first (grouped by action); a TTY is asked once, while
 non-interactive runs require `--yes` and `--dry-run` changes nothing.
-Skipped entries are informational and exit 0.
+Skipped entries are informational and exit 0. Run uninstall with the same
+PTEST_STATE_DIR used for runs, so it inspects the same machine-state
+location (the plan names it as `state: ...`).
 `ptest uninstall --self` also removes the local installation (only
 installer-created entries; anything else inside the root is kept). See
 `ptest help uninstall` for details.

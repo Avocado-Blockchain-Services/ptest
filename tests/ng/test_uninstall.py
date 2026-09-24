@@ -1685,3 +1685,170 @@ def test_self_refuses_when_a_bundle_entry_is_invalid(
 
 
 
+
+
+# --- PTEST_STATE_DIR ----------------------------------------------------------
+
+def _fake_account(tmp_path: Path, monkeypatch) -> Path:
+    """Private account home whose `.local` must stay untouched by the run."""
+    home = tmp_path / "account"
+    home.mkdir(mode=0o700, exist_ok=True)
+    local = home / ".local"
+    local.mkdir(mode=0o770, exist_ok=True)
+    local.chmod(0o770)
+    monkeypatch.setattr(
+        pwd, "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=str(home)))
+    return home
+
+
+def _workspace_domain(monkeypatch, state: Path):
+    from ptest import platform as platform_api
+    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    return platform_api.domain_paths(None)
+
+
+def test_uninstall_text_states_workspace_state_location(
+        tmp_path, monkeypatch, capsys):
+    """P3: the text plan names the inspected state dir + PTEST_STATE_DIR."""
+    _fake_account(tmp_path, monkeypatch)
+    state = tmp_path / "workspace-state"
+    _workspace_domain(monkeypatch, state)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+
+    assert main(("uninstall", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    flat = "".join(line.strip() for line in out.splitlines())
+    assert f"state: {state / 'coordination'} (PTEST_STATE_DIR)" in flat
+
+
+def test_uninstall_json_reports_workspace_state_location(
+        tmp_path, monkeypatch, capsys):
+    """P3: the JSON plan carries domain_root/domain_from_env like where."""
+    _fake_account(tmp_path, monkeypatch)
+    state = tmp_path / "workspace-state"
+    _workspace_domain(monkeypatch, state)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+
+    assert main(("uninstall", "--dry-run", "--json")) == 0
+    doc = C.decode_public_document(
+        capsys.readouterr().out.encode("utf-8"))
+    assert doc.kind == "uninstall"
+    assert doc.data["domain_root"] == str(state / "coordination")
+    assert doc.data["domain_from_env"] is True
+
+
+def test_uninstall_reports_fixture_domain_without_env_marker(
+        case, tmp_path, monkeypatch, capsys):
+    """P3: without PTEST_STATE_DIR the plan still states the location."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--dry-run") == 0
+    flat = "".join(
+        line.strip() for line in capsys.readouterr().out.splitlines())
+    assert f"state: {domain.root}" in flat
+    assert "(PTEST_STATE_DIR)" not in flat
+
+    assert _uninstall(domain, "--dry-run", "--json") == 0
+    doc = C.decode_public_document(
+        capsys.readouterr().out.encode("utf-8"))
+    assert doc.data["domain_root"] == str(domain.root)
+    assert doc.data["domain_from_env"] is False
+
+
+def test_state_dir_workspace_domain_scoped_removal(
+        case, tmp_path, monkeypatch, capsys):
+    """P3 twin: only this checkout's entries go in the PTEST_STATE_DIR domain.
+
+    Removed: this checkout's ``checkouts/<id>/`` dir and ledger rows.
+    Kept: machine.toml, the domain marker, review-models/, another
+    checkout's dir + rows, coordination/ and the state dir itself, and
+    the default account (fixture) domain, untouched.
+    """
+    home = _fake_account(tmp_path, monkeypatch)
+    state = tmp_path / "workspace-state"
+    domain = _workspace_domain(monkeypatch, state)
+    root = tmp_path / "repo-one"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    other_root = tmp_path / "repo-two"
+    other_root.mkdir()
+    _git(other_root)
+    _v1(other_root, OTHER_PROJ)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    for checkout, run_id in ((_checkout(root), "ee" * 16),
+                             (_checkout(other_root, OTHER_PROJ), "ff" * 16)):
+        ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+            run_id=run_id, checkout=checkout, owner=owner, slots=1,
+            exclusive=False, fixture=False))
+        assert scheduler.cancel_pending(domain, ticket, owner) is True
+    mine = _snapshot_case(case, domain, root)
+    other = _snapshot_case(case, domain, other_root, OTHER_PROJ)
+    models = domain.root / "review-models"
+    models.mkdir(parents=True, exist_ok=True)
+    (models / "model.bin").write_bytes(b"cached\n")
+    fixture_domain = case.domain(slots=2, jobs=2)
+    fixture_repo = fixture_domain.root / "fixture-repo"
+    fixture_repo.mkdir()
+    _git(fixture_repo)
+    sheltered = _snapshot_case(case, fixture_domain, fixture_repo)
+    sheltered_ticket = scheduler.enqueue(fixture_domain, C.AdmissionRequest(
+        run_id="aa" * 16, checkout=sheltered, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(
+        fixture_domain, sheltered_ticket, owner) is True
+    monkeypatch.chdir(root)
+
+    assert main(("uninstall", "--yes")) == 0
+    flat = "".join(
+        line.strip() for line in capsys.readouterr().out.splitlines())
+    assert f"state: {domain.root} (PTEST_STATE_DIR)" in flat
+
+    assert not (domain.root / "checkouts" / mine.checkout_id).exists()
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id"
+    ).fetchall())
+    assert mine.checkout_id not in rows
+    assert rows.get(other.checkout_id, 0) >= 1
+    assert (domain.root / "checkouts" / other.checkout_id).is_dir()
+    assert (state / "machine.toml").is_file()
+    assert domain.marker.is_file()
+    assert (models / "model.bin").is_file()
+    assert domain.root.is_dir()
+    assert state.is_dir()
+    assert (fixture_domain.root / "checkouts" / sheltered.checkout_id
+            ).is_dir()
+    sheltered_rows = dict(sqlite3.connect(fixture_domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id"
+    ).fetchall())
+    assert sheltered_rows.get(sheltered.checkout_id, 0) >= 1
+    assert list((home / ".local").iterdir()) == []
+
+
+def test_help_and_readme_name_state_dir_for_uninstall(
+        tmp_path, monkeypatch, capsys):
+    """P3 docs: help + README say to reuse the run's PTEST_STATE_DIR."""
+    monkeypatch.chdir(tmp_path)
+    assert main(("help", "uninstall")) == 0
+    assert "PTEST_STATE_DIR" in capsys.readouterr().out
+    assert main(("uninstall", "--help")) == 0
+    assert "PTEST_STATE_DIR" in capsys.readouterr().out
+    readme = Path(__file__).resolve().parents[2] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert "ptest uninstall" in text
+    assert "PTEST_STATE_DIR" in text

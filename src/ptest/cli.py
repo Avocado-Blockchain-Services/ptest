@@ -1899,17 +1899,18 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                     "uninstall",
                     uninstall_api.document_data(
                         plan, applied=None, dry_run=True,
-                        self_plan=self_plan),
+                        self_plan=self_plan, domain=domain),
                     domain=domain))
             else:
                 sys.stdout.write(uninstall_api.render_text(
-                    plan, dry_run=True, self_plan=self_plan))
+                    plan, dry_run=True, self_plan=self_plan,
+                    domain=domain))
             return 0
         if not parsed.json and not parsed.uninstall_yes:
             # `--yes` prints only the result below; anything else shows
             # the plan once here (dry-run/preview/consent paths).
             sys.stdout.write(uninstall_api.render_text(
-                plan, self_plan=self_plan))
+                plan, self_plan=self_plan, domain=domain))
         if parsed.json and not parsed.uninstall_yes and (removals or self_work):
             # `--json` never prompts: exactly one success document
             # carrying the plan with applied=false, exit non-zero.
@@ -1917,7 +1918,7 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                 "uninstall",
                 uninstall_api.document_data(
                     plan, applied=None, dry_run=False,
-                    self_plan=self_plan),
+                    self_plan=self_plan, domain=domain),
                 domain=domain))
             print("refusing to remove without --yes; re-run with --yes "
                   "to remove these entries", file=sys.stderr)
@@ -1945,19 +1946,19 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                     plan, applied=applied, dry_run=False,
                     self_plan=self_plan, self_removed=self_removed,
                     self_link_removed=self_link_removed,
-                    self_kept=self_result.kept),
+                    self_kept=self_result.kept, domain=domain),
                 domain=domain))
         else:
             if parsed.uninstall_yes:
                 sys.stdout.write(uninstall_api.render_text(
                     plan, applied=applied, self_plan=self_plan,
-                    self_kept=self_result.kept))
+                    self_kept=self_result.kept, domain=domain))
             else:
                 # The plan was already printed before consent; follow it
                 # with only the summary line plus any --self kept files.
                 sys.stdout.write(uninstall_api.render_text(
                     plan, applied=applied, self_plan=self_plan,
-                    self_kept=self_result.kept,
+                    self_kept=self_result.kept, domain=domain,
                     summary_only=True))
             if self_removed:
                 print("ptest was uninstalled")

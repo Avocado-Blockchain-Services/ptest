@@ -937,6 +937,19 @@ def apply_self(plan: SelfPlan) -> SelfApplied:
 
 # -- rendering + JSON payload ----------------------------------------------------------
 
+def _state_facts(domain: C.DomainPaths | None) -> tuple[str | None, bool]:
+    """Machine-state location the plan inspected, plus env selection.
+
+    Mirrors the ``where``/``status`` ``domain_root``/``domain_from_env``
+    naming: the flag is true only when ``PTEST_STATE_DIR`` selected a
+    non-fixture domain.
+    """
+    if domain is None:
+        return None, False
+    return str(domain.root), bool(
+        not domain.fixture and os.environ.get("PTEST_STATE_DIR"))
+
+
 def _truncate(text: str, width: int) -> str:
     if len(text) <= width:
         return text
@@ -955,7 +968,8 @@ def render_text(plan: RepoPlan, *, applied: Applied | None = None,
                dry_run: bool = False, width: int | None = None,
                self_plan: SelfPlan | None = None,
                self_kept: tuple = (),
-               summary_only: bool = False) -> str:
+               summary_only: bool = False,
+               domain: C.DomainPaths | None = None) -> str:
     """Plain grouped plan/result rendering for human terminals.
 
     ``summary_only`` (with ``applied``) emits just the trailing summary
@@ -973,6 +987,15 @@ def render_text(plan: RepoPlan, *, applied: Applied | None = None,
         groups[entry.action].append(entry)
     labels = {REMOVE: "remove:", KEPT: "kept (edited):", SKIPPED: "skipped:"}
     budget = max(16, term - 4)
+    state_root, state_from_env = _state_facts(domain)
+    state_text = ("<unresolved>" if state_root is None
+                  else terminal_text(state_root))
+    chunks = _wrap_text(state_text, budget)
+    lines.append(f"  state: {chunks[0]}")
+    for chunk in chunks[1:]:
+        lines.append(f"      {chunk}")
+    if state_from_env:
+        lines[-1] += " (PTEST_STATE_DIR)"
     for action in (REMOVE, KEPT, SKIPPED):
         items = groups[action]
         if not items:
@@ -1034,7 +1057,8 @@ def document_data(plan: RepoPlan, *, applied: Applied | None,
                   dry_run: bool, self_plan: SelfPlan | None,
                   self_removed: bool = False,
                   self_link_removed: bool = False,
-                  self_kept: tuple = ()) -> dict:
+                  self_kept: tuple = (),
+                  domain: C.DomainPaths | None = None) -> dict:
     """Allowlisted uninstall payload for the public JSON document."""
     removes = [entry.target for entry in plan.entries if entry.action == REMOVE]
     self_work = (self_plan is not None and self_plan.requested
@@ -1061,6 +1085,8 @@ def document_data(plan: RepoPlan, *, applied: Applied | None,
             "path_symlink_removed": self_link_removed,
             "kept": list(self_kept),
         }
+    state_root, state_from_env = _state_facts(domain)
     return {"root": str(plan.root), "dry_run": dry_run,
             "plan": [_entry_payload(entry) for entry in plan.entries],
-            "result": result, "self": self_payload}
+            "result": result, "self": self_payload,
+            "domain_root": state_root, "domain_from_env": state_from_env}

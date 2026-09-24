@@ -2768,6 +2768,14 @@ def _validate_uninstall_payload(data: dict) -> None:
     _need_bool(selfish, "removed")
     _need_bool(selfish, "path_symlink_removed")
     _check_str_list(_need_list(selfish, "kept"), "uninstall.self.kept")
+    if data.get("domain_root") is not None and not isinstance(
+            data["domain_root"], str):
+        raise _invalid("report-invalid",
+                       "uninstall.domain_root must be a string or null")
+    if "domain_from_env" in data and not isinstance(
+            data["domain_from_env"], bool):
+        raise _invalid("report-invalid",
+                       "uninstall.domain_from_env must be a boolean")
 
 
 def _validate_register_payload(data: dict) -> None:
@@ -3465,6 +3473,8 @@ def _project_uninstall_payload(data: dict) -> dict:
             "path_symlink_removed": data["self"]["path_symlink_removed"],
             "kept": list(data["self"]["kept"]),
         },
+        "domain_root": data.get("domain_root"),
+        "domain_from_env": data.get("domain_from_env", False),
     }
 
 
@@ -4597,6 +4607,8 @@ PUBLIC_SCHEMAS: dict = {
                 "kept": {"type": "array", "items": {"type": "string"}},
             }, "required": ["requested", "root", "removed",
                             "path_symlink_removed", "kept"]},
+            "domain_root": {"type": ["string", "null"]},
+            "domain_from_env": {"type": "boolean"},
         },
         "required": ["root", "dry_run", "plan", "result", "self"],
     }),
