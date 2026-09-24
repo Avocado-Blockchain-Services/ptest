@@ -62,3 +62,13 @@ enterprise installation. Security gate instructions are in [docs/security.md](do
 
 The old implementation is retained only in Git history; see
 [docs/legacy-index.md](docs/legacy-index.md).
+
+`ptest uninstall` reverses what ptest set up in a repository: it removes the
+`.ptest.toml` files, ptest-managed guidance, the un-edited
+`recommendations.md` report, and this checkout's private state (history,
+setup records, scheduler rows). Files you edited are kept and reported;
+symlinks and anything outside the repository root are never touched. The
+plan prints first (grouped by action); a TTY is asked once, while
+non-interactive runs require `--yes` and `--dry-run` changes nothing.
+`ptest uninstall --self` also removes the local installation. See
+`ptest help uninstall` for details.

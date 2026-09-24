@@ -27,13 +27,14 @@ Inspect and review:
   ptest doctor                    # consented CLI review; use --offline for static-only
   ptest guide                     # render bundled repair guide text
   ptest rules                     # preview agent guidance
+  ptest uninstall                 # remove what ptest set up (see ptest help uninstall)
 
 Machine output:
   Legacy doctor --json stays static; --assessment-json is the versioned review result.
   --json on init/register/where/status/history/plan; guide is text-only.
 
 Discover commands:
-  ptest help <topic>              # init register where status history plan doctor guide rules run agents
+  ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall
   ptest <inspection-command> --help  # e.g. ptest doctor --help
   ptest --help | -h               # this overview
 
@@ -207,6 +208,29 @@ docs/ptest-agent.md); it does not install per-agent skills. Use
 init --agents for provider skills; failures roll back guidance writes.
 Rules accepts no --json."""
 
+_UNINSTALL = """ptest uninstall: remove what ptest set up, keeping your work.
+
+Syntax:
+  ptest uninstall [--yes] [--dry-run] [--json] [--self]
+
+Removes the repository `.ptest.toml` files (root and declared monorepo
+children), ptest-managed guidance (docs/ptest-agent.md, the managed block
+in AGENTS.md/CLAUDE.md, managed provider skills), the un-edited
+recommendations.md report, and this checkout's private state (its history,
+setup records, and scheduler rows). Files you edited are kept and reported
+as kept (edited); symlinks, unbalanced marker blocks, and anything outside
+the repository root are never touched and reported as skipped.
+
+The full plan prints first, grouped by action (remove, kept (edited),
+skipped). On a TTY, uninstall asks once: `Remove these? [y/N]`.
+Non-interactive runs require --yes; without it the plan prints and the
+command exits non-zero. --dry-run prints the plan and changes nothing.
+--json emits the versioned uninstall document. A second run reports
+nothing to remove and exits 0. --self also removes the local ptest
+installation (default ~/.local/ptest) when it looks like an install.sh
+layout, plus a PATH ptest symlink only when it resolves into that root;
+anything else is left alone. --self works outside any repository."""
+
 _RUN = """Running tests: scoped iteration and the integrated full gate, from the repository root.
 
 Syntax (ptest options precede scoped/native arguments):
@@ -299,6 +323,7 @@ _TOPIC_TEXTS = {
     "rules": _RULES,
     "run": _RUN,
     "agents": _AGENTS,
+    "uninstall": _UNINSTALL,
 }
 
 TOPICS = tuple(_TOPIC_TEXTS)

@@ -30,7 +30,7 @@ GUARD_PROTOCOL_VERSION = 2
 PUBLIC_KINDS = (
     "init", "register", "plan", "where",
     "status", "history", "doctor", "run",
-    "agent-assessment",
+    "agent-assessment", "uninstall",
 )
 
 
@@ -2724,6 +2724,38 @@ def _validate_doctor_payload(data: dict) -> None:
         _check_reason_dict(item)
 
 
+_UNINSTALL_ACTIONS = frozenset({"remove", "kept", "skipped"})
+
+
+def _check_uninstall_entry(item: object) -> None:
+    if not isinstance(item, dict):
+        raise _invalid("report-invalid", "uninstall.plan entries must be objects")
+    if item.get("action") not in _UNINSTALL_ACTIONS:
+        raise _invalid("report-invalid", "uninstall.plan entry has an unknown action")
+    _need_str(item, "target", allow_empty=True)
+    _need_str(item, "detail", allow_empty=True)
+
+
+def _validate_uninstall_payload(data: dict) -> None:
+    _need_str(data, "root", allow_empty=True)
+    _need_bool(data, "dry_run")
+    for entry in _need_list(data, "plan"):
+        _check_uninstall_entry(entry)
+    if "result" not in data or not isinstance(data["result"], dict):
+        raise _invalid("report-invalid", "uninstall.result must be an object")
+    result = data["result"]
+    for name in ("removed", "kept", "skipped"):
+        _check_str_list(_need_list(result, name), f"uninstall.result.{name}")
+    _need_bool(result, "nothing_to_remove")
+    if "self" not in data or not isinstance(data["self"], dict):
+        raise _invalid("report-invalid", "uninstall.self must be an object")
+    selfish = data["self"]
+    _need_bool(selfish, "requested")
+    _need_str(selfish, "root", allow_none=True, allow_empty=True)
+    _need_bool(selfish, "removed")
+    _need_bool(selfish, "path_symlink_removed")
+
+
 def _validate_register_payload(data: dict) -> None:
     _need_str(data, "root")
     _need_bool(data, "initialized")
@@ -3169,6 +3201,7 @@ _PAYLOAD_VALIDATORS = {
     "doctor": _validate_doctor_payload,
     "register": _validate_register_payload,
     "agent-assessment": _validate_agent_assessment_payload,
+    "uninstall": _validate_uninstall_payload,
 }
 
 
@@ -3390,6 +3423,31 @@ def _project_register_payload(data: dict) -> dict:
     }
 
 
+def _project_uninstall_entry(item: dict) -> dict:
+    return {"action": item["action"], "target": item["target"],
+            "detail": item["detail"]}
+
+
+def _project_uninstall_payload(data: dict) -> dict:
+    return {
+        "root": data["root"], "dry_run": data["dry_run"],
+        "plan": [_project_uninstall_entry(entry)
+                 for entry in data["plan"]],
+        "result": {
+            "removed": list(data["result"]["removed"]),
+            "kept": list(data["result"]["kept"]),
+            "skipped": list(data["result"]["skipped"]),
+            "nothing_to_remove": data["result"]["nothing_to_remove"],
+        },
+        "self": {
+            "requested": data["self"]["requested"],
+            "root": data["self"]["root"],
+            "removed": data["self"]["removed"],
+            "path_symlink_removed": data["self"]["path_symlink_removed"],
+        },
+    }
+
+
 def _project_aa_citation(item: dict) -> dict:
     return {"path": item["path"], "start_line": item["start_line"],
             "end_line": item["end_line"], "sha256": item["sha256"]}
@@ -3476,6 +3534,7 @@ _PROJECTORS: dict = {
     "doctor": _project_doctor_payload,
     "register": _project_register_payload,
     "agent-assessment": _project_agent_assessment_payload,
+    "uninstall": _project_uninstall_payload,
 }
 
 
@@ -4483,6 +4542,38 @@ PUBLIC_SCHEMAS: dict = {
     }),
     "agent-assessment": _envelope_schema(
         "agent-assessment", _agent_assessment_data_schema()),
+    "uninstall": _envelope_schema("uninstall", {
+        "type": "object",
+        "properties": {
+            "root": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "plan": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["remove", "kept", "skipped"]},
+                    "target": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+                "required": ["action", "target", "detail"],
+            }},
+            "result": {"type": "object", "properties": {
+                "removed": {"type": "array", "items": {"type": "string"}},
+                "kept": {"type": "array", "items": {"type": "string"}},
+                "skipped": {"type": "array", "items": {"type": "string"}},
+                "nothing_to_remove": {"type": "boolean"},
+            }, "required": ["removed", "kept", "skipped",
+                            "nothing_to_remove"]},
+            "self": {"type": "object", "properties": {
+                "requested": {"type": "boolean"},
+                "root": {"type": ["string", "null"]},
+                "removed": {"type": "boolean"},
+                "path_symlink_removed": {"type": "boolean"},
+            }, "required": ["requested", "root", "removed",
+                            "path_symlink_removed"]},
+        },
+        "required": ["root", "dry_run", "plan", "result", "self"],
+    }),
 }
 
 PROTOCOL_V1_DESCRIPTOR: dict = {

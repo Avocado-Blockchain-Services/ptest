@@ -21,6 +21,7 @@ from . import contracts as C
 from . import doctor, executability, files, help as help_api, history
 from . import init_render, init_smoke
 from . import operations, platform, recommendations, scheduler
+from . import uninstall as uninstall_api
 from . import render
 from .adapters import pytest as pytest_adapter
 from .adapters import vitest as vitest_adapter
@@ -29,7 +30,7 @@ from .runners import adapter_for
 
 _INSPECTION = frozenset({
     "init", "register", "where", "status", "history", "plan",
-    "doctor", "guide", "rules",
+    "doctor", "guide", "rules", "uninstall",
 })
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--result-json",
@@ -73,6 +74,8 @@ class ParsedArgs:
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
     apply_rules: bool = False
+    uninstall_self: bool = False
+    uninstall_yes: bool = False
     children: tuple = ()
     agents: tuple[str, ...] = ()
     agents_explicit: bool = False
@@ -398,6 +401,23 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if tuple(args) == ("--apply",):
             return ParsedArgs(command=command, apply_rules=True)
         raise _problem("invalid-config", "rules accepts only --apply")
+    if command == "uninstall":
+        uninstall_self = uninstall_yes = uninstall_dry = uninstall_json = False
+        for token in args:
+            if token == "--self":
+                uninstall_self = True
+            elif token == "--yes":
+                uninstall_yes = True
+            elif token == "--dry-run":
+                uninstall_dry = True
+            elif token == "--json":
+                uninstall_json = True
+            else:
+                raise _problem("invalid-config", "unknown inspection option")
+        return ParsedArgs(command=command, json=uninstall_json,
+                          dry_run=uninstall_dry,
+                          uninstall_self=uninstall_self,
+                          uninstall_yes=uninstall_yes)
     if command in {"where", "status", "plan"}:
         allowed = {"--json", "--reveal-command"} if command == "where" else {"--json"}
         base = None
@@ -1813,6 +1833,91 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
             workspace.aggregate, workspace=workspace))
 
 
+def _uninstall_consented() -> bool:
+    """Ask once on a TTY; any non-yes answer (including EOF) declines."""
+    if not sys.stdin.isatty():
+        return False
+    print("Remove these? [y/N]", file=sys.stderr)
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
+    domain: C.DomainPaths | None = None
+    try:
+        root = config_api.repository_root(cwd)
+        domain = platform.domain_paths(parsed.fixture_domain)
+        plan = uninstall_api.plan_repo(root, domain)
+        self_plan = (uninstall_api.plan_self() if parsed.uninstall_self
+                     else uninstall_api.SelfPlan(requested=False))
+        if self_plan.refused is not None:
+            raise _problem(
+                "not-install-layout",
+                f"refusing --self: {self_plan.refused_path} "
+                f"{self_plan.refused}")
+        removals = [entry for entry in plan.entries
+                    if entry.action == uninstall_api.REMOVE]
+        self_work = self_plan.requested and self_plan.root is not None
+        if parsed.dry_run:
+            if parsed.json:
+                sys.stdout.buffer.write(_document(
+                    "uninstall",
+                    uninstall_api.document_data(
+                        plan, applied=None, dry_run=True,
+                        self_plan=self_plan),
+                    domain=domain))
+            else:
+                sys.stdout.write(uninstall_api.render_text(
+                    plan, dry_run=True, self_plan=self_plan))
+            return 0
+        if not parsed.json:
+            sys.stdout.write(uninstall_api.render_text(
+                plan, self_plan=self_plan))
+        if removals or self_work:
+            if not parsed.uninstall_yes and not _uninstall_consented():
+                if sys.stdin.isatty():
+                    raise _problem("confirmation-declined",
+                                   "uninstall declined; nothing changed")
+                raise _problem(
+                    "confirmation-required",
+                    "refusing to remove without --yes; re-run with --yes "
+                    "to remove these entries")
+        applied = uninstall_api.apply_repo(plan, domain)
+        self_removed = self_link_removed = False
+        if self_work:
+            assert self_plan.root is not None
+            self_removed, self_link_removed = uninstall_api.apply_self(
+                self_plan)
+        if parsed.json:
+            sys.stdout.buffer.write(_document(
+                "uninstall",
+                uninstall_api.document_data(
+                    plan, applied=applied, dry_run=False,
+                    self_plan=self_plan, self_removed=self_removed,
+                    self_link_removed=self_link_removed),
+                domain=domain))
+        else:
+            sys.stdout.write(uninstall_api.render_text(
+                plan, applied=applied, self_plan=self_plan))
+            if self_removed:
+                print("ptest was uninstalled")
+        if self_removed and parsed.json:
+            print("ptest was uninstalled", file=sys.stderr)
+        skipped = [entry for entry in plan.entries
+                   if entry.action == uninstall_api.SKIPPED]
+        if skipped:
+            raise _problem(
+                "uninstall-skipped",
+                f"{len(skipped)} entries were skipped; safe removals completed")
+        return 0
+    except C.Problem as problem:
+        return _emit_error(problem, kind="uninstall",
+                           json_output=parsed.json, domain=domain)
+
+
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     command = parsed.command
     if command == "help":
@@ -1846,6 +1951,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return 0
         except C.Problem as problem:
             return _emit_error(problem, kind="rules", json_output=False)
+    if command == "uninstall":
+        return _run_uninstall(parsed, cwd)
     if command == "init":
         try:
             agents = _init_agents(parsed, json_output=parsed.json)

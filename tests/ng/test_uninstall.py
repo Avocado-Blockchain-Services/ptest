@@ -1,0 +1,884 @@
+"""`ptest uninstall` strict-TDD suite: spec groups plus abuse-case twins.
+
+Tests run through the CLI (`main`) with an explicit `--fixture-domain`, so
+no real account domain, installer, or provider is ever touched.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from ptest import agent_rules
+from ptest import contracts as C
+from ptest import history as history_api
+from ptest import platform as platform_api
+from ptest import recommendations
+from ptest import scheduler
+from ptest.cli import main
+
+PROJ = "ab" * 16
+OTHER_PROJ = "cd" * 16
+
+
+def _git(root: Path) -> None:
+    marker = root / ".git"
+    marker.mkdir(exist_ok=True)
+    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (marker / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+
+
+def _v1(root: Path, project_id: str = PROJ) -> None:
+    (root / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + project_id + "\"\n"
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+
+
+def _checkout_id(root: Path) -> str:
+    return hashlib.sha256(os.fsencode(os.path.realpath(root))).hexdigest()[:32]
+
+
+def _checkout(root: Path, project_id: str = PROJ) -> C.CheckoutIdentity:
+    return C.CheckoutIdentity(
+        project_id=project_id, checkout_id=_checkout_id(root), root=root)
+
+
+def _uninstall(domain: C.DomainPaths, *args: str) -> int:
+    return main(("--fixture-domain", str(domain.root), "uninstall", *args))
+
+
+def _snapshot(root: Path) -> dict:
+    """Byte-exact tree image, symlink-aware (links recorded, never followed)."""
+    out: dict = {}
+    for current, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = Path(current) / name
+            rel = str(path.relative_to(root))
+            try:
+                stamp = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            import stat as _stat
+            if _stat.S_ISLNK(stamp.st_mode):
+                out[rel] = ("link", os.readlink(path))
+            elif _stat.S_ISREG(stamp.st_mode):
+                out[rel] = ("file", path.read_bytes())
+            else:
+                out[rel] = ("other", None)
+    return out
+
+
+def _report_bytes(body: bytes = b"# notes\nkept body\n") -> bytes:
+    return recommendations._marker_for(body) + body
+
+
+def _snapshot_case(case, domain: C.DomainPaths, root: Path,
+                   project_id: str = PROJ):
+    checkout = _checkout(root, project_id)
+    before = case.snapshot(digest="11" * 32, compatibility="compat-v1")
+    after = case.snapshot(digest="22" * 32, compatibility="compat-v1")
+    plan = C.Plan(mode=C.Mode.FULL, execution="full",
+                  input_digest=after.digest,
+                  compatibility=after.compatibility)
+    result = case.result(sequence=1, plan=plan, input_before=before,
+                         input_after=after, policy_digest="33" * 32,
+                         project_id=checkout.project_id,
+                         checkout_id=checkout.checkout_id)
+    inventory = case.inventory(("tests/test_a.py",))
+    published = history_api.publish_outcome(domain, checkout, result, inventory)
+    assert published.committed is True
+    return checkout
+
+
+# --- round trip -----------------------------------------------------------
+
+def test_round_trip_restores_pre_init_tree_byte_for_byte(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = domain.root / "repo"
+    (root / "api").mkdir(parents=True)
+    (root / "web").mkdir()
+    _git(root)
+    (root / "AGENTS.md").write_text("# Agent notes\n", encoding="utf-8")
+    (root / "CLAUDE.md").write_text("# Claude notes\n", encoding="utf-8")
+    before = _snapshot(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--child", "api", "--runner", "pytest",
+                 "--child", "web", "--runner", "pytest",
+                 "--agents", "claude,codex,opencode,gemini")) == 0
+    capsys.readouterr()
+    assert (root / ".ptest.toml").is_file()
+    assert (root / "api" / ".ptest.toml").is_file()
+    assert (root / "docs" / "ptest-agent.md").is_file()
+    (root / "recommendations.md").write_bytes(_report_bytes())
+    (root / "api" / "recommendations.md").write_bytes(_report_bytes())
+    checkout = _snapshot_case(case, domain, root)
+    assert (domain.root / "checkouts" / checkout.checkout_id).is_dir()
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "remove" in out
+
+    assert _snapshot(root) == before
+    assert not (domain.root / "checkouts" / checkout.checkout_id).exists()
+    if domain.ledger.exists():
+        rows = sqlite3.connect(domain.ledger).execute(
+            "SELECT run_id FROM jobs WHERE checkout_id=?",
+            (checkout.checkout_id,)).fetchall()
+        assert rows == []
+
+
+def test_init_after_uninstall_is_a_clean_first_init(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    (root / "pyproject.toml").write_text(
+        "[project]\ndependencies = [\"pytest>=8\"]\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    out = capsys.readouterr().out
+    assert (root / ".ptest.toml").is_file()
+    assert (root / "docs" / "ptest-agent.md").is_file()
+    assert (root / ".agents" / "skills" / "ptest" / "SKILL.md").is_file()
+    assert "already" not in out
+
+
+def test_subdirectory_anchors_at_the_git_root(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = domain.root / "repo"
+    (root / "api").mkdir(parents=True)
+    (root / "web").mkdir()
+    _git(root)
+    (root / "AGENTS.md").write_text("# notes\n", encoding="utf-8")
+    before = _snapshot(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--child", "api", "--runner", "pytest",
+                 "--child", "web", "--runner", "pytest",
+                 "--agents", "claude")) == 0
+    capsys.readouterr()
+
+    monkeypatch.chdir(root / "api")
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert _snapshot(root) == before
+    assert not (root / ".ptest.toml").exists()
+    assert not (root / "api" / ".ptest.toml").exists()
+    assert not (root / "web" / ".ptest.toml").exists()
+
+
+# --- keep edited files ----------------------------------------------------
+
+def test_edited_guide_skill_report_kept_but_edited_config_removed(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest",
+                 "--agents", "claude,codex")) == 0
+    capsys.readouterr()
+    guide = root / "docs" / "ptest-agent.md"
+    guide.write_text(guide.read_text(encoding="utf-8") + "\nuser edit\n",
+                     encoding="utf-8")
+    skill = root / ".agents" / "skills" / "ptest" / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nuser edit\n",
+                     encoding="utf-8")
+    (root / "recommendations.md").write_bytes(_report_bytes())
+    with (root / "recommendations.md").open("ab") as stream:
+        stream.write(b"\nuser edit\n")
+    config = root / ".ptest.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "# tuned\n",
+                      encoding="utf-8")
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "kept (edited)" in out
+    assert "user edit" in guide.read_text(encoding="utf-8")
+    assert "user edit" in skill.read_text(encoding="utf-8")
+    assert "user edit" in (root / "recommendations.md").read_bytes().decode()
+    assert not config.exists()
+
+
+def test_unmanaged_skill_content_is_kept(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    foreign = root / ".claude" / "skills" / "ptest" / "SKILL.md"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("# user skill\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "kept (edited)" in out
+    assert foreign.read_text(encoding="utf-8") == "# user skill\n"
+    assert not (root / ".ptest.toml").exists()
+
+
+def test_legacy_codex_skill_managed_bytes_are_removed(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    legacy = root / ".codex" / "skills" / "ptest" / "SKILL.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(agent_rules._legacy_provider_text("codex"))
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert not legacy.exists()
+    assert not (root / ".codex").exists()
+
+
+# --- unmanaged or foreign files -------------------------------------------
+
+def test_unbalanced_markers_are_left_alone(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    agents = root / "AGENTS.md"
+    agents.write_text("# notes\n<!-- ptest-agent-rules:start -->\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    code = _uninstall(domain, "--yes")
+    out = capsys.readouterr().out
+    assert code != 0
+    assert "skipped" in out
+    assert agents.read_text(encoding="utf-8") == (
+        "# notes\n<!-- ptest-agent-rules:start -->\n")
+    assert not (root / ".ptest.toml").exists()
+
+
+def test_duplicated_markers_are_left_alone(case, tmp_path, monkeypatch):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    block = agent_rules._block("AGENTS.md")
+    agents = root / "AGENTS.md"
+    agents.write_text(block + "\n" + block, encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") != 0
+    assert agents.read_text(encoding="utf-8") == block + "\n" + block
+
+
+def test_opencode_owned_files_and_foreign_skills_survive(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "opencode")) == 0
+    capsys.readouterr()
+    oc = root / ".opencode"
+    (oc / "package.json").write_text('{"name":"x"}\n', encoding="utf-8")
+    (oc / "node_modules").mkdir()
+    (oc / "node_modules" / "keep.js").write_text("1\n", encoding="utf-8")
+    other = oc / "skills" / "other" / "SKILL.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# other\n", encoding="utf-8")
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert (oc / "package.json").read_text(encoding="utf-8") == '{"name":"x"}\n'
+    assert (oc / "node_modules" / "keep.js").is_file()
+    assert other.read_text(encoding="utf-8") == "# other\n"
+    assert not (oc / "skills" / "ptest").exists()
+
+
+# --- symlinks ---------------------------------------------------------------
+
+def test_symlinked_config_skill_docs_and_agent_file_are_left_alone(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    (root / "docs").mkdir(parents=True)
+    outside.mkdir()
+    _git(root)
+    real_config = outside / ".ptest.toml"
+    real_config.write_text("version = 1\n", encoding="utf-8")
+    (root / ".ptest.toml").symlink_to(real_config)
+    real_skill = outside / "SKILL.md"
+    real_skill.write_text("# skill\n", encoding="utf-8")
+    skill = root / ".claude" / "skills" / "ptest" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.symlink_to(real_skill)
+    real_docs = outside / "docs"
+    real_docs.mkdir()
+    (real_docs / "ptest-agent.md").write_text("# guide\n", encoding="utf-8")
+    (root / "docs").rmdir()
+    (root / "docs").symlink_to(real_docs, target_is_directory=True)
+    real_agents = outside / "AGENTS.md"
+    real_agents.write_text("# agents\n", encoding="utf-8")
+    (root / "AGENTS.md").symlink_to(real_agents)
+    monkeypatch.chdir(root)
+
+    code = _uninstall(domain, "--yes")
+    out = capsys.readouterr().out
+    assert code != 0
+    assert "skipped" in out
+    assert (root / ".ptest.toml").is_symlink()
+    assert real_config.read_bytes() == b"version = 1\n"
+    assert skill.is_symlink()
+    assert real_skill.read_bytes() == b"# skill\n"
+    assert (root / "docs").is_symlink()
+    assert (real_docs / "ptest-agent.md").read_bytes() == b"# guide\n"
+    assert (root / "AGENTS.md").is_symlink()
+    assert real_agents.read_bytes() == b"# agents\n"
+
+
+# --- consent ----------------------------------------------------------------
+
+def _tty(monkeypatch, answer):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    if isinstance(answer, str):
+        monkeypatch.setattr("builtins.input", lambda *args, **kwargs: answer)
+    else:
+        def _raise(*args, **kwargs):
+            raise EOFError
+        monkeypatch.setattr("builtins.input", _raise)
+
+
+def test_tty_decline_changes_nothing(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    before = _snapshot(root)
+    _tty(monkeypatch, "n")
+
+    assert _uninstall(domain) != 0
+    err = capsys.readouterr().err
+    assert "nothing changed" in err
+    assert _snapshot(root) == before
+
+
+def test_tty_eof_changes_nothing(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    before = _snapshot(root)
+    _tty(monkeypatch, None)
+
+    assert _uninstall(domain) != 0
+    assert _snapshot(root) == before
+
+
+def test_tty_accept_removes(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    _tty(monkeypatch, "y")
+
+    assert _uninstall(domain) == 0
+    capsys.readouterr()
+    assert not (root / ".ptest.toml").exists()
+
+
+def test_non_tty_without_yes_shows_plan_and_changes_nothing(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    before = _snapshot(root)
+
+    code = _uninstall(domain)
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "remove" in captured.out
+    assert "--yes" in captured.err
+    assert _snapshot(root) == before
+
+
+def test_dry_run_changes_nothing(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    before = _snapshot(root)
+
+    assert _uninstall(domain, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "remove" in out
+    assert _snapshot(root) == before
+
+
+# --- state --------------------------------------------------------------------
+
+def test_checkout_state_removed_while_second_checkout_survives(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo-one"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    other = domain.root / "repo-two"
+    other.mkdir()
+    _git(other)
+    _v1(other, OTHER_PROJ)
+    first = _snapshot_case(case, domain, root)
+    second = _snapshot_case(case, domain, other, OTHER_PROJ)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    for checkout, run_id in ((first, "ee" * 16), (second, "ff" * 16)):
+        ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+            run_id=run_id, checkout=checkout, owner=owner, slots=1,
+            exclusive=False, fixture=True))
+        assert scheduler.cancel_pending(domain, ticket, owner) is True
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+
+    assert not (domain.root / "checkouts" / first.checkout_id).exists()
+    assert (domain.root / "checkouts" / second.checkout_id).is_dir()
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id").fetchall())
+    assert first.checkout_id not in rows
+    assert rows.get(second.checkout_id, 0) >= 1
+
+
+def test_setup_fingerprint_dir_is_removed_with_checkout_state(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    checkout = _checkout(root)
+    from ptest import operations
+    operations._record_setup_fingerprint(domain, checkout, "ab" * 32)
+    marker = domain.root / "checkouts" / checkout.checkout_id / "setup-fingerprint.json"
+    assert marker.is_file()
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert not marker.exists()
+    assert not (domain.root / "checkouts" / checkout.checkout_id).exists()
+
+
+def test_active_run_refuses_before_any_mutation(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    checkout = _checkout(root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="aa" * 16, checkout=checkout, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    monkeypatch.chdir(root)
+    before = _snapshot(root)
+
+    code = _uninstall(domain, "--yes")
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "active" in captured.err
+    assert _snapshot(root) == before
+    assert (root / ".ptest.toml").is_file()
+
+
+def test_foreign_terminal_ledger_rows_survive(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    mine = _checkout(root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    foreign_root = domain.root / "foreign"
+    foreign_root.mkdir()
+    foreign = C.CheckoutIdentity(
+        project_id=OTHER_PROJ, checkout_id="00" * 16, root=foreign_root)
+    ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="bb" * 16, checkout=foreign, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(domain, ticket, owner) is True
+    mine_ticket = scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="cc" * 16, checkout=mine, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    assert scheduler.cancel_pending(domain, mine_ticket, owner) is True
+    terminal = scheduler.reconcile(domain)
+    assert any(item.checkout_id == foreign.checkout_id
+               and item.state is C.LeaseState.CANCELLED for item in terminal)
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    rows = dict(sqlite3.connect(domain.ledger).execute(
+        "SELECT checkout_id, COUNT(*) FROM jobs GROUP BY checkout_id").fetchall())
+    assert mine.checkout_id not in rows
+    assert rows.get(foreign.checkout_id, 0) >= 1
+
+
+def test_shared_review_model_cache_is_kept(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    from ptest import files as files_api
+    cache_dir = files_api.ensure_private_dir(domain.root, "review-models")
+    files_api.publish_atomic(
+        cache_dir, "codex.json",
+        json.dumps({"cli_version": "x", "model": "m"}).encode("utf-8"))
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+    assert (cache_dir / "codex.json").is_file()
+
+
+# --- --self -------------------------------------------------------------------
+
+def _fake_home(tmp_path: Path, monkeypatch) -> Path:
+    import pwd
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        pwd, "getpwuid",
+        lambda uid: SimpleNamespace(pw_dir=str(home)))
+    return home
+
+
+def _install_fixture(root: Path, bundle_id: str = "9" * 8) -> Path:
+    bundle = root / ".ptest-bundles" / bundle_id
+    (bundle / "venv" / "bin").mkdir(parents=True)
+    (bundle / "complete.json").write_text(json.dumps({
+        "version": 1, "bundle_id": bundle_id,
+        "ptest_version": "0.1.5", "python_version": "3.11.0",
+        "wheel_sha256s": ["ab" * 32, "cd" * 32],
+        "entrypoint": "venv/bin/ptest",
+    }), encoding="utf-8")
+    target = bundle / "venv" / "bin" / "ptest"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(target, 0o755)
+    public = root / "ptest"
+    public.symlink_to(Path(".ptest-bundles") / bundle_id / "venv" / "bin" / "ptest")
+    return target
+
+
+def test_self_removes_fixture_install_root_but_keeps_foreign_symlink(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ptest").symlink_to(target)
+    (bindir / "other").symlink_to("/bin/true")
+    monkeypatch.setenv("PATH", str(bindir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    code = _uninstall(domain, "--self", "--yes")
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ptest was uninstalled" in captured.out
+    assert not inst.exists()
+    assert not (bindir / "ptest").exists()
+    assert (bindir / "other").is_symlink()
+
+
+def test_self_detects_running_binary_inside_install_root(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    target = _install_fixture(inst)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(sys, "argv", [str(target), "uninstall"])
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    assert _uninstall(domain, "--self", "--yes") == 0
+    out = capsys.readouterr().out
+    assert "ptest was uninstalled" in out
+    assert not inst.exists()
+
+
+def test_self_refuses_a_root_without_install_layout(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    home = _fake_home(tmp_path, monkeypatch)
+    bogus = home / ".local" / "ptest"
+    bogus.mkdir(parents=True)
+    (bogus / "notes.txt").write_text("user data\n", encoding="utf-8")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    code = _uninstall(domain, "--self", "--yes")
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "not" in captured.err and "install" in captured.err
+    assert (bogus / "notes.txt").read_text(encoding="utf-8") == "user data\n"
+
+
+def test_self_prefers_a_valid_root_over_a_stale_candidate(
+        case, tmp_path, monkeypatch):
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    home = _fake_home(tmp_path, monkeypatch)
+    inst = home / ".local" / "ptest"
+    inst.mkdir(parents=True)
+    _install_fixture(inst)
+    stale = tmp_path / "stale"
+    (stale / ".ptest-bundles" / "zzz").mkdir(parents=True)
+    stale_target = stale / ".ptest-bundles" / "zzz" / "ptest"
+    stale_target.write_text("x\n", encoding="utf-8")
+    os.chmod(stale_target, 0o755)
+    monkeypatch.setattr(sys, "argv", [str(stale_target)])
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+
+    plan = uninstall_api.plan_self()
+    assert plan.root == inst
+    assert plan.refused is None
+
+
+def test_self_with_no_install_root_reports_nothing_to_remove(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    _fake_home(tmp_path, monkeypatch)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    assert _uninstall(domain, "--self", "--yes") == 0
+    assert "nothing to remove" in capsys.readouterr().out
+
+
+# --- idempotence --------------------------------------------------------------
+
+def test_second_run_reports_nothing_to_remove(case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+    assert _uninstall(domain, "--yes") == 0
+    capsys.readouterr()
+
+    assert _uninstall(domain, "--yes") == 0
+    assert "nothing to remove" in capsys.readouterr().out
+
+
+# --- JSON document ------------------------------------------------------------
+
+def test_json_plan_and_result_are_a_public_document(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--runner", "pytest", "--agents", "codex")) == 0
+    capsys.readouterr()
+
+    assert _uninstall(domain, "--yes", "--json") == 0
+    raw = capsys.readouterr().out.encode("utf-8")
+    doc = C.decode_public_document(raw)
+    assert doc.kind == "uninstall"
+    assert doc.error is None
+    data = doc.data
+    assert data["root"] == str(root)
+    assert data["dry_run"] is False
+    kinds = {entry["action"] for entry in data["plan"]}
+    assert "remove" in kinds
+    assert set(data["result"]) == {
+        "removed", "kept", "skipped", "nothing_to_remove"}
+    assert ".ptest.toml" in data["result"]["removed"]
+    assert data["result"]["nothing_to_remove"] is False
+    for entry in data["plan"]:
+        assert set(entry) == {"action", "target", "detail"}
+        assert entry["action"] in {"remove", "kept", "skipped"}
+    assert set(data["self"]) == {
+        "requested", "root", "removed", "path_symlink_removed"}
+
+
+def test_json_error_keeps_the_document_contract(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain(slots=2, jobs=2)
+    root = domain.root / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    checkout = _checkout(root)
+    owner = platform_api.process_identity(os.getpid())
+    assert owner is not None
+    scheduler.enqueue(domain, C.AdmissionRequest(
+        run_id="dd" * 16, checkout=checkout, owner=owner, slots=1,
+        exclusive=False, fixture=True))
+    monkeypatch.chdir(root)
+
+    code = _uninstall(domain, "--yes", "--json")
+    captured = capsys.readouterr()
+    assert code != 0
+    doc = C.decode_public_document(captured.out.encode("utf-8"))
+    assert doc.kind == "uninstall"
+    assert doc.data is None
+    assert doc.error is not None
+
+
+# --- help and README ----------------------------------------------------------
+
+def test_help_uninstall_topic_and_flag(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(("help", "uninstall")) == 0
+    out = capsys.readouterr().out
+    assert "--self" in out and "--yes" in out and "--dry-run" in out
+    assert main(("uninstall", "--help")) == 0
+    assert "--self" in capsys.readouterr().out
+
+
+def test_overview_and_readme_document_uninstall(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(("help",)) == 0
+    assert "uninstall" in capsys.readouterr().out
+    readme = Path(__file__).resolve().parents[2] / "README.md"
+    assert "ptest uninstall" in readme.read_text(encoding="utf-8")
+
+
+# --- abuse twins ---------------------------------------------------------------
+
+def test_hostile_monorepo_children_never_escape_the_root(
+        case, tmp_path, monkeypatch, capsys):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"../evil\", \"/abs\", \"api\"]\n",
+        encoding="utf-8")
+    (root / "api").mkdir()
+    (root / "api" / ".ptest.toml").write_text(
+        "version = 1\nproject_id = \"" + PROJ + "\"\n"
+        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
+        encoding="utf-8")
+    evil = tmp_path / "evil" / ".ptest.toml"
+    evil.parent.mkdir()
+    evil.write_text("version = 1\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+
+    code = _uninstall(domain, "--yes")
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "skipped" in captured.out
+    assert evil.read_bytes() == b"version = 1\n"
+    assert not (root / "api" / ".ptest.toml").exists()
+    assert not (root / ".ptest.toml").exists()
+
+
+def test_symlinked_child_dir_is_never_entered(case, tmp_path, monkeypatch):
+    domain = case.domain()
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    _git(root)
+    (root / ".ptest.toml").write_text(
+        "version = 2\n[monorepo]\nchildren = [\"api\"]\n", encoding="utf-8")
+    real = outside / "api"
+    real.mkdir()
+    (real / ".ptest.toml").write_text("version = 1\n", encoding="utf-8")
+    (root / "api").symlink_to(real, target_is_directory=True)
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") != 0
+    assert (real / ".ptest.toml").read_bytes() == b"version = 1\n"
+
+
+def test_block_rewrite_fails_closed_on_plan_apply_race(
+        case, tmp_path, monkeypatch):
+    from ptest import uninstall as uninstall_api
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    monkeypatch.chdir(root)
+    block = agent_rules._block("AGENTS.md")
+    (root / "AGENTS.md").write_text("# notes\n\n" + block, encoding="utf-8")
+    from ptest import config as config_api
+    plan = uninstall_api.plan_repo(
+        config_api.repository_root(root), domain)
+    assert any(entry.action == "remove" and entry.target == "AGENTS.md"
+               for entry in plan.entries)
+    (root / "AGENTS.md").write_text("# notes\nconcurrent edit\n",
+                                    encoding="utf-8")
+
+    with pytest.raises(C.Problem):
+        uninstall_api.apply_repo(plan, domain)
+    assert (root / "AGENTS.md").read_text(encoding="utf-8") == (
+        "# notes\nconcurrent edit\n")
+
+
+
