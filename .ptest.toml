@@ -4,10 +4,10 @@ project_id = "51267ba68f5301a17172322e836c3466"
 [runner]
 kind = "pytest"
 launcher = ["uv", "run", "--locked", "--no-sync", "python"]
-args = ["--cov=ptest", "--cov-report=term"]
+args = []
 full_args = []
 test_roots = ["tests"]
-workers = 8
+workers = 1
 lifecycle = "cooperative-process-group"
 
 [setup]
