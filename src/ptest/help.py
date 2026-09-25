@@ -66,7 +66,7 @@ Syntax:
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
   prompts) and emits the init document. Without --agents/--json on a TTY,
-  init asks which agents to install guidance for. --child pairs declare
+  init asks which agents to install guidance for (default: all). --child pairs declare
   monorepo children; each --child requires a following --runner. Omit
   --runner to autodetect (including multi-child monorepos). command is not
   a usable init --runner choice: it requires an explicit pre-authored

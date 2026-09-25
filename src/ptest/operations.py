@@ -1906,6 +1906,11 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
     instead: the selected subset size, or the full-suite reason in words.
     """
     project = render.terminal_text(checkout.root.name)
+    if request.setup_only:
+        progress.emit(progress.format_setup_run_start(
+            project, tuple(config.runner.launcher),
+            color=sys.stderr.isatty()), quiet=request.quiet)
+        return
     runner = config.runner.kind.value
     if (request.mode is C.Mode.AUTOMATIC and plan.static_preview
             and snapshot is not None and plan.execution in ("selected", "full")):
@@ -1948,7 +1953,8 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
     scope = progress.fit_text(scope, fixed=fixed) if scope else scope
     progress.emit(progress.format_start(
         project=project, runner=runner, workers=workers,
-        scope=scope, full=full), quiet=request.quiet)
+        scope=scope, full=full, color=sys.stderr.isatty()),
+        quiet=request.quiet)
     if request.verbose:
         progress.emit(
             f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
@@ -1999,16 +2005,22 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
               run_mono: float, *, baseline_note: str | None = None) -> None:
     """One end line with ptest's own verdict, bridge counts, and duration."""
     if request.verbose:
-        line = progress.format_timing(result.timings)
+        line = progress.format_timing(result.timings,
+                                      color=sys.stderr.isatty())
         if line is not None:
             progress.emit(line, quiet=request.quiet)
+    elapsed_s = time.monotonic() - run_mono
+    if request.setup_only and result.status is C.Status.PASSED:
+        progress.emit(progress.format_setup_run_done(
+            elapsed_s, color=sys.stderr.isatty()), quiet=request.quiet)
+        return
     hint = (result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
                               C.Status.NOT_RUN)
             and progress.claim_hint())
     progress.emit(progress.format_end(
         result.status, counts=result.counts,
-        duration_s=time.monotonic() - run_mono, exit_code=result.exit_code,
-        hint=hint), quiet=request.quiet)
+        duration_s=elapsed_s, exit_code=result.exit_code,
+        hint=hint, color=sys.stderr.isatty()), quiet=request.quiet)
     if baseline_note is not None:
         progress.emit(baseline_note, quiet=request.quiet)
 
@@ -2930,7 +2942,7 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
         domain, setup_config,
         C.RunRequest(mode=C.Mode.SCOPED, argv=(),
                      queue_timeout_s=queue_timeout_s,
-                     fixture_domain=fixture_domain))
+                     fixture_domain=fixture_domain, setup_only=True))
     if result.status is C.Status.PASSED:
         setup_reason = _finish_setup(domain, config, checkout, before)
         if setup_reason is not None:

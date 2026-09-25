@@ -858,8 +858,9 @@ def test_failing_smoke_points_at_runner_output_above(
     assert re.search(r"(✗|\[fail\]) exit ", out)
     assert "see runner output above" in out
     assert "no detail" not in out
-    assert out.index("ptest initialized") < out.index("Smoke: running")
-    assert out.index("Smoke: running") < out.index("exit 1")
+    assert out.index("ptest initialized") < out.index("ptest: . · smoke:")
+    assert out.index("ptest: . · smoke:") < out.index("exit 1")
+    assert "Smoke: running" not in out
 
 
 def test_ask_init_smoke_sanitizes_hostile_names(monkeypatch, capsys):
@@ -1139,6 +1140,31 @@ def test_format_smoke_compact_cells_share_one_line():
     text = init_smoke.format_smoke(results, width=80)
     assert text.startswith("  smoke      api ✓ 2.2s   web ✓ 1.8s")
     assert text.endswith("\n")
+
+
+def test_format_smoke_colors_marks_on_tty_only(monkeypatch):
+    from ptest import init_smoke
+
+    results = (
+        init_smoke.SmokeResult(
+            project="api", status="passed", command="ptest api/x.py",
+            duration_s=2.2, exit_code=None, lines=(), reason=None),
+        init_smoke.SmokeResult(
+            project="web", status="failed", command="ptest web/a.test.ts",
+            duration_s=None, exit_code=1,
+            lines=("boom",), reason=None),
+    )
+    plain = init_smoke.format_smoke(results, width=80)
+    assert "\x1b" not in plain
+
+    tty = init_smoke.format_smoke(results, width=80, color=True)
+    assert "\x1b[32m✓\x1b[0m" in tty
+    assert "\x1b[31m✗\x1b[0m" in tty
+    assert "\x1b[2msmoke\x1b[0m" in tty
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in init_smoke.format_smoke(results, width=80,
+                                                 color=True)
 
 
 def test_format_smoke_empty_is_empty():

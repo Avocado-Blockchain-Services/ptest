@@ -26,7 +26,7 @@ from . import files as _files
 from . import monorepo as _monorepo
 from . import operations
 from .doctor import match_rules
-from .render import terminal_text
+from .render import colors_enabled, paint, terminal_text
 
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -272,7 +272,6 @@ def run_setup(domain: C.DomainPaths, plan: SmokePlan, *,
     if plan.config is None or plan.candidate is None \
             or plan.setup_argv is None:
         return "smoke unavailable"
-    _announce(" ".join(plan.setup_argv))
     try:
         result = operations.run_setup_only(
             domain, plan.config, queue_timeout_s=SMOKE_QUEUE_TIMEOUT_S,
@@ -287,9 +286,14 @@ def run_setup(domain: C.DomainPaths, plan: SmokePlan, *,
     return None
 
 
-def _announce(command: str) -> None:
-    """Print the running line before executing, so TTY output stays ordered."""
-    sys.stdout.write(f"Smoke: running {terminal_text(command)}\n")
+def _announce(project: str, candidate: str | None) -> None:
+    """Print the smoke line before executing, so TTY output stays ordered.
+
+    The setup run needs no announce: its own
+    ``ptest: <project> · setup: <argv>`` start line says it.
+    """
+    target = terminal_text(candidate) if candidate else "full suite"
+    sys.stdout.write(f"ptest: {terminal_text(project)} · smoke: {target}\n")
     sys.stdout.flush()
 
 
@@ -318,7 +322,7 @@ def run_plan(domain: C.DomainPaths, plan: SmokePlan, *,
     if plan.skip_reason is not None or plan.config is None \
             or plan.candidate is None:
         return skip_result(plan, plan.skip_reason or "smoke unavailable")
-    _announce(command)
+    _announce(plan.project, plan.candidate)
     started = time.monotonic()
     try:
         result = operations.execute(
@@ -342,37 +346,43 @@ def run_plan(domain: C.DomainPaths, plan: SmokePlan, *,
         lines=_useful_lines(result), reason=None)
 
 
-def _smoke_cell(item: SmokeResult) -> str:
+def _smoke_cell(item: SmokeResult, *, color: bool = False) -> str:
     """One compact cell per smoke result; every field is sanitized."""
-    plain = "NO_COLOR" in os.environ
+    bracket = "NO_COLOR" in os.environ
     project = terminal_text(item.project)
     if item.status == STATUS_PASSED:
         duration = (f"{item.duration_s:.1f}s"
                     if isinstance(item.duration_s, (int, float)) else "?")
-        mark = "[ok]" if plain else "✓"
+        mark = "[ok]" if bracket else paint("✓", "green", color=color)
         return f"{project} {mark} {duration}"
     if item.status == STATUS_FAILED:
-        mark = "[fail]" if plain else "✗"
+        mark = "[fail]" if bracket else paint("✗", "red", color=color)
         return f"{project} {mark} exit {item.exit_code}"
     return f"{project} – {terminal_text(item.reason or 'skipped')}"
 
 
 def format_smoke(results: tuple[SmokeResult, ...], *,
-                 width: int | None = None) -> str:
+                 width: int | None = None, color: bool = False) -> str:
     """Render one compact ``smoke`` row; ``""`` when empty.
 
     The row shares the file-action grid (``  smoke      <cells>``) so it
     aligns with the grouped file lines; cells share one line (wrapped
     between cells only); each failed cell contributes at most
-    ``_MAX_LINES`` indented detail lines below.
+    ``_MAX_LINES`` indented detail lines below. The ``smoke`` label is
+    dimmed on color terminals, after layout so columns never shift.
     """
     from .project_facts import wrap_atoms
     if not results:
         return ""
-    cells = [_smoke_cell(item) for item in results]
+    cells = [_smoke_cell(item, color=color) for item in results]
     indent = f"  {'smoke':<10} "
     lines = list(wrap_atoms(cells, width, indent=indent,
                             hang=" " * len(indent), sep="   "))
+    if colors_enabled(color):
+        dimmed = paint("smoke", "dim", color=True)
+        lines = [line.replace("  smoke     ", f"  {dimmed}     ", 1)
+                 if line.startswith("  smoke     ") else line
+                 for line in lines]
     for item in results:
         if item.status == STATUS_FAILED:
             for detail in item.lines[:_MAX_LINES]:

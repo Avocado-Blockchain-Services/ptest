@@ -942,7 +942,7 @@ def _render_init_footer_text(result, rules, *, parsed: ParsedArgs,
     """
     return init_render.render_init_footer(
         result, rules, dry_run=parsed.dry_run, smoke=smoke,
-        plans=plans, facts=facts)
+        plans=plans, facts=facts, color=sys.stdout.isatty())
 
 
 def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
@@ -1684,8 +1684,10 @@ def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
                 "message": (
                     "No source files were admitted to this project packet."
                     if not packet.excerpts else
-                    f"Bounded evidence omitted {packet.excluded_count} entries and "
-                    f"truncated {packet.truncated_count} files or excerpts."),
+                    f"Bounded evidence omitted "
+                    f"{C.plural(packet.excluded_count, 'entry')} and "
+                    f"truncated {C.plural(packet.truncated_count, 'file')} "
+                    f"or excerpts."),
                 "paths": [packet.scope],
             }
             if limitation not in limitations:
@@ -1801,18 +1803,16 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
 
     def emit_progress(phase: str, provider: str, project: str,
                       elapsed_s: float, emitted_at: float | None = None):
-        detail = " | ".join((
-            render.terminal_text(phase),
-            "provider=" + render.terminal_text(provider),
-            "project=" + render.terminal_text(project),
-            f"elapsed={max(0, int(elapsed_s))}s",
-        ))
+        line = (f"doctor: {render.terminal_text(phase)} "
+                f"{render.terminal_text(project)} with "
+                f"{render.terminal_text(provider)} · "
+                f"{max(0, int(elapsed_s))}s")
         if sys.stderr.isatty():
             spinner = "|/-\\"[int(max(0, elapsed_s)) % 4]
-            print(f"\r{spinner} doctor review: {detail}",
+            print(f"\r{spinner} {line}",
                   end="", file=sys.stderr, flush=True)
         else:
-            print("doctor review: " + detail, file=sys.stderr, flush=True)
+            print(line, file=sys.stderr, flush=True)
         last_progress_at[0] = (time.monotonic() if emitted_at is None
                                else emitted_at)
 
@@ -2029,7 +2029,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         else:
             sys.stdout.write(render.render_agent_assessment(
                 child_data, workspace, report_path=publication.path,
-                publication_status=publication.status))
+                publication_status=publication.status,
+                color=sys.stdout.isatty()))
             mention = _fix_mention(resolution)
             if mention is not None:
                 sys.stdout.write(mention + "\n")
@@ -2542,15 +2543,15 @@ def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str,
     if parsed.agents_explicit or json_output or not sys.stdin.isatty():
         return parsed.agents
     print("Install repository-local ptest guidance for which agents? "
-          "[none/claude,codex,opencode,gemini/all] (default: none):",
+          "[all/claude,codex,opencode,gemini/none] (default: all):",
           file=sys.stderr)
     try:
         choice = input().strip().lower()
     except EOFError:
         return ()
-    if not choice or choice == "none":
+    if choice == "none":
         return ()
-    if choice == "all":
+    if not choice or choice == "all":
         return agent_rules.SUPPORTED_AGENTS
     names = tuple(part.strip() for part in choice.split(","))
     if (any(not name for name in names)
@@ -2606,7 +2607,7 @@ def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | No
     progress.emit(progress.format_end(
         status, counts=total_counts,
         duration_s=time.monotonic() - started, exit_code=code,
-        hint=hint, lead="total"), quiet=quiet)
+        hint=hint, lead="total", color=sys.stderr.isatty()), quiet=quiet)
 
 
 def _lease(item: C.LeaseView) -> dict:

@@ -311,6 +311,22 @@ def test_no_ansi_under_no_color_or_without_color_flag(monkeypatch):
     assert _GITHUB_URL not in plain
 
 
+def test_init_paints_projects_and_repo_on_tty_only(monkeypatch):
+    colored = render_init(_result(), None, facts=(_api_facts(),),
+                          repo_name="shop", width=80, color=True)
+    assert "\x1b[1mshop\x1b[0m" in colored
+    assert "\x1b[1mapi" in colored
+
+    plain = render_init(_result(), None, facts=(_api_facts(),),
+                        repo_name="shop", width=80)
+    assert "\x1b" not in plain
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in render_init(
+        _result(), None, facts=(_api_facts(),), repo_name="shop",
+        width=80, color=True)
+
+
 def test_render_init_without_facts_uses_note_projects():
     result = _result(details=(
         _note("api · pytest · ready"),

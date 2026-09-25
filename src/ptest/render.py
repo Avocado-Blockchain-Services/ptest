@@ -42,6 +42,36 @@ def terminal_text(value: object) -> str:
 
 _AGENT_ASSESSMENT_MAX_BYTES = 256 * 1024
 
+
+_STYLES = {
+    "green": "32",
+    "red": "31",
+    "yellow": "33",
+    "dim": "2",
+    "bold": "1",
+}
+
+
+def colors_enabled(tty: bool) -> bool:
+    """TTY color gate: explicit TTY, without NO_COLOR, TERM not dumb."""
+    return (bool(tty) and "NO_COLOR" not in os.environ
+            and os.environ.get("TERM") != "dumb")
+
+
+def paint(text: str, style: str, *, color: bool = False) -> str:
+    """Wrap already-sanitized text in one ANSI style when color is on.
+
+    Paint only after ``terminal_text`` (or prose derived from it): the
+    wrapper adds no display width and untrusted text cannot inject
+    codes. Unknown styles return the text unchanged.
+    """
+    if not colors_enabled(color):
+        return text
+    code = _STYLES.get(style)
+    if code is None:
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
 # One gap finding line (summary plus suggested change) never costs more than
 # this many UTF-8 bytes; longer model prose is cut with a marker so a single
 # verbose finding cannot crowd out other projects. Residual over-budget
@@ -135,15 +165,6 @@ def _truncate_utf8_bytes(text: str, limit: int,
         return text
     room = limit - len(marker.encode("utf-8"))
     head = encoded[:room].decode("utf-8", errors="ignore")
-    return _word_cut(head, room).rstrip() + marker
-
-
-def _truncate_words(text: str, limit: int, marker: str = "…") -> str:
-    """Cut text to at most limit characters at a word boundary."""
-    if len(text) <= limit:
-        return text
-    room = limit - len(marker)
-    head = text[:room]
     return _word_cut(head, room).rstrip() + marker
 
 
@@ -261,7 +282,8 @@ def _child_limitation_suffix(child) -> tuple[bool, bool]:
     return partial, not_runnable
 
 
-def _assessment_head_line(child, runner: str) -> str:
+def _assessment_head_line(child, runner: str, *,
+                          color: bool = False) -> str:
     """Score header: scope, runner, ok/gap/unknown/n-a counts, suffixes."""
     rows = child.get("rows", []) if isinstance(child, dict) else []
     if not isinstance(rows, list):
@@ -275,7 +297,8 @@ def _assessment_head_line(child, runner: str) -> str:
             counts["unknown"] += 1
     scope = (child.get("scope", "unknown")
              if isinstance(child, dict) else "unknown")
-    head = (f"{terminal_text(scope)}  {terminal_text(runner)} · "
+    head = (f"{paint(terminal_text(scope), 'bold', color=color)}  "
+            f"{terminal_text(runner)} · "
             f"{counts['satisfied']} ok · {counts['gap']} gap · "
             f"{counts['unknown']} unknown")
     if counts["not-applicable"]:
@@ -318,26 +341,21 @@ def _first_sentence(text: str) -> str:
     return text[:match.end()].strip()
 
 
-def _unknown_reason(row: dict, width: int, head: str) -> str:
-    """Short reason for one unknown row, word-cut to fit the line."""
+def _unknown_reason(row: dict) -> str:
+    """Full reason for one unknown row; wrapped by the caller, never cut."""
     rationale = row.get("rationale", "")
     if not isinstance(rationale, str):
         rationale = ""
     if rationale.startswith(PTEST_ANSWER_PREFIX):
-        reason = _agent_assessment_prose(rationale[len(PTEST_ANSWER_PREFIX):])
-    elif rationale.startswith(FAILED_PREFIX):
-        reason = _agent_assessment_prose(
+        return _agent_assessment_prose(rationale[len(PTEST_ANSWER_PREFIX):])
+    if rationale.startswith(FAILED_PREFIX):
+        return _agent_assessment_prose(
             "review failed: " + rationale[len(FAILED_PREFIX):])
-    else:
-        reason = _first_sentence(_agent_assessment_prose(rationale))
-    room = width - len(head)
-    if room < 1:
-        return ""
-    return _truncate_words(reason, room)
+    return _first_sentence(_agent_assessment_prose(rationale))
 
 
-def _na_reason(row: dict, width: int, head: str) -> str:
-    """Short reason for one n/a row, word-cut to fit the line."""
+def _na_reason(row: dict) -> str:
+    """Full reason for one n/a row; wrapped by the caller, never cut."""
     rationale = row.get("rationale", "")
     if not isinstance(rationale, str):
         rationale = ""
@@ -345,11 +363,46 @@ def _na_reason(row: dict, width: int, head: str) -> str:
         if rationale.startswith(prefix):
             rationale = rationale[len(prefix):]
             break
-    reason = _agent_assessment_prose(rationale)
-    room = width - len(head)
-    if room < 1:
-        return ""
-    return _truncate_words(reason, room)
+    return _agent_assessment_prose(rationale)
+
+
+_ICON_STYLES = {
+    "satisfied": "green",
+    "gap": "red",
+    "unknown": "yellow",
+    "not-applicable": "dim",
+}
+
+
+def _paint_icon(line: str, icon: str, status: str, *, color: bool) -> str:
+    """Paint the leading icon of an already-laid-out line.
+
+    Layout math always runs on the plain text; painting the fixed
+    leading token afterwards keeps columns aligned.
+    """
+    if not line.startswith(f"  {icon} "):
+        return line
+    rest = line[2 + len(icon):]
+    return f"  {paint(icon, _ICON_STYLES[status], color=color)}{rest}"
+
+
+def _reason_lines(icon: str, status: str, label: str, reason: str,
+                  suffix: str, width: int, *, color: bool) -> list[str]:
+    """One headed line plus word-wrapped continuation lines.
+
+    The full reason is kept: continuation lines hang under the label
+    like gap findings, and the suffix rides the last line.
+    """
+    if not reason:
+        return [_paint_icon(f"  {icon} {label}{suffix}", icon, status,
+                            color=color)]
+    # wrap_words rejoins on single spaces, so the two-space label/reason
+    # separator is restored on the headed line after wrapping.
+    lines = wrap_words(f"{icon} {label} {reason}", width, indent="  ",
+                       hang="      ")
+    lines[0] = lines[0].replace(f"{icon} {label} ", f"{icon} {label}  ", 1)
+    lines[-1] += suffix
+    return [_paint_icon(line, icon, status, color=color) for line in lines]
 
 
 def _row_label(row: dict) -> str:
@@ -359,13 +412,15 @@ def _row_label(row: dict) -> str:
     return label or "unknown"
 
 
-def _satisfied_columns(cells: list[str], width: int) -> list[str]:
+def _satisfied_columns(cells: list[str], width: int, *, icon: str,
+                       color: bool = False) -> list[str]:
     """Pack ``✓ Label`` cells into width-fitting aligned columns.
 
     Every cell is padded to the common column width so cells in one
     column start at the same offset; only the last cell on a line is
     left unpadded (no trailing whitespace). Oversize cells overflow
-    rather than split, like every other atom.
+    rather than split, like every other atom. Icons are painted after
+    padding so ANSI codes never disturb the columns.
     """
     if not cells:
         return []
@@ -384,13 +439,20 @@ def _satisfied_columns(cells: list[str], width: int) -> list[str]:
         chunk.append(cell)
     if chunk:
         lines.append(render(chunk))
-    return lines
+    if not colors_enabled(color):
+        return lines
+    boundary = re.compile("(^|  )" + re.escape(icon) + " ")
+    tinted = paint(icon, _ICON_STYLES["satisfied"], color=color)
+    return [boundary.sub(lambda match: match.group(1) + tinted + " ", line)
+            for line in lines]
 
 
-def _gap_lines(row: dict, by_id: dict, icons: dict, width: int) -> list[str]:
+def _gap_lines(row: dict, by_id: dict, icons: dict, width: int, *,
+               color: bool = False) -> list[str]:
     """One gap line plus the wrapped finding detail under it."""
     label = _row_label(row)
-    lines = [f"  {icons['gap']} {label}{_dropped_suffix(row)}"]
+    lines = [_paint_icon(f"  {icons['gap']} {label}{_dropped_suffix(row)}",
+                         icons["gap"], "gap", color=color)]
     finding = by_id.get(row.get("id"))
     if finding is None:
         lines.append("      no finding recorded; see recommendations.md.")
@@ -411,43 +473,37 @@ def _gap_lines(row: dict, by_id: dict, icons: dict, width: int) -> list[str]:
 
 
 def _block_lines(rows: list[dict], by_id: dict, icons: dict,
-                 width: int) -> list[str]:
-    """Item lines for one group: satisfied columns, then one line per row."""
+                 width: int, *, color: bool = False) -> list[str]:
+    """Item lines for one group: satisfied columns, then wrapped rows."""
     satisfied = [f"{icons['satisfied']} {_row_label(row)}"
                  f"{_dropped_suffix(row)}"
                  for row in rows if row.get("status") == "satisfied"]
     lines = []
     if satisfied:
-        lines.extend(_satisfied_columns(satisfied, width))
+        lines.extend(_satisfied_columns(satisfied, width, icon=icons["satisfied"],
+                                        color=color))
     for row in rows:
         status = row.get("status")
         if status == "satisfied":
             continue
         label = _row_label(row)
+        suffix = _dropped_suffix(row)
         if status == "gap":
-            lines.extend(_gap_lines(row, by_id, icons, width))
-        elif status == "unknown":
-            head = f"  {icons['unknown']} {label}  "
-            reason = _unknown_reason(row, width, head)
-            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
-                         if reason else f"{head.rstrip()}"
-                         f"{_dropped_suffix(row)}")
+            lines.extend(_gap_lines(row, by_id, icons, width, color=color))
         elif status == "not-applicable":
-            head = f"  {icons['not-applicable']} {label}  "
-            reason = _na_reason(row, width, head)
-            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
-                         if reason else f"{head.rstrip()}"
-                         f"{_dropped_suffix(row)}")
+            lines.extend(_reason_lines(icons["not-applicable"],
+                                       "not-applicable", label,
+                                       _na_reason(row), suffix, width,
+                                       color=color))
         else:
-            head = f"  {icons['unknown']} {label}  "
-            reason = _unknown_reason(row, width, head)
-            lines.append(f"{head}{reason}{_dropped_suffix(row)}"
-                         if reason else f"{head.rstrip()}"
-                         f"{_dropped_suffix(row)}")
+            lines.extend(_reason_lines(icons["unknown"], "unknown", label,
+                                       _unknown_reason(row), suffix, width,
+                                       color=color))
     return lines
 
 
-def _assessment_item_lines(child, icons: dict, width: int) -> list[str]:
+def _assessment_item_lines(child, icons: dict, width: int, *,
+                           color: bool = False) -> list[str]:
     """Compact item lines with the parallel-safety group set apart.
 
     PARALLEL-001 renders on its own line after the safety block, never
@@ -471,22 +527,23 @@ def _assessment_item_lines(child, icons: dict, width: int) -> list[str]:
               if row.get("id") in _PARALLEL_SAFETY_IDS]
     parallel = [row for row in rows
                 if row.get("id") == _PARALLEL_ITEM_ID]
-    lines = _block_lines(main, by_id, icons, width)
+    lines = _block_lines(main, by_id, icons, width, color=color)
     if safety:
         if lines:
             lines.append("")
-        lines.append("  parallel safety")
-        lines.extend(_block_lines(safety, by_id, icons, width))
+        lines.append(paint("  parallel safety", "dim", color=color))
+        lines.extend(_block_lines(safety, by_id, icons, width, color=color))
     if parallel:
         if lines:
             lines.append("")
-        lines.extend(_block_lines(parallel, by_id, icons, width))
+        lines.extend(_block_lines(parallel, by_id, icons, width, color=color))
     return lines
 
 
 def render_agent_assessment(children, workspace, *, report_path: str,
                             publication_status: str,
-                            width: int | None = None) -> str:
+                            width: int | None = None,
+                            color: bool = False) -> str:
     """Render one headed block per project with item verdicts and findings.
 
     Each block carries a score header, plain-language fact lines, and the
@@ -504,11 +561,11 @@ def render_agent_assessment(children, workspace, *, report_path: str,
                  if isinstance(child, dict) else "unknown")
         runner = _assessment_runner(scope, workspace)
         fact_lines, _ = _child_fact_lines(child, resolved)
-        head = [_assessment_head_line(child, runner)]
+        head = [_assessment_head_line(child, runner, color=color)]
         head.extend(fact_lines)
         head_sections.append("\n".join(head))
         variable_sections.append(
-            _assessment_item_lines(child, icons, resolved))
+            _assessment_item_lines(child, icons, resolved, color=color))
 
     dependency_details = _agent_dependency_detail_lines(children, resolved)
     trailer = (f"Report: {terminal_text(report_path)} "
@@ -532,7 +589,7 @@ def render_agent_assessment(children, workspace, *, report_path: str,
     for head, item_lines in zip(head_sections, variable_sections):
         kept = _fit_lines_with_omission(
             item_lines, max(0, variable_budget) // siblings,
-            lambda count: f"  [{count} findings omitted; "
+            lambda count: f"  [{C.plural(count, 'finding')} omitted; "
                           "see recommendations.md]")
         # A blank line separates the fact lines from the item verdicts.
         sections.append(head if not kept else "\n".join((head, "", *kept)))
@@ -544,7 +601,7 @@ def render_agent_assessment(children, workspace, *, report_path: str,
         kept_dependencies = _fit_lines_with_omission(
             dependency_details,
             max(0, _AGENT_ASSESSMENT_MAX_BYTES - committed - header_cost),
-            lambda count: (f"[{count} dependency details omitted; "
+            lambda count: (f"[{C.plural(count, 'dependency detail')} omitted; "
                            "see recommendations.md for full limitations]"))
         sections.append("\n".join(("Dependencies:", *kept_dependencies)))
     sections.append(trailer)
@@ -721,9 +778,11 @@ def render_doctor(report: C.DoctorReport, workspace=None) -> str:
         coverage = "Scan coverage: unavailable."
     elif usage.truncated:
         coverage = ("Scan coverage: incomplete; "
-                    f"{usage.files} files inspected, {usage.skipped} entries skipped.")
+                    f"{C.plural(usage.files, 'file')} inspected, "
+                    f"{C.plural(usage.skipped, 'entry')} skipped.")
     else:
-        coverage = f"Scan coverage: complete; {usage.files} files inspected."
+        coverage = (f"Scan coverage: complete; "
+                    f"{C.plural(usage.files, 'file')} inspected.")
 
     lines = [
         "ptest doctor",
@@ -806,7 +865,7 @@ def render_doctor(report: C.DoctorReport, workspace=None) -> str:
         for (_, message), count in non_scan_limitations.items():
             description = terminal_text(message)
             if count > 1:
-                description += f" ({count} occurrences)"
+                description += f" ({C.plural(count, 'occurrence')})"
             descriptions.append(description)
         lines.append("Limitations: " + "; ".join(descriptions))
     lines.extend(("", "Next: ptest doctor --json"))
@@ -843,5 +902,5 @@ def render_guide() -> str:
 
 __all__ = [
     "render_json", "render_doctor_json", "render_doctor",
-    "render_guide", "terminal_text",
+    "render_guide", "terminal_text", "colors_enabled", "paint",
 ]
