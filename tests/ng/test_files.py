@@ -559,7 +559,7 @@ import sys
 from pathlib import Path
 WRAPPER_VALUE_OPTS = (
     "--fixture-domain", "--base", "--workers", "--queue-timeout",
-    "--result-json",
+    "--timeout", "--result-json",
 )
 WRAPPER_BOOL_OPTS = (
     "--changed", "--full", "--no-setup", "--shadow",

@@ -234,8 +234,9 @@ def test_existing_status_is_read_only_and_reports_current_queue_wait(case, world
 
 
 @pytest.mark.parametrize("memory", [128, None])
-def test_memory_budget_loosening_waits_for_idle(case, world, monkeypatch, tmp_path, memory):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_memory_budget_loosening_waits_for_idle(case, world, monkeypatch, tmp_path, memory, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain)
     ticket, grant = _running(case, domain, world)
     _configure(domain, memory=memory)
@@ -398,8 +399,9 @@ def test_default_queue_survives_two_240_second_predecessors(case, world):
 
 
 @pytest.mark.parametrize("kind", ["slots", "jobs", "memory", "checkout", "lock", "exclusive"])
-def test_atomic_admission_honors_each_independent_resource_bound(case, world, monkeypatch, tmp_path, kind):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_atomic_admission_honors_each_independent_resource_bound(case, world, monkeypatch, tmp_path, kind, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain, slots=2, jobs=1 if kind == "jobs" else 2,
                memory=64 if kind == "memory" else None)
     request = _request(case, domain, "first", slots=2 if kind == "slots" else 1,
@@ -416,8 +418,9 @@ def test_atomic_admission_honors_each_independent_resource_bound(case, world, mo
     assert _sql(domain, "SELECT count(*) FROM jobs WHERE state='GRANTED'") == [(1,)]
 
 
-def test_lowering_limits_and_introducing_memory_budget_keep_existing_charge(case, world, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_lowering_limits_and_introducing_memory_budget_keep_existing_charge(case, world, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain, slots=4, jobs=2, memory=None)
     first = enqueue(domain, _request(case, domain, "first", slots=3))
     assert poll(domain, first).grant.slots == 3
@@ -438,8 +441,9 @@ def test_lowering_limits_and_introducing_memory_budget_keep_existing_charge(case
 )
 def test_busy_reload_applies_each_tightening_and_defers_only_loosening(
         case, world, monkeypatch, tmp_path, initial, requested,
-        active_kwargs, follower_kwargs, applied):
-    domain = _normal_domain(monkeypatch, tmp_path)
+        active_kwargs, follower_kwargs, applied, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain, slots=initial[0], jobs=initial[1], memory=initial[2])
     _, active_grant = _running(case, domain, world, "active", **active_kwargs)
     _configure(domain, slots=requested[0], jobs=requested[1], memory=requested[2])
@@ -470,8 +474,9 @@ def test_busy_reload_applies_each_tightening_and_defers_only_loosening(
 
 
 @pytest.mark.parametrize("memory", [None, 64])
-def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case, world, monkeypatch, tmp_path, memory):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case, world, monkeypatch, tmp_path, memory, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     assert scheduler.effective_limits(domain) == C.EffectiveLimits()
     assert not domain.root.exists()
     _configure(domain, memory=memory)
@@ -487,8 +492,9 @@ def test_effective_limits_are_typed_read_only_and_reflect_deferred_increase(case
     assert domain.ledger.read_bytes() == before
 
 
-def test_lowered_memory_budget_waits_for_existing_reservation_to_drain(case, world, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_lowered_memory_budget_waits_for_existing_reservation_to_drain(case, world, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain, memory=128)
     ticket, grant = _running(case, domain, world, memory_mb=80)
     _configure(domain, memory=64)
@@ -716,8 +722,9 @@ def _racing_admission(domain, request, barrier, channel):
 
 
 @pytest.mark.parametrize("kind", ["slots", "jobs", "memory", "lock"])
-def test_multiprocess_admission_event_log_respects_bounds(case, monkeypatch, tmp_path, kind):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_multiprocess_admission_event_log_respects_bounds(case, monkeypatch, tmp_path, kind, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     _configure(domain, slots=2, jobs=1 if kind == "jobs" else 2,
                memory=64 if kind == "memory" else None)
     ctx = multiprocessing.get_context("fork")
@@ -787,8 +794,9 @@ def test_descendant_escaping_during_absence_probe_retains_charge(case, world, mo
 @pytest.mark.parametrize("quota,cpuset,expected", [("300000 100000", "0-15", 1),
                                                   ("max 100000", "0-3", 2),
                                                   ("max 100000", "0-15", 4)])
-def test_persisted_defaults_include_cgroup_ancestor_bounds(case, world, monkeypatch, tmp_path, quota, cpuset, expected):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_persisted_defaults_include_cgroup_ancestor_bounds(case, world, monkeypatch, tmp_path, quota, cpuset, expected, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     monkeypatch.setattr(scheduler.os, "sched_getaffinity", lambda _: set(range(16)))
     monkeypatch.setattr(scheduler.os, "cpu_count", lambda: 16)
     kernel = {
@@ -808,8 +816,9 @@ def test_persisted_defaults_include_cgroup_ancestor_bounds(case, world, monkeypa
 
 
 def test_missing_nonroot_cgroup_controls_do_not_reduce_normal_defaults(
-        case, world, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+        case, world, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     monkeypatch.setattr(scheduler.os, "sched_getaffinity", lambda _: set(range(16)))
     monkeypatch.setattr(scheduler.os, "cpu_count", lambda: 16)
     kernel = {
@@ -910,8 +919,9 @@ def test_fixture_checkout_symlink_escape_rejected_before_state_creation(case, tm
     assert not domain.ledger.exists()
 
 
-def test_normal_domain_cannot_be_redirected_and_ignores_environment(case, world, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_normal_domain_cannot_be_redirected_and_ignores_environment(case, world, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     sentinel = tmp_path / "legacy-config"
     sentinel.write_bytes(b"not toml; must never be read")
     for name in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PTEST_CONFIG", "PTEST_RUN_ID"):
@@ -1126,22 +1136,7 @@ def _request(case, domain, label: str, *, slots: int = 1,
     )
 
 
-def _normal_domain(monkeypatch, base: Path) -> C.DomainPaths:
-    home = base / "account"
-    home.mkdir(mode=0o700, parents=True)
-    monkeypatch.setattr(
-        scheduler.pwd, "getpwuid",
-        lambda _uid: SimpleNamespace(pw_dir=str(home)),
-    )
-    root = home / ".local" / "state" / "ptest" / "coordination"
-    return C.DomainPaths(
-        root=root,
-        machine_config=home / ".config" / "ptest" / "machine.toml",
-        ledger=root / "coordinator.sqlite3",
-        marker=root / "domain.json",
-        fixture=False,
-        domain_id=None,
-    )
+
 def test_budget_one_cannot_grant_two(case):
     domain = case.domain(slots=1, jobs=1)
     first = enqueue(domain, _request(case, domain, "first"))
@@ -1470,8 +1465,9 @@ def test_finish_releases_only_with_a_complete_quiescence_proof(case):
     assert view.ownership == "uncertain"
 
 
-def test_first_normal_admission_creates_only_canonical_private_state(case, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_first_normal_admission_creates_only_canonical_private_state(case, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     shared = Path(domain.root).parents[2]
     shared.mkdir(mode=0o755)
     legacy = shared / "legacy-sibling"
@@ -1485,15 +1481,17 @@ def test_first_normal_admission_creates_only_canonical_private_state(case, monke
     assert legacy.read_bytes() == b"must remain untouched"
 
 
-def test_reconcile_on_an_absent_normal_domain_is_non_mutating(monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_reconcile_on_an_absent_normal_domain_is_non_mutating(monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     assert reconcile(domain) == ()
     assert not domain.root.exists()
     assert not domain.machine_config.exists()
 
 
-def test_configured_unknown_memory_reserves_the_declared_budget(case, monkeypatch, tmp_path):
-    domain = _normal_domain(monkeypatch, tmp_path)
+def test_configured_unknown_memory_reserves_the_declared_budget(case, monkeypatch, tmp_path, account_home):
+    account_home(name="account")
+    domain = platform.domain_paths(None)
     domain.machine_config.parent.mkdir(mode=0o700, parents=True)
     domain.machine_config.write_text(
         "max_slots = 2\nmax_jobs = 2\nmemory_mb = 64\n", encoding="ascii"
