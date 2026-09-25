@@ -216,8 +216,6 @@ def build_followup_request(first_request: bytes,
     if any(identifier not in by_id for identifier in requested_ids):
         raise ValueError("follow-up requested an unoffered excerpt")
     additions = [by_id[identifier] for identifier in requested_ids]
-    if sum(entry.size for entry in additions) > MAX_FOLLOWUP_BYTES:
-        raise ValueError("follow-up exceeds its byte bound")
     try:
         payload = json.loads(first_request.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -230,13 +228,32 @@ def build_followup_request(first_request: bytes,
                       if isinstance(entry, dict)}
     existing_bytes = sum(len(str(entry.get("text", "")).encode("utf-8"))
                          for entry in excerpts if isinstance(entry, dict))
-    if len(excerpts) + len(additions) > MAX_FINAL_FILES \
-            or existing_bytes + sum(entry.size for entry in additions) \
-            > MAX_FINAL_BYTES:
-        raise ValueError("follow-up exceeds the final item bound")
     if any(entry.excerpt.path in existing_paths for entry in additions):
         raise ValueError("follow-up did not add new evidence")
+
+    sent_ids: set[str] = set()
+    added_bytes = 0
+
+    def render() -> bytes:
+        packet["phase"] = "evidence-followup"
+        packet["omission_inventory"] = [
+            entry.public_inventory() for entry in inventory
+            if entry.opaque_id not in sent_ids]
+        packet["omitted"] = [
+            entry.get("path") for entry in packet["omission_inventory"]]
+        payload["packet"] = packet
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True).encode("utf-8")
+
+    selected: list[OmittedExcerpt] = []
     for entry in additions:
+        if len(selected) >= MAX_FOLLOWUP_FILES:
+            break
+        if added_bytes + entry.size > MAX_FOLLOWUP_BYTES:
+            continue
+        if len(excerpts) + 1 > MAX_FINAL_FILES \
+                or existing_bytes + added_bytes + entry.size > MAX_FINAL_BYTES:
+            continue
         excerpt = entry.excerpt
         excerpts.append({
             "path": excerpt.path,
@@ -247,19 +264,20 @@ def build_followup_request(first_request: bytes,
             "completeness": ("complete" if excerpt.complete else "partial"),
             "text": excerpt.text,
         })
-    packet["phase"] = "evidence-followup"
-    sent_ids = set(requested_ids)
-    packet["omission_inventory"] = [
-        entry.public_inventory() for entry in inventory
-        if entry.opaque_id not in sent_ids]
-    packet["omitted"] = [
-        entry.get("path") for entry in packet["omission_inventory"]]
-    payload["packet"] = packet
-    request = json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=True).encode("utf-8")
-    if len(request) > max_request_bytes:
-        raise ValueError("follow-up request exceeds its prompt bound")
-    return request, tuple(entry.excerpt.path for entry in additions)
+        sent_ids.add(entry.opaque_id)
+        added_bytes += entry.size
+        candidate = render()
+        if len(candidate) > max_request_bytes:
+            excerpts.pop()
+            sent_ids.remove(entry.opaque_id)
+            added_bytes -= entry.size
+            continue
+        selected.append(entry)
+
+    if not selected:
+        raise ValueError("no requested excerpt fits the follow-up bounds")
+    request = render()
+    return request, tuple(entry.excerpt.path for entry in selected)
 
 
 __all__ = [

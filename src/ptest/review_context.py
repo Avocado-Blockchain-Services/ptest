@@ -875,6 +875,8 @@ def _exported_root_object(tokens: list) -> tuple[int, int] | None:
                and tokens[expression] == ("ident", "defineConfig")
                and tokens[expression + 1] == ("punct", "(")
                and tokens[expression + 2] == ("punct", "{"))
+    if wrapped and not _trusted_define_config_binding(tokens):
+        return None
     root_open = expression + 2 if wrapped else expression
     if root_open >= len(tokens) or tokens[root_open] != ("punct", "{"):
         return None
@@ -889,6 +891,55 @@ def _exported_root_object(tokens: list) -> tuple[int, int] | None:
     if any(token != ("punct", ";") for token in tokens[tail:]):
         return None
     return root_open, root_close
+
+
+def _trusted_define_config_binding(tokens: list) -> bool:
+    """Accept only the direct Vitest named import, without a local shadow."""
+    imported = False
+    for index in range(len(tokens) - 1):
+        if tokens[index:index + 2] != [
+                ("ident", "import"), ("punct", "{")]:
+            continue
+        close = _matching_token(tokens, index + 1, "{", "}")
+        if close is None or close + 2 >= len(tokens):
+            continue
+        if tokens[close + 1:close + 3] != [
+                ("ident", "from"), ("string", "vitest/config")]:
+            continue
+        members = tokens[index + 2:close]
+        # A direct binding is safe to recognize among additional named
+        # imports. Do not accept `defineConfig as other`, since the exported
+        # expression below calls the original name.
+        if any(token == ("ident", "defineConfig")
+               and (position == 0
+                    or members[position - 1] == ("punct", ","))
+               and (position + 1 == len(members)
+                    or members[position + 1] == ("punct", ","))
+               for position, token in enumerate(members)):
+            imported = True
+            break
+    if not imported:
+        return False
+
+    # A top-level declaration with this name shadows the imported helper.
+    # Track only statement-level declarations; this is intentionally not a
+    # general JavaScript binding or scope evaluator.
+    depth = {"{": 0, "[": 0, "(": 0}
+    pairs = {"}": "{", "]": "[", ")": "("}
+    for index, token in enumerate(tokens):
+        if not any(depth.values()) and token in (
+                ("ident", "const"), ("ident", "let"), ("ident", "var"),
+                ("ident", "class"), ("ident", "function")):
+            if index + 1 < len(tokens) and tokens[index + 1] == (
+                    "ident", "defineConfig"):
+                return False
+        if token[0] == "punct":
+            if token[1] in depth:
+                depth[token[1]] += 1
+            elif token[1] in pairs:
+                depth[pairs[token[1]]] = max(
+                    0, depth[pairs[token[1]]] - 1)
+    return True
 
 
 def _literal_string_array(tokens: list, opener: int, key: str
@@ -979,6 +1030,7 @@ def _exported_test_arrays(text: str, keys: tuple[str, ...]
     opener, closer = test_blocks[0]
     depth = 0
     index = opener + 1
+    seen_keys: set[str] = set()
     while index < closer:
         token = tokens[index]
         if depth == 0 and token == ("punct", ".") \
@@ -989,6 +1041,9 @@ def _exported_test_arrays(text: str, keys: tuple[str, ...]
                 and token[1] in keys and index + 2 < closer \
                 and tokens[index + 1] == ("punct", ":"):
             key = token[1]
+            if key in seen_keys:
+                dynamic = True
+            seen_keys.add(key)
             value = tokens[index + 2]
             if value != ("punct", "["):
                 dynamic = True
@@ -1487,7 +1542,10 @@ def collect_vitest_context(root: Path, scope: str, argv: tuple,
                     for pattern in excludes:
                         if pattern not in known_excluded:
                             known_excluded.append(pattern)
-                    if dynamic:
+                    unsupported_patterns = any(
+                        _compile_glob(pattern) is None
+                        for pattern in (*includes, *excludes))
+                    if dynamic or unsupported_patterns:
                         collector.note_missing(selected, "dynamic-config")
                         profile_status = "partial"
                     for target in setup_targets:

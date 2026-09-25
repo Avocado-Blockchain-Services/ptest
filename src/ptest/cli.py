@@ -1611,15 +1611,26 @@ def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
              "paths": []},
         ))
     for packet in packets:
+        context = getattr(packet, "context", None)
+        config_status = getattr(context, "config_status", "unavailable")
         if (not packet.excerpts or packet.excluded_count
-                or packet.truncated_count):
+                or packet.truncated_count
+                or config_status in ("partial", "unavailable")):
+            excluded_inventory = len(getattr(
+                context, "known_excluded", ()))
+            evidence_limits = (
+                f"{packet.excluded_count} collector exclusions; "
+                f"{packet.truncated_count} files or excerpts omitted or "
+                "truncated by bounds; "
+                f"safe suite-exclusion inventory: {excluded_inventory} "
+                f"{'entry' if excluded_inventory == 1 else 'entries'}; "
+                f"runner configuration status: {config_status}.")
             limitation = {
                 "code": "partial-evidence",
                 "message": (
-                    "No source files were admitted to this project packet."
-                    if not packet.excerpts else
-                    f"Bounded evidence omitted {packet.excluded_count} entries and "
-                    f"truncated {packet.truncated_count} files or excerpts."),
+                    ("No source files were admitted to this project packet. "
+                     if not packet.excerpts else "Evidence limits: ")
+                    + evidence_limits),
                 "paths": [packet.scope],
             }
             if limitation not in limitations:
@@ -1837,7 +1848,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                         on_done=lambda index, result, scope=packet.scope: progress(
                             "reviewing", adapter.name, scope,
                             time.monotonic() - started),
-                        progress=lambda _event: heartbeat())
+                        progress=lambda _event: heartbeat(),
+                        deadline=deadline)
                 except C.Problem as problem:
                     if problem.code == "review-cancelled":
                         raise _problem("review-cancelled", "review was cancelled") from None
@@ -1890,7 +1902,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                         on_done=lambda index, result, scope=packet.scope: progress(
                             "requesting evidence", adapter.name, scope,
                             time.monotonic() - started),
-                        progress=lambda _event: heartbeat())
+                        progress=lambda _event: heartbeat(),
+                        deadline=deadline)
                 except C.Problem as problem:
                     if problem.code == "review-cancelled":
                         raise _problem("review-cancelled",

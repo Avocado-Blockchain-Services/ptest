@@ -846,7 +846,8 @@ def _cancelled_result(adapter: ReviewerAdapter,
 def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                 timeout_s: int,
                 progress: Callable[[ProgressEvent], None],
-                cancel: threading.Event | None) -> ProviderResult:
+                cancel: threading.Event | None,
+                deadline: float | None = None) -> ProviderResult:
     """Run one owned provider child and normalize exactly one assessment."""
     if not isinstance(adapter, ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
@@ -862,6 +863,11 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         raise _problem("invalid-bound", "prompt input exceeds 1 MiB")
     if timeout_s < TIMEOUT_MIN_S or timeout_s > TIMEOUT_MAX_S:
         raise _problem("invalid-bound", "timeout_s outside 1..900 seconds")
+    if (deadline is not None
+            and (isinstance(deadline, bool)
+                 or not isinstance(deadline, (int, float))
+                 or not math.isfinite(deadline))):
+        raise _problem("invalid-bound", "deadline must be a finite monotonic time")
     if not adapter.qualified:
         raise _problem("provider-unqualified",
                        f"reviewer {adapter.name} profile unproven")
@@ -871,6 +877,10 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                        f"reviewer {adapter.name} executable missing")
     if cancel is not None and cancel.is_set():
         return _cancelled_result(adapter)
+    if deadline is not None and deadline - time.monotonic() < 1:
+        return _result(adapter, ok=False, assessment=b"", error="timeout",
+                       exit_code=None, timed_out=True, cancelled=False,
+                       truncated=False, pid=os.getpid(), scratch="unstarted")
 
     scratch = tempfile.mkdtemp(prefix="ptest-review-")
     try:
@@ -881,6 +891,11 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
         raise
 
     try:
+        if deadline is not None and deadline - time.monotonic() < 1:
+            shutil.rmtree(scratch, ignore_errors=True)
+            return _result(adapter, ok=False, assessment=b"", error="timeout",
+                           exit_code=None, timed_out=True, cancelled=False,
+                           truncated=False, pid=os.getpid(), scratch="unstarted")
         proc, pgid, sid, leader_start = _spawn_owned(
             list(adapter.argv), stdin=subprocess.PIPE,
             stderr=subprocess.PIPE, cwd=scratch)
@@ -951,7 +966,9 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                         timed_out=False, cancelled=True, truncated=False,
                         pid=proc.pid, scratch=scratch)
                 elapsed = time.monotonic() - start
-                if elapsed >= timeout_s:
+                now = time.monotonic()
+                if elapsed >= timeout_s or (
+                        deadline is not None and now >= deadline):
                     timed_out = True
                     break
                 now = time.monotonic()
@@ -959,6 +976,11 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                     _emit("reviewing")
                     last_beat = now
                 remaining = timeout_s - elapsed
+                if deadline is not None:
+                    remaining = min(remaining, deadline - now)
+                if remaining <= 0:
+                    timed_out = True
+                    break
                 for key, _ in selector.select(min(0.2, remaining)):
                     chunk = _read_ready(selector, key)
                     if chunk is None:
@@ -974,7 +996,9 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                 if not selector.get_map():
                     if proc.poll() is not None:
                         break
-                    if time.monotonic() - start >= timeout_s:
+                    now = time.monotonic()
+                    if (now - start >= timeout_s
+                            or deadline is not None and now >= deadline):
                         timed_out = True
                         break
                     time.sleep(0.05)
@@ -996,9 +1020,17 @@ def _launch_one(adapter: ReviewerAdapter, packet: bytes, schema: bytes,
                            timed_out=False, cancelled=False, truncated=True,
                            pid=proc.pid, scratch=scratch)
         if proc.poll() is None:
+            remaining = timeout_s - (time.monotonic() - start)
+            if deadline is not None:
+                remaining = min(remaining, deadline - time.monotonic())
+            if remaining <= 0:
+                _stop_owned(proc, pgid, sid, leader_start)
+                return _result(adapter, ok=False, assessment=b"",
+                               error="timeout", exit_code=proc.poll(),
+                               timed_out=True, cancelled=False,
+                               truncated=False, pid=proc.pid, scratch=scratch)
             try:
-                proc.wait(timeout=max(0.1, timeout_s - (time.monotonic()
-                                                       - start)))
+                proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 _stop_owned(proc, pgid, sid, leader_start)
                 return _result(adapter, ok=False, assessment=b"",
@@ -1062,7 +1094,8 @@ def launch_reviews(adapter: ReviewerAdapter,
                    timeout_s: int, *,
                    concurrency: int = 4,
                    on_done: Callable[[int, ProviderResult], None] | None = None,
-                   progress: Callable[[ProgressEvent], None] | None = None
+                   progress: Callable[[ProgressEvent], None] | None = None,
+                   deadline: float | None = None
                    ) -> tuple[ProviderResult, ...]:
     """Run one review per request with bounded concurrency.
 
@@ -1087,6 +1120,11 @@ def launch_reviews(adapter: ReviewerAdapter,
         raise TypeError("timeout_s must be int")
     if timeout_s < TIMEOUT_MIN_S or timeout_s > TIMEOUT_MAX_S:
         raise _problem("invalid-bound", "timeout_s outside 1..900 seconds")
+    if (deadline is not None
+            and (isinstance(deadline, bool)
+                 or not isinstance(deadline, (int, float))
+                 or not math.isfinite(deadline))):
+        raise _problem("invalid-bound", "deadline must be a finite monotonic time")
     if not _is_int(concurrency):
         raise TypeError("concurrency must be int")
     if not 1 <= concurrency <= 8:
@@ -1118,9 +1156,23 @@ def launch_reviews(adapter: ReviewerAdapter,
     cancel = threading.Event()
 
     def _work(index: int, packet: bytes, schema: bytes) -> ProviderResult:
+        if cancel.is_set():
+            return _cancelled_result(adapter)
+        item_timeout = timeout_s
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                return _result(
+                    adapter, ok=False, assessment=b"", error="timeout",
+                    exit_code=None, timed_out=True, cancelled=False,
+                    truncated=False, pid=os.getpid(), scratch="unstarted")
+            item_timeout = min(timeout_s, int(remaining))
         try:
-            return _launch_one(adapter, packet, schema, timeout_s, _emit,
-                               cancel)
+            if deadline is None:
+                return _launch_one(adapter, packet, schema, item_timeout,
+                                   _emit, cancel)
+            return _launch_one(adapter, packet, schema, item_timeout, _emit,
+                               cancel, deadline=deadline)
         except Problem as problem:
             return ProviderResult(
                 provider=adapter.name, ok=False, assessment=b"",

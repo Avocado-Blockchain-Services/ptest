@@ -499,6 +499,8 @@ def test_review_text_mentions_fix_when_config_out_of_date(
                                   "establish this criterion."),
                     "evidence": [],
                     "finding": None,
+                    "proof": [],
+                    "needs": [],
                 }).encode("utf-8"),
                 error="", exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=7301, argv=adapter.argv,

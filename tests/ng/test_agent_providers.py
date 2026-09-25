@@ -104,7 +104,7 @@ def test_exact_function_signatures():
     ]
     assert list(inspect.signature(ap.launch_reviews).parameters) == [
         "adapter", "requests", "timeout_s", "concurrency", "on_done",
-        "progress",
+        "progress", "deadline",
     ]
     assert list(inspect.signature(ap.with_model).parameters) == [
         "adapter", "model",
@@ -1285,6 +1285,78 @@ def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
     assert results[0].error == "timeout"
     assert results[1].ok is True and results[1].assessment == b"fast"
     _assert_dead(results[0].pid)
+
+
+def test_launch_reviews_does_not_start_queued_item_after_absolute_deadline(
+        bindir, monkeypatch):
+    from types import SimpleNamespace
+
+    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    clock = [100.0]
+    monkeypatch.setattr(
+        ap, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    started = []
+
+    def fake_launch(adapter, packet, schema, timeout_s, progress, cancel,
+                    deadline=None):
+        item = json.loads(packet)["id"]
+        started.append((item, timeout_s))
+        assert deadline == 101.0
+        clock[0] = 102.0
+        return ap._result(
+            adapter, ok=True, assessment=item.encode(), error="",
+            exit_code=0, timed_out=False, cancelled=False, truncated=False,
+            pid=os.getpid(), scratch="synthetic")
+
+    monkeypatch.setattr(ap, "_launch_one", fake_launch)
+    requests = [
+        (json.dumps({"id": item}).encode("utf-8"), SCHEMA)
+        for item in ("first", "queued")
+    ]
+
+    results = ap.launch_reviews(
+        adapter, requests, 30, concurrency=1, deadline=101.0)
+
+    assert started == [("first", 1)]
+    assert results[0].ok is True
+    assert results[1].timed_out is True
+
+
+def test_launch_reviews_cancellation_does_not_start_queued_item(
+        bindir, monkeypatch, tmp_path):
+    import concurrent.futures as _futures
+
+    log = tmp_path / "cancelled-wave.log"
+    _python_bin(
+        bindir, "claude",
+        "import json, sys, time\n"
+        "body = json.loads(sys.stdin.read())\n"
+        "item = body['id']\n"
+        f"open({str(log)!r}, 'a').write(item + '\\n')\n"
+        "time.sleep(30)\n",
+    )
+    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    requests = [
+        (json.dumps({"id": item}).encode("utf-8"), SCHEMA)
+        for item in ("first", "queued")
+    ]
+    real_as_completed = _futures.as_completed
+
+    def interrupt_after_first_start(*args, **kwargs):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if log.exists() and log.read_text(encoding="utf-8").splitlines():
+                raise KeyboardInterrupt
+            time.sleep(0.02)
+        raise AssertionError("provider did not start")
+
+    monkeypatch.setattr(_futures, "as_completed", interrupt_after_first_start)
+    with pytest.raises(Problem) as exc:
+        ap.launch_reviews(adapter, requests, 30, concurrency=1)
+
+    assert exc.value.code == "review-cancelled"
+    assert real_as_completed is not None
+    assert log.read_text(encoding="utf-8").splitlines() == ["first"]
 
 
 def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(

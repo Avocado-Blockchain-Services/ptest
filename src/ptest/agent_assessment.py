@@ -1576,9 +1576,19 @@ def _conclusive_suite_skips(*, runner_kind: str, context: RC.ReviewContext,
         return set()
     if runner_kind == "vitest" and context.suite_profiles:
         def excluded_in_profile(rel: str, profile) -> bool:
-            return (profile.status == "resolved"
-                    and any(RC._glob_match(pattern, rel)
-                            for pattern in profile.excludes))
+            if profile.status != "resolved":
+                return False
+            # Unsupported patterns are unknown, not negative matches. An
+            # include can itself keep an otherwise excluded path in-suite.
+            if any(RC._compile_glob(pattern) is None
+                   for pattern in (*profile.includes, *profile.excludes)):
+                return False
+            if profile.includes and not any(
+                    RC._glob_match(pattern, rel)
+                    for pattern in profile.includes):
+                return True
+            return any(RC._glob_match(pattern, rel)
+                       for pattern in profile.excludes)
 
         skipped: set[str] = set()
         for rel in rels:
@@ -2111,7 +2121,7 @@ def _fixture_first_paths(routed: list[SourceExcerpt]) -> list[SourceExcerpt]:
 
 def _mandatory_context_excerpts(
         packet: EvidencePacket) -> list[SourceExcerpt]:
-    """Admitted runner config + setup/helper closure, in packet order.
+    """Admitted runner config + setup/helper/fixture closure, in order.
 
     Mandatory context is seeded before item-specific sampling so the
     effective runner configuration and its configured setup/helper
@@ -2119,7 +2129,7 @@ def _mandatory_context_excerpts(
     matches. Only actually admitted excerpts are seeded: the admitted
     ``.ptest.toml``, admitted excerpts on the context's config paths
     (the selected Vitest configuration), and admitted excerpts carrying
-    a setup/helper context role. Selected-scope reviews keep their
+    a setup/helper/fixture context role. Selected-scope reviews keep their
     privacy boundary and seed nothing.
     """
     if packet.scope != packet.declaration:
@@ -2137,7 +2147,7 @@ def _mandatory_context_excerpts(
                if prefix and excerpt.path.startswith(prefix)
                else excerpt.path)
         if excerpt.path in wanted \
-                or roles.get(rel) in ("setup", "helper"):
+                or roles.get(rel) in ("setup", "helper", "fixture"):
             mandatory.append(excerpt)
     return mandatory
 

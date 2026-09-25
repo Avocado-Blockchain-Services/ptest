@@ -16,9 +16,9 @@ from ptest.checklist import CATALOG
 EXPECTED = (
     ("FIX-001", "Test data factories", "factories", None),
     ("FIX-002", "Fixture state isolation", "factories", None),
-    ("DB-001", "Database setup reuse", "databases", "no-database"),
-    ("DB-002", "Database isolation", "databases", "no-database"),
-    ("CACHE-001", "Cache isolation", "cache", "no-cache"),
+    ("DB-001", "Database setup reuse", "databases", None),
+    ("DB-002", "Database isolation", "databases", None),
+    ("CACHE-001", "Cache isolation", "cache", None),
     ("RESOURCE-001", "Files and ports", "files-ports", None),
     ("NETWORK-001", "Network isolation", "time-network", None),
     ("PROCESS-001", "Child processes", "processes", None),
@@ -65,7 +65,7 @@ def test_catalog_prompts_state_question_evidence_na_rule_and_unknown():
         assert isinstance(entry.prompt, str) and entry.prompt.strip(), entry.id
         assert "?" in entry.prompt, entry.id
         lowered = entry.prompt.casefold()
-        assert "n/a" in lowered, entry.id
+        assert ("n/a" in lowered or "cannot apply" in lowered), entry.id
         assert "unknown" in lowered, entry.id
         assert len(entry.prompt.encode("utf-8")) <= 2048, entry.id
 

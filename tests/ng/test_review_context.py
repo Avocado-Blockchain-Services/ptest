@@ -371,7 +371,8 @@ def test_unexported_test_object_is_not_effective_suite_config():
     """An unused object literal cannot lend excludes to exported config."""
     from ptest import review_context as RC
 
-    text = ("const unused = { test: { exclude: ['e2e/**'] } };\n"
+    text = ("import { defineConfig, configDefaults } from 'vitest/config';\n"
+            "const unused = { test: { exclude: ['e2e/**'] } };\n"
             "export default defineConfig({ test: { include: ['src/**'] } });\n")
 
     patterns = RC.parse_config_text(text)
@@ -390,6 +391,134 @@ def test_arbitrary_test_object_spread_is_partial_but_known_defaults_stay_support
     assert unknown.dynamic
     assert supported.dynamic is False
     assert supported.excludes == ("e2e/**",)
+
+
+@pytest.mark.parametrize("config_text", [
+    "export default { test: { exclude: ['e2e/**'], exclude: [] } };\n",
+    "export default defineConfig({ test: { exclude: ['e2e/**'] } });\n",
+    ("function defineConfig(value) { return { ...value, "
+     "test: { exclude: [] } }; }\n"
+     "export default defineConfig({ test: { exclude: ['e2e/**'] } });\n"),
+])
+def test_vitest_ambiguous_exported_arrays_never_exclude_suite(
+        tmp_path, config_text):
+    """Duplicate keys and unverified wrappers cannot decide membership."""
+    from ptest import agent_assessment as AA
+
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "vitest.config.ts": config_text,
+        "src/unit.test.ts": "test('active', () => {});\n",
+        "e2e/load.spec.ts": "test('browser', () => {});\n",
+    }, config=_config(
+        runner_kind=C.RunnerKind.VITEST, launcher=("node",),
+        args=("--config=vitest.config.ts",), test_roots=("src",)))
+
+    assert packet.context.suite_profiles[0].status == "partial"
+    assert ("vitest.config.ts", "dynamic-config") in packet.context.missing
+    assert "e2e/load.spec.ts" in {excerpt.path
+                                  for excerpt in packet.excerpts}
+    assert AA._conclusive_suite_skips(
+        runner_kind="vitest", context=packet.context,
+        rels={"e2e/load.spec.ts"}, role_of=dict(packet.context.roles),
+        linked=set(), runner_args=("--config=vitest.config.ts",),
+        runner_full_args=()) == set()
+
+
+def test_vitest_literal_include_membership_can_exclude_outside_files(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "vitest.config.ts": (
+            "export default { test: { include: ['src/unit/**'] } };\n"),
+        "src/unit/active.test.ts": "test('active', () => {});\n",
+        "e2e/load.spec.ts": "test('browser', () => {});\n",
+    }, config=_config(
+        runner_kind=C.RunnerKind.VITEST, launcher=("node",),
+        args=("--config=vitest.config.ts",), test_roots=("src",)))
+
+    assert packet.context.suite_profiles[0].status == "resolved"
+    assert packet.context.suite_profiles[0].includes == ("src/unit/**",)
+    assert "e2e/load.spec.ts" not in {excerpt.path
+                                       for excerpt in packet.excerpts}
+    assert packet.excluded_count >= 1
+    assert AA._conclusive_suite_skips(
+        runner_kind="vitest", context=packet.context,
+        rels={"e2e/load.spec.ts"}, role_of=dict(packet.context.roles),
+        linked=set(), runner_args=("--config=vitest.config.ts",),
+        runner_full_args=()) == {"e2e/load.spec.ts"}
+
+
+def test_vitest_unsupported_include_glob_keeps_membership_unknown(tmp_path):
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "vitest.config.ts": (
+            "export default { test: { "
+            "include: ['src/@(unit|integration)/**'] } };\n"),
+        "src/unit/active.test.ts": "test('active', () => {});\n",
+        "e2e/load.spec.ts": "test('browser', () => {});\n",
+    }, config=_config(
+        runner_kind=C.RunnerKind.VITEST, launcher=("node",),
+        args=("--config=vitest.config.ts",), test_roots=("src",)))
+
+    assert packet.context.suite_profiles[0].status == "partial"
+    assert "e2e/load.spec.ts" in {excerpt.path
+                                  for excerpt in packet.excerpts}
+
+
+def test_vitest_full_profile_unknown_keeps_outside_include_candidate(tmp_path):
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "vitest.config.ts": (
+            "export default { test: { include: ['src/unit/**'] } };\n"),
+        "src/unit/active.test.ts": "test('active', () => {});\n",
+        "e2e/load.spec.ts": "test('browser', () => {});\n",
+    }, config=_config(
+        runner_kind=C.RunnerKind.VITEST, launcher=("node",),
+        args=("--config=vitest.config.ts",),
+        full_args=("--project", "integration"), test_roots=("src",)))
+
+    assert packet.context.suite_profiles[0].status == "resolved"
+    assert packet.context.suite_profiles[1].status == "partial"
+    assert "e2e/load.spec.ts" in {excerpt.path
+                                  for excerpt in packet.excerpts}
+
+
+def test_pytest_mandatory_review_includes_fixture_closure_without_item_hits(
+        tmp_path):
+    import re
+
+    from ptest import agent_assessment as AA
+    from ptest.checklist import CATALOG
+
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "tests/conftest.py": "pytest_plugins = ['support.fixtures']\n",
+        "support/fixtures.py": (
+            "def deny_remote_access(config):\n"
+            "    config.addinivalue_line('markers', 'offline')\n"),
+        "tests/test_basic.py": "def test_basic():\n    assert True\n",
+    })
+    role_map = dict(packet.context.roles)
+    assert role_map["support/fixtures.py"] == "fixture"
+
+    network_item = next(entry for entry in CATALOG
+                        if entry.id == "NETWORK-001")
+    helper = next(excerpt for excerpt in packet.excerpts
+                  if excerpt.path == "support/fixtures.py")
+    assert not any(re.search(pattern, helper.path)
+                   for pattern in network_item.path_patterns)
+    assert not any(re.search(pattern, helper.text)
+                   for pattern in network_item.text_patterns)
+
+    mandatory_paths = {excerpt.path
+                       for excerpt in AA._mandatory_context_excerpts(packet)}
+    assert "support/fixtures.py" in mandatory_paths
+    network_review = next(review for review in AA.plan_item_reviews(packet)
+                          if review.item_id == "NETWORK-001")
+    assert "support/fixtures.py" in network_review.excerpt_paths
 
 
 def test_secret_names_never_enter_context_inventory(tmp_path):

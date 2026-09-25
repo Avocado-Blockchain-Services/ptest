@@ -138,7 +138,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "Trace the actual creation/schema operation to its caller "
                 "and fixture scope. Importing a database library or resetting "
                 "records does not prove repeated server or schema creation. "
-                "Missing setup evidence is unknown, never N/A."),
+                "Missing setup evidence is unknown, never N/A. Use N/A only "
+                "with affirmative evidence that database setup cannot apply "
+                "in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
@@ -165,7 +167,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "through each caller to teardown. A hardcoded prefix alone "
                 "does not prove collision if a helper adds run or worker "
                 "identity. Check shared setup and counterevidence; missing "
-                "ownership evidence is unknown, never N/A."),
+                "ownership evidence is unknown, never N/A. Use N/A only with "
+                "affirmative evidence that database identity and cleanup "
+                "cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
@@ -196,7 +200,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "any proven exclusive disposable-service boundary. Client "
                 "construction alone does not prove unowned deletion; a "
                 "global flush is safe only when exclusivity is established. "
-                "Missing ownership evidence is unknown, never N/A."),
+                "Missing ownership evidence is unknown, never N/A. Use N/A "
+                "only with affirmative evidence that mutable caches cannot "
+                "apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*cach[^/]*$"),
@@ -218,7 +224,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "released? Trace the writable path or bind through allocation "
                 "and release. Fixture-provided temporary paths and OS port "
                 "0 are ownership mechanisms; fixed paths/ports need a proven "
-                "owner. Missing setup or cleanup evidence is unknown."),
+                "owner. Missing setup or cleanup evidence is unknown. Use "
+                "N/A only with affirmative evidence that writable files and "
+                "listening ports cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"\bopen\s*\(", r"Path\s*\(",
@@ -247,7 +255,8 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "denial boundary through configured shared setup. An external "
                 "URL beneath a global mock is not proof of live traffic. "
                 "Missing or incomplete setup is unknown, not suite-wide "
-                "satisfaction."),
+                "satisfaction. Use N/A only with affirmative evidence that "
+                "network access cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML),
         text_patterns=(r"https?://",
@@ -272,7 +281,8 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "cancelled, and reaped? Trace an actual spawn to wait, cancel, "
                 "and reap paths. Runner/provider worker declarations alone "
                 "do not prove an orphan test process. Missing lifecycle "
-                "evidence is unknown."),
+                "evidence is unknown. Use N/A only with affirmative evidence "
+                "that no test-created child process can exist in scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"subprocess|asyncio\.create_subprocess|Popen"
@@ -298,7 +308,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "synchronization, and whether fake timers or shared setup "
                 "intercept it. A sleep-like name alone is not a gap. Cite the "
                 "clock use, synchronization role, and any counterevidence; "
-                "missing setup is unknown."),
+                "missing setup is unknown. Use N/A only with affirmative "
+                "evidence that time-dependent assertions and synchronization "
+                "cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"(?i)sleep|monotonic|datetime|timezone|freeze_time"
                        r"|freezegun|deadline|timeout|clock",),

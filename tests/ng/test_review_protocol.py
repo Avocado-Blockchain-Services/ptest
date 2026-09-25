@@ -269,6 +269,58 @@ def test_one_followup_adds_only_offered_packet_evidence_and_cannot_recurse(
     assert AA.plan_followup_review(packet, followup, final) == (None, None)
 
 
+def test_followup_sends_stable_subset_that_fits_bounds(tmp_path):
+    from ptest.agent_assessment import SourceExcerpt
+    from ptest.review_protocol import OmittedExcerpt, build_followup_request
+
+    first = OmittedExcerpt(
+        "ctx-" + "1" * 24,
+        SourceExcerpt("src/a.py", 1, 1, "a" * 64, "a" * 40_000),
+        "source")
+    second = OmittedExcerpt(
+        "ctx-" + "2" * 24,
+        SourceExcerpt("src/b.py", 1, 1, "b" * 64, "b" * 40_000),
+        "source")
+    payload = {
+        "policy": {},
+        "packet": {"phase": "initial",
+                   "omission_inventory": [first.public_inventory(),
+                                          second.public_inventory()],
+                   "omitted": ["src/a.py", "src/b.py"]},
+        "excerpts": [],
+    }
+    request, paths = build_followup_request(
+        json.dumps(payload).encode("utf-8"), (first, second),
+        (first.opaque_id, second.opaque_id), max_request_bytes=50_000)
+
+    assert paths == ("src/a.py",)
+    body = json.loads(request.decode("utf-8"))
+    assert [excerpt["path"] for excerpt in body["excerpts"]] == ["src/a.py"]
+    assert body["packet"]["omitted"] == ["src/b.py"]
+    assert [entry["id"] for entry in body["packet"]["omission_inventory"]] == [
+        second.opaque_id]
+
+    fitting = tuple(OmittedExcerpt(
+        f"ctx-{index:024x}",
+        SourceExcerpt(f"src/fit-{index}.py", 1, 1,
+                      f"{index + 3:064x}", "x" * 1024),
+        "source") for index in range(4))
+    four_payload = {
+        "policy": {},
+        "packet": {"phase": "initial",
+                   "omission_inventory": [entry.public_inventory()
+                                          for entry in fitting],
+                   "omitted": [entry.excerpt.path for entry in fitting]},
+        "excerpts": [],
+    }
+    four_request, four_paths = build_followup_request(
+        json.dumps(four_payload).encode("utf-8"), fitting,
+        tuple(entry.opaque_id for entry in fitting), max_request_bytes=16_000)
+    four_body = json.loads(four_request.decode("utf-8"))
+    assert four_paths == tuple(entry.excerpt.path for entry in fitting)
+    assert len(four_body["excerpts"]) == 4
+
+
 def test_followup_with_nonempty_final_needs_becomes_unknown(tmp_path):
     from ptest import agent_assessment as AA
 

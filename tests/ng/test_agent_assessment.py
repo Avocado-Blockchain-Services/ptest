@@ -1086,6 +1086,44 @@ def test_installed_facts_create_no_public_limitation_code(tmp_path):
     assert not any("installed" in code for code in codes)
 
 
+def test_partial_evidence_limitation_separates_exclusion_budget_and_config():
+    from types import SimpleNamespace
+
+    from ptest import review_context as RC
+    from ptest.cli import _assessment_limitations
+
+    packet = SimpleNamespace(
+        excerpts=(object(),), excluded_count=3, truncated_count=2,
+        scope=".", dependencies=(),
+        context=RC.ReviewContext(
+            runner_kind="vitest", config_status="partial",
+            known_excluded=("e2e/**",),
+            missing=(("vitest.config.ts", "dynamic-config"),)),
+    )
+
+    limitation = next(item for item in _assessment_limitations((packet,))
+                      if item["code"] == "partial-evidence")
+
+    assert "3 collector exclusions" in limitation["message"]
+    assert "2 files or excerpts omitted or truncated by bounds" in limitation["message"]
+    assert "safe suite-exclusion inventory: 1 entry" in limitation["message"]
+    assert "runner configuration status: partial" in limitation["message"]
+    assert "vitest.config.ts" not in repr(limitation)
+    assert "e2e/**" not in repr(limitation)
+
+    config_only = SimpleNamespace(
+        excerpts=(object(),), excluded_count=0, truncated_count=0,
+        scope=".", dependencies=(),
+        context=RC.ReviewContext(
+            runner_kind="vitest", config_status="partial"),
+    )
+    config_limitation = next(
+        item for item in _assessment_limitations((config_only,))
+        if item["code"] == "partial-evidence")
+    assert "0 collector exclusions" in config_limitation["message"]
+    assert "runner configuration status: partial" in config_limitation["message"]
+
+
 def test_dependency_env_scan_respects_review_deadline(tmp_path):
     from ptest import agent_assessment as AA
 

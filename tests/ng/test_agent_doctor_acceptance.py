@@ -150,7 +150,7 @@ def _install_fake_review(monkeypatch, *, cancelled: bool = False):
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -343,8 +343,7 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
     from ptest.agent_providers import ProviderResult
 
     def cancelled_launches(adapter, requests, timeout_s, *, concurrency=4,
-                           on_done=None,
-                    progress=None):
+                           on_done=None, progress=None, deadline=None):
         launch_calls.append((adapter.name,))
         return tuple(
             ProviderResult(

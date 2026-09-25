@@ -956,7 +956,7 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     launched = []
 
     def fail_launches(adapter, requests, timeout_s, *, concurrency=4,
-                      on_done=None, progress=None):
+                      on_done=None, progress=None, deadline=None):
         for _request, _schema in requests:
             launched.append(adapter.name)
         return tuple(

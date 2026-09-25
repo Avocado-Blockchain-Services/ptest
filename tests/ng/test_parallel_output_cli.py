@@ -282,6 +282,7 @@ def _install_fake_claude(bindir: Path) -> None:
         "excerpts = request['excerpts']",
         "if excerpts:",
         "    first = excerpts[0]",
+        "    quote = first['text'].splitlines()[0][:512]",
         "    reply = {'status': 'satisfied',",
         "             'rationale': ('Reviewed ' + item_id + ' against '",
         "                         'the cited excerpt lines.'),",
@@ -289,12 +290,18 @@ def _install_fake_claude(bindir: Path) -> None:
         "                           'start_line': first['start_line'],",
         "                           'end_line': first['end_line'],",
         "                           'sha256': first['sha256']}],",
+        "             'proof': [{'role': 'applicability',",
+        "                        'citation_index': 0, 'quote': quote},",
+        "                       {'role': 'mechanism',",
+        "                        'citation_index': 0, 'quote': quote}],",
+        "             'needs': [],",
         "             'finding': None}",
         "else:",
         "    reply = {'status': 'unknown',",
         "             'rationale': ('The bounded source evidence does not '",
         "                         'establish this row.'),",
-        "             'evidence': [], 'finding': None}",
+        "             'evidence': [], 'finding': None,",
+        "             'proof': [], 'needs': []}",
         "envelope = {'type': 'result', 'subtype': 'success',",
         "            'is_error': False, 'num_turns': 1,",
         "            'permission_denials': [],",
@@ -348,7 +355,7 @@ def test_review_disclosure_is_at_most_three_lines_before_prompt(
     lines = [line for line in head.splitlines() if line.strip()]
     assert len(lines) <= 3
     assert lines[0].startswith("Model review disclosure: claude ")
-    assert "9 calls" in lines[0]
+    assert "9 initial item calls" in lines[0]
     assert "4 at a time" in lines[0]
     assert "model haiku" in lines[0]
     assert "--offline" in "\n".join(lines[1:])
@@ -764,7 +771,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     assert "parallel: inside vitest" in human.out
     assert ("? Test timing  no timing history yet: "
             "run ptest --full once") in human.out
-    assert "✗ Test selection" in human.out
+    assert "– Test selection" in human.out
     # PARALLEL-001: api configures xdist but opts out with -n 0, so the
     # deterministic answer is a gap carrying the fallback reason and fix.
     assert "✗ Parallel execution" in human.out
@@ -791,10 +798,9 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
     # provider.
     assert set(counts) <= catalog_ids - {
         "TIMING-001", "SELECT-001", "PARALLEL-001"}
-    # Web reviews every non-deterministic item (9); api skips the three
-    # pure-library items without a model call (6). At most one call per
-    # child.
-    assert sum(counts.values()) == 15
+    # Both children review all nine non-deterministic items. At most one
+    # call per child; absence of a pure-library hit is no longer a skip.
+    assert sum(counts.values()) == 18
     assert all(count <= 2 for count in counts.values())
 
     disclosure_head, _, _ = human.err.partition("Run this review once?")
@@ -911,6 +917,7 @@ def _install_fake_claude_with_db_gap(bindir: Path) -> None:
         "excerpts = request['excerpts']",
         "if excerpts:",
         "    first = excerpts[0]",
+        "    quote = first['text'].splitlines()[0][:512]",
         "    citation = {'path': first['path'],",
         "                'start_line': first['start_line'],",
         "                'end_line': first['end_line'],",
@@ -920,6 +927,11 @@ def _install_fake_claude_with_db_gap(bindir: Path) -> None:
         "                 'rationale': ('DB-002 shows the tests share one '",
         "                               'database without isolation.'),",
         "                 'evidence': [citation],",
+        "                 'proof': [{'role': 'applicability',",
+        "                            'citation_index': 0, 'quote': quote},",
+        "                           {'role': 'violation',",
+        "                            'citation_index': 0, 'quote': quote}],",
+        "                 'needs': [],",
         "                 'finding': {",
         "                     'summary': ('Tests share one database '",
         "                                 'without isolation.'),",
@@ -931,12 +943,18 @@ def _install_fake_claude_with_db_gap(bindir: Path) -> None:
         "                 'rationale': ('Reviewed ' + item_id + ' against '",
         "                             'the cited excerpt lines.'),",
         "                 'evidence': [citation],",
+        "                 'proof': [{'role': 'applicability',",
+        "                            'citation_index': 0, 'quote': quote},",
+        "                           {'role': 'mechanism',",
+        "                            'citation_index': 0, 'quote': quote}],",
+        "                 'needs': [],",
         "                 'finding': None}",
         "else:",
         "    reply = {'status': 'unknown',",
         "             'rationale': ('The bounded source evidence does not '",
         "                         'establish this row.'),",
-        "             'evidence': [], 'finding': None}",
+        "             'evidence': [], 'finding': None,",
+        "             'proof': [], 'needs': []}",
         "envelope = {'type': 'result', 'subtype': 'success',",
         "            'is_error': False, 'num_turns': 1,",
         "            'permission_denials': [],",
@@ -1125,7 +1143,7 @@ def _write_det1_shaped_monorepo(root: Path) -> None:
 
 def test_doctor_det1_deterministic_rows_cite_child_config(
         tmp_path, monkeypatch, capsys):
-    """DET1 twin: api parallel ✓ (4 workers), selection ✗ gap, timing ?.
+    """DET1 twin: api parallel ✓ (4 workers), monorepo selection n/a.
 
     The child ``.ptest.toml`` files are tier-0 evidence, so no deterministic
     satisfied/gap row downgrades for a missing citation; citations carry the
@@ -1145,7 +1163,7 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     human = capsys.readouterr()
     assert "✓ Parallel execution" in human.out
     assert "? Parallel execution" not in human.out
-    assert "✗ Test selection" in human.out
+    assert "– Test selection" in human.out
     assert ("? Test timing  no timing history yet: "
             "run ptest --full once") in human.out
     assert "(the ptest config is not in the review evidence)" not in human.out
@@ -1179,19 +1197,19 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     assert (parallel["evidence"][1]["start_line"],
             parallel["evidence"][1]["end_line"]) == (2, 2)
     selection = api_rows["SELECT-001"]
-    assert selection["status"] == "gap"
+    assert selection["status"] == "not-applicable"
     assert len(selection["evidence"]) == 1
     assert selection["evidence"][0]["path"] == "api/.ptest.toml"
     assert (selection["evidence"][0]["start_line"],
-            selection["evidence"][0]["end_line"]) == (11, 12)
+            selection["evidence"][0]["end_line"]) == (3, 10)
     findings = {finding["id"]: finding
                 for finding in by_scope["api"]["findings"]}
-    assert "SELECT-001" in findings
+    assert "SELECT-001" not in findings
     assert "PARALLEL-001" not in findings
     assert api_rows["TIMING-001"]["status"] == "unknown"
     assert "no timing history yet" in api_rows["TIMING-001"]["rationale"]
-    # Web (vitest): no automatic selection, so n/a by design, still cited.
-    # The n/a is justified by kind = "vitest" in [runner], not [selection].
+    # Both children share a root dispatcher that does not expose `--changed`.
+    # This affirmative routing limitation justifies N/A for both child rows.
     web_rows = {row["id"]: row for row in by_scope["web"]["rows"]}
     assert web_rows["SELECT-001"]["status"] == "not-applicable"
     assert len(web_rows["SELECT-001"]["evidence"]) == 1

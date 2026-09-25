@@ -1934,7 +1934,7 @@ def _ok_item_launches(launches, hook=None, *, pid=1000, status="unknown"):
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -1973,7 +1973,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -2185,7 +2185,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
 
     def launch_many(adapter, requests_arg, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         assert concurrency == 4
         return _ok_item_launches(launches, hook, pid=1000)(
             adapter, requests_arg, timeout_s, concurrency=concurrency,
@@ -2268,7 +2268,7 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -2443,7 +2443,7 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
                     on_done=None,
-                    progress=None):
+                    progress=None, deadline=None):
         results = []
         for _request, _schema in requests:
             timed_out = case_name == "timeout"
@@ -2538,10 +2538,11 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
     requested_ids = []
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None, progress=None):
+                    on_done=None, progress=None, deadline=None):
         bodies = [json.loads(request.decode("utf-8")) for request, _ in requests]
         phase = bodies[0]["packet"]["phase"]
-        launch_calls.append((adapter, timeout_s, concurrency, bodies))
+        launch_calls.append((adapter, timeout_s, concurrency, bodies,
+                             deadline))
         results = []
         for (request, _schema), body in zip(requests, bodies):
             if (phase == "initial"
@@ -2587,6 +2588,7 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
     assert initial[0].argv == followup[0].argv
     assert initial[2] == followup[2] == 2
     assert followup[1] < initial[1]
+    assert initial[4] == followup[4] == 130.0
     assert build_calls == [1, 1]
 
 
@@ -3613,7 +3615,7 @@ def _fenced_item_launches(launches, *, pid=5000):
     from ptest.agent_providers import ProviderResult
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None, progress=None):
+                    on_done=None, progress=None, deadline=None):
         results = []
         for request, schema in requests:
             body = json.loads(request)
@@ -3677,7 +3679,7 @@ def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
     _fake_qualified_profiles(monkeypatch)
 
     def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None, progress=None):
+                    on_done=None, progress=None, deadline=None):
         results = []
         for index, (request, schema) in enumerate(requests):
             if index % 3 == 0:
