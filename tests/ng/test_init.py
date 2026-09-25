@@ -13,6 +13,7 @@ import pytest
 from ptest.config import init_project, resolve_config
 from ptest.contracts import InitAction, InitOptions, Problem, RunnerKind
 from factories_repo import fake_git_marker
+from support import write_file
 
 
 # Payload-only scratch label (see test_cli._REVIEW_SCRATCH): a
@@ -648,47 +649,25 @@ def test_standalone_xdist_init_reports_parallel_fallback_and_run_notes(tmp_path)
     ]
 
 
-def _write_child_config(path, kind, launcher, extra=""):
-    (path / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "abababababababababababababababab"\n'
-        "[runner]\n"
-        f'kind = "{kind}"\n'
-        f"launcher = {launcher}\n"
-        'args = []\n'
-        'full_args = []\n'
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n' + extra,
-        encoding="utf-8",
-    )
-
-
-def test_existing_persea_shaped_monorepo_reports_per_project_notes(tmp_path):
-    api = tmp_path / "api"
-    web = tmp_path / "web"
-    (api / "tests").mkdir(parents=True)
-    (web / "tests").mkdir(parents=True)
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n',
-        encoding="utf-8",
-    )
-    (api / "pyproject.toml").write_text(
-        '[tool.pytest.ini_options]\n'
-        'addopts = \'-n 4 --dist=loadgroup -m "not slow"\'\n',
-        encoding="utf-8",
-    )
-    (api / "tests" / "conftest.py").write_text(
-        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
-        encoding="utf-8",
-    )
-    _write_child_config(api, "pytest", '["python"]')
-    (web / "tests" / "a.test.ts").write_text(
-        "export {};\n", encoding="utf-8")
-    _write_child_config(
-        web, "vitest", '["node"]',
-        extra='[setup]\nargv = ["npm", "ci"]\nrequired_paths = ["node_modules"]\n'
-              "network = true\nlifecycle_scripts = true\n",
-    )
+def test_existing_persea_shaped_monorepo_reports_per_project_notes(
+        tmp_path, monorepo):
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",),
+                 "project_id": "ab" * 16},
+         "web": {"kind": "vitest", "launcher": ("node",),
+                 "project_id": "ab" * 16,
+                 "setup": {"argv": ("npm", "ci"),
+                           "required_paths": ("node_modules",),
+                           "network": True, "lifecycle_scripts": True}}},
+        parent=tmp_path, name=None,
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n')
+    api, web = root / "api", root / "web"
+    write_file(api / "pyproject.toml",
+               '[tool.pytest.ini_options]\n'
+               'addopts = \'-n 4 --dist=loadgroup -m "not slow"\'\n')
+    write_file(api / "tests" / "conftest.py",
+               "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+    write_file(web / "tests" / "a.test.ts", "export {};\n")
 
     result = init_project(tmp_path, _options(dry_run=False))
 
@@ -737,11 +716,8 @@ def test_monorepo_dry_run_marks_preexisting_children_already_present(tmp_path):
 
 
 def _make_cli_init_repo(root):
-    marker = root / ".git"
-    marker.mkdir()
-    (marker / "HEAD").write_text("ref: refs/heads/main\n")
-    (marker / "config").write_text(
-        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    # Detection-only fake marker (no git binary).
+    fake_git_marker(root)
     (root / "pyproject.toml").write_text(
         '[project]\ndependencies = ["pytest>=8"]\n', encoding="utf-8")
 
