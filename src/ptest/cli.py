@@ -1977,7 +1977,7 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
     for rel in updated:
         print(f"updated {rel}")
     if doctor_fix.selection_enabled_by(plan):
-        print("run ptest --full once to record a baseline")
+        print("run a parallel full baseline once to record a baseline")
     return 0
 
 

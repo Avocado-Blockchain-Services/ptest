@@ -36,6 +36,8 @@ def _write_addopts(root: Path, addopts: str) -> None:
 
 
 def _stub_xdist_venv(root: Path) -> None:
+    from ptest.runtime.pytest_bridge import _COVERAGE_TUPLE
+
     packages = root / ".venv" / "lib" / "python3.12" / "site-packages"
     dist_info = packages / "pytest_xdist-3.8.0.dist-info"
     dist_info.mkdir(parents=True)
@@ -43,6 +45,11 @@ def _stub_xdist_venv(root: Path) -> None:
         "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.8.0\n",
         encoding="utf-8",
     )
+    # The tier probe reads versions from dist-info directory names only,
+    # so these stubs pin the frozen pytest-cov/coverage pair by name.
+    pytest_cov, coverage = _COVERAGE_TUPLE
+    (packages / f"pytest_cov-{pytest_cov}.dist-info").mkdir(exist_ok=True)
+    (packages / f"coverage-{coverage}.dist-info").mkdir(exist_ok=True)
     (root / ".venv" / "pyvenv.cfg").write_text(
         "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12\n",
         encoding="utf-8",
@@ -142,6 +149,34 @@ def test_fix_drops_stale_n0_when_parallel_tier_qualifies(
         line for line in before.decode().splitlines() if not line.startswith("args = ")]
 
 
+def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
+        tmp_path, monkeypatch, capsys):
+    """A stale `-n 0` is dropped on a `--cov` project when the tier qualifies.
+
+    Regression pin for the coverage merge: if stale detection regressed
+    to treating `--cov` as serial, the tier reason would no longer be
+    exactly "sets -n 0" and the fallback would be kept.
+    """
+    root = _write_pytest_project(tmp_path / "stale-cov")
+    _write_config(root, args=("-n", "0", "--cov", "pkg",
+                              "--cov-report", "term"))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "DRAFT" in out
+    assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' in out
+    assert '+args = ["--cov", "pkg", "--cov-report", "term"]' in out
+    assert "serial" not in out.lower()
+
+    assert main(("doctor", "--fix", "--yes")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert '"-n", "0"' not in raw
+    assert '"--cov"' in raw
+
+
 def test_fix_adds_missing_group_to_setup_argv(tmp_path, monkeypatch, capsys):
     root = _write_pytest_project(
         tmp_path / "extras", addopts="", groups={"dev": ["pytest>=8"]})
@@ -176,7 +211,7 @@ def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):
     assert "enabled = true" in raw
     assert "closed_inputs = true" in raw
     out = capsys.readouterr().out
-    assert "run ptest --full once to record a baseline" in out
+    assert "run a parallel full baseline once to record a baseline" in out
 
 
 def test_fix_appends_missing_selection_table_at_eof(
