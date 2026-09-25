@@ -274,9 +274,15 @@ def test_choose_plan_is_pure_without_subprocess_or_test_imports(case, monkeypatc
         return real_import(name, *args, **kwargs)
     def forbidden(*args, **kwargs):
         raise AssertionError("static planning executed a subprocess")
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-    monkeypatch.setattr(subprocess, "Popen", forbidden)
-    assert choose_plan(config, snap, history, case.request()).execution == "none"
+    # Scoped to the planning call only: the bridge's call-phase
+    # pytest_runtest_logreport lazy-imports pytest after the call returns,
+    # and a process-wide patch would turn that harness import into a
+    # worker INTERNALERROR under xdist.
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "__import__", guarded_import)
+        m.setattr(subprocess, "Popen", forbidden)
+        plan = choose_plan(config, snap, history, case.request())
+    assert plan.execution == "none"
 
 
 def test_changed_test_dependency_unions_all_dependent_groups(case):

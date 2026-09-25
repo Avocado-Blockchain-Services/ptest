@@ -14,20 +14,9 @@ from pathlib import Path
 from ptest import contracts as C
 
 
-def _stub_cov_venv(root: Path) -> None:
+def _pytest_repo(root: Path, venv_stub, *, cov_pair: bool = True) -> Path:
     from ptest.runtime.pytest_bridge import _COVERAGE_TUPLE
 
-    packages = root / ".venv" / "lib" / "python3.12" / "site-packages"
-    pytest_cov, coverage = _COVERAGE_TUPLE
-    (packages / f"pytest_cov-{pytest_cov}.dist-info").mkdir(parents=True)
-    (packages / f"coverage-{coverage}.dist-info").mkdir(parents=True)
-    (root / ".venv" / "pyvenv.cfg").write_text(
-        "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12\n",
-        encoding="utf-8",
-    )
-
-
-def _pytest_repo(root: Path, *, cov_pair: bool = True) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "tests").mkdir(exist_ok=True)
     (root / "tests" / "test_example.py").write_text(
@@ -36,7 +25,8 @@ def _pytest_repo(root: Path, *, cov_pair: bool = True) -> Path:
     (root / "pyproject.toml").write_text(
         '[project]\nname = "fixture"\ndependencies = []\n', encoding="utf-8")
     if cov_pair:
-        _stub_cov_venv(root)
+        pytest_cov, coverage = _COVERAGE_TUPLE
+        venv_stub(root, pytest_cov=pytest_cov, coverage=coverage)
     return root
 
 
@@ -72,10 +62,10 @@ def _stub_execute(monkeypatch, calls, *, status=C.Status.PASSED):
 # --- choice matrix ----------------------------------------------------------
 
 
-def test_changed_setup_later_writes_cov_and_selection_draft(tmp_path, monkeypatch, capsys):
+def test_changed_setup_later_writes_cov_and_selection_draft(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     _stub_execute(monkeypatch, calls)
@@ -92,10 +82,10 @@ def test_changed_setup_later_writes_cov_and_selection_draft(tmp_path, monkeypatc
     assert "baseline" in out
 
 
-def test_changed_setup_now_writes_and_runs_full_baseline(tmp_path, monkeypatch, capsys):
+def test_changed_setup_now_writes_and_runs_full_baseline(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     _stub_execute(monkeypatch, calls)
@@ -108,10 +98,10 @@ def test_changed_setup_now_writes_and_runs_full_baseline(tmp_path, monkeypatch, 
     assert calls[0].mode is C.Mode.FULL
 
 
-def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys):
+def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     _stub_execute(monkeypatch, calls)
@@ -123,10 +113,10 @@ def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys):
     assert calls == []
 
 
-def test_changed_setup_enter_defaults_to_later(tmp_path, monkeypatch, capsys):
+def test_changed_setup_enter_defaults_to_later(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
@@ -144,10 +134,10 @@ def test_changed_setup_enter_defaults_to_later(tmp_path, monkeypatch, capsys):
     assert "[now/later/no] (default: later)" in err
 
 
-def test_changed_setup_non_interactive_default_is_later(tmp_path, monkeypatch, capsys):
+def test_changed_setup_non_interactive_default_is_later(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     _stub_execute(monkeypatch, calls)
@@ -188,11 +178,11 @@ def test_ask_choice_enter_and_eof_take_the_default(monkeypatch, capsys):
 
 
 def test_changed_setup_now_surfaces_baseline_recorded(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, venv_stub):
     from ptest import operations
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     result = case.result(baseline_published=True)
@@ -216,10 +206,10 @@ def test_changed_setup_now_surfaces_baseline_recorded(
 # --- eligibility ------------------------------------------------------------
 
 
-def test_changed_setup_without_pytest_cov_prints_needs_line(tmp_path, monkeypatch, capsys):
+def test_changed_setup_without_pytest_cov_prints_needs_line(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path, cov_pair=False)
+    _pytest_repo(tmp_path, venv_stub, cov_pair=False)
     monkeypatch.chdir(tmp_path)
 
     assert main(_init_argv("--changed-setup", "later")) == 0
@@ -254,10 +244,10 @@ def test_changed_setup_skips_vitest_without_a_question(tmp_path, monkeypatch, ca
     assert "Set up ptest --changed" not in captured.err
 
 
-def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     calls: list = []
     _stub_execute(monkeypatch, calls)
@@ -270,10 +260,10 @@ def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, c
     assert "--cov" in out or "would" in out
 
 
-def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatch, capsys):
+def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     assert main(_init_argv("--changed-setup", "no")) == 0
     before = (tmp_path / ".ptest.toml").read_bytes()
@@ -289,29 +279,29 @@ def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatc
 # --- grammar ----------------------------------------------------------------
 
 
-def test_changed_setup_invalid_value_is_rejected(tmp_path, monkeypatch, capsys):
+def test_changed_setup_invalid_value_is_rejected(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
 
     assert main(_init_argv("--changed-setup", "someday")) == 2
     assert not (tmp_path / ".ptest.toml").exists()
 
 
-def test_changed_setup_repeated_flag_is_rejected(tmp_path, monkeypatch, capsys):
+def test_changed_setup_repeated_flag_is_rejected(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
 
     assert main(_init_argv("--changed-setup", "later", "--changed-setup", "no")) == 2
 
 
-def test_changed_setup_cannot_combine_with_json(tmp_path, monkeypatch, capsys):
+def test_changed_setup_cannot_combine_with_json(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
-    _pytest_repo(tmp_path)
+    _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
 
     assert main(_init_argv("--changed-setup", "later", "--json")) == 2
@@ -349,11 +339,11 @@ def test_skill_template_defaults_to_changed():
     assert "docs/ptest-agent.md" in text
 
 
-def test_init_then_uninstall_recognises_new_guide_and_skill(tmp_path, monkeypatch):
+def test_init_then_uninstall_recognises_new_guide_and_skill(tmp_path, monkeypatch, venv_stub):
     from ptest.cli import main
     import ptest.agent_rules as rules_module
 
-    _pytest_repo(tmp_path, cov_pair=False)
+    _pytest_repo(tmp_path, venv_stub, cov_pair=False)
     monkeypatch.chdir(tmp_path)
     assert main(("init", "--runner", "pytest", "--agents", "claude",
                  "--no-doctor", "--no-smoke",
@@ -369,11 +359,11 @@ def test_init_then_uninstall_recognises_new_guide_and_skill(tmp_path, monkeypatc
     assert guide_entry is not None and guide_entry.action == uninstall_api.REMOVE
 
 
-def test_init_upgrades_previous_skill_in_place(tmp_path, monkeypatch):
+def test_init_upgrades_previous_skill_in_place(tmp_path, monkeypatch, venv_stub):
     from ptest.cli import main
     import ptest.agent_rules as rules_module
 
-    _pytest_repo(tmp_path, cov_pair=False)
+    _pytest_repo(tmp_path, venv_stub, cov_pair=False)
     target = tmp_path / ".claude" / "skills" / "ptest"
     target.mkdir(parents=True)
     (target / "SKILL.md").write_bytes(

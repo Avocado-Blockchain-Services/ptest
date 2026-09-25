@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ptest import contracts as C
+from support import git, init_git_repo
 
 
 def snapshot(*args, **kwargs):
@@ -49,9 +50,9 @@ def test_snapshot_reads_git_nul_status_and_committed_base_union(case):
     domain, root = _repository(case)
     config = _config(case, domain)
     ensure_fingerprint_key(domain)
-    initial = _git(root, "rev-parse", "HEAD")
+    initial = git(root, "rev-parse", "HEAD")
     (root / "src" / "a.py").write_text("two\n")
-    _git(root, "add", "src/a.py"); _git(root, "commit", "-m", "change")
+    git(root, "add", "src/a.py"); git(root, "commit", "-m", "change")
     baseline = case.history(with_baseline=True).baseline
     baseline = type(baseline)(run_id=baseline.run_id, head=initial, input_digest=baseline.input_digest,
                               compatibility="x", inventory=baseline.inventory,
@@ -97,7 +98,7 @@ def test_deleted_and_renamed_paths_are_reported_without_losing_snapshot(case):
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     (root / "src" / "a.py").rename(root / "src" / "renamed.py")
     (root / "tests" / "test_a.py").unlink()
-    _git(root, "add", "-A")
+    git(root, "add", "-A")
     result = snapshot(domain, config, None, None)
     assert result.digest is not None
     assert any(change.kind == "renamed" for change in result.changes)
@@ -109,7 +110,7 @@ def test_ignored_generated_input_is_fingerprinted_when_declared(case):
     from ptest import contracts as C
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
-    (root / ".gitignore").write_text("generated/\n"); _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore")
+    (root / ".gitignore").write_text("generated/\n"); git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore")
     (root / "generated").mkdir(); (root / "generated" / "input.py").write_text("generated\n")
     original = _config(case, domain)
     policy = C.SelectionPolicy(enabled=True, closed_inputs=True, input_roots=("src", "tests"),
@@ -141,7 +142,7 @@ def test_mode_change_and_gitlink_fail_closed(case):
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     (root / "src" / "a.py").chmod(0o755)
     assert any(change.new == "src/a.py" for change in snapshot(domain, config, None, None).changes)
-    _git(root, "update-index", "--add", "--cacheinfo", "160000," + "a" * 40 + ",submodule")
+    git(root, "update-index", "--add", "--cacheinfo", "160000," + "a" * 40 + ",submodule")
     assert snapshot(domain, config, None, None).digest is None
 
 
@@ -149,17 +150,17 @@ def test_unmerged_conflict_and_shallow_baseline_fail_closed(case):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
-    initial = _git(root, "rev-parse", "HEAD")
-    main_branch = _git(root, "branch", "--show-current")
-    _git(root, "checkout", "-b", "other")
-    (root / "src" / "a.py").write_text("other\n"); _git(root, "commit", "-am", "other")
-    _git(root, "checkout", main_branch)
-    (root / "src" / "a.py").write_text("master\n"); _git(root, "commit", "-am", "master")
+    initial = git(root, "rev-parse", "HEAD")
+    main_branch = git(root, "branch", "--show-current")
+    git(root, "checkout", "-b", "other")
+    (root / "src" / "a.py").write_text("other\n"); git(root, "commit", "-am", "other")
+    git(root, "checkout", main_branch)
+    (root / "src" / "a.py").write_text("master\n"); git(root, "commit", "-am", "master")
     assert subprocess.run(("git", "-C", str(root), "merge", "other")).returncode != 0
     conflicted = snapshot(domain, config, None, None)
     assert conflicted.digest is None
     assert any(reason.code == "unknown-input" for reason in conflicted.limitations)
-    _git(root, "merge", "--abort")
+    git(root, "merge", "--abort")
     shallow = domain.root / "shallow"
     subprocess.run(("git", "clone", "--depth", "1", "file://" + str(root), str(shallow)), check=True, stdout=subprocess.PIPE)
     shallow_checkout = case.checkout(domain); object.__setattr__(shallow_checkout, "root", shallow)
@@ -168,22 +169,12 @@ def test_unmerged_conflict_and_shallow_baseline_fail_closed(case):
                               compatibility="x", inventory=baseline.inventory, policy_digest=baseline.policy_digest,
                               created_at=baseline.created_at)
     assert snapshot(domain, case.config(checkout=shallow_checkout), baseline, None).digest is None
-def _git(root, *args):
-    return subprocess.run(("git", "-C", str(root), *args), check=True,
-                          stdout=subprocess.PIPE).stdout.decode().strip()
-
-
 def _repository(case):
     domain = case.domain()
-    root = domain.root / "repo"
-    root.mkdir()
-    _git(root, "init")
-    _git(root, "config", "user.email", "fixture@example.test")
-    _git(root, "config", "user.name", "Fixture")
-    (root / "src").mkdir(); (root / "tests").mkdir()
-    (root / "src" / "a.py").write_text("one\n")
-    (root / "tests" / "test_a.py").write_text("pass\n")
-    _git(root, "add", "."); _git(root, "commit", "-m", "initial")
+    root = init_git_repo(
+        domain.root / "repo",
+        files={"src/a.py": "one\n", "tests/test_a.py": "pass\n"},
+        message="initial")
     return domain, root
 
 
@@ -205,7 +196,7 @@ def test_undeclared_ignored_content_is_not_an_automatic_exemption(case):
     domain, root = _repository(case)
     ensure_fingerprint_key(domain)
     (root / ".gitignore").write_text("__pycache__/\n.venv/\n")
-    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore caches")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
     config = _config(case, domain)
     before = snapshot(domain, config, None, None)
     (root / "src/__pycache__").mkdir()
@@ -228,7 +219,7 @@ def test_pytest_full_snapshot_excludes_only_root_cache_and_bytecode(case):
     config = _config(case, domain)
     before = snapshot(domain, config, None, None, pytest_full_outputs=True)
     (root / ".gitignore").write_text(".pytest_cache/\ntests/__pycache__/\n")
-    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore native outputs")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore native outputs")
     (root / ".pytest_cache").mkdir(); (root / ".pytest_cache" / "CACHEDIR.TAG").write_text("cache")
     (root / "tests" / "__pycache__").mkdir(); (root / "tests" / "__pycache__" / "test_a.cpython-313-pytest-9.1.1.pyc").write_bytes(b"pyc")
     after = snapshot(domain, config, None, None, pytest_full_outputs=True)
@@ -249,8 +240,8 @@ def test_uv_environment_is_excluded_from_full_snapshot_without_ignored_bypass(ca
         "[tool.pytest.ini_options]\n", encoding="utf-8")
     (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     (root / ".gitignore").write_text(".venv/\nlocal-secret.txt\n", encoding="utf-8")
-    _git(root, "add", "pyproject.toml", "uv.lock", ".gitignore")
-    _git(root, "commit", "-m", "uv project")
+    git(root, "add", "pyproject.toml", "uv.lock", ".gitignore")
+    git(root, "commit", "-m", "uv project")
     created = init_project(root, InitOptions(runner=RunnerKind.PYTEST,
                                              dry_run=False,
                                              reveal_command=False))
@@ -284,13 +275,13 @@ def test_generated_uv_config_full_candidate_launches_with_real_environment(case)
     locked = subprocess.run(("uv", "lock"), cwd=root, check=False,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert locked.returncode == 0, locked.stderr.decode(errors="replace")
-    _git(root, "add", "pyproject.toml", "uv.lock", ".gitignore", "tests/test_a.py")
-    _git(root, "commit", "-m", "uv candidate")
+    git(root, "add", "pyproject.toml", "uv.lock", ".gitignore", "tests/test_a.py")
+    git(root, "commit", "-m", "uv candidate")
     created = init_project(root, InitOptions(runner=RunnerKind.PYTEST,
                                              dry_run=False,
                                              reveal_command=False))
-    _git(root, "add", ".ptest.toml")
-    _git(root, "commit", "-m", "generated ptest config")
+    git(root, "add", ".ptest.toml")
+    git(root, "commit", "-m", "generated ptest config")
     subprocess.run(("uv", "venv", str(root / ".venv")), check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert created.target.is_file()
@@ -314,11 +305,11 @@ def test_pytest_full_snapshot_excludes_root_conftest_and_imported_src_bytecode(c
     (root / "src" / "__pycache__" / "helper.cpython-313.pyc").write_bytes(b"pyc")
     (root / "__pycache__").mkdir()
     (root / "__pycache__" / "conftest.cpython-313.pyc").write_bytes(b"pyc")
-    _git(root, "add", "conftest.py", "src/helper.py")
-    _git(root, "commit", "-m", "root conftest and imported module")
+    git(root, "add", "conftest.py", "src/helper.py")
+    git(root, "commit", "-m", "root conftest and imported module")
     (root / ".gitignore").write_text("__pycache__/\n**/__pycache__/\n")
-    _git(root, "add", ".gitignore")
-    _git(root, "commit", "-m", "ignore bytecode")
+    git(root, "add", ".gitignore")
+    git(root, "commit", "-m", "ignore bytecode")
 
     result = source_module.snapshot(domain, config, None, None, pytest_full_outputs=True)
 
@@ -363,7 +354,7 @@ def test_pytest_full_snapshot_retains_nonstandard_cache_outputs(case, path):
     ensure_fingerprint_key(domain)
     config = _config(case, domain)
     (root / ".gitignore").write_text(".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\n")
-    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore caches")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
     target = root / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"output")
     result = snapshot(domain, config, None, None, pytest_full_outputs=True)
     assert path in {item.path for item in result.files}
@@ -383,8 +374,8 @@ def test_pytest_full_generated_allowlist_never_overrides_tracked_or_declared_inp
     (root / "generated").mkdir()
     declared_pyc = root / "generated" / "test.cpython-313.pyc"
     declared_pyc.write_bytes(b"declared bytecode")
-    _git(root, "add", ".")
-    _git(root, "commit", "-m", "track cache lookalikes")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "track cache lookalikes")
     policy = replace(_config(case, domain).selection, ignored_inputs=("generated",))
     config = case.config(checkout=_config(case, domain).checkout, selection=policy)
     result = snapshot(domain, config, None, None, pytest_full_outputs=True)
@@ -402,8 +393,8 @@ def test_undeclared_ignored_runtime_input_forces_full(case, with_docs_change):
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     (root / ".gitignore").write_text("local_settings.py\n")
     (root / "tests/other.py").write_text("pass\n")
-    _git(root, "add", ".gitignore", "tests/other.py")
-    _git(root, "commit", "-m", "selection fixture")
+    git(root, "add", ".gitignore", "tests/other.py")
+    git(root, "commit", "-m", "selection fixture")
     config = replace(_config(case, domain), selection=C.SelectionPolicy(
         enabled=True, closed_inputs=True, input_roots=("src", "tests"), no_tests=("docs",),
         groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
@@ -411,7 +402,7 @@ def test_undeclared_ignored_runtime_input_forces_full(case, with_docs_change):
     baseline = replace(_baseline(case, config, before),
                        inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
     (root / "src/local_settings.py").write_text("RUNTIME_FLAG = True\n")
-    assert _git(root, "check-ignore", "src/local_settings.py") == "src/local_settings.py"
+    assert git(root, "check-ignore", "src/local_settings.py") == "src/local_settings.py"
     if with_docs_change:
         (root / "docs").mkdir()
         (root / "docs/readme.md").write_text("docs only\n")
@@ -432,8 +423,8 @@ def test_raw_crlf_change_hidden_by_git_conversion_forces_full(case):
     (root / ".gitattributes").write_text("*.txt text\n")
     (root / "src/golden.txt").write_bytes(b"expected\n")
     (root / "tests/other.py").write_text("pass\n")
-    _git(root, "add", ".gitattributes", "src/golden.txt", "tests/other.py")
-    _git(root, "commit", "-m", "conversion fixture")
+    git(root, "add", ".gitattributes", "src/golden.txt", "tests/other.py")
+    git(root, "commit", "-m", "conversion fixture")
     config = replace(_config(case, domain), selection=C.SelectionPolicy(
         enabled=True, closed_inputs=True, input_roots=("src", "tests"), no_tests=("docs",),
         groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
@@ -459,14 +450,14 @@ def test_snapshot_never_executes_configured_process_filter(case):
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     (root / ".gitattributes").write_text("*.dat filter=sentinel\n")
     (root / "src/input.dat").write_bytes(b"original\n")
-    _git(root, "add", ".gitattributes", "src/input.dat")
-    _git(root, "commit", "-m", "filter fixture")
+    git(root, "add", ".gitattributes", "src/input.dat")
+    git(root, "commit", "-m", "filter fixture")
     marker = domain.root / "filter-executed"
     driver = domain.root / "filter-driver"
     driver.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
     driver.chmod(0o700)
-    _git(root, "config", "filter.sentinel.process", str(driver))
-    _git(root, "config", "filter.sentinel.required", "true")
+    git(root, "config", "filter.sentinel.process", str(driver))
+    git(root, "config", "filter.sentinel.required", "true")
     (root / "src/input.dat").write_bytes(b"changed\n")
 
     result = snapshot(domain, _config(case, domain), None, None)
@@ -483,7 +474,7 @@ def test_committed_delta_does_not_mark_worktree_dirty_and_newer_base_cannot_hide
     config = _config(case, domain)
     baseline = _baseline(case, config, snapshot(domain, config, None, None))
     (root / "src/a.py").write_text("second\n")
-    _git(root, "commit", "-am", "second")
+    git(root, "commit", "-am", "second")
     result = snapshot(domain, config, baseline, "HEAD")
     assert result.clean
     assert any(change.new == "src/a.py" for change in result.changes)
@@ -499,7 +490,7 @@ def test_environment_change_with_path_change_cannot_narrow(case, monkeypatch, ch
         enabled=True, closed_inputs=True, environment=("TASK8_TOKEN",), no_tests=("docs",),
         groups=(C.Group(name="core", sources=("src",), tests=("tests/test_a.py",)),)))
     (root / "tests/other.py").write_text("pass\n")
-    _git(root, "add", "tests/other.py"); _git(root, "commit", "-m", "other test")
+    git(root, "add", "tests/other.py"); git(root, "commit", "-m", "other test")
     monkeypatch.setenv("TASK8_TOKEN", "before")
     before = snapshot(domain, config, None, None)
     baseline = replace(_baseline(case, config, before), inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
@@ -562,7 +553,7 @@ def test_mode_change_prevents_narrowing_even_with_mapped_change(case, staged):
                        inventory=case.inventory(("tests/test_a.py", "tests/other.py")))
     (root / "src/a.py").chmod(0o755)
     if staged:
-        _git(root, "add", "src/a.py")
+        git(root, "add", "src/a.py")
     result = snapshot(domain, config, baseline, None)
     assert choose_plan(config, result, C.HistoryView(baseline=baseline), case.request()).execution == "full"
 
@@ -575,7 +566,7 @@ def test_index_flags_cannot_hide_runtime_edit_behind_docs_change(case, flag):
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True, no_tests=("docs",)))
     baseline = _baseline(case, config, snapshot(domain, config, None, None))
-    _git(root, "update-index", flag, "src/a.py")
+    git(root, "update-index", flag, "src/a.py")
     (root / "src/a.py").write_text("hidden runtime change")
     (root / "docs").mkdir(); (root / "docs/readme.md").write_text("docs")
     result = snapshot(domain, config, baseline, None)
@@ -586,8 +577,8 @@ def test_dd_unmerged_index_cannot_produce_usable_identity(case):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
-    oid = _git(root, "rev-parse", "HEAD:src/a.py")
-    _git(root, "update-index", "--force-remove", "src/a.py")
+    oid = git(root, "rev-parse", "HEAD:src/a.py")
+    git(root, "update-index", "--force-remove", "src/a.py")
     subprocess.run(("git", "-C", str(root), "update-index", "--index-info"),
                    input=f"100644 {oid} 1\tsrc/a.py\n".encode(), check=True)
     (root / "src/a.py").unlink()
@@ -605,7 +596,7 @@ def test_in_progress_operation_with_clean_status_fails_closed(case, marker):
     if marker.startswith("rebase-"):
         target.mkdir()
     else:
-        target.write_text(_git(root, "rev-parse", "HEAD") + "\n")
+        target.write_text(git(root, "rev-parse", "HEAD") + "\n")
     assert snapshot(domain, _config(case, domain), None, None).digest is None
 
 
@@ -615,7 +606,7 @@ def test_git_environment_cannot_redirect_snapshot(case, monkeypatch):
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     other_domain, other = _repository(case)
     (other / "alien.py").write_text("wrong checkout")
-    _git(other, "add", "."); _git(other, "commit", "-m", "alien")
+    git(other, "add", "."); git(other, "commit", "-m", "alien")
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git/index"))
@@ -631,7 +622,7 @@ def test_snapshot_never_executes_repository_fsmonitor(case):
     marker = domain.root / "hook-executed"
     hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf '\\0'\n")
     hook.chmod(0o700)
-    _git(root, "config", "core.fsmonitor", str(hook))
+    git(root, "config", "core.fsmonitor", str(hook))
     snapshot(domain, _config(case, domain), None, None)
     assert not marker.exists()
 
@@ -651,13 +642,13 @@ def test_real_divergent_commit_is_not_accepted_as_baseline_or_base(case):
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     config = _config(case, domain)
-    main = _git(root, "branch", "--show-current")
-    _git(root, "checkout", "-b", "divergent")
-    (root / "src/a.py").write_text("divergent\n"); _git(root, "commit", "-am", "diverge")
+    main = git(root, "branch", "--show-current")
+    git(root, "checkout", "-b", "divergent")
+    (root / "src/a.py").write_text("divergent\n"); git(root, "commit", "-am", "diverge")
     other = snapshot(domain, config, None, None)
     baseline = _baseline(case, config, other)
-    _git(root, "checkout", main)
-    (root / "src/a.py").write_text("main\n"); _git(root, "commit", "-am", "main")
+    git(root, "checkout", main)
+    (root / "src/a.py").write_text("main\n"); git(root, "commit", "-am", "main")
     assert snapshot(domain, config, baseline, None).digest is None
     assert snapshot(domain, config, None, other.head).digest is None
 
@@ -667,7 +658,7 @@ def test_declared_non_input_ignored_output_does_not_change_identity(case):
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     (root / ".gitignore").write_text("reports/\n")
-    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "ignore declared output")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore declared output")
     config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
         input_roots=("src", "tests"), non_input_outputs=("reports",)))
     before = snapshot(domain, config, None, None)
@@ -796,7 +787,7 @@ def test_declared_ignored_input_change_with_docs_forces_full(case):
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
     (root / ".gitignore").write_text("generated/\n")
-    _git(root, "add", ".gitignore"); _git(root, "commit", "-m", "generated inputs")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "generated inputs")
     (root / "generated").mkdir(); (root / "generated/input.py").write_text("original\n")
     config = replace(_config(case, domain), selection=C.SelectionPolicy(enabled=True, closed_inputs=True,
         ignored_inputs=("generated",), no_tests=("docs",)))
