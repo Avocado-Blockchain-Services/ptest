@@ -21,7 +21,7 @@ from .project_facts import (
     wrap_atoms,
     wrap_words,
 )
-from .render import terminal_text
+from .render import colors_enabled, paint, terminal_text
 
 _MAX_BODY_LINES = 200
 _CONFIG_NAME = ".ptest.toml"
@@ -81,12 +81,8 @@ def _bound_repo_name(repo_name: object) -> str:
     return clean
 
 
-def _use_color(color: bool) -> bool:
-    return bool(color) and "NO_COLOR" not in os.environ
-
-
 def _banner_lines(repo_name: object, color: bool) -> list[str]:
-    use_color = _use_color(color)
+    use_color = colors_enabled(color)
     start = _COLOR_START if use_color else ""
     stop = _COLOR_STOP if use_color else ""
     lines = [f"{start}{row}{stop}" for row in _WORDMARK]
@@ -117,11 +113,11 @@ def _header(result: C.InitResult, rules: object, dry_run: bool) -> str:
 
 
 def _header_line(result: C.InitResult, rules: object, dry_run: bool,
-                 repo_name: str) -> str:
+                 repo_name: str, *, color: bool = False) -> str:
     phrase = _header(result, rules, dry_run)
     bound = _bound_repo_name(repo_name)
     if bound:
-        return f"{phrase} · {bound}"
+        return f"{phrase} · {paint(bound, 'bold', color=color)}"
     return phrase
 
 
@@ -185,7 +181,20 @@ def _file_groups(result: C.InitResult, rules: object,
     return groups
 
 
-def _file_lines(result: C.InitResult, rules: object, width: int) -> list[str]:
+def _dim_field(line: str, start: int, stop: int, *, color: bool) -> str:
+    """Dim one fixed field of an already-laid-out line.
+
+    Layout math always runs on the plain text; painting the fixed
+    field afterwards keeps columns aligned. Continuation lines start
+    with a space at the field position and pass through untouched.
+    """
+    if not colors_enabled(color) or len(line) <= stop or line[start] == " ":
+        return line
+    return line[:start] + paint(line[start:stop], "dim", color=True) + line[stop:]
+
+
+def _file_lines(result: C.InitResult, rules: object, width: int, *,
+                color: bool = False) -> list[str]:
     lines: list[str] = []
     last_source: str | None = None
     for source, action, targets in _file_groups(result, rules):
@@ -199,7 +208,9 @@ def _file_lines(result: C.InitResult, rules: object, width: int) -> list[str]:
         hang = " " * len(prefix)
         lines.extend(wrap_atoms(shown, width, indent="  " + prefix,
                                 hang="  " + hang, sep=", "))
-    return lines
+    if not colors_enabled(color):
+        return lines
+    return [_dim_field(line, 2, 12, color=color) for line in lines]
 
 
 def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
@@ -215,7 +226,8 @@ def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
 
 
 def _project_fact_lines(facts: Mapping[str, object], width: int,
-                        name_width: int = 6) -> list[str]:
+                        name_width: int = 6, *,
+                        color: bool = False) -> list[str]:
     project = terminal_text(facts.get("project", "."))
     runner = terminal_text(facts.get("runner", "unknown"))
     prefix = f"  {project:<{name_width}}{runner}  "
@@ -226,12 +238,17 @@ def _project_fact_lines(facts: Mapping[str, object], width: int,
         atoms = [terminal_text(atom) for atom in detail_atoms(detail)]
         lines.extend(wrap_atoms(atoms, width, indent=hang, hang=hang,
                                 sep=" "))
-    return lines
+    if not colors_enabled(color):
+        return lines
+    bold = len(project)
+    return [(line[:2] + paint(line[2:2 + bold], "bold", color=True)
+             + line[2 + bold:]) if len(line) > 2 and line[2] != " " else line
+            for line in lines]
 
 
 def _project_lines(result: C.InitResult,
                    facts: Sequence[Mapping[str, object]],
-                   width: int) -> list[str]:
+                   width: int, *, color: bool = False) -> list[str]:
     validated = [check_facts(item) for item in facts]
     validated = [item for item in validated if item is not None]
     if validated:
@@ -240,9 +257,11 @@ def _project_lines(result: C.InitResult,
         name_width = max(6, longest + 2)
         lines: list[str] = []
         for item in validated:
-            lines.extend(_project_fact_lines(item, width, name_width))
+            lines.extend(_project_fact_lines(item, width, name_width,
+                                             color=color))
         return lines
-    return [f"  {terminal_text(project)}  {terminal_text(runner)}"
+    return [f"  {paint(terminal_text(project), 'bold', color=color)}  "
+            f"{terminal_text(runner)}"
             for project, runner in _note_projects(result)]
 
 
@@ -273,13 +292,13 @@ def render_init(result: C.InitResult, rules: object = None, *,
         raise TypeError("render_init requires InitResult")
     resolved = terminal_width(width)
     lines = _banner_lines(repo_name, color)
-    lines.append(_header_line(result, rules, dry_run, repo_name))
+    lines.append(_header_line(result, rules, dry_run, repo_name, color=color))
     blocks: list[list[str]] = []
-    projects = _project_lines(result, facts, resolved)
+    projects = _project_lines(result, facts, resolved, color=color)
     if projects:
         blocks.append(projects)
     if rules is not None:
-        files = _file_lines(result, rules, resolved)
+        files = _file_lines(result, rules, resolved, color=color)
         if files:
             blocks.append(files)
     if result.warnings:
@@ -360,7 +379,8 @@ def render_init_footer(result: C.InitResult, rules: object = None, *,
                        smoke: Sequence[object] = (),
                        plans: Sequence[object] = (),
                        facts: Sequence[Mapping[str, object]] = (),
-                       width: int | None = None) -> str:
+                       width: int | None = None,
+                       color: bool = False) -> str:
     """Render smoke, actionable next steps, and at most one restart line.
 
     Returns ``""`` when there is nothing to say.
@@ -376,7 +396,7 @@ def render_init_footer(result: C.InitResult, rules: object = None, *,
             if not isinstance(item, SmokeResult):
                 raise TypeError("render_init_footer smoke requires "
                                 "SmokeResult rows")
-        block = format_smoke(smoke_items, width=resolved)
+        block = format_smoke(smoke_items, width=resolved, color=color)
         if block:
             lines.append(block.rstrip("\n"))
     steps = _next_steps(facts, smoke_items, tuple(plans), resolved)

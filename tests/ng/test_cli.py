@@ -963,6 +963,22 @@ def test_init_agents_all_uses_the_closed_provider_list(tmp_path, monkeypatch, ca
     assert "ptest initialized" in captured.out
 
 
+def test_init_agents_prompt_defaults_to_all_on_enter(tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "")
+    assert main(("init", "--runner", "pytest")) == 0
+    captured = capsys.readouterr()
+    assert "(default: all)" in captured.err
+    for relative in (".claude/skills/ptest/SKILL.md",
+                     ".agents/skills/ptest/SKILL.md",
+                     ".opencode/skills/ptest/SKILL.md",
+                     ".gemini/skills/ptest/SKILL.md"):
+        assert (tmp_path / relative).is_file()
+
+
 def test_init_json_is_non_interactive_and_byte_exact(tmp_path, monkeypatch, capsys):
     import sys
 
@@ -2211,7 +2227,9 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
     failure_document = C.decode_public_document(captured.out)
     assert failure_document.data is None
     assert failure_document.error.code == "provider-failed"
-    assert "doctor review: reviewing" in captured.err
+    assert "doctor: reviewing" in captured.err
+    assert "provider=" not in captured.err
+    assert "elapsed=" not in captured.err
     assert launches
     declarations = [declaration for declaration in launches]
     api_count = declarations.count("api")
@@ -2546,9 +2564,12 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
                  "--json")) == 0
 
     stderr = capsys.readouterr().err
-    assert sum("collecting |" in line for line in stderr.splitlines()) >= 2
-    assert sum("validating |" in line for line in stderr.splitlines()) >= 2
-    assert "elapsed=15s" in stderr
+    assert sum("doctor: collecting" in line
+               for line in stderr.splitlines()) >= 2
+    assert sum("doctor: validating" in line
+               for line in stderr.splitlines()) >= 2
+    assert "· 15s" in stderr
+    assert "|" not in stderr
     assert "%" not in stderr
 
 

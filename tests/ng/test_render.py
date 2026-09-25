@@ -780,10 +780,10 @@ def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
     assert "✓" not in text
 
 
-def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
+def test_na_rationale_wraps_fully_without_ellipsis():
     from ptest.render import render_agent_assessment
 
-    rationale = " ".join(f"token{i:03d}" for i in range(100))
+    rationale = " ".join(f"token{i:03d}" for i in range(30))
     child = {
         "scope": "api",
         "score": {"satisfied": 0, "applicable": 0, "percent": 0},
@@ -796,13 +796,65 @@ def test_na_rationale_truncates_at_word_boundary_with_ellipsis():
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
-    line = next(item for item in text.splitlines()
-                if item.startswith("  – Database isolation"))
-    assert line.endswith("…")
-    assert "[truncated]" not in line
-    import re
+    assert "…" not in text
+    for index in range(30):
+        assert f"token{index:03d}" in text
 
-    assert re.fullmatch(r"token\d{3}", line[:-1].rsplit(" ", 1)[-1])
+
+def test_unknown_reason_wraps_fully_without_ellipsis():
+    from ptest.render import render_agent_assessment
+
+    rationale = ("no timing history yet: run ptest --full once for whole-run "
+                 "timing; per-test timings need a coverage run first")
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 0, "applicable": 0, "percent": 0},
+        "rows": [_aa_row("TIMING-001", "unknown", label="Test timing",
+                         rationale=rationale, evidence=[])],
+        "findings": [],
+        "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=60)
+    assert "…" not in text
+    squashed = " ".join(text.split())
+    assert "per-test timings need a coverage run first" in squashed
+
+
+def test_assessment_colors_icons_on_tty_only(monkeypatch):
+    from ptest.render import render_agent_assessment
+
+    child = {
+        "scope": "api",
+        "score": {"satisfied": 1, "applicable": 2, "percent": 50},
+        "rows": [
+            _aa_row("FIX-001", "satisfied", label="Test data factories"),
+            _aa_row("FIX-002", "gap", label="Parallel execution",
+                    rationale="Serial fallback."),
+        ],
+        "findings": [{"id": "FIX-002", "summary": "Runs serially.",
+                      "suggested_change": "Enable xdist.",
+                      "recipe_id": None,
+                      "evidence": [_aa_citation()]}],
+        "limitations": [],
+    }
+    plain = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90)
+    assert "\x1b" not in plain
+
+    tty = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90, color=True)
+    assert "\x1b[32m✓\x1b[0m" in tty
+    assert "\x1b[31m✗\x1b[0m" in tty
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    dimmed = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90, color=True)
+    assert "\x1b" not in dimmed
 
 
 def test_hostile_fact_characters_never_reach_doctor_raw():

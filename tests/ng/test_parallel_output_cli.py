@@ -804,7 +804,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
                  if line.startswith("Model review disclosure:"))
     disclosure_only = [
         line for line in disclosure_lines[start:]
-        if line.strip() and not line.startswith("doctor review:")]
+        if line.strip() and not line.startswith("doctor:")]
     assert len(disclosure_only) <= 3
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
