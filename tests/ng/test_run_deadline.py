@@ -605,17 +605,123 @@ def test_execute_propagates_resolved_deadline_to_launch_guard(case, monkeypatch)
     from ptest.config import resolve_config as resolve
     config = resolve(root).config
     assert config is not None
+    launch = operations._launch_guard
     seen = []
+    manifests = []
+    real_encode = C.encode_launch_manifest
+
+    def capture_encode(manifest):
+        manifests.append(manifest.compound_timeout_s)
+        return real_encode(manifest)
 
     def spy(*args):
         seen.append(operations._COMPOUND_TIMEOUT_S.get())
-        raise OSError("injected launch failure")
+        return launch(*args)
 
+    monkeypatch.setattr(C, "encode_launch_manifest", capture_encode)
     monkeypatch.setattr(operations, "_launch_guard", spy)
     result = operations.execute(
         domain, config, C.RunRequest(mode=C.Mode.FULL, timeout_s=1234))
-    assert result.status is C.Status.INCOMPLETE
+    assert result.status is C.Status.PASSED
+    # The wrapper observed the resolved limit while execute() held it, and
+    # the real guard baked that same value into the manifest it launched.
     assert seen == [1234.0]
+    assert manifests == [1234.0]
+    assert operations._COMPOUND_TIMEOUT_S.get() == C.DEFAULT_COMPOUND_TIMEOUT_S
+
+
+def test_execute_full_gate_uses_full_family_evidence(case, monkeypatch):
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    from ptest.config import resolve_config as resolve
+    config = resolve(root).config
+    assert config is not None
+    wanted = {}
+
+    def record_evidence(_domain, _checkout, *, full):
+        wanted.setdefault("full", []).append(full)
+        return (None, None)
+
+    def fail(*args):
+        raise OSError("injected launch failure")
+
+    monkeypatch.setattr(history_api, "comparable_run_evidence", record_evidence)
+    monkeypatch.setattr(operations, "_launch_guard", fail)
+    # A bare AUTOMATIC command run executes the full gate even though the
+    # request (and its history row) is recorded as AUTOMATIC: the deadline
+    # must come from full-family evidence, never a scoped single-file row.
+    operations.execute(domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC))
+    assert wanted["full"] == [True]
+    # A scoped run keeps non-full evidence (with its fallback to full).
+    operations.execute(domain, config, _scoped_request())
+    assert wanted["full"] == [True, False]
+
+
+def test_shadow_uses_full_family_evidence(case, monkeypatch):
+    from types import SimpleNamespace
+
+    from ptest import selection as selection_api
+
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    project_id = root.joinpath(".ptest.toml").read_text().splitlines()[1]
+    root.joinpath(".ptest.toml").write_text(
+        "version = 1\n"
+        f"{project_id}\n"
+        "[runner]\n"
+        'kind = "pytest"\n'
+        'launcher = ["echo"]\n'
+        'args = ["hello"]\n'
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 1\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8",
+    )
+    from ptest.config import resolve_config as resolve
+    config = resolve(root).config
+    assert config is not None
+    assert config.runner.kind is C.RunnerKind.PYTEST
+    wanted = {}
+
+    def record_evidence(_domain, _checkout, *, full):
+        wanted.setdefault("full", []).append(full)
+        return (None, None)
+
+    class _FakePytestAdapter:
+        def qualified_profile(self, _config):
+            return {"selection": True}
+
+        def compound_support(self, _config, qualified_profile=None):
+            return C.CompoundSupport(
+                selection=True, parallel_identity=False,
+                profile="fake", limitations=())
+
+        def prepare_advanced(self, _config, _plan, _grant, _identity,
+                             expected_runtime_identity=None):
+            return C.PreparedRun(
+                argv=("echo", "hello"), cwd=root, env_updates=())
+
+    def fake_shadow_plans(_config, _snapshot, _history_view, _request, _support):
+        return SimpleNamespace(
+            selected=C.Plan(mode=C.Mode.AUTOMATIC, execution="selected",
+                            files=("tests/test_a.py",)),
+            full=C.Plan(mode=C.Mode.AUTOMATIC, execution="full"),
+        )
+
+    def fail(*args, **kwargs):
+        raise OSError("injected launch failure")
+
+    monkeypatch.setattr(history_api, "comparable_run_evidence", record_evidence)
+    monkeypatch.setattr(operations, "adapter_for", lambda _kind: _FakePytestAdapter())
+    monkeypatch.setattr(selection_api, "choose_shadow_plans", fake_shadow_plans)
+    monkeypatch.setattr(operations, "_run_guard", fail)
+    with pytest.raises(OSError, match="injected launch failure"):
+        operations.execute(
+            domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC, shadow=True))
+    # The shadow compound always runs the full-gate attempt a002, so its
+    # deadline must come from full-family evidence.
+    assert wanted["full"] == [True]
     assert operations._COMPOUND_TIMEOUT_S.get() == C.DEFAULT_COMPOUND_TIMEOUT_S
 
 

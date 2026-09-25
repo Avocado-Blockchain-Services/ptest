@@ -1608,9 +1608,12 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 return _reason("unknown-input", "shadow source identity is unavailable")
             return _source_invalidation(input_before, gate_after)
 
+        # The shadow compound always runs the full-gate attempt (a002) next
+        # to the selected attempt (a001), so its deadline must come from
+        # full-family evidence even though the request mode is AUTOMATIC.
         limit, _ = resolve_compound_timeout(
             config.runner, request,
-            history.comparable_run_evidence(domain, checkout, full=False))
+            history.comparable_run_evidence(domain, checkout, full=True))
         token = _COMPOUND_TIMEOUT_S.set(limit)
         try:
             raw_guard, frames, execution_s = _run_guard(
@@ -2534,11 +2537,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
             return _source_invalidation(input_before, gate_snapshot)
 
         try:
+            # Evidence must match what will actually run, not the request
+            # label: a bare AUTOMATIC request is recorded with
+            # mode=AUTOMATIC but may execute the full gate, so a scoped
+            # single-file row must never set the deadline for that run.
+            # FULL requests always plan execution "full", so the plan check
+            # covers both cases.
             limit, _ = resolve_compound_timeout(
                 effective.runner, request,
                 history.comparable_run_evidence(
                     domain, checkout,
-                    full=request.mode is C.Mode.FULL))
+                    full=(plan.execution == "full")))
             token = _COMPOUND_TIMEOUT_S.set(limit)
             try:
                 raw_guard, frames, execution_s = _run_guard(
