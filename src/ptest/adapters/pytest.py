@@ -418,17 +418,21 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
     reject_unowned_controls(controls, full=plan.execution == "full")
     native = tuple(config.runner.args)
     generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
-    if grant.slots > 1 and plan.execution == "selected":
-        # The bridge binds selected files to the argv tail, so the owned
-        # worker count leads the file positionals.
-        native += ("-n", str(grant.slots))
+    if plan.execution == "selected":
+        # The bridge binds selected files to the argv tail, so owned
+        # worker controls (parallel "-n N" or the serial suffix) lead the
+        # file positionals.
+        if grant.slots > 1:
+            native += ("-n", str(grant.slots))
+        elif grant.slots == 1:
+            native += _serial_suffix(config)
     if plan.execution == "full":
         native += tuple(config.runner.full_args) + tuple(config.runner.test_roots)
     else:
         native += tuple(plan.files)
     if grant.slots > 1 and plan.execution != "selected":
         native += ("-n", str(grant.slots))
-    elif grant.slots == 1:
+    elif grant.slots == 1 and plan.execution != "selected":
         native += _serial_suffix(config)
     argv = tuple(config.runner.launcher) + (str(_bridge_path()),) + native
     env = [

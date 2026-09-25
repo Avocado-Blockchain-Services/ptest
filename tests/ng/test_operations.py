@@ -1356,3 +1356,14 @@ def test_parallel_worker_reason_messages():
 
     inactive = SimpleNamespace(active=False, reason=None, runs=True)
     assert operations._parallel_worker_reason(inactive, 1, 1) is None
+
+    reason = operations._parallel_worker_reason(
+        qualified, 1, 1, needs_parallel_baseline=True)
+    assert (reason.code, reason.message) == (
+        "parallel-workers",
+        "serial: parallel selection needs a parallel coverage baseline "
+        "— run ptest --full once")
+    assert operations._parallel_worker_reason(
+        None, 1, 1, needs_parallel_baseline=True) is None
+    assert operations._parallel_worker_reason(
+        qualified, 1, 1, needs_parallel_baseline=False) is None

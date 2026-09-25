@@ -184,7 +184,8 @@ def _select_fix(config: C.Config, cfg: str, *,
         if parallel_active:
             fix += (" Test selection needs the coverage profile: add --cov "
                     f"and --cov-report to runner args and a [selection] "
-                    f"policy in {cfg}.")
+                    f"policy in {cfg}. Run a parallel full baseline once "
+                    "to unlock parallel selection.")
         elif not qualified:
             fix += (" For pytest without the coverage catalog profile, first "
                     "add --cov and --cov-report to runner args.")
@@ -309,6 +310,9 @@ def _parallel_environment_fix(facts: dict, serial_reason: str,
                 '["uv", "run", "--locked", "--no-sync", "python"] '
                 f"in {cfg}")
     if "pytest-cov" in serial_reason:
+        if "more than one pytest-cov" in serial_reason:
+            return ("remove the duplicate pytest-cov install "
+                    "from the project environment")
         frozen = executability_api._COVERAGE_TUPLE
         pair = f"pytest-cov {frozen[0]} with coverage {frozen[1]}"
         if "cannot verify pytest-cov" in serial_reason:

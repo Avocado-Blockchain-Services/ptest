@@ -360,6 +360,92 @@ def test_q_py_select_parallel_coverage_baseline_then_parallel_selected(case):
     assert selected_data["source_valid"] is True
 
 
+def test_q_py_select_without_parallel_profile_runs_serial_with_baseline_reason(case):
+    """A selected run without a parallel profile says why it goes serial.
+
+    The baseline is forced serial (--workers 1), so it publishes a
+    serial-only profile; the later selected run names the missing parallel
+    coverage baseline instead of going serial silently.
+    """
+    domain = case.domain(slots=4, jobs=4)
+    launcher = _parallel_coverage_launcher()
+    root = _project(case, domain, launcher=launcher)
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4 --dist=load'\n",
+        encoding="utf-8")
+    (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(launcher))}\n'
+        'args = ["-s", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py", "tests/test_extra.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", "tests/__pycache__", "ptest-result-q-py-select-serial.json", "ptest-result-q-py-select-serial-selected.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
+    )
+    _commit_fixture(root)
+    baseline = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-serial.json",
+                           "--full", "--workers", "1", timeout=60)
+    baseline_data = _data(baseline)
+    assert baseline.code == 0, baseline.stderr.decode()
+    assert baseline_data["granted_workers"] == 1
+    assert baseline_data["baseline_published"] is True
+    (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
+    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-serial-selected.json",
+                           "--changed", timeout=60)
+    selected_data = _data(selected)
+    assert selected.code == 0, selected.stderr.decode()
+    assert selected_data["plan"]["execution"] == "selected"
+    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
+    assert selected_data["granted_workers"] == 1
+    assert selected_data["command"]["workers"] == 1
+    assert ["parallel-workers",
+            "serial: parallel selection needs a parallel coverage baseline "
+            "— run ptest --full once"] in [
+                [reason["code"], reason["message"]]
+                for reason in selected_data["reasons"]]
+
+
+def test_q_py_scoped_coverage_uses_parallel_workers_without_baseline(case):
+    """A scoped coverage run with no stored profile still uses xdist workers.
+
+    Adding --cov must never make scoped runs serial: the tier admits the
+    frozen pair, and coverage completeness only gates qualification, never
+    the scoped verdict.
+    """
+    domain = case.domain(slots=4, jobs=4)
+    launcher = _parallel_coverage_launcher()
+    root = _project(case, domain, launcher=launcher, allow_xdist=True,
+                    args=("--cov=project_module", "--cov-report=term"))
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4 --dist=load'\n",
+        encoding="utf-8")
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(launcher))}\n'
+        'args = ["-s", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", "tests/__pycache__", "ptest-result-q-py-scoped-cov.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
+    )
+    _commit_fixture(root)
+    scoped = case.invoke(domain, root, "--result-json", "ptest-result-q-py-scoped-cov.json",
+                         "--", "tests/test_native.py", timeout=60)
+    scoped_data = _data(scoped)
+    assert scoped.code == 0, scoped.stderr.decode()
+    assert scoped_data["plan"]["execution"] == "scoped"
+    assert scoped_data["granted_workers"] == 4
+
+
 def test_q_py_scoped_after_full_baseline_normalizes_owned_scope_identity(case):
     """A qualified full baseline must not make an explicit native scope stale."""
     domain = case.domain(slots=1, jobs=1)

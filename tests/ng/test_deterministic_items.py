@@ -272,6 +272,8 @@ def test_select_fix_orders_coverage_profile_when_parallel_active(tmp_path):
     assert "add --cov" in answer.finding_change
     assert "--cov-report" in answer.finding_change
     assert "[selection]" in answer.finding_change
+    assert "parallel full baseline once" in answer.finding_change
+    assert "unlock parallel selection" in answer.finding_change
     assert "runs serially under ptest" not in answer.finding_change
     assert "keep parallel runs" not in answer.finding_change
     assert "accept serial runs" not in answer.finding_change
@@ -299,6 +301,7 @@ def test_select_fix_orders_selection_policy_when_parallel_active_and_qualified(
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
     assert "[selection]" in answer.finding_change
+    assert "parallel full baseline once" in answer.finding_change
     assert "runs serially under ptest" not in answer.finding_change
     assert "keep parallel runs" not in answer.finding_change
     assert "accept serial runs" not in answer.finding_change
@@ -327,6 +330,20 @@ def test_parallel_coverage_fix_installs_frozen_tuple_from_addopts_twin(tmp_path)
     assert answer.status == "gap"
     assert answer.finding_change == (
         "install pytest-cov 7.1.0 with coverage 7.15.0")
+
+
+def test_parallel_duplicate_cov_install_fix_removes_duplicate(tmp_path):
+    """Two pytest-cov installs: the fix names removal, not installation."""
+    _stub_qualified_venv(tmp_path)
+    packages = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+    (packages / "pytest_cov-7.1.0.dist-info").mkdir(exist_ok=True)
+    (packages / "pytest_cov-7.1.0-2.dist-info").mkdir(exist_ok=True)
+    (packages / "coverage-7.15.0.dist-info").mkdir(exist_ok=True)
+    answer = _parallel_answers_for(
+        tmp_path, addopts="-n 4 --cov")["PARALLEL-001"]
+    assert answer.status == "gap"
+    assert answer.finding_change == (
+        "remove the duplicate pytest-cov install from the project environment")
 
 
 def test_timing_without_history_is_unknown(tmp_path):

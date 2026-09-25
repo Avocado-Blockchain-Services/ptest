@@ -64,16 +64,24 @@ def _reason(code: str, message: str) -> C.Reason:
     return C.Reason(code=code, message=message)
 
 
-def _parallel_worker_reason(tier, requested: int, granted: int) -> C.Reason | None:
+def _parallel_worker_reason(tier, requested: int, granted: int, *,
+                            needs_parallel_baseline: bool = False) -> C.Reason | None:
     """Additive ``parallel-workers`` reason for native pytest xdist runs.
 
     Emitted only when the scheduler grants fewer slots than the parallel
-    tier requested, or when an xdist-active project runs serially because
-    of a tier fallback. ``tier`` is the ``executability.parallel_request``
-    for the run config (None for non-pytest runners).
+    tier requested, when an xdist-active project runs serially because
+    of a tier fallback, or when a selected run without a parallel
+    coverage baseline is forced serial. ``tier`` is the
+    ``executability.parallel_request`` for the run config (None for
+    non-pytest runners).
     """
     if tier is None:
         return None
+    if granted == 1 and needs_parallel_baseline:
+        return _reason(
+            "parallel-workers",
+            "serial: parallel selection needs a parallel coverage baseline "
+            "— run ptest --full once")
     if granted < requested:
         if granted >= 2:
             return _reason(
@@ -2001,12 +2009,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
     # A qualified xdist pytest project requests its tier worker count on
-    # the basic path. An advanced full run may do the same: its complete
-    # coverage/worker evidence can earn the parallel-identity profile that
-    # later selected runs need. Anything advanced without that consumed
-    # proof stays serial unless the tier admits a full run.
+    # the basic path. An advanced full or scoped run may do the same: a
+    # full run's complete coverage/worker evidence can earn the
+    # parallel-identity profile that later selected runs need, while a
+    # scoped verdict never depends on coverage completeness. An advanced
+    # selected run without that consumed proof stays serial, as does any
+    # advanced run the tier does not admit.
     tier_admits = tier is not None and tier.active and tier.reason is None
-    if tier_admits and (not advanced or plan.execution == "full"
+    if tier_admits and (not advanced or plan.execution in ("full", "scoped")
                         or support.parallel_identity):
         if tier.auto:
             requested_slots = scheduler.effective_limits(domain).max_slots
@@ -2022,8 +2032,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
             config.runner.workers,
             config.runner.workers if request.workers is None else request.workers,
         )
-    if (advanced and not support.parallel_identity
-            and (plan.execution != "full" or not tier_admits)):
+    needs_parallel_baseline = (
+        advanced and plan.execution == "selected" and not support.parallel_identity
+        and tier_admits)
+    if needs_parallel_baseline or (advanced and not tier_admits):
         requested_slots = 1
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()
@@ -2217,7 +2229,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # live lease for scheduler recovery instead of guessing release.
             reasons = (_reason("state-unavailable", "guard execution could not be completed"),)
             parallel_reason = _parallel_worker_reason(
-                tier, requested_slots, grant.slots)
+                tier, requested_slots, grant.slots,
+                needs_parallel_baseline=needs_parallel_baseline)
             if parallel_reason is not None:
                 reasons += (parallel_reason,)
             try:
@@ -2325,7 +2338,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                          execution_s=execution_elapsed))),
         )
         parallel_reason = _parallel_worker_reason(
-            tier, requested_slots, grant.slots)
+            tier, requested_slots, grant.slots,
+            needs_parallel_baseline=needs_parallel_baseline)
         if parallel_reason is not None:
             reasons += (parallel_reason,)
         result = _result(run_id=run_id, checkout=checkout, request=request,

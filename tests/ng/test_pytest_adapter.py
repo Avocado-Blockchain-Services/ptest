@@ -1544,6 +1544,24 @@ def test_prepare_advanced_selected_parallel_leads_n_before_files(tmp_path):
     assert tuple(prepared.argv[-3:-1]) == ("-n", "4")
 
 
+def test_prepare_advanced_selected_serial_leads_suffix_before_files(tmp_path):
+    """Selected serial argv ends with the bound files for the tail check."""
+    from ptest.adapters.pytest import prepare_advanced
+
+    config = _parallel_project(
+        tmp_path, args=(), full_args=(),
+        addopts="-n 4 --dist=load")
+    config = replace(config, runner=replace(
+        config.runner, launcher=("python",)))
+
+    plan = C.Plan(mode=C.Mode.AUTOMATIC, execution="selected",
+                  files=("tests/alpha.py",))
+    prepared = prepare_advanced(config, plan, _grant(1), _attempt(1))
+
+    assert prepared.argv[-1:] == ("tests/alpha.py",)
+    assert tuple(prepared.argv[-3:-1]) == ("-n", "0")
+
+
 def test_inspect_capability_mentions_parallel_tier():
     capability = inspect_capability(_config())
 
