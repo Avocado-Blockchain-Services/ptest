@@ -118,6 +118,85 @@ def format_setup_done(setup_s: float | None) -> str:
     return f"ptest: setup done ({format_duration(setup_s)})"
 
 
+def format_changed_selected(*, selected: int, total: int,
+                            changed_files: int) -> str:
+    """Changed-mode plan segment for a selected run.
+
+    ``selected``/``total`` count test files (the plan subset over the
+    baseline inventory); ``changed_files`` counts distinct changed paths.
+    """
+    files = _plural(changed_files, "file") + " changed"
+    return f"changed: {selected} of {total} tests ({files})"
+
+
+def explain_changed_full_reason(reason: C.Reason | None, *,
+                                config_name: str | None = None,
+                                changed_path: str | None = None) -> str:
+    """Plain words for a changed-mode full-suite selection reason code."""
+    code = reason.code if reason is not None else ""
+    message = reason.message if reason is not None else ""
+    if code == "no-baseline":
+        return "no baseline yet (this run records one if it passes on a clean tree)"
+    if code == "selection-disabled":
+        return f"selection is off in {config_name or 'the config'} (ptest doctor --fix)"
+    if code == "policy-changed":
+        if changed_path is not None:
+            return f"{changed_path} is a full trigger"
+        return "a full trigger changed"
+    if code == "unknown-input":
+        if changed_path is not None:
+            return f"{changed_path} is outside the selection map"
+        return "changed inputs could not be classified"
+    if code == "incompatible-baseline":
+        if "policy" in message or "compatibility" in message:
+            return "policy changed"
+        return "baseline is not an ancestor of HEAD"
+    if code == "policy-invalid":
+        return "policy changed"
+    if code == "selection-shadow-quarantine":
+        return "selection is quarantined (full suite required)"
+    if code == "prior-failure":
+        return "a failed test requires a full run"
+    if code == "incomplete-inventory":
+        return "test inventory is incomplete"
+    if code == "full-gate-obligation":
+        return "a full run is required"
+    return "a full run is required"
+
+
+def _no_baseline_detail(result: C.RunResult) -> str:
+    """Plain words for why a full run recorded no baseline."""
+    counts = result.counts
+    failed = counts.failed if counts is not None else None
+    if result.status is not C.Status.PASSED:
+        if result.status is C.Status.FAILED:
+            if failed:
+                return _plural(failed, "failure")
+            return "failed"
+        return "incomplete results"
+    before, after = result.input_before, result.input_after
+    if before is None or after is None:
+        return "incomplete results"
+    if before.digest != after.digest:
+        return "files changed during the run"
+    if not before.clean or not after.clean:
+        return "uncommitted changes"
+    if any(reason.code == "incomplete-inventory" for reason in result.reasons):
+        return "incomplete results"
+    if any(reason.code == "changed-during-run" for reason in result.reasons):
+        return "files changed during the run"
+    if any(reason.code == "unknown-input" for reason in result.reasons):
+        return "uncommitted changes"
+    return "not eligible for a baseline"
+
+
+def format_baseline_note(result: C.RunResult) -> str:
+    """End-line note for a full run: baseline recorded, or why not."""
+    if result.baseline_published:
+        return "ptest: baseline recorded"
+    return f"ptest: no baseline recorded: {_no_baseline_detail(result)}"
+
+
 def format_setup_failed(*, exit_code: int | None = None,
                         problem_code: str | None = None) -> str:
     if exit_code is not None:
@@ -210,6 +289,8 @@ __all__ = [
     "reset", "claim_hint",
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
+    "format_changed_selected", "explain_changed_full_reason",
+    "format_baseline_note",
     "format_setup_start", "format_setup_done", "format_setup_failed",
     "format_end", "format_timing", "holder_label", "emit",
 ]

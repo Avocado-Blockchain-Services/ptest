@@ -1851,15 +1851,102 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
+def _prefix_matches(path: str, patterns) -> bool:
+    # Same literal-prefix rule as selection._matches (the canonical
+    # definition lives there; selection.py is outside this change's scope,
+    # so the one-liner is repeated instead of reaching into a private).
+    return any(path == item or path.startswith(item + "/") for item in patterns)
+
+
+def _changed_paths(snapshot: C.InputSnapshot) -> list[str]:
+    """Distinct changed paths (old/new merged) in first-seen order."""
+    paths: list[str] = []
+    for change in snapshot.changes:
+        for path in (change.old, change.new):
+            if path is not None and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _changed_trigger_path(config: C.Config,
+                          snapshot: C.InputSnapshot) -> str | None:
+    """First changed path that forces a full suite, if any."""
+    patterns = tuple(config.selection.full_triggers) + (".ptest.toml",)
+    for path in _changed_paths(snapshot):
+        if _prefix_matches(path, patterns):
+            return path
+    return None
+
+
+def _unmapped_changed_path(config: C.Config,
+                           snapshot: C.InputSnapshot) -> str | None:
+    """First changed path outside the declared selection map, if any."""
+    policy = config.selection
+    covered: set[str] = set(policy.no_tests)
+    for group in policy.groups:
+        covered.update(group.sources)
+        covered.update(group.tests)
+    triggers = tuple(policy.full_triggers) + (".ptest.toml",)
+    for change in snapshot.changes:
+        for path in (change.old, change.new):
+            if path is None:
+                continue
+            if _prefix_matches(path, triggers):
+                continue
+            if (change.kind in ("untracked", "ignored")
+                    and _prefix_matches(path, policy.non_input_outputs)):
+                continue
+            if not _prefix_matches(path, tuple(covered)):
+                return path
+    return None
+
+
 def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
-                request: C.RunRequest, plan: C.Plan, workers: int) -> None:
+                request: C.RunRequest, plan: C.Plan, workers: int,
+                snapshot: C.InputSnapshot | None = None,
+                history_view: C.HistoryView | None = None) -> None:
     """One start line naming project, runner, workers and scope.
 
     The scope is shown as the user typed it (a monorepo route passes the
     repo-root-relative scopes separately from the child-rebased argv).
+    In changed mode with a real selection plan, the line names the plan
+    instead: the selected subset size, or the full-suite reason in words.
     """
     project = render.terminal_text(checkout.root.name)
     runner = config.runner.kind.value
+    if (request.mode is C.Mode.AUTOMATIC and plan.static_preview
+            and snapshot is not None and plan.execution in ("selected", "full")):
+        if plan.execution == "selected":
+            total = len(plan.files)
+            if history_view is not None and history_view.baseline is not None:
+                total = len(history_view.baseline.inventory.tests)
+            segment = progress.format_changed_selected(
+                selected=len(plan.files), total=total,
+                changed_files=len(_changed_paths(snapshot)))
+        else:
+            reason = plan.reasons[0] if plan.reasons else None
+            config_path = (config.config_path.name
+                           if config.config_path is not None else None)
+            if reason is not None and reason.code == "policy-changed":
+                changed_path = _changed_trigger_path(config, snapshot)
+            elif reason is not None and reason.code == "unknown-input":
+                changed_path = _unmapped_changed_path(config, snapshot)
+            else:
+                changed_path = None
+            segment = ("changed → full suite: "
+                       + progress.explain_changed_full_reason(
+                           reason,
+                           config_name=(render.terminal_text(config_path)
+                                        if config_path is not None else None),
+                           changed_path=(render.terminal_text(changed_path)
+                                         if changed_path is not None else None)))
+        progress.emit(f"ptest: {project} · {runner} · {segment}",
+                      quiet=request.quiet)
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
+                quiet=request.quiet)
+        return
     shown = request.display_argv if request.display_argv is not None else request.argv
     full = not (request.mode is C.Mode.SCOPED and shown)
     scope = "" if full else render.terminal_text(" ".join(shown))
@@ -1902,8 +1989,20 @@ def _waiting_snapshot(domain: C.DomainPaths,
     return in_use, limit, labels
 
 
+def _baseline_note(*, plan: C.Plan, advanced: bool,
+                   result: C.RunResult) -> str | None:
+    """Baseline end-line note, for full runs that can publish a baseline.
+
+    Returns None for selected/scoped runs and for runners without the
+    history publication path, leaving their end lines unchanged.
+    """
+    if not advanced or plan.execution != "full":
+        return None
+    return progress.format_baseline_note(result)
+
+
 def _emit_end(request: C.RunRequest, result: C.RunResult,
-              run_mono: float) -> None:
+              run_mono: float, *, baseline_note: str | None = None) -> None:
     """One end line with ptest's own verdict, bridge counts, and duration."""
     if request.verbose:
         line = progress.format_timing(result.timings)
@@ -1916,6 +2015,8 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         result.status, counts=result.counts,
         duration_s=time.monotonic() - run_mono, exit_code=result.exit_code,
         hint=hint), quiet=request.quiet)
+    if baseline_note is not None:
+        progress.emit(baseline_note, quiet=request.quiet)
 
 
 def execute(domain: C.DomainPaths, config: C.Config,
@@ -2120,10 +2221,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
     started = _iso_now()
     run_mono = time.monotonic()
     _emit_start(checkout=checkout, config=config, request=request,
-                plan=plan, workers=requested_slots)
+                plan=plan, workers=requested_slots,
+                snapshot=planning_snapshot, history_view=history_view)
 
     def _finish(result: C.RunResult) -> C.RunResult:
-        _emit_end(request, result, run_mono)
+        _emit_end(request, result, run_mono,
+                  baseline_note=_baseline_note(
+                      plan=plan, advanced=advanced, result=result))
         return result
 
     signals = _Signals()
