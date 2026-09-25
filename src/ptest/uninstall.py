@@ -363,6 +363,7 @@ def _decide_block(name: str):
 def _decide_skill(rel: str, provider: str):
     def decide(raw: bytes) -> PlanEntry | None:
         managed = raw in (agent_rules._provider_text(provider),
+                          agent_rules._legacy_provider_text(provider),
                           agent_rules._previous_provider_text(provider),
                           agent_rules._pre_gate_provider_text(provider))
         if managed:

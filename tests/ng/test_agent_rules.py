@@ -8,7 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from ptest.agent_rules import apply, preview
+from ptest.agent_rules import _legacy_provider_text, apply, preview
+
+
+def test_exact_released_template_upgrades_to_front_matter_format(tmp_path):
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    legacy = _legacy_provider_text("claude")
+    assert b"---" not in legacy
+    (target / "SKILL.md").write_bytes(legacy)
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    text = (target / "SKILL.md").read_text(encoding="utf-8")
+    assert text.startswith("---\nname: ptest\n")
+    assert "docs/ptest-agent.md" in text
 
 
 def test_obsolete_codex_skill_path_is_ignored_and_preserved(tmp_path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,72 @@ def test_fix_appends_missing_selection_table_at_eof(
     assert "\n[selection]\nenabled = true\nclosed_inputs = true\n" in raw
     assert main(("doctor", "--fix", "--yes")) == 0
     assert "config is up to date" in capsys.readouterr().out
+
+
+def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
+        tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "tuned", addopts="")
+    _write_config(root, args=("--cov",), extra_lines=(
+        "",
+        "[selection]",
+        "enabled = false",
+        'input_roots = ["tests", "libs/mylib"]',
+        "closed_inputs = false",
+    ))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "enabled = true" in out
+    assert "closed_inputs = true" not in out
+    assert '"libs/mylib"' in out
+
+    assert main(("doctor", "--fix", "--yes")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert "enabled = true" in raw
+    assert 'input_roots = ["tests", "libs/mylib"]' in raw
+    assert "closed_inputs = false" in raw
+    # Absent keys are still filled from the draft.
+    assert "full_triggers" in raw
+
+
+def test_fix_handles_quoted_table_header_without_duplication(
+        tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "quoted", addopts="")
+    _write_config(root, args=("--cov",), selection=True)
+    quoted = (root / ".ptest.toml").read_text(encoding="utf-8")
+    quoted = quoted.replace("[selection]", '["selection"]')
+    (root / ".ptest.toml").write_text(quoted, encoding="utf-8")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--yes")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    tomllib.loads(raw)
+    assert '["selection"]' in raw
+    assert "\n[selection]\n" not in raw
+    assert "enabled = true" in raw
+
+
+def test_fix_handles_quoted_key_without_duplication(
+        tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "quoted-key")
+    _write_config(root, args=("-n", "0"))
+    quoted = (root / ".ptest.toml").read_text(encoding="utf-8")
+    quoted = quoted.replace('args = ["-n", "0"]', '"args" = ["-n", "0"]')
+    (root / ".ptest.toml").write_text(quoted, encoding="utf-8")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--yes")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    tomllib.loads(raw)
+    assert "args" in raw
+    assert '"-n", "0"' not in raw
 
 
 def test_fix_preserves_unmanaged_settings_byte_for_byte(

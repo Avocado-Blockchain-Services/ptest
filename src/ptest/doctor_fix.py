@@ -373,21 +373,33 @@ def plan_project(root: Path, declaration: str,
             and (not isinstance(selection, dict)
                  or selection.get("enabled") is not True)
             and _has_cov(current_args)):
+        # The enablement itself flips false (or missing) to true; every
+        # other key is only filled when absent, so hand-tuned values stay
+        # untouched and appear as kept context in the diff.
+        if not isinstance(selection, dict) or "enabled" not in selection:
+            changes.append(FieldChange(
+                "selection", "enabled", True, draft=True))
+        elif selection.get("enabled") is not True:
+            changes.append(FieldChange("selection", "enabled", True))
         roots, triggers = _selection_draft(
             project_dir, tuple(config.runner.test_roots))
-        changes.append(FieldChange("selection", "enabled", True, draft=True))
-        changes.append(FieldChange(
-            "selection", "closed_inputs", True, draft=True))
-        changes.append(FieldChange(
-            "selection", "input_roots", tuple(roots["input_roots"]),
-            draft=True))
-        changes.append(FieldChange(
-            "selection", "full_triggers", tuple(triggers["full_triggers"]),
-            draft=True))
+        draft = (("closed_inputs", True),
+                 ("input_roots", tuple(roots["input_roots"])),
+                 ("full_triggers", tuple(triggers["full_triggers"])))
+        have = selection if isinstance(selection, dict) else {}
+        for key, value in draft:
+            if key not in have:
+                changes.append(FieldChange(
+                    "selection", key, value, draft=True))
 
     if not changes:
         return None
     updated = _apply_changes(raw, changes)
+    try:
+        tomllib.loads(updated.decode("utf-8"))
+    except (ValueError, tomllib.TOMLDecodeError):
+        raise _problem("invalid-config",
+                       f"config file {rel} cannot be patched safely") from None
     return FileFix(rel=rel, previous=raw, updated=updated,
                    changes=tuple(changes),
                    drafts=any(change.draft for change in changes),
@@ -395,7 +407,15 @@ def plan_project(root: Path, declaration: str,
 
 
 _TABLE_RE = re.compile(r"^\[([^[\]]+)\]\s*(?:#.*)?$")
-_KEY_RE_TEMPLATE = r"^\s*%s\s*="
+_KEY_RE_TEMPLATE = r"^\s*[\"']?%s[\"']?\s*="
+
+
+def _table_name(header: str) -> str:
+    """Normalise a matched table header: ``["selection"]`` is `selection`."""
+    name = header.strip()
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+        return name[1:-1]
+    return name
 
 
 def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
@@ -408,11 +428,12 @@ def _apply_changes(raw: bytes, changes: list[FieldChange]) -> bytes:
         by_table.setdefault(change.table, []).append(change)
 
     # Locate table regions: header index -> end index (next header or EOF).
+    # Quoted headers (``["selection"]``) name the same table as bare ones.
     headers: list[tuple[int, str]] = []
     for index, line in enumerate(lines):
         match = _TABLE_RE.match(line.strip())
         if match:
-            headers.append((index, match.group(1)))
+            headers.append((index, _table_name(match.group(1))))
 
     pending = {table: list(items) for table, items in by_table.items()}
     edits: dict[int, str] = {}

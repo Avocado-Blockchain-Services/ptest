@@ -331,6 +331,25 @@ def test_pre_gate_skill_managed_bytes_are_removed(
     assert not skill.exists()
 
 
+def test_released_template_skill_is_removed_as_managed(
+        case, tmp_path, monkeypatch, capsys):
+    """Twin: the pre-8cd2b54 short template uninstalls as managed."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    skill = root / ".claude" / "skills" / "ptest" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(agent_rules._legacy_provider_text("claude"))
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "edited" not in out
+    assert not skill.exists()
+
+
 def test_obsolete_codex_skill_path_is_left_alone(
         case, tmp_path, monkeypatch, capsys):
     domain = case.domain()

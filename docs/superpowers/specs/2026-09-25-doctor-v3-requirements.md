@@ -60,11 +60,14 @@ Section L (output-mode collapse):
   `offline` (profile `ptest-offline-v1`) and publication status `skipped`
   (path stays `recommendations.md`, sha256 of empty input). The legacy
   `doctor` public schema is removed entirely (spec explicitly allows this).
-- Legacy Codex location (`_LEGACY_CODEX_SKILL`, `_legacy_codex_note`,
-  `_legacy_provider_text`, the `"legacy"` skill kind, uninstall's
-  `_LEGACY_SKILL_REL` entry) deleted as one concept: the old released
-  template bytes have no other consumer, and there are no external users
-  to protect. Kept: `_PREVIOUS_GUIDE_SHA256S`, `"previous"` skill kind.
+- Legacy Codex *location* (`_LEGACY_CODEX_SKILL`, `_legacy_codex_note`,
+  uninstall's `_LEGACY_SKILL_REL` entry, migration/preservation messages
+  and refusals) deleted. BUT audit A1 (HIGH) showed the pre-8cd2b54 short
+  template bytes were also the canonical-path content at
+  `.claude|.agents|.opencode|.gemini/skills/ptest/SKILL.md`, still
+  ptest-managed there: `_legacy_provider_text` and the `"legacy"` upgrade
+  kind plus the uninstall managed entry were restored (location handling
+  stays deleted). Kept: `_PREVIOUS_GUIDE_SHA256S`, `"previous"` skill kind.
 - `docs/legacy-index.md` deleted; only live-doc `legacy` mentions swept
   (historical specs/designs under docs/ keep their wording).
 
@@ -81,6 +84,11 @@ Section F (`doctor --fix`, new module `src/ptest/doctor_fix.py`):
   effective runner args, drafts `input_roots` from test roots plus `src/`
   and `full_triggers` from files present on disk, and is marked by a
   separate DRAFT section in the diff output (never written to the file).
+  Per audit A1 (LOW), an existing table only flips `enabled` false→true
+  and fills *absent* keys; hand-tuned values are kept and show as kept
+  context in the diff. Per audit A1 (NOTE), quoted headers/keys
+  (`["selection"]`, `"args"`) patch in place, and patched bytes are
+  re-parsed — refusal (`invalid-config`) instead of a duplicate table.
 - Consent/safety mirror existing precedents: TTY
   `Apply these changes to <files>? [y/N]`, `--yes`, `--dry-run`, atomic
   temp+rename keeping the exact mode, no symlink following, fail closed

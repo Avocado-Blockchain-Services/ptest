@@ -68,6 +68,23 @@ def _detail(target: str, action: str) -> C.ActionRecord:
     return C.ActionRecord(target=target, action=action, source="guidance")
 
 
+def _legacy_provider_text(provider: str) -> bytes:
+    """Exact pre-8cd2b54 shipped template bytes, for upgrade recognition.
+
+    These bytes were written by ``_provider_text`` at the then-canonical
+    provider paths before 8cd2b54; they are still ptest-managed at the
+    canonical paths today and upgrade in place. This covers content only:
+    the obsolete ``.codex/skills/ptest`` location itself is gone and is
+    never inspected.
+    """
+    return (
+        f"# ptest skill for {provider}\n\n"
+        "Read `docs/ptest-agent.md` before running or changing tests.\n"
+        "Run ptest from the monorepo root; prefix focused scopes with the "
+        "declared child and use `ptest --full` for the integrated gate.\n"
+    ).encode("utf-8")
+
+
 def _previous_provider_text(provider: str) -> bytes:
     """Exact base-commit skill bytes, recognized as previous managed content.
 
@@ -160,9 +177,10 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
     """Validate one canonical skill target without writing.
 
     Returns ``(relative, target, existing, kind)`` where ``kind`` is
-    ``"missing"``, ``"previous"`` (exact base-commit template, safe to
-    upgrade) or ``"current"`` (already in the generated format). Anything
-    else raises before any write.
+    ``"missing"``, ``"legacy"`` (exact pre-8cd2b54 shipped template at a
+    canonical path, safe to upgrade), ``"previous"`` (exact base-commit
+    template, safe to upgrade) or ``"current"`` (already in the generated
+    format). Anything else raises before any write.
     """
     if provider not in _PROVIDER_SKILLS:
         raise _problem("unsupported-capability", "agent provider is not supported")
@@ -194,6 +212,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
         raise _problem("state-unavailable", f"agent provider target {relative} is unavailable") from None
     if current == _provider_text(provider):
         return relative, target, current, "current"
+    if current == _legacy_provider_text(provider):
+        return relative, target, current, "legacy"
     if current in (_previous_provider_text(provider),
                    _pre_gate_provider_text(provider)):
         return relative, target, current, "previous"
@@ -672,7 +692,7 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
         if kind == "missing":
             actions.append(f"create {relative}")
             details.append(_detail(relative, "would create"))
-        elif kind == "previous":
+        elif kind in ("legacy", "previous"):
             actions.append(f"update {relative}")
             details.append(_detail(relative, "would update"))
         else:
@@ -915,7 +935,7 @@ def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
             if kind == "current":
                 observed.append(_detail(relative, "already present"))
                 continue
-            if kind == "previous":
+            if kind in ("legacy", "previous"):
                 if existing is None:
                     raise _problem("state-unavailable",
                                    f"agent provider target {relative} is unavailable")
