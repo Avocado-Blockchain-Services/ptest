@@ -9,11 +9,11 @@ ptest prints its own short status lines on **stderr**, each prefixed `ptest:`, p
 (reuse the existing render/terminal helpers). Runner stdout/stderr stay untouched.
 1. **Start:** one line naming the project, runner, workers and scope, e.g.
    `ptest: api · pytest · 4 workers · api/tests` or `ptest: api · pytest · full suite` (monorepo: per child).
-2. **Waiting for a slot:** if the run is not granted within about 1 s, say so:
-   `ptest: waiting for a free slot — 2 runs active (limit 4), queue timeout 10m`.
-   Repeat with elapsed time about every 15 s (a TTY may update one line in place; non-TTY/NO_COLOR prints a new line at most
-   every 15 s, never a spinner stream). Name what holds the slots when the scheduler knows it (project dir name, pid) —
-   never secrets or full argv.
+2. **Waiting for a slot:** if the run is not granted within about 1 s, say what the run needs vs what is free:
+   `ptest: waiting for 4 slots (2 of 4 free) — in use by ptest (pid 13178) · queue timeout 10m`.
+   Repeat about every 15 s as `ptest: still waiting for 4 slots (2 of 4 free) · 16.0s` (a TTY may update one line in place;
+   non-TTY/NO_COLOR prints a new line at most every 15 s, never a spinner stream). Name what holds the slots when the
+   scheduler knows it (project dir name, pid) — never secrets or full argv.
 3. **Setup:** before ptest runs setup: `ptest: setup: uv sync --locked (first run | inputs changed)`; after:
    `ptest: setup done (4.2s)` or the failure with its exit code.
 4. **End:** one line with the verdict ptest itself derived, counts when the bridge has them, and duration:

@@ -165,7 +165,7 @@ def test_queued_run_prints_waiting_line_then_repeats_with_elapsed(case):
     domain = case.domain(slots=1, jobs=1)
     root = _command_project(case, domain, args=("literal",))
     release = _hold_slot(domain, root)
-    timer = threading.Timer(17.0, release)
+    timer = threading.Timer(25.0, release)
     timer.start()
     try:
         completed = case.invoke(domain, root, timeout=60)
@@ -178,16 +178,18 @@ def test_queued_run_prints_waiting_line_then_repeats_with_elapsed(case):
 
     assert completed.code == 0
     lines = _ptest_lines(completed)
-    waiting = [line for line in lines if "waiting for a free slot" in line]
+    waiting = [line for line in lines if "waiting for 1 slot" in line]
     assert len(waiting) == 2, lines
     first, second = waiting
     assert first.startswith(
-        "ptest: waiting for a free slot — 1 runs active (limit 1), "
-        "queue timeout 30m")
+        "ptest: waiting for 1 slot (0 of 1 free) — in use by ")
+    assert "queue timeout 30m" in first
     assert "(pid " in first  # the holder is named, never with argv/secrets
     assert "(position" not in first  # queue position is -v detail only
     assert first.endswith("run with ptest -v for scheduling and setup details")
-    assert "(waiting " in second
+    assert re.fullmatch(
+        r"ptest: still waiting for 1 slot \([01] of 1 free\) · \d+(\.\d+)?s",
+        second), lines
     assert "ptest -v" not in second
     end = lines[-1]
     assert re.fullmatch(r"ptest: passed · \d+(\.\d+)?s", end), lines
@@ -603,7 +605,7 @@ def test_queue_timeout_refusal_keeps_code_message_and_hint_once(case):
     lines = _ptest_lines(completed) + [
         line for line in completed.stderr.decode("utf-8", "replace").splitlines()
         if line.startswith("queue-timeout:")]
-    waiting = [line for line in lines if "waiting for a free slot" in line]
+    waiting = [line for line in lines if "waiting for 1 slot" in line]
     assert len(waiting) == 1, lines
     assert "queue timeout 3s" in waiting[0]
     assert waiting[0].endswith("run with ptest -v for scheduling and setup details")
@@ -693,7 +695,7 @@ def test_status_lines_are_identical_on_tty_and_non_tty():
             project="api", runner="pytest", workers=4,
             scope="api/tests", full=False), stream=stream)
         progress.emit(progress.format_waiting(
-            active=2, limit=4, timeout_s=600.0), stream=stream)
+            needed=4, free=2, limit=4, timeout_s=600.0), stream=stream)
         progress.emit(progress.format_end(
             C.Status.PASSED, counts=None, duration_s=192.3,
             exit_code=0), stream=stream)
