@@ -227,7 +227,7 @@ def test_doctor_review_runs_one_haiku_call_per_item(
                for item in launches)
 
     human = capsys.readouterr()
-    assert "9 ok · 2 gap · 1 unknown" in human.out
+    assert "9 ✓  2 ✗  1 ?" in human.out
     assert "runs ✓" in human.out
     for entry in CATALOG:
         assert entry.label in human.out
@@ -276,8 +276,8 @@ def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
                  "--allow-model-review")) == 0
 
     human = capsys.readouterr()
-    assert "? .: Test data factories — review failed:" in human.out
-    assert "review failed: provider exited with an error" in human.out
+    assert "? .: Test data factories\n" in human.out
+    assert "    review failed: provider exited with an error" in human.out
     assert (root / "recommendations.md").is_file()
 
 

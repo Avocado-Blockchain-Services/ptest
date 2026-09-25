@@ -131,10 +131,10 @@ def test_grid_header_facts_and_single_table_at_width_100():
     # One table: exactly one top border and one header row.
     assert text.count("╭") == 1
     assert text.count("│ check") == 1
-    assert ("│ Test data factories     │ ✓ ok                     │ "
-            "✓ ok                     │") in text
-    assert ("│ Fixture state isolation │ ✗ gap                    │ "
-            "✓ ok                     │") in text
+    assert ("│ Test data factories     │ ✓ ok          │ "
+            "✓ ok      │") in text
+    assert ("│ Fixture state isolation │ ✗ gap         │ "
+            "✓ ok      │") in text
     assert "├─ parallel safety ─" in text
     assert "│ Parallel execution" in text
     assert text.index("parallel safety") < text.index(
@@ -142,9 +142,9 @@ def test_grid_header_facts_and_single_table_at_width_100():
     # No duplicate header row for the single-item Parallel execution
     # group: only the divider separates it from parallel safety.
     assert "Parallel execution" not in text.split("Cache isolation")[0]
-    # One dim footer tally per project, separated by a rule.
-    assert ("│                         │ 2 ok · 2 gap · 3 unknown │ "
-            "5 ok · 0 gap · 2 unknown │") in text
+    # One compact footer tally per project, separated by a rule.
+    assert "│ 2 ✓  2 ✗  3 ? │" in text
+    assert "│ 5 ✓  2 ?  │" in text
     assert text.index("Test data factories") < text.index(
         "parallel safety")
     for line in text.splitlines():
@@ -208,14 +208,16 @@ def test_grid_unknowns_group_identical_reasons_per_project():
     text = _grid()
 
     unknowns = text[text.index("Unknowns"):text.index("Next:")]
-    assert ("api: Database setup reuse, Cache isolation — "
-            "offline static run: model review unavailable") in unknowns
+    # The wide prefix does not fit a third of the line: the shared
+    # reason drops to the next line, indented.
+    assert "? api: Database setup reuse, Cache isolation\n" in unknowns
+    assert ("    offline static run: model review unavailable") in unknowns
     # Same reason under another project stays a separate line.
-    assert ("web: Database setup reuse — "
+    assert ("? web: Database setup reuse — "
             "offline static run: model review unavailable") in unknowns
     # Distinct reasons list each check on its own line.
-    assert "api: Test timing — No timing history yet" in unknowns
-    assert "web: Test selection — Could not trace" in unknowns
+    assert "? api: Test timing — No timing history yet" in unknowns
+    assert "? web: Test selection — Could not trace" in unknowns
     assert unknowns.count(
         "offline static run: model review unavailable") == 2
 
@@ -436,7 +438,7 @@ def test_grid_gaps_separate_blocks_with_aligned_hanging_indent():
             "✗ api · Parallel execution") in gaps
 
 
-def test_grid_unknowns_bullet_hang_aligns_under_reason_start():
+def test_grid_unknowns_wide_prefix_drops_reason_to_next_line():
     rationale = " ".join(f"token{i:03d}" for i in range(30))
     child = {
         "scope": "api", "facts": _facts(),
@@ -451,11 +453,32 @@ def test_grid_unknowns_bullet_hang_aligns_under_reason_start():
 
     unknowns = text[text.index("Unknowns"):text.index("Next:")]
     body = [line for line in unknowns.splitlines()[1:] if line]
-    assert body[0].startswith("? api: Database setup reuse — token")
-    hang = " " * len("? api: Database setup reuse — ")
+    # The `? api: Database setup reuse — ` prefix is wider than a
+    # third of the line: no thin reason column, the reason starts on
+    # the next line indented four spaces.
+    assert body[0] == "? api: Database setup reuse"
     assert len(body) > 1
     for line in body[1:]:
-        assert line.startswith(hang), line
+        assert line.startswith("    "), line
+        assert len(line) <= 60, line
+    for index in range(30):
+        assert f"token{index:03d}" in unknowns
+
+
+def test_grid_unknowns_narrow_prefix_keeps_reason_on_head_line():
+    child = {
+        "scope": "api", "facts": _facts(),
+        "rows": [_row("DB-001", "unknown", label="DB",
+                      rationale="Brief reason.", evidence=[])],
+        "findings": [], "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _workspace("api"), report_path="recommendations.md",
+        publication_status="created", width=60, color=False,
+        repo="shop", provider="offline", duration_s=3, calls=0)
+
+    unknowns = text[text.index("Unknowns"):text.index("Next:")]
+    assert "? api: DB — Brief reason." in unknowns.splitlines()
 
 
 def test_grid_not_applicable_groups_reasons_dim():
@@ -510,7 +533,49 @@ def test_grid_styled_cells_runs_marks_gaps_and_next():
     assert ("\x1b[33m?\x1b[0m \x1b[1mapi: Test timing\x1b[0m"
             "\x1b[2m — \x1b[0m") in text
     assert "Next: \x1b[1mptest doctor --fix\x1b[0m" in text
-    assert "\x1b[2m2 ok · 2 gap · 3 unknown\x1b[0m" in text
+    assert "\x1b[32m2 ✓\x1b[0m" in text
+    assert "\x1b[31m2 ✗\x1b[0m" in text
+    assert "\x1b[33m3 ?\x1b[0m" in text
+
+
+def test_grid_two_projects_fit_in_60_columns_without_stacking():
+    text = _grid(width=60)
+
+    assert text.count("╭") == 1
+    for line in text.splitlines():
+        if line[:1] in ("╭", "│", "├", "╰"):
+            assert len(line) <= 60, line
+
+
+def test_grid_tally_omits_zeros_and_marks_na_dim():
+    children = [
+        {"scope": "api", "facts": _facts(),
+         "rows": [_row("FIX-001", "satisfied", label="Ok check")],
+         "findings": [], "limitations": []},
+        {"scope": "web", "facts": _facts(project="web"),
+         "rows": [_row("SEL-1", "not-applicable", label="Skipped check",
+                       rationale="Skipped: no runner.")],
+         "findings": [], "limitations": []},
+        {"scope": "cli", "facts": _facts(project="cli"),
+         "rows": [], "findings": [], "limitations": []},
+    ]
+    text = render_agent_assessment(
+        children, _workspace("api", "web", "cli"),
+        report_path="recommendations.md", publication_status="created",
+        width=100, color=False, repo="shop", provider="codex/gpt-5",
+        duration_s=3, calls=1)
+
+    assert "1 ✓" in text
+    assert "1 –" in text
+    assert "0 ✓  0 ✗  0 ?" in text
+
+    dimmed = render_agent_assessment(
+        children, _workspace("api", "web", "cli"),
+        report_path="recommendations.md", publication_status="created",
+        width=100, color=True, repo="shop", provider="codex/gpt-5",
+        duration_s=3, calls=1)
+    assert "\x1b[32m1 ✓\x1b[0m" in dimmed
+    assert "\x1b[2m1 –\x1b[0m" in dimmed
 
 
 def test_grid_offline_renders_static_sections_in_grid_style():
@@ -582,6 +647,62 @@ def test_grid_offline_renders_static_sections_in_grid_style():
     assert "Readiness" not in online
     assert "Static findings" not in online
     assert "Worksheet" not in online
+
+
+def test_grid_offline_renders_diagnostics_and_limitations():
+    from ptest import contracts as C
+    from ptest.doctor import RepositoryInspection, WorkspaceInspection
+
+    report = C.DoctorReport(
+        scope=(), readiness=(), findings=(), limits=C.DEFAULT_SCAN_LIMITS,
+        usage=C.ScanUsage(entries=6, files=2, file_bytes=20,
+                          total_bytes=20, findings=0, output_bytes=20,
+                          elapsed_s=0.0, skipped=1, truncated=True),
+        limitations=(),
+    )
+    aggregate = C.DoctorReport(
+        scope=(), readiness=(), findings=(), limits=C.DEFAULT_SCAN_LIMITS,
+        usage=C.ScanUsage(entries=6, files=2, file_bytes=20,
+                          total_bytes=20, findings=0, output_bytes=20,
+                          elapsed_s=0.0, skipped=1, truncated=True),
+        limitations=(
+            C.Reason(code="static-evidence-insufficient",
+                     message="Only declared children were inspected."),
+            C.Reason(code="static-evidence-insufficient",
+                     message="Only declared children were inspected."),
+        ),
+    )
+    workspace = WorkspaceInspection(
+        scope=(), repositories=(
+            RepositoryInspection(
+                declaration="api", local_scope=None, report=report,
+                config_problem=C.Problem(
+                    code="invalid-config", message="bad runner",
+                    phase="config")),
+            RepositoryInspection(declaration="web", local_scope=None,
+                                 report=report, config_problem=None),
+        ), aggregate=aggregate,
+    )
+    text = render_agent_assessment(
+        _two_projects(), workspace, report_path="recommendations.md",
+        publication_status="skipped", width=100, color=False,
+        repo="shop", provider="offline", duration_s=3, calls=0)
+
+    assert "Diagnostics" in text
+    assert "- api: invalid-config: bad runner" in text
+    assert "Limitations" in text
+    assert "Scan coverage: incomplete; 2 files inspected, 1 entry skipped." in text
+    assert ("Only declared children were inspected. "
+            "(2 occurrences)") in " ".join(text.split())
+    assert (text.index("Worksheet") < text.index("Diagnostics")
+            < text.index("Limitations") < text.index("Next:"))
+
+    online = render_agent_assessment(
+        _two_projects(), workspace, report_path="recommendations.md",
+        publication_status="created", width=100, color=False,
+        repo="shop", provider="codex/gpt-5", duration_s=3, calls=1)
+    assert "Diagnostics" not in online
+    assert "Limitations" not in online
 
 
 def test_grid_missing_cell_renders_blank_without_breaking_borders():

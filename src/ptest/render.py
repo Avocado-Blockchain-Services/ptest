@@ -538,17 +538,35 @@ _ICON_STYLES = {
 }
 
 
-def _grid_tally(statuses: dict, *, ascii_only: bool) -> str:
-    """One project tally: ``4 ok · 2 gap · 3 unknown`` (n/a when nonzero)."""
+def _grid_tally(statuses: dict, glyphs: dict) -> str:
+    """One compact project tally: ``2 ✓  2 ✗  3 ?`` (``1 –`` for n/a).
+
+    Zero counts are omitted, unless every count is zero. Narrow cells
+    keep narrow status columns narrow.
+    """
     counts = {"satisfied": 0, "gap": 0, "unknown": 0, "not-applicable": 0}
     for status in statuses.values():
         counts[_grid_status_key(status)] += 1
-    mid = " - " if ascii_only else " · "
-    parts = [f"{counts['satisfied']} ok", f"{counts['gap']} gap",
-             f"{counts['unknown']} unknown"]
+    pairs = [f"{counts[key]} {glyphs[key]}"
+             for key in ("satisfied", "gap", "unknown")
+             if counts[key]]
     if counts["not-applicable"]:
-        parts.append(f"{counts['not-applicable']} n/a")
-    return mid.join(parts)
+        pairs.append(f"{counts['not-applicable']} "
+                     f"{glyphs['not-applicable']}")
+    if not pairs:
+        pairs = [f"0 {glyphs[key]}"
+                 for key in ("satisfied", "gap", "unknown")]
+    return "  ".join(pairs)
+
+
+def _paint_tally(tally: str, room: int, styles: dict, *,
+                 color: bool) -> str:
+    """Tint one laid-out tally pair by pair, like the status cells."""
+    tinted = []
+    for pair in tally.split("  "):
+        icon = pair.split(" ", 1)[1] if " " in pair else ""
+        tinted.append(paint(pair, styles.get(icon, ""), color=color))
+    return "  ".join(tinted) + " " * max(0, room - len(tally))
 
 
 def _grid_table_lines(sections, labels, columns, glyphs, borders, *,
@@ -573,8 +591,11 @@ def _grid_table_lines(sections, labels, columns, glyphs, borders, *,
         return _grid_cell(status, glyphs, bracket=bracket)
 
     ids = [row_id for _, group in sections for row_id in group]
-    tallies = [_grid_tally(column["statuses"], ascii_only=ascii_only)
+    tallies = [_grid_tally(column["statuses"], glyphs)
                for column in columns]
+    tally_styles = {glyphs["satisfied"]: "green", glyphs["gap"]: "red",
+                    glyphs["unknown"]: "yellow",
+                    glyphs["not-applicable"]: "dim"}
     label_w = max([len("check")] + [len(labels[row_id]) for row_id in ids])
     cell_floors = []
     proj_w = []
@@ -659,8 +680,12 @@ def _grid_table_lines(sections, labels, columns, glyphs, borders, *,
                     styles.append(_ICON_STYLES[_grid_status_key(status)])
             lines.append(row_line(cells, styles))
     lines.append(divider(None))
-    lines.append(row_line(["", *tallies],
-                          ["dim"] * (len(columns) + 1)))
+    foot = [vertical, " " + " " * widths[0] + " ", vertical]
+    for tally_text, room in zip(tallies, proj_w):
+        foot.append(" " + _paint_tally(tally_text, room, tally_styles,
+                                       color=color) + " ")
+        foot.append(vertical)
+    lines.append("".join(foot))
     lines.append(border(borders["bl"], borders["bm"], borders["br"]))
     return lines
 
@@ -755,12 +780,34 @@ def _grouped_reason_lines(infos: list, glyphs: dict, status: str, *,
         head = f"{scope}: {', '.join(groups[(scope, reason)])}"
         prefix = f"{bullet} "
         sep = f" {dash} " if reason else ""
+        if reason and len(prefix + head + sep) > width // 3:
+            # A wide prefix would leave a thin reason column: the head
+            # keeps its own line and the reason wraps from four spaces.
+            for line in wrap_words(prefix + head, width, indent="",
+                                   hang=" " * len(prefix)):
+                lines.append(_paint_grouped_head(line, prefix, bullet,
+                                                 status, color=color))
+            lines.extend(paint(line, "dim", color=color)
+                         for line in wrap_words(reason, width, indent="    ",
+                                               hang="    "))
+            continue
         hang = " " * len(prefix + head + sep) if reason else " " * len(prefix)
         for line in wrap_words(prefix + head + sep + reason, width,
                                indent="", hang=hang):
             lines.append(_paint_grouped_line(line, prefix, head, sep,
                                              bullet, status, color=color))
     return lines
+
+
+def _paint_grouped_head(line: str, prefix: str, bullet: str, status: str,
+                        *, color: bool) -> str:
+    """Tint one laid-out head line whose reason moved to the next line."""
+    if status != "unknown":
+        return paint(line, "dim", color=color)
+    if line.startswith(prefix):
+        return (paint(bullet, "yellow", color=color) + " "
+                + paint(line[len(prefix):], "bold", color=color))
+    return paint(line, "bold", color=color)
 
 
 def _paint_grouped_line(line: str, prefix: str, head: str, sep: str,
@@ -905,6 +952,49 @@ def _static_finding_lines(workspace, aggregate, *, ascii_only: bool,
     return lines
 
 
+def _static_diagnostic_lines(workspace, *, width: int) -> list[str]:
+    """Per-repository configuration diagnostics, wrapped like the rest."""
+    lines = []
+    for repo in getattr(workspace, "repositories", None) or ():
+        problem = getattr(repo, "config_problem", None)
+        if problem is None:
+            continue
+        lines.extend(wrap_words(
+            f"- {_grid_text(getattr(repo, 'declaration', 'unknown'))}: "
+            f"{terminal_text(getattr(problem, 'code', 'unknown'))}: "
+            f"{terminal_text(getattr(problem, 'message', ''))}",
+            width, indent="", hang="  "))
+    return lines
+
+
+def _static_limitation_lines(aggregate, *, width: int) -> list[str]:
+    """Aggregate non-scan limitations, identical messages counted once."""
+    reasons = [item for item in (getattr(aggregate, "limitations", None)
+                                 or ())
+               if getattr(item, "code", None) != "scan-limit"]
+    groups: dict = {}
+    order: list = []
+    for item in reasons:
+        key = (getattr(item, "code", ""), getattr(item, "message", ""))
+        if key not in groups:
+            groups[key] = 0
+            order.append(key)
+        groups[key] += 1
+    lines = []
+    usage = getattr(aggregate, "usage", None)
+    if usage is not None and getattr(usage, "truncated", False):
+        lines.extend(wrap_words(
+            "Scan stopped at configured bounds; detailed limit notices "
+            "suppressed.", width, indent="", hang="  "))
+    for key in order:
+        description = terminal_text(key[1])
+        if groups[key] > 1:
+            description += f" ({C.plural(groups[key], 'occurrence')})"
+        lines.extend(wrap_words(f"- {description}", width, indent="",
+                                hang="  "))
+    return lines
+
+
 def _static_worksheet_lines(*, ascii_only: bool, width: int) -> list[str]:
     """The review worksheet as one wrapped catalog line, still per check."""
     dash = "-" if ascii_only else "—"
@@ -930,9 +1020,9 @@ def render_agent_assessment(children, workspace, *, report_path: str,
     per project (plus a dim full-suite detail line) sit above the table;
     per-gap findings, unknowns and n/a notes grouped by reason, the
     single next command and the report pointer sit below. Offline grids
-    additionally carry the static readiness, rule findings and worksheet
-    sections in the same visual language. Terminal output never carries
-    Markdown tables or HTML entities.
+    additionally carry the static readiness, rule findings, worksheet,
+    diagnostics and limitations sections in the same visual language.
+    Terminal output never carries Markdown tables or HTML entities.
     """
     resolved = terminal_width(width)
     ascii_only = _grid_ascii(encoding)
@@ -1022,6 +1112,14 @@ def render_agent_assessment(children, workspace, *, report_path: str,
             ("Worksheet", _static_worksheet_lines(ascii_only=ascii_only,
                                                   width=resolved),
              lambda count: ("[worksheet detail omitted; "
+                            "see ptest doctor --json]")),
+            ("Diagnostics", _static_diagnostic_lines(
+                workspace, width=resolved),
+             lambda count: ("[diagnostic detail omitted; "
+                            "see ptest doctor --json]")),
+            ("Limitations", _static_limitation_lines(
+                static_report, width=resolved),
+             lambda count: ("[limitation detail omitted; "
                             "see ptest doctor --json]")),
         ]
     any_gap = any(_grid_status_key(status) == "gap"
