@@ -1230,13 +1230,7 @@ def test_real_source_change_retains_reason_without_source_valid_claim(case):
     ))
     (root / "tracked-input.txt").write_text("original")
     (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n")
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
-    for args in (("init",), ("add", "."), ("commit", "-m", "fixture")):
-        subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", *args],
-                       cwd=root, env=env, capture_output=True, check=True, timeout=5)
+    support.init_git_repo(root)
     result = case.invoke(domain, root, "--", "tests", timeout=10)
     data = _data(result)
     assert result.code == 0

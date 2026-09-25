@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import support
 from ptest import config as config_api, contracts as C, operations
 from ptest.adapters.pytest import prepare
 from ptest.runtime import pytest_bridge
@@ -112,13 +113,6 @@ def test_normal_domain_setup_bootstraps_account_coordinator(case, monkeypatch, t
     (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
     subprocess.run(("uv", "lock"), cwd=root, check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(("git", "init"), cwd=root, check=True,
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(("git", "config", "user.email", "fixture@example.test"),
-                   cwd=root, check=True, stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE)
-    subprocess.run(("git", "config", "user.name", "Fixture"), cwd=root,
-                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     config_text = (
         "version = 1\nproject_id = \"" + "ab" * 16 + "\"\n"
         "[runner]\nkind = \"pytest\"\nlauncher = [\"" + str(root / ".venv/bin/python") + "\"]\n"
@@ -129,10 +123,7 @@ def test_normal_domain_setup_bootstraps_account_coordinator(case, monkeypatch, t
         "lifecycle_scripts = false\n[selection]\nnon_input_outputs = [\".venv\"]\n"
     )
     (root / ".ptest.toml").write_text(config_text, encoding="utf-8")
-    subprocess.run(("git", "add", "."), cwd=root, check=True,
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(("git", "commit", "-m", "normal setup fixture"), cwd=root,
-                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    support.init_git_repo(root)
     config = config_api.resolve_config(root).config
     assert config is not None
     # Initialize the account-scoped coordinator before history/guard work.
