@@ -167,12 +167,21 @@ def test_init_persea_shaped_monorepo_reports_projects_and_fix(
 def test_doctor_review_runs_one_haiku_call_per_item(
         tmp_path, monkeypatch, capsys, ptest_project):
     from ptest.checklist import CATALOG
+    from ptest import platform
 
     root = _write_db_standalone_repo(ptest_project, tmp_path, "review")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
                        str(tmp_path / "locks"))
+    # Explicit empty account state: under isolation the domain root does
+    # not exist yet, so history validation fails closed ("history is
+    # unavailable") instead of reading empty ("no timing history yet").
+    # Creating it keeps the no-history assertions deterministic without
+    # touching the real account domain.
+    state_root = platform.domain_paths(None).root
+    state_root.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_root, 0o700)
 
     argv = ("doctor", "--reviewer", "claude", "--allow-model-review")
     assert main(argv) == 0
