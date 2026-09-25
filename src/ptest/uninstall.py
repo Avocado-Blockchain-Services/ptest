@@ -57,7 +57,6 @@ _ACTIVE_STATES = frozenset({
 })
 
 _SKILL_PROVIDERS = ("claude", "codex", "opencode", "gemini")
-_LEGACY_SKILL_REL = ".codex/skills/ptest/SKILL.md"
 
 
 def _problem(code: str, message: str) -> C.Problem:
@@ -364,7 +363,6 @@ def _decide_block(name: str):
 def _decide_skill(rel: str, provider: str):
     def decide(raw: bytes) -> PlanEntry | None:
         managed = raw in (agent_rules._provider_text(provider),
-                          agent_rules._legacy_provider_text(provider),
                           agent_rules._previous_provider_text(provider),
                           agent_rules._pre_gate_provider_text(provider))
         if managed:
@@ -372,13 +370,6 @@ def _decide_skill(rel: str, provider: str):
                 REMOVE, rel, "managed skill", "unlink", rel=rel, expect=raw)
         return PlanEntry(KEPT, rel, "edited", "keep")
     return decide
-
-
-def _decide_legacy_skill(raw: bytes) -> PlanEntry | None:
-    if raw == agent_rules._legacy_provider_text("codex"):
-        return PlanEntry(REMOVE, _LEGACY_SKILL_REL, "managed skill", "unlink",
-                         rel=_LEGACY_SKILL_REL, expect=raw)
-    return PlanEntry(KEPT, _LEGACY_SKILL_REL, "edited", "keep")
 
 
 def _guidance_entries(root: Path) -> list[PlanEntry]:
@@ -403,10 +394,6 @@ def _guidance_entries(root: Path) -> list[PlanEntry]:
                           decide=_decide_skill(rel, provider))
         if entry is not None:
             entries.append(entry)
-    legacy_entry = _classify(root, _LEGACY_SKILL_REL, limit=_FILE_MAX_BYTES,
-                             decide=_decide_legacy_skill)
-    if legacy_entry is not None:
-        entries.append(legacy_entry)
     return entries
 
 

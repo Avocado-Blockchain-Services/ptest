@@ -461,7 +461,7 @@ def test_child_assessment_data_carries_facts_and_json_drops_them():
         "publication": {"status": "created", "path": "recommendations.md",
                         "sha256": "0" * 64},
     })
-    # ... and projection drops it, so --assessment-json is unchanged.
+    # ... and projection drops it, so --json is unchanged.
     projected = C._project_agent_assessment_payload({
         "schema": C.AGENT_ASSESSMENT_SCHEMA,
         "provider": {"name": "claude", "cli_version": "t",
@@ -817,7 +817,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
             "to run 4 workers" in report)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
     document = C.decode_public_document(
         capsys.readouterr().out.encode("utf-8"))
     assert document.kind == "agent-assessment" and document.error is None
@@ -1158,7 +1158,7 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     assert "PRIVATE_STATE_SENTINEL_DET1" not in report
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
     out = capsys.readouterr().out
     assert "PRIVATE_STATE_SENTINEL_DET1" not in out
     document = C.decode_public_document(out.encode("utf-8"))

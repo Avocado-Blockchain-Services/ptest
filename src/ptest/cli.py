@@ -66,7 +66,6 @@ class ParsedArgs:
     changed: bool = False
     full: bool = False
     json: bool = False
-    prompt: bool = False
     reveal_command: bool = False
     dry_run: bool = False
     runner: C.RunnerKind | None = None
@@ -88,7 +87,6 @@ class ParsedArgs:
     reviewer: str | None = None
     reviewer_explicit: bool = False
     allow_model_review: bool = False
-    assessment_json: bool = False
     review_timeout_s: int = 300
     review_timeout_explicit: bool = False
     review_model: str | None = None
@@ -370,8 +368,6 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "init smoke modes cannot be combined or repeated")
                 no_smoke_seen = True
                 smoke = False
-            elif token == "--assessment-json":
-                raise _problem("invalid-config", "assessment output is only available for doctor")
             elif token == "--json":
                 # Init's frozen grammar omits --json, but accepting it is
                 # harmless only when it is explicitly requested by automation.
@@ -465,11 +461,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         return ParsedArgs(command=command, json="--json" in args,
                           scope=target, history_limit=limit)
     if command == "doctor":
-        json_output = prompt = False
+        json_output = False
         reviewer = None
-        reviewer_seen = allow_seen = assessment_seen = timeout_seen = False
+        reviewer_seen = allow_seen = timeout_seen = False
         model_seen = concurrency_seen = False
-        allow_model_review = assessment_json = offline = False
+        allow_model_review = offline = False
         offline_seen = False
         review_timeout_s = 300
         review_model = None
@@ -489,8 +485,6 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             token = args[index]
             if token == "--json":
                 json_output = True
-            elif token == "--prompt":
-                prompt = True
             elif token in {"--scope", "--max-entries", "--max-files",
                            "--max-file-bytes", "--max-total-bytes"}:
                 value, index = _value(args, index, token)
@@ -514,11 +508,6 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "option cannot be repeated")
                 allow_seen = True
                 allow_model_review = True
-            elif token == "--assessment-json":
-                if assessment_seen:
-                    raise _problem("invalid-config", "option cannot be repeated")
-                assessment_seen = True
-                assessment_json = True
             elif token == "--review-timeout":
                 value, index = _value(args, index, token)
                 if timeout_seen:
@@ -580,9 +569,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if probe:
             if scope is None:
                 raise _problem("invalid-config", "doctor probe requires --scope")
-            if json_output or prompt:
+            if json_output:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
-            if (reviewer_seen or allow_seen or assessment_seen or timeout_seen
+            if (reviewer_seen or allow_seen or timeout_seen
                     or model_seen or concurrency_seen or offline):
                 raise _problem("invalid-config", "doctor probe cannot combine review modes")
             if limits:
@@ -596,20 +585,13 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             )
         if probe_options_seen:
             raise _problem("invalid-config", "probe options require --probe")
-        if json_output and prompt:
-            raise _problem("invalid-config", "doctor output modes cannot be combined")
-        if offline and (json_output or prompt):
-            raise _problem("invalid-config", "doctor output modes cannot be combined")
-        if assessment_seen and (json_output or prompt or offline):
-            raise _problem("invalid-config", "assessment output cannot combine with static modes")
         if (reviewer_seen or allow_seen or timeout_seen or model_seen
-                or concurrency_seen) and (json_output or prompt or offline):
-            raise _problem("invalid-config", "review options cannot combine with static modes")
-        return ParsedArgs(command=command, json=json_output, prompt=prompt,
+                or concurrency_seen) and offline:
+            raise _problem("invalid-config", "review options cannot combine with --offline")
+        return ParsedArgs(command=command, json=json_output,
                           scope=scope, reviewer=reviewer,
                           reviewer_explicit=reviewer_seen,
                           allow_model_review=allow_model_review,
-                          assessment_json=assessment_json,
                           review_timeout_s=review_timeout_s,
                           review_timeout_explicit=timeout_seen,
                           review_model=review_model,
@@ -1876,7 +1858,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             domain=_domain_public(domain), data=draft_data, error=None)
         if sys.stderr.isatty():
             print(file=sys.stderr)
-        if parsed.assessment_json:
+        if parsed.json:
             sys.stdout.buffer.write(render.render_json(document))
         else:
             sys.stdout.write(render.render_agent_assessment(
@@ -1897,15 +1879,69 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
                           domain: C.DomainPaths) -> None:
     workspace = doctor.inspect_workspace(domain, resolution,
                                          _doctor_limits(parsed), parsed.scope)
-    if parsed.prompt:
-        sys.stdout.write(render.repair_prompt(
-            workspace.aggregate, workspace=workspace))
-    elif parsed.json:
-        sys.stdout.buffer.write(render.render_doctor_json(
-            workspace.aggregate, domain=_domain_public(domain)))
+    if parsed.json:
+        sys.stdout.buffer.write(_doctor_offline_assessment_json(
+            resolution, domain, workspace))
     else:
         sys.stdout.write(render.render_doctor(
             workspace.aggregate, workspace=workspace))
+
+
+_OFFLINE_UNKNOWN_REASON = "offline static run: model review unavailable"
+
+
+def _doctor_offline_assessment_json(
+        resolution: C.ConfigResolution,
+        domain: C.DomainPaths, workspace) -> bytes:
+    """Build the versioned assessment document from static facts only.
+
+    No provider is launched and no report is written: deterministic items
+    are answered from ptest's own facts while every item needing a model
+    call becomes an ``unknown`` row carrying the offline reason.
+    """
+    packets = agent_assessment.build_packets(workspace, resolution)
+    if not packets:
+        raise _problem("invalid-config", "no selected project evidence is available")
+    review_items = _resolution_items(resolution)
+    executions = _execution_facts(resolution, _items=review_items)
+    project_facts = _project_facts(resolution, _items=review_items)
+    initialization_blocker = _initialization_required_limitation(resolution)
+    child_data = []
+    for packet in packets:
+        reviews = _plan_item_reviews(
+            packet, domain, resolution,
+            facts=project_facts.get(packet.declaration))
+        replies = tuple(
+            None if review.answer is not None or review.request is None
+            else _OFFLINE_UNKNOWN_REASON
+            for review in reviews)
+        assessment = _assemble_with_parallel(packet, reviews, replies)
+        child_limitations = _assessment_limitations((packet,))
+        if initialization_blocker is not None and packet.declaration == ".":
+            child_limitations.insert(0, dict(initialization_blocker))
+        child_data.append(_child_assessment_data(
+            packet, assessment, child_limitations,
+            execution=executions.get(packet.declaration),
+            facts=project_facts.get(packet.declaration)))
+    limitations = _assessment_limitations(packets, top_level=True)
+    if initialization_blocker is not None:
+        limitations.insert(0, dict(initialization_blocker))
+    document = C.PublicDocument(
+        kind="agent-assessment", ptest_version=C.PTEST_VERSION,
+        domain=_domain_public(domain),
+        data={
+            "schema": C.AGENT_ASSESSMENT_SCHEMA,
+            "provider": {"name": "offline",
+                         "cli_version": C.PTEST_VERSION,
+                         "profile": "ptest-offline-v1"},
+            "children": child_data,
+            "limitations": limitations,
+            "publication": {"status": "skipped",
+                            "path": "recommendations.md",
+                            "sha256": "0" * 64},
+        },
+        error=None)
+    return render.render_json(document)
 
 
 def _uninstall_consented() -> bool:
@@ -2270,21 +2306,20 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     print(render.terminal_text(f"{reason.code}: {reason.message}"),
                           file=sys.stderr)
                 return result.exit_code
-            if not (parsed.offline or parsed.json or parsed.prompt):
-                declined = _run_review_entry(
-                    parsed, resolution, domain,
-                    interactive=_interactive_review(),
-                )
-                if declined:
-                    return 0
+            if parsed.offline:
+                _doctor_static_output(parsed, resolution, domain)
                 return 0
-            _doctor_static_output(parsed, resolution, domain)
+            declined = _run_review_entry(
+                parsed, resolution, domain,
+                interactive=_interactive_review(),
+            )
+            if declined:
+                return 0
             return 0
     except C.Problem as problem:
         return _emit_error(
             problem, kind=command or "where",
-            json_output=(parsed.json or
-                         (command == "doctor" and parsed.assessment_json)),
+            json_output=parsed.json,
         )
     raise _problem("invalid-config", "unknown command")
 

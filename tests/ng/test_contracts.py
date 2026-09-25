@@ -494,9 +494,10 @@ def test_generated_schema_files_match_frozen_shapes():
     root = Path(__file__).resolve().parents[2]
     schemas = {}
     for kind in ("run", "plan", "where", "status", "history", "init",
-                 "doctor", "register", "uninstall"):
+                 "agent-assessment", "register", "uninstall"):
         path = root / "docs" / "schemas" / "v1" / f"{kind}.json"
         schemas[kind] = json.loads(path.read_text(encoding="utf-8"))
+    assert not (root / "docs" / "schemas" / "v1" / "doctor.json").exists()
     capability = schemas["where"]["properties"]["data"]["properties"][
         "capability"]
     assert capability["type"] == ["object", "null"]
@@ -516,12 +517,13 @@ def test_generated_schema_files_match_frozen_shapes():
     obligations = schemas["history"]["properties"]["data"]["properties"][
         "obligations"]["items"]
     assert "source_digest" in obligations["required"]
-    limits = schemas["doctor"]["properties"]["data"]["properties"]["limits"]
-    assert "ast_nodes" in limits["required"]
-    findings = schemas["doctor"]["properties"]["data"]["properties"][
-        "findings"]["items"]
-    assert findings["properties"]["code"]["enum"] == sorted(
-        C.FINDING_CODES)
+    provider = schemas["agent-assessment"]["properties"]["data"][
+        "properties"]["provider"]["properties"]["name"]
+    assert provider["enum"] == sorted(C.AGENT_ASSESSMENT_PROVIDERS)
+    publication = schemas["agent-assessment"]["properties"]["data"][
+        "properties"]["publication"]["properties"]["status"]
+    assert publication["enum"] == sorted(
+        C.AGENT_ASSESSMENT_PUBLICATION_STATUSES)
     uninstall = schemas["uninstall"]["properties"]["data"]["properties"]
     assert sorted(uninstall["plan"]["items"]["required"]) == [
         "action", "detail", "target"]
@@ -1424,7 +1426,7 @@ def test_addendum_schema_shapes():
     root = Path(__file__).resolve().parents[2]
     schemas = {}
     for kind in ("run", "plan", "where", "status", "history", "init",
-                 "doctor", "register"):
+                 "agent-assessment", "register"):
         path = root / "docs" / "schemas" / "v1" / f"{kind}.json"
         schemas[kind] = json.loads(path.read_text(encoding="utf-8"))
     init_data = schemas["init"]["properties"]["data"]["properties"]

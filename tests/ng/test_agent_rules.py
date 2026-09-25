@@ -8,7 +8,21 @@ from pathlib import Path
 
 import pytest
 
-from ptest.agent_rules import _legacy_provider_text, apply, preview
+from ptest.agent_rules import apply, preview
+
+
+def test_obsolete_codex_skill_path_is_ignored_and_preserved(tmp_path):
+    """The removed `.codex` location is neither read nor written."""
+    legacy_dir = tmp_path / ".codex" / "skills" / "ptest"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "SKILL.md").write_text("user-owned codex skill\n", encoding="utf-8")
+
+    result = apply(tmp_path, agents=("codex",))
+
+    assert result.changed is True
+    assert (legacy_dir / "SKILL.md").read_text() == "user-owned codex skill\n"
+    assert all(".codex/skills/ptest/SKILL.md" not in action
+               for action in result.actions)
 from ptest.contracts import Problem
 
 FAST_FORWARD_GATE_RULE = (
@@ -199,19 +213,6 @@ def test_every_generated_skill_has_valid_front_matter_and_root_paths(tmp_path):
     assert len(seen) >= 2
 
 
-def test_exact_released_template_upgrades_to_front_matter_format(tmp_path):
-    target = tmp_path / ".claude" / "skills" / "ptest"
-    target.mkdir(parents=True)
-    legacy = _legacy_provider_text("claude")
-    assert b"---" not in legacy
-    (target / "SKILL.md").write_bytes(legacy)
-
-    result = apply(tmp_path, agents=("claude",))
-
-    assert result.changed is True
-    text = (target / "SKILL.md").read_text(encoding="utf-8")
-    assert text.startswith("---\nname: ptest\n")
-    assert "docs/ptest-agent.md" in text
 
 
 def test_edited_skill_conflicts_before_any_rules_write(tmp_path):
@@ -227,49 +228,10 @@ def test_edited_skill_conflicts_before_any_rules_write(tmp_path):
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "# custom skill\n"
 
 
-def test_legacy_codex_template_is_preserved_with_migration_note(tmp_path):
-    legacy_dir = tmp_path / ".codex" / "skills" / "ptest"
-    legacy_dir.mkdir(parents=True)
-    legacy_bytes = _legacy_provider_text("codex")
-    (legacy_dir / "SKILL.md").write_bytes(legacy_bytes)
-
-    result = apply(tmp_path, agents=("codex",))
-
-    assert result.changed is True
-    assert (legacy_dir / "SKILL.md").read_bytes() == legacy_bytes
-    canonical = (tmp_path / ".agents" / "skills" / "ptest" / "SKILL.md")
-    assert canonical.read_text(encoding="utf-8").startswith("---\nname: ptest\n")
-    assert any(".codex/skills/ptest/SKILL.md" in action
-               for action in result.actions)
 
 
-def test_legacy_codex_user_content_aborts_before_any_write(tmp_path):
-    legacy_dir = tmp_path / ".codex" / "skills" / "ptest"
-    legacy_dir.mkdir(parents=True)
-    (legacy_dir / "SKILL.md").write_text("user-owned codex skill\n", encoding="utf-8")
-
-    with pytest.raises(Problem, match="already exists"):
-        apply(tmp_path, agents=("codex",))
-
-    assert not (tmp_path / "docs").exists()
-    assert not (tmp_path / "AGENTS.md").exists()
-    assert not (tmp_path / ".agents").exists()
-    assert (legacy_dir / "SKILL.md").read_text() == "user-owned codex skill\n"
 
 
-def test_legacy_codex_symlink_aborts_before_any_write(tmp_path):
-    outside = tmp_path.parent / "outside-codex-skill.md"
-    outside.write_text("outside\n", encoding="utf-8")
-    legacy_dir = tmp_path / ".codex" / "skills" / "ptest"
-    legacy_dir.mkdir(parents=True)
-    (legacy_dir / "SKILL.md").symlink_to(outside)
-
-    with pytest.raises(Problem, match="unsafe"):
-        apply(tmp_path, agents=("codex",))
-
-    assert not (tmp_path / "docs").exists()
-    assert not (tmp_path / "AGENTS.md").exists()
-    assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
 def test_mid_write_failure_rolls_back_owned_guidance(tmp_path, monkeypatch):
@@ -599,24 +561,6 @@ def test_rollback_leaves_same_byte_file_swapped_between_read_and_replace(
     assert not (tmp_path / ".claude").exists()
 
 
-def test_unreadable_legacy_codex_artifact_is_not_silently_missing(tmp_path, monkeypatch):
-    import ptest.files as files_module
-
-    legacy = tmp_path / ".codex" / "skills" / "ptest"
-    legacy.mkdir(parents=True)
-    (legacy / "SKILL.md").write_bytes(_legacy_provider_text("codex"))
-    real_read = files_module.read_regular
-
-    def denied_read(root, relative, limit):
-        if relative == ".codex/skills/ptest/SKILL.md":
-            raise Problem(code="state-unavailable", message="injected denial",
-                          phase="files")
-        return real_read(root, relative, limit)
-
-    monkeypatch.setattr(files_module, "read_regular", denied_read)
-
-    with pytest.raises(Problem, match="denial"):
-        preview(tmp_path, agents=("codex",))
 
 
 def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path):

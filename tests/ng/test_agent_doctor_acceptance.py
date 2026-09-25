@@ -203,18 +203,15 @@ def test_static_doctor_modes_compose_without_review_or_report_writes(
         assert human.out.index("| 1 | api ") < human.out.index("| 2 | web ")
         assert "root_noise_test.py" not in human.out
 
-    assert main(("doctor", "--json")) == 0
-    legacy = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
-    assert legacy.kind == "doctor" and legacy.error is None
-    assert set(legacy.data) == {
-        "scope", "readiness", "findings", "limits", "usage", "limitations",
-    }
-    assert "provider" not in legacy.data and "children" not in legacy.data
-
-    assert main(("doctor", "--prompt")) == 0
-    prompt = capsys.readouterr()
-    assert "Assessment request:" in prompt.out
-    assert prompt.err == ""
+    assert main(("doctor", "--offline", "--json")) == 0
+    offline = capsys.readouterr()
+    public = C.decode_public_document(offline.out.encode("utf-8"))
+    assert public.kind == "agent-assessment" and public.error is None
+    assert public.data["provider"]["name"] == "offline"
+    assert [child["scope"] for child in public.data["children"]] == (
+        ["."] if topology == "standalone" else ["api", "web"])
+    assert public.data["publication"]["status"] == "skipped"
+    assert offline.err == ""
     assert _tree_state(root) == before
 
 
@@ -426,7 +423,7 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     ):
         assert proof in rendered
 
-    assert main((*review_argv, "--assessment-json")) == 0
+    assert main((*review_argv, "--json")) == 0
     public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
     assert public.kind == "agent-assessment" and public.error is None
     assert set(public.data) == {
@@ -480,7 +477,7 @@ def test_review_unavailable_or_cancelled_preserves_existing_report(
         launches = _install_fake_review(monkeypatch, cancelled=True)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == expected_exit
+                 "--json")) == expected_exit
     document = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
     assert document.kind == "doctor" and document.data is None
     assert document.error.code == expected_code
@@ -523,3 +520,70 @@ def test_review_passes_heartbeat_progress_to_launch_reviews(
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
     assert seen, "review launched no items"
     assert all(callable(progress) for progress in seen)
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--prompt"),
+    ("doctor", "--assessment-json"),
+    ("doctor", "--offline", "--prompt"),
+])
+def test_doctor_removed_output_flags_are_unknown_options(argv):
+    from ptest.cli import parse_argv
+
+    with pytest.raises(C.Problem, match="unknown inspection option"):
+        parse_argv(argv)
+
+
+def test_doctor_json_emits_versioned_assessment_document(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "json-review"
+    _write_v1(root, "ab" * 16)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    _patch_qualification(monkeypatch)
+    _install_fake_review(monkeypatch)
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda *args, **kwargs: pytest.fail("doctor review executed project tests"),
+    )
+
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--json")) == 0
+    public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert public.kind == "agent-assessment" and public.error is None
+    assert set(public.data) == {
+        "schema", "provider", "children", "limitations", "publication",
+    }
+    assert public.data["provider"]["name"] == "claude"
+    assert [child["scope"] for child in public.data["children"]] == ["."]
+    assert (root / "recommendations.md").is_file()
+
+
+def test_doctor_offline_json_emits_assessment_document_without_review(
+        tmp_path, monkeypatch, capsys):
+    root = tmp_path / "offline-json"
+    _write_v1(root, "ab" * 16)
+    before = _tree_state(root)
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.resolve_reviewer",
+        lambda *args, **kwargs: pytest.fail("offline json resolved a reviewer"),
+    )
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_reviews",
+        lambda *args, **kwargs: pytest.fail("offline json launched a reviewer"),
+    )
+
+    assert main(("doctor", "--offline", "--json")) == 0
+    public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
+    assert public.kind == "agent-assessment" and public.error is None
+    assert public.data["schema"] == C.AGENT_ASSESSMENT_SCHEMA
+    assert public.data["provider"]["name"] == "offline"
+    assert [child["scope"] for child in public.data["children"]] == ["."]
+    for child in public.data["children"]:
+        assert [row["id"] for row in child["rows"]] == list(
+            C.AGENT_ASSESSMENT_CHECKLIST_IDS)
+        assert any(row["status"] == "unknown" for row in child["rows"])
+    assert public.data["publication"]["status"] == "skipped"
+    assert _tree_state(root) == before

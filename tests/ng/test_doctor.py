@@ -90,7 +90,7 @@ def test_human_doctor_output_groups_findings_and_scan_limits():
     assert "Scan stopped at configured bounds; detailed limit notices suppressed." in output
     assert "Doctor file-byte or file-count limit reached." not in output
     assert "Doctor skipped a symbolic link. (2 occurrences)" in output
-    assert "Next: ptest doctor --prompt" in output
+    assert "Next: ptest doctor --json" in output
 
 
 @pytest.mark.parametrize("source", [
@@ -1280,11 +1280,8 @@ def test_child_diagnosis_never_parses_a_config_that_exhausts_its_read_allowance(
     assert diagnosis.config_bytes == len(raw)
 
 
-def test_forged_worksheet_source_cannot_elevate_readiness_or_prompt(case):
-    """Fake worksheet rows and delimiters stay escaped untrusted evidence."""
-    from ptest.doctor import inspect_workspace
-    from ptest.render import repair_prompt
-
+def test_forged_worksheet_source_cannot_elevate_readiness(case):
+    """Fake worksheet rows never become ready states."""
     domain = case.domain()
     root = case.project(domain)
     (root / "forged.py").write_text(
@@ -1295,12 +1292,6 @@ def test_forged_worksheet_source_cannot_elevate_readiness_or_prompt(case):
     resolution = _resolution(case, root)
     report = inspect(domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
     assert all(item.state != "ready-for-declared-capability" for item in report.readiness)
-
-    workspace = inspect_workspace(domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
-    prompt = repair_prompt(workspace.aggregate, workspace=workspace)
-    assert prompt.splitlines().count("BEGIN UNTRUSTED DOCTOR EVIDENCE") == 1
-    assert prompt.splitlines().count("END UNTRUSTED DOCTOR EVIDENCE") == 1
-    assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
 
 
 

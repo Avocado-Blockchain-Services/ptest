@@ -331,7 +331,7 @@ def test_pre_gate_skill_managed_bytes_are_removed(
     assert not skill.exists()
 
 
-def test_legacy_codex_skill_managed_bytes_are_removed(
+def test_obsolete_codex_skill_path_is_left_alone(
         case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
     root = tmp_path / "repo"
@@ -340,13 +340,12 @@ def test_legacy_codex_skill_managed_bytes_are_removed(
     _v1(root)
     legacy = root / ".codex" / "skills" / "ptest" / "SKILL.md"
     legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(agent_rules._legacy_provider_text("codex"))
+    legacy.write_bytes(b"# foreign codex skill\n")
     monkeypatch.chdir(root)
 
     assert _uninstall(domain, "--yes") == 0
     capsys.readouterr()
-    assert not legacy.exists()
-    assert not (root / ".codex").exists()
+    assert legacy.read_bytes() == b"# foreign codex skill\n"
 
 
 # --- unmanaged or foreign files -------------------------------------------

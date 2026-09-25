@@ -97,12 +97,14 @@ def test_doctor_help_documents_consented_review_and_per_provider_qualification(
     normalized_doctor_help = " ".join(doctor_help.split())
     for marker in (
         "--reviewer", "--allow-model-review", "--review-timeout",
-        "--assessment-json", "--offline", "--json", "--prompt", "--probe",
+        "--offline", "--json", "--probe",
         "bounded source", "costs may apply", "secrets", "Claude", "Codex",
         "OpenCode", "qualified reviewers", "free tier", "not supported",
         "provider-unqualified",
     ):
         assert marker.lower() in normalized_doctor_help.lower(), marker
+    for removed in ("--assessment-json", "--prompt"):
+        assert removed not in normalized_doctor_help, removed
     assert "all three" not in normalized_doctor_help.lower()
 
     assert main(("help", "init")) == 0
@@ -163,7 +165,7 @@ def test_help_agents_is_self_contained_workflow(tmp_path, monkeypatch, capsys):
         "monorepo root",
         "ptest --full",
         "--probe",
-        "--prompt",
+        "--offline --json",
         "unknown",
         "guide",
     ):

@@ -2819,7 +2819,7 @@ AGENT_ASSESSMENT_CHECKLIST_IDS = tuple(
 AGENT_ASSESSMENT_RECIPES = {
     entry.id: entry.recipe for entry in _CHECKLIST_CATALOG}
 
-AGENT_ASSESSMENT_PROVIDERS = frozenset({"claude", "codex", "opencode"})
+AGENT_ASSESSMENT_PROVIDERS = frozenset({"claude", "codex", "opencode", "offline"})
 
 AGENT_ASSESSMENT_STATUSES = frozenset({
     "satisfied", "gap", "unknown", "not-applicable",
@@ -2833,7 +2833,7 @@ AGENT_ASSESSMENT_LIMITATION_CODES = frozenset({
 })
 
 AGENT_ASSESSMENT_PUBLICATION_STATUSES = frozenset({
-    "created", "replaced", "unchanged",
+    "created", "replaced", "unchanged", "skipped",
 })
 
 _AGENT_ASSESSMENT_BIDI = frozenset({
@@ -4467,7 +4467,7 @@ def _agent_assessment_data_schema() -> dict:
                 "type": "object",
                 "properties": {
                     "name": {"type": "string",
-                             "enum": ["claude", "codex", "opencode"]},
+                             "enum": sorted(AGENT_ASSESSMENT_PROVIDERS)},
                     "cli_version": {"type": "string"},
                     "profile": {"type": "string"},
                 },
@@ -4482,8 +4482,8 @@ def _agent_assessment_data_schema() -> dict:
                 "type": "object",
                 "properties": {
                     "status": {"type": "string",
-                               "enum": ["created", "replaced",
-                                        "unchanged"]},
+                               "enum": sorted(
+                                   AGENT_ASSESSMENT_PUBLICATION_STATUSES)},
                     "path": {"type": "string",
                              "const": "recommendations.md"},
                     "sha256": {"type": "string",
@@ -4551,19 +4551,6 @@ PUBLIC_SCHEMAS: dict = {
             "config": _config_summary_schema(),
         },
         "required": ["action", "target", "exists", "warnings", "config"],
-    }),
-    "doctor": _envelope_schema("doctor", {
-        "type": "object",
-        "properties": {
-            "scope": {"type": "array", "items": {"type": "string"}},
-            "readiness": {"type": "array", "items": _readiness_schema()},
-            "findings": {"type": "array", "items": _finding_schema()},
-            "limits": _scan_limits_schema(),
-            "usage": _scan_usage_schema(),
-            "limitations": {"type": "array", "items": _reason_schema()},
-        },
-        "required": ["scope", "readiness", "findings", "limits", "usage",
-                     "limitations"],
     }),
     "register": _envelope_schema("register", {
         "type": "object",
