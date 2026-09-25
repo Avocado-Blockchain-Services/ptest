@@ -569,7 +569,7 @@ def _decode_attempt(binding: NativeReportBinding, raw: bytes) -> NativeAttemptRe
     if set(value) != _ATTEMPT_FIELDS | {"project_narrowing"}:
         _reject()
     try:
-        terminal_fields = {key: value[key] for key in _FIELDS} | {
+        terminal_fields = {key: value.get(key) for key in _FIELDS} | {
             "project_narrowing": value["project_narrowing"]}
         terminal = _decode(binding, json.dumps(terminal_fields,
                                                separators=(",", ":")).encode())

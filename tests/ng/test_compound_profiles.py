@@ -332,6 +332,59 @@ def test_prepared_advanced_selection_capability_is_not_a_qualification_claim():
     assert prepared.capability.selection is False
 
 
+def _attempt_roundtrip_case(case, *, attempt_id="a001", test_counts="default"):
+    """Write one complete advanced attempt report and consume it.
+
+    ``test_counts="default"`` mirrors the bridge ``run()`` call shape and
+    asserts the writer emits every reader-mandated terminal field on its
+    own; an explicit dict asserts counts ride the report cleanly.
+    """
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    run_id, nonce = "cd" * 16, "ef" * 32
+    binding = allocate_report(domain, checkout, run_id=run_id, nonce=nonce,
+                              attempt_id=attempt_id, runner="pytest",
+                              execution_mode="selected", effective_profile="advanced")
+    facts = _parallel_facts()
+    runtime_identity = hashlib.sha256(json.dumps(
+        facts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    prefix = f"pt_{checkout.checkout_id[:8]}_{run_id}_{attempt_id}_w000"
+    extra = {} if test_counts == "default" else {"test_counts": test_counts}
+    _write_attempt_report(
+        binding.path, {"run_id": run_id, "nonce": nonce, "attempt_id": attempt_id,
+                       "execution_mode": "selected", "effective_profile": "advanced"},
+        runtime="9.1.1", native_exit=0, bridge_exit=0, complete=True,
+        problem=None, runtime_identity=runtime_identity, runtime_facts=facts,
+        inventory=[{"id": "tests/test.py::test_ok", "file": "tests/test.py",
+                    "outcome": "passed", "setup_s": 0.0, "call_s": 0.0,
+                    "teardown_s": 0.0}],
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}],
+        coverage_complete=True, reporters_complete=True, **extra)
+    return consume_attempt_report(binding)
+
+
+def test_attempt_writer_emits_reader_mandatory_terminal_counts(case):
+    """H1 twin: a bridge-written attempt report must consume cleanly.
+
+    The run-output merge made ``test_counts`` a mandatory terminal key
+    while the attempt writer still emitted the old field set, so every
+    advanced run exited 70 ``report-invalid`` despite native passes.
+    """
+    evidence = _attempt_roundtrip_case(case)
+    assert evidence.attempt_id == "a001"
+    assert evidence.terminal_complete is True
+
+
+def test_attempt_report_carries_terminal_counts(case):
+    """Terminal test counts ride the attempt report under strict validation."""
+    evidence = _attempt_roundtrip_case(
+        case, attempt_id="a002",
+        test_counts={"collected": 1, "executed": 1, "passed": 1,
+                     "failed": 0, "skipped": 0, "unknown": 0})
+    assert evidence.attempt_id == "a002"
+    assert evidence.terminal_complete is True
+
+
 def test_attempt_report_writer_honours_native_report_size_descriptor(tmp_path):
     path = tmp_path / "native.json"
     records = [

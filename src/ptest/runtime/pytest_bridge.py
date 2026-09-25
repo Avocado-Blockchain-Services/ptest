@@ -764,12 +764,20 @@ def _empty_narrowing() -> dict[str, Any]:
     return {"narrowing": None, "conftest_hooks": [], "notes": []}
 
 
-def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
-                  native_exit: int | None, bridge_exit: int,
-                  complete: bool, problem: str | None,
-                  project_narrowing: dict[str, Any] | None = None,
-                  test_counts: dict[str, int] | None = None) -> None:
-    payload = {
+def _terminal_payload(identity: dict[str, str], *, runtime: str,
+                      native_exit: int | None, bridge_exit: int,
+                      complete: bool, problem: str | None,
+                      project_narrowing: dict[str, Any] | None,
+                      test_counts: dict[str, int] | None) -> dict[str, Any]:
+    """Shared terminal field set for both native report writers.
+
+    Single source of truth for the reader-mandated terminal keys: the
+    basic and attempt writers project through this helper, so a newly
+    mandatory field cannot be added to one writer and missed in the
+    other (which previously broke every advanced run with
+    ``report-invalid`` despite native passes).
+    """
+    return {
         "protocol": 1,
         **identity,
         "runner": "pytest",
@@ -783,6 +791,18 @@ def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
         else _empty_narrowing(),
         "test_counts": test_counts,
     }
+
+
+def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
+                  native_exit: int | None, bridge_exit: int,
+                  complete: bool, problem: str | None,
+                  project_narrowing: dict[str, Any] | None = None,
+                  test_counts: dict[str, int] | None = None) -> None:
+    payload = _terminal_payload(
+        identity, runtime=runtime, native_exit=native_exit,
+        bridge_exit=bridge_exit, complete=complete, problem=problem,
+        project_narrowing=project_narrowing, test_counts=test_counts,
+    )
     raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
     max_bytes, _, _, _ = _report_limits()
     if len(raw) > max_bytes:
@@ -808,16 +828,14 @@ def _write_attempt_report(path: Path, identity: dict[str, str], *, runtime: str,
                           workers: list[dict[str, str]], coverage_complete: bool,
                           reporters_complete: bool,
                           inventory_complete: bool | None = None,
-                          project_narrowing: dict[str, Any] | None = None) -> None:
-    payload = {
-        "protocol": 1, **identity, "runner": "pytest",
-        "observed_runtime_version": runtime,
-        "terminal_complete": complete,
-        "native_exit_code": native_exit if complete else None,
-        "bridge_exit_code": bridge_exit,
-        "problem": problem,
-        "project_narrowing": project_narrowing if isinstance(project_narrowing, dict)
-        else _empty_narrowing(),
+                          project_narrowing: dict[str, Any] | None = None,
+                          test_counts: dict[str, int] | None = None) -> None:
+    payload = _terminal_payload(
+        identity, runtime=runtime,
+        native_exit=native_exit if complete else None,
+        bridge_exit=bridge_exit, complete=complete, problem=problem,
+        project_narrowing=project_narrowing, test_counts=test_counts,
+    ) | {
         "runtime_identity": runtime_identity,
         "runtime_facts": runtime_facts,
         "inventory": {
@@ -2652,6 +2670,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                         reporters_complete=bool(advanced_plugin is not None and advanced_plugin.reporters_complete),
                         inventory_complete=bool(advanced_plugin is not None and advanced_plugin.collection_complete),
                         project_narrowing=narrowing_report,
+                        test_counts=test_counts,
                     )
                 else:
                     _write_report(binding[0], binding[1], runtime=runtime,
