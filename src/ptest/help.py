@@ -35,8 +35,7 @@ Local state:
   Use one value across projects to share limits. Explicit --fixture-domain wins.
 
 Machine output:
-  Legacy doctor --json stays static; --assessment-json is the versioned review result.
-  --json on init/register/where/status/history/plan; guide is text-only.
+  --json on init/register/where/status/history/plan/doctor; guide is text-only.
 
 Discover commands:
   ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall
@@ -122,14 +121,16 @@ _DOCTOR = """ptest doctor: consented bounded CLI review by default, offline stat
 
 Review syntax (default mode):
   ptest doctor [--reviewer auto|claude|codex|opencode]
-               [--allow-model-review] [--assessment-json]
+               [--allow-model-review] [--json]
                [--review-timeout 10..900] [--scope PATH]
                [--review-model MODEL] [--review-concurrency 1..8]
 
 Offline static syntax (never launches a provider or writes a report):
-  ptest doctor --offline [--scope PATH] [--max-entries N] [--max-files N]
-               [--max-file-bytes N] [--max-total-bytes N]
-  ptest doctor --json | --prompt [--scope PATH]
+  ptest doctor --offline [--json] [--scope PATH] [--max-entries N]
+               [--max-files N] [--max-file-bytes N] [--max-total-bytes N]
+
+Fix syntax (never runs a model review; static plan plus guarded write):
+  ptest doctor --fix [--offline] [--yes] [--dry-run]
 
 Probe syntax (EXECUTES tests and setup; not a static inspection; single-project v1 only):
   ptest doctor --probe --scope S [--repeat 1..5 (default 2)]
@@ -154,9 +155,18 @@ Notes:
   Selecting an unqualified provider, or auto finding only unqualified
   providers, fails closed with provider-unqualified. Normal test execution
   remains local and model-free.
-  --assessment-json is the versioned review document; legacy --json and
-  --prompt stay static and offline. --prompt grants assessment text only,
-  never repair authority.
+  --json emits the versioned review document. Offline --json emits the
+  same document kind built from static facts only: items ptest cannot
+  decide offline are unknown with a reason.
+
+  --fix diffs each `.ptest.toml` against the config ptest would write
+  today plus deterministic fixes (stale `-n 0`, setup extras/groups,
+  a `[selection]` draft under coverage) and applies the diff with
+  consent: a TTY is asked once, non-interactive runs require --yes,
+  and --dry-run shows the diff only. Writes are atomic, never follow
+  symlinks, fail closed on concurrent edits, keep unmanaged settings
+  byte-identical, and are idempotent. Model-review findings about test
+  code are never applied.
 
   Each review makes one model call per checklist item that needs one
   (4 at a time by default; --review-concurrency 1..8 bounds
@@ -319,15 +329,14 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
 4. Review with consent or inspect offline:
      ptest doctor                  # separately consented source review on a TTY
      ptest doctor --offline        # static scan: hypotheses, read-only
-     ptest doctor --prompt         # assessment text for repair planning only
-     ptest doctor --json           # typed findings document
+     ptest doctor --json           # versioned review document
+     ptest doctor --offline --json # same document from static facts only
    Doctor review is separately consented and may send bounded source text to
    the selected provider; costs may apply. Claude and Codex are qualified
    reviewers; OpenCode is not supported because its free tier refuses
-   tool-free runs. Use --offline, --prompt, or
-   legacy --json for static output. --prompt and --json are mutually
-   exclusive. Never infer readiness from an unknown or incomplete static
-   scan: report unknown honestly; a clean or truncated scan is never a pass
+   tool-free runs. Use --offline for static output. Never infer readiness
+   from an unknown or incomplete static scan: report unknown honestly;
+   a clean or truncated scan is never a pass
    and never proves parallel, timing, or execution readiness.
    ptest doctor --probe --scope tests/test_example.py EXECUTES tests and
    setup (may use configured services/network): requires deliberate

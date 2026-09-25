@@ -5,8 +5,10 @@ model-independent; no cloud account, model API, or remote service is required
 to run tests. Run `ptest init`, then use `ptest <scoped paths>` or
 `ptest --full`.
 
-Doctor has explicit offline static modes (`--offline`, `--json`, and `--prompt`)
-and a separately consented CLI review design. Claude and Codex are qualified
+Doctor has an explicit offline static mode (`--offline`) and a separately
+consented CLI review design. `ptest doctor --json` emits the versioned
+review document; `ptest doctor --offline --json` emits the same document
+built from static facts only. Claude and Codex are qualified
 reviewers. OpenCode is not supported because its free tier refuses tool-free
 runs (HTTP 403 FreeTierError). Review sends bounded source text to the
 selected provider using your
@@ -81,9 +83,6 @@ export PTEST_STATE_DIR=/abs/workspace/.ptest-state
 Use the same value for every project that should share concurrency limits.
 See [workspace-local setup](docs/installation.md#workspace-local-setup) for
 running from a checkout without a global installation.
-
-The old implementation is retained only in Git history; see
-[docs/legacy-index.md](docs/legacy-index.md).
 
 `ptest uninstall` reverses what ptest set up in a repository: it removes the
 `.ptest.toml` files, ptest-managed guidance, the un-edited

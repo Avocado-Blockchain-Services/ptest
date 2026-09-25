@@ -318,7 +318,8 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
 
     monkeypatch.setattr(subprocess, "Popen", no_execution)
     monkeypatch.setattr(socket, "create_connection", no_execution)
-    options = (("--json",) if json_mode else
+    options = ((("--offline", "--json") if command == "doctor" else ("--json",))
+               if json_mode else
                (("--offline",) if command == "doctor" else ()))
     assert main(("--fixture-domain", str(domain.root), command, *options)) == 0
     captured = capsys.readouterr()
@@ -329,7 +330,8 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
     assert _tree_bytes(domain.root) == before
     if json_mode:
         document = C.decode_public_document(captured.out)
-        assert document.kind == command
+        assert document.kind == (
+            "agent-assessment" if command == "doctor" else command)
         assert document.error is None
         data = document.data
         if command in {"where", "register"}:
@@ -350,9 +352,9 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
         elif command == "history":
             assert data == {"summaries": [], "obligations": []}
         else:
-            assert any(item["code"] == "cache.global-flush" for item in data["findings"])
-            assert next(item for item in data["readiness"]
-                        if item["area"] == "parallel")["state"] == "unknown"
+            assert data["provider"]["name"] == "offline"
+            assert data["publication"]["status"] == "skipped"
+            assert [child["scope"] for child in data["children"]] == ["."]
     else:
         if command == "init":
             assert "ptest already configured" in captured.out
@@ -613,20 +615,6 @@ def test_nonempty_status_and_history_are_real_producer_data(
             assert captured.out == (
                 f"queued: 1\nactive: 0\ndomain: {domain.root}\n"
                 if name == "status" else "history: 1 runs\n")
-    assert _tree_bytes(domain.root) == before
-
-
-def test_doctor_prompt_uses_actual_findings_without_commands_or_writes(
-        inspection_project, capsys):
-    domain, _ = inspection_project
-    before = _tree_bytes(domain.root)
-    assert main(("--fixture-domain", str(domain.root), "doctor", "--prompt")) == 0
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    assert "cache.global-flush" in captured.out
-    assert "tests/test_cache.py" in captured.out
-    assert "Repair constraints:" in captured.out
-    assert all(token not in captured.out for token in SECRET_ARGV)
     assert _tree_bytes(domain.root) == before
 
 
@@ -908,21 +896,20 @@ def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
     assert "review not yet performed" in captured.out
 
 
-def test_doctor_json_from_monorepo_root_keeps_single_aggregate_shape(
+def test_doctor_offline_json_from_monorepo_root_lists_every_child(
         tmp_path, monkeypatch, capsys):
     _monorepo_cli_root(tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert main(("doctor", "--json")) == 0
+    assert main(("doctor", "--offline", "--json")) == 0
     captured = capsys.readouterr()
     document = C.decode_public_document(captured.out)
-    assert document.kind == "doctor" and document.error is None
-    assert set(document.data) == {
-        "scope", "readiness", "findings", "limits", "usage", "limitations"}
-    assert document.data["scope"] == []
-    assert [item["area"] for item in document.data["readiness"]] == [
-        "execution", "parallel", "selection", "timing"]
-    assert all(item["path"].startswith(("api/", "web/"))
-               for item in document.data["findings"])
+    assert document.kind == "agent-assessment" and document.error is None
+    assert document.data["provider"]["name"] == "offline"
+    assert [child["scope"] for child in document.data["children"]] == [
+        "api", "web"]
+    for child in document.data["children"]:
+        assert [row["id"] for row in child["rows"]] == list(
+            C.AGENT_ASSESSMENT_CHECKLIST_IDS)
 
 
 def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
@@ -942,22 +929,6 @@ def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
     captured = capsys.readouterr()
     assert "unsafe-path" in captured.err
     assert captured.out == ""
-
-
-def test_doctor_prompt_requests_assessment_without_repair_or_execution(
-        tmp_path, monkeypatch, capsys):
-    import subprocess
-
-    _monorepo_cli_root(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("prompt executed a runner"))
-    assert main(("doctor", "--prompt")) == 0
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    assert "Assessment request:" in captured.out
-    assert "assessment authority only" in captured.out
-    assert "api/tests/cache_test.py" in captured.out
-    assert "FIX-001" in captured.out
 
 
 def test_doctor_probe_still_executes_without_checklist(
@@ -1220,7 +1191,7 @@ def test_doctor_parser_defaults_request_review_without_launch_flags():
     assert parsed.reviewer is None
     assert parsed.reviewer_explicit is False
     assert parsed.allow_model_review is False
-    assert parsed.assessment_json is False
+    assert parsed.json is False
     assert parsed.review_timeout_s == 300
     assert parsed.review_timeout_explicit is False
     assert parsed.offline is False
@@ -1239,15 +1210,46 @@ def test_doctor_parser_accepts_supported_reviewers(reviewer):
 
 def test_doctor_parser_accepts_full_review_option_set():
     parsed = parse_argv(("doctor", "--reviewer", "codex",
-                         "--allow-model-review", "--assessment-json",
+                         "--allow-model-review", "--json",
                          "--review-timeout", "60", "--scope", "tests/x.py"))
 
     assert parsed.reviewer == "codex"
     assert parsed.allow_model_review is True
-    assert parsed.assessment_json is True
+    assert parsed.json is True
     assert parsed.review_timeout_s == 60
     assert parsed.review_timeout_explicit is True
     assert parsed.scope == "tests/x.py"
+
+
+def test_doctor_parser_accepts_offline_json_combination():
+    parsed = parse_argv(("doctor", "--offline", "--json"))
+
+    assert parsed.offline is True
+    assert parsed.json is True
+
+
+def test_doctor_parser_accepts_fix_with_consent_flags():
+    parsed = parse_argv(("doctor", "--fix", "--offline", "--yes", "--dry-run"))
+
+    assert parsed.fix is True
+    assert parsed.fix_yes is True
+    assert parsed.dry_run is True
+    assert parsed.offline is True
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--yes"),
+    ("doctor", "--dry-run"),
+    ("doctor", "--fix", "--json"),
+    ("doctor", "--fix", "--reviewer", "claude"),
+    ("doctor", "--fix", "--allow-model-review"),
+    ("doctor", "--fix", "--scope", "tests"),
+    ("doctor", "--fix", "--max-files", "3"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--fix"),
+])
+def test_doctor_parser_rejects_fix_misuse(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
 
 
 @pytest.mark.parametrize("reviewer", ["gemini", "CLAUDE", "all", "none"])
@@ -1265,7 +1267,6 @@ def test_doctor_parser_rejects_out_of_bound_review_timeout(timeout):
 @pytest.mark.parametrize("argv", [
     ("doctor", "--reviewer", "claude", "--reviewer", "codex"),
     ("doctor", "--allow-model-review", "--allow-model-review"),
-    ("doctor", "--assessment-json", "--assessment-json"),
     ("doctor", "--review-timeout", "60", "--review-timeout", "61"),
     ("doctor", "--offline", "--offline"),
 ])
@@ -1277,35 +1278,23 @@ def test_doctor_parser_rejects_repeated_review_options(argv):
 @pytest.mark.parametrize("argv", [
     ("doctor", "--probe", "--scope", "tests/a.py", "--reviewer", "claude"),
     ("doctor", "--probe", "--scope", "tests/a.py", "--allow-model-review"),
-    ("doctor", "--probe", "--scope", "tests/a.py", "--assessment-json"),
     ("doctor", "--probe", "--scope", "tests/a.py", "--review-timeout", "60"),
     ("doctor", "--probe", "--scope", "tests/a.py", "--offline"),
     ("doctor", "--probe", "--scope", "tests/a.py", "--json"),
-    ("doctor", "--offline", "--json"),
-    ("doctor", "--offline", "--prompt"),
-    ("doctor", "--offline", "--assessment-json"),
     ("doctor", "--offline", "--reviewer", "claude"),
     ("doctor", "--offline", "--allow-model-review"),
     ("doctor", "--offline", "--review-timeout", "60"),
-    ("doctor", "--json", "--assessment-json"),
-    ("doctor", "--prompt", "--assessment-json"),
-    ("doctor", "--json", "--reviewer", "claude"),
-    ("doctor", "--prompt", "--reviewer", "codex"),
-    ("doctor", "--json", "--allow-model-review"),
-    ("doctor", "--prompt", "--allow-model-review"),
-    ("doctor", "--json", "--review-timeout", "60"),
-    ("doctor", "--prompt", "--review-timeout", "120"),
-    ("doctor", "--probe", "--scope", "tests/a.py", "--assessment-json",
-     "--reviewer", "auto"),
+    ("doctor", "--prompt"),
+    ("doctor", "--assessment-json"),
+    ("doctor", "--offline", "--prompt"),
 ])
 def test_doctor_parser_rejects_incompatible_modes_before_side_effects(argv):
     with pytest.raises(C.Problem):
         parse_argv(argv)
 
 
-def test_doctor_parser_keeps_legacy_modes():
+def test_doctor_parser_accepts_json_and_offline_modes():
     assert parse_argv(("doctor", "--json")).json is True
-    assert parse_argv(("doctor", "--prompt")).prompt is True
     assert parse_argv(("doctor", "--offline")).offline is True
     assert parse_argv(("doctor", "--offline", "--scope", "tests")).scope == "tests"
     probe = parse_argv(("doctor", "--probe", "--scope", "tests/a.py")).probe
@@ -1367,8 +1356,7 @@ def test_init_parser_rejects_incompatible_review_modes(argv):
     ("doctor", "--reviewer", "gemini"),
     ("doctor", "--review-timeout", "5"),
     ("doctor", "--probe", "--scope", "tests/a.py", "--reviewer", "claude"),
-    ("doctor", "--offline", "--json"),
-    ("doctor", "--json", "--assessment-json"),
+    ("doctor", "--json", "--prompt"),
     ("doctor", "--reviewer", "claude", "--prompt"),
     ("init", "--json", "--doctor"),
     ("init", "--dry-run", "--reviewer", "claude"),
@@ -1393,7 +1381,7 @@ def test_invalid_review_invocations_exit_two_without_launch(
     ("doctor", "--reviewer", "claude"),
     ("doctor", "--reviewer", "auto", "--allow-model-review"),
     ("doctor", "--allow-model-review"),
-    ("doctor", "--assessment-json"),
+    ("doctor", "--json"),
 ])
 def test_doctor_without_full_explicit_consent_requires_consent_before_qualification(
         tmp_path, monkeypatch, capsys, argv):
@@ -1448,7 +1436,7 @@ def test_explicit_provider_and_consent_with_missing_provider_never_launches(
     assert "consent-required" not in text
 
 
-def test_explicit_assessment_json_without_consent_reports_consent_required(
+def test_explicit_json_without_consent_reports_consent_required(
         tmp_path, monkeypatch, capsys):
     import sys
 
@@ -1457,7 +1445,7 @@ def test_explicit_assessment_json_without_consent_reports_consent_required(
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
 
-    assert main(("doctor", "--assessment-json")) == 2
+    assert main(("doctor", "--json")) == 2
 
     captured = capsys.readouterr()
     document = C.decode_public_document(captured.out)
@@ -1942,7 +1930,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
         "checks confirmed from evidence")
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
     document = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
     assert document.kind == "agent-assessment"
     child = document.data["children"][0]
@@ -1957,12 +1945,6 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     blocker = next(item for item in document.data["limitations"]
                    if item["code"] == "capability-unsupported")
     assert "initialization-required" in blocker["message"]
-
-    assert main(("doctor", "--json")) == 0
-    legacy = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
-    assert legacy.kind == "doctor"
-    assert "children" not in legacy.data
-    assert "provider" not in legacy.data
 
 
 def test_plan_item_reviews_never_falls_back_to_plain_planner(
@@ -2039,7 +2021,7 @@ def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
     )
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.kind == "agent-assessment"
@@ -2141,7 +2123,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
 
     before = time.monotonic()
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json", "--review-timeout", "60")) == 0
+                 "--json", "--review-timeout", "60")) == 0
     after = time.monotonic()
 
     captured = capsys.readouterr()
@@ -2222,7 +2204,7 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
         "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 2
+                 "--json")) == 2
 
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
@@ -2282,7 +2264,7 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
         _ok_item_launches(launches, hook, pid=4000))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 2
+                 "--json")) == 2
 
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
@@ -2342,7 +2324,7 @@ def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
         _ok_item_launches(launches, hook, pid=4500))
 
     argv = ("doctor", "--scope", "api/tests", "--reviewer", "claude",
-            "--allow-model-review", "--assessment-json")
+            "--allow-model-review", "--json")
     assert main(argv) == 0
 
     public_document = C.decode_public_document(capsys.readouterr().out)
@@ -2402,7 +2384,7 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
         "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == exit_code
+                 "--json")) == exit_code
 
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
@@ -2430,7 +2412,7 @@ def test_custom_report_conflict_preserves_user_content_after_complete_review(
         _ok_item_launches([], pid=6001))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 2
+                 "--json")) == 2
 
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
@@ -2459,7 +2441,7 @@ def test_total_review_deadline_prevents_late_provider_launch(
     )
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 124
+                 "--json")) == 124
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is None
@@ -2516,7 +2498,7 @@ def test_packet_collection_timeout_prevents_late_provider_and_preserves_report(
         _ok_item_launches(launches, hook, pid=8001))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 124
+                 "--json")) == 124
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is None
@@ -2560,7 +2542,7 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
         _ok_item_launches([], pid=8002))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
 
     stderr = capsys.readouterr().err
     assert sum("collecting |" in line for line in stderr.splitlines()) >= 2
@@ -2623,7 +2605,7 @@ def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
     monkeypatch.setattr(recommendations, "publish_recommendations", publish)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data is not None
@@ -3172,7 +3154,7 @@ def test_review_model_and_concurrency_parse_where_reviewer_is_valid(command):
     ("doctor", "--review-model", "haiku", "--prompt"),
     ("doctor", "--review-concurrency", "2", "--prompt"),
     ("doctor", "--review-model", "x", "--probe", "--scope", "tests/a.py"),
-    ("doctor", "--review-concurrency", "2", "--assessment-json"),
+    ("doctor", "--review-concurrency", "2", "--json"),
     ("doctor", "--review-concurrency", "0"),
     ("doctor", "--review-concurrency", "9"),
     ("doctor", "--review-concurrency", "many"),
@@ -3507,7 +3489,7 @@ def test_fenced_item_replies_review_and_publish(case, tmp_path, monkeypatch,
         _fenced_item_launches(launches))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.kind == "agent-assessment"
@@ -3552,7 +3534,7 @@ def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
         "ptest.cli.agent_providers.launch_reviews", launch_many)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 2
+                 "--json")) == 2
 
     captured = capsys.readouterr()
     failure_document = C.decode_public_document(captured.out)
@@ -3592,7 +3574,7 @@ def test_empty_init_file_reviews_and_publishes(case, tmp_path, monkeypatch,
         _ok_item_launches(launches, pid=6200))
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 0
+                 "--json")) == 0
 
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.kind == "agent-assessment"

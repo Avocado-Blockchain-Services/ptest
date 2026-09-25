@@ -26,7 +26,6 @@ _PROVIDER_SKILLS = {
     "gemini": ".gemini/skills/ptest/SKILL.md",
 }
 SUPPORTED_AGENTS = tuple(_PROVIDER_SKILLS)
-_LEGACY_CODEX_SKILL = ".codex/skills/ptest/SKILL.md"
 _PROVIDER_DESCRIPTIONS = {
     "claude": "Coordinate repository testing through ptest from the repository root.",
     "codex": "Run repository tests through ptest; Codex discovers this skill automatically.",
@@ -70,7 +69,14 @@ def _detail(target: str, action: str) -> C.ActionRecord:
 
 
 def _legacy_provider_text(provider: str) -> bytes:
-    """Exact released ptest template bytes, used only for upgrade recognition."""
+    """Exact pre-8cd2b54 shipped template bytes, for upgrade recognition.
+
+    These bytes were written by ``_provider_text`` at the then-canonical
+    provider paths before 8cd2b54; they are still ptest-managed at the
+    canonical paths today and upgrade in place. This covers content only:
+    the obsolete ``.codex/skills/ptest`` location itself is gone and is
+    never inspected.
+    """
     return (
         f"# ptest skill for {provider}\n\n"
         "Read `docs/ptest-agent.md` before running or changing tests.\n"
@@ -171,10 +177,10 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
     """Validate one canonical skill target without writing.
 
     Returns ``(relative, target, existing, kind)`` where ``kind`` is
-    ``"missing"``, ``"legacy"`` (exact released template, safe to upgrade),
-    ``"previous"`` (exact base-commit template, safe to upgrade) or
-    ``"current"`` (already in the generated format). Anything else raises
-    before any write.
+    ``"missing"``, ``"legacy"`` (exact pre-8cd2b54 shipped template at a
+    canonical path, safe to upgrade), ``"previous"`` (exact base-commit
+    template, safe to upgrade) or ``"current"`` (already in the generated
+    format). Anything else raises before any write.
     """
     if provider not in _PROVIDER_SKILLS:
         raise _problem("unsupported-capability", "agent provider is not supported")
@@ -212,46 +218,6 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_gate_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
-
-
-def _legacy_codex_note(root: Path) -> str | None:
-    """Inspect the obsolete Codex skill path without following or mutating it.
-
-    Returns a migration note when the file holds the exact released template,
-    ``None`` when absent. Any user-owned, non-regular, symlinked, oversized
-    or otherwise unsafe legacy artifact raises before any init write.
-    """
-    try:
-        os.lstat(root / _LEGACY_CODEX_SKILL)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise _problem(
-            "state-unavailable",
-            f"legacy agent provider target {_LEGACY_CODEX_SKILL} is unavailable") from None
-    try:
-        raw = files.read_regular(root, _LEGACY_CODEX_SKILL, _MAX_FILE_BYTES + 1)
-    except Problem as problem:
-        if problem.code == "state-unavailable":
-            # Only a file that vanished between the probe and the read
-            # counts as absent; an unreadable artifact must fail loudly
-            # rather than be silently reported as missing.
-            try:
-                os.lstat(root / _LEGACY_CODEX_SKILL)
-            except FileNotFoundError:
-                return None
-        raise
-    if len(raw) > _MAX_FILE_BYTES:
-        raise _problem(
-            "invalid-bound",
-            f"legacy agent provider target {_LEGACY_CODEX_SKILL} exceeds the size limit")
-    if raw != _legacy_provider_text("codex"):
-        raise _problem(
-            "already-exists",
-            f"legacy agent provider target {_LEGACY_CODEX_SKILL} already exists "
-            "and is not ptest-managed")
-    return (f"legacy Codex skill preserved at {_LEGACY_CODEX_SKILL}; "
-            "Codex now discovers .agents/skills/ptest/SKILL.md")
 
 
 def _guide() -> bytes:
@@ -697,7 +663,6 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
     for provider in providers:
         if provider not in _PROVIDER_SKILLS:
             raise _problem("unsupported-capability", "agent provider is not supported")
-    note = _legacy_codex_note(root) if "codex" in providers else None
     actions: list[str] = []
     details: list[C.ActionRecord] = []
     if guide_kind == "missing":
@@ -733,9 +698,6 @@ def preview(root: Path, *, agents: tuple[str, ...] = ()) -> RulesPlan:
         else:
             actions.append(f"already present {relative}")
             details.append(_detail(relative, "already present"))
-    if note is not None:
-        actions.append(f"note: {note}")
-        details.append(_detail(note, "note"))
     return RulesPlan(actions=tuple(actions), details=tuple(details))
 
 
@@ -986,9 +948,6 @@ def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
             payload = _provider_text(provider)
             create_file(relative, payload)
             observed.append(_detail(relative, "created"))
-        for item in plan.details:
-            if item.action == "note":
-                observed.append(item)
     except Exception as error:
         incomplete = _rollback(root, created_files, created_dirs, updated_files)
         if incomplete:

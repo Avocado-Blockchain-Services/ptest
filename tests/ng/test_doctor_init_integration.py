@@ -239,7 +239,7 @@ def test_doctor_review_runs_one_haiku_call_per_item(
             "workers with -n auto in the pytest configuration.") in report
     assert "Resolve the parallel-safety gaps first." not in report
 
-    assert main((*argv, "--assessment-json")) == 0
+    assert main((*argv, "--json")) == 0
     document = C.decode_public_document(
         capsys.readouterr().out.encode("utf-8"))
     assert document.kind == "agent-assessment" and document.error is None
@@ -286,7 +286,7 @@ def test_doctor_review_fails_when_every_item_fails(tmp_path, monkeypatch,
     (bindir / "fail-items.txt").write_text("*\n", encoding="utf-8")
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
-                 "--assessment-json")) == 2
+                 "--json")) == 2
 
     document = C.decode_public_document(
         capsys.readouterr().out.encode("utf-8"))

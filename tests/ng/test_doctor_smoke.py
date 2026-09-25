@@ -38,7 +38,7 @@ def _write_v1(root: Path, project_id: str) -> None:
 
 def test_smoke_standalone_reports_bounded_worksheet_and_unknown_readiness(case):
     from ptest.doctor import inspect_workspace
-    from ptest.render import render_doctor, repair_prompt
+    from ptest.render import render_doctor
 
     domain = case.domain()
     root = case.project(domain)
@@ -61,9 +61,6 @@ def test_smoke_standalone_reports_bounded_worksheet_and_unknown_readiness(case):
     text = render_doctor(workspace.aggregate, workspace=workspace)
     assert text.startswith("ptest doctor")
     assert "FIX-001" in text and "TIMING-001" in text
-    prompt = repair_prompt(workspace.aggregate, workspace=workspace)
-    assert "Assessment request:" in prompt
-    assert len(prompt.encode("utf-8")) <= C.MAX_PROMPT_BYTES
 
 
 def test_smoke_monorepo_reports_children_in_declaration_order(case, tmp_path):
@@ -189,11 +186,9 @@ def test_smoke_external_manifest_is_opt_in_and_sandboxed(tmp_path):
         human = run("doctor", "--offline", env=provider_env)
         assert human.returncode == 0 and "ptest doctor" in human.stdout
         assert "FIX-001" in human.stdout and "TIMING-001" in human.stdout
-        structured = run("doctor", "--json", env=provider_env)
+        structured = run("doctor", "--offline", "--json", env=provider_env)
         assert structured.returncode == 0
-        assert C.decode_public_document(structured.stdout).kind == "doctor"
-        prompt = run("doctor", "--prompt", env=provider_env)
-        assert prompt.returncode == 0 and "Assessment request:" in prompt.stdout
+        assert C.decode_public_document(structured.stdout).kind == "agent-assessment"
         guide = run("guide")
         assert guide.returncode == 0 and "Doctor assessment checklist" in guide.stdout
         if name == "monorepo-root":
