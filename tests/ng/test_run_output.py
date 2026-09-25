@@ -27,7 +27,8 @@ from ptest.cli import parse_argv
 _COMMAND_FIXTURE = Path(__file__).parent / "fixtures" / "command" / "command.py"
 
 
-def _command_project(case, domain, *, args=(), full_args=(), setup=None):
+def _command_project(case, domain, *, args=(), full_args=(), setup=None,
+                     launcher=None):
     root = case.project(domain, kind="command")
     shutil.copy2(_COMMAND_FIXTURE, root / "command.py")
     project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
@@ -36,7 +37,7 @@ def _command_project(case, domain, *, args=(), full_args=(), setup=None):
         "version = 1",
         f'project_id = "{project_id}"',
         "[runner]",
-        f"launcher = {json.dumps([sys.executable, 'command.py'])}",
+        f"launcher = {json.dumps(list(launcher) if launcher is not None else [sys.executable, 'command.py'])}",
         f"args = {json.dumps(list(args))}",
         f"full_args = {json.dumps(list(full_args))}",
         'kind = "command"',
@@ -331,7 +332,10 @@ def test_verbose_run_prints_detail_lines(case):
 
 def test_command_runner_never_gets_forwarded_verbose(case):
     domain = case.domain()
-    root = _command_project(case, domain, args=("literal",))
+    # Short stable interpreter: the 110-column display clamp would trim a
+    # worktree-qualified venv path, hiding the literal tail under test.
+    launcher = ("/usr/bin/python3", "command.py")
+    root = _command_project(case, domain, args=("literal",), launcher=launcher)
 
     completed = case.invoke(domain, root, "-v", env={"COLUMNS": "200"}, timeout=20)
 
@@ -340,7 +344,7 @@ def test_command_runner_never_gets_forwarded_verbose(case):
                     if line.startswith("ptest: -v runner: ")]
     assert len(runner_lines) == 1
     argv_part = runner_lines[0].removeprefix("ptest: -v runner: ")
-    assert argv_part == f"{sys.executable} command.py literal"
+    assert argv_part == f"{launcher[0]} command.py literal"
 
 
 def test_tail_verbose_is_runner_data_not_ptest_option(case):
