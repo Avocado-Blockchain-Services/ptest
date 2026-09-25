@@ -2725,14 +2725,26 @@ def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
     """Split one summary into (execution_s, total_tests, is_full) or None.
 
     Comparable means the same mode family (full vs non-full), a terminal
-    passed|failed status, and a numeric execution duration. Unusable counts
-    yield a None total instead of disqualifying the row.
+    passed|failed status, and a numeric execution duration. The family is
+    what actually ran (summary plan.execution), not the request label
+    (top-level mode). Unusable counts yield a None total instead of
+    disqualifying the row.
     """
     if not isinstance(summary, dict):
         return None
     mode = summary.get("mode")
     if not isinstance(mode, str):
         return None
+    plan = summary.get("plan")
+    plan_execution = plan.get("execution") if isinstance(plan, dict) else None
+    # Classify by what actually ran, not the request label: a bare
+    # AUTOMATIC full-gate run is stored with top-level mode=AUTOMATIC but
+    # plan.execution="full". Call sites look evidence up the same way
+    # (execute() uses full=(plan.execution == "full")), so the row must
+    # read back under full=True. Rows without a plan payload (legacy or
+    # hand-built) keep the old top-level mode reading.
+    is_full = (plan_execution == "full") if isinstance(
+        plan_execution, str) else (mode == "full")
     if summary.get("status") not in ("passed", "failed"):
         return None
     timings = summary.get("timings")
@@ -2750,7 +2762,7 @@ def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
                 continue
             total = value
             break
-    return (float(execution), total, mode == "full")
+    return (float(execution), total, is_full)
 
 
 def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,

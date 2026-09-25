@@ -657,6 +657,40 @@ def test_execute_full_gate_uses_full_family_evidence(case, monkeypatch):
     assert wanted["full"] == [True, False]
 
 
+def test_bare_automatic_full_gate_history_round_trips(case, monkeypatch):
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    from ptest.config import resolve_config as resolve
+    config = resolve(root).config
+    assert config is not None
+    first = operations.execute(domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC))
+    assert first.status is C.Status.PASSED
+    # The bare run really is a full gate recorded under the request label.
+    assert first.mode is C.Mode.AUTOMATIC
+    assert first.plan.execution == "full"
+    # Basic command runs do not publish history themselves, so commit the
+    # real result through the real store — the same publish_outcome call
+    # the advanced path makes — leaving the true bare-run row on disk.
+    checkout = operations._checkout(config)
+    publication = history_api.publish_outcome(domain, checkout, first, None)
+    assert publication.committed
+    sources = []
+    real_resolve = operations.resolve_compound_timeout
+
+    def spy_resolve(runner, request, evidence):
+        limit, source = real_resolve(runner, request, evidence)
+        sources.append(source)
+        return (limit, source)
+
+    monkeypatch.setattr(operations, "resolve_compound_timeout", spy_resolve)
+    second = operations.execute(domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC))
+    assert second.status is C.Status.PASSED
+    # The row written by the first bare run (stored as mode=AUTOMATIC but
+    # plan.execution="full") must read back under the full family, so the
+    # second bare run resolves its deadline from history, not the default.
+    assert sources and sources[-1] == "history"
+
+
 def test_shadow_uses_full_family_evidence(case, monkeypatch):
     from types import SimpleNamespace
 
