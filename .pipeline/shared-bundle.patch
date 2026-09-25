@@ -28,10 +28,10 @@ index 599afa2..8f8661a 100644
 +[tool.coverage.run]
 +data_file = ".venv/.coverage"
 diff --git a/tests/ng/conftest.py b/tests/ng/conftest.py
-index 45f5963..d823679 100644
+index 45f5963..efa2034 100644
 --- a/tests/ng/conftest.py
 +++ b/tests/ng/conftest.py
-@@ -1,10 +1,20 @@
+@@ -1,10 +1,21 @@
 -"""Shared NG fixtures (test-only, Task0 owned).
 -
 -Provides ``case`` (a :class:`CaseFactory`) and clears orchestrator control
@@ -48,7 +48,8 @@ index 45f5963..d823679 100644
 +* ``_guard_real_install_against_self_uninstall`` (session, autouse): runs
 +  once per xdist worker (once in a serial run) and fails the run if the
 +  real install root or PATH link changed.
-+* Topic factory plugins ``factories_*`` are registered when present.
++* Topic factory plugins ``factories_*`` are registered from
++  ``pytest_configure`` when present (never via ``pytest_plugins``).
  """
  from __future__ import annotations
  
@@ -56,7 +57,7 @@ index 45f5963..d823679 100644
  import os
  import pwd
  import stat
-@@ -12,7 +22,21 @@ from pathlib import Path
+@@ -12,7 +23,31 @@ from pathlib import Path
  
  import pytest
  
@@ -69,17 +70,27 @@ index 45f5963..d823679 100644
 +    patch_account_home,
 +)
 +
-+pytest_plugins = [
-+    _plugin for _plugin in (
-+        "factories_domain", "factories_repo", "factories_exec",
-+        "factories_agents",
-+    )
-+    if importlib.util.find_spec(_plugin) is not None
-+]
++# Topic factory plugins.  Registered from pytest_configure, NOT through a
++# module-level ``pytest_plugins``: a full run anchors collection on
++# ``tests`` (the .ptest.toml test_roots), so this conftest is not an initial
++# conftest there and pytest rejects any ``pytest_plugins`` attribute in it.
++# pytest_configure is historic, so it runs whether this conftest loads at
++# startup (scoped runs) or later during collection (full runs).
++_FACTORY_PLUGINS = (
++    "factories_domain", "factories_repo", "factories_exec",
++    "factories_agents",
++)
++
++
++def pytest_configure(config):
++    for name in _FACTORY_PLUGINS:
++        if (config.pluginmanager.get_plugin(name) is None
++                and importlib.util.find_spec(name) is not None):
++            config.pluginmanager.import_plugin(name)
  
  
  def _real_home() -> Path:
-@@ -25,6 +49,10 @@ def _real_home() -> Path:
+@@ -25,6 +60,10 @@ def _real_home() -> Path:
  _REAL_INSTALL_ROOT = _real_home() / ".local" / "ptest"
  _REAL_PATH_LINK = _real_home() / ".local" / "bin" / "ptest"
  
@@ -90,7 +101,7 @@ index 45f5963..d823679 100644
  
  def _snapshot_path(path: Path):
      """(exists, (inode, mtime_ns) or None, link target or None)."""
-@@ -50,6 +78,7 @@ def _guard_real_install_against_self_uninstall():
+@@ -50,6 +89,7 @@ def _guard_real_install_against_self_uninstall():
      Records the real install root and the real ``~/.local/bin/ptest``
      link (existence, inode, mtime -- neither is required to exist) and
      aborts the session via ``pytest.exit`` if either differs at teardown.
@@ -98,7 +109,7 @@ index 45f5963..d823679 100644
      """
      before = (_snapshot_path(_REAL_INSTALL_ROOT),
                _snapshot_path(_REAL_PATH_LINK))
-@@ -66,38 +95,51 @@ def _guard_real_install_against_self_uninstall():
+@@ -66,38 +106,51 @@ def _guard_real_install_against_self_uninstall():
  
  
  @pytest.fixture(autouse=True)

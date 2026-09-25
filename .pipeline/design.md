@@ -17,6 +17,7 @@ Tasks T1 to T5 start at the same moment from the same base. **Section 4 (shared-
 - After that commit, only **T2** may edit `tests/ng/conftest.py`, `tests/ng/support.py`, `pyproject.toml` and `.ptest.toml`. T2 edits only when verification forces it, and records each change in `.pipeline/progress-T2.md`. If T3, T4 or T5 finds a defect in the bundle, it works around it inside its own files and reports the defect. It never edits a bundle file.
 - A topic factory module may import `support`, `ptest.*` and the stdlib. It **never** imports another `factories_*` module or another test module. Anything two topics need lives in `support.py`, and is frozen here.
 - Run tests only with `.venv/bin/ptest <files>` from the worktree root. Use chunks of a few files per call. **No task runs `--full`.** After all merges the orchestrator runs exactly one parallel `.venv/bin/ptest --full` as the final gate.
+- The one exception executes no tests. It is the collection-only anchor check `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` (D13). It reproduces the full-run collection anchor (`test_roots = ["tests"]`) without running anything, so it is not a `--full` run. Any task may run it. T2 must run it (T2 acceptance).
 - Commit inside the worktree. Never push, merge, or touch `main`/`dev`.
 
 ## 2. Decisions
@@ -34,6 +35,8 @@ Tasks T1 to T5 start at the same moment from the same base. **Section 4 (shared-
 | D9 | No public schema change. The deadline surfaces in the execution-timeout problem message. `protocol-v1.json` is unchanged because `compound_timeout_s` already exists. | "Additive only" is met trivially. |
 | D10 | Per-task progress goes in `.pipeline/progress-T<n>.md`, not the shared `progress.md`. | Avoids merge conflicts. |
 | D11 | `[tool.coverage.run] data_file = ".venv/.coverage"`. | Probed: with the default repo-root `.coverage`, the first run after creation reports `changed-during-run` (untracked). With it gitignored, every run reports it (ignored class). Inside `.venv` (a `non_input_outputs` path) both consecutive runs passed. |
+| D12 | The resolved compound deadline reaches `_launch_guard` through the module-level contextvar `operations._COMPOUND_TIMEOUT_S`, not through a new parameter. The signatures of `_launch_guard` and `_run_guard` stay byte-identical to base. | Existing tests monkeypatch both seams with wrappers that accept and forward only positional args: test_operations.py l.494, 546, 700, 788, 828, 879; test_pytest_scoped_subprocess.py l.1124 (`invalid_grant(domain, grant, prepared, setup=None)`) and l.1143. A new keyword, required or optional, raises TypeError or is dropped by `launch(*args)`. Those files belong to T4, which starts from base and never sees T1's change. A contextvar set by the caller and read inside the real seam survives any positional forwarding wrapper that runs in the same thread, so no test file has to change and there is no ordering dependency between tasks. |
+| D13 | Factory plugins are registered by `pytest_configure` in `tests/ng/conftest.py` via `config.pluginmanager.import_plugin`. **No conftest defines `pytest_plugins`.** `.ptest.toml` `test_roots` stays `["tests"]`. | In full mode the pytest adapter passes `config.runner.test_roots` (`tests`) as the positional arg (src/ptest/adapters/pytest.py:430). pytest 9.1.1 anchors initial conftests on `tests` and adds only `test*` subdirectories, and `ng` does not match. So tests/ng/conftest.py is imported during collection, and `_check_non_top_pytest_plugins` fails the run on any `pytest_plugins` attribute, even an empty list. `pytest_configure` is a historic hook, so it runs whether the conftest is initial (scoped runs) or late (full runs). Probed on base plus the revised bundle: `--collect-only tests` collects 3920 tests; a stub `factories_domain` fixture is listed by `--fixtures` under both the `tests` anchor and a `tests/ng/<file>` anchor; `ptest tests/ng/test_config.py` gives 169 passed on 4 workers. Toy layout: the old bundle fails with `tests` as the anchor, the new one passes under `tests`, `tests/ng`, `tests/ng/<file>` and no args, both with `-n auto` and with `-n 0`, and assertion rewriting stays active in the plugin modules. |
 
 ## 3. Frozen interfaces
 
@@ -85,14 +88,43 @@ def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
     #                      none -> (DEFAULT_COMPOUND_TIMEOUT_S, "default")
     #                      else -> (clamp(max(signals), MIN, MAX_DYNAMIC), "history")
 ```
-- `_launch_guard(..., *, compound_timeout_s: float)` and `_run_guard(..., *, compound_timeout_s: float)` take a required keyword.
-- Both call sites (~1572 and ~2491) resolve once before launch. History is read only through `comparable_run_evidence`.
+```python
+import contextvars
+# D12. Read only by _launch_guard. The default keeps direct/test callers at today's 600 s.
+_COMPOUND_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "ptest_compound_timeout_s", default=C.DEFAULT_COMPOUND_TIMEOUT_S)
+```
+- **The signatures of `_launch_guard` and `_run_guard` do not change.** Their parameter lists stay byte-identical to base. Add no parameter, positional or keyword (D12).
+- `_launch_guard` builds its `C.LaunchManifest` with `compound_timeout_s=_COMPOUND_TIMEOUT_S.get()`. That replaces today's `C.MAX_COMPOUND_TIMEOUT_S`, which becomes 86400. Nothing else in `_launch_guard` changes.
+- Both call sites (~1572 and ~2491) resolve the limit once before launch: `limit, _source = resolve_compound_timeout(runner, request, history.comparable_run_evidence(...))`. They then wrap only the existing, unchanged `_run_guard(...)` call:
+  ```python
+  token = _COMPOUND_TIMEOUT_S.set(limit)
+  try:
+      raw_guard, frames, execution_s = _run_guard(<unchanged args>)
+  finally:
+      _COMPOUND_TIMEOUT_S.reset(token)
+  ```
+  At ~2491 the set/try/reset sits inside the existing `try: ... except (C.Problem, OSError)`, so launch-failure handling is unchanged. History is read only through `comparable_run_evidence`.
+- The monkeypatched wrappers in T4-owned files (D12 line list) call the real seam synchronously in the same thread, so they see the value unchanged. **No test file is edited for this.** T1 must not edit them, and T4 has no deadline-related wrapper edits.
 
 `src/ptest/guard.py`:
-- The effective limit is `min(manifest.compound_timeout_s or DEFAULT_COMPOUND_TIMEOUT_S, MAX_COMPOUND_TIMEOUT_S)`.
-- All three `execution-timeout` messages become exactly:
-  `f"compound execution deadline expired after {limit:.0f}s; raise it with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml"`
-  The existing prefix is kept, so substring assertions still hold.
+- Two new module-level helpers. The limit is derived from the manifest, which every site can already reach, so **no guard function signature changes** (`_ready`, `_run_one`, `_Control.await_attempt_decision`, `run_guard`):
+  ```python
+  def _compound_limit_s(manifest: LaunchManifest) -> float:
+      return min(manifest.compound_timeout_s or DEFAULT_COMPOUND_TIMEOUT_S,
+                 MAX_COMPOUND_TIMEOUT_S)
+
+  def _compound_timeout_message(manifest: LaunchManifest) -> str:
+      return (f"compound execution deadline expired after "
+              f"{_compound_limit_s(manifest):.0f}s; raise it with --timeout SECONDS "
+              f"or [runner] timeout / full_timeout in .ptest.toml")
+  ```
+- `run_guard` computes `compound_deadline = time.monotonic() + _compound_limit_s(manifest)` (~l.461).
+- The new text applies **only to compound-scope expiry**, at exactly three sites:
+  - guard.py:245, `_Control.await_attempt_decision`: `_compound_timeout_message(self.manifest)`
+  - guard.py:332, `_ready`: `_compound_timeout_message(control.manifest)`
+  - guard.py:398, `_run_one`, **only when `timeout_scope == "compound"`**: `_compound_timeout_message(manifest)`, using `_run_one`'s existing `manifest` parameter
+- Attempt and setup expiry (`timeout_scope` of `"attempt"` or `"setup"`, guard.py:380-383) keep today's text, `timeout_scope + " execution deadline expired"`, byte-for-byte. So `test_guard.py::test_timeout_fact_preserves_raw_status_and_closes_spawn[attempt]` (`scope in message`) holds unedited. `[compound]` holds because the new text starts with `compound execution deadline expired`.
 
 `src/ptest/help.py`: the `_RUN` syntax adds `[--timeout 1..86400 (default: from history, else 600)]`. Keep the help tests (test_help.py, owned by T4) green by editing only help.py.
 
@@ -122,7 +154,7 @@ def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
 - `case` (unchanged) → `CaseFactory(tmp_path)`.
 - `_deny_non_tmp_self_roots` (autouse): a `--self` root must sit under `tmp_path` or `isolated_env.root`.
 - `_guard_real_install_against_self_uninstall` (session, autouse): unchanged.
-- Plugins are registered through `pytest_plugins`. The guard list (`find_spec`) tolerates modules that are not merged yet.
+- Plugins are registered by `pytest_configure(config)`, which calls `config.pluginmanager.import_plugin(name)` for each name in `_FACTORY_PLUGINS` that is not registered yet and whose `find_spec` resolves. `find_spec` tolerates modules that are not merged yet. **No conftest anywhere defines `pytest_plugins`** (D13), not even as an empty list.
 
 ### 3.4 Topic factory modules: fixture naming (frozen, globally unique)
 
@@ -149,6 +181,7 @@ The verbatim bundle is also committed as the git patch **`.pipeline/shared-bundl
 - test_cli + test_doctor + test_init + test_parallel_output_cli → 536 passed, 2 failed. **T4 fixes these:** `test_parallel_output_cli::test_doctor_persea_shaped_monorepo` and `::test_doctor_det1_deterministic_rows_cite_child_config` expect `no timing history yet`. They passed on base only because doctor read the **real** account state domain. They must build their own history or state explicitly.
 - test_uninstall + test_state_directory + test_install + test_platform → 164 passed, 1 failed. **T2 fixes this:** `test_uninstall::test_self_plans_only_the_argv_fixture_root_never_real_paths` asserts `str(inst) in out`, but the render wraps the longer xdist tmp path (`popen-gwN`). Make the assertion independent of path length without weakening it: for example a shorter tmp root via `tmp_path_factory.mktemp("u")`, or comparing against the unwrapped rendering of the same line.
 - The first run after any edit to a test/support file can report `changed-during-run` (pycache). Rerun once; that is not a failure.
+- **Revision (D13):** the first bundle defined `pytest_plugins` in tests/ng/conftest.py, which collection under the full-mode `tests` anchor rejects. The bundle now registers plugins from `pytest_configure`. The re-probe of the revised bundle, applied and then reverted: `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` collects 3920 tests. A throwaway `factories_domain.py` fixture is visible via `--fixtures` under both the `tests` and the `tests/ng/test_config.py` anchor. `ptest tests/ng/test_config.py` gives 169 passed on 4 workers with coverage TOTAL. The patch applies cleanly to base (`git apply --check`).
 
 ## 5. Tasks
 
@@ -175,9 +208,11 @@ Every task must:
   - config parse bounds (0, 86401, bool, string, nan → invalid-config); render round-trip with and without the keys (without = byte-identical to today)
   - CLI `--timeout` parse bounds and no-repeat; accepted with `--full` and `--changed`
   - `repr(RunnerConfig)` unchanged
-  - the guard message text from 3.1 with a real short compound deadline (reuse the existing test_guard pattern at `compound_timeout_s=0.5`; no long timeouts)
+  - the guard message text from 3.1 with a real short compound deadline (reuse the existing test_guard pattern at `compound_timeout_s=0.5`; no long timeouts). `{0.5:.0f}` renders as `0`, so assert the exact string `"compound execution deadline expired after 0s; raise it with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml"`. Also assert that a real short **attempt** timeout still yields exactly `"attempt execution deadline expired"`.
+  - D12 propagation: a positional-only wrapper `def spy(*args): return launch(*args)` installed on `operations._launch_guard` (the same shape as the T4-owned wrappers) sees `operations._COMPOUND_TIMEOUT_S.get()` equal to the resolved limit during `operations.execute`. Use a command-kind project with no nested pytest, and `C.RunRequest(timeout_s=...)` so the value is distinct from 600. After `execute` returns, the contextvar is back at `DEFAULT_COMPOUND_TIMEOUT_S`, including when the wrapper raises (reuse the `fail(*args)` launch-failure pattern).
 - Existing literal `compound_timeout_s=600.0` in test_contracts stays valid.
-- Read-only regression run (T1 edits only src to fix these): `tests/ng/test_cli.py test_help.py test_operations.py test_run_output.py test_monorepo_scopes.py test_source.py test_history.py test_init_smoke.py`.
+- Read-only regression run (T1 edits only src to fix these): `tests/ng/test_cli.py test_help.py test_operations.py test_run_output.py test_monorepo_scopes.py test_source.py test_history.py test_init_smoke.py test_pytest_scoped_subprocess.py test_task_11d_pytest.py test_task_11f_pytest.py test_shadow.py`. This is satisfiable because `_launch_guard`/`_run_guard` signatures are unchanged (D12). The positional-only wrappers in test_operations.py (l.494, 546, 700, 788, 828, 879) and test_pytest_scoped_subprocess.py (l.1124, 1143) must pass **unedited**.
+- `git diff fadb2ab -- src/ptest/operations.py` shows no change to the `def _launch_guard(` or `def _run_guard(` parameter lists.
 - T1 does not need to migrate builders in test_config/test_contracts (their TOML literals are the subject under test), but it must obey isolation.
 
 ### T2: isolation foundation, parallel config, domain/state factories
@@ -185,6 +220,7 @@ Every task must:
 
 **Acceptance:**
 - `.venv/bin/ptest tests/ng/test_config.py` shows more than one worker (`gw*` ids or ptest's worker count) with coverage output. Record the header line.
+- **Full-mode anchor check (collection only, D13):** with `factories_domain.py` in place, run `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests`. It exits 0 with no `pytest_plugins` / "non-top-level conftest" error, and its collected count is at least the base count (3920) plus T2's new tests. Then `.venv/bin/python -m pytest --fixtures -q -p no:cacheprovider tests | grep -E "domain_factory|account_home|state_dir_factory"` lists all three. Also `grep -rnE "^[[:space:]]*pytest_plugins[[:space:]]*=" tests/` returns nothing. Record the commands and output in progress-T2.md. This executes no tests and is not a `--full` run.
 - `factories_domain.py` provides section 3.4.
 - Install, uninstall, state and platform tests use `account_home`, `state_dir_factory` or `isolated_env` instead of ad-hoc pwd/HOME patches. Remove each duplicated `_fake_home`/`_domain` helper.
 - `state_dir_factory` is the only way T2 tests set `PTEST_STATE_DIR`.
@@ -235,7 +271,7 @@ Every task must:
 | Risk | Mitigation |
 |------|-----------|
 | The default pwd-home patch changes output of tests that silently read the real account domain. | This is intended: they were isolation bugs. Tasks see it at once because the bundle is their first commit. Fix it with explicit state in owned files. |
-| `pytest_plugins` in `tests/ng/conftest.py` is rejected as non-top-level. | It is loaded as an initial conftest (testpaths/args under tests/ng). T2 verifies. Fallback, T2 only: `def pytest_configure(config): config.pluginmanager.import_plugin(name)` for each module that exists. |
+| Plugin registration fails under the full-mode anchor. `ptest --full` passes `test_roots = ["tests"]`, so tests/ng/conftest.py is **not** an initial conftest there, and pytest rejects any `pytest_plugins` attribute in it. | Removed at the source (D13). The bundle registers plugins through `pytest_configure` + `import_plugin`, and no conftest defines `pytest_plugins`. The failure only appears under the `tests` anchor, which no scoped task run uses, so T2 acceptance and final-gate step 3 check it by collection only before the single `--full`. |
 | Coverage and xdist overhead. | Accepted: qualification requires it. T2 records the scoped chunk timings. |
 | History-derived deadline too tight after a fast run. | Safety factor 3, 60 s floor, and an explicit `--timeout` escape named in the message. |
 | A merge conflict on a bundle file. | Bundle commits are byte-identical, and only T2 edits them afterwards. |
@@ -243,4 +279,5 @@ Every task must:
 ## 7. Final gate (orchestrator, after merging T1 to T5)
 1. `uv sync --locked --extra test`
 2. Chunked smoke: 4 or 5 groups of about 12 files through `.venv/bin/ptest`.
-3. Exactly one `.venv/bin/ptest --full`. It must be parallel (more than one worker), all green, with total test count ≥ 3818 plus the new test_run_deadline and test_isolation tests.
+3. Collection only, full-mode anchor: `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` exits 0, and `--fixtures ... tests` lists fixtures from all four `factories_*` modules. Do not start `--full` until this passes.
+4. Exactly one `.venv/bin/ptest --full`. It must be parallel (more than one worker), all green, with total test count ≥ 3818 plus the new test_run_deadline and test_isolation tests.
