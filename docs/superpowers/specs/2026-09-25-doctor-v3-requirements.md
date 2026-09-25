@@ -99,3 +99,9 @@ Section F (`doctor --fix`, new module `src/ptest/doctor_fix.py`):
   to review them`, N = field changes) is appended to both human text
   outputs only; planning failures there stay silent so doctor output
   never breaks, while `doctor --fix` itself reports refusals loudly.
+
+## Amendment 2026-09-25
+
+User decision: `ptest doctor` asks no question other than the LLM-review consent. `ptest doctor --fix` applies its
+changes directly (the flag is the consent) and prints what changed; `--dry-run` previews only; `--yes` was removed. This
+replaces F.2 above.
