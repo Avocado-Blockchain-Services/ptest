@@ -12,28 +12,19 @@ import os
 import hashlib
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from ptest import contracts as C
+from factories_agents import write_fake_provider
+from support import PYTHON_SHEBANG, write_ptest_toml
 
 
 def _write_v1(root: Path, project_id: str) -> None:
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        'kind = "command"\n'
-        'launcher = ["true"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="command", launcher=("true",), args=(),
+                     full_args=(), test_roots=("tests",), workers=1,
+                     project_id=project_id)
 
 
 def test_smoke_standalone_reports_bounded_worksheet_and_unknown_readiness(case):
@@ -146,14 +137,12 @@ def test_smoke_external_manifest_is_opt_in_and_sandboxed(tmp_path):
         provider_bin.mkdir()
         provider_marker = tmp_path / f"{name}-provider-launched"
         for provider in ("claude", "codex", "opencode"):
-            executable = provider_bin / provider
-            executable.write_text(
-                f"#!{sys.executable}\n"
-                "from pathlib import Path\n"
+            write_fake_provider(
+                provider_bin, provider,
+                script=PYTHON_SHEBANG
+                + "from pathlib import Path\n"
                 f"Path({str(provider_marker)!r}).touch()\n",
-                encoding="utf-8",
             )
-            executable.chmod(0o700)
 
         def run(*args, env=None):
             return subprocess.run([str(binary), *args], cwd=snapshot,
@@ -176,7 +165,17 @@ def test_smoke_external_manifest_is_opt_in_and_sandboxed(tmp_path):
             return ("other", *identity)
 
         report_before = report_state()
-        provider_env = {**os.environ, "PATH": str(provider_bin)}
+        # Every child below must resolve its state under tmp, never the
+        # real account domain: platform.domain_paths(None) derives state
+        # from pwd.getpwuid().pw_dir when PTEST_STATE_DIR is unset.
+        state_dir = tmp_path / f"{name}-doctor-state"
+        state_dir.mkdir(mode=0o700)
+        os.chmod(state_dir, 0o700)
+        provider_env = {
+            **os.environ,
+            "PATH": str(provider_bin),
+            "PTEST_STATE_DIR": str(state_dir),
+        }
         bare = run("doctor", env=provider_env)
         assert bare.returncode == 2
         assert "consent-required" in bare.stdout + bare.stderr
@@ -189,7 +188,7 @@ def test_smoke_external_manifest_is_opt_in_and_sandboxed(tmp_path):
         structured = run("doctor", "--offline", "--json", env=provider_env)
         assert structured.returncode == 0
         assert C.decode_public_document(structured.stdout).kind == "agent-assessment"
-        guide = run("guide")
+        guide = run("guide", env=provider_env)
         assert guide.returncode == 0 and "Doctor assessment checklist" in guide.stdout
         if name == "monorepo-root":
             for scope in ("api", "web", "api/tests"):

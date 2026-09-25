@@ -15,6 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from factories_agents import (
+    agent_api_facts as _api_facts,
+    agent_citation as _citation,
+    agent_finding as _finding,
+    agent_row as _row,
+)
+
 CITATION_SHA = "ef" * 32
 PACKET_SHA = "cd" * 32
 PROJECT_ID = "ab" * 16
@@ -35,43 +42,6 @@ FORBIDDEN_COMMANDS = (
     "rm ", "curl", "wget", "bash", "sh -c", "sudo", "chmod",
     "docker", "npm install", "pip install", "--workers", "--parallel",
 )
-
-
-def _citation(path="src/example.py", start=3, end=9, sha=CITATION_SHA):
-    return {"path": path, "start_line": start, "end_line": end,
-            "sha256": sha}
-
-
-def _row(row_id, status="satisfied", rationale=None, evidence=None,
-         label=None):
-    if rationale is None:
-        rationale = f"Row {row_id} judged {status} against packet excerpt."
-    if evidence is None:
-        evidence = [] if status == "unknown" else [_citation()]
-    row = {"id": row_id, "status": status, "rationale": rationale,
-           "evidence": evidence}
-    if label is not None:
-        row["label"] = label
-    return row
-
-
-def _finding(row_id, summary=None, change=None, recipe="__catalog__",
-             evidence=None):
-    recipes = {
-        "FIX-001": "factories", "FIX-002": "factories",
-        "DB-001": "databases", "DB-002": "databases",
-        "CACHE-001": "cache", "RESOURCE-001": "files-ports",
-        "NETWORK-001": "time-network", "PROCESS-001": "processes",
-        "TIME-001": "time-network", "SELECT-001": None,
-        "TIMING-001": None,
-    }
-    if recipe == "__catalog__":
-        recipe = recipes[row_id]
-    return {"id": row_id,
-            "summary": summary or f"Close gap {row_id} with owned setup.",
-            "suggested_change": change or f"Apply packaged recipe for {row_id}.",
-            "recipe_id": recipe,
-            "evidence": evidence if evidence is not None else [_citation()]}
 
 
 def _mixed_rows():
@@ -122,20 +92,6 @@ def _child(rows=None, findings=None, scope="child-a",
     if facts is not None:
         child["facts"] = facts
     return child
-
-
-def _api_facts(**overrides):
-    facts = {
-        "project": "api", "runner": "pytest", "runs": True,
-        "runs_reason": None, "runs_fix": None,
-        "parallel": "4 workers (xdist, --dist loadgroup)",
-        "parallel_short": "4 workers", "parallel_fix": None,
-        "setup": "uv sync --locked",
-        "full_suite": 'your pytest config: -m "not slow"',
-        "full_blocked": None,
-    }
-    facts.update(overrides)
-    return facts
 
 
 def _run(children=None, provider=None, limitations=None):

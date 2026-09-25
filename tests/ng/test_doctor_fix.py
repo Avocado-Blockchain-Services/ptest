@@ -10,6 +10,7 @@ import pytest
 
 from ptest import contracts as C
 from ptest.cli import main
+from support import write_ptest_toml
 
 
 PROJECT_ID = "ab" * 16
@@ -58,36 +59,24 @@ def _stub_xdist_venv(root: Path) -> None:
 
 def _write_config(root: Path, *, args=(), setup: bool = False,
                   selection: bool = False, extra_lines=()) -> None:
-    lines = [
-        "version = 1",
-        f'project_id = "{PROJECT_ID}"',
-        "",
-        "[runner]",
-        'kind = "pytest"',
-        'launcher = ["uv", "run", "--locked", "--no-sync", "python"]',
-        "args = [" + ", ".join(f'"{token}"' for token in args) + "]",
-        "full_args = []",
-        'test_roots = ["tests"]',
-        "workers = 1",
-        'lifecycle = "cooperative-process-group"',
-    ]
+    setup_block = None
     if setup:
-        lines.extend([
-            "",
-            "[setup]",
-            'argv = ["uv", "sync", "--locked"]',
-            'required_paths = [".venv/bin/python"]',
-            "network = true",
-            "lifecycle_scripts = true",
-        ])
+        setup_block = {
+            "argv": ["uv", "sync", "--locked"],
+            "required_paths": [".venv/bin/python"],
+            "network": True,
+            "lifecycle_scripts": True,
+        }
+    tail = ""
     if selection:
-        lines.extend([
-            "",
-            "[selection]",
-            "enabled = false",
-        ])
-    lines.extend(extra_lines)
-    (root / ".ptest.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tail += "\n[selection]\nenabled = false\n"
+    if extra_lines:
+        tail += "\n".join(extra_lines) + "\n"
+    write_ptest_toml(
+        root, kind="pytest",
+        launcher=("uv", "run", "--locked", "--no-sync", "python"),
+        args=args, project_id=PROJECT_ID, setup=setup_block, tail=tail,
+    )
 
 
 def _write_pytest_project(root: Path, *, addopts="-n 4", groups=None,
@@ -504,6 +493,7 @@ def test_review_text_mentions_fix_when_config_out_of_date(
                 }).encode("utf-8"),
                 error="", exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=7301, argv=adapter.argv,
+                # Payload-only scratch label; never a filesystem path.
                 scratch="/tmp/ptest-fix-mention",
             ))
         return tuple(results)

@@ -10,7 +10,6 @@ import inspect
 import json
 import os
 import signal
-import stat
 import subprocess
 import tempfile
 import time
@@ -20,6 +19,13 @@ import pytest
 
 from ptest import agent_providers as ap
 from ptest.contracts import Problem
+from factories_agents import (
+    agent_codex_stream,
+    agent_echo_claude_script,
+    fake_provider_env as _env_for,
+    write_fake_provider,
+)
+from support import PYTHON_SHEBANG
 
 PACKET = b'{"child":"alpha","files":[]}'
 SCHEMA = b'{"schema":"ptest.agent-assessment/v1"}'
@@ -27,26 +33,9 @@ MARKER = "PTEST-PACKET-MARKER-9f31"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _write_bin(bindir: Path, name: str, body: str) -> None:
-    path = bindir / name
-    path.write_text(body, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-@pytest.fixture
-def bindir(tmp_path: Path) -> Path:
-    d = tmp_path / "bin"
-    d.mkdir()
-    return d
-
-
-def _env_for(bindir: Path) -> dict[str, str]:
-    return {"PATH": str(bindir)}
-
-
-def _resolve(bindir: Path, name: str, body: str):
-    _write_bin(bindir, name, body)
-    return ap.resolve_reviewer(name, _env_for(bindir))
+def _resolve(fake_provider_bin: Path, name: str, body: str):
+    write_fake_provider(fake_provider_bin, name, script=body)
+    return ap.resolve_reviewer(name, _env_for(fake_provider_bin))
 
 
 def _synthetic(adapter):
@@ -117,34 +106,34 @@ def test_exact_function_signatures():
     ]
 
 
-def test_resolve_reviewer_rejects_unknown_name(bindir):
+def test_resolve_reviewer_rejects_unknown_name(fake_provider_bin):
     with pytest.raises(Problem) as exc:
-        ap.resolve_reviewer("gemini", _env_for(bindir))
+        ap.resolve_reviewer("gemini", _env_for(fake_provider_bin))
     assert exc.value.code == "provider-unavailable"
 
 
-def test_resolve_reviewer_missing_executable(bindir):
+def test_resolve_reviewer_missing_executable(fake_provider_bin):
     with pytest.raises(Problem) as exc:
-        ap.resolve_reviewer("claude", _env_for(bindir))
+        ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     assert exc.value.code == "provider-unavailable"
 
 
-def test_resolve_reviewer_fail_closed_unqualified(bindir):
-    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
+def test_resolve_reviewer_fail_closed_unqualified(fake_provider, fake_provider_bin):
+    fake_provider("opencode")
+    adapter = ap.resolve_reviewer("opencode", _env_for(fake_provider_bin))
     assert adapter.name == "opencode"
     assert adapter.qualified is False
     assert tuple(adapter.argv[:1]) != ()
     assert adapter.argv[0].endswith("/opencode")
     assert len(adapter.argv) > 1  # fixed containment argv, not bare binary
     assert "--bare" not in adapter.argv  # no auth-disabling fallback
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    qualified = ap.resolve_reviewer("claude", _env_for(bindir))
+    fake_provider("claude")
+    qualified = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     assert qualified.qualified is True
     assert qualified.argv[0].endswith("/claude")
 
 
-def test_qualification_status_per_provider(bindir):
+def test_qualification_status_per_provider(fake_provider_bin):
     assert ap.qualification_status("claude").qualified is True
     assert ap.qualification_status("codex").qualified is True
     assert ap.qualification_status("opencode").qualified is False
@@ -157,26 +146,26 @@ def test_fourth_supported_name_is_unqualified(monkeypatch):
     assert status.qualified is False
 
 
-def test_launch_rejects_unqualified_adapter(bindir):
-    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
+def test_launch_rejects_unqualified_adapter(fake_provider, fake_provider_bin):
+    fake_provider("opencode")
+    adapter = ap.resolve_reviewer("opencode", _env_for(fake_provider_bin))
     assert adapter.qualified is False
     with pytest.raises(Problem) as exc:
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert exc.value.code == "provider-unqualified"
 
 
-def test_launch_rejects_bad_timeout(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+def test_launch_rejects_bad_timeout(fake_provider, fake_provider_bin):
+    fake_provider("claude")
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(fake_provider_bin)))
     for bad in (0, -1, 901, "10"):
         with pytest.raises((Problem, TypeError)):
             ap.launch_review(adapter, PACKET, SCHEMA, bad, _no_progress([]))
 
 
-def test_launch_rejects_oversize_or_empty_inputs(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+def test_launch_rejects_oversize_or_empty_inputs(fake_provider, fake_provider_bin):
+    fake_provider("claude")
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(fake_provider_bin)))
     with pytest.raises(Problem):
         ap.launch_review(adapter, b"", SCHEMA, 10, _no_progress([]))
     with pytest.raises(Problem):
@@ -188,7 +177,7 @@ def test_launch_rejects_oversize_or_empty_inputs(bindir):
         ap.launch_review(adapter, PACKET.decode(), SCHEMA, 10, _no_progress([]))
 
 
-def test_launch_missing_executable_at_launch(bindir, tmp_path):
+def test_launch_missing_executable_at_launch(fake_provider_bin, tmp_path):
     missing = tmp_path / "gone" / "claude"
     adapter = ap.ReviewerAdapter(
         name="claude",
@@ -226,8 +215,8 @@ OPENCODE_OK = (
 )
 
 
-def test_claude_clean_success(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_claude_clean_success(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     events: list = []
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress(events))
     assert result.ok is True
@@ -238,15 +227,15 @@ def test_claude_clean_success(bindir):
     assert any(e.phase == "reviewing" and e.provider == "claude" for e in events)
 
 
-def test_codex_clean_success_last_message_wins(bindir):
-    adapter = _synthetic(_resolve(bindir, "codex", CODEX_OK))
+def test_codex_clean_success_last_message_wins(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", CODEX_OK))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == b"LAST"
 
 
-def test_opencode_clean_success_single_result_event(bindir):
-    adapter = _synthetic(_resolve(bindir, "opencode", OPENCODE_OK))
+def test_opencode_clean_success_single_result_event(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "opencode", OPENCODE_OK))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == b"DONE"
@@ -254,7 +243,7 @@ def test_opencode_clean_success_single_result_event(bindir):
 
 # ---- argv / environment isolation ----------------------------------------
 
-def test_fixed_argv_and_hostile_packet_never_executes(bindir, tmp_path):
+def test_fixed_argv_and_hostile_packet_never_executes(fake_provider_bin, tmp_path):
     canary = tmp_path / "pwned"
     hostile = (
         b'{"evil": "$(touch ' + str(canary).encode() + b') ; rm -rf / ' + MARKER.encode() + b'"}'
@@ -266,7 +255,7 @@ def test_fixed_argv_and_hostile_packet_never_executes(bindir, tmp_path):
         "\"num_turns\": 1, \"permission_denials\": [], \"result\": \"nargs=%s\"}' \"$#\"\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     result = ap.launch_review(adapter, hostile, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == f"nargs={len(adapter.argv) - 1}".encode()
@@ -275,8 +264,8 @@ def test_fixed_argv_and_hostile_packet_never_executes(bindir, tmp_path):
     assert not canary.exists()
 
 
-def test_scratch_cwd_fresh_and_outside_repo(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_scratch_cwd_fresh_and_outside_repo(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     first = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     second = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert first.ok and second.ok
@@ -311,10 +300,10 @@ def test_sanitized_child_env_drops_credentials():
     assert "RANDOM_VAR" not in out
 
 
-def test_source_packet_never_leaks_to_logs_or_result(bindir, caplog):
+def test_source_packet_never_leaks_to_logs_or_result(fake_provider_bin, caplog):
     packet = b'{"secret": "' + MARKER.encode() + b'"}'
     body = "#!/bin/sh\ncat >/dev/null\nprintf 'not json{{{' \nexit 0\n"
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     with caplog.at_level("INFO"):
         result = ap.launch_review(adapter, packet, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
@@ -325,62 +314,62 @@ def test_source_packet_never_leaks_to_logs_or_result(bindir, caplog):
 
 # ---- failure normalization -------------------------------------------------
 
-def test_malformed_result_is_failure(bindir):
+def test_malformed_result_is_failure(fake_provider_bin):
     body = "#!/bin/sh\ncat >/dev/null\nprintf 'not json{{{' \nexit 0\n"
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.assessment == b""
     assert result.error == "invalid-assessment"
 
 
-def test_duplicate_result_is_failure(bindir):
+def test_duplicate_result_is_failure(fake_provider_bin):
     body = "#!/bin/sh\ncat >/dev/null\nprintf '{\"results\": [\"A\", \"B\"]}'\nexit 0\n"
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_opencode_duplicate_result_events_are_failure(bindir):
+def test_opencode_duplicate_result_events_are_failure(fake_provider_bin):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "printf '%s\\n' '{\"event\":\"result\",\"data\":\"A\"}' '{\"event\":\"result\",\"data\":\"B\"}'\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "opencode", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "opencode", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_codex_without_message_is_failure(bindir):
+def test_codex_without_message_is_failure(fake_provider_bin):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "printf '%s\\n' '{\"type\":\"status\",\"content\":\"working\"}'\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "codex", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_claude_tool_attempt_is_failure_not_assessment(bindir):
+def test_claude_tool_attempt_is_failure_not_assessment(fake_provider_bin):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "printf '{\"type\": \"result\", \"subtype\": \"success\", \"is_error\": false, "
         "\"num_turns\": 1, "
         "\"permission_denials\": [{\"tool\": \"Read\"}], \"result\": \"X\"}'\nexit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
     assert result.assessment == b""
 
 
-def test_codex_tool_call_is_failure(bindir):
+def test_codex_tool_call_is_failure(fake_provider_bin):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "printf '%s\\n' "
@@ -391,27 +380,27 @@ def test_codex_tool_call_is_failure(bindir):
         "'{\"type\":\"turn.completed\",\"usage\":{}}'\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "codex", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
 
 
-def test_opencode_tool_event_is_failure(bindir):
+def test_opencode_tool_event_is_failure(fake_provider_bin):
     body = (
         "#!/bin/sh\ncat >/dev/null\n"
         "printf '%s\\n' '{\"event\":\"tool\",\"data\":\"exec\"}' '{\"event\":\"result\",\"data\":\"HI\"}'\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "opencode", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "opencode", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
 
 
-def test_nonzero_exit_is_failure_despite_valid_payload(bindir):
+def test_nonzero_exit_is_failure_despite_valid_payload(fake_provider_bin):
     body = "#!/bin/sh\ncat >/dev/null\nprintf '{\"result\": \"X\"}'\nexit 3\n"
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.assessment == b""
@@ -423,8 +412,8 @@ def test_nonzero_exit_is_failure_despite_valid_payload(bindir):
 HANG = "#!/bin/sh\ncat >/dev/null\nsleep 30\nexit 0\n"
 
 
-def test_timeout_reaps_owned_child_and_spares_neighbor(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", HANG))
+def test_timeout_reaps_owned_child_and_spares_neighbor(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", HANG))
     neighbor = _neighbor()
     try:
         result = ap.launch_review(adapter, PACKET, SCHEMA, 2, _no_progress([]))
@@ -439,10 +428,10 @@ def test_timeout_reaps_owned_child_and_spares_neighbor(bindir):
     assert neighbor_alive
 
 
-def test_stderr_flood_counts_toward_combined_cap(bindir):
+def test_stderr_flood_counts_toward_combined_cap(fake_provider_bin):
     body = ("#!/bin/sh\ncat >/dev/null\n"
             "head -c 700000 /dev/zero | tr '\\0' 'B' 1>&2\nexit 0\n")
-    adapter = _synthetic(_resolve(bindir, "codex", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", body))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 20, _no_progress([]))
     assert result.ok is False
     assert result.truncated is True
@@ -450,9 +439,9 @@ def test_stderr_flood_counts_toward_combined_cap(bindir):
     _assert_dead(result.pid)
 
 
-def test_output_cap_reaps_owned_child_and_spares_neighbor(bindir):
+def test_output_cap_reaps_owned_child_and_spares_neighbor(fake_provider_bin):
     body = "#!/bin/sh\ncat >/dev/null\nhead -c 700000 /dev/zero | tr '\\0' 'A'\nexit 0\n"
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     neighbor = _neighbor()
     try:
         result = ap.launch_review(adapter, PACKET, SCHEMA, 20, _no_progress([]))
@@ -467,8 +456,8 @@ def test_output_cap_reaps_owned_child_and_spares_neighbor(bindir):
     assert neighbor_alive
 
 
-def test_cancel_reaps_owned_child_and_spares_neighbor(bindir):
-    adapter = _synthetic(_resolve(bindir, "codex", HANG))
+def test_cancel_reaps_owned_child_and_spares_neighbor(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", HANG))
     neighbor = _neighbor()
 
     def _cancel_immediately(event):
@@ -487,7 +476,7 @@ def test_cancel_reaps_owned_child_and_spares_neighbor(bindir):
     assert neighbor_alive
 
 
-def test_timeout_kills_descendant_after_direct_child_exit(bindir, tmp_path):
+def test_timeout_kills_descendant_after_direct_child_exit(fake_provider_bin, tmp_path):
     """Direct child exits early; same-group descendant must still die.
 
     Negative contract: timeout cleanup must not skip the owned group just
@@ -500,7 +489,7 @@ def test_timeout_kills_descendant_after_direct_child_exit(bindir, tmp_path):
         f"echo $! > {pidfile}\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     neighbor = _neighbor()
     try:
         result = ap.launch_review(adapter, PACKET, SCHEMA, 2, _no_progress([]))
@@ -541,7 +530,9 @@ def test_record_validation():
         ap.ProviderResult(provider="claude", ok=True, assessment="nope",
                           error="", exit_code=0, timed_out=False,
                           cancelled=False, truncated=False,
-                          pid=1, argv=("x",), scratch="/tmp/x")
+                          pid=1, argv=("x",),
+                          # Payload-only scratch label; never a filesystem path.
+                          scratch="/tmp/x")
     assert json.dumps({"kinds": list(ap.SUPPORTED_REVIEWERS)})
 
 
@@ -549,10 +540,10 @@ def test_find_executable_ignores_relative_path_components(tmp_path, monkeypatch)
     """Relative PATH entries must never resolve a cwd-relative binary."""
     repo = tmp_path / "repo"
     (repo / "bin").mkdir(parents=True)
-    _write_bin(repo / "bin", "claude", "#!/bin/sh\necho UNTRUSTED\n")
+    write_fake_provider(repo / "bin", "claude", script="#!/bin/sh\necho UNTRUSTED\n")
     trusted = tmp_path / "tools"
     trusted.mkdir()
-    _write_bin(trusted, "claude", "#!/bin/sh\necho TRUSTED\n")
+    write_fake_provider(trusted, "claude", script="#!/bin/sh\necho TRUSTED\n")
     monkeypatch.chdir(repo)
     env = {"PATH": os.pathsep.join(["bin", ".", "", str(trusted)])}
     adapter = ap.resolve_reviewer("claude", env)
@@ -563,10 +554,10 @@ def test_find_executable_ignores_relative_path_components(tmp_path, monkeypatch)
     assert exc.value.code == "provider-unavailable"
 
 
-def test_launch_popen_failure_cleans_scratch(bindir, monkeypatch):
+def test_launch_popen_failure_cleans_scratch(fake_provider, fake_provider_bin, monkeypatch):
     """Popen failure after mkdtemp must not leak the owned scratch dir."""
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+    fake_provider("claude")
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(fake_provider_bin)))
     created: list[str] = []
     real_mkdtemp = tempfile.mkdtemp
 
@@ -591,8 +582,8 @@ def test_launch_popen_failure_cleans_scratch(bindir, monkeypatch):
     assert not Path(scratch).exists()
 
 
-def test_broken_progress_callback_cannot_fail_review(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_broken_progress_callback_cannot_fail_review(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
 
     def _broken(event):
         raise RuntimeError("progress sink down")
@@ -660,7 +651,7 @@ def _reap_leader_with_member(leader, member):
         pass
 
 
-def test_stale_member_pid_never_signaled_numerically(bindir, tmp_path,
+def test_stale_member_pid_never_signaled_numerically(fake_provider_bin, tmp_path,
                                                      monkeypatch):
     """A recycled member PID must never receive a stale numeric signal.
 
@@ -676,7 +667,7 @@ def test_stale_member_pid_never_signaled_numerically(bindir, tmp_path,
         f"echo $! > {pidfile}\n"
         "exit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     neighbor = _neighbor()
     calls: list = []
     real_kill = os.kill
@@ -747,10 +738,10 @@ def test_unreadable_member_starttime_is_not_verified(monkeypatch):
         _reap_leader_with_member(leader, member)
 
 
-def test_timeout_with_unreadable_identity_fails_closed(bindir, monkeypatch):
+def test_timeout_with_unreadable_identity_fails_closed(fake_provider_bin, monkeypatch):
     """Unreadable /proc identity at runtime must raise, never kill blindly."""
     monkeypatch.setattr(ap, "_proc_starttime", lambda pid: None)
-    adapter = _synthetic(_resolve(bindir, "claude", HANG))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", HANG))
     neighbor = _neighbor()
     try:
         with pytest.raises(Problem) as exc:
@@ -763,7 +754,7 @@ def test_timeout_with_unreadable_identity_fails_closed(bindir, monkeypatch):
     assert neighbor_alive
 
 
-def test_launch_fails_closed_without_pidfd_containment(bindir, tmp_path,
+def test_launch_fails_closed_without_pidfd_containment(fake_provider_bin, tmp_path,
                                                        monkeypatch):
     """Without a pinnable handle there is no sound cleanup: do not launch."""
     monkeypatch.setattr(ap, "_PIDFD_AVAILABLE", False)
@@ -772,7 +763,7 @@ def test_launch_fails_closed_without_pidfd_containment(bindir, tmp_path,
         "#!/bin/sh\ntouch \"" + str(canary) + "\"\ncat >/dev/null\n"
         "printf '{\"result\": \"X\"}'\nexit 0\n"
     )
-    adapter = _synthetic(_resolve(bindir, "claude", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", body))
     with pytest.raises(Problem) as exc:
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert exc.value.code == "provider-failed"
@@ -929,13 +920,10 @@ _OPENCODE_NOTE = (
 )
 
 
-def _replay(bindir: Path, name: str, payload: bytes):
+def _replay(fake_provider_bin: Path, name: str, payload: bytes):
     """Fake executable that replays one fixed native envelope on stdout."""
-    blob = bindir / f"{name}.payload"
-    blob.write_bytes(payload)
-    _write_bin(bindir, name,
-               "#!/bin/sh\ncat >/dev/null\ncat \"" + str(blob) + "\"\nexit 0\n")
-    return ap.resolve_reviewer(name, _env_for(bindir))
+    write_fake_provider(fake_provider_bin, name, stdout=payload)
+    return ap.resolve_reviewer(name, _env_for(fake_provider_bin))
 
 
 def _claude_variant(**overrides):
@@ -945,17 +933,13 @@ def _claude_variant(**overrides):
     return json.dumps(envelope).encode("utf-8")
 
 
-def _codex_stream(*lines: str) -> bytes:
-    return ("\n".join(lines) + "\n").encode("utf-8")
-
-
-def test_frozen_argv_matches_qualification_record(bindir):
+def test_frozen_argv_matches_qualification_record(fake_provider, fake_provider_bin):
     for name, tail in (("claude", _CLAUDE_FROZEN_TAIL),
                        ("codex", _CODEX_FROZEN_TAIL)):
         status = ap.qualification_status(name)
         assert tuple(status.argv) == (name,) + tuple(tail)
-        _write_bin(bindir, name, "#!/bin/sh\nexit 0\n")
-        adapter = ap.resolve_reviewer(name, _env_for(bindir))
+        fake_provider(name)
+        adapter = ap.resolve_reviewer(name, _env_for(fake_provider_bin))
         assert tuple(adapter.argv[1:]) == tuple(tail)
         for flag in _INVENTED_FLAGS:
             assert flag not in adapter.argv
@@ -974,73 +958,74 @@ def test_qualification_status_names_the_record():
     assert opencode.note == _OPENCODE_NOTE
 
 
-def test_resolve_reviewer_carries_qualification_from_status(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+def test_resolve_reviewer_carries_qualification_from_status(fake_provider, fake_provider_bin):
+    fake_provider("claude")
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     status = ap.qualification_status("claude")
     assert adapter.qualified is True
     assert adapter.qualification_note == status.note
-    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
-    denied = ap.resolve_reviewer("opencode", _env_for(bindir))
+    fake_provider("opencode")
+    denied = ap.resolve_reviewer("opencode", _env_for(fake_provider_bin))
     assert denied.qualified is False
     assert denied.qualification_note == _OPENCODE_NOTE
 
 
-def test_claude_native_envelope_success_from_fixture(bindir):
+def test_claude_native_envelope_success_from_fixture(fake_provider_bin):
     payload = (FIXTURE_DIR / "claude-success.json").read_bytes()
-    adapter = _replay(bindir, "claude", payload)
+    adapter = _replay(fake_provider_bin, "claude", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == b'{"assessment": "payload"}'
 
 
-def test_claude_extra_turn_is_tool_attempt(bindir):
-    adapter = _replay(bindir, "claude", _claude_variant(num_turns=2))
+def test_claude_extra_turn_is_tool_attempt(fake_provider_bin):
+    adapter = _replay(fake_provider_bin, "claude", _claude_variant(num_turns=2))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
 
 
-def test_claude_permission_denial_is_tool_attempt(bindir):
-    adapter = _replay(bindir, "claude", _claude_variant(
+def test_claude_permission_denial_is_tool_attempt(fake_provider_bin):
+    # Payload-only denial path inside the fake envelope; never on disk.
+    adapter = _replay(fake_provider_bin, "claude", _claude_variant(
         permission_denials=[{"tool": "Read", "path": "/tmp/decoy"}]))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
 
 
-def test_claude_missing_permission_denials_is_invalid(bindir):
+def test_claude_missing_permission_denials_is_invalid(fake_provider_bin):
     envelope = json.loads(
         (FIXTURE_DIR / "claude-success.json").read_text(encoding="utf-8"))
     del envelope["permission_denials"]
-    adapter = _replay(bindir, "claude", json.dumps(envelope).encode("utf-8"))
+    adapter = _replay(fake_provider_bin, "claude", json.dumps(envelope).encode("utf-8"))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_claude_error_envelope_is_invalid(bindir):
-    adapter = _replay(bindir, "claude", _claude_variant(is_error=True))
+def test_claude_error_envelope_is_invalid(fake_provider_bin):
+    adapter = _replay(fake_provider_bin, "claude", _claude_variant(is_error=True))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
-    failed = _replay(bindir, "claude", _claude_variant(subtype="error"))
+    failed = _replay(fake_provider_bin, "claude", _claude_variant(subtype="error"))
     result = ap.launch_review(failed, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_codex_native_stream_success_from_fixture(bindir):
+def test_codex_native_stream_success_from_fixture(fake_provider_bin):
     payload = (FIXTURE_DIR / "codex-success.jsonl").read_bytes()
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == b'{"assessment": "payload"}'
 
 
-def test_codex_startup_error_item_is_accepted(bindir):
+def test_codex_startup_error_item_is_accepted(fake_provider_bin):
     payload = (FIXTURE_DIR / "codex-startup-error.jsonl").read_bytes()
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.assessment == b'{"assessment": "payload"}'
@@ -1048,12 +1033,12 @@ def test_codex_startup_error_item_is_accepted(bindir):
 
 @pytest.mark.parametrize("item_type", ["command_execution", "file_change",
                                        "collab_agent"])
-def test_codex_tool_shaped_item_is_tool_attempt(bindir, item_type):
+def test_codex_tool_shaped_item_is_tool_attempt(fake_provider_bin, item_type):
     tool_item = json.dumps({"id": "item_0", "type": item_type,
                             "text": "ran"})
     message_item = json.dumps({"id": "item_1", "type": "agent_message",
                                "text": '{"assessment": "payload"}'})
-    payload = _codex_stream(
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "turn.started"}',
         json.dumps({"type": "item.completed",
@@ -1062,41 +1047,41 @@ def test_codex_tool_shaped_item_is_tool_attempt(bindir, item_type):
                     "item": json.loads(message_item)}),
         '{"type": "turn.completed", "usage": {}}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "tool-attempt"
 
 
-def test_codex_turn_failed_is_provider_failure(bindir):
-    payload = _codex_stream(
+def test_codex_turn_failed_is_provider_failure(fake_provider_bin):
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "turn.started"}',
         '{"type": "item.completed", "item": {"id": "item_0", '
         '"type": "agent_message", "text": "partial"}}',
         '{"type": "turn.failed", "error": "boom"}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "provider-failed"
 
 
-def test_codex_missing_turn_completed_is_invalid(bindir):
-    payload = _codex_stream(
+def test_codex_missing_turn_completed_is_invalid(fake_provider_bin):
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "turn.started"}',
         '{"type": "item.completed", "item": {"id": "item_0", '
         '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_codex_event_after_turn_completed_is_invalid(bindir):
-    payload = _codex_stream(
+def test_codex_event_after_turn_completed_is_invalid(fake_provider_bin):
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "turn.started"}',
         '{"type": "item.completed", "item": {"id": "item_0", '
@@ -1105,14 +1090,14 @@ def test_codex_event_after_turn_completed_is_invalid(bindir):
         '{"type": "item.completed", "item": {"id": "item_1", '
         '"type": "agent_message", "text": "trailing"}}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_codex_second_turn_started_is_invalid(bindir):
-    payload = _codex_stream(
+def test_codex_second_turn_started_is_invalid(fake_provider_bin):
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "turn.started"}',
         '{"type": "turn.started"}',
@@ -1120,18 +1105,18 @@ def test_codex_second_turn_started_is_invalid(bindir):
         '"type": "agent_message", "text": "{\\"assessment\\": \\"payload\\"}"}}',
         '{"type": "turn.completed", "usage": {}}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "invalid-assessment"
 
 
-def test_codex_top_level_error_is_provider_failure(bindir):
-    payload = _codex_stream(
+def test_codex_top_level_error_is_provider_failure(fake_provider_bin):
+    payload = agent_codex_stream(
         '{"type": "thread.started", "thread_id": "THREAD-PLACEHOLDER"}',
         '{"type": "error", "message": "transport exploded"}',
     )
-    adapter = _replay(bindir, "codex", payload)
+    adapter = _replay(fake_provider_bin, "codex", payload)
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is False
     assert result.error == "provider-failed"
@@ -1139,61 +1124,37 @@ def test_codex_top_level_error_is_provider_failure(bindir):
 
 # ---- review runtime: cancel event, bounded fan-out, cheap models (T6) -----
 
-def _python_bin(bindir: Path, name: str, script: str) -> None:
-    import sys as _sys
-
-    _write_bin(bindir, name, "#!" + _sys.executable + "\n" + script)
+def _python_bin(fake_provider_bin: Path, name: str, script: str) -> None:
+    write_fake_provider(fake_provider_bin, name, script=PYTHON_SHEBANG + script)
 
 
-def _echo_claude_script(log: str | None = None, delay_s: float = 0.0) -> str:
-    """Python fake: echoes the stdin packet id inside a Claude envelope."""
-    lines = [
-        "import json, sys, time",
-    ]
-    if log is not None:
-        lines.append(f"open({log!r}, 'a').write('start %d\\n' % time.monotonic_ns())")
-    lines.append("body = sys.stdin.read()")
-    if delay_s:
-        lines.append(f"time.sleep({delay_s!r})")
-    if log is not None:
-        lines.append(f"open({log!r}, 'a').write('end %d\\n' % time.monotonic_ns())")
-    lines += [
-        "item = json.loads(body)['id']",
-        "envelope = {'type': 'result', 'subtype': 'success',",
-        "            'is_error': False, 'num_turns': 1,",
-        "            'permission_denials': [], 'result': item}",
-        "sys.stdout.write(json.dumps(envelope))",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def test_launch_review_without_cancel_keeps_positional_shape(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_launch_review_without_cancel_keeps_positional_shape(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     result = ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
     assert result.ok is True
     assert result.cancelled is False
 
 
-def test_launch_review_cancel_is_keyword_only(bindir):
+def test_launch_review_cancel_is_keyword_only(fake_provider_bin):
     import threading
 
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     with pytest.raises(TypeError):
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]),
                          threading.Event())
 
 
-def test_launch_review_preset_cancel_never_starts_child(bindir, tmp_path):
+def test_launch_review_preset_cancel_never_starts_child(fake_provider_bin, tmp_path):
     import threading
 
     canary = tmp_path / "launched"
     _python_bin(
-        bindir, "claude",
+        fake_provider_bin, "claude",
         "import sys\n"
         f"open({str(canary)!r}, 'w').write('x')\n"
         "sys.stdout.write('never')\n",
     )
-    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(bindir)))
+    adapter = _synthetic(ap.resolve_reviewer("claude", _env_for(fake_provider_bin)))
     cancel = threading.Event()
     cancel.set()
     result = ap.launch_review(adapter, PACKET, SCHEMA, 20, _no_progress([]),
@@ -1204,10 +1165,10 @@ def test_launch_review_preset_cancel_never_starts_child(bindir, tmp_path):
     assert not canary.exists()
 
 
-def test_launch_review_cancel_event_mid_run_reaps_child(bindir):
+def test_launch_review_cancel_event_mid_run_reaps_child(fake_provider_bin):
     import threading
 
-    adapter = _synthetic(_resolve(bindir, "codex", HANG))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", HANG))
     neighbor = _neighbor()
     cancel = threading.Event()
 
@@ -1232,10 +1193,10 @@ def test_launch_review_cancel_event_mid_run_reaps_child(bindir):
     assert neighbor_alive
 
 
-def test_launch_reviews_aligns_results_and_bounds_concurrency(bindir, tmp_path):
+def test_launch_reviews_aligns_results_and_bounds_concurrency(fake_provider_bin, tmp_path):
     log = str(tmp_path / "fanout.log")
-    _python_bin(bindir, "claude", _echo_claude_script(log=log, delay_s=0.4))
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    _python_bin(fake_provider_bin, "claude", agent_echo_claude_script(log=log, delay_s=0.4))
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     requests = [
         (json.dumps({"id": f"item-{index}"}).encode("utf-8"), SCHEMA)
         for index in range(4)
@@ -1262,9 +1223,9 @@ def test_launch_reviews_aligns_results_and_bounds_concurrency(bindir, tmp_path):
     assert peak == 2
 
 
-def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
+def test_launch_reviews_per_item_timeout_marks_only_that_item(fake_provider_bin):
     _python_bin(
-        bindir, "claude",
+        fake_provider_bin, "claude",
         "import json, sys, time\n"
         "body = sys.stdin.read()\n"
         "item = json.loads(body)['id']\n"
@@ -1275,7 +1236,7 @@ def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
         "            'permission_denials': [], 'result': item}\n"
         "sys.stdout.write(json.dumps(envelope))\n",
     )
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     requests = [
         (json.dumps({"id": "slow"}).encode("utf-8"), SCHEMA),
         (json.dumps({"id": "fast"}).encode("utf-8"), SCHEMA),
@@ -1288,10 +1249,10 @@ def test_launch_reviews_per_item_timeout_marks_only_that_item(bindir):
 
 
 def test_launch_reviews_does_not_start_queued_item_after_absolute_deadline(
-        bindir, monkeypatch):
+        fake_provider_bin, monkeypatch):
     from types import SimpleNamespace
 
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     clock = [100.0]
     monkeypatch.setattr(
         ap, "time", SimpleNamespace(monotonic=lambda: clock[0]))
@@ -1323,19 +1284,19 @@ def test_launch_reviews_does_not_start_queued_item_after_absolute_deadline(
 
 
 def test_launch_reviews_cancellation_does_not_start_queued_item(
-        bindir, monkeypatch, tmp_path):
+        fake_provider_bin, monkeypatch, tmp_path):
     import concurrent.futures as _futures
 
     log = tmp_path / "cancelled-wave.log"
     _python_bin(
-        bindir, "claude",
+        fake_provider_bin, "claude",
         "import json, sys, time\n"
         "body = json.loads(sys.stdin.read())\n"
         "item = body['id']\n"
         f"open({str(log)!r}, 'a').write(item + '\\n')\n"
         "time.sleep(30)\n",
     )
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     requests = [
         (json.dumps({"id": item}).encode("utf-8"), SCHEMA)
         for item in ("first", "queued")
@@ -1360,14 +1321,14 @@ def test_launch_reviews_cancellation_does_not_start_queued_item(
 
 
 def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(
-        bindir, monkeypatch, tmp_path):
+        fake_provider_bin, monkeypatch, tmp_path):
     import concurrent.futures as _futures
 
     pidlog = tmp_path / "pids.log"
     body = ("#!/bin/sh\n"
             f"echo $$ >> {pidlog}\n"
             "cat >/dev/null\nsleep 30\nexit 0\n")
-    adapter = _synthetic(_resolve(bindir, "codex", body))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", body))
     requests = [(PACKET, SCHEMA), (PACKET, SCHEMA)]
     real_wait = _futures.wait
     calls = []
@@ -1401,8 +1362,8 @@ def test_launch_reviews_keyboard_interrupt_raises_review_cancelled(
         _assert_dead(pid)
 
 
-def test_launch_reviews_rejects_bad_concurrency(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_launch_reviews_rejects_bad_concurrency(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     for bad in (0, 9):
         with pytest.raises(Problem) as exc:
             ap.launch_reviews(adapter, [(PACKET, SCHEMA)], 10,
@@ -1410,8 +1371,8 @@ def test_launch_reviews_rejects_bad_concurrency(bindir):
         assert exc.value.code == "invalid-bound"
 
 
-def test_launch_reviews_empty_requests_returns_empty(bindir):
-    adapter = _synthetic(_resolve(bindir, "claude", CLAUDE_OK))
+def test_launch_reviews_empty_requests_returns_empty(fake_provider_bin):
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", CLAUDE_OK))
     assert ap.launch_reviews(adapter, [], 10) == ()
 
 
@@ -1466,49 +1427,49 @@ def test_launch_reviews_reports_each_item_as_it_completes(monkeypatch):
     assert [r.assessment for r in outcome["results"]] == [b"fast", b"slow"]
 
 
-def test_with_model_appends_only_the_model_flag(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    claude = ap.resolve_reviewer("claude", _env_for(bindir))
+def test_with_model_appends_only_the_model_flag(fake_provider, fake_provider_bin):
+    fake_provider("claude")
+    claude = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     modeled = ap.with_model(claude, "haiku")
     assert tuple(modeled.argv) == tuple(claude.argv) + ("--model", "haiku")
     assert tuple(claude.argv) == tuple(
-        ap.resolve_reviewer("claude", _env_for(bindir)).argv)
+        ap.resolve_reviewer("claude", _env_for(fake_provider_bin)).argv)
 
-    _write_bin(bindir, "codex", "#!/bin/sh\nexit 0\n")
-    codex = ap.resolve_reviewer("codex", _env_for(bindir))
+    fake_provider("codex")
+    codex = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert tuple(ap.with_model(codex, "gpt-5.6-luna").argv) == (
         tuple(codex.argv) + ("-m", "gpt-5.6-luna"))
 
 
 @pytest.mark.parametrize("bad", ["", "--model", "-m", "has space", "a;b",
                                  "x" * 129, "-leading-dash"])
-def test_with_model_rejects_invalid_ids(bindir, bad):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+def test_with_model_rejects_invalid_ids(fake_provider, fake_provider_bin, bad):
+    fake_provider("claude")
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     with pytest.raises(Problem):
         ap.with_model(adapter, bad)
 
 
-def test_with_model_accepts_boundary_length_id(bindir):
-    _write_bin(bindir, "claude", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("claude", _env_for(bindir))
+def test_with_model_accepts_boundary_length_id(fake_provider, fake_provider_bin):
+    fake_provider("claude")
+    adapter = ap.resolve_reviewer("claude", _env_for(fake_provider_bin))
     assert ap.with_model(adapter, "a" * 128).argv[-1] == "a" * 128
 
 
-def test_with_model_rejects_unqualified_provider(bindir):
-    _write_bin(bindir, "opencode", "#!/bin/sh\nexit 0\n")
-    adapter = ap.resolve_reviewer("opencode", _env_for(bindir))
+def test_with_model_rejects_unqualified_provider(fake_provider, fake_provider_bin):
+    fake_provider("opencode")
+    adapter = ap.resolve_reviewer("opencode", _env_for(fake_provider_bin))
     with pytest.raises(Problem) as exc:
         ap.with_model(adapter, "haiku")
     assert exc.value.code == "provider-unqualified"
 
 
-def _debug_models_bin(bindir: Path, payload: bytes, *, exit_code: int = 0) -> None:
-    blob = bindir / "codex.models.payload"
+def _debug_models_bin(fake_provider_bin: Path, payload: bytes, *, exit_code: int = 0) -> None:
+    blob = fake_provider_bin / "codex.models.payload"
     blob.write_bytes(payload)
-    _write_bin(
-        bindir, "codex",
-        "#!/bin/sh\n"
+    write_fake_provider(
+        fake_provider_bin, "codex",
+        script="#!/bin/sh\n"
         "if [ \"$1\" = debug ] && [ \"$2\" = models ]; then\n"
         f"  cat \"{blob}\"; exit {exit_code}\n"
         "fi\n"
@@ -1516,10 +1477,10 @@ def _debug_models_bin(bindir: Path, payload: bytes, *, exit_code: int = 0) -> No
     )
 
 
-def test_discover_models_lists_only_visible_slugs(bindir):
+def test_discover_models_lists_only_visible_slugs(fake_provider_bin):
     payload = (FIXTURE_DIR / "codex-debug-models.json").read_bytes()
-    _debug_models_bin(bindir, payload)
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    _debug_models_bin(fake_provider_bin, payload)
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert ap.discover_models(adapter) == (
         "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
         "gpt-5.5",
@@ -1532,22 +1493,22 @@ def test_discover_models_lists_only_visible_slugs(bindir):
     (b'{"models": []}', 1),
     (b'{"models": "nope"}', 0),
 ])
-def test_discover_models_returns_empty_on_failure(bindir, payload, exit_code):
-    _debug_models_bin(bindir, payload, exit_code=exit_code)
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+def test_discover_models_returns_empty_on_failure(fake_provider_bin, payload, exit_code):
+    _debug_models_bin(fake_provider_bin, payload, exit_code=exit_code)
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert ap.discover_models(adapter) == ()
 
 
-def test_discover_models_over_bound_output_returns_empty(bindir):
+def test_discover_models_over_bound_output_returns_empty(fake_provider_bin):
     blob = b'{"models": [' + b" " * (4 * 1024 * 1024 + 1) + b"]}"
-    _debug_models_bin(bindir, blob)
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    _debug_models_bin(fake_provider_bin, blob)
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert ap.discover_models(adapter) == ()
 
 
-def test_discover_models_timeout_returns_empty(bindir, monkeypatch):
-    _write_bin(bindir, "codex", "#!/bin/sh\nsleep 30\nexit 0\n")
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+def test_discover_models_timeout_returns_empty(fake_provider_bin, monkeypatch):
+    write_fake_provider(fake_provider_bin, "codex", script="#!/bin/sh\nsleep 30\nexit 0\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     monkeypatch.setattr(ap, "_DISCOVERY_TIMEOUT_S", 1)
     assert ap.discover_models(adapter) == ()
 
@@ -1561,19 +1522,19 @@ def test_discover_models_non_codex_returns_empty_without_launch(tmp_path):
     assert ap.discover_models(adapter) == ()
 
 
-def test_cli_version_reports_first_line(bindir):
-    _write_bin(bindir, "codex",
-               "#!/bin/sh\nprintf 'codex-cli 0.155.1\\nsha: abc\\n'\nexit 0\n")
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+def test_cli_version_reports_first_line(fake_provider_bin):
+    write_fake_provider(fake_provider_bin, "codex",
+                          script="#!/bin/sh\nprintf 'codex-cli 0.155.1\\nsha: abc\\n'\nexit 0\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert ap.cli_version(adapter) == "codex-cli 0.155.1"
 
 
-def test_cli_version_returns_none_on_failure(bindir, monkeypatch):
-    _write_bin(bindir, "codex", "#!/bin/sh\nexit 3\n")
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+def test_cli_version_returns_none_on_failure(fake_provider_bin, monkeypatch):
+    write_fake_provider(fake_provider_bin, "codex", script="#!/bin/sh\nexit 3\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     assert ap.cli_version(adapter) is None
-    _write_bin(bindir, "codex", "#!/bin/sh\nsleep 30\nexit 0\n")
-    slow = ap.resolve_reviewer("codex", _env_for(bindir))
+    write_fake_provider(fake_provider_bin, "codex", script="#!/bin/sh\nsleep 30\nexit 0\n")
+    slow = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     monkeypatch.setattr(ap, "_VERSION_TIMEOUT_S", 1)
     assert ap.cli_version(slow) is None
 
@@ -1593,7 +1554,7 @@ def _fifo_eof_within(reader: int, deadline_s: float) -> bool:
 
 
 def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
-        bindir, monkeypatch):
+        fake_provider_bin, monkeypatch):
     """A forked grandchild holding a fifo write end leaves no survivor.
 
     The fake CLI backgrounds a 60s sleep holding the fifo open, then
@@ -1602,16 +1563,16 @@ def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
     /proc scan. Both cli_version and discover_model_entries delegate
     to the same _run_owned_capture helper.
     """
-    fifo = bindir / "grandchild.fifo"
+    fifo = fake_provider_bin / "grandchild.fifo"
     os.mkfifo(fifo)
-    _write_bin(
-        bindir, "codex",
-        "#!/bin/sh\n"
+    write_fake_provider(
+        fake_provider_bin, "codex",
+        script="#!/bin/sh\n"
         f'F="{fifo}"\n'
         'sleep 60 <> "$F" &\n'
         "exec sleep 60\n",
     )
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
     monkeypatch.setattr(ap, "_VERSION_TIMEOUT_S", 1)
     assert ap.cli_version(adapter) is None
     reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
@@ -1622,12 +1583,12 @@ def test_owned_capture_kills_grandchild_proved_by_fifo_eof(
         os.close(reader)
 
 
-def test_cli_version_early_stops_on_over_bound_output(bindir):
+def test_cli_version_early_stops_on_over_bound_output(fake_provider_bin):
     """cli_version returns None well before its timeout on huge output."""
-    _write_bin(
-        bindir, "codex",
-        "#!/bin/sh\nhead -c 1200000 /dev/zero | tr '\\0' 'v'\nsleep 30\n")
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    write_fake_provider(
+        fake_provider_bin, "codex",
+        script="#!/bin/sh\nhead -c 1200000 /dev/zero | tr '\\0' 'v'\nsleep 30\n")
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
 
     started = time.monotonic()
     try:
@@ -1637,7 +1598,7 @@ def test_cli_version_early_stops_on_over_bound_output(bindir):
     assert elapsed < ap._VERSION_TIMEOUT_S - 1
 
 
-def test_discover_models_drops_slugs_failing_model_re(bindir):
+def test_discover_models_drops_slugs_failing_model_re(fake_provider_bin):
     """Discovered codex slugs are validated at discovery, not at pick."""
     payload = json.dumps({
         "models": [
@@ -1651,8 +1612,8 @@ def test_discover_models_drops_slugs_failing_model_re(bindir):
              "description": "over bound", "visibility": "list"},
         ],
     }).encode("utf-8")
-    _debug_models_bin(bindir, payload)
-    adapter = ap.resolve_reviewer("codex", _env_for(bindir))
+    _debug_models_bin(fake_provider_bin, payload)
+    adapter = ap.resolve_reviewer("codex", _env_for(fake_provider_bin))
 
     assert ap.discover_models(adapter) == ("gpt-5.6-luna",)
     assert ap.discover_model_entries(adapter) == (
@@ -1662,9 +1623,9 @@ def test_discover_models_drops_slugs_failing_model_re(bindir):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owned launch is posix-only")
-def test_owned_spawn_refusals_name_the_reviewer(bindir, monkeypatch):
+def test_owned_spawn_refusals_name_the_reviewer(fake_provider_bin, monkeypatch):
     """_launch_one restores the reviewer prefix on _spawn_owned refusals."""
-    adapter = _synthetic(_resolve(bindir, "claude", "#!/bin/sh\nexit 0\n"))
+    adapter = _synthetic(_resolve(fake_provider_bin, "claude", "#!/bin/sh\nexit 0\n"))
     monkeypatch.setattr(ap, "_PIDFD_AVAILABLE", False)
     with pytest.raises(Problem) as refused:
         ap.launch_review(adapter, PACKET, SCHEMA, 10, _no_progress([]))
@@ -1674,9 +1635,9 @@ def test_owned_spawn_refusals_name_the_reviewer(bindir, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owned launch is posix-only")
-def test_unverifiable_identity_refusal_names_the_reviewer(bindir, monkeypatch):
+def test_unverifiable_identity_refusal_names_the_reviewer(fake_provider_bin, monkeypatch):
     """An unverifiable process identity names its reviewer, then fails closed."""
-    adapter = _synthetic(_resolve(bindir, "codex", "#!/bin/sh\nsleep 30\n"))
+    adapter = _synthetic(_resolve(fake_provider_bin, "codex", "#!/bin/sh\nsleep 30\n"))
 
     def _no_pgid(pid):
         raise ProcessLookupError("synthetic unreadable pgid")

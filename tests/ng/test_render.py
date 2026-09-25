@@ -10,6 +10,10 @@ from ptest import contracts as C
 from ptest.render import (
     render_agent_assessment, render_doctor, render_doctor_json, render_json,
 )
+from factories_agents import (
+    agent_api_facts as _aa_facts,
+    agent_citation,
+)
 
 
 def _aa_workspace(declaration="api", runner="pytest", selection=True):
@@ -22,8 +26,7 @@ def _aa_workspace(declaration="api", runner="pytest", selection=True):
 
 
 def _aa_citation(path="api/tests/test_example.py", start=3, end=9):
-    return {"path": path, "start_line": start, "end_line": end,
-            "sha256": "ef" * 32}
+    return agent_citation(path, start, end)
 
 
 def _aa_row(row_id, status, label=None, rationale=None, evidence="default"):
@@ -37,20 +40,6 @@ def _aa_row(row_id, status, label=None, rationale=None, evidence="default"):
     if label is not None:
         row["label"] = label
     return row
-
-
-def _aa_facts(**overrides):
-    facts = {
-        "project": "api", "runner": "pytest", "runs": True,
-        "runs_reason": None, "runs_fix": None,
-        "parallel": "4 workers (xdist, --dist loadgroup)",
-        "parallel_short": "4 workers", "parallel_fix": None,
-        "setup": "uv sync --locked",
-        "full_suite": 'your pytest config: -m "not slow"',
-        "full_blocked": None,
-    }
-    facts.update(overrides)
-    return facts
 
 
 def test_agent_assessment_renders_score_header_facts_and_items():
@@ -498,6 +487,7 @@ def test_render_json_uses_shared_descriptor_and_never_exposes_argv():
         ("/secret/executable", "secret-sentinel", "$(literal)"),
         workers=1, provenance=("config",),
     )
+    # Payload-only paths under test; never touch the filesystem.
     payload = {
         "root": "/tmp/project",
         "config_path": "/tmp/project/.ptest.toml",

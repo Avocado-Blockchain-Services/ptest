@@ -16,6 +16,13 @@ import pytest
 from ptest import contracts as C
 from ptest.checklist import CATALOG
 from ptest.contracts import Problem
+from factories_agents import (
+    agent_citation as _citation,
+    agent_finding as _finding,
+    agent_packet_for,
+    agent_row as _row,
+    agent_score as _score,
+)
 
 CHILD_PID = "ab" * 16
 PACKET_SHA = "cd" * 32
@@ -35,43 +42,6 @@ DOCTOR_GOLDEN_SHA256 = (
 DOCTOR_ERROR_GOLDEN_SHA256 = (
     "3e7c8d5f9e5731a4808cc37a39304aca561138fd707e2b74f05c8dd5aa2bc180"
 )
-
-
-def _citation(path="src/example.py", start=3, end=9, sha=CITATION_SHA):
-    return {"path": path, "start_line": start, "end_line": end,
-            "sha256": sha}
-
-
-def _row(row_id, status="satisfied", rationale=None, evidence=None):
-    if rationale is None:
-        rationale = f"Row {row_id} judged {status} against packet excerpt."
-    if evidence is None:
-        evidence = [] if status == "unknown" else [_citation()]
-    return {"id": row_id, "status": status, "rationale": rationale,
-            "evidence": evidence}
-
-
-RECIPES = {
-    "FIX-001": "factories", "FIX-002": "factories",
-    "DB-001": "databases", "DB-002": "databases",
-    "CACHE-001": "cache", "RESOURCE-001": "files-ports",
-    "NETWORK-001": "time-network", "PROCESS-001": "processes",
-    "TIME-001": "time-network", "SELECT-001": None,
-    "TIMING-001": None, "PARALLEL-001": None,
-}
-
-
-def _finding(row_id, recipe="__catalog__"):
-    if recipe == "__catalog__":
-        recipe = RECIPES[row_id]
-    return {"id": row_id, "summary": f"Close gap {row_id} with owned setup.",
-            "suggested_change": f"Apply packaged recipe for {row_id}.",
-            "recipe_id": recipe, "evidence": [_citation()]}
-
-
-def _score(satisfied, applicable):
-    return {"satisfied": satisfied, "applicable": applicable,
-            "percent": (100 * satisfied) // applicable}
 
 
 def _mixed_rows():
@@ -314,6 +284,7 @@ def test_reject_finding_shape_mismatch():
     ("summary", "Contact <https://example.com> for help."),
     ("summary", "Use <b>bold</b> markup here."),
     ("summary", "First | second column layout."),
+    # Payload-only string under test; never touches the filesystem.
     ("summary", "Run `rm -rf /tmp/x` to clean."),
     ("summary", "# Finding headline here"),
     ("summary", "This scores 80% on quality."),
@@ -356,6 +327,7 @@ def test_accept_library_naming_in_finding_content(value):
     ("# Finding headline here", True),
     ("This scores 80% on quality.", True),
     ("First | second column layout.", True),
+    # Payload-only string under test; never touches the filesystem.
     ("Run `rm -rf /tmp/x` to clean.", True),
     ("Verified by observed pytest output exit code 0.", True),
     ("ptest --full is green on the excerpt.", True),
@@ -712,37 +684,11 @@ def test_additive_dropped_citations_row_validates_and_projects_away():
 
 
 def _t4_packet(tmp_path):
-    from ptest import agent_assessment as AA
-    from ptest import doctor
-
-    files = {
+    return agent_packet_for(tmp_path, {
         "pyproject.toml": "[project]\nname = 'demo'\n",
         ".ptest.toml": "[selection]\nenabled = false\n",
         "tests/test_pure.py": "def test_pure():\n    assert True\n",
-    }
-    for rel, text in files.items():
-        target = tmp_path / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    domain = C.DomainPaths(
-        root=tmp_path, machine_config=tmp_path / ".ptest" / "config.toml",
-        ledger=tmp_path / ".ptest" / "ledger",
-        marker=tmp_path / ".ptest" / "marker",
-        fixture=True, domain_id=None)
-    config = C.Config(
-        runner=C.RunnerConfig(kind=C.RunnerKind.PYTEST, launcher=("uv",),
-                              test_roots=("tests",)),
-        setup=None, resources=C.ResourceConfig(),
-        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
-        project_id=CHILD_PID)
-    resolution = C.ConfigResolution(root=tmp_path, path=None, config=config,
-                                    monorepo=None, provenance=(), warnings=(),
-                                    problem=None)
-    workspace = doctor.inspect_workspace(
-        domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
-    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
-    assert len(packets) == 1
-    return packets[0]
+    })
 
 
 def _t4_public_child(assessment):
