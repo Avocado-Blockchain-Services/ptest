@@ -135,7 +135,7 @@ def format_changed_selected(*, selected: int, total: int,
     distinct files of the baseline inventory); ``changed_files`` counts
     distinct changed paths.
     """
-    files = _plural(changed_files, "file") + " changed"
+    files = C.plural(changed_files, "file") + " changed"
     return f"changed: {selected} of {total} test files ({files})"
 
 
@@ -181,7 +181,7 @@ def _no_baseline_detail(result: C.RunResult) -> str:
     if result.status is not C.Status.PASSED:
         if result.status is C.Status.FAILED:
             if failed:
-                return _plural(failed, "failure")
+                return C.plural(failed, "failure")
             return "failed"
         return "incomplete results"
     before, after = result.input_before, result.input_after
