@@ -66,16 +66,24 @@ def parse_choice(value: str) -> str:
 
 
 def ask_choice(project: str) -> str:
-    """Ask the setup question once on the terminal; Enter takes the default."""
+    """Ask the setup question on the terminal; Enter takes the default.
+
+    An unrecognised answer re-asks instead of silently taking the
+    default; Enter and EOF still mean the default.
+    """
     from .render import terminal_text
-    print(QUESTION.format(project=terminal_text(project)), file=sys.stderr)
-    try:
-        answer = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return DEFAULT_CHOICE
-    if not answer:
-        return DEFAULT_CHOICE
-    return answer if answer in CHOICES else DEFAULT_CHOICE
+    while True:
+        print(QUESTION.format(project=terminal_text(project)), file=sys.stderr)
+        try:
+            answer = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return DEFAULT_CHOICE
+        if not answer:
+            return DEFAULT_CHOICE
+        if answer in CHOICES:
+            return answer
+        print(f"{terminal_text(answer)} is not one of now/later/no; "
+              "please answer again", file=sys.stderr)
 
 
 def has_frozen_pair(config: C.Config) -> bool:

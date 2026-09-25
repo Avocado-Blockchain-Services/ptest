@@ -2665,8 +2665,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 changed_started = time.monotonic()
                 changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
                 first_failure = 0
+                heads = (monorepo.child_baseline_heads(domain, children)
+                         if parsed.base is None else None)
                 for item in monorepo.select_changed_children(
-                        resolution.root, children, parsed.base):
+                        resolution.root, children, parsed.base, heads):
                     if not item.run:
                         if not parsed.quiet:
                             print(f"ptest: {item.target.declaration} · no changes",

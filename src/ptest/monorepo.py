@@ -400,37 +400,106 @@ class ChangedChild:
     vitest_changed: bool
 
 
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _child_baseline_head(domain: C.DomainPaths, child: ChildTarget) -> str | None:
+    """Recorded baseline commit for one child, or None (run the child)."""
+    from . import history
+    from .operations import _checkout
+
+    try:
+        if child.config is None:
+            return None
+        checkout = _checkout(child.config)
+        view = history.read_history(domain, checkout)
+        baseline = view.baseline
+        return baseline.head if baseline is not None else None
+    except Exception:
+        # Advisory read only: unknown history runs the child (fail closed).
+        return None
+
+
+def child_baseline_heads(domain: C.DomainPaths,
+                         children: tuple[ChildTarget, ...]) -> dict[str, str | None]:
+    """Best-effort recorded-baseline commits keyed by child declaration."""
+    return {child.declaration: _child_baseline_head(domain, child)
+            for child in children}
+
+
+def _committed_since(root: Path, older: str) -> tuple[str, ...] | None:
+    """Repo-relative paths committed between one baseline head and HEAD."""
+    if not _COMMIT_RE.fullmatch(older):
+        return None
+    raw = _git_blob(root, "diff", "--name-only", "-z", "--no-ext-diff",
+                    "--no-textconv", "--find-renames", older, "HEAD", "--")
+    if raw is None:
+        return None
+    return _nul_paths(raw)
+
+
+def _run_all(children: tuple[ChildTarget, ...],
+             base: str | None) -> tuple[ChangedChild, ...]:
+    return tuple(ChangedChild(child, True, _vitest_base(child, base) is not None)
+                 for child in children)
+
+
 def select_changed_children(root: Path, children: tuple[ChildTarget, ...],
-                            base: str | None) -> tuple[ChangedChild, ...]:
+                            base: str | None,
+                            baseline_heads: dict[str, str | None] | None = None,
+                            ) -> tuple[ChangedChild, ...]:
     """Decide per child whether root `ptest --changed` runs it.
 
-    A child runs when a changed file sits inside its directory, or when a
-    changed file outside every child directory is one of its full triggers
-    (its selection ``full_triggers`` plus the implicit ``.ptest.toml``; a
-    changed root manifest therefore runs every child).  Unavailable Git
-    evidence runs every child.  The ``vitest_changed`` flag marks the
-    section-A.2 delegation (see ``child_changed_request``).
+    With an explicit base the committed range is ``base..HEAD`` for every
+    child.  Without one, each child consults its recorded baseline: the
+    child runs unless its directory holds no worktree change AND no change
+    committed since its baseline head; a missing baseline (or unreadable
+    history) runs the child, since that run can record one.  In both
+    modes a child also runs when a changed file outside every child
+    directory is one of its full triggers (its selection
+    ``full_triggers`` plus the implicit ``.ptest.toml``; a changed root
+    manifest therefore runs every child).  Unavailable Git evidence runs
+    every child.  The ``vitest_changed`` flag marks the section-A.2
+    delegation (see ``child_changed_request``).
     """
-    changed = worktree_changed_files(root, base)
+    if base is not None:
+        changed = worktree_changed_files(root, base)
+        if changed is None:
+            return _run_all(children, base)
+        return tuple(
+            _classify(child, changed, changed, children, base)
+            for child in children)
+    worktree = worktree_changed_files(root, None)
+    if worktree is None or baseline_heads is None:
+        return _run_all(children, base)
+    committed: dict[str, tuple[str, ...] | None] = {}
+    for child in children:
+        head = baseline_heads.get(child.declaration)
+        committed[child.declaration] = (
+            None if head is None else _committed_since(root, head))
     selected: list[ChangedChild] = []
     for child in children:
-        triggers = ((child.config.selection.full_triggers
-                     if child.config is not None else ())
-                    + (".ptest.toml",))
-        if changed is None:
-            selected.append(ChangedChild(child, True, _vitest_base(child, base) is not None))
+        own_range = committed[child.declaration]
+        if own_range is None:
+            selected.append(ChangedChild(child, True, False))
             continue
-        inside = [path for path in changed
-                  if path == child.declaration or path.startswith(child.declaration + "/")]
-        if inside:
-            selected.append(ChangedChild(child, True, _vitest_base(child, base) is not None))
-            continue
-        outside = [path for path in changed
-                   if not any(path == other.declaration or path.startswith(other.declaration + "/")
-                              for other in children)]
-        run = any(_matches(path, triggers) for path in outside)
-        selected.append(ChangedChild(child, run, run and _vitest_base(child, base) is not None))
+        relevant = worktree + own_range
+        selected.append(_classify(child, relevant, relevant, children, base))
     return tuple(selected)
+
+
+def _classify(child: ChildTarget, own: tuple[str, ...], outside_pool: tuple[str, ...],
+              children: tuple[ChildTarget, ...], base: str | None) -> ChangedChild:
+    """Run one child when its own paths changed or an outside trigger did."""
+    triggers = ((child.config.selection.full_triggers
+                 if child.config is not None else ())
+                + (".ptest.toml",))
+    if any(_matches(path, (child.declaration,)) for path in own):
+        return ChangedChild(child, True, _vitest_base(child, base) is not None)
+    outside = [path for path in outside_pool
+               if not any(_matches(path, (other.declaration,)) for other in children)]
+    run = any(_matches(path, triggers) for path in outside)
+    return ChangedChild(child, run, run and _vitest_base(child, base) is not None)
 
 
 def _vitest_base(target: ChildTarget, base: str | None) -> str | None:

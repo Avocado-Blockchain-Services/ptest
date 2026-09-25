@@ -159,6 +159,60 @@ def test_changed_setup_non_interactive_default_is_later(tmp_path, monkeypatch, c
     assert calls == []
 
 
+# --- choice answers -----------------------------------------------------------
+
+
+def test_ask_choice_reasks_on_unrecognised_answer(monkeypatch, capsys):
+    from ptest import init_changed
+
+    answers = iter(["nao", "now"])
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: next(answers))
+
+    assert init_changed.ask_choice("api") == "now"
+    err = capsys.readouterr().err
+    assert err.count("Set up ptest --changed for") == 2
+    assert "nao" in err
+
+
+def test_ask_choice_enter_and_eof_take_the_default(monkeypatch, capsys):
+    from ptest import init_changed
+
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "")
+    assert init_changed.ask_choice("api") == "later"
+
+    def _eof(*args, **kwargs):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert init_changed.ask_choice("api") == "later"
+
+
+def test_changed_setup_now_surfaces_baseline_recorded(
+        case, tmp_path, monkeypatch, capsys):
+    from ptest import operations
+    from ptest.cli import main
+
+    _pytest_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    calls: list = []
+    result = case.result(baseline_published=True)
+    plan = C.Plan(mode=C.Mode.FULL, execution="full")
+
+    def fake_execute(domain, config, request):
+        calls.append(request)
+        note = operations._baseline_note(plan=plan, advanced=True, result=result)
+        operations._emit_end(request, result, 0.0, baseline_note=note)
+        return type("Result", (), {
+            "status": C.Status.PASSED, "exit_code": 0, "reasons": ()})()
+
+    monkeypatch.setattr(operations, "execute", fake_execute)
+
+    assert main(_init_argv("--changed-setup", "now")) == 0
+    assert len(calls) == 1
+    assert calls[0].mode is C.Mode.FULL
+    assert "ptest: baseline recorded" in capsys.readouterr().err
+
+
 # --- eligibility ------------------------------------------------------------
 
 

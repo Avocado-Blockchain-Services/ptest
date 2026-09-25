@@ -123,10 +123,11 @@ def format_changed_selected(*, selected: int, total: int,
     """Changed-mode plan segment for a selected run.
 
     ``selected``/``total`` count test files (the plan subset over the
-    baseline inventory); ``changed_files`` counts distinct changed paths.
+    distinct files of the baseline inventory); ``changed_files`` counts
+    distinct changed paths.
     """
     files = _plural(changed_files, "file") + " changed"
-    return f"changed: {selected} of {total} tests ({files})"
+    return f"changed: {selected} of {total} test files ({files})"
 
 
 def explain_changed_full_reason(reason: C.Reason | None, *,

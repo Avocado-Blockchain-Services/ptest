@@ -1851,13 +1851,6 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
-def _prefix_matches(path: str, patterns) -> bool:
-    # Same literal-prefix rule as selection._matches (the canonical
-    # definition lives there; selection.py is outside this change's scope,
-    # so the one-liner is repeated instead of reaching into a private).
-    return any(path == item or path.startswith(item + "/") for item in patterns)
-
-
 def _changed_paths(snapshot: C.InputSnapshot) -> list[str]:
     """Distinct changed paths (old/new merged) in first-seen order."""
     paths: list[str] = []
@@ -1873,7 +1866,7 @@ def _changed_trigger_path(config: C.Config,
     """First changed path that forces a full suite, if any."""
     patterns = tuple(config.selection.full_triggers) + (".ptest.toml",)
     for path in _changed_paths(snapshot):
-        if _prefix_matches(path, patterns):
+        if selection._matches(path, patterns):
             return path
     return None
 
@@ -1891,12 +1884,12 @@ def _unmapped_changed_path(config: C.Config,
         for path in (change.old, change.new):
             if path is None:
                 continue
-            if _prefix_matches(path, triggers):
+            if selection._matches(path, triggers):
                 continue
             if (change.kind in ("untracked", "ignored")
-                    and _prefix_matches(path, policy.non_input_outputs)):
+                    and selection._matches(path, policy.non_input_outputs)):
                 continue
-            if not _prefix_matches(path, tuple(covered)):
+            if not selection._matches(path, tuple(covered)):
                 return path
     return None
 
@@ -1919,7 +1912,8 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
         if plan.execution == "selected":
             total = len(plan.files)
             if history_view is not None and history_view.baseline is not None:
-                total = len(history_view.baseline.inventory.tests)
+                total = len({record.file for record
+                             in history_view.baseline.inventory.tests})
             segment = progress.format_changed_selected(
                 selected=len(plan.files), total=total,
                 changed_files=len(_changed_paths(snapshot)))

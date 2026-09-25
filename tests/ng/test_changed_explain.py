@@ -40,13 +40,13 @@ def _result(case, **overrides) -> C.RunResult:
 def test_changed_selected_names_plan_counts():
     assert progress.format_changed_selected(
         selected=12, total=812, changed_files=3,
-    ) == "changed: 12 of 812 tests (3 files changed)"
+    ) == "changed: 12 of 812 test files (3 files changed)"
 
 
 def test_changed_selected_singular_file():
     assert progress.format_changed_selected(
         selected=1, total=812, changed_files=1,
-    ) == "changed: 1 of 812 tests (1 file changed)"
+    ) == "changed: 1 of 812 test files (1 file changed)"
 
 
 def test_emit_start_changed_selected(case, capsys):
@@ -62,7 +62,47 @@ def test_emit_start_changed_selected(case, capsys):
         workers=1, snapshot=snapshot, history_view=history_view)
     err = capsys.readouterr().err
     assert err.splitlines()[0] == (
-        "ptest: proj · pytest · changed: 1 of 1 tests (1 file changed)")
+        "ptest: proj · pytest · changed: 1 of 1 test files (1 file changed)")
+
+
+def test_emit_start_counts_test_files_not_test_items(case, capsys):
+    config = case.config()
+    request = case.request()
+    plan = C.Plan(mode=C.Mode.AUTOMATIC, execution="selected",
+                  files=("tests/test_a.py", "tests/test_b.py"),
+                  static_preview=True)
+    snapshot = case.snapshot(changes=(
+        C.Change(old=None, new="src/a.py", kind="added"),))
+    records = (
+        C.TestRecord(id="tests/test_a.py::t1", file="tests/test_a.py",
+                     outcome=C.Outcome("passed"), setup_s=None, call_s=0.01,
+                     teardown_s=None),
+        C.TestRecord(id="tests/test_a.py::t2", file="tests/test_a.py",
+                     outcome=C.Outcome("passed"), setup_s=None, call_s=0.01,
+                     teardown_s=None),
+        C.TestRecord(id="tests/test_a.py::t3", file="tests/test_a.py",
+                     outcome=C.Outcome("passed"), setup_s=None, call_s=0.01,
+                     teardown_s=None),
+        C.TestRecord(id="tests/test_b.py::t1", file="tests/test_b.py",
+                     outcome=C.Outcome("passed"), setup_s=None, call_s=0.01,
+                     teardown_s=None),
+        C.TestRecord(id="tests/test_b.py::t2", file="tests/test_b.py",
+                     outcome=C.Outcome("passed"), setup_s=None, call_s=0.01,
+                     teardown_s=None),
+    )
+    inventory = C.Inventory(adapter="pytest", version="9.1.1", complete=True,
+                            tests=records, digest="99" * 32)
+    baseline = C.Baseline(
+        run_id="ab" * 16, head="a" * 40, input_digest="11" * 32,
+        compatibility="test-compat-v1", inventory=inventory,
+        policy_digest="22" * 32, created_at="2026-09-25T00:00:00+00:00")
+    history_view = case.history(baseline=baseline)
+    operations._emit_start(
+        checkout=_checkout(), config=config, request=request, plan=plan,
+        workers=1, snapshot=snapshot, history_view=history_view)
+    err = capsys.readouterr().err
+    assert err.splitlines()[0] == (
+        "ptest: proj · pytest · changed: 2 of 2 test files (1 file changed)")
 
 
 # ---- B.1: changed -> full reason words ---------------------------------------
