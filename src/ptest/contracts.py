@@ -16,7 +16,7 @@ import json
 import math
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -119,7 +119,12 @@ MAX_QUEUE_TIMEOUT_S = 86400.0
 DEFAULT_SETUP_TIMEOUT_S = 300.0
 DEFAULT_ATTEMPT_TIMEOUT_S = 30.0
 DEFAULT_ATTEMPT_DECISION_TIMEOUT_S = 30.0
-MAX_COMPOUND_TIMEOUT_S = 600.0
+DEFAULT_COMPOUND_TIMEOUT_S = 600.0
+MIN_COMPOUND_TIMEOUT_S = 60.0
+MAX_DYNAMIC_COMPOUND_TIMEOUT_S = 21600.0
+MAX_COMPOUND_TIMEOUT_S = 86400.0
+COMPOUND_TIMEOUT_SAFETY_FACTOR = 3.0
+COMPOUND_TIMEOUT_PER_TEST_S = 0.25
 CANCEL_GRACE_S = 3.0
 SCHEDULER_POLL_S = 0.25
 CONTROL_FRAME_MAX_BYTES = 65536
@@ -420,6 +425,8 @@ class RunnerConfig:
     test_roots: tuple = ()
     workers: int = 1
     lifecycle: str = "cooperative-process-group"
+    timeout_s: float | None = field(default=None, repr=False)
+    full_timeout_s: float | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         kind = _check_enum("runner.kind", self.kind, RunnerKind)
@@ -434,6 +441,11 @@ class RunnerConfig:
         object.__setattr__(self, "workers", _check_int("runner.workers", self.workers, lo=1, hi=64))
         if self.lifecycle != "cooperative-process-group":
             raise ValueError("runner.lifecycle must be cooperative-process-group")
+        for field_name in ("timeout_s", "full_timeout_s"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _check_float(
+                    f"runner.{field_name}", value, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1067,6 +1079,7 @@ class RunRequest:
     quiet: bool = False
     display_argv: tuple[str, ...] | None = None
     setup_only: bool = False
+    timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1092,6 +1105,9 @@ class RunRequest:
             object.__setattr__(self, "display_argv",
                                _check_argv_tokens("request.display_argv", self.display_argv,
                                                   allow_empty=True))
+        if self.timeout_s is not None:
+            object.__setattr__(self, "timeout_s", _check_float(
+                "request.timeout_s", self.timeout_s, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
 
 
 @dataclass(frozen=True, kw_only=True)

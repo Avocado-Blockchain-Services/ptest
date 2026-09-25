@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -2718,6 +2719,82 @@ def read_history_summaries(
 ) -> tuple[dict, ...]:
     """Return descriptor-validated public RunResult payloads for T11 rendering."""
     return tuple(_history_payload(domain, checkout, limit)["summaries"])
+
+
+def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
+    """Split one summary into (execution_s, total_tests, is_full) or None.
+
+    Comparable means the same mode family (full vs non-full), a terminal
+    passed|failed status, and a numeric execution duration. The family is
+    what actually ran (summary plan.execution), not the request label
+    (top-level mode). Unusable counts yield a None total instead of
+    disqualifying the row.
+    """
+    if not isinstance(summary, dict):
+        return None
+    mode = summary.get("mode")
+    if not isinstance(mode, str):
+        return None
+    plan = summary.get("plan")
+    plan_execution = plan.get("execution") if isinstance(plan, dict) else None
+    # Classify by what actually ran, not the request label: a bare
+    # AUTOMATIC full-gate run is stored with top-level mode=AUTOMATIC but
+    # plan.execution="full". Call sites look evidence up the same way
+    # (execute() uses full=(plan.execution == "full")), so the row must
+    # read back under full=True. Rows without a plan payload (legacy or
+    # hand-built) keep the old top-level mode reading.
+    is_full = (plan_execution == "full") if isinstance(
+        plan_execution, str) else (mode == "full")
+    if summary.get("status") not in ("passed", "failed"):
+        return None
+    timings = summary.get("timings")
+    execution = timings.get("execution", timings.get("execution_s")) if isinstance(
+        timings, dict) else None
+    if (isinstance(execution, bool) or not isinstance(execution, (int, float))
+            or not math.isfinite(execution)):
+        return None
+    total: int | None = None
+    counts = summary.get("counts")
+    if isinstance(counts, dict):
+        for key in ("collected", "executed"):
+            value = counts.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                continue
+            total = value
+            break
+    return (float(execution), total, is_full)
+
+
+def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                            *, full: bool) -> tuple[float | None, int | None]:
+    """(execution_s, total_tests) of the most recent comparable completed run.
+
+    Comparable means the same mode family (full vs non-full), status
+    passed|failed, and a numeric timings execution duration. A non-full
+    request falls back to the latest qualifying full run. Reads at most 20
+    summaries and never raises: any store, shape, or decode problem yields
+    (None, None).
+    """
+    try:
+        summaries = read_history_summaries(domain, checkout, 20)
+    except Exception:
+        return (None, None)
+    fallback: tuple[float, int | None] | None = None
+    try:
+        for summary in summaries:
+            entry = _comparable_entry(summary)
+            if entry is None:
+                continue
+            execution_s, total_tests, is_full = entry
+            if is_full == bool(full):
+                return (execution_s, total_tests)
+            if fallback is None and is_full:
+                fallback = (execution_s, total_tests)
+    except Exception:
+        return (None, None)
+    if not full and fallback is not None:
+        return fallback
+    return (None, None)
 
 
 def read_history_payload(

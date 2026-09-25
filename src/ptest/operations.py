@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from collections.abc import Callable
 from datetime import datetime, timezone
+import contextvars
 import hashlib
 import json
 import os
@@ -37,6 +38,44 @@ _GUARD_SCRIPT = (
 )
 _FRAME_TIMEOUT_S = 2.0
 _POLL_S = 0.05
+# The resolved compound deadline travels from execute() to _launch_guard
+# through this contextvar so both seam signatures stay byte-identical: the
+# T4-owned tests monkeypatch the seams with wrappers that forward only
+# positional args, and a same-thread wrapper still observes the value.
+# Direct or test callers that never resolve see today's 600 s default.
+_COMPOUND_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "ptest_compound_timeout_s", default=C.DEFAULT_COMPOUND_TIMEOUT_S)
+
+
+def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
+                             evidence: tuple[float | None, int | None]
+                             ) -> tuple[float, str]:
+    """Resolve the compound execution deadline and name its source.
+
+    Precedence: explicit CLI ``--timeout`` ("cli"), then ``full_timeout``
+    for FULL-mode runs or ``timeout`` ("config"), then the dynamic deadline
+    from comparable history ("history"), else the 600 s default ("default").
+    The dynamic deadline is max(last duration x safety factor, test count x
+    per-test budget), clamped to [MIN, MAX_DYNAMIC].
+    """
+    if request.timeout_s is not None:
+        return (float(request.timeout_s), "cli")
+    if request.mode is C.Mode.FULL and runner.full_timeout_s is not None:
+        return (float(runner.full_timeout_s), "config")
+    if runner.timeout_s is not None:
+        return (float(runner.timeout_s), "config")
+    execution_s, total_tests = evidence
+    signals: list[float] = []
+    if execution_s is not None:
+        signals.append(execution_s * C.COMPOUND_TIMEOUT_SAFETY_FACTOR)
+    if total_tests is not None:
+        signals.append(total_tests * C.COMPOUND_TIMEOUT_PER_TEST_S)
+    if not signals:
+        return (C.DEFAULT_COMPOUND_TIMEOUT_S, "default")
+    limited = max(signals)
+    limited = min(max(limited, C.MIN_COMPOUND_TIMEOUT_S),
+                  C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
+    return (limited, "history")
 # The parent-to-guard boundary strips inherited PTEST_* control variables so
 # orchestrator state can never leak into the guard. Keep the configured state
 # directory so the guard validates the same domain, and the opt-in doctor
@@ -1084,7 +1123,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         attempts=attempts, attempt_ids=attempt_ids,
         setup_timeout_s=C.DEFAULT_SETUP_TIMEOUT_S,
         attempt_timeout_s=None,
-        compound_timeout_s=C.MAX_COMPOUND_TIMEOUT_S,
+        compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
     )
     guard_peer, controller = socket.socketpair()
     manifest_read, manifest_write = os.pipe()
@@ -1569,10 +1608,20 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 return _reason("unknown-input", "shadow source identity is unavailable")
             return _source_invalidation(input_before, gate_after)
 
-        raw_guard, frames, execution_s = _run_guard(
-            domain, grant, tuple(prepared_runs), signal_state,
-            decide_compound, setup=setup_prepared,
-        )
+        # The shadow compound always runs the full-gate attempt (a002) next
+        # to the selected attempt (a001), so its deadline must come from
+        # full-family evidence even though the request mode is AUTOMATIC.
+        limit, _ = resolve_compound_timeout(
+            config.runner, request,
+            history.comparable_run_evidence(domain, checkout, full=True))
+        token = _COMPOUND_TIMEOUT_S.set(limit)
+        try:
+            raw_guard, frames, execution_s = _run_guard(
+                domain, grant, tuple(prepared_runs), signal_state,
+                decide_compound, setup=setup_prepared,
+            )
+        finally:
+            _COMPOUND_TIMEOUT_S.reset(token)
         observed = getattr(frames, "facts_by_attempt", {})
         raw_codes = {
             attempt_id: facts["raw_exit_code"]
@@ -2488,9 +2537,24 @@ def execute(domain: C.DomainPaths, config: C.Config,
             return _source_invalidation(input_before, gate_snapshot)
 
         try:
-            raw_guard, frames, execution_s = _run_guard(
-                domain, grant, prepared, signals, decide_attempt,
-                setup_prepared)
+            # Evidence must match what will actually run, not the request
+            # label: a bare AUTOMATIC request is recorded with
+            # mode=AUTOMATIC but may execute the full gate, so a scoped
+            # single-file row must never set the deadline for that run.
+            # FULL requests always plan execution "full", so the plan check
+            # covers both cases.
+            limit, _ = resolve_compound_timeout(
+                effective.runner, request,
+                history.comparable_run_evidence(
+                    domain, checkout,
+                    full=(plan.execution == "full")))
+            token = _COMPOUND_TIMEOUT_S.set(limit)
+            try:
+                raw_guard, frames, execution_s = _run_guard(
+                    domain, grant, prepared, signals, decide_attempt,
+                    setup_prepared)
+            finally:
+                _COMPOUND_TIMEOUT_S.reset(token)
         except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
