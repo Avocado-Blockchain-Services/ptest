@@ -17,11 +17,8 @@ from pathlib import Path
 import pytest
 
 from ptest import contracts as C
-from factories_agents import (
-    PYTHON_SHEBANG,
-    write_fake_provider,
-    write_ptest_toml,
-)
+from factories_agents import write_fake_provider
+from support import PYTHON_SHEBANG, write_ptest_toml
 
 
 def _write_v1(root: Path, project_id: str) -> None:

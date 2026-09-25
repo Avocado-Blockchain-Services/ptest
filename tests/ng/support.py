@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import pwd
 import secrets
 import select
 import signal
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import NamedTuple
 
 from ptest import contracts as C
@@ -38,7 +40,7 @@ CONTROL_VARS = (
 # untouched native tail. Never infer runner option arity inside that suffix.
 _WRAPPER_VALUE_OPTS = (
     "--fixture-domain", "--base", "--workers", "--queue-timeout",
-    "--result-json",
+    "--timeout", "--result-json",
 )
 _WRAPPER_BOOL_OPTS = (
     "--changed", "--full", "--no-setup", "--shadow",
@@ -581,3 +583,245 @@ class CaseFactory:
             except ValueError:
                 continue
         return tuple(items)
+
+
+# ---------------------------------------------------------------------------
+# Frozen shared builders (ptest-parallel-suite design, section 3.2).
+# Topic factory plugins (factories_*.py) build on these and never import
+# each other.  Every builder writes only below a caller-supplied path.
+# ---------------------------------------------------------------------------
+
+XDIST_GROUPS = ("process-table", "uv-cache", "toolchain")
+
+GIT_IDENTITY = MappingProxyType({
+    "GIT_AUTHOR_NAME": "Fixture",
+    "GIT_AUTHOR_EMAIL": "fixture@example.test",
+    "GIT_COMMITTER_NAME": "Fixture",
+    "GIT_COMMITTER_EMAIL": "fixture@example.test",
+})
+
+GIT_TIMEOUT_S = 30.0
+PYTHON_SHEBANG = f"#!{sys.executable}\n"
+
+
+def _real_tool_env() -> dict:
+    """Toolchain caches resolved from the REAL account at import time.
+
+    The only real-home paths tests may use: concurrency-safe, read-mostly
+    caches, so an isolated HOME never forces a network download.
+    """
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    candidates = {
+        "UV_CACHE_DIR": cache / "uv",
+        "UV_PYTHON_INSTALL_DIR": data / "uv" / "python",
+        "npm_config_cache": home / ".npm",
+        "CARGO_HOME": home / ".cargo",
+        "RUSTUP_HOME": home / ".rustup",
+        "GOPATH": home / "go",
+        "GOCACHE": cache / "go-build",
+    }
+    values = {}
+    for name, default in candidates.items():
+        explicit = os.environ.get(name)
+        if explicit:
+            values[name] = explicit
+        elif default.is_dir():
+            values[name] = str(default)
+    return values
+
+
+REAL_TOOL_ENV = MappingProxyType(_real_tool_env())
+
+_GITCONFIG = (
+    "[user]\n\tname = Fixture\n\temail = fixture@example.test\n"
+    "[init]\n\tdefaultBranch = main\n"
+    "[commit]\n\tgpgsign = false\n"
+    "[tag]\n\tgpgsign = false\n"
+    "[core]\n\thooksPath = /dev/null\n"
+)
+
+
+class IsolatedEnv(NamedTuple):
+    root: Path
+    home: Path
+    state_dir: Path
+    environ: MappingProxyType
+
+
+def build_isolated_env(root: Path) -> IsolatedEnv:
+    """Create a private per-test environment below ``root`` (all 0700).
+
+    ``state_dir`` is created but NOT exported: PTEST_STATE_DIR stays unset
+    by default (the passwd home is patched instead); a test that wants an
+    explicit state directory sets it via monkeypatch.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    home = root / "home"
+    state = root / "state"
+    xdg = root / "xdg"
+    xdg_dirs = {
+        "XDG_CONFIG_HOME": xdg / "config",
+        "XDG_CACHE_HOME": xdg / "cache",
+        "XDG_DATA_HOME": xdg / "data",
+        "XDG_STATE_HOME": xdg / "state",
+    }
+    for path in (home, state, xdg, *xdg_dirs.values()):
+        path.mkdir(exist_ok=True)
+        os.chmod(path, 0o700)
+    gitconfig = root / "gitconfig"
+    gitconfig.write_text(_GITCONFIG, encoding="utf-8")
+    environ = {
+        "HOME": str(home),
+        **{name: str(path) for name, path in xdg_dirs.items()},
+        "GIT_CONFIG_GLOBAL": str(gitconfig),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        **REAL_TOOL_ENV,
+    }
+    return IsolatedEnv(root=root, home=home, state_dir=state,
+                       environ=MappingProxyType(environ))
+
+
+def patch_account_home(monkeypatch, home: Path) -> Path:
+    """Make ``pwd.getpwuid(os.getuid()).pw_dir`` resolve to ``home``."""
+    home = Path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    os.chmod(home, 0o700)
+    uid = os.getuid()
+    previous = pwd.getpwuid
+
+    def getpwuid(query):
+        record = previous(query)
+        if query != uid:
+            return record
+        return pwd.struct_passwd((
+            record.pw_name, record.pw_passwd, record.pw_uid, record.pw_gid,
+            record.pw_gecos, str(home), record.pw_shell,
+        ))
+
+    monkeypatch.setattr(pwd, "getpwuid", getpwuid)
+    return home
+
+
+def git_env(extra: dict | None = None) -> dict:
+    """Hermetic git environment: no inherited GIT_*, no user/system config."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_") and key not in CONTROL_VARS}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env.update(GIT_IDENTITY)
+    env.update(extra or {})
+    return env
+
+
+def git(root, *args: str, env: dict | None = None, check: bool = True) -> str:
+    """Run hermetic ``git -C root ...``; return stripped stdout."""
+    completed = subprocess.run(
+        ("git", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false",
+         "-c", "tag.gpgsign=false", "-c", "core.hooksPath=" + os.devnull,
+         "-C", str(root), *args),
+        env=git_env(env), check=check, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_TIMEOUT_S,
+    )
+    return completed.stdout.decode("utf-8", "replace").strip()
+
+
+def _relative_file(relative) -> Path:
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"file key must be a relative path: {relative!r}")
+    return path
+
+
+def write_file(path, content) -> Path:
+    """Write str (utf-8) or bytes to ``path``, creating parents."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    elif isinstance(content, str):
+        path.write_text(content, encoding="utf-8")
+    else:
+        raise TypeError("content must be str or bytes")
+    return path
+
+
+def write_executable(path, text: str) -> Path:
+    path = write_file(path, text)
+    os.chmod(path, 0o755)
+    return path
+
+
+def init_git_repo(root, *, files: dict | None = None, branch: str = "main",
+                  commit: bool = True, message: str = "initial") -> Path:
+    """``git init -b branch`` with fixture identity, files, optional commit."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    git(root, "init", "-q", "-b", branch)
+    git(root, "config", "user.name", GIT_IDENTITY["GIT_AUTHOR_NAME"])
+    git(root, "config", "user.email", GIT_IDENTITY["GIT_AUTHOR_EMAIL"])
+    for relative, content in (files or {}).items():
+        write_file(root / _relative_file(relative), content)
+    if commit:
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "--allow-empty", "-m", message)
+    return root
+
+
+def git_commit_all(root, message: str = "update") -> str:
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "--allow-empty", "-m", message)
+    return git(root, "rev-parse", "HEAD")
+
+
+_SETUP_KEYS = frozenset({"argv", "required_paths", "network", "lifecycle_scripts"})
+
+
+def ptest_toml_text(*, kind: str = "command", launcher=("echo",),
+                    args=("hello",), full_args=(), test_roots=None,
+                    workers: int = 1, project_id: str | None = None,
+                    runner_extra: str = "", setup: dict | None = None,
+                    tail: str = "") -> str:
+    """Canonical ``.ptest.toml`` text; ``runner_extra`` lands in [runner]."""
+    if test_roots is None:
+        test_roots = () if kind == "command" else ("tests",)
+    lines = [
+        "version = 1",
+        f"project_id = {json.dumps(project_id or secrets.token_hex(16))}",
+        "",
+        "[runner]",
+        f"kind = {json.dumps(kind)}",
+        f"launcher = {json.dumps(list(launcher))}",
+        f"args = {json.dumps(list(args))}",
+        f"full_args = {json.dumps(list(full_args))}",
+    ]
+    if test_roots:
+        lines.append(f"test_roots = {json.dumps(list(test_roots))}")
+    lines.append(f"workers = {int(workers)}")
+    lines.append('lifecycle = "cooperative-process-group"')
+    if runner_extra:
+        lines.append(runner_extra.rstrip("\n"))
+    if setup is not None:
+        unknown = set(setup) - _SETUP_KEYS
+        if unknown:
+            raise TypeError(f"unknown setup keys: {sorted(unknown)}")
+        lines.extend([
+            "",
+            "[setup]",
+            f"argv = {json.dumps(list(setup['argv']))}",
+            f"required_paths = {json.dumps(list(setup.get('required_paths', ())))}",
+            f"network = {str(bool(setup.get('network', False))).lower()}",
+            "lifecycle_scripts = "
+            f"{str(bool(setup.get('lifecycle_scripts', False))).lower()}",
+        ])
+    text = "\n".join(lines) + "\n"
+    if tail:
+        text += tail if tail.endswith("\n") else tail + "\n"
+    return text
+
+
+def write_ptest_toml(root, **kwargs) -> Path:
+    return write_file(Path(root) / ".ptest.toml", ptest_toml_text(**kwargs))
