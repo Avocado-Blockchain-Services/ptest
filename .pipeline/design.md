@@ -1,1022 +1,283 @@
-# Design: parallel pytest (xdist) under ptest, init/doctor output redesign, fewer doctor unknowns
+# Design: ptest-parallel-suite
 
-Author: architect (Claude Opus 5.5), 2026-09-24.
-Chain worktree: `/home/ingmar/worktrees/ptest/cc-parallel-and-output/ptest`, branch `feature/parallel-and-output`,
-base `main` 3f399fb. Authoritative spec: `docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md`
-(§P, §O, §U, §D). This design amends it and the three earlier specs; the amendments M1–M12 and the three pointer
-sections are written out in full in §10 (the shared-file content), which is appended to the specs verbatim.
+Branch `feature/ptest-parallel-suite` (worktree `~/worktrees/ptest/cc-ptest-parallel-suite/ptest`), base `fadb2ab`.
+Author: architect (Claude). Muse implements and audits. The context pack is `.pipeline/context-pack.md`.
 
-Waves: T1, T2, T3, T4 run in parallel off the same base, with disjoint files. **T5 is a barrier (wave 2): it
-starts only after T1–T4 are merged into the chain branch, and it is MANDATORY.** T5 imports names that T2, T3, and
-T4 create. A T5 that starts before the merge must return BLOCKED; it must not stub those names.
+## 0. Goals
 
----
+1. **Deadline (T1).** Replace the hardcoded 600 s compound execution deadline with one that can be configured (`[runner] timeout` / `full_timeout`, CLI `--timeout`). When neither is set, derive the deadline from history within fixed bounds. The failure message states the limit and how to raise it.
+2. **Parallel suite (T2 to T5).** `tests/ng` runs under pytest-xdist (`-n auto --dist loadgroup`) on ptest's parallel tier. Every test is isolated: its own HOME, passwd home, state dir, XDG dirs and git config; no fixed ports or paths; no leaks.
+3. **Factories.** Move hand-rolled builders into frozen shared builders (`support.py`) and four topic factory plugins (`factories_*.py`). Delete duplicated helpers. Every test and assertion stays.
 
-## 0. Ground truth (read from the code, not assumed)
+## 1. Execution model: all tasks start together
 
-| Fact | Where |
-|---|---|
-| Today init writes `args = ["-n","0"]` whenever the pytest addopts activate xdist. `check_config` marks an xdist project *not runnable* unless the ptest args carry a serial spelling. | `config._fresh_config` L689; `executability.check_config` L1020 |
-| Native pytest always requests exactly 1 slot. `prepare()` refuses `grant.slots != 1`. `prepare_advanced` already appends `-n <slots>` when `slots > 1`. | `operations.execute` L1938; `adapters/pytest.prepare` L286/L378 |
-| The scheduler already grants `min(requested, max_slots)` and queues until that many slots are free (a memory budget without a per-worker estimate forces 1). | `scheduler._actual_slots` L759 |
-| The bridge already reads `PTEST_GRANT_WORKERS` (1–64). When `workers > 1` it already expects `tx == ["popen"]*workers`, `numprocesses == workers`, and `maxprocesses ∈ {None, workers}`, and it checks gateway specs in `pytest_xdist_setupnodes`. What is missing: the xdist plugin exemption for `workers > 1`, worker observation, and cross-worker reconciliation. | `pytest_bridge.OwnedPlugin._validate` L1016–1124, L1329 |
-| xdist 3.8.0 controller: `DSession.pytest_collection` returns True, so the controller never collects, never calls `pytest_collection_modifyitems`/`pytest_collection_finish`, and never runs `pytest_runtest_protocol`. It forwards every worker report through `pytest_runtest_logreport`/`pytest_collectreport`. It sets `session.testscollected = len(ids)` and calls `pytest_xdist_node_collection_finished(node, ids)`. A crash emits a synthetic failed report (`when="???"`) plus `pytest_testnodedown(node, error)`, then restarts the worker unless restarts are disabled. | persea `api/.venv/.../xdist/dsession.py` (read-only) |
-| xdist workers are `execnet` popen children (plain `subprocess.Popen`, same process group). They receive `sys.path = xdist.plugin._sys_path` (the controller's `sys.path`, frozen when xdist is imported) and the controller's `invocation_params.args`. The worker returns `config.workeroutput` in its `workerfinished` event, which the controller sees as `node.workeroutput`. | xdist `remote.py`, `workermanage.py` L325–349 |
-| The guard `setsid`s and kills and reaps its whole process group (`_cancel_and_reap`, `_group_needs_cleanup`, `_predecessor_quiescent`). This already covers execnet workers. | `guard.py` L279–363 |
-| The private report field set is exact (`reports._FIELDS`), and its profile is `basic_serial` or `advanced`. **Neither report format changes in this design.** | `reports.py` L31–41 |
-| The agent-assessment validator accepts unknown extra keys (`_check_required_keys`), and projection drops them from JSON. This precedent is `rows[].dropped_citations`. Satisfied, gap, and not-applicable rows need ≥ 1 citation. Findings need ≥ 1 citation and prose that passes `C.aa_prose_is_untrusted` (so no `ptest --x`, no `uv run`, no backticks, no `%`). | `contracts.py` L2238, L2995–3040, L2851 |
-| The persea `api/.venv` has pytest 9.1.1, pytest-xdist 3.8.0, pytest-cov 7.1.0, and pytest-timeout 2.4.0. The persea `api/.ptest.toml` already has `args = ["-n","0"]` and `[selection] enabled = false`. Its addopts are `-n 4 --dist=loadgroup -m "not extended_migration"`. | persea (read-only) |
-| The ptest test extra pins `pytest-xdist==3.8.0` (`uv sync --locked --extra test`). No dependency change is needed. | `pyproject.toml` L13 |
+Tasks T1 to T5 start at the same moment from the same base. **Section 4 (shared-file bundle)** is frozen. It is the full set of cross-task contracts: conftest isolation, shared builders, xdist config and the `--timeout` wrapper grammar.
 
-## 1. Architecture and seams
-
-```
-                 checked-in pytest config (addopts)          project env (.venv dist-info)
-                                 \                               /
-T2  executability.parallel_request(config) ──► ParallelRequest (qualifies? N, dist, reason)
-        │                         │                                  │
-        │ check_config ──► Executability(+parallel/setup/full_suite fields).facts()  ──► T5 cli ──► T3 renderers
-        │                                                                    (init, doctor child["facts"], recommendations.md)
-        ▼
-T2  operations.execute: requested_slots = N (auto → max_slots) ──► scheduler grant (min(N, max_slots), queues)
-T2  adapters/pytest.prepare: argv += ("-n", granted) | ("-n","0") ; env PTEST_GRANT_WORKERS=granted
-        ▼  (guard: setsid group, kill+reap on timeout/Ctrl-C; unchanged)
-T1  pytest_bridge.run (controller): exempt qualified xdist, observe forwarded reports, node collections,
-        worker records; reconcile collected-vs-reported; verdict from own counts; one private report (unchanged format)
-T1  pytest_bridge (loaded in each worker via -p pytest_bridge): per-worker identity env, the same hook/narrowing
-        gates as serial, record → config.workeroutput["ptest_bridge"]
-
-T4  deterministic_items.answers_for(domain, resolution, packet) ──► plan_item_reviews(packet, answers=…)
-        (SELECT-001, TIMING-001 need no model call; code-signal routing; sharper prompts)
-T5  cli: wires facts, the init header/footer, deterministic answers, the short disclosure, help/README, and the integration tests
-```
+- **First commit of every task (mandatory):** apply the section 4 bundle verbatim, unless the base already contains it byte-for-byte. Commit message: `shared: apply frozen parallel-suite bundle`. Identical edits merge cleanly. Each task then checks its own files under the real parallel configuration and the real isolation.
+- After that commit, only **T2** may edit `tests/ng/conftest.py`, `tests/ng/support.py`, `pyproject.toml` and `.ptest.toml`. T2 edits only when verification forces it, and records each change in `.pipeline/progress-T2.md`. If T3, T4 or T5 finds a defect in the bundle, it works around it inside its own files and reports the defect. It never edits a bundle file.
+- A topic factory module may import `support`, `ptest.*` and the stdlib. It **never** imports another `factories_*` module or another test module. Anything two topics need lives in `support.py`, and is frozen here.
+- Run tests only with `.venv/bin/ptest <files>` from the worktree root. Use chunks of a few files per call. **No task runs `--full`.** After all merges the orchestrator runs exactly one parallel `.venv/bin/ptest --full` as the final gate.
+- The one exception executes no tests. It is the collection-only anchor check `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` (D13). It reproduces the full-run collection anchor (`test_roots = ["tests"]`) without running anything, so it is not a `--full` run. Any task may run it. T2 must run it (T2 acceptance).
+- Commit inside the worktree. Never push, merge, or touch `main`/`dev`.
 
 ## 2. Decisions
 
-### 2.1 Parallel tier (§P) — T1 bridge, T2 admission
+| # | Decision | Rationale |
+|---|----------|-----------|
+| D1 | `addopts = "-n auto --dist loadgroup"` in `[tool.pytest.ini_options]`. | `loadgroup` behaves like `load` for ungrouped tests and still respects `xdist_group`. `loadfile` would serialise the large files (test_history, test_cli). No separate measurement task; T2 only confirms that the header shows more than one worker and `gw*` ids. |
+| D2 | `.ptest.toml [runner] args = ["--cov=ptest", "--cov-report=term"]`, `workers = 8`. | Parallel qualification needs both cov args (context pack). `-n/--dist` stay out of runner args, as the ptest docs require. If 8 exceeds the machine grant, T2 may lower it. |
+| D3 | Autouse `isolated_env` per test. It redirects HOME, XDG_*, `pwd.getpwuid(uid).pw_dir`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` into a fresh `tmp_path_factory.mktemp("iso")` directory, a sibling of `tmp_path`. `PTEST_STATE_DIR` stays **unset**, exactly as the old `_clear_bootstrap_control_env` left it. | ptest ignores HOME and derives state from passwd, so patching the passwd home makes every in-process normal-domain resolution land in tmp. A probe that exported PTEST_STATE_DIR by default broke 11 of 165 test_platform/test_uninstall tests that assert normal-domain behaviour, so it stays opt-in (`isolated_env.state_dir` is created, not exported). Child processes: every spawned `ptest` must pass `--fixture-domain` (CaseFactory.invoke already does) or an explicit `PTEST_STATE_DIR` (per-task acceptance). |
+| D4 | Strip inherited `PTEST_*`, `GIT_*`, `PYTEST_XDIST_*`, `COV_CORE_*`, `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` before setting the isolation vars. | The outer ptest/xdist/cov state must not leak into nested pytest or ptest children. |
+| D5 | The only real-home paths a test may use are `support.REAL_TOOL_ENV`: the uv cache, uv-managed pythons, and the npm/cargo/rustup/go caches. They are resolved at import. | An isolated HOME must not force network downloads (test_task_11d runs real `uv sync`). These caches handle concurrent use and are read-mostly. |
+| D6 | `_guard_real_install_against_self_uninstall` stays session-scoped autouse. It runs once per xdist worker, and its snapshot is taken at import. | Each worker fails its own run if the real install changed. |
+| D7 | Allowed `xdist_group` names: `"process-table"`, `"uv-cache"`, `"toolchain"` (`support.XDIST_GROUPS`). No others. | Making tests independent is preferred. Each use must carry a `# xdist_group: <reason>` comment. |
+| D8 | New `RunnerConfig` fields use `field(default=None, repr=False)`. | `source._compatibility_runner` hashes `repr(config.runner)`. Keeping the repr unchanged keeps existing baselines compatible, and a deadline is not a test input. |
+| D9 | No public schema change. The deadline surfaces in the execution-timeout problem message. `protocol-v1.json` is unchanged because `compound_timeout_s` already exists. | "Additive only" is met trivially. |
+| D10 | Per-task progress goes in `.pipeline/progress-T<n>.md`, not the shared `progress.md`. | Avoids merge conflicts. |
+| D11 | `[tool.coverage.run] data_file = ".venv/.coverage"`. | Probed: with the default repo-root `.coverage`, the first run after creation reports `changed-during-run` (untracked). With it gitignored, every run reports it (ignored class). Inside `.venv` (a `non_input_outputs` path) both consecutive runs passed. |
+| D12 | The resolved compound deadline reaches `_launch_guard` through the module-level contextvar `operations._COMPOUND_TIMEOUT_S`, not through a new parameter. The signatures of `_launch_guard` and `_run_guard` stay byte-identical to base. | Existing tests monkeypatch both seams with wrappers that accept and forward only positional args: test_operations.py l.494, 546, 700, 788, 828, 879; test_pytest_scoped_subprocess.py l.1124 (`invalid_grant(domain, grant, prepared, setup=None)`) and l.1143. A new keyword, required or optional, raises TypeError or is dropped by `launch(*args)`. Those files belong to T4, which starts from base and never sees T1's change. A contextvar set by the caller and read inside the real seam survives any positional forwarding wrapper that runs in the same thread, so no test file has to change and there is no ordering dependency between tasks. |
+| D13 | Factory plugins are registered by `pytest_configure` in `tests/ng/conftest.py` via `config.pluginmanager.import_plugin`. **No conftest defines `pytest_plugins`.** `.ptest.toml` `test_roots` stays `["tests"]`. | In full mode the pytest adapter passes `config.runner.test_roots` (`tests`) as the positional arg (src/ptest/adapters/pytest.py:430). pytest 9.1.1 anchors initial conftests on `tests` and adds only `test*` subdirectories, and `ng` does not match. So tests/ng/conftest.py is imported during collection, and `_check_non_top_pytest_plugins` fails the run on any `pytest_plugins` attribute, even an empty list. `pytest_configure` is a historic hook, so it runs whether the conftest is initial (scoped runs) or late (full runs). Probed on base plus the revised bundle: `--collect-only tests` collects 3920 tests; a stub `factories_domain` fixture is listed by `--fixtures` under both the `tests` anchor and a `tests/ng/<file>` anchor; `ptest tests/ng/test_config.py` gives 169 passed on 4 workers. Toy layout: the old bundle fails with `tests` as the anchor, the new one passes under `tests`, `tests/ng`, `tests/ng/<file>` and no args, both with `-n auto` and with `-n 0`, and assertion rewriting stays active in the plugin modules. |
 
-1. **Qualification is split by source:**
-   - **Config-level:** the checked-in pytest addopts. Both the executability check (init, doctor) and every run decide it.
-   - **Environment-level:** the xdist version in the project environment. Every run decides it again.
-   - **Runtime:** the bridge is the source of truth. It re-verifies everything and fails closed.
-2. **Worker count:** N is the project's `-n N` or `--numprocesses N`. `-n auto` and `-n logical` request the
-   machine's `max_slots` (`scheduler.effective_limits(domain).max_slots`). `ptest --workers W` caps N at W.
-   `[runner] workers` in `.ptest.toml` is ignored for pytest xdist.
-3. **Slots:** ptest requests N slots. The scheduler grants `min(N, max_slots)` and queues until that many are free.
-   This is deterministic and needs no scheduler change. A grant of ≥ 2 slots runs `-n <granted>`. A grant of 1 runs
-   serially with `-n 0`. When the grant is below the request, the run prints one reason line
-   (§3.5): `parallel-workers: 2 xdist workers (4 requested, 2 granted)`.
-4. **Supported `--dist` modes:** load, loadscope, loadfile, loadgroup, and worksteal. `no` also works, because
-   xdist maps it to load when `-n` is set. `xdist_group` works with loadgroup natively. `--dist each` falls back to
-   serial, because it runs every test on every worker.
-5. **Fallback:** ptest itself generates `-n 0` whenever an xdist-active project runs serially. Two consequences:
-   - The old not-runnable rule ("pytest addopts enable xdist … add `-n 0`") is **deleted**.
-   - Init writes `-n 0` only for config-level reasons (unsupported `--dist`, `--cov`, `--maxprocesses`).
-     Environment reasons can change with `uv sync`, so they are never written into config.
-   - Remote or rsync xdist (`--tx`, `--rsyncdir`, `--px` in addopts) stays not runnable, as today, and now has a
-     static reason.
-6. **Coverage (§P.5) is out of scope:** `--cov` in the addopts or runner args gives a config-level fallback with
-   "coverage (--cov) under xdist is out of scope; ptest runs serially". The advanced (coverage-catalog) profile stays
-   serial (`parallel_identity=False`), and `prepare_advanced` also generates `-n 0` for xdist-active projects.
-7. **No new profile or tier:** `ExecutionTier`, the report format, `reports.py`, and `history.py` are unchanged.
-   The private profile label stays `basic_serial`, meaning "the bridge-observed basic profile". The worker count
-   is the public `granted_workers`. This keeps the change small and leaves every public schema untouched except
-   one additive reason code (§3.5).
-8. **Workers are observed (§P.3):**
-   - Loading:
-     - When `workers ≥ 2`, the bridge appends its own runtime directory to `sys.path` before `pytest.main`.
-     - It prepends the internal controls `-p pytest_bridge --max-worker-restart=0` to the native argv. Every worker
-       imports the bridge as a plugin, and a crashed worker is never silently replaced.
-     - The worker half registers only when `config.workerinput` exists. It verifies that its own file is the
-       executor's bridge (the realpath equals the `pytest_bridge.py` beside the `PTEST_BRIDGE_PROTOCOL` descriptor),
-       so a project module named `pytest_bridge` fails closed.
-   - Checks in the worker:
-     - It applies the same serial gates: hook ownership, full-mode narrowing and redirect refusals, and refused
-       report-rewriting hooks.
-     - It tracks its protocol items and counts.
-     - Its record goes to `config.workeroutput["ptest_bridge"]`.
-   - Checks on the controller:
-     - It observes the forwarded reports and the per-node collections.
-     - It requires one valid record from every started worker, with no refusals. All node collections must be
-       identical.
-     - In full mode, every collected id must have at least one report.
-     - Anything unverifiable makes the run `bridge-refused` (incomplete), never PASSED.
-9. **Identity (§P.2):**
-   - xdist sets `PYTEST_XDIST_WORKER=gwK`.
-   - The worker half sets `PTEST_WORKER_ID=w{K:03d}`.
-   - It also sets `PTEST_RESOURCE_PREFIX`: the controller prefix with its trailing `w000` replaced.
-   - The run, checkout, and attempt ids are inherited from the controller environment.
+## 3. Frozen interfaces
 
-### 2.2 Output (§O) — T3 renders, T2 produces the facts, T5 wires
+### 3.1 Deadline (T1 only, frozen so tests and help agree)
 
-1. **Facts:** the plain-language project facts come from one frozen dict per project (§3.1).
-   - T2 builds the dict from the same `parallel_request` that admission uses, so the doctor or init says exactly
-     what `ptest` will do.
-   - T3 only lays the dict out, and never imports `Executability`.
-2. **Width and wrapping:**
-   - Width is `shutil.get_terminal_size((80, 24)).columns`, clamped to [60, 110]. Every renderer takes an explicit
-     `width` override for tests.
-   - Wrapping is atom-based: labels, paths, commands, and fact segments are unbreakable atoms. Prose wraps only at
-     spaces. Continuations use hanging indents.
-   - An atom wider than the line overflows rather than breaking.
-3. **Init layout:**
-   - The fixed box and the generic next steps are deleted.
-   - Only the wordmark stays (amendment M8). It is colored on a TTY and plain under `NO_COLOR` or on a non-TTY.
-4. **Doctor layout:** the §O.4 shape. The `--offline` static doctor is unchanged (M12).
-5. **Model-review disclosure:** at most three lines before the prompt. The full legal text moves to
-   `ptest doctor --help` and the README.
-
-### 2.3 Unknowns (§U) — T4
-
-1. **Deterministic answers:** SELECT-001 (the spec's "SELECTION-001") and TIMING-001 get answers from ptest's own
-   facts, with no model call.
-   - Each answer is an `ItemReview` with `request=None, skip_reason=None, answer=<DeterministicAnswer>`.
-   - The row rationale starts with `Answered by ptest: `.
-   - Satisfied, gap, and not-applicable answers cite the project's `.ptest.toml` excerpt. If the packet lacks it,
-     the answer degrades to unknown with the reason.
-2. **Code-signal routing:** new text signals for RESOURCE-001, NETWORK-001, and PROCESS-001. Conftest excerpts that
-   define fixtures used by the routed tests rank first.
-3. **Prompts:** sharper prompts. A gap needs a concrete cited violation. Satisfied needs the guaranteeing mechanism.
-   Otherwise the answer is unknown with one sentence naming the missing evidence.
-
-## 3. Frozen interfaces (exact; no task may invent an alternative)
-
-### 3.1 Project facts: `Executability` fields and `facts()` (T2 implements; T3 renders plain dicts; T5 wires)
-
+`src/ptest/contracts.py`:
 ```python
-# src/ptest/executability.py  (T2)
-# literal; T3 keeps an identical literal in project_facts.FACT_KEYS (§3.8); T5 asserts equality (§4 T5.4(f))
-FACT_KEYS: tuple[str, ...] = (
-    "project", "runner", "runs", "runs_reason", "runs_fix",
-    "parallel", "parallel_short", "parallel_fix",
-    "setup", "full_suite", "full_blocked",
-)
+DEFAULT_COMPOUND_TIMEOUT_S = 600.0        # no CLI, no config, no usable history
+MIN_COMPOUND_TIMEOUT_S = 60.0             # floor for the dynamic deadline only
+MAX_DYNAMIC_COMPOUND_TIMEOUT_S = 21600.0  # 6 h ceiling for the dynamic deadline
+MAX_COMPOUND_TIMEOUT_S = 86400.0          # hard ceiling: explicit values + guard clamp (was 600.0)
+COMPOUND_TIMEOUT_SAFETY_FACTOR = 3.0
+COMPOUND_TIMEOUT_PER_TEST_S = 0.25
 
-@dataclass(frozen=True, slots=True)
-class Executability:
-    project: str
-    runner: str
-    status: str
-    caveats: tuple[str, ...]
-    reason: str | None
-    fix: str | None
-    full: bool
-    example: str | None
-    # new, defaulted, appended AFTER the existing fields (positional constructors keep working)
-    parallel: str | None = None        # text after "parallel: " (long form); None = omit
-    parallel_short: str | None = None  # text after "parallel: " for one-line summaries; None iff parallel is None
-    parallel_fix: str | None = None    # actionable fix when parallel is off only because of the ptest config
-    setup: str | None = None           # " ".join(config.setup.argv); None = no [setup]
-    full_suite: str | None = None      # text after "full suite = "; None = omit the line
-    full_blocked: str | None = None    # text after "full suite: not available — "; None unless full is False
+class RunnerConfig:            # existing, kw_only frozen dataclass; append:
+    timeout_s: float | None = field(default=None, repr=False)
+    full_timeout_s: float | None = field(default=None, repr=False)
+    # __post_init__: None, or _check_float(..., lo=1, hi=MAX_COMPOUND_TIMEOUT_S); bool rejected
 
-    def facts(self) -> dict:           # keys exactly FACT_KEYS, in that order
-        not_runnable = self.status == STATUS_NOT_EXECUTABLE
-        return {"project": self.project, "runner": self.runner, "runs": not not_runnable,
-                "runs_reason": self.reason if not_runnable else None,
-                "runs_fix": self.fix if not_runnable else None,
-                "parallel": self.parallel, "parallel_short": self.parallel_short,
-                "parallel_fix": self.parallel_fix, "setup": self.setup,
-                "full_suite": self.full_suite, "full_blocked": self.full_blocked}
+class RunRequest:              # existing; append:
+    timeout_s: float | None = None   # _check_float lo=1 hi=MAX_COMPOUND_TIMEOUT_S when not None
 ```
+`src/ptest/config.py`:
+- `_runner` accepts the optional keys `timeout` and `full_timeout`. Each is an int or float, not bool, finite, 1..86400. Otherwise the existing `_fail()` path runs (invalid-config).
+- `_serialize_fresh` emits `timeout = {v:g}` or `full_timeout = {v:g}` right after `lifecycle`, and **only when set**. A config without the keys parses and renders byte-identically to today.
 
-Value types: `runs` is a bool. Every other value is `str` (1–512 characters, no control characters) or `None`.
-`project` is `"."` or a declaration such as `"api"`. `runner` is one of `pytest`, `vitest`, `command`, or `unknown`.
-`to_public()` keeps its exact shape `{"status","detail","fix"}`.
+`src/ptest/cli.py`:
+- `_EXECUTION_VALUE` gains `"--timeout"`. `ParsedArgs.timeout_s: float | None = None`.
+- Parse with `_number(value, lo=1, hi=C.MAX_COMPOUND_TIMEOUT_S)`. A repeat raises `invalid-config "option cannot be repeated"`.
+- The flag is allowed in every execution mode, including `--full` and `--changed`. `timeout_s` is threaded into every `C.RunRequest(...)` that the CLI and `monorepo.py` build.
 
-**Exact texts (T2 produces these; T3 and T5 tests may use them as literals).** `{cfg}` is `.ptest.toml` for project
-`.` and `{project}/.ptest.toml` otherwise, the existing `_cfg`.
-
-| Case | `parallel` | `parallel_short` | `parallel_fix` |
-|---|---|---|---|
-| pytest, tier qualifies, `-n N` | `f"{N} workers (xdist, --dist {dist})"` | `f"{N} workers"` | None |
-| pytest, tier qualifies, `-n auto`/`logical` | `f"one worker per granted slot (xdist -n auto, --dist {dist})"` | `"auto"` | None |
-| vitest | `"inside vitest (its own workers)"` | `"inside vitest"` | None |
-| command runner | None | None | None |
-| pytest, xdist not active | `"no — xdist is not enabled in your pytest config"` | `"no"` | None |
-| pytest, fallback reason R (below) | `f"no — {R}"` | `"no"` | None |
-| pytest, otherwise qualified but ptest args carry `-n 0`/`-n0`/`--numprocesses=0` | `f"no — {cfg} sets -n 0"` | `"no"` | `f'remove "-n", "0" from [runner] args in {cfg} to run {N} workers'` (auto: `… to run in parallel`) |
-
-`{dist}` is the effective mode: the declared `--dist`, or `load` when it is unspecified or `no`.
-
-Fallback reasons R, in precedence order (first match wins; `config_level` marks the ones init writes `-n 0` for):
-
-| # | R (exact) | config_level | runs |
-|---|---|---|---|
-| 1 | `remote xdist workers (--tx, --rsyncdir, --px) are not supported` | False | **False** (reason = R, fix = `remove --tx, --rsyncdir and --px from your pytest addopts`) |
-| 2 | `f"--dist {mode} is not supported; ptest runs serially"` | True | True |
-| 3 | `coverage (--cov) under xdist is out of scope; ptest runs serially` | True | True |
-| 4 | `--maxprocesses is not supported; ptest runs serially` | True | True |
-| 5 | `your pytest config asks for 1 worker` | False | True |
-| 6 | `f"ptest cannot verify pytest-xdist for launcher {name}; use an absolute interpreter or a uv launcher to run in parallel"` | False | True |
-| 7 | `pytest-xdist is not installed in the project environment yet; ptest runs serially until setup installs it` | False | True |
-| 8 | `more than one pytest-xdist install in the project environment; ptest runs serially` | False | True |
-| 9 | `f"pytest-xdist {version} is not qualified (ptest supports 3.8.0); ptest runs serially"` | False | True |
-
-The ptest-args `-n 0` row is checked after rows 1–9: an actionable fix is shown only when removing `-n 0` would
-really give parallel runs.
-
-- **`full_suite`:** set when `full` is True and the static filter scan finds narrowing. The value is
-  `f"your pytest config: {', '.join(parts)}"`.
-  - `parts` holds the allowlisted checked-in narrowing tokens as `option value`, with the value in double quotes
-    when it contains whitespace. Example: `-m "not extended_migration"`.
-  - Add `conftest.py hooks` once when any conftest collection or sessionfinish hook exists.
-  - Persea example: `your pytest config: -m "not extended_migration", conftest.py hooks`.
-- **`full_blocked`:** set when `full` is False. It is the existing text after `ptest --full unavailable: `, for
-  example `test_roots is "."`.
-- **`setup`:** example `uv sync --locked`.
-- **`verdict()`** keeps feeding the init notes `f"{project} · {runner} · {verdict}"`. Its new wording:
-  - Not runnable: `f"runs: no — {reason} → {fix}"`.
-  - Otherwise: `"runs: yes"` followed by `"; " + caveat` for each caveat.
-- **Caveats** are the plain lines below, in this order. Status is `caveat` iff there are any caveats.
-  - `f"parallel: {parallel}"`
-  - `f"setup: {setup} (ptest runs it when needed)"`
-  - `f"full suite = {full_suite}"`
-  - `f"full suite: not available — {full_blocked}"`
-- The strings `ready with caveats`, `expected:`, `fingerprint`, and `serial: xdist disabled under ptest (-n 0)`
-  disappear from executability output.
-
-### 3.2 Parallel request (T2; consumed by T2 internally and optionally by T5 `cli._summary`)
-
+`src/ptest/history.py` (new public function, never raises):
 ```python
-# src/ptest/executability.py  (T2)
-XDIST_QUALIFIED_VERSIONS = frozenset({"3.8.0"})   # mirror of pytest_bridge.QUALIFIED_XDIST_VERSIONS
-XDIST_DIST_MODES = frozenset({"load", "loadscope", "loadfile", "loadgroup", "worksteal"})  # mirror of pytest_bridge.PARALLEL_DIST_MODES
-
-@dataclass(frozen=True, slots=True)
-class ParallelRequest:
-    active: bool          # checked-in pytest config activates xdist (existing _xdist_active semantics)
-    workers: int | None   # N from -n N / --numprocesses N; None when auto/logical or inactive
-    auto: bool            # -n auto / -n logical
-    dist: str             # effective --dist ("load" when unspecified or "no")
-    reason: str | None    # None <=> the parallel tier qualifies (config + environment); else R from §3.1
-    config_level: bool    # reason is config-level (init writes -n 0)
-    runs: bool            # False only for R1 (remote/rsync)
-
-def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest: ...
-def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]:
-    """(version, None) when found; (None, R6|R7|R8 text) otherwise. Static, bounded, no symlink follow."""
+def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                            *, full: bool) -> tuple[float | None, int | None]:
+    """(execution_s, total_tests) of the most recent completed comparable run.
+    Comparable = same mode family (full vs non-full), status passed|failed, numeric
+    timings.execution_s. Non-full falls back to the latest qualifying full run.
+    Reads at most 20 summaries. Any Problem/OSError/shape error -> (None, None)."""
 ```
-
-Environment probe (exact rules):
-- **Launcher to venv:**
-  - `("uv","run","--locked","--no-sync","python")` → `<project root>/.venv`.
-  - `("uv","run","--locked","--no-sync","--project",P,"python")` → `Path(P)/.venv`.
-  - A single absolute interpreter `X` → `Path(X).parent.parent`. Do not resolve symlinks, and require `pyvenv.cfg`
-    there.
-  - Anything else → R6, with `name = Path(launcher[-1]).name`.
-- **Dist-info lookup:** list `<venv>/lib/python3.*/site-packages/pytest_xdist-*.dist-info` (at most 8 python dirs,
-  lstat, real directories only).
-  - Zero hits → R7. More than one → R8.
-  - Version = the text between `pytest_xdist-` and `.dist-info`. Outside `XDIST_QUALIFIED_VERSIONS` → R9.
-
-### 3.3 Adapter → bridge contract (T2 produces, T1 consumes)
-
-- **argv (basic profile):** `launcher + (bridge_path,) + runner.args + (runner.full_args + test_roots | plan.files) + generated`.
-  - `generated = ("-n", str(grant.slots))` iff `grant.slots >= 2`. This requires that `parallel_request(config).reason`
-    is None; otherwise `admission-invalid`.
-  - `generated = ("-n", "0")` iff `grant.slots == 1`, `request.active`, and the ptest args carry no serial spelling.
-  - Otherwise `generated = ()`.
-  - `prepare_advanced` applies the same `-n 0` rule (it never gets > 1 slot).
-- **env:** unchanged from base. `PTEST_GRANT_WORKERS=str(grant.slots)`, `PTEST_WORKER_ID=w000`, and
-  `PTEST_RESOURCE_PREFIX=pt_{checkout[:8]}_{run_id}_{attempt}_w000`. No new variables.
-- **Summary:** `summary.generated_options = ("pytest-xdist.workers=%d" % slots,)` when `slots >= 2`, else unchanged.
-- **Serial compatibility:** with `workers == 1`, the bridge must behave exactly as at base. Every existing serial
-  test must pass unchanged.
-
-### 3.4 Bridge constants and worker contract (T1; T2 mirrors the constants; T5 asserts equality)
-
+`src/ptest/operations.py`:
 ```python
-# src/ptest/runtime/pytest_bridge.py  (T1)
-QUALIFIED_XDIST_VERSIONS = frozenset({"3.8.0"})
-PARALLEL_DIST_MODES = frozenset({"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
-_WORKER_CONTROLS = ("-p", "pytest_bridge", "--max-worker-restart=0")   # prepended to native argv iff workers >= 2
+def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
+                             evidence: tuple[float | None, int | None]) -> tuple[float, str]:
+    # precedence: request.timeout_s -> "cli"
+    #             request.mode is FULL and runner.full_timeout_s -> "config"
+    #             runner.timeout_s -> "config"
+    #             dynamic: signals = [execution_s * SAFETY_FACTOR] + [tests * PER_TEST_S if tests]
+    #                      none -> (DEFAULT_COMPOUND_TIMEOUT_S, "default")
+    #                      else -> (clamp(max(signals), MIN, MAX_DYNAMIC), "history")
 ```
-
-Refusal messages, exact (T5 may assert them on stderr through the `ptest-bridge-refusal:` marker):
-- `f"pytest-xdist {version} is not qualified for parallel runs"` (code `unsupported-capability`). Also used when the
-  distribution is missing, with version `missing`.
-- `f"pytest xdist --dist {mode} is not supported in parallel runs"`
-- `"a parallel worker was not observed by the bridge"`
-- `"parallel workers collected different tests"`
-- `"full pytest run left collected items unrun"` (existing text, now also used in parallel)
-- `"native exit hides observed test failures"` (existing)
-- `"unqualified xdist scheduling or crash hook is not owned by the parallel grant"` (a non-xdist implementation of
-  `pytest_xdist_make_scheduler`, `pytest_xdist_getremotemodule`, or `pytest_handlecrashitem`)
-
-### 3.5 Run reason for parallel (T2)
-
-A new additive reason code `"parallel-workers"`. It is added to `C.REASON_CODES` and to every
-`docs/schemas/v1/*.json` enum that lists reason codes, except `agent-assessment.json`. It is appended to
-`RunResult.reasons` of pytest runs for xdist-active projects **only when** the grant is below the request, or when the
-run is serial because of a fallback. The cli prints it as `parallel-workers: <message>`. Messages, exact:
-- `f"{g} xdist workers ({r} requested, {g} granted)"` when 2 ≤ g < r
-- `f"serial ({r} requested, 1 granted)"` when g == 1 < r
-- `f"serial: {R}"` when fallback reason R applies (§3.1, rows 2–9 and the `-n 0` row)
-
-### 3.6 Init rendering (T3) and init flow (T5)
-
 ```python
-# src/ptest/init_render.py  (T3)
-def render_init(result: C.InitResult, rules: object = None, *, dry_run: bool = False,
-                agents: tuple[str, ...] = (), repo_name: str = "", color: bool = False,
-                facts: Sequence[Mapping[str, object]] = (), width: int | None = None) -> str
-    # wordmark + "ptest <version>" line, header, project lines, grouped file actions, warnings. No smoke, no next steps.
-def render_init_footer(result: C.InitResult, rules: object = None, *, dry_run: bool = False,
-                       smoke: Sequence[object] = (), plans: Sequence[object] = (),
-                       facts: Sequence[Mapping[str, object]] = (), width: int | None = None) -> str
-    # smoke line (only if smoke), actionable next steps (only if any), one restart line (only if a skill was created/updated). May be "".
-
-# src/ptest/init_smoke.py  (T3)
-@dataclass(frozen=True, slots=True)
-class SmokeResult: ...existing fields...; setup_argv: tuple[str, ...] | None = None   # appended last; set by skip_result for setup-pending skips
-def format_smoke(results: tuple[SmokeResult, ...], *, width: int | None = None) -> str  # compact block; "" when empty
+import contextvars
+# D12. Read only by _launch_guard. The default keeps direct/test callers at today's 600 s.
+_COMPOUND_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "ptest_compound_timeout_s", default=C.DEFAULT_COMPOUND_TIMEOUT_S)
 ```
-
-- **Header** (exact phrases kept; `test_init.py` asserts one of them):
-  `f"{phrase} · {repo_name}"`, where the phrase is `ptest initialized`, `ptest init preview`,
-  `ptest init needs attention`, or `ptest already configured`. When `repo_name` is empty, the phrase stands alone.
-- **Project line:**
-  `"  {project}  {runner}  runs: yes · parallel: {parallel_short} · setup: {setup}"`. Omit a segment whose value is
-  None. Put `full suite = {full_suite}` (or `full suite: not available — {full_blocked}`) on a hanging line under
-  `runs`. A not-runnable project shows `runs: no — {runs_reason} → {runs_fix}`.
-- **Without facts:** when `facts` is empty (dry-run), the project lines come from the init notes' first two
-  ` · ` fields (`project runner`) only.
-- **File actions** are grouped by action, one line per action:
-  - Config line: `config     unchanged  .ptest.toml, api/.ptest.toml`.
-  - Guidance line: `guidance   created    docs/ptest-agent.md, ptest skill for claude, codex, opencode, gemini`.
-  - Skill paths map to `ptest skill for <agent>`: `.claude/skills/ptest/SKILL.md`→claude,
-    `.agents/skills/ptest/SKILL.md`→codex, `.opencode/skills/ptest/SKILL.md`→opencode,
-    `.gemini/skills/ptest/SKILL.md`→gemini.
-- **Smoke cells:**
-  - Passed: `f"{project} ✓ {s:.1f}s"`, or `f"{project} [ok] {s:.1f}s"` under `NO_COLOR`.
-  - Failed: `f"{project} ✗ exit {code}"`, with at most 5 indented detail lines below.
-  - Skipped: `f"{project} – {reason}"`.
-- **Next steps** (exact substrings, one per line; shown only when there is at least one):
-  - `f"{project}  not runnable → {runs_fix}"`
-  - `f"{project}  parallel off → {parallel_fix}"`
-  - `f"{project}  setup pending → run: {display_command} (runs {setup} first)"`. This comes from `plans` with
-    `setup_argv` whose project had no passed smoke. `display_command` is `init_smoke.display_command(project, candidate)`.
-  - `f"{project}  smoke failed → see the runner output above"`
-- **Restart line** (exactly one, only when a skill target in `rules.details` has action `created` or `updated`):
-  `"Restart your coding agents to load the new ptest skill."`, or `"… the updated ptest skill."` when every skill
-  action was `updated`. Never shown for previews.
-
-**T5 init flow:**
-1. Write `render_init(…, facts=facts)`.
-2. Build `plans = init_smoke.plan_resolution(...)`, best-effort (`()` on error).
-3. Get the smoke results through the refactored `_init_smoke_results(parsed, cwd, plans, domain)`, which may print
-   live runner output.
-4. Write `render_init_footer(…, smoke=results, plans=plans, facts=facts)`.
-5. Offer the review as today.
-
-`facts = tuple(item.facts() for item in executability.check_resolution(config_api.resolve_config(cwd)))`,
-best-effort, `()` for `--dry-run` and on error. `--json` stays byte-compatible (no facts, no footer).
-
-### 3.7 Doctor child `facts` (T5 writes, T3 reads)
-
-- **T5:** `cli._child_assessment_data(packet, assessment, limitations, *, execution=None, facts=None)` sets
-  `child["facts"] = facts` (exact `FACT_KEYS` dict) when facts is not None.
-- **Validator and projection:** `contracts` tolerates the extra key, and the projection drops it, so
-  `--assessment-json` output is unchanged. T5 tests this.
-- **T3:** `recommendations._normalize_run` keeps a validated copy through `project_facts.check_facts` (keys ⊆
-  `project_facts.FACT_KEYS`, T3's own literal mirror; types as in §3.1; invalid → None). `render_agent_assessment` reads `child.get("facts")`. When facts are missing or invalid, both fall back to
-  `child["execution"]`: `runs: yes`, or `runs: no — {detail} → {fix}`.
-
-### 3.8 Doctor terminal and report (T3)
-
-```python
-# src/ptest/render.py  (T3)
-def render_agent_assessment(children, workspace, *, report_path: str, publication_status: str,
-                            width: int | None = None) -> str
-PTEST_ANSWER_PREFIX = "Answered by ptest: "   # literal mirror of agent_assessment.PTEST_ANSWER_PREFIX (T5 asserts equality)
-# src/ptest/project_facts.py  (T3, new) — pure helpers used by init_render, render, recommendations
-MIN_WIDTH, MAX_WIDTH = 60, 110
-FACT_KEYS: tuple[str, ...] = (                                    # literal mirror of executability.FACT_KEYS (T5 asserts equality)
-    "project", "runner", "runs", "runs_reason", "runs_fix",
-    "parallel", "parallel_short", "parallel_fix",
-    "setup", "full_suite", "full_blocked",
-)
-def terminal_width(width: int | None = None) -> int
-def check_facts(value: object) -> dict | None                     # dict with keys ⊆ FACT_KEYS and §3.1 value types, else None
-def summary_atoms(facts: Mapping[str, object]) -> list[str]        # ["runs: yes", "parallel: 4 workers", "setup: uv sync --locked"]
-def detail_lines(facts: Mapping[str, object]) -> list[str]         # ["full suite = …"] or ["full suite: not available — …"] or []
-def long_lines(facts: Mapping[str, object]) -> list[str]           # report: runs / parallel (long) / setup "(ptest runs it when needed)" / full suite
-def wrap_atoms(atoms: Sequence[str], width: int, *, indent: str = "", hang: str | None = None,
-               sep: str = " · ") -> list[str]
-def wrap_words(text: str, width: int, *, indent: str = "", hang: str | None = None) -> list[str]
-```
-
-**Header line:**
-`f"{scope}  {runner} · {ok} ok · {gap} gap · {unknown} unknown"`. Add `+ " · {n} n/a"` when n > 0. Add
-`"   (partial evidence)"` when there is a partial-evidence limitation, and
-`"   (checklist only: ptest cannot run this project yet)"` when the project is not runnable.
-
-**Body lines:**
-- The summary-atoms line and the detail lines, indented 2.
-- A blank line.
-- Satisfied rows compacted into width-fitting columns (`✓ Label`, keeping `_dropped_suffix`).
-- One line per gap: `✗ Label`. Under it, the wrapped `finding.summary` (indent 6), then `→ suggested_change`.
-- One line per unknown: `? Label  <reason>`. The reason is:
-  - the rationale with `PTEST_ANSWER_PREFIX` stripped;
-  - for a `FAILED_PREFIX` rationale, `review failed: <reason>`;
-  - otherwise the model's first sentence.
-  The reason is word-cut to the width.
-- One line per n/a: `– Label  <reason>`, with the SKIP_PREFIX or PTEST prefix stripped.
-
-**Trailer:** one line, `f"Report: {path} ({status}) — citations, fixes and verification steps."`. The 256 KiB bound
-is kept.
-
-**Report (`recommendations.md`):**
-- The "Execution:" line is replaced by the `long_lines(facts)` bullets.
-- Unknown rows print `Status: unknown.` then `Reason: <rationale without prefix>`. PTEST rows say
-  `(answered by ptest without a model call)`.
-- All other content is kept.
-
-### 3.9 Deterministic items (T4; T5 wires)
-
-```python
-# src/ptest/deterministic_items.py  (T4, new)
-DETERMINISTIC_ITEM_IDS: tuple[str, ...] = ("SELECT-001", "TIMING-001")
-
-@dataclass(frozen=True, slots=True)
-class DeterministicAnswer:
-    item_id: str                           # one of DETERMINISTIC_ITEM_IDS
-    status: str                            # "satisfied" | "gap" | "unknown" | "not-applicable"
-    reason: str                            # one plain sentence, no prefix, no backticks
-    evidence_paths: tuple[str, ...] = ()   # packet excerpt paths to cite (root-relative, as in packet.excerpts)
-    finding_summary: str | None = None     # gap only; passes C.aa_prose_is_untrusted() is False
-    finding_change: str | None = None      # gap only; same rule
-
-def answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution, packet) -> dict[str, DeterministicAnswer]:
-    """Never raises. {} when the packet's child config does not resolve."""
-
-# src/ptest/agent_assessment.py  (T4)
-PTEST_ANSWER_PREFIX = "Answered by ptest: "
-def plan_item_reviews(packet: EvidencePacket, answers: Mapping[str, object] | None = None) -> tuple[ItemReview, ...]
-@dataclass(frozen=True, slots=True)
-class ItemReview:  # existing fields unchanged, plus:
-    answer: object | None = None   # DeterministicAnswer; exactly one of request / skip_reason / answer is set
-```
-
-- **Row from an answer** (built in `assemble_child`, which takes `None` as the reply, like a skip):
-  - `rationale = PTEST_ANSWER_PREFIX + answer.reason`.
-  - `evidence` holds whole-excerpt citations of `evidence_paths`.
-  - A gap adds `Finding(id, finding_summary, finding_change, recipe_id=None, evidence=same citations)`.
-- **Degrade:** if a satisfied, gap, or not-applicable answer has no citable excerpt, it becomes unknown. Its
-  rationale is `PTEST_ANSWER_PREFIX + reason + " (the ptest config is not in the review evidence)"`.
-- The model is told never to start a rationale with this prefix. `_validate_one_row` rejects one that does.
-
-Exact deterministic reasons (T3 and T5 tests use them as literals):
-
-| Item | Condition | status | reason |
-|---|---|---|---|
-| TIMING-001 | no completed full run in history (or no history) | unknown | `no timing history yet: run ptest --full once` |
-| TIMING-001 | history unreadable | unknown | `ptest history is unavailable, so timing cannot be read` |
-| TIMING-001 | full runs exist, no per-test timings | unknown | `f"ptest has whole-run timing only (last full run {s:.1f} s); per-test timings are not recorded for this runner"` |
-| TIMING-001 | last clean baseline has per-test `call_s` | satisfied | `f"ptest recorded per-test timings for {n} tests in the last clean full run; {k} take over 3 s (slowest {m:.1f} s)"` |
-| SELECT-001 | runner vitest or command | not-applicable | `f"ptest has no automatic test selection for {runner}; every run is scoped or full"` |
-| SELECT-001 | pytest, `[selection] enabled = false` | gap | `f"selection is disabled in {cfg}"` |
-| SELECT-001 | pytest, enabled, not `closed_inputs` or no `input_roots` | gap | `f"selection inputs are not declared closed in {cfg}"` |
-| SELECT-001 | pytest, enabled, closed, input_roots nonempty | satisfied | `f"selection is enabled with closed inputs ({i} input roots, {t} full triggers); unknown input widens to the full suite"` |
-
-TIMING never answers gap (M9). The finding texts for the SELECT gaps are T4's choice. They must pass
-`aa_prose_is_untrusted() is False` and name the concrete fix:
-- Enable `[selection]` with `closed_inputs`, `input_roots`, and `full_triggers` in `{cfg}`.
-- For pytest without the coverage catalog profile (`adapters.pytest.qualified_profile(config) is None`), first add
-  `--cov` and `--cov-report` to `[runner] args`.
-
-History access is read-only: `history.read_history` and `history.read_history_summaries` inside try/except. It must
-never call `scheduler.initialize`. The checkout identity uses the `cli._checkout` derivation
-(`sha256(realpath(root))[:32]`).
-
-**T5 wiring in `_run_doctor_review`:**
-`plans = [agent_assessment.plan_item_reviews(packet, answers=deterministic_items.answers_for(domain, resolution, packet)) for packet in packets]`.
-The disclosure call count needs no other change (`review.request is not None`).
-
-### 3.10 Disclosure (T5)
-
-At most three lines, then the prompt:
-
-```
-Model review disclosure: {provider} gets bounded source excerpts from {project}: {calls} calls, {concurrency} at a time, model {model}.
-Secrets, private files, agent instructions, dependency folders, caches and build output are never sent. Provider costs may apply.
-Full disclosure: ptest doctor --help. Static review without a model: ptest doctor --offline.
-Run this review once? [y/N]:
-```
-
-- **Unknown model:** when the model is unknown before consent, the tail of line 1 is `model chosen from the
-  provider list after consent (one extra call sends only that list)`.
-- **No call count:** when `calls is None`, line 1 ends after `{project}.`.
-- **Fixed prefix:** line 1 always starts with `Model review disclosure: {provider} ` (`test_init.py` and
-  `test_agent_doctor_acceptance.py` rely on it).
-- **Newline:** a newline is printed before the disclosure whenever stderr is a TTY. Every other interactive prompt
-  after the spinner does the same.
-
-### 3.11 Names that must survive (no task may rename or remove them)
-
-- **executability:** `check_config`, `check_resolution`, `commands`, `pytest_xdist_active`,
-  `full_project_filter_text`, `full_project_filter_label`, `_pytest_addopts`, `STATUS_*`, `Executability.verdict`,
-  `to_public`.
-- **adapters/pytest:** `prepare`, `prepare_advanced`, `reject_unowned_controls`, `require_python_launcher`,
-  `qualified_profile`, `compound_support`, `inspect_capability`.
-- **agent_assessment:** `FAILED_PREFIX`, `SKIP_PREFIX`, `build_packets`, `plan_item_reviews` (packet stays the first
-  positional argument), `assemble_child`, `ItemReview`, `AssessmentRow`, `ChildAssessment`.
-- **render:** `terminal_text`, `render_agent_assessment`, `_dropped_suffix`, `_word_cut`, `render_doctor`,
-  `render_json`.
-- **init_render:** `render_init`.
-- **init_smoke:** `plan_resolution`, `run_plan`, `run_setup`, `skip_result`, `setup_advice`, `display_command`,
-  `parse_consent`, `SMOKE_QUESTION`, `SETUP_QUESTION`, `SmokePlan`, `SmokeResult`, `format_smoke`.
-- **recommendations:** `render_recommendations`, `publish_recommendations`, `PublishedIdentity`.
-- **pytest_bridge:** `run`, `cluster_narrow_name`, `short_redirect_cluster`, `full_redirect_name`,
-  `full_ini_refusal_name`, `full_narrowing_text`, `full_refusal_name`, `OwnedPlugin`, `AdvancedPlugin`,
-  `BridgeRefusal`.
-
-## 4. Per-task acceptance criteria
-
-Every task runs `uv sync --locked --extra test` in its own worktree first. It never shares a `.venv`. It commits
-inside its worktree, never pushes or merges, and runs tests only through `ptest`. Every task deletes code it makes
-dead.
-
-### T1: parallel bridge (owns `src/ptest/runtime/pytest_bridge.py`, `src/ptest/runtime/protocol-v1.json`, `tests/ng/test_pytest_parallel_subprocess.py` (new), `tests/ng/fixtures/pytest/parallel/` (new), `tests/ng/test_pytest_full_subprocess.py`, `tests/ng/test_pytest_scoped_subprocess.py`)
-
-1. **Constants:** the §3.4 constants exist with the exact values.
-2. **Serial path unchanged:** with `PTEST_GRANT_WORKERS=1`, behavior is byte-identical to base.
-   `test_pytest_full_subprocess.py`, `test_pytest_scoped_subprocess.py`, and (read-only for T1)
-   `test_pytest_xdist_serial_subprocess.py` pass without edits.
-3. **Pre-flight when `workers >= 2` (basic profile):**
-   - `run()` verifies `importlib.metadata.version("pytest-xdist") ∈ QUALIFIED_XDIST_VERSIONS` before `pytest.main`
-     (§3.4 message).
-   - It appends the bridge directory to `sys.path` and prepends `_WORKER_CONTROLS` to the native argv.
-   - Advanced with `workers > 1` stays refused (unchanged).
-4. **Controller:**
-   - Exempts plugins whose module root is `xdist` only when all of these hold: `numprocesses == workers`,
-     `tx == ["popen"]*workers` (after expansion), `dist ∈ PARALLEL_DIST_MODES`, `maxprocesses ∈ {None, workers}`,
-     and no px, rsync, looponfail, or rsyncdirs.
-   - Refuses non-xdist `pytest_xdist_make_scheduler`, `pytest_xdist_getremotemodule`, and `pytest_handlecrashitem`.
-   - Registers `pytest_xdist_node_collection_finished` and `pytest_testnodedown` for the basic profile.
-   - Records node collections (all must be identical) and every reported nodeid.
-   - Sets the collected count from the node collections: an empty collection gives derived status 5.
-   - Counts failures from the forwarded reports (crash reports included).
-5. **Worker half (loaded by `-p pytest_bridge`; active only with `config.workerinput`):**
-   - Verifies its own file identity (§2.1.8).
-   - Sets `PTEST_WORKER_ID` and `PTEST_RESOURCE_PREFIX` (§2.1.9). Requires `gwK` with K < workers.
-   - Applies the serial `_validate` gates for the execution mode, skipping only the controller-only
-     tx/numprocesses/maxprocesses checks and exempting xdist-module plugins.
-   - Tracks the protocol-seen count, failures, and full-mode accepted conftest hooks and notes.
-   - Writes `config.workeroutput["ptest_bridge"]` in a tryfirst `pytest_sessionfinish`.
-   - Detects post-modifyitems drops by item identity, not nodeid text. loadgroup rewrites nodeids to
-     `id@group` in a worker modifyitems hook, so string comparisons across that hook are wrong.
-   - Factor the hookimpl marking into one helper that `run()` and the worker bootstrap share.
-6. **Parallel reconciliation in `run()`:**
-   - Refuse (bridge-refused, report `terminal_complete=false`, exit 4 if native was 0 or 5) when any of these holds:
-     - a started worker lacks a valid, unrefused record;
-     - collections differ;
-     - in full mode, a collected id was never reported while native is 0;
-     - native 0 or 5 hides observed failures.
-   - `project_narrowing` is the controller's ini narrowing plus the union of the worker records' conftest hooks and
-     notes. The report format is unchanged.
-7. **Real-xdist subprocess twins** in `tests/ng/test_pytest_parallel_subprocess.py`:
-   - They run the bridge file directly as a subprocess, with `sys.executable`, a scrubbed env (like
-     `_clear_native_pytest_environment`), `PTEST_BRIDGE_PROTOCOL`, the §3.3 env, and a private 0700 report dir with
-     a valid report binding. They parse the JSON report and the stderr marker. Each twin has a timeout ≤ 60 s.
-   - Required cases:
-     - (a) Parallel pass with 4 workers. The report is complete; 4 distinct `PYTEST_XDIST_WORKER` and
-       `PTEST_WORKER_ID` values (w000–w003) and 4 distinct resource prefixes are observed by tests (written to
-       files under tmp).
-     - (b) Parallel fail: native 1, report complete, `problem="native-failure"`.
-     - (c) Worker crash (`os.kill(os.getpid(), SIGKILL)` in one test): never exit 0. The report is incomplete, or
-       native is nonzero.
-     - (d) `loadgroup` with `xdist_group`: tests of one group ran on one worker.
-     - (e) Ctrl-C: SIGINT the bridge's session (`start_new_session=True`) after every worker has written a start
-       marker. The process exits within 15 s, and no process of that session survives (`os.killpg(pgid, 0)` raises
-       `ProcessLookupError`, checked after a bounded poll).
-     - (f) A worker-only conftest drops items: a deep `tests/sub/conftest.py` modifyitems deselect runs labelled,
-       with the conftest path in `project_narrowing.conftest_hooks`. A `pytest_collection_finish` drop is refused.
-     - (g) Verdict forgery: a controller-visible conftest `pytest_sessionfinish` wrapper that forces exit 0 is
-       refused. A worker-only `pytest_runtest_makereport` that rewrites failures to passes is refused (full mode).
-     - (h) The persea-shaped fixture (`tests/ng/fixtures/pytest/parallel/`: addopts
-       `-n 4 --dist=loadgroup -m "not slow"`, a conftest with `pytest_configure_node`, `xdist_group` tests, one slow
-       test) runs with 4 workers. `project_narrowing.narrowing == "-m not slow"` and the conftest hooks are listed.
-     - (i) An unqualified or missing xdist version is refused before collection. Simulate it with a stub
-       `pytest_xdist-0.0.0.dist-info` on a tmp `sys.path` prefix, or skip if not reproducible (document why).
-     - (j) `--dist each` is refused.
-8. **Scoped check:**
-   `ptest tests/ng/test_pytest_parallel_subprocess.py tests/ng/test_pytest_full_subprocess.py tests/ng/test_pytest_scoped_subprocess.py tests/ng/test_pytest_xdist_serial_subprocess.py`
-   passes.
-
-### T2: admission, qualification, init (owns `src/ptest/adapters/pytest.py`, `src/ptest/operations.py`, `src/ptest/scheduler.py`, `src/ptest/guard.py`, `src/ptest/executability.py`, `src/ptest/config.py`, `src/ptest/contracts.py`, `docs/schemas/v1/` except `agent-assessment.json`, `src/ptest/resources/repository-agent-guide.md`, `src/ptest/resources/agent-guide.md`, `pyproject.toml`, `uv.lock`, and tests `test_pytest_adapter.py`, `test_operations.py`, `test_scheduler.py`, `test_guard.py`, `test_executability.py`, `test_config.py`, `test_init.py`, `test_contracts.py`, `test_resources.py`, `test_agent_rules.py`, `test_pytest_xdist_serial_subprocess.py`, `test_task_11d_pytest.py`, `test_task_11f_pytest.py`)
-
-1. **Interfaces:** §3.1 (fields, `facts()`, `FACT_KEYS`, texts, caveats, `verdict()`) and §3.2 (`ParallelRequest`,
-   `parallel_request`, `xdist_environment_version`, the mirror constants) are implemented exactly.
-   - Tests cover every row of the parallel table and the reasons table, and the precedence order.
-   - The fixtures are tmp projects with stub `pytest_xdist-<v>.dist-info` directories in a tmp venv with
-     `pyvenv.cfg`.
-2. **Executability rules:**
-   - `check_config` no longer marks an xdist project not runnable for a missing `-n 0`.
-   - R1 (remote/rsync) is not runnable with the §3.1 fix.
-   - A vitest project gets `parallel="inside vitest (its own workers)"`.
-   - The persea-shaped fixture (addopts `-n 4 --dist=loadgroup -m "not extended_migration"`, conftest hooks, uv
-     launcher, qualified stub dist-info) gives `parallel_short == "4 workers"` and the exact `full_suite` example.
-3. **Init:** `config._fresh_config` writes `("-n","0")` iff `parallel_request(...).config_level`.
-   - Tests: `--dist each` gives `["-n","0"]`; the persea shape gives `[]`; the fake-xdist fixture with a bare
-     `python` launcher gives `[]`.
-   - `test_pytest_xdist_serial_subprocess.py` is updated: the init assertion becomes `[]`. The scoped and full
-     twins still pass serially through the generated `-n 0`, with the same label.
-4. **Operations and adapter:**
-   - `operations.execute` requests N slots for a qualified native pytest (non-advanced). `auto` requests
-     `scheduler.effective_limits(domain).max_slots`, capped by `request.workers`. Otherwise it requests 1.
-   - `adapters/pytest.prepare` accepts `grant.slots >= 1` under §3.3 (refusing `slots > 1` without a qualified
-     request) and generates `-n` exactly as §3.3. `prepare_advanced` generates `-n 0` under the same rule.
-   - `inspect_capability` limitation wording mentions the parallel tier plainly.
-   - The §3.5 reason code is added to contracts and schemas (additive enum only), and emitted exactly as §3.5.
-   - Tests use a fake 2- and 4-slot fixture domain and assert argv, env, `granted_workers`, the command summary
-     `workers` (requested), and the reason messages.
-5. **Guard:** a test in `test_guard.py` shows that a runner spawning 4 popen children in its group has no survivors
-   after an execution timeout and after a SIGINT cancel. Use a fake runner script, not xdist. `guard.py` changes
-   only if that test finds a gap.
-6. **Scheduler:** no behavior change expected. A test pins that a 4-slot request on a 2-slot machine is granted 2,
-   and that a 4-slot request on a busy 4-slot machine queues.
-7. **Resources:** the resource guides and README-facing agent guides (`resources/*.md`) describe the parallel tier
-   and its fallback in plain words. Remove the "-n 0 serial" guidance.
-8. **Must not edit:** T2 must not edit `test_pytest_full_subprocess.py` or `test_pytest_scoped_subprocess.py`
-   (T1's). Both must still pass with T2's code:
-   `ptest tests/ng/test_pytest_full_subprocess.py tests/ng/test_pytest_scoped_subprocess.py`.
-9. **Scoped check:**
-   `ptest tests/ng/test_pytest_adapter.py tests/ng/test_operations.py tests/ng/test_scheduler.py tests/ng/test_guard.py tests/ng/test_executability.py tests/ng/test_config.py tests/ng/test_init.py tests/ng/test_contracts.py tests/ng/test_resources.py tests/ng/test_agent_rules.py tests/ng/test_pytest_xdist_serial_subprocess.py tests/ng/test_task_11d_pytest.py tests/ng/test_task_11f_pytest.py`
-   passes.
-
-### T3: output redesign (owns `src/ptest/init_render.py`, `src/ptest/init_smoke.py`, `src/ptest/render.py`, `src/ptest/recommendations.py`, `src/ptest/project_facts.py` (new), and tests `test_init_render.py`, `test_init_smoke.py`, `test_render.py`, `test_recommendations.py`, `test_project_facts.py` (new))
-
-1. **Interfaces:** `project_facts.py` implements §3.8 exactly. All three renderers use it: one wrapping
-   implementation, one width rule [60, 110].
-2. **Fixed-width code deleted:** remove `_WIDTH=64`, the box characters, `_HINTS`, `_split_caveats`,
-   `_split_verdict`, `_bullet_lines`, the generic `run:` next steps, and the per-agent restart paragraphs.
-3. **Init rendering** follows §3.6 exactly.
-   - A golden test at width 80 reproduces the spec's target shape for a persea-shaped input. That input is two
-     facts dicts, config records `unchanged` × 3, guidance `created` docs plus 4 skills, `updated` AGENTS.md and
-     CLAUDE.md, and smoke api ✓ 2.2 s and web ✓ 1.8 s. Only the wordmark and version lines precede it.
-   - Tests:
-     - no restart line on a re-run with all guidance `unchanged`, and exactly one on creation;
-     - no next-steps block when nothing is actionable;
-     - each of the four next-step kinds;
-     - width 60 and 110 never split an atom (label, path, command, fact segment);
-     - `NO_COLOR` and non-TTY output contains no ANSI bytes;
-     - `render_init(result)` without facts still renders the header phrase.
-4. **Doctor rendering** follows §3.8 exactly.
-   - Golden test at width 90 with the spec's O.4 example: 5 ok, 1 gap, 5 unknown, partial evidence.
-   - Every unknown row shows a reason: model, deterministic (prefix stripped), or `review failed:`.
-   - The round-19 dropped-citation suffix is kept.
-   - Fallback to `execution` when `facts` is missing.
-   - Byte bound kept.
-5. **Report:** `recommendations.md` uses `long_lines(facts)` and prints unknown reasons (§3.8). It validates
-   `facts` defensively; invalid facts fall back to `execution`. All other existing content is kept.
-6. **Smoke:** `init_smoke.format_smoke` gives the compact block. `SmokeResult.setup_argv` is set by `skip_result`
-   for setup-pending plans.
-7. **Scoped check:**
-   `ptest tests/ng/test_init_render.py tests/ng/test_init_smoke.py tests/ng/test_render.py tests/ng/test_recommendations.py tests/ng/test_project_facts.py`
-   passes.
-   - T3 never imports `ptest.executability` (no `Executability`, no `FACT_KEYS`), `deterministic_items`, or
-     `agent_assessment.PTEST_ANSWER_PREFIX`. It uses dict literals, its own `project_facts.FACT_KEYS` literal
-     (§3.8), and its own `PTEST_ANSWER_PREFIX` literal. `executability.FACT_KEYS` does not exist at base 3f399fb,
-     so importing it would fail in T3's wave-1 worktree.
-
-### T4: fewer unknowns (owns `src/ptest/agent_assessment.py`, `src/ptest/checklist.py`, `src/ptest/deterministic_items.py` (new), `docs/schemas/v1/agent-assessment.json`, and tests `test_agent_assessment.py`, `test_agent_assessment_contract.py`, `test_checklist.py`, `test_deterministic_items.py` (new), `tests/ng/fixtures/agent_assessment/`)
-
-1. **Interfaces:** §3.9 is implemented exactly, including the `ItemReview.answer` invariant, `assemble_child` rows
-   and findings, the degrade rule, and the prompt/validation guard for `PTEST_ANSWER_PREFIX`.
-   - A contract test runs a child that holds a deterministic gap plus a deterministic satisfied row through
-     `C.encode_public_document("agent-assessment", ...)`, and it validates.
-   - The SELECT finding prose passes `aa_prose_is_untrusted() is False`.
-2. **`deterministic_items.answers_for`:**
-   - Covers every row of the §3.9 table with tmp domains: an empty history, a history with a basic full run, a
-     baseline with `call_s`, and an unreadable history.
-   - Also covers configs with selection disabled, not closed, and closed; vitest; and command.
-   - Never raises, and never initializes the scheduler.
-3. **Routing (U.2):**
-   - RESOURCE-001 text signals: `tmp_path`, `tempfile`, `mkdtemp`, `mkstemp`, `socket`, `bind(`, port constants
-     (`PORT\s*=\s*\d`, `port=\d`), `/tmp`, lock files (`\.lock\b`, `filelock`, `flock`).
-   - NETWORK-001: `httpx`, `requests`, `aiohttp`, `respx`, `responses`, `pytest[-_]socket`, `socket.socket`
-     patches, `disable_socket`, network-deny fixtures, `vcr`.
-   - PROCESS-001: `subprocess`, `asyncio.create_subprocess`, `multiprocessing`, `Popen`, `os.fork`, `.join(`,
-     `.terminate(`, `.kill(`, `.wait(`.
-   - Conftest excerpts that define a fixture whose name appears as a parameter in the item's routed test excerpts
-     rank first.
-   - Packet admission may add signal-bearing files within the existing byte and file caps.
-   - Tests show each signal routes, and that a referenced conftest fixture outranks a scanner hit.
-4. **Prompts (U.3):**
-   - `_ITEM_INSTRUCTION` and each catalog `prompt` say: gap only with a cited concrete violation; satisfied only
-     when the evidence shows the guaranteeing mechanism (for example a session-wide network block or per-worker
-     port allocation); otherwise unknown with one sentence naming the missing evidence; absence of code is unknown,
-     never a guess.
-   - Tests pin the key sentences.
-5. **Schema:** `agent-assessment.json` changes only if needed, and only additively. The expectation is no change.
-6. **Scoped check:**
-   `ptest tests/ng/test_agent_assessment.py tests/ng/test_agent_assessment_contract.py tests/ng/test_checklist.py tests/ng/test_deterministic_items.py`
-   passes.
-
-### T5: wave 2, MANDATORY: CLI wiring and integration (barrier: starts after T1–T4 are merged into the chain)
-
-Owns `src/ptest/cli.py`, `src/ptest/help.py`, `README.md`, and the tests `test_cli.py`, `test_help.py`,
-`test_doctor_init_integration.py`, and `test_parallel_output_cli.py` (new). Post-merge only, T5 may also edit these
-wave-1 tests to update output-string assertions, and nothing else in them: `test_init.py`,
-`test_agent_doctor_acceptance.py`, `test_doctor_smoke.py`, `test_acceptance.py`, and `test_install.py`.
-
-1. **Init wiring:** exactly §3.6 flow. Delete the old smoke-text concatenation (`_init_smoke_text` becomes
-   `_init_smoke_results`).
-2. **Doctor wiring:**
-   - `_child_assessment_data(..., facts=...)` fills `child["facts"]` (§3.7) from the `check_resolution` facts.
-   - Deterministic answers are wired (§3.9).
-   - `render_agent_assessment(...)` is called with the default width.
-   - The disclosure follows §3.10.
-   - `cli._summary` may report the requested worker count for qualified pytest projects (optional; value change
-     only).
-3. **Help and README:**
-   - `help.py`: `ptest doctor --help` carries the full legal disclosure text that used to be in
-     `_render_review_disclosure`, word for word, plus a one-paragraph description of the parallel tier.
-   - `README.md`:
-     - the parallel tier: how N is chosen, slots, the fallback reasons, and that `-n 0` in `.ptest.toml` opts out;
-     - coverage under xdist is out of scope;
-     - the new init and doctor output, and the short disclosure plus a pointer to the full text.
-4. **Integration tests** in `tests/ng/test_parallel_output_cli.py`, through `cli.main` or `case.invoke`, with no
-   monkeypatching of ptest modules. Fake provider executables only (the `test_doctor_init_integration` pattern).
-   - (a) **Parallel end to end:**
-     - tmp git project, launcher `[sys.executable]`, addopts `-n 4 --dist=loadgroup -m "not slow"`, `xdist_group`
-       tests, a conftest modifyitems hook;
-     - `cli.main(("init","--no-doctor","--agents","none"))` writes `args = []`; stdout contains
-       `parallel: 4 workers` and none of `┌`, `ready with caveats`, `expected:`, or `fingerprint`;
-     - `case.invoke(domain(slots=4), root, "--full")` exits 0 with `granted_workers == 4`, a `project-filtered`
-       reason with `-m not slow`, and 4 distinct worker ids recorded by the tests;
-     - with `domain(slots=2)`: `granted_workers == 2` and stderr contains
-       `parallel-workers: 2 xdist workers (4 requested, 2 granted)`.
-   - (b) **Fallback:** `--dist each` → init writes `["-n","0"]`, init stdout shows
-     `parallel: no — --dist each is not supported; ptest runs serially`, and `--full` passes serially.
-   - (c) **Ctrl-C through the guard:**
-     - `ptest --full` subprocess on a suite whose tests write a start marker then sleep 30 s;
-     - after all 4 markers appear, SIGINT the ptest process;
-     - ptest exits within 20 s with a non-success code, and psutil finds no surviving process whose environ carries
-       that run's `PTEST_RUN_ID`, or whose cmdline contains the tmp root.
-   - (d) **Doctor on a persea-shaped monorepo** (uv-style api with the stub-qualified dist-info and `-n 0` in
-     `api/.ptest.toml`; vitest web):
-     - human output has `api  pytest · ` with counts;
-     - `runs: yes · parallel: no · setup:` lines; `web … parallel: inside vitest`;
-     - `? Test timing  no timing history yet: run ptest --full once`;
-     - a SELECT gap line `✗ Test selection`;
-     - every `?` row has a reason;
-     - the provider call count equals the planned requests (TIMING and SELECT take no call);
-     - the disclosure is ≤ 3 lines before the prompt;
-     - `recommendations.md` contains the plain facts and `Reason:` lines;
-     - `--assessment-json` has no `facts` key and validates.
-   - (e) **Init on the same monorepo:** grouped `config     unchanged` line, exactly one `Restart your coding
-     agents` line on first init with agents, none on re-run, and `api  parallel off → remove "-n", "0" from [runner]
-     args in api/.ptest.toml to run 4 workers`.
-   - (f) **Mirror equality:**
-     - `pytest_bridge.QUALIFIED_XDIST_VERSIONS == executability.XDIST_QUALIFIED_VERSIONS`;
-     - `pytest_bridge.PARALLEL_DIST_MODES == executability.XDIST_DIST_MODES`;
-     - `project_facts.FACT_KEYS == executability.FACT_KEYS` (same order), and
-       `tuple(Executability(...).facts()) == project_facts.FACT_KEYS`;
-     - `render.PTEST_ANSWER_PREFIX == agent_assessment.PTEST_ANSWER_PREFIX` (and the recommendations literal, if
-       separate).
-5. **Suite health:**
-   - Fix every test broken only by the merged output changes, in the files listed above.
-   - Run the scoped command of all five tasks and the context-pack coverage command:
-     `ptest tests/ng/test_pytest_parallel_subprocess.py tests/ng/test_pytest_adapter.py tests/ng/test_executability.py tests/ng/test_init_render.py tests/ng/test_render.py tests/ng/test_agent_assessment.py`.
-   - Also run `ptest tests/ng/test_cli.py tests/ng/test_help.py tests/ng/test_doctor_init_integration.py tests/ng/test_parallel_output_cli.py tests/ng/test_init.py tests/ng/test_agent_doctor_acceptance.py tests/ng/test_doctor_smoke.py tests/ng/test_acceptance.py`.
-   - The controller runs `ptest --full` once afterwards.
-
-## 5. Test approach
-
-- **TDD per task:** tests come first, through `ptest <files>` only (never `pytest` or `uv run pytest`). A missing
-  test path silently gives "no tests ran", so create the file first. The trailing "changed-during-run … path
-  classes: ignored" line is benign.
-- **Real xdist:** real xdist 3.8.0 comes from the test extra. T1 twins run the bridge directly. The e2e tests
-  through ptest's admission and guard are in T5, because only T5 sees T1 and T2 together.
-- **Other fakes:** providers are fake executables or vendored fixtures. Never launch claude, codex, or opencode.
-  Stub xdist versions use tmp `pytest_xdist-<v>.dist-info` directories. Never modify persea.
-- **Timeouts:** subprocess timeouts ≤ 60 s. Sleeping tests are interrupted by the test, never waited out.
-- **Coverage:** no coverage gate (none configured). The scoped coverage command from the context pack is run by T5.
-
-## 6. File ownership and new files
-
-| Task | Files (exclusive in its wave) |
-|---|---|
-| T1 | `src/ptest/runtime/pytest_bridge.py`, `src/ptest/runtime/protocol-v1.json`, `tests/ng/test_pytest_parallel_subprocess.py`*, `tests/ng/fixtures/pytest/parallel/`*, `tests/ng/test_pytest_full_subprocess.py`, `tests/ng/test_pytest_scoped_subprocess.py` |
-| T2 | `src/ptest/adapters/pytest.py`, `src/ptest/operations.py`, `src/ptest/scheduler.py`, `src/ptest/guard.py`, `src/ptest/executability.py`, `src/ptest/config.py`, `src/ptest/contracts.py`, `docs/schemas/v1/*.json` except `agent-assessment.json`, `src/ptest/resources/repository-agent-guide.md`, `src/ptest/resources/agent-guide.md`, `pyproject.toml`, `uv.lock`, tests listed in §4 T2 |
-| T3 | `src/ptest/init_render.py`, `src/ptest/init_smoke.py`, `src/ptest/render.py`, `src/ptest/recommendations.py`, `src/ptest/project_facts.py`*, tests listed in §4 T3 (`test_project_facts.py`*) |
-| T4 | `src/ptest/agent_assessment.py`, `src/ptest/checklist.py`, `src/ptest/deterministic_items.py`*, `docs/schemas/v1/agent-assessment.json`, tests listed in §4 T4 (`test_deterministic_items.py`*), `tests/ng/fixtures/agent_assessment/` |
-| T5 (wave 2) | `src/ptest/cli.py`, `src/ptest/help.py`, `README.md`, `tests/ng/test_cli.py`, `tests/ng/test_help.py`, `tests/ng/test_doctor_init_integration.py`, `tests/ng/test_parallel_output_cli.py`*, plus the post-merge assertion-only edits listed in §4 T5 |
-| transcription | the §10 appends to the four files under `docs/superpowers/specs/` (shared-file content, applied verbatim before wave 1; no task edits these spec files) |
-
-\* marks new files. The exhaustive new-file list:
-- `src/ptest/project_facts.py` (T3)
-- `tests/ng/test_project_facts.py` (T3)
-- `src/ptest/deterministic_items.py` (T4)
-- `tests/ng/test_deterministic_items.py` (T4)
-- `tests/ng/test_pytest_parallel_subprocess.py` (T1)
-- `tests/ng/fixtures/pytest/parallel/pyproject.toml.txt` (T1)
-- `tests/ng/fixtures/pytest/parallel/conftest.py.txt` (T1)
-- `tests/ng/fixtures/pytest/parallel/test_groups.py.txt` (T1)
-- `tests/ng/test_parallel_output_cli.py` (T5)
-
-Files no task touches: `reports.py`, `history.py`, `agent_rules.py`, `doctor.py`, `runners.py`, `selection.py`,
-`agent_providers.py`, `monorepo.py`, `files.py`, `platform.py`, `storage.py`, and `source.py`.
-
-## 7. Risks and mitigations
-
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Worker plugin not loaded (sys.path or `-p` mechanics differ) | Parallel runs refuse | The controller requires a record from every worker, so this fails closed. T1 twin (a) proves the loading on real xdist 3.8.0. |
-| A project module named `pytest_bridge` shadows the worker plugin | Forged worker records | File-identity check against the executor's protocol-descriptor sibling (§2.1.8). |
-| loadgroup `@group` nodeid rewrite breaks reconciliation | False refusals | Reconcile on the ids the controller receives; detect worker drops by item identity (§4 T1.5). |
-| Worker crash triggers xdist restarts and slow storms | Slow or unclear runs | `--max-worker-restart=0`. A lost worker record makes the run incomplete. |
-| Parallel scoped runs of one file cost worker startup | Slower tiny runs | Accepted: it matches the project's own `pytest` behavior. Declining it needs a `-n 0` opt-out in `.ptest.toml`. |
-| Existing configs (persea) keep `-n 0` | No speed-up until edited | Plain `parallel off →` next step in init and doctor. Init stays non-destructive (M5). |
-| T5 starts before the merge | BLOCKED integration | Stated barrier. T5's first step verifies `Executability.facts`, `render_init_footer`, and `deterministic_items` exist, else returns BLOCKED. |
-| Output-string tests in unowned files break after the merge | Red suite | T5 owns the post-merge assertion updates in the listed files. |
-
-## 8. Open questions (non-blocking; defaults chosen)
-
-- Should init offer to remove its own earlier `-n 0` from existing configs? Default: no, only the next step (M5).
-- Should `worksteal` be qualified? Default: yes (the controller sees exactly one report stream). The controller can
-  drop it from both constant sets.
-- Should the wordmark stay? Default: yes (M8). Deleting it is a one-function change in `init_render`.
-
-## 9. Amendments
-
-The shared-file content in §10 appends the amendments M1–M12 to
-`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md`, and one pointer section to each of the three
-earlier specs (`2026-09-22-agent-doctor-design.md`, `2026-09-23-doctor-init-v2-requirements.md`,
-`2026-09-23-init-smoke-amendment.md`). §10 is the authoritative text; §2 and §3 implement it. Tasks told to honor an
-M-number read it in §10.
-
-### A-user-1 (2026-09-24, user decision via controller): checklist item PARALLEL-001 "Parallel execution"
-Source: requirements §U.5 (added after this design was written). Binding for T3, T4 and T5.
-- **T4** adds canonical checklist entry `PARALLEL-001`, label "Parallel execution", to `src/ptest/checklist.py`. It is
-  additive to the catalog, to `docs/schemas/v1/agent-assessment.json` and to the drift guards. It is answered
-  **deterministically** in `deterministic_items.py` (no model call) from the project facts in §3.1/§3.2:
-  - satisfied: `parallel: N workers (xdist, --dist <mode>)`, or `inside vitest (its own workers)`;
-  - gap: parallel is configured but runs serially under ptest (P.4 reason plus fix);
-  - gap: not configured. Suggest `pytest-xdist` plus `-n auto` (or the vitest pool settings) only when the
-    parallel-safety items (FIX-002, DB-001, DB-002, CACHE-001, RESOURCE-001, NETWORK-001, PROCESS-001, TIME-001) have
-    no gap; otherwise the fix is "resolve the parallel-safety gaps first";
-  - unknown: only with a stated reason.
-  The item is ordered last in the catalog, so existing IDs and orders are unchanged.
-- **T3** renders the eight isolation items as a visible **"parallel safety"** group, followed by PARALLEL-001, in the
-  doctor terminal output and in `recommendations.md`.
-- **T5** wires the facts T4 needs, and its integration test asserts PARALLEL-001 through `cli.main` for a
-  persea-shaped fixture (4 xdist workers means satisfied) and for a serial-fallback fixture (gap with the reason).
-
-### T1f-audit (2026-09-24, controller decision on the T1 audit BLOCK): T1.7(e) Ctrl-C twins
-Source: `.ctl/T1-audit-findings.md` [MEDIUM]. Binding for T1 twins (e) in `tests/ng/test_pytest_parallel_subprocess.py`
-and (c) in `tests/ng/test_parallel_output_cli.py`; overrides the `start_new_session=True` wording in §4 T1.7(e).
-- No twin uses `start_new_session`: a detached session made the scheduler count a twin descendant in another process
-  group as escaped under a concurrent ptest admission, ending that run incomplete (exit 70).
-- The Ctrl-C twins deliver SIGINT to the bridge child PID only (`os.kill(pid, SIGINT)`); no-survivor proof is a
-  descendant-held fifo reaching EOF (every xdist worker holds the write end from test-module import until death),
-  never a process-group poll.
-- The catch-all `operations.py` guard-failure reason ("exceeded its deadline") now reports the actual guard problem
-  code and message (ownership/lease), so an incomplete handoff names its cause.
-
-## 10. Shared-file content (verbatim)
-
-Four appends. Each block starts with an `=== APPEND TO: <path> ===` marker line, which is not part of the text. Append
-everything after the marker (up to the next marker or the closing fence) to the end of that file, preceded by one
-blank line. Nothing else in these files changes.
-
-````text
-=== APPEND TO: docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md ===
-
-## Amendments (design, 2026-09-24)
-
-The gated design is `.pipeline/design.md` on `feature/parallel-and-output`. Where these amendments conflict with the
-sections above or with the three earlier specs, the amendments win. Each earlier spec carries a pointer section back
-here.
-
-- **M1 (parallel tier and worker count; amends §P.1, v2 §A.1, agent-doctor "Pytest's declared capability", A7).**
-  A pytest project qualifies for the parallel tier only when all three sources agree: its checked-in pytest addopts
-  activate xdist (config level, decided by init, doctor and every run); the project environment, reached through a
-  launcher ptest can verify, holds exactly one qualified `pytest-xdist` (3.8.0) dist-info (environment level, decided
-  again by every run); and the bridge re-verifies everything at runtime and fails closed. N is the project's `-n N` /
-  `--numprocesses N`; `-n auto` and `-n logical` request the machine's `max_slots`; `ptest --workers W` caps N at W;
-  `[runner] workers` is ignored for pytest xdist. An installed xdist alone still does not mean parallel support.
-- **M2 (slots; amends §P.1 "queues or runs with fewer workers").** ptest requests N slots. The scheduler grants
-  `min(N, max_slots)` and queues until that many slots are free. A grant of 2 or more runs `-n <granted>`; a grant of 1
-  runs serially with `-n 0`. A new additive reason code `parallel-workers` (in `C.REASON_CODES` and every run-side
-  schema enum, not `agent-assessment.json`) is emitted only when the grant is below the request or the run is serial
-  because of a fallback, with the exact messages `<g> xdist workers (<r> requested, <g> granted)`,
-  `serial (<r> requested, 1 granted)`, and `serial: <reason>`.
-- **M3 (distribution modes and remote workers; amends §P.1 and §P.4).** Supported `--dist` modes are `load`,
-  `loadscope`, `loadfile`, `loadgroup`, and `worksteal`; `no` runs as `load`; `xdist_group` works under `loadgroup`.
-  `--dist each` falls back to serial. Remote or rsync xdist (`--tx`, `--rsyncdir`, `--px` in the addopts) is **not
-  runnable**, as at base, rather than a serial fallback: the reason is "remote xdist workers (--tx, --rsyncdir, --px)
-  are not supported" and the fix is "remove --tx, --rsyncdir and --px from your pytest addopts".
-- **M4 (fallback and who writes `-n 0`; amends §P.4, v2 §A.1, A7).** ptest itself generates `-n 0` whenever an
-  xdist-active project runs serially, so the base rule "pytest addopts enable xdist … add `-n 0`" (not runnable) is
-  deleted. Init writes `-n 0` into `.ptest.toml` only for config-level reasons (unsupported `--dist`, `--cov`,
-  `--maxprocesses`). Environment-level reasons (xdist missing, duplicated, unqualified, or unverifiable for the
-  launcher) can change with `uv sync`, so they are reported and never written into config. The fallback reasons and
-  their precedence are the design's §3.1 table; each is shown as one plain `parallel: no — <reason>` line.
-- **M5 (init stays non-destructive; amends §P.4 and §O.3).** Init never rewrites an existing `.ptest.toml`. A `-n 0`
-  written by an earlier init stays in place. When removing it would really give parallel runs, init and doctor show
-  one actionable next step, `<project>  parallel off → remove "-n", "0" from [runner] args in <cfg> to run <N>
-  workers`. `-n 0` in `[runner] args` is the documented user opt-out from the parallel tier.
-- **M6 (coverage; resolves §P.5).** `pytest-cov` under xdist is out of scope. `--cov` in the addopts or the runner
-  args is a config-level fallback with the message "coverage (--cov) under xdist is out of scope; ptest runs
-  serially". The advanced (coverage-catalog) profile stays serial and also generates `-n 0` for xdist-active projects.
-- **M7 (no new profile or report format; amends §P and agent-doctor "Pytest's declared capability remains
-  basic-serial").** `ExecutionTier`, the private report field set and format, `reports.py`, and `history.py` are
-  unchanged. The private profile label stays `basic_serial`, now meaning "the bridge-observed basic profile", serial or
-  parallel. The public worker count is `granted_workers`. On the run side the only public schema change is the
-  additive `parallel-workers` reason code (M2). Every §F guarantee (own verdict, collected-versus-run reconciliation,
-  labelled narrowing, refused rewriting hooks, conftest ownership) holds in parallel mode through the loaded worker
-  half of the bridge, and anything unverifiable is `bridge-refused`, never passed.
-- **M8 (init presentation; amends §O.3, v2 §B, agent-doctor "Init presentation" and acceptance criterion 12,
-  init-smoke decision 5).** The wordmark stays, colored only on a capable TTY and plain under `NO_COLOR` or a non-TTY,
-  followed by the `ptest <version>` line. The separate repository and URL lines, the fixed 64-column box, the
-  Configuration/Guidance/Warnings/Next steps sections, the generic next steps, and the per-agent restart paragraphs
-  are replaced by: a header `<phrase> · <repository>`; one line per project with its facts; file actions grouped by
-  action (`created`, `updated`, `unchanged`, `conflicted`); one compact smoke line (`<project> ✓ <s>s`,
-  `<project> ✗ exit <code>` with at most 5 detail lines, `<project> – <reason>`); next steps only when actionable
-  (not runnable, parallel off, setup pending, smoke failed); and exactly one restart line, only when a skill was
-  created or updated. Every name still passes through `render.terminal_text`. Width is the terminal width clamped to
-  60–110, and labels, paths, commands, and fact segments never break. `init --json` is byte-compatible and carries no
-  banner, facts, or smoke.
-- **M9 (deterministic items; amends §U.1).** The spec's "SELECTION-001" is the canonical `SELECT-001`. SELECT-001 and
-  TIMING-001 are answered by ptest with no model call; the row rationale starts with `Answered by ptest: `, which the
-  model may never use. Satisfied, gap, and not-applicable answers cite the project's `.ptest.toml` excerpt; without
-  it they degrade to unknown with the reason. **TIMING-001 never answers gap:** ptest has no agreed per-test threshold
-  that makes a suite defective, so it answers satisfied (with the count of tests over 3 s and the slowest time) or
-  unknown with the exact reason (`no timing history yet: run ptest --full once`, history unavailable, or whole-run
-  timing only). History is read only; the scheduler is never initialized by doctor.
-- **M10 (plain project facts and doctor layout; amends §O.2, §O.4, v2 §A.3 wording and A2, init-smoke decision 4).**
-  Executability output uses the plain facts `runs`, `parallel`, `setup`, and `full suite`. The phrases
-  `ready with caveats`, `expected:`, `fingerprint`, and `serial: xdist disabled under ptest (-n 0)` disappear; a
-  setup-owed project now reads `setup: <argv> (ptest runs it when needed)` instead of `ready with caveats`. The
-  internal status `caveat` and `Executability.to_public()` (`status`, `detail`, `fix`) are unchanged. Doctor prints
-  one header line per project with counts, the facts, compacted satisfied columns, each gap with its finding and
-  change, and every unknown with a one-line reason (model reason, ptest reason, or `review failed: <reason>`); the
-  round-19 dropped-citation suffix stays. The facts reach the report through an additive `child["facts"]` that the
-  validator tolerates and the public projection drops, so `--assessment-json` is unchanged. `recommendations.md`
-  replaces its "Execution:" line with the plain facts and prints `Reason:` for unknown rows; all other content stays.
-- **M11 (model-review disclosure; amends §O.5 detail, agent-doctor disclosure paragraph, v2 §C.7, A5).** Before the
-  consent prompt ptest prints at most three lines: provider, project, call count, concurrency, and model (or "chosen
-  from the provider list after consent"); the excluded classes and that provider costs may apply; and pointers to
-  `ptest doctor --help` and `ptest doctor --offline`. The full legal disclosure text (the user's existing provider
-  account, that ptest cannot perfectly detect secrets, the excluded classes, costs) moves word for word to
-  `ptest doctor --help` and the README. Consent rules, one disclosure per fan-out, and "no provider executable runs
-  before consent" are unchanged. On a TTY a newline is printed before this and every other prompt that follows the
-  spinner.
-- **M12 (unchanged surfaces; confirms agent-doctor command matrix and acceptance 11).** `ptest doctor --offline` (the
-  bounded static doctor), `doctor --json`, `doctor --prompt`, `doctor --probe`, `init --json`, and
-  `--assessment-json` keep their contracts and bytes. The only public additions are the `parallel-workers` reason
-  code (M2) and the checklist item PARALLEL-001 (§U.5, additive).
-
-=== APPEND TO: docs/superpowers/specs/2026-09-22-agent-doctor-design.md ===
-
-## Amendments — parallel and output (2026-09-24)
-
-`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
-Where they conflict, the 2026-09-24 amendments win:
-
-- "Pytest's declared capability remains `basic-serial` … worker parallelism … out of scope" and A7: superseded for
-  pytest xdist by M1–M4 and M7. Acceptance criterion 7's negative still holds: xdist presence alone does not imply
-  parallel support.
-- "Init presentation" and acceptance criterion 12: amended by M8 (wordmark and version stay; box, fixed sections, and
-  URL line replaced; grouped actions; one restart line).
-- The disclosure paragraph and A5: amended by M11 (three-line disclosure; full text in `ptest doctor --help` and the
-  README; consent rules unchanged).
-- A2: refined by M10 (plain facts, compacted satisfied rows, a reason on every unknown).
-- Command matrix and acceptance criterion 11: confirmed unchanged by M12.
-
-=== APPEND TO: docs/superpowers/specs/2026-09-23-doctor-init-v2-requirements.md ===
-
-## Amendments — parallel and output (2026-09-24)
-
-`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
-Where they conflict, the 2026-09-24 amendments win:
-
-- §A.1 ("real parallel ownership of xdist workers is out of scope"; init disables xdist): superseded by M1–M5. ptest
-  now runs qualified xdist projects in parallel and generates `-n 0` itself for serial fallbacks; init writes `-n 0`
-  only for config-level reasons and never removes an earlier one.
-- §A.3 caveat wording ("serial: xdist disabled under ptest"): replaced by the plain facts of M10.
-- §B output: amended by M8. Idempotent, non-clobbering repeated init is unchanged (M5).
-- §C.7 disclosure: amended by M11. §C per-project, per-item review is unchanged; SELECT-001 and TIMING-001 are now
-  answered by ptest without a model call (M9).
-- §E smoke report format: amended by M8. §E behavior (consent, setup gating, failure containment) is unchanged.
-- §F ("xdist and other serial-grant rules are unchanged"): the serial-grant rules are unchanged for serial runs; the
-  parallel grant keeps every §F guarantee (M7).
-
-=== APPEND TO: docs/superpowers/specs/2026-09-23-init-smoke-amendment.md ===
-
-## Amendments — parallel and output (2026-09-24)
-
-`docs/superpowers/specs/2026-09-24-parallel-and-output-requirements.md` ("Amendments", M1–M12) amends this document.
-Where they conflict, the 2026-09-24 amendments win:
-
-- Decision 4 ("a setup-owed project reads `ready with caveats`"): replaced by M10. A setup-owed project shows
-  `setup: <argv> (ptest runs it when needed)` and, when no smoke passed, the `setup pending` next step of M8.
-- Decision 5 (one `Smoke` section with `passed:` / `failed:` / `skipped:` lines): replaced by the compact smoke line
-  of M8. Every field still passes through `render.terminal_text`, and `init --json` stays untouched.
-- Decisions 1–3 and 6–9 (in-process execution, deterministic candidate, consent, failure containment, planning,
-  interrupts) are unchanged.
-````
+- **The signatures of `_launch_guard` and `_run_guard` do not change.** Their parameter lists stay byte-identical to base. Add no parameter, positional or keyword (D12).
+- `_launch_guard` builds its `C.LaunchManifest` with `compound_timeout_s=_COMPOUND_TIMEOUT_S.get()`. That replaces today's `C.MAX_COMPOUND_TIMEOUT_S`, which becomes 86400. Nothing else in `_launch_guard` changes.
+- Both call sites (~1572 and ~2491) resolve the limit once before launch: `limit, _source = resolve_compound_timeout(runner, request, history.comparable_run_evidence(...))`. They then wrap only the existing, unchanged `_run_guard(...)` call:
+  ```python
+  token = _COMPOUND_TIMEOUT_S.set(limit)
+  try:
+      raw_guard, frames, execution_s = _run_guard(<unchanged args>)
+  finally:
+      _COMPOUND_TIMEOUT_S.reset(token)
+  ```
+  At ~2491 the set/try/reset sits inside the existing `try: ... except (C.Problem, OSError)`, so launch-failure handling is unchanged. History is read only through `comparable_run_evidence`.
+- The monkeypatched wrappers in T4-owned files (D12 line list) call the real seam synchronously in the same thread, so they see the value unchanged. **No test file is edited for this.** T1 must not edit them, and T4 has no deadline-related wrapper edits.
+
+`src/ptest/guard.py`:
+- Two new module-level helpers. The limit is derived from the manifest, which every site can already reach, so **no guard function signature changes** (`_ready`, `_run_one`, `_Control.await_attempt_decision`, `run_guard`):
+  ```python
+  def _compound_limit_s(manifest: LaunchManifest) -> float:
+      return min(manifest.compound_timeout_s or DEFAULT_COMPOUND_TIMEOUT_S,
+                 MAX_COMPOUND_TIMEOUT_S)
+
+  def _compound_timeout_message(manifest: LaunchManifest) -> str:
+      return (f"compound execution deadline expired after "
+              f"{_compound_limit_s(manifest):.0f}s; raise it with --timeout SECONDS "
+              f"or [runner] timeout / full_timeout in .ptest.toml")
+  ```
+- `run_guard` computes `compound_deadline = time.monotonic() + _compound_limit_s(manifest)` (~l.461).
+- The new text applies **only to compound-scope expiry**, at exactly three sites:
+  - guard.py:245, `_Control.await_attempt_decision`: `_compound_timeout_message(self.manifest)`
+  - guard.py:332, `_ready`: `_compound_timeout_message(control.manifest)`
+  - guard.py:398, `_run_one`, **only when `timeout_scope == "compound"`**: `_compound_timeout_message(manifest)`, using `_run_one`'s existing `manifest` parameter
+- Attempt and setup expiry (`timeout_scope` of `"attempt"` or `"setup"`, guard.py:380-383) keep today's text, `timeout_scope + " execution deadline expired"`, byte-for-byte. So `test_guard.py::test_timeout_fact_preserves_raw_status_and_closes_spawn[attempt]` (`scope in message`) holds unedited. `[compound]` holds because the new text starts with `compound execution deadline expired`.
+
+`src/ptest/help.py`: the `_RUN` syntax adds `[--timeout 1..86400 (default: from history, else 600)]`. Keep the help tests (test_help.py, owned by T4) green by editing only help.py.
+
+### 3.2 Shared test builders (in `support.py`, section 4; every task may use them)
+
+| Name | Signature | Contract |
+|------|-----------|----------|
+| `XDIST_GROUPS` | `tuple[str, ...]` | The only allowed group names (D7). |
+| `GIT_IDENTITY` | `Mapping[str, str]` | Fixture author and committer. |
+| `REAL_TOOL_ENV` | `Mapping[str, str]` | D5. Resolved once at import. |
+| `IsolatedEnv` | `NamedTuple(root, home, state_dir, environ)` | Value of the `isolated_env` fixture. |
+| `build_isolated_env` | `(root: Path) -> IsolatedEnv` | Creates 0700 `home/`, `state/`, `xdg/{config,cache,data,state}` and `gitconfig` under `root`. |
+| `patch_account_home` | `(monkeypatch, home: Path) -> Path` | Makes `pwd.getpwuid(os.getuid()).pw_dir == str(home)`. May be called again to repoint. |
+| `git_env` | `(extra: dict \| None = None) -> dict` | os.environ minus `GIT_*`/CONTROL_VARS, plus hermetic git config and identity. |
+| `git` | `(root, *args, env=None, check=True) -> str` | Runs hermetic git with a 30 s timeout. Returns stripped stdout. |
+| `init_git_repo` | `(root, *, files=None, branch="main", commit=True, message="initial") -> Path` | `git init -b`, local identity config, writes `files`, and optionally makes one commit (`--allow-empty`). |
+| `git_commit_all` | `(root, message="update") -> str` | `add -A` plus commit. Returns the HEAD sha. |
+| `write_file` | `(path, content: str \| bytes) -> Path` | Creates parent directories. |
+| `write_executable` | `(path, text: str) -> Path` | `write_file` plus mode 0755. |
+| `PYTHON_SHEBANG` | `str` | `#!{sys.executable}\n` |
+| `ptest_toml_text` | `(*, kind="command", launcher=("echo",), args=("hello",), full_args=(), test_roots=None, workers=1, project_id=None, runner_extra="", setup=None, tail="") -> str` | Canonical `.ptest.toml`. `test_roots=None` means `()` for command and `("tests",)` otherwise. `setup` is a dict whose keys must come from {argv, required_paths, network, lifecycle_scripts}. |
+| `write_ptest_toml` | `(root, **same kwargs) -> Path` | Writes `root/.ptest.toml` and returns its path. |
+
+### 3.3 Fixtures (conftest, frozen)
+
+- `isolated_env` (autouse, function) → `IsolatedEnv`. A test may request it by name to learn its paths. It strips `CONTROL_VARS`, every `PTEST_*`/`GIT_*`/`PYTEST_XDIST_*`/`COV_CORE_*`, `PYTEST_ADDOPTS` and `PYTEST_PLUGINS`. It sets HOME, XDG_{CONFIG,CACHE,DATA,STATE}_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM and REAL_TOOL_ENV, and patches the passwd home. It replaces the old `_clear_bootstrap_control_env`.
+- `case` (unchanged) → `CaseFactory(tmp_path)`.
+- `_deny_non_tmp_self_roots` (autouse): a `--self` root must sit under `tmp_path` or `isolated_env.root`.
+- `_guard_real_install_against_self_uninstall` (session, autouse): unchanged.
+- Plugins are registered by `pytest_configure(config)`, which calls `config.pluginmanager.import_plugin(name)` for each name in `_FACTORY_PLUGINS` that is not registered yet and whose `find_spec` resolves. `find_spec` tolerates modules that are not merged yet. **No conftest anywhere defines `pytest_plugins`** (D13), not even as an empty list.
+
+### 3.4 Topic factory modules: fixture naming (frozen, globally unique)
+
+Every fixture defined in a module must start with one of that module's prefixes. Fixtures are function-scoped by default. Session scope is allowed only for expensive read-only artifacts built under `tmp_path_factory`, with an explicit env and no mutation after build. Every resource a fixture creates lives under `tmp_path`, `tmp_path_factory` or `isolated_env.root`. Every spawned process is reaped in teardown.
+
+| Module | Task | Allowed prefixes | Must provide (factory callables, kw-only options, unknown kwargs → TypeError) |
+|--------|------|------------------|------|
+| `factories_domain.py` | T2 | `state_`, `domain_`, `account_` | `domain_factory(slots=1, jobs=1) -> C.DomainPaths` (delegates to `CaseFactory.domain`); `account_home(name="home") -> Path` (a fresh home plus `patch_account_home`); `state_dir_factory(name="state") -> Path` (0700 dir, sets `PTEST_STATE_DIR`) |
+| `factories_repo.py` | T3 | `repo_`, `git_repo`, `ptest_project`, `monorepo`, `venv_stub` | `git_repo(name="repo", *, parent=None, files=None, commit=True, branch="main") -> Path`; `ptest_project(name="proj", *, parent=None, git=False, files=None, **toml) -> Path` (toml kwargs go to `ptest_toml_text`); `monorepo(children: dict[str, dict], *, git=False, root_toml=...) -> Path`; `venv_stub(root, *, pytest=None, pytest_cov=None, coverage=None, xdist=None) -> Path` |
+| `factories_exec.py` | T4 | `fake_exec`, `fake_bin`, `fake_pytest_`, `exec_` | `fake_bin` (a per-test directory prepended to PATH by monkeypatch); `fake_exec(name, script: str, *, bin_dir=None) -> Path`; `fake_pytest_project(*, tests: dict[str, str], git=True, **toml) -> Path` |
+| `factories_agents.py` | T5 | `fake_provider`, `agent_`, `doctor_`, `review_` | `fake_provider(name, *, stdout="", exit_code=0, script=None) -> Path` (an executable on the `fake_bin`-equivalent PATH dir owned by this module); other factories as needed |
+
+Existing fixture names defined inside test files stay where they are unless they are migrated.
+
+## 4. Shared-file bundle (exact content; also in the `sharedFileContent` return field)
+
+Four files: `tests/ng/conftest.py` (full replacement), `tests/ng/support.py` (three exact edits: import `pwd` and `MappingProxyType`, add `"--timeout"` to `_WRAPPER_VALUE_OPTS`, append the frozen builders block), `pyproject.toml` (adds `addopts` and `[tool.coverage.run] data_file`), `.ptest.toml` (`args` gains the cov args, `workers = 8`). `.gitignore` is **not** changed. The text is identical to `sharedFileContent`.
+
+The verbatim bundle is also committed as the git patch **`.pipeline/shared-bundle.patch`**. It applies cleanly to base `fadb2ab`: `git apply .pipeline/shared-bundle.patch`. The patch and the `sharedFileContent` text are identical, and either one is authoritative.
+
+**Probe results (bundle applied temporarily in the chain worktree, then reverted):**
+- `ptest tests/ng/test_config.py` → 169 passed, `4 workers`, `gw0..gw3`, coverage TOTAL printed. Two consecutive runs passed.
+- test_task_11d_pytest + test_pytest_full_subprocess + test_source + test_agent_providers → 253 passed (4 workers, 56 s).
+- test_cli + test_doctor + test_init + test_parallel_output_cli → 536 passed, 2 failed. **T4 fixes these:** `test_parallel_output_cli::test_doctor_persea_shaped_monorepo` and `::test_doctor_det1_deterministic_rows_cite_child_config` expect `no timing history yet`. They passed on base only because doctor read the **real** account state domain. They must build their own history or state explicitly.
+- test_uninstall + test_state_directory + test_install + test_platform → 164 passed, 1 failed. **T2 fixes this:** `test_uninstall::test_self_plans_only_the_argv_fixture_root_never_real_paths` asserts `str(inst) in out`, but the render wraps the longer xdist tmp path (`popen-gwN`). Make the assertion independent of path length without weakening it: for example a shorter tmp root via `tmp_path_factory.mktemp("u")`, or comparing against the unwrapped rendering of the same line.
+- The first run after any edit to a test/support file can report `changed-during-run` (pycache). Rerun once; that is not a failure.
+- **Revision (D13):** the first bundle defined `pytest_plugins` in tests/ng/conftest.py, which collection under the full-mode `tests` anchor rejects. The bundle now registers plugins from `pytest_configure`. The re-probe of the revised bundle, applied and then reverted: `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` collects 3920 tests. A throwaway `factories_domain.py` fixture is visible via `--fixtures` under both the `tests` and the `tests/ng/test_config.py` anchor. `ptest tests/ng/test_config.py` gives 169 passed on 4 workers with coverage TOTAL. The patch applies cleanly to base (`git apply --check`).
+
+## 5. Tasks
+
+Every task must:
+- Record per-file test counts before and after (from `.venv/bin/ptest` output) in `.pipeline/progress-T<n>.md`. For every owned test file, "after" must be at least "before".
+- Add no skip, xfail or deletion. Delete no assertion and weaken none. Keep every test id, except where a parametrisation id is unchanged in content.
+- Pass every owned test file under the bundle (parallel header shows more than one worker).
+- Every `subprocess` spawn of ptest in owned files (`-m ptest`, `ptest` executables) passes `--fixture-domain` or an explicit `PTEST_STATE_DIR` under tmp. No child may resolve the real account domain.
+- For owned files, return empty from:
+  - `grep -nE 'os\.chdir\(|os\.environ\[[^]]+\] *=|Path\.home\(\)|expanduser\(' <owned files>` (except inside `monkeypatch` usage or assertions about those functions)
+  - a check for literal `/tmp/` *filesystem* paths (string payloads that never hit disk are fine; add a comment)
+  - a check for fixed non-zero ports
+- Delete a hand-rolled helper (`_git`, `_repository`, `_commit_fixture`, `_write_config`, toml-writing `_config`, `_domain`, `_fake_*`, `_monorepo*`, `_git_*project`) only after every caller in owned files uses a factory or support builder. **Leave literal TOML/text that is the subject of an assertion (render/parse golden strings) literal.** Migrate only builders of test *inputs*.
+
+### T1: configurable and dynamic run deadline
+**Owns:** `src/ptest/{contracts,config,operations,guard,cli,history,help,monorepo}.py`, `src/ptest/runtime/protocol-v1.json` (expected unchanged), `docs/schemas/**` (expected unchanged), `tests/ng/test_run_deadline.py` (new), `tests/ng/test_guard.py`, `tests/ng/test_contracts.py`, `tests/ng/test_config.py`, `.pipeline/progress-T1.md` (new).
+
+**Acceptance:**
+- Section 3.1 is implemented exactly.
+- `test_run_deadline.py` covers:
+  - precedence (cli > full_timeout in FULL > timeout > history > default); full_timeout is ignored for non-full modes
+  - the dynamic clamp at MIN and MAX_DYNAMIC; empty or broken history → 600 "default"
+  - `comparable_run_evidence` mode-family selection and its never-raise behaviour
+  - config parse bounds (0, 86401, bool, string, nan → invalid-config); render round-trip with and without the keys (without = byte-identical to today)
+  - CLI `--timeout` parse bounds and no-repeat; accepted with `--full` and `--changed`
+  - `repr(RunnerConfig)` unchanged
+  - the guard message text from 3.1 with a real short compound deadline (reuse the existing test_guard pattern at `compound_timeout_s=0.5`; no long timeouts). `{0.5:.0f}` renders as `0`, so assert the exact string `"compound execution deadline expired after 0s; raise it with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml"`. Also assert that a real short **attempt** timeout still yields exactly `"attempt execution deadline expired"`.
+  - D12 propagation: a positional-only wrapper `def spy(*args): return launch(*args)` installed on `operations._launch_guard` (the same shape as the T4-owned wrappers) sees `operations._COMPOUND_TIMEOUT_S.get()` equal to the resolved limit during `operations.execute`. Use a command-kind project with no nested pytest, and `C.RunRequest(timeout_s=...)` so the value is distinct from 600. After `execute` returns, the contextvar is back at `DEFAULT_COMPOUND_TIMEOUT_S`, including when the wrapper raises (reuse the `fail(*args)` launch-failure pattern).
+- Existing literal `compound_timeout_s=600.0` in test_contracts stays valid.
+- Read-only regression run (T1 edits only src to fix these): `tests/ng/test_cli.py test_help.py test_operations.py test_run_output.py test_monorepo_scopes.py test_source.py test_history.py test_init_smoke.py test_pytest_scoped_subprocess.py test_task_11d_pytest.py test_task_11f_pytest.py test_shadow.py`. This is satisfiable because `_launch_guard`/`_run_guard` signatures are unchanged (D12). The positional-only wrappers in test_operations.py (l.494, 546, 700, 788, 828, 879) and test_pytest_scoped_subprocess.py (l.1124, 1143) must pass **unedited**.
+- `git diff fadb2ab -- src/ptest/operations.py` shows no change to the `def _launch_guard(` or `def _run_guard(` parameter lists.
+- T1 does not need to migrate builders in test_config/test_contracts (their TOML literals are the subject under test), but it must obey isolation.
+
+### T2: isolation foundation, parallel config, domain/state factories
+**Owns:** the bundle files after the first commit (`pyproject.toml`, `.ptest.toml`, `tests/ng/conftest.py`, `tests/ng/support.py`), `tests/ng/factories_domain.py` (new), `tests/ng/test_isolation.py` (new), `tests/ng/test_{uninstall,state_directory,install,platform,files,scheduler,resources,storage,history}.py`, `.pipeline/progress-T2.md` (new).
+
+**Acceptance:**
+- `.venv/bin/ptest tests/ng/test_config.py` shows more than one worker (`gw*` ids or ptest's worker count) with coverage output. Record the header line.
+- **Full-mode anchor check (collection only, D13):** with `factories_domain.py` in place, run `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests`. It exits 0 with no `pytest_plugins` / "non-top-level conftest" error, and its collected count is at least the base count (3920) plus T2's new tests. Then `.venv/bin/python -m pytest --fixtures -q -p no:cacheprovider tests | grep -E "domain_factory|account_home|state_dir_factory"` lists all three. Also `grep -rnE "^[[:space:]]*pytest_plugins[[:space:]]*=" tests/` returns nothing. Record the commands and output in progress-T2.md. This executes no tests and is not a `--full` run.
+- `factories_domain.py` provides section 3.4.
+- Install, uninstall, state and platform tests use `account_home`, `state_dir_factory` or `isolated_env` instead of ad-hoc pwd/HOME patches. Remove each duplicated `_fake_home`/`_domain` helper.
+- `state_dir_factory` is the only way T2 tests set `PTEST_STATE_DIR`.
+- Scheduler, resource and storage tests show no cross-worker contention. Use `xdist_group("process-table")` only for tests that scan or signal processes they did not spawn, and give a reason comment.
+- Add `tests/ng/test_isolation.py` (new):
+  - `isolated_env` redirects HOME/XDG/pwd home/GIT_CONFIG_GLOBAL, and PTEST_STATE_DIR is unset
+  - `platform.domain_paths(None).root` is under `isolated_env.home`; after `monkeypatch.setenv("PTEST_STATE_DIR", str(isolated_env.state_dir))`, `platform.configured_state_directory() == isolated_env.state_dir`
+  - two tests get distinct roots
+  - inherited `PTEST_*`/`PYTEST_XDIST_*` vars are absent
+  - `conftest._snapshot_path` detects creation, mtime change and relink on a tmp path
+  - `support.ptest_toml_text()` parses through `ptest.config` for the kinds command and pytest
+  - `init_git_repo` produces one commit on `main` with the fixture identity
+- `test_files.py` MINI_PREFIX grammar mirror: add `"--timeout"` to its `WRAPPER_VALUE_OPTS` so it matches `support._WRAPPER_VALUE_OPTS`.
+- Across all T2 files, run chunked verification in groups of 3 or 4 files per call.
+
+### T3: repo, config, monorepo and venv factories; init, selection, CLI and shadow tests
+**Owns:** `tests/ng/factories_repo.py` (new), `tests/ng/test_{cli,init,init_smoke,init_render,init_changed,monorepo_changed,monorepo_scopes,changed_explain,selection,source,project_facts,executability,shadow,doctor_init_integration,compound_profiles}.py`, `.pipeline/progress-T3.md` (new).
+
+**Acceptance:**
+- `factories_repo.py` provides section 3.4.
+- Every per-file `_git`/`_repository`/`git init` sequence uses `support.git`/`init_git_repo` or `git_repo`. Every `.ptest.toml` input builder uses `ptest_toml_text`/`write_ptest_toml`/`ptest_project`. Every monorepo builder (`_monorepo_root`, `_monorepo_cli_root`, `_monorepo`) uses `monorepo`. Every venv stub uses `venv_stub`.
+- test_cli's `scratch="/tmp/ptest-review-test"` stays only if it is a non-filesystem payload (verify, then comment). Otherwise use tmp_path.
+- Any test that previously leaned on the real account domain (where/status/history/doctor against no fixture) now sees an empty tmp home. Give it explicit state; never point it back at the real home.
+
+### T4: fake executables and subprocess pytest projects; adapter, subprocess and operations tests
+**Owns:** `tests/ng/factories_exec.py` (new), `tests/ng/test_{pytest_scoped_subprocess,pytest_full_subprocess,pytest_parallel_subprocess,pytest_parallel_coverage_subprocess,pytest_xdist_serial_subprocess,task_11d_pytest,task_11f_pytest,pytest_adapter,pytest_bridge_unit,vitest_adapter,simple_adapters,parallel_output_cli,run_output,acceptance,help,operations}.py`, `.pipeline/progress-T4.md` (new).
+
+**Acceptance:**
+- `factories_exec.py` provides section 3.4.
+- `_commit_fixture` and `_git_pytest_project`-style builders use `init_git_repo`/`fake_pytest_project`. `_fake_node`, `_fake_python_on_path` and `_fake_cli_executable` use `fake_exec`/`fake_bin`.
+- `test_parallel_output_cli.py:697` `os.chdir` becomes `monkeypatch.chdir`.
+- Fix the two test_parallel_output_cli doctor tests from the probe results in section 4. They must not depend on real-account history.
+- test_task_11d's real `uv lock/sync` tests carry `xdist_group("uv-cache")` and run with `REAL_TOOL_ENV` (inherited through the environment). No network beyond what they do today.
+- Nested pytest children must not inherit xdist/cov control vars. conftest D4 covers this; verify one subprocess test prints no `gw` worker.
+- Timing-sensitive tests keep their existing bounds and must pass 3 times in a row under `-n auto`. Record this.
+
+### T5: agent provider, doctor and review factories; agent, doctor, review and recommendation tests
+**Owns:** `tests/ng/factories_agents.py` (new), `tests/ng/test_{agent_assessment,agent_assessment_contract,agent_providers,agent_rules,agent_doctor_acceptance,doctor,doctor_fix,doctor_smoke,review_context,review_protocol,recommendations,checklist,deterministic_items,reports,render,probes,security_gates}.py`, `.pipeline/progress-T5.md` (new).
+
+**Acceptance:**
+- `factories_agents.py` provides section 3.4.
+- `_fake_account`, `_fake_reviewer`, `_fake_qualified_profiles`, `_fake_entries`/`_fake_version` and provider-executable writers use its factories plus `write_executable`. Configs use `ptest_toml_text`.
+- Fake providers must never resolve the real `claude`/`codex`/`gemini`/`opencode` on the real PATH. Each provider test pins PATH to its fake dir and the system dirs it needs, and never includes `~/.local/bin`.
+- `scratch="/tmp/..."` values in agent_doctor_acceptance and doctor_fix: verify they are payload-only. If they are real paths, move them under tmp_path.
+
+## 6. Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| The default pwd-home patch changes output of tests that silently read the real account domain. | This is intended: they were isolation bugs. Tasks see it at once because the bundle is their first commit. Fix it with explicit state in owned files. |
+| Plugin registration fails under the full-mode anchor. `ptest --full` passes `test_roots = ["tests"]`, so tests/ng/conftest.py is **not** an initial conftest there, and pytest rejects any `pytest_plugins` attribute in it. | Removed at the source (D13). The bundle registers plugins through `pytest_configure` + `import_plugin`, and no conftest defines `pytest_plugins`. The failure only appears under the `tests` anchor, which no scoped task run uses, so T2 acceptance and final-gate step 3 check it by collection only before the single `--full`. |
+| Coverage and xdist overhead. | Accepted: qualification requires it. T2 records the scoped chunk timings. |
+| History-derived deadline too tight after a fast run. | Safety factor 3, 60 s floor, and an explicit `--timeout` escape named in the message. |
+| A merge conflict on a bundle file. | Bundle commits are byte-identical, and only T2 edits them afterwards. |
+
+## 7. Final gate (orchestrator, after merging T1 to T5)
+1. `uv sync --locked --extra test`
+2. Chunked smoke: 4 or 5 groups of about 12 files through `.venv/bin/ptest`.
+3. Collection only, full-mode anchor: `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests` exits 0, and `--fixtures ... tests` lists fixtures from all four `factories_*` modules. Do not start `--full` until this passes.
+4. Exactly one `.venv/bin/ptest --full`. It must be parallel (more than one worker), all green, with total test count ≥ 3818 plus the new test_run_deadline and test_isolation tests.
