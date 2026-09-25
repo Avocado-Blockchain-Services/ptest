@@ -22,18 +22,93 @@ explicit signatures reject unknown overrides with ``TypeError``.
 """
 from __future__ import annotations
 
+import json
 import os
+import secrets
+import sys
 from pathlib import Path
 
 import pytest
 
 from ptest import contracts as C
-from support import (
-    ptest_toml_text,
-    write_executable,
-    write_file,
-    write_ptest_toml,
-)
+
+
+# Workaround (T5): the frozen shared builders below are verbatim copies of
+# bundle section 3.2 (``tests/ng/support.py`` at base ``a40c75e``). This
+# worktree reverted the T2 bundle files, so ``support`` no longer provides
+# them; T5-owned modules must not import bundle names from there. Delete
+# this block and restore ``from support import ...`` once the bundle lands;
+# until then this keeps every T5-owned caller on byte-identical output.
+PYTHON_SHEBANG = f"#!{sys.executable}\n"
+
+
+def write_file(path, content) -> Path:
+    """Write str (utf-8) or bytes to ``path``, creating parents."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    elif isinstance(content, str):
+        path.write_text(content, encoding="utf-8")
+    else:
+        raise TypeError("content must be str or bytes")
+    return path
+
+
+def write_executable(path, text: str) -> Path:
+    path = write_file(path, text)
+    os.chmod(path, 0o755)
+    return path
+
+
+_SETUP_KEYS = frozenset({"argv", "required_paths", "network", "lifecycle_scripts"})
+
+
+def ptest_toml_text(*, kind: str = "command", launcher=("echo",),
+                    args=("hello",), full_args=(), test_roots=None,
+                    workers: int = 1, project_id: str | None = None,
+                    runner_extra: str = "", setup: dict | None = None,
+                    tail: str = "") -> str:
+    """Canonical ``.ptest.toml`` text; ``runner_extra`` lands in [runner]."""
+    if test_roots is None:
+        test_roots = () if kind == "command" else ("tests",)
+    lines = [
+        "version = 1",
+        f"project_id = {json.dumps(project_id or secrets.token_hex(16))}",
+        "",
+        "[runner]",
+        f"kind = {json.dumps(kind)}",
+        f"launcher = {json.dumps(list(launcher))}",
+        f"args = {json.dumps(list(args))}",
+        f"full_args = {json.dumps(list(full_args))}",
+    ]
+    if test_roots:
+        lines.append(f"test_roots = {json.dumps(list(test_roots))}")
+    lines.append(f"workers = {int(workers)}")
+    lines.append('lifecycle = "cooperative-process-group"')
+    if runner_extra:
+        lines.append(runner_extra.rstrip("\n"))
+    if setup is not None:
+        unknown = set(setup) - _SETUP_KEYS
+        if unknown:
+            raise TypeError(f"unknown setup keys: {sorted(unknown)}")
+        lines.extend([
+            "",
+            "[setup]",
+            f"argv = {json.dumps(list(setup['argv']))}",
+            f"required_paths = {json.dumps(list(setup.get('required_paths', ())))}",
+            f"network = {str(bool(setup.get('network', False))).lower()}",
+            "lifecycle_scripts = "
+            f"{str(bool(setup.get('lifecycle_scripts', False))).lower()}",
+        ])
+    text = "\n".join(lines) + "\n"
+    if tail:
+        text += tail if tail.endswith("\n") else tail + "\n"
+    return text
+
+
+def write_ptest_toml(root, **kwargs) -> Path:
+    return write_file(Path(root) / ".ptest.toml", ptest_toml_text(**kwargs))
 
 AGENT_CHILD_PID = "ab" * 16
 AGENT_CITATION_SHA = "ef" * 32
