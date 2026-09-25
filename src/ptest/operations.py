@@ -1851,6 +1851,24 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
+def _setup_failed_line(*, setup_raw: int | None,
+                       setup_problem: C.Problem | None) -> str | None:
+    """Setup status line: None when the setup is clean, else the failure.
+
+    A zero exit with an attached problem names the problem code — a setup
+    that exits 0 is never printed as "setup failed (exit 0)".
+    """
+    if setup_raw == 0:
+        if setup_problem is None:
+            return None
+        return progress.format_setup_failed(problem_code=setup_problem.code)
+    return progress.format_setup_failed(
+        exit_code=setup_raw,
+        problem_code=(setup_problem.code
+                      if setup_raw is None and setup_problem is not None
+                      else None))
+
+
 def _changed_paths(snapshot: C.InputSnapshot) -> list[str]:
     """Distinct changed paths (old/new merged) in first-seen order."""
     paths: list[str] = []
@@ -1939,8 +1957,9 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
                                         if config_path is not None else None),
                            changed_path=(render.terminal_text(changed_path)
                                          if changed_path is not None else None)))
-        progress.emit(f"ptest: {project} · {runner} · {segment}",
-                      quiet=request.quiet)
+        progress.emit(progress.format_changed_start(
+            project=project, runner=runner, segment=segment,
+            color=sys.stderr.isatty()), quiet=request.quiet)
         if request.verbose:
             progress.emit(
                 f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
@@ -1990,7 +2009,7 @@ def _waiting_snapshot(domain: C.DomainPaths,
 
 
 def _baseline_note(*, plan: C.Plan, advanced: bool,
-                   result: C.RunResult) -> str | None:
+                   result: C.RunResult, color: bool = False) -> str | None:
     """Baseline end-line note, for full runs that can publish a baseline.
 
     Returns None for selected/scoped runs and for runners without the
@@ -1998,7 +2017,7 @@ def _baseline_note(*, plan: C.Plan, advanced: bool,
     """
     if not advanced or plan.execution != "full":
         return None
-    return progress.format_baseline_note(result)
+    return progress.format_baseline_note(result, color=color)
 
 
 def _emit_end(request: C.RunRequest, result: C.RunResult,
@@ -2233,7 +2252,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
     def _finish(result: C.RunResult) -> C.RunResult:
         _emit_end(request, result, run_mono,
                   baseline_note=_baseline_note(
-                      plan=plan, advanced=advanced, result=result))
+                      plan=plan, advanced=advanced, result=result,
+                      color=sys.stderr.isatty()))
         return result
 
     signals = _Signals()
@@ -2501,17 +2521,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
             else C.Problem(**frames.setup_facts["problem"])
         )
         if frames.setup_facts is not None:
-            if setup_raw == 0 and setup_problem is None:
-                progress.emit(
-                    progress.format_setup_done(frames.setup_elapsed_s),
-                    quiet=request.quiet)
-            else:
-                progress.emit(progress.format_setup_failed(
-                    exit_code=setup_raw,
-                    problem_code=(setup_problem.code
-                                  if setup_raw is None and setup_problem is not None
-                                  else None)),
-                    quiet=request.quiet)
+            line = _setup_failed_line(setup_raw=setup_raw,
+                                      setup_problem=setup_problem)
+            progress.emit(
+                line if line is not None
+                else progress.format_setup_done(frames.setup_elapsed_s),
+                quiet=request.quiet)
         setup_failed = (
             frames.setup_facts is not None
             and (setup_raw != 0 or setup_problem is not None)

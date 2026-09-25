@@ -2672,8 +2672,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         resolution.root, children, parsed.base, heads):
                     if not item.run:
                         if not parsed.quiet:
-                            print(f"ptest: {item.target.declaration} · no changes",
-                                  file=sys.stderr)
+                            print(progress.format_no_changes(
+                                render.terminal_text(item.target.declaration),
+                                color=sys.stderr.isatty()), file=sys.stderr)
                         changed_outcomes.append(
                             (0, C.Status.NO_TESTS_NEEDED, None))
                         continue

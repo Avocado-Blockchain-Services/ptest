@@ -249,6 +249,23 @@ def test_root_changed_uses_baselines_when_base_is_absent(
     assert "ptest: total" in err
 
 
+def test_no_changes_line_styles_prefix_and_project_on_tty():
+    from ptest import progress
+
+    line = progress.format_no_changes("web", color=True)
+    assert "\x1b[2mptest:\x1b[0m" in line
+    assert "\x1b[1mweb\x1b[0m" in line
+    assert line.endswith("· no changes")
+
+
+def test_no_changes_line_plain_without_tty(monkeypatch):
+    from ptest import progress
+
+    assert progress.format_no_changes("web") == "ptest: web · no changes"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in progress.format_no_changes("web", color=True)
+
+
 def test_select_changed_outside_git_runs_every_child(tmp_path):
     children = tuple(monorepo.ChildTarget(
         declaration=name, directory=tmp_path / name, config=None)

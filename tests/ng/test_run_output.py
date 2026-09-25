@@ -639,6 +639,38 @@ def test_setup_failure_prints_failed_line_with_exit(case):
     assert "ptest: setup failed (exit 3)" in lines, lines
 
 
+def test_setup_failed_line_names_problem_for_zero_exit():
+    from ptest import operations
+
+    problem = operations._problem("state-unavailable", "guard trouble")
+    assert operations._setup_failed_line(
+        setup_raw=0, setup_problem=problem) == (
+        "ptest: setup failed (state-unavailable)")
+
+
+def test_setup_failed_line_keeps_exit_for_nonzero_exit():
+    from ptest import operations
+
+    assert operations._setup_failed_line(
+        setup_raw=3, setup_problem=None) == "ptest: setup failed (exit 3)"
+
+
+def test_setup_failed_line_uses_problem_code_without_exit():
+    from ptest import operations
+
+    problem = operations._problem("state-unavailable", "guard trouble")
+    assert operations._setup_failed_line(
+        setup_raw=None, setup_problem=problem) == (
+        "ptest: setup failed (state-unavailable)")
+
+
+def test_setup_failed_line_clean_setup_reports_done():
+    from ptest import operations
+
+    assert operations._setup_failed_line(
+        setup_raw=0, setup_problem=None) is None
+
+
 def test_queue_timeout_refusal_keeps_code_message_and_hint_once(case):
     domain = case.domain(slots=1, jobs=1)
     root = _command_project(case, domain, args=("literal",))

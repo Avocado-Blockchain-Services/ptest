@@ -139,6 +139,19 @@ def format_changed_selected(*, selected: int, total: int,
     return f"changed: {selected} of {total} test files ({files})"
 
 
+def format_changed_start(*, project: str, runner: str, segment: str,
+                         color: bool = False) -> str:
+    """Changed-mode start line: styled head like ``format_start``."""
+    return (f"{_prefix(color=color)} {_project(project, color=color)} · "
+            f"{runner} · {segment}")
+
+
+def format_no_changes(declaration: str, *, color: bool = False) -> str:
+    """Skip line for a monorepo child with no changes."""
+    return (f"{_prefix(color=color)} {_project(declaration, color=color)} "
+            "· no changes")
+
+
 def explain_changed_full_reason(reason: C.Reason | None, *,
                                 config_name: str | None = None,
                                 changed_path: str | None = None) -> str:
@@ -200,11 +213,13 @@ def _no_baseline_detail(result: C.RunResult) -> str:
     return "not eligible for a baseline"
 
 
-def format_baseline_note(result: C.RunResult) -> str:
+def format_baseline_note(result: C.RunResult, *,
+                       color: bool = False) -> str:
     """End-line note for a full run: baseline recorded, or why not."""
     if result.baseline_published:
-        return "ptest: baseline recorded"
-    return f"ptest: no baseline recorded: {_no_baseline_detail(result)}"
+        return f"{_prefix(color=color)} baseline recorded"
+    return (f"{_prefix(color=color)} no baseline recorded: "
+            f"{_no_baseline_detail(result)}")
 
 
 def format_setup_failed(*, exit_code: int | None = None,
@@ -327,7 +342,8 @@ __all__ = [
     "reset", "claim_hint",
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
-    "format_changed_selected", "explain_changed_full_reason",
+    "format_changed_selected", "format_changed_start", "format_no_changes",
+    "explain_changed_full_reason",
     "format_baseline_note",
     "format_setup_start", "format_setup_done", "format_setup_failed",
     "format_setup_run_start", "format_setup_run_done",

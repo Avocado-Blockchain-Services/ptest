@@ -65,6 +65,38 @@ def test_emit_start_changed_selected(case, capsys):
         "ptest: proj · pytest · changed: 1 of 1 test files (1 file changed)")
 
 
+def test_changed_start_styles_prefix_and_project_on_tty():
+    line = progress.format_changed_start(
+        project="api", runner="pytest",
+        segment="changed: 1 of 1 test files (1 file changed)", color=True)
+    assert "\x1b[2mptest:\x1b[0m" in line
+    assert "\x1b[1mapi\x1b[0m" in line
+    assert line.endswith("changed: 1 of 1 test files (1 file changed)")
+
+
+def test_changed_start_plain_without_tty(monkeypatch):
+    segment = "changed: 1 of 1 test files (1 file changed)"
+    assert progress.format_changed_start(
+        project="api", runner="pytest", segment=segment) == (
+        f"ptest: api · pytest · {segment}")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in progress.format_changed_start(
+        project="api", runner="pytest", segment=segment, color=True)
+
+
+def test_baseline_note_styles_prefix_on_tty(case):
+    result = _result(case, baseline_published=True)
+    assert progress.format_baseline_note(
+        result, color=True) == "\x1b[2mptest:\x1b[0m baseline recorded"
+
+
+def test_baseline_note_plain_without_tty(case, monkeypatch):
+    result = _result(case, baseline_published=True)
+    assert progress.format_baseline_note(result) == "ptest: baseline recorded"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in progress.format_baseline_note(result, color=True)
+
+
 def test_emit_start_counts_test_files_not_test_items(case, capsys):
     config = case.config()
     request = case.request()
