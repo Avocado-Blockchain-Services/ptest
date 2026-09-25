@@ -12,17 +12,23 @@ import pytest
 from ptest import contracts as C
 from ptest.cli import main, parse_argv
 from ptest.runners import adapter_for, registered_kinds
+from factories_repo import fake_git_marker
+from support import write_file, write_ptest_toml
 
 
-def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, monkeypatch):
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
-    for child in ("api", "web"):
-        root = tmp_path / child
-        root.mkdir()
-        (root / ".ptest.toml").write_text(
-            'version = 1\nproject_id = "' + ("ab" if child == "api" else "cd") * 16 + '"\n'
-            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+# Payload-only scratch label: ProviderResult.scratch never touches the
+# filesystem here (real runs use tempfile.mkdtemp); the fixed value keeps
+# golden reply bytes stable across xdist workers.
+_REVIEW_SCRATCH = "/tmp/ptest-review-test"
+
+
+def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, monkeypatch, monorepo):
+    monorepo(
+        {"api": {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": "ab" * 16},
+         "web": {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": "cd" * 16}},
+        parent=tmp_path, name=None)
     monkeypatch.chdir(tmp_path)
     calls = []
     monkeypatch.setattr("ptest.operations.execute", lambda domain, config, request: calls.append((domain, config, request)) or type("R", (), {"reasons": (), "exit_code": 0})())
@@ -33,20 +39,18 @@ def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, m
 
 
 def test_report_verification_scopes_follow_dispatcher_route_validation(
-        tmp_path):
+        tmp_path, monorepo):
     from ptest import config as config_api
     from ptest import doctor
-    from ptest import monorepo
+    from ptest import monorepo as monorepo_api
     from ptest.cli import _recommendation_verification_scopes
 
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    monorepo(
+        {"api": {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": "ab" * 16}},
+        parent=tmp_path, name=None)
     child = tmp_path / "api"
     (child / "tests" / "unit").mkdir(parents=True)
-    (child / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "' + "ab" * 16 + '"\n'
-        '[runner]\nkind = "command"\nlauncher = ["true"]\n',
-        encoding="utf-8")
     resolution = config_api.resolve_config(tmp_path)
     domain = C.DomainPaths(
         root=tmp_path, machine_config=tmp_path / ".ptest" / "config.toml",
@@ -56,16 +60,16 @@ def test_report_verification_scopes_follow_dispatcher_route_validation(
 
     whole = doctor.inspect_workspace(
         domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
-    children = monorepo.preflight_children(tmp_path, resolution.monorepo)
+    children = monorepo_api.preflight_children(tmp_path, resolution.monorepo)
     with pytest.raises(C.Problem, match="name a test path inside a project"):
-        monorepo.route_scopes(("api",), children)
+        monorepo_api.route_scopes(("api",), children)
     assert _recommendation_verification_scopes(whole, resolution) == (None,)
 
     nested = doctor.inspect_workspace(
         domain, resolution, C.DEFAULT_SCAN_LIMITS, "api/tests")
     assert _recommendation_verification_scopes(nested, resolution) == (
         "api/tests",)
-    assert monorepo.route_scopes(("api/tests",), children).scopes == (
+    assert monorepo_api.route_scopes(("api/tests",), children).scopes == (
         "tests",)
 
 
@@ -101,10 +105,8 @@ def test_report_standalone_route_rejects_cli_command_and_flag_tokens(
     from ptest import doctor
     from ptest.cli import _recommendation_verification_scopes
 
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "' + "cd" * 16 + '"\n'
-        '[runner]\nkind = "command"\nlauncher = ["true"]\n',
-        encoding="utf-8")
+    write_ptest_toml(tmp_path, kind="command", launcher=("true",), args=(),
+                       full_args=(), project_id="cd" * 16)
     (tmp_path / scope).mkdir()
     resolution = config_api.resolve_config(tmp_path)
     domain = C.DomainPaths(
@@ -122,10 +124,7 @@ def test_report_standalone_route_rejects_cli_command_and_flag_tokens(
 
 
 def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeypatch, capsys):
-    marker = tmp_path / ".git"
-    marker.mkdir()
-    (marker / "HEAD").write_text("ref: refs/heads/main\n")
-    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    fake_git_marker(tmp_path)
     api = tmp_path / "api"
     web = tmp_path / "web"
     api.mkdir()
@@ -143,10 +142,7 @@ def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeyp
 
 
 def test_init_explicit_agent_choice_adds_only_repository_local_skill(tmp_path, monkeypatch):
-    marker = tmp_path / ".git"
-    marker.mkdir()
-    (marker / "HEAD").write_text("ref: refs/heads/main\n")
-    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    fake_git_marker(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
     monkeypatch.chdir(tmp_path)
 
@@ -158,15 +154,12 @@ def test_init_explicit_agent_choice_adds_only_repository_local_skill(tmp_path, m
 
 
 def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_failure(
-        tmp_path, monkeypatch):
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
-    for child, project_id in (("api", "ab"), ("web", "cd")):
-        root = tmp_path / child
-        root.mkdir()
-        (root / ".ptest.toml").write_text(
-            'version = 1\nproject_id = "' + project_id * 16 + '"\n'
-            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+        tmp_path, monkeypatch, monorepo):
+    monorepo(
+        {child: {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": project_id * 16}
+         for child, project_id in (("api", "ab"), ("web", "cd"))},
+        parent=tmp_path, name=None)
     monkeypatch.chdir(tmp_path)
     calls = []
     monkeypatch.setattr(
@@ -193,15 +186,12 @@ def test_monorepo_total_status_is_worst_of_child_outcomes():
 
 
 def test_monorepo_full_total_names_worst_child_status_not_exit_code(
-        tmp_path, monkeypatch, capsys):
-    (tmp_path / ".ptest.toml").write_text(
-        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
-    for child, project_id in (("api", "ab"), ("web", "cd")):
-        root = tmp_path / child
-        root.mkdir()
-        (root / ".ptest.toml").write_text(
-            'version = 1\nproject_id = "' + project_id * 16 + '"\n'
-            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+        tmp_path, monkeypatch, capsys, monorepo):
+    monorepo(
+        {child: {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": project_id * 16}
+         for child, project_id in (("api", "ab"), ("web", "cd"))},
+        parent=tmp_path, name=None)
     monkeypatch.chdir(tmp_path)
     outcomes = iter([
         (3, C.Status.FAILED), (5, C.Status.INCOMPLETE),
@@ -226,6 +216,9 @@ def test_monorepo_full_total_names_worst_child_status_not_exit_code(
 
 @pytest.mark.parametrize("scope", ["", "api", "web/x", "api/../x", "/api/x", "api\\x", "api/x", "api2/x"])
 def test_root_scope_rejects_invalid_or_undeclared_scope_before_execution(tmp_path, monkeypatch, scope):
+    # Manifest only, no child projects on disk: rejection happens before
+    # any child resolution, so the monorepo factory (which creates children)
+    # would change the setup under test.
     (tmp_path / ".ptest.toml").write_text(
         'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -366,16 +359,10 @@ SECRET_ARGV = ("/private/launcher-secret", "ODD=token-secret",
 def inspection_project(case, monkeypatch):
     domain = case.domain()
     root = case.project(domain)
-    (root / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "' + "ab" * 16 + '"\n'
-        '[runner]\nkind = "command"\n'
-        f'launcher = {json.dumps(SECRET_ARGV[:2])}\n'
-        f'args = {json.dumps(SECRET_ARGV[2:4])}\n'
-        f'full_args = {json.dumps(SECRET_ARGV[4:])}\n'
-        'test_roots = ["tests"]\n'
-        'workers = 1\nlifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="command", launcher=tuple(SECRET_ARGV[:2]),
+                       args=tuple(SECRET_ARGV[2:4]),
+                       full_args=tuple(SECRET_ARGV[4:]),
+                       test_roots=("tests",), project_id="ab" * 16)
     (root / "tests").mkdir()
     (root / "tests" / "test_cache.py").write_text(
         "raise RuntimeError('inspection executed project code')\n"
@@ -502,27 +489,13 @@ def test_where_describes_conditional_pytest_and_prepared_vitest_without_executio
     domain = case.domain()
     root = case.project(domain, kind=kind)
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
-    lines = [
-        "version = 1",
-        f'project_id = "{project_id}"',
-        "[runner]",
-        f'kind = "{kind}"',
-        f'launcher = {json.dumps(["python"] if kind == "pytest" else ["node"])}',
-        "args = []",
-        "full_args = []",
-        f"test_roots = {json.dumps(list(roots))}",
-        "workers = 8",
-        'lifecycle = "cooperative-process-group"',
-    ]
-    if setup:
-        lines.extend([
-            "[setup]",
-            'argv = ["uv", "sync"]',
-            'required_paths = [".venv"]',
-            "network = true",
-            "lifecycle_scripts = true",
-        ])
-    (root / ".ptest.toml").write_text("\n".join(lines) + "\n")
+    write_ptest_toml(
+        root, kind=kind,
+        launcher=("python",) if kind == "pytest" else ("node",),
+        args=(), full_args=(), test_roots=tuple(roots), workers=8,
+        project_id=project_id,
+        setup={"argv": ("uv", "sync"), "required_paths": (".venv",),
+               "network": True, "lifecycle_scripts": True} if setup else None)
     monkeypatch.chdir(root)
     monkeypatch.setattr("subprocess.Popen", lambda *a, **k: pytest.fail("where executed a runner"))
     monkeypatch.setattr("socket.create_connection", lambda *a, **k: pytest.fail("where made a network request"))
@@ -825,19 +798,10 @@ def _command_config():
 
 def _write_workers_eight_config(root, kind):
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        f'kind = "{kind}"\n'
-        f'launcher = {json.dumps(["python"] if kind == "pytest" else ["echo"])}\n'
-        'args = ["-q"]\n'
-        'full_args = []\n'
-        'test_roots = ["tests"]\n'
-        "workers = 8\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind=kind,
+                     launcher=("python",) if kind == "pytest" else ("echo",),
+                     args=("-q",), test_roots=("tests",), workers=8,
+                     project_id=project_id)
 
 
 @pytest.mark.parametrize("command", ["where", "register"])
@@ -899,19 +863,9 @@ def test_where_describes_unverified_source_evidence_statically(
     root = case.project(domain, kind="pytest")
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
     test_roots = ["nested/tests"] if fixture == "nested_no_root_config" else ["tests"]
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        'kind = "pytest"\n'
-        'launcher = ["python"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        f"test_roots = {json.dumps(test_roots)}\n"
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="pytest", launcher=("python",), args=(),
+                       full_args=(), test_roots=tuple(test_roots),
+                       project_id=project_id)
     for path in test_roots:
         (root / path).mkdir(parents=True)
     if fixture == "over_budget":
@@ -936,39 +890,28 @@ def test_where_describes_unverified_source_evidence_statically(
     assert "incomplete/70" in text
 
 
-def _monorepo_cli_root(base, declarations=("api", "web")):
-    (base / ".ptest.toml").write_text(
-        "version = 2\n[monorepo]\nchildren = "
-        + json.dumps(list(declarations)) + "\n",
-        encoding="utf-8",
-    )
+def _monorepo_cli_root(monorepo, base, declarations=("api", "web")):
+    """Doctor-review twin dispatcher; test payload files stay explicit."""
+    specs = {}
     for index, child in enumerate(declarations):
-        root = base / child
-        (root / "tests").mkdir(parents=True)
-        (root / ".ptest.toml").write_text(
-            "version = 1\n"
-            f'project_id = "{("ab" if index == 0 else "cd") * 16}"\n'
-            "[runner]\n"
-            'kind = "command"\n'
-            'launcher = ["true"]\n'
-            "args = []\n"
-            "full_args = []\n"
-            'test_roots = ["tests"]\n'
-            "workers = 1\n"
-            'lifecycle = "cooperative-process-group"\n',
-            encoding="utf-8",
-        )
-        (root / "tests" / "cache_test.py").write_text(
-            "def test_cache(client):\n    client.flushall()\n", encoding="utf-8")
+        specs[child] = {"kind": "command", "launcher": ("true",),
+                        "args": (), "full_args": (), "test_roots": ("tests",),
+                        "workers": 1,
+                        "project_id": (("ab" if index == 0 else "cd")) * 16}
+    root = monorepo(specs, parent=base, name=None)
+    for child in declarations:
+        write_file(root / child / "tests" / "cache_test.py",
+                   "def test_cache(client):\n    client.flushall()\n")
+    return root
 
 
 def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, monorepo):
     """Root content must not leak into child rows; every child stays numbered."""
     import socket
     import subprocess
 
-    _monorepo_cli_root(tmp_path)
+    _monorepo_cli_root(monorepo, tmp_path)
     (tmp_path / "root_noise_test.py").write_text("cache.flushall()\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("doctor executed a runner"))
@@ -986,8 +929,8 @@ def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
 
 
 def test_doctor_offline_json_from_monorepo_root_lists_every_child(
-        tmp_path, monkeypatch, capsys):
-    _monorepo_cli_root(tmp_path)
+        tmp_path, monkeypatch, capsys, monorepo):
+    _monorepo_cli_root(monorepo, tmp_path)
     monkeypatch.chdir(tmp_path)
     assert main(("doctor", "--offline", "--json")) == 0
     captured = capsys.readouterr()
@@ -1002,8 +945,8 @@ def test_doctor_offline_json_from_monorepo_root_lists_every_child(
 
 
 def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
-        tmp_path, monkeypatch, capsys):
-    _monorepo_cli_root(tmp_path)
+        tmp_path, monkeypatch, capsys, monorepo):
+    _monorepo_cli_root(monorepo, tmp_path)
     monkeypatch.chdir(tmp_path)
     assert main(("doctor", "--offline", "--scope", "api")) == 0
     captured = capsys.readouterr()
@@ -1021,9 +964,9 @@ def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
 
 
 def test_doctor_probe_still_executes_without_checklist(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, monorepo):
     calls = []
-    _monorepo_cli_root(tmp_path, declarations=("api",))
+    _monorepo_cli_root(monorepo, tmp_path, declarations=("api",))
     monkeypatch.chdir(tmp_path / "api")
     monkeypatch.setattr(
         "ptest.operations.execute",
@@ -1585,10 +1528,7 @@ def test_init_doctor_without_explicit_consent_keeps_files_and_reports_consent(
     import sys
 
     _forbid_launch(monkeypatch)
-    marker = tmp_path / ".git"
-    marker.mkdir()
-    (marker / "HEAD").write_text("ref: refs/heads/main\n")
-    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    fake_git_marker(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
@@ -1609,10 +1549,7 @@ def test_init_doctor_on_existing_config_without_consent_keeps_bytes_and_reports_
     import sys
 
     _forbid_launch(monkeypatch)
-    marker = tmp_path / ".git"
-    marker.mkdir()
-    (marker / "HEAD").write_text("ref: refs/heads/main\n")
-    (marker / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    fake_git_marker(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
@@ -1893,21 +1830,17 @@ def test_tty_auto_skips_unqualified_opencode_without_prompting(
     assert "opencode is not supported" in err
 
 
-def _review_project(root):
-    """Create a two-child v2 project for the shared doctor review path."""
-    (root / ".ptest.toml").write_text(
-        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n',
-        encoding="utf-8")
-    for name, project_id in (("api", "ab"), ("web", "cd")):
-        child = root / name
-        child.mkdir()
-        (child / ".ptest.toml").write_text(
-            "version = 1\n"
-            f'project_id = "{project_id * 16}"\n'
-            "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
-            encoding="utf-8")
-        (child / "test_example.py").write_text(
-            "def test_example():\n    assert True\n", encoding="utf-8")
+def _review_project(monorepo, root):
+    """Two-child v2 project for the shared doctor review path."""
+    children = monorepo(
+        {name: {"kind": "command", "launcher": ("true",), "args": (),
+                "full_args": (), "project_id": project_id * 16}
+         for name, project_id in (("api", "ab"), ("web", "cd"))},
+        parent=root, name=None)
+    for name in ("api", "web"):
+        write_file(children / name / "test_example.py",
+                   "def test_example():\n    assert True\n")
+    return children
 
 
 def _fake_qualified_profiles(monkeypatch, *, unqualified=()):
@@ -1987,7 +1920,7 @@ def _ok_item_launches(launches, hook=None, *, pid=1000, status="unknown"):
                 assessment=_one_row_reply(request, status=status), error="",
                 exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=pid + len(launches),
-                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+                argv=adapter.argv, scratch=_REVIEW_SCRATCH))
             if on_done is not None:
                 on_done(len(results) - 1, results[-1])
         return tuple(results)
@@ -2026,7 +1959,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
                 assessment=_one_row_reply(request, status="satisfied"),
                 error="", exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=8003, argv=adapter.argv,
-                scratch="/tmp/ptest-review-test"))
+                scratch=_REVIEW_SCRATCH))
         return tuple(results)
 
     monkeypatch.setattr(
@@ -2104,10 +2037,8 @@ def test_zero_planned_calls_produce_report_without_disclosure_or_launch(
 
     root = tmp_path / "all-skipped"
     root.mkdir()
-    (root / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "abababababababababababababababab"\n'
-        "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
-        encoding="utf-8")
+    write_ptest_toml(root, kind="command", launcher=("true",), args=(),
+                       full_args=(), project_id="ab" * 16)
     (root / "pyproject.toml").write_text(
         "[project]\nname = \"demo\"\n", encoding="utf-8")
     (root / "tests").mkdir()
@@ -2188,14 +2119,14 @@ def test_only_selected_profile_qualification_gates_source_scan(
 
 
 def test_doctor_reviews_children_sequentially_and_publishes_one_document(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, monorepo):
     import time
     import sys
     from ptest import recommendations
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     (root / "api" / ".env").write_text(
         "API_TOKEN=must-not-enter-review-packet\n", encoding="utf-8")
     monkeypatch.chdir(root)
@@ -2291,13 +2222,13 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
 
 
 def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, monorepo):
     import sys
     from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
@@ -2318,7 +2249,7 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
                 provider=adapter.name, ok=False, assessment=b"",
                 error="provider-failed", exit_code=7, timed_out=False,
                 cancelled=False, truncated=False, pid=2002,
-                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+                argv=adapter.argv, scratch=_REVIEW_SCRATCH))
         return tuple(results)
 
     monkeypatch.setattr(
@@ -2345,12 +2276,12 @@ def test_all_item_failure_keeps_prior_report_and_emits_no_assessment(
 
 @pytest.mark.parametrize("mutation", ["source", "config", "invalid-config"])
 def test_revalidation_rejects_source_or_config_drift_before_publication(
-        case, tmp_path, monkeypatch, capsys, mutation):
+        case, tmp_path, monkeypatch, capsys, mutation, monorepo):
     import sys
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
@@ -2404,12 +2335,12 @@ def test_revalidation_rejects_source_or_config_drift_before_publication(
 
 
 def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, monorepo):
     import sys
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     scoped_source = root / "api" / "tests" / "test_scoped.py"
     scoped_source.parent.mkdir()
     scoped_source.write_text("def test_scoped():\n    assert True\n",
@@ -2500,7 +2431,7 @@ def test_incomplete_or_invalid_provider_result_has_no_report(
                 exit_code=0 if invalid else None,
                 timed_out=timed_out, cancelled=cancelled, truncated=False,
                 pid=5001, argv=adapter.argv,
-                scratch="/tmp/ptest-review-test"))
+                scratch=_REVIEW_SCRATCH))
         return tuple(results)
 
     monkeypatch.setattr(
@@ -2605,7 +2536,7 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
                 provider=adapter.name, ok=True, assessment=reply, error="",
                 exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=9000 + len(results),
-                argv=adapter.argv, scratch="/tmp/ptest-review-test")
+                argv=adapter.argv, scratch=_REVIEW_SCRATCH)
             results.append(result)
             if on_done is not None:
                 on_done(len(results) - 1, result)
@@ -2767,7 +2698,7 @@ def test_non_tty_packet_collection_and_revalidation_emit_15_second_heartbeats(
 
 
 def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, monorepo):
     import sys
     from ptest import cli
     from ptest import recommendations
@@ -2775,18 +2706,13 @@ def test_valid_multi_child_report_proofs_above_256_publish_without_loss(
     domain = case.domain()
     root = case.project(domain)
     children = [f"child{index}" for index in range(5)]
-    (root / ".ptest.toml").write_text(
-        "version = 2\n[monorepo]\nchildren = "
-        + json.dumps(children) + "\n", encoding="utf-8")
-    for index, name in enumerate(children):
+    root = monorepo(
+        {name: {"kind": "command", "launcher": ("true",), "args": (),
+                "full_args": (), "project_id": f"{index + 1:02x}" * 16}
+         for index, name in enumerate(children)},
+        parent=root, name=None)
+    for name in children:
         child = root / name
-        child.mkdir()
-        project_id = f"{index + 1:02x}" * 16
-        (child / ".ptest.toml").write_text(
-            "version = 1\n"
-            f'project_id = "{project_id}"\n'
-            "[runner]\nkind = \"command\"\nlauncher = [\"true\"]\n",
-            encoding="utf-8")
         for source_index in range(51):
             (child / f"module_{source_index:02d}.py").write_text(
                 "VALUE = 1\n", encoding="utf-8")
@@ -3440,7 +3366,7 @@ def _pick_provider(monkeypatch, reply):
             provider=adapter.name, ok=True, assessment=reply,
             error="", exit_code=0, timed_out=False, cancelled=False,
             truncated=False, pid=4100, argv=adapter.argv,
-            scratch="/tmp/ptest-review-test")
+            scratch=_REVIEW_SCRATCH)
 
     monkeypatch.setattr("ptest.cli.agent_providers.launch_review",
                         fake_launch)
@@ -3672,7 +3598,7 @@ def _fenced_item_launches(launches, *, pid=5000):
                 provider=adapter.name, ok=True, assessment=fenced, error="",
                 exit_code=0, timed_out=False, cancelled=False,
                 truncated=False, pid=pid + len(launches),
-                argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+                argv=adapter.argv, scratch=_REVIEW_SCRATCH))
             if on_done is not None:
                 on_done(len(results) - 1, results[-1])
         return tuple(results)
@@ -3681,13 +3607,13 @@ def _fenced_item_launches(launches, *, pid=5000):
 
 
 def test_fenced_item_replies_review_and_publish(case, tmp_path, monkeypatch,
-                                                capsys):
+                                                capsys, monorepo):
     """Claude fenced replies validate, so review publishes instead of failing."""
     import sys
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
@@ -3710,14 +3636,14 @@ def test_fenced_item_replies_review_and_publish(case, tmp_path, monkeypatch,
 
 
 def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
-                                                  capsys):
+                                                  capsys, monorepo):
     """An all-failed review names each distinct reason with its count."""
     import sys
     from ptest.agent_providers import ProviderResult
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
@@ -3733,13 +3659,13 @@ def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
                     provider=adapter.name, ok=False, assessment=b"",
                     error="timeout", exit_code=None, timed_out=True,
                     cancelled=False, truncated=False, pid=6100 + index,
-                    argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+                    argv=adapter.argv, scratch=_REVIEW_SCRATCH))
             else:
                 results.append(ProviderResult(
                     provider=adapter.name, ok=False, assessment=b"",
                     error="invalid-assessment", exit_code=1, timed_out=False,
                     cancelled=False, truncated=False, pid=6100 + index,
-                    argv=adapter.argv, scratch="/tmp/ptest-review-test"))
+                    argv=adapter.argv, scratch=_REVIEW_SCRATCH))
         return tuple(results)
 
     monkeypatch.setattr(
@@ -3760,13 +3686,13 @@ def test_all_item_failure_counts_distinct_reasons(case, tmp_path, monkeypatch,
 
 
 def test_empty_init_file_reviews_and_publishes(case, tmp_path, monkeypatch,
-                                               capsys):
+                                               capsys, monorepo):
     """A project with an empty tests/__init__.py still reviews and publishes."""
     import sys
 
     domain = case.domain()
     root = case.project(domain)
-    _review_project(root)
+    _review_project(monorepo, root)
     for child in ("api", "web"):
         tests_dir = root / child / "tests"
         tests_dir.mkdir(exist_ok=True)

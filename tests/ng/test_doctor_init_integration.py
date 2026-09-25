@@ -17,81 +17,48 @@ import sys
 
 from ptest import contracts as C
 from ptest.cli import main
+from support import write_file, write_ptest_toml
 
 
-def _write_child_config(path, kind, launcher, extra=""):
-    (path / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "abababababababababababababababab"\n'
-        "[runner]\n"
-        f'kind = "{kind}"\n'
-        f"launcher = {launcher}\n"
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n' + extra,
-        encoding="utf-8",
-    )
+def _write_persea_shaped_monorepo(monorepo, parent):
+    """Persea-shaped api/web dispatcher; extra files stay explicit."""
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",),
+                 "project_id": "ab" * 16},
+         "web": {"kind": "vitest", "launcher": ("node",),
+                 "project_id": "ab" * 16,
+                 "setup": {"argv": ("npm", "ci"),
+                           "required_paths": ("node_modules",),
+                           "network": True, "lifecycle_scripts": True}}},
+        parent=parent, name="monorepo",
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n')
+    write_file(root / "api" / "pyproject.toml",
+               "[tool.pytest.ini_options]\n"
+               "addopts = '-n 4 --dist=loadgroup -m \"not slow\"'\n")
+    write_file(root / "api" / "tests" / "conftest.py",
+               "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+    write_file(root / "web" / "tests" / "a.test.ts", "export {};\n")
+    return root
 
 
-def _write_persea_shaped_monorepo(root):
-    api = root / "api"
-    web = root / "web"
-    (api / "tests").mkdir(parents=True)
-    (web / "tests").mkdir(parents=True)
-    (root / ".ptest.toml").write_text(
-        "version = 2\n\n[monorepo]\nchildren = [\"api\", \"web\"]\n",
-        encoding="utf-8",
-    )
-    (api / "pyproject.toml").write_text(
-        "[tool.pytest.ini_options]\n"
-        "addopts = '-n 4 --dist=loadgroup -m \"not slow\"'\n",
-        encoding="utf-8",
-    )
-    (api / "tests" / "conftest.py").write_text(
-        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
-        encoding="utf-8",
-    )
-    _write_child_config(api, "pytest", '["python"]')
-    (web / "tests" / "a.test.ts").write_text(
-        "export {};\n", encoding="utf-8")
-    _write_child_config(
-        web, "vitest", '["node"]',
-        extra="[setup]\n"
-              'argv = ["npm", "ci"]\n'
-              'required_paths = ["node_modules"]\n'
-              "network = true\nlifecycle_scripts = true\n",
-    )
+_DB_CONFTEST = (
+    "import sqlalchemy\n"
+    "\n"
+    "\n"
+    'ENGINE = sqlalchemy.create_engine("sqlite://")\n'
+    "\n"
+    "\n"
+    "def uses_database():\n"
+    "    return ENGINE\n"
+)
 
 
-def _write_db_standalone_repo(root):
-    (root / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"\n'
-        "[runner]\n"
-        'kind = "pytest"\n'
-        'launcher = ["python"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
-    tests = root / "tests"
-    tests.mkdir()
-    (tests / "test_example.py").write_text(
-        "def test_example():\n    assert True\n", encoding="utf-8")
-    (tests / "conftest.py").write_text(
-        "import sqlalchemy\n"
-        "\n"
-        "\n"
-        'ENGINE = sqlalchemy.create_engine("sqlite://")\n'
-        "\n"
-        "\n"
-        "def uses_database():\n"
-        "    return ENGINE\n",
-        encoding="utf-8",
-    )
+def _write_db_standalone_repo(ptest_project, parent, name):
+    return ptest_project(
+        name, parent=parent, kind="pytest", launcher=("python",),
+        project_id="cd" * 16,
+        files={"tests/test_example.py": "def test_example():\n    assert True\n",
+               "tests/conftest.py": _DB_CONFTEST})
 
 
 def _install_fake_claude(bindir):
@@ -180,10 +147,8 @@ def _read_launches(bindir):
 
 
 def test_init_persea_shaped_monorepo_reports_projects_and_fix(
-        tmp_path, monkeypatch, capsys):
-    root = tmp_path / "monorepo"
-    root.mkdir()
-    _write_persea_shaped_monorepo(root)
+        tmp_path, monkeypatch, capsys, monorepo):
+    root = _write_persea_shaped_monorepo(monorepo, tmp_path)
     monkeypatch.chdir(root)
 
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
@@ -200,12 +165,10 @@ def test_init_persea_shaped_monorepo_reports_projects_and_fix(
 
 
 def test_doctor_review_runs_one_haiku_call_per_item(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, ptest_project):
     from ptest.checklist import CATALOG
 
-    root = tmp_path / "review"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "review")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -262,10 +225,8 @@ def test_doctor_review_runs_one_haiku_call_per_item(
 
 
 def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
-                                                   capsys):
-    root = tmp_path / "one-failure"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+                                                   capsys, ptest_project):
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "one-failure")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -282,10 +243,8 @@ def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
 
 
 def test_doctor_review_fails_when_every_item_fails(tmp_path, monkeypatch,
-                                                  capsys):
-    root = tmp_path / "all-fail"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+                                                  capsys, ptest_project):
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "all-fail")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -303,10 +262,8 @@ def test_doctor_review_fails_when_every_item_fails(tmp_path, monkeypatch,
 
 
 def test_doctor_review_launches_nothing_before_consent(tmp_path, monkeypatch,
-                                                      capsys):
-    root = tmp_path / "declined"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+                                                      capsys, ptest_project):
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "declined")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -323,7 +280,7 @@ def test_doctor_review_launches_nothing_before_consent(tmp_path, monkeypatch,
 
 
 def test_doctor_review_computes_executability_once(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, ptest_project):
     """One executability pass per doctor run, shared by facts and answers.
 
     The review flow shares a single ``check_resolution`` across the
@@ -332,9 +289,7 @@ def test_doctor_review_computes_executability_once(
     """
     from ptest import executability as exec_module
 
-    root = tmp_path / "once"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "once")
     bindir = tmp_path / "bin"
     _prepare_review(monkeypatch, root, bindir)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -375,18 +330,8 @@ def test_doctor_select_fix_orders_coverage_profile_on_parallel_project(
     root.mkdir()
     (root / "pyproject.toml").write_text(
         "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
-    (root / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "' + "dd" * 16 + '"\n'
-        "[runner]\n"
-        'kind = "pytest"\n'
-        f"launcher = {json.dumps([sys.executable])}\n"
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="pytest", launcher=(sys.executable,),
+                     project_id="dd" * 16)
     tests = root / "tests"
     tests.mkdir()
     (tests / "test_example.py").write_text(
@@ -417,18 +362,9 @@ def test_doctor_qualified_cov_states_no_tradeoff_both_items(
     root.mkdir()
     (root / "pyproject.toml").write_text(
         "[tool.pytest.ini_options]\naddopts = '-n 4'\n", encoding="utf-8")
-    (root / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "' + "dd" * 16 + '"\n'
-        "[runner]\n"
-        'kind = "pytest"\n'
-        f"launcher = {json.dumps([sys.executable])}\n"
-        'args = ["--cov", "pkg", "--cov-report", "term"]\n'
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="pytest", launcher=(sys.executable,),
+                     args=("--cov", "pkg", "--cov-report", "term"),
+                     project_id="dd" * 16)
     tests = root / "tests"
     tests.mkdir()
     (tests / "test_example.py").write_text(

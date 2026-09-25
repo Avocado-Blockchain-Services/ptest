@@ -20,6 +20,7 @@ from ptest import config as config_api
 from ptest import contracts as C, history, operations, platform, reports, scheduler
 from ptest import selection
 from ptest.cli import parse_argv
+from support import init_git_repo, write_ptest_toml
 
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "shadow"
@@ -60,20 +61,16 @@ def _shadow_project(case, domain, *, ratio=0.75):
     project_id = tomllib.loads((root / ".ptest.toml").read_text())["project_id"]
     groups = ('[{ name = "shared", sources = ["src/shared.py"], '
               'tests = ["tests/test_alpha.py"] }]')
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\nkind = \"pytest\"\n"
-        f"launcher = [{json.dumps(_coverage_launcher())}]\n"
-        'args = ["-p", "no:xdist", "--cov=src", "--cov-report=term"]\n'
-        "full_args = []\n"
-        'test_roots = ["tests"]\nworkers = 8\n'
-        "[selection]\nenabled = true\nclosed_inputs = true\n"
+    write_ptest_toml(
+        root, kind="pytest", launcher=(_coverage_launcher(),),
+        args=("-p", "no:xdist", "--cov=src", "--cov-report=term"),
+        test_roots=("tests",), workers=8, project_id=project_id,
+        tail="[selection]\nenabled = true\nclosed_inputs = true\n"
         f"full_ratio = {ratio}\ninput_roots = [\"src\", \"tests\"]\n"
         'ignored_inputs = ["src/__pycache__", "tests/__pycache__"]\n'
-        'non_input_outputs = [".coverage", ".pytest_cache", "__pycache__", ".ptest-result.json"]\n'
+        'non_input_outputs = [".coverage", ".pytest_cache", "__pycache__", '
+        '".ptest-result.json"]\n'
         f"groups = {groups}\n",
-        encoding="utf-8",
     )
     return root
 
@@ -92,17 +89,6 @@ def _published_attempt_ids(domain, checkout, run_id):
             "ORDER BY attempt_id", (run_id,)))
 
 
-def _commit(root):
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
-    for args in (("init",), ("add", "."), ("commit", "-m", "fixture")):
-        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", "-C", str(root), *args),
-                       env=env, check=True, capture_output=True, timeout=10)
-
-
 def _invoke(case, domain, root, *args):
     result_path = root / ".ptest-result.json"
     result_path.unlink(missing_ok=True)
@@ -115,7 +101,7 @@ def _invoke(case, domain, root, *args):
 def _quarantined_recovery_case(case, domain):
     """Build a real quarantined history and a corrected policy for S3."""
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -127,7 +113,7 @@ def _quarantined_recovery_case(case, domain):
         'tests = ["tests/test_alpha.py", "tests/test_beta.py"]',
     ), encoding="utf-8")
     (root / "src" / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     corrected = _invoke(case, domain, root, "--full")
     assert corrected.code == 0, corrected.stderr.decode()
     (root / "src" / "shared.py").write_text(
@@ -364,7 +350,7 @@ def test_shadow_queued_cancellation_returns_cancelled_and_releases_ticket(
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     domain = case.domain(slots=1, jobs=1)
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -415,7 +401,7 @@ def test_shadow_failed_setup_is_first_attempt_with_setup_timing_and_exit(
         + "lifecycle_scripts = false\n",
         encoding="utf-8",
     )
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
     (root / "src" / "shared.py").write_text("VALUE = 1\n# setup\n", encoding="utf-8")
@@ -471,7 +457,7 @@ def test_shadow_successful_setup_preserves_phase_identity_and_history(
         + "lifecycle_scripts = false\n",
         encoding="utf-8",
     )
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
     monkeypatch.setattr(operations, "_stored_setup_fingerprint",
@@ -520,7 +506,7 @@ def test_s1_selected_native_failure_still_runs_full_and_preserves_first_nonzero(
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     domain = case.domain(slots=1, jobs=1)
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
 
@@ -544,7 +530,7 @@ def test_s2_four_file_bad_policy_shadow_quarantines_and_recovers(case, monkeypat
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     domain = case.domain(slots=1, jobs=1)
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     baseline = _invoke(case, domain, root, "--full")
     assert baseline.code == 0, baseline.stderr.decode()
     assert _data(baseline)["baseline_published"] is True
@@ -584,7 +570,7 @@ def test_s2_four_file_bad_policy_shadow_quarantines_and_recovers(case, monkeypat
         'tests = ["tests/test_alpha.py", "tests/test_beta.py"]',
     ), encoding="utf-8")
     (root / "src" / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     corrected = _invoke(case, domain, root, "--full")
     assert corrected.code == 0
     (root / "src" / "shared.py").write_text("VALUE = 1\n# benign\n", encoding="utf-8")
@@ -605,7 +591,7 @@ def test_s2_source_fix_without_policy_correction_does_not_clear_quarantine(
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     domain = case.domain(slots=1, jobs=1)
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert _invoke(case, domain, root, "--shadow").code == 1
@@ -623,7 +609,7 @@ def test_s2_unrelated_history_health_blocks_quarantine_clear(case, monkeypatch):
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     domain = case.domain(slots=1, jobs=1)
     root = _shadow_project(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert _invoke(case, domain, root, "--shadow").code == 1
@@ -633,7 +619,7 @@ def test_s2_unrelated_history_health_blocks_quarantine_clear(case, monkeypatch):
         'tests = ["tests/test_alpha.py", "tests/test_beta.py"]',
     ), encoding="utf-8")
     (root / "src" / "shared.py").write_text("VALUE = 1\n", encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     (root / "src" / "shared.py").write_text(
         "VALUE = 1\n# benign\n", encoding="utf-8")
@@ -694,7 +680,7 @@ def test_s3_source_edit_while_full_child_is_active_keeps_raw_evidence_and_quaran
         "    assert VALUE == 1\n"
     )
     (root / "tests" / "test_beta.py").write_text(active_test, encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert _invoke(case, domain, root, "--shadow").code == 1
@@ -703,7 +689,7 @@ def test_s3_source_edit_while_full_child_is_active_keeps_raw_evidence_and_quaran
     config = root / ".ptest.toml"
     config.write_text(config.read_text(encoding="utf-8").replace(
         "full_ratio = 0.75", "full_ratio = 0.80"), encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     checkout = operations._checkout(config_api.resolve_config(root).config)
     recovered_history = history.read_history(domain, checkout)
@@ -768,7 +754,7 @@ def test_s3_compound_deadline_expires_while_full_child_is_active(
         "    assert VALUE == 1\n"
     )
     (root / "tests" / "test_beta.py").write_text(active_test, encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     (root / "src" / "shared.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert _invoke(case, domain, root, "--shadow").code == 1
@@ -777,7 +763,7 @@ def test_s3_compound_deadline_expires_while_full_child_is_active(
     config = root / ".ptest.toml"
     config.write_text(config.read_text(encoding="utf-8").replace(
         "full_ratio = 0.75", "full_ratio = 0.80"), encoding="utf-8")
-    _commit(root)
+    init_git_repo(root, message="fixture")
     assert _invoke(case, domain, root, "--full").code == 0
     checkout = operations._checkout(config_api.resolve_config(root).config)
     assert history.read_history(domain, checkout).selection_quarantine is not None
@@ -875,7 +861,7 @@ def test_s3_missing_handoff_is_incomplete_and_retains_raw_outcomes_and_quarantin
     _use_guard_driver(monkeypatch, GUARD_FAILURE="drain")
     domain = case.domain(slots=1, jobs=1)
     root = _quarantined_recovery_case(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     result = _shadow_direct(case, domain, root)
     checkout = operations._checkout(config_api.resolve_config(root).config)
     assert result.status is C.Status.INCOMPLETE
@@ -953,7 +939,7 @@ def test_s3_stable_two_pass_shadow_with_fake_elapsed_time_clears_quarantine(
     monkeypatch.setattr(operations, "_FRAME_TIMEOUT_S", 40.0)
     domain = case.domain(slots=1, jobs=1)
     root = _quarantined_recovery_case(case, domain)
-    _commit(root)
+    init_git_repo(root, message="fixture")
     result = _shadow_direct(case, domain, root)
     checkout = operations._checkout(config_api.resolve_config(root).config)
     assert (result.status, result.exit_code, result.runner_exit_code) == (

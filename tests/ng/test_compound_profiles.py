@@ -26,6 +26,7 @@ def _config(kind: C.RunnerKind, *, args=(), full_args=(), workers=1):
                               workers=workers),
         setup=None, resources=C.ResourceConfig(),
         selection=C.SelectionPolicy(enabled=True, closed_inputs=True),
+        # Payload-only path: a Config field, never created on disk.
         project_id="ab" * 16, config_path=Path("/tmp/project/.ptest.toml"),
     )
 

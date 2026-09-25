@@ -19,6 +19,7 @@ def _reason(code: str, message: str) -> C.Reason:
 
 
 def _checkout() -> C.CheckoutIdentity:
+    # Payload-only path: formatting input, never created on disk.
     return C.CheckoutIdentity(
         project_id="ab" * 16, checkout_id="cd" * 16, root=Path("/tmp/proj"))
 

@@ -12,6 +12,7 @@ import pytest
 
 from ptest.config import init_project, resolve_config
 from ptest.contracts import InitAction, InitOptions, Problem, RunnerKind
+from factories_repo import fake_git_marker
 
 
 def _options(runner=None, *, dry_run=False, reveal_command=False):
@@ -268,10 +269,9 @@ def test_monorepo_subprojects_initialize_their_own_nearest_roots(tmp_path, marke
     api.mkdir(parents=True)
     web.mkdir()
     if marker == "directory":
-        git = repo / ".git"
-        git.mkdir()
-        (git / "HEAD").write_text("ref: refs/heads/main\n")
-        (git / "config").write_text("[core]\nrepositoryformatversion = 0\n")
+        # Detection-only fake marker (no git binary); the worktree-file
+        # variant below needs its distinct shape, so it stays inline.
+        fake_git_marker(repo)
     else:
         (repo / ".git").write_text("gitdir: /unreadable/shared/metadata\n")
     (api / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")

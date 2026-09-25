@@ -15,6 +15,7 @@ import sys
 import pytest
 
 from ptest import contracts as C
+from factories_repo import fake_git_marker
 
 
 def _passed_cells(text: str) -> int:
@@ -22,16 +23,10 @@ def _passed_cells(text: str) -> int:
     return len(re.findall(r"✓|\[ok\]", text))
 
 
-def _git(root):
-    marker = root / ".git"
-    marker.mkdir(exist_ok=True)
-    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-    (marker / "config").write_text(
-        "[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
-
-
 def _pytest_repo(root, files):
-    _git(root)
+    # Detection-only fake marker (no git binary): candidate choice and
+    # smoke tests never classify changes, so a real repo is unnecessary.
+    fake_git_marker(root)
     tests = root / "tests"
     tests.mkdir(exist_ok=True)
     for name, body in files.items():
@@ -87,7 +82,7 @@ def test_candidate_never_picks_db_or_network_test(tmp_path):
 def test_candidate_picks_vitest_shape(tmp_path):
     from ptest import init_smoke
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "b.test.ts").write_text("import {db} from './db';\n", encoding="utf-8")
@@ -99,7 +94,7 @@ def test_candidate_picks_vitest_shape(tmp_path):
 
 def _persea_web_shape(root):
     """Persea-web-shaped fixture: Playwright specs in e2e/, unit tests in src/."""
-    _git(root)
+    fake_git_marker(root)
     (root / "vitest.config.ts").write_text(
         "import { defineConfig, configDefaults } from 'vitest/config';\n"
         "export default defineConfig({\n"
@@ -296,7 +291,7 @@ def test_tty_consent_names_the_file_and_runs(tmp_path, monkeypatch, capsys, case
 def test_smoke_and_no_smoke_conflict(tmp_path, monkeypatch, capsys):
     from ptest import cli
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     assert cli.main((
@@ -334,7 +329,7 @@ def test_missing_setup_skips_with_exact_command(
         tmp_path, monkeypatch, capsys, case):
     from ptest import cli, operations
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     web = tmp_path / "web"
     (web / "tests").mkdir(parents=True)
     (web / "tests" / "a.test.ts").write_text("export {};\n", encoding="utf-8")
@@ -422,7 +417,7 @@ def test_monorepo_reports_one_smoke_line_per_project(
         tmp_path, monkeypatch, capsys, case):
     from ptest import cli
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     api = tmp_path / "api"
     (api / "tests").mkdir(parents=True)
     (api / "tests" / "test_api.py").write_text(
@@ -663,7 +658,7 @@ def _vitest_toml_with_setup(*, launcher=("node",)):
 
 
 def _npm_locked_vitest_repo(root):
-    _git(root)
+    fake_git_marker(root)
     tests = root / "tests"
     tests.mkdir(exist_ok=True)
     (tests / "a.test.ts").write_text(
@@ -802,7 +797,7 @@ def test_executability_and_smoke_lines_agree_on_setup_project(
     _pytest_repo(tmp_path, {"test_tiny.py": "def test_tiny():\n    assert True\n"})
     (tmp_path / "uv.lock").write_text("# fake uv lock\n", encoding="utf-8")
     (tmp_path / ".setup-done").write_text("done\n", encoding="utf-8")
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     (tmp_path / ".ptest.toml").write_text(
         _pytest_toml_with_setup(
             setup_argv=[_sys.executable, "setup.py"],
@@ -941,7 +936,7 @@ def test_monorepo_child_executes_via_preflight_children(
     from ptest import cli, config as config_api
     from ptest import monorepo as monorepo_api
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     api = tmp_path / "api"
     (api / "tests").mkdir(parents=True)
     (api / "tests" / "test_api.py").write_text(
@@ -986,7 +981,7 @@ def test_monorepo_preflight_problem_skips_every_project(
     from ptest import cli, operations
     from ptest import monorepo as monorepo_api
 
-    _git(tmp_path)
+    fake_git_marker(tmp_path)
     api = tmp_path / "api"
     (api / "tests").mkdir(parents=True)
     (api / "tests" / "test_api.py").write_text(
@@ -1085,7 +1080,7 @@ def test_smoke_skips_deeply_excluded_e2e_spec(tmp_path):
 
 
 def _vitest_repo_with_glob(root, *, test_body):
-    _git(root)
+    fake_git_marker(root)
     (root / "vitest.config.ts").write_text(
         "import { defineConfig, configDefaults } from 'vitest/config';\n"
         "export default defineConfig({\n"

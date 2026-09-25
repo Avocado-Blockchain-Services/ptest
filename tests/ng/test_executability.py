@@ -8,6 +8,7 @@ import pytest
 
 from ptest import contracts as C
 from ptest import executability as E
+from support import write_file
 
 
 def _config(tmp_path, *, kind=C.RunnerKind.PYTEST, launcher=("python",),
@@ -24,11 +25,6 @@ def _config(tmp_path, *, kind=C.RunnerKind.PYTEST, launcher=("python",),
         project_id="ab" * 16,
         config_path=tmp_path / name,
     )
-
-
-def _write(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def test_verdict_and_public_shapes():
@@ -85,7 +81,7 @@ def test_runner_parallel_control_is_not_executable(tmp_path):
 
 
 def test_xdist_addopts_without_serial_is_runnable_with_parallel_fallback(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -99,7 +95,7 @@ def test_xdist_addopts_without_serial_is_runnable_with_parallel_fallback(tmp_pat
 
 
 def test_xdist_addopts_with_serial_is_caveat(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
 
     result = E.check_config(_config(tmp_path, args=("-n", "0")), project=".")
@@ -112,7 +108,7 @@ def test_xdist_addopts_with_serial_is_caveat(tmp_path):
 
 
 def test_no_xdist_suppresses_activation(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 -p no:xdist"\n')
     (tmp_path / "tests").mkdir()
 
@@ -179,9 +175,9 @@ def test_report_char_clusters_are_not_full_refusals(tokens):
 
 def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
     """Section F flips this twin: checked-in clusters are allowed and labelled."""
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-vx"\n')
-    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+    write_file(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path), project=".")
 
@@ -194,7 +190,7 @@ def test_clustered_x_addopts_are_project_filtered_full(tmp_path):
 
 
 def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def pytest_runtest_protocol(item, nextitem):\n    return None\n")
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -210,7 +206,7 @@ def test_scoped_refused_conftest_hook_is_not_executable(tmp_path):
 @pytest.mark.parametrize("hook", ["pytest_runtest_logreport", "pytest_collectreport"])
 def test_reporting_hook_conftest_makes_full_unavailable(tmp_path, hook):
     """Round 18: static prediction mirrors the bridge refusal for these hooks."""
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def %s(*args):\n    return None\n" % hook)
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -238,7 +234,7 @@ def test_dot_test_root_is_caveat_without_full(tmp_path):
 
 def test_narrowing_addopts_are_project_filtered_full(tmp_path):
     """Section F flips this twin: checked-in -m is allowed and labelled."""
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = \'-m "not slow"\'\n')
     (tmp_path / "tests").mkdir()
 
@@ -254,7 +250,7 @@ def test_narrowing_addopts_are_project_filtered_full(tmp_path):
 
 def test_maxfail_nonzero_is_project_filtered_full(tmp_path):
     """Section F flips this twin: checked-in --maxfail is allowed and labelled."""
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "--maxfail=3"\n')
     (tmp_path / "tests").mkdir()
 
@@ -269,7 +265,7 @@ def test_maxfail_nonzero_is_project_filtered_full(tmp_path):
 
 
 def test_redirect_addopts_stay_unavailable(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-c other.ini"\n')
     (tmp_path / "tests").mkdir()
 
@@ -285,7 +281,7 @@ def test_redirect_addopts_stay_unavailable(tmp_path):
 
 def test_collection_hook_is_project_filtered_full(tmp_path):
     """Section F: a conftest collection hook is allowed and labelled."""
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def pytest_collection_modifyitems(items):\n    return None\n")
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -300,7 +296,7 @@ def test_collection_hook_is_project_filtered_full(tmp_path):
 
 def test_persea_shaped_addopts_are_project_filtered_full_with_serial_caveat(tmp_path):
     """Persea api shape: xdist addopts plus a -m filter stay executable."""
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\n'
            'addopts = \'-p xdist.plugin -n 2 --dist=loadgroup -m "not slow"\'\n')
     (tmp_path / "tests").mkdir()
@@ -328,7 +324,7 @@ def test_maxfail_zero_is_not_narrowing():
 
 def test_pytest_toml_addopts_are_project_filtered_full(tmp_path):
     """Section F HIGH: pytest 9 reads pytest.toml first, statically too."""
-    _write(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
+    write_file(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
     (tmp_path / "tests").mkdir()
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -340,8 +336,8 @@ def test_pytest_toml_addopts_are_project_filtered_full(tmp_path):
 
 def test_pytest_toml_wins_over_pytest_ini(tmp_path):
     """Section F HIGH: the first config file in pytest 9 order decides."""
-    _write(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
-    _write(tmp_path / "pytest.ini", '[pytest]\naddopts = "-m \'not fast\'"\n')
+    write_file(tmp_path / "pytest.toml", '[pytest]\naddopts = ["-k", "not slow"]\n')
+    write_file(tmp_path / "pytest.ini", '[pytest]\naddopts = "-m \'not fast\'"\n')
     (tmp_path / "tests").mkdir()
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -353,7 +349,7 @@ def test_pytest_toml_wins_over_pytest_ini(tmp_path):
 @pytest.mark.parametrize("addopts", ["--co", "--lf"])
 def test_non_allowlisted_ini_narrowing_makes_full_unavailable(tmp_path, addopts):
     """Section F MEDIUM: observation controls predict a refused full run."""
-    _write(tmp_path / "pytest.ini", "[pytest]\naddopts = %s\n" % addopts)
+    write_file(tmp_path / "pytest.ini", "[pytest]\naddopts = %s\n" % addopts)
     (tmp_path / "tests").mkdir()
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -366,7 +362,7 @@ def test_non_allowlisted_ini_narrowing_makes_full_unavailable(tmp_path, addopts)
 
 def test_conftest_sessionfinish_is_project_filtered_full(tmp_path):
     """Round 14: a conftest sessionfinish is allowed and labelled, like persea api."""
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -378,10 +374,10 @@ def test_conftest_sessionfinish_is_project_filtered_full(tmp_path):
 
 def test_persea_shaped_static_prediction_combines_narrowing_and_hooks(tmp_path):
     """Round 14: the persea api shape predicts one combined label in init."""
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\n'
            'addopts = \'-m "not extended_migration"\'\n')
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def pytest_collection_modifyitems(items):\n    return None\n"
            "\n"
            "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
@@ -417,7 +413,7 @@ def test_vitest_missing_entry_without_setup_is_not_executable(tmp_path):
 
 def test_vitest_is_executable_with_exclusive_caveat(tmp_path):
     entry = tmp_path / "node_modules" / "vitest" / "vitest.mjs"
-    _write(entry, "export {};\n")
+    write_file(entry, "export {};\n")
 
     result = E.check_config(
         _config(tmp_path, kind=C.RunnerKind.VITEST, launcher=("node",)),
@@ -463,7 +459,7 @@ def test_declared_setup_is_caveat_even_when_paths_present(tmp_path):
     setup = C.SetupConfig(argv=("uv", "sync", "--locked"),
                           required_paths=("tests",),
                           network=False, lifecycle_scripts=False)
-    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+    write_file(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path, setup=setup), project=".")
 
@@ -480,7 +476,7 @@ def test_missing_setup_path_is_trailing_caveat(tmp_path):
                           required_paths=("node_modules/.ptest-setup-done",),
                           network=True, lifecycle_scripts=True)
     entry = tmp_path / "node_modules" / "vitest" / "vitest.mjs"
-    _write(entry, "export {};\n")
+    write_file(entry, "export {};\n")
 
     result = E.check_config(
         _config(tmp_path, kind=C.RunnerKind.VITEST, launcher=("node",),
@@ -495,8 +491,8 @@ def test_missing_setup_path_is_trailing_caveat(tmp_path):
 
 def test_example_prefers_first_pytest_test_file(tmp_path):
     tests = tmp_path / "tests"
-    _write(tests / "test_b.py", "def test_b():\n    assert True\n")
-    _write(tests / "test_a.py", "def test_a():\n    assert True\n")
+    write_file(tests / "test_b.py", "def test_b():\n    assert True\n")
+    write_file(tests / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path), project=".")
 
@@ -604,9 +600,9 @@ def test_check_never_starts_a_subprocess_or_imports_project_code(tmp_path, monke
     monkeypatch.setattr(subprocess, "Popen", _forbidden)
     monkeypatch.setattr(subprocess, "call", _forbidden)
     monkeypatch.setattr(subprocess, "check_output", _forbidden)
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
-    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+    write_file(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path), project=".")
 
@@ -621,7 +617,7 @@ def test_check_never_starts_a_subprocess_or_imports_project_code(tmp_path, monke
 
 
 def test_non_xdist_addopts_are_untouched_by_serial_detection(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = \'-m "not slow" --timeout=300\'\n')
     (tmp_path / "tests").mkdir()
     from ptest.config import _fresh_config
@@ -633,23 +629,23 @@ def test_non_xdist_addopts_are_untouched_by_serial_detection(tmp_path):
 
 def _persea_web_shape(root):
     """Persea-web-shaped fixture: Playwright specs in e2e/, unit tests in src/."""
-    _write(root / "vitest.config.ts",
+    write_file(root / "vitest.config.ts",
            "import { defineConfig, configDefaults } from 'vitest/config';\n"
            "export default defineConfig({\n"
            "  test: {\n"
            "    exclude: [...configDefaults.exclude, 'e2e/**'],\n"
            "  },\n"
            "});\n")
-    _write(root / "playwright.config.ts",
+    write_file(root / "playwright.config.ts",
            "import { defineConfig } from '@playwright/test';\n"
            "export default defineConfig({ testDir: './e2e' });\n")
-    _write(root / "e2e" / "agents.spec.ts",
+    write_file(root / "e2e" / "agents.spec.ts",
            "import { test } from '@playwright/test';\n"
            "test('flow', () => {});\n")
-    _write(root / "src" / "i18n-defaults.test.ts",
+    write_file(root / "src" / "i18n-defaults.test.ts",
            "import { it } from 'vitest';\n"
            "it('defaults', () => {});\n")
-    _write(root / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(root / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
 
 def _vitest_dot_config(tmp_path):
@@ -666,13 +662,13 @@ def test_vitest_example_skips_excluded_e2e_spec(tmp_path):
 
 
 def test_vitest_example_skips_playwright_test_dir_without_config(tmp_path):
-    _write(tmp_path / "e2e" / "agents.spec.ts",
+    write_file(tmp_path / "e2e" / "agents.spec.ts",
            "import { test } from '@playwright/test';\n"
            "test('flow', () => {});\n")
-    _write(tmp_path / "src" / "a.test.ts",
+    write_file(tmp_path / "src" / "a.test.ts",
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
@@ -681,13 +677,13 @@ def test_vitest_example_skips_playwright_test_dir_without_config(tmp_path):
 
 def test_vitest_example_skips_playwright_import_outside_test_dir(tmp_path):
     # The Playwright file sorts first, so only the import check can skip it.
-    _write(tmp_path / "src" / "a-play.spec.ts",
+    write_file(tmp_path / "src" / "a-play.spec.ts",
            "import { test } from '@playwright/test';\n"
            "test('flow', () => {});\n")
-    _write(tmp_path / "src" / "z.test.ts",
+    write_file(tmp_path / "src" / "z.test.ts",
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
@@ -695,18 +691,18 @@ def test_vitest_example_skips_playwright_import_outside_test_dir(tmp_path):
 
 
 def test_vitest_example_applies_literal_include(tmp_path):
-    _write(tmp_path / "vitest.config.ts",
+    write_file(tmp_path / "vitest.config.ts",
            "import { defineConfig } from 'vitest/config';\n"
            "export default defineConfig({\n"
            "  test: { include: ['src/**/*.test.ts'] },\n"
            "});\n")
-    _write(tmp_path / "e2e" / "agents.spec.ts",
+    write_file(tmp_path / "e2e" / "agents.spec.ts",
            "import { it } from 'vitest';\n"
            "it('flow', () => {});\n")
-    _write(tmp_path / "src" / "a.test.ts",
+    write_file(tmp_path / "src" / "a.test.ts",
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
@@ -714,19 +710,19 @@ def test_vitest_example_applies_literal_include(tmp_path):
 
 
 def test_vitest_example_ignores_non_literal_config_parts(tmp_path):
-    _write(tmp_path / "vitest.config.ts",
+    write_file(tmp_path / "vitest.config.ts",
            "import { defineConfig, configDefaults } from 'vitest/config';\n"
            "const EXTRA = 'dist/**';\n"
            "export default defineConfig({\n"
            "  test: { exclude: [...configDefaults.exclude, SOME_CONST, 'e2e/**'] },\n"
            "});\n")
-    _write(tmp_path / "e2e" / "agents.spec.ts",
+    write_file(tmp_path / "e2e" / "agents.spec.ts",
            "import { it } from 'vitest';\n"
            "it('flow', () => {});\n")
-    _write(tmp_path / "src" / "a.test.ts",
+    write_file(tmp_path / "src" / "a.test.ts",
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
@@ -737,17 +733,17 @@ def test_vitest_example_ignores_non_literal_config_parts(tmp_path):
 
 
 def _write_vitest_config(tmp_path, *, test_body):
-    _write(tmp_path / "vitest.config.ts",
+    write_file(tmp_path / "vitest.config.ts",
            "import { defineConfig, configDefaults } from 'vitest/config';\n"
            "export default defineConfig({\n"
            "  test: {\n" + test_body + "\n"
            "  },\n"
            "});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
 
 def _vitest_unit(tmp_path, rel):
-    _write(tmp_path / rel,
+    write_file(tmp_path / rel,
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
 
@@ -775,7 +771,7 @@ def test_glob_exclude_reaches_deep_nested_files(tmp_path):
     _write_vitest_config(
         tmp_path,
         test_body="    exclude: [...configDefaults.exclude, 'e2e/**'],")
-    _write(tmp_path / "e2e" / "auth" / "login.spec.ts",
+    write_file(tmp_path / "e2e" / "auth" / "login.spec.ts",
            "import { helper } from '../fixtures';\n"
            "test('flow', () => {});\n")
     _vitest_unit(tmp_path, "z.test.ts")
@@ -827,10 +823,10 @@ def test_glob_extglob_exclude_is_ignored(tmp_path):
 def test_glob_expands_every_brace_group(tmp_path):
     _write_vitest_config(
         tmp_path, test_body="    include: ['**/*.{test,spec}.{ts,js}'],")
-    _write(tmp_path / "src" / "a.spec.js",
+    write_file(tmp_path / "src" / "a.spec.js",
            "import { it } from 'vitest';\n"
            "it('works', () => {});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
 
     result = E.check_config(_vitest_dot_config(tmp_path), project=".")
 
@@ -838,17 +834,17 @@ def test_glob_expands_every_brace_group(tmp_path):
 
 
 def test_static_reader_accepts_quoted_test_keys(tmp_path):
-    _write(tmp_path / "vitest.config.ts",
+    write_file(tmp_path / "vitest.config.ts",
            "import { defineConfig } from 'vitest/config';\n"
            "export default defineConfig({\n"
            '  "test": {\n'
            '    "include": [\'src/**/*.test.ts\'],\n'
            "  },\n"
            "});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
     # Deep path: the default e2e/** testDir glob misses it until the glob
     # fix, so only the quoted include can hide this file.
-    _write(tmp_path / "e2e" / "auth" / "agents.spec.ts",
+    write_file(tmp_path / "e2e" / "auth" / "agents.spec.ts",
            "import { it } from 'vitest';\n"
            "it('flow', () => {});\n")
 
@@ -858,7 +854,7 @@ def test_static_reader_accepts_quoted_test_keys(tmp_path):
 
 
 def test_static_reader_reads_every_test_block(tmp_path):
-    _write(tmp_path / "vitest.config.ts",
+    write_file(tmp_path / "vitest.config.ts",
            "import { defineConfig } from 'vitest/config';\n"
            "export default defineConfig({\n"
            "  test: { exclude: ['dist/**'] },\n"
@@ -866,9 +862,9 @@ def test_static_reader_reads_every_test_block(tmp_path):
            "export const extra = defineConfig({\n"
            "  test: { include: ['src/**/*.test.ts'] },\n"
            "});\n")
-    _write(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
+    write_file(tmp_path / "node_modules" / "vitest" / "vitest.mjs", "export {};\n")
     # Deep path: only the second block's include can hide this file.
-    _write(tmp_path / "e2e" / "auth" / "agents.spec.ts",
+    write_file(tmp_path / "e2e" / "auth" / "agents.spec.ts",
            "import { it } from 'vitest';\n"
            "it('flow', () => {});\n")
 
@@ -880,7 +876,7 @@ def test_static_reader_reads_every_test_block(tmp_path):
 def test_vitest_config_wins_over_vite_config(tmp_path):
     # lib/ is outside both src/** and the Playwright testDir, so only the
     # vite.config include can hide it when configs are wrongly merged.
-    _write(tmp_path / "vite.config.ts",
+    write_file(tmp_path / "vite.config.ts",
            "import { defineConfig } from 'vitest/config';\n"
            "export default defineConfig({\n"
            "  test: { include: ['src/**/*.test.ts'] },\n"
@@ -1013,23 +1009,6 @@ def _uv(tmp_path, **kwargs):
     return _config(tmp_path, **kwargs)
 
 
-def _stub_venv(root, *, version="3.8.0", extra=(), pythons=("python3.12",),
-               cov=None):
-    venv = root / ".venv"
-    venv.mkdir(parents=True, exist_ok=True)
-    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
-    for py in pythons:
-        site = venv / "lib" / py / "site-packages"
-        site.mkdir(parents=True, exist_ok=True)
-        (site / f"pytest_xdist-{version}.dist-info").mkdir(exist_ok=True)
-        if cov is not None:
-            (site / f"pytest_cov-{cov[0]}.dist-info").mkdir(exist_ok=True)
-            (site / f"coverage-{cov[1]}.dist-info").mkdir(exist_ok=True)
-        for name in extra:
-            (site / name).mkdir(exist_ok=True)
-    return venv
-
-
 #: The frozen pytest-cov/coverage tuple the parallel tier admits.
 _FROZEN_COV = ("7.1.0", "7.15.0")
 
@@ -1108,10 +1087,10 @@ def test_verdict_runs_wording():
         "fix": None}
 
 
-def test_parallel_qualified_n_workers(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_qualified_n_workers(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
     assert result.parallel == "4 workers (xdist, --dist loadgroup)"
@@ -1123,10 +1102,10 @@ def test_parallel_qualified_n_workers(tmp_path):
     assert req.reason is None and req.config_level is False and req.runs is True
 
 
-def test_parallel_auto_workers(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_auto_workers(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "--numprocesses=auto"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
     assert result.parallel == "one worker per granted slot (xdist -n auto, --dist load)"
@@ -1136,10 +1115,10 @@ def test_parallel_auto_workers(tmp_path):
     assert req.workers is None and req.auto is True and req.reason is None
 
 
-def test_parallel_dist_no_maps_to_load(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_dist_no_maps_to_load(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 2 --dist=no"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
     assert result.parallel == "2 workers (xdist, --dist load)"
@@ -1159,7 +1138,7 @@ def test_parallel_inactive_text(tmp_path):
 
 def test_parallel_vitest_and_command_texts(tmp_path):
     entry = tmp_path / "node_modules" / "vitest" / "vitest.mjs"
-    _write(entry, "export {};\n")
+    write_file(entry, "export {};\n")
     vitest = E.check_config(
         _config(tmp_path, kind=C.RunnerKind.VITEST, launcher=("node",)),
         project=".")
@@ -1175,10 +1154,10 @@ def test_parallel_vitest_and_command_texts(tmp_path):
     assert command.parallel_short is None
 
 
-def test_parallel_remote_is_not_runnable(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_remote_is_not_runnable(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --tx popen"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
 
@@ -1207,7 +1186,7 @@ def test_parallel_remote_is_not_runnable(tmp_path):
      "ptest runs serially until setup installs it", False),
 ])
 def test_parallel_fallback_rows(tmp_path, addopts, reason, config_level):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts)
 
     result = E.check_config(_uv(tmp_path), project=".")
@@ -1223,10 +1202,10 @@ def test_parallel_fallback_rows(tmp_path, addopts, reason, config_level):
     assert req.runs is True
 
 
-def test_parallel_cov_admitted_with_frozen_tuple(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_cov_admitted_with_frozen_tuple(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n')
-    _stub_venv(tmp_path, cov=_FROZEN_COV)
+    venv_stub(tmp_path, xdist="3.8.0", pytest_cov=_FROZEN_COV[0], coverage=_FROZEN_COV[1])
 
     req = E.parallel_request(_uv(tmp_path), project=".")
     assert req.active is True
@@ -1238,20 +1217,20 @@ def test_parallel_cov_admitted_with_frozen_tuple(tmp_path):
     assert result.parallel_short == "4 workers"
 
 
-def test_parallel_cov_in_runner_args_admitted_with_frozen_tuple(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_cov_in_runner_args_admitted_with_frozen_tuple(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
-    _stub_venv(tmp_path, cov=_FROZEN_COV)
+    venv_stub(tmp_path, xdist="3.8.0", pytest_cov=_FROZEN_COV[0], coverage=_FROZEN_COV[1])
 
     req = E.parallel_request(_uv(tmp_path, full_args=("--cov",)), project=".")
     assert req.active is True
     assert req.reason is None
 
 
-def test_parallel_cov_version_mismatch_falls_back(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_cov_version_mismatch_falls_back(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n')
-    _stub_venv(tmp_path, cov=("7.0.0", "7.16.1"))
+    venv_stub(tmp_path, xdist="3.8.0", pytest_cov="7.0.0", coverage="7.16.1")
 
     req = E.parallel_request(_uv(tmp_path), project=".")
     assert req.active is True
@@ -1263,20 +1242,20 @@ def test_parallel_cov_version_mismatch_falls_back(tmp_path):
     assert req.runs is True
 
 
-def test_parallel_cov_passes_through_to_later_config_rows(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_cov_passes_through_to_later_config_rows(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "--cov --maxprocesses=2 -n 4"\n')
-    _stub_venv(tmp_path, cov=_FROZEN_COV)
+    venv_stub(tmp_path, xdist="3.8.0", pytest_cov=_FROZEN_COV[0], coverage=_FROZEN_COV[1])
 
     req = E.parallel_request(_uv(tmp_path), project=".")
     assert req.reason == "--maxprocesses is not supported; ptest runs serially"
     assert req.config_level is True
 
 
-def test_parallel_duplicate_dist_info_falls_back(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_duplicate_dist_info_falls_back(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
-    _stub_venv(tmp_path, extra=("pytest_xdist-3.8.0-2.dist-info",))
+    venv_stub(tmp_path, xdist=("3.8.0", "3.8.0-2"))
 
     result = E.check_config(_uv(tmp_path), project=".")
 
@@ -1285,10 +1264,10 @@ def test_parallel_duplicate_dist_info_falls_back(tmp_path):
         "ptest runs serially")
 
 
-def test_parallel_unqualified_version_falls_back(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_unqualified_version_falls_back(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
-    _stub_venv(tmp_path, version="4.0.0")
+    venv_stub(tmp_path, xdist="4.0.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
 
@@ -1298,7 +1277,7 @@ def test_parallel_unqualified_version_falls_back(tmp_path):
 
 
 def test_parallel_unverifiable_launcher_falls_back(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
 
     result = E.check_config(_config(tmp_path), project=".")
@@ -1308,10 +1287,10 @@ def test_parallel_unverifiable_launcher_falls_back(tmp_path):
         "use an absolute interpreter or a uv launcher to run in parallel")
 
 
-def test_parallel_ptest_n0_row_with_fix(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_ptest_n0_row_with_fix(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=loadgroup"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path, args=("-n", "0")), project=".")
 
@@ -1321,10 +1300,10 @@ def test_parallel_ptest_n0_row_with_fix(tmp_path):
         'remove "-n", "0" from [runner] args in .ptest.toml to run 4 workers')
 
 
-def test_parallel_ptest_n0_row_auto_fix(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_parallel_ptest_n0_row_auto_fix(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n auto"\n')
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path, args=("-n", "0")), project="api")
 
@@ -1345,7 +1324,7 @@ def test_parallel_ptest_n0_row_auto_fix(tmp_path):
     ("-n 1 --dist=load", "your pytest config asks for 1 worker"),
 ])
 def test_parallel_fallback_precedence(tmp_path, addopts, reason):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            "[tool.pytest.ini_options]\naddopts = \"%s\"\n" % addopts)
 
     req = E.parallel_request(_uv(tmp_path), project=".")
@@ -1353,45 +1332,42 @@ def test_parallel_fallback_precedence(tmp_path, addopts, reason):
     assert req.reason == reason
 
 
-def test_xdist_environment_version_shapes(tmp_path):
+def test_xdist_environment_version_shapes(tmp_path, venv_stub):
     version, problem = E.xdist_environment_version(_uv(tmp_path))
     assert version is None
     assert problem == ("pytest-xdist is not installed in the project environment yet; "
                        "ptest runs serially until setup installs it")
 
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
     assert E.xdist_environment_version(_uv(tmp_path)) == ("3.8.0", None)
 
     version, problem = E.xdist_environment_version(_config(tmp_path))
     assert version is None and "launcher python" in problem
 
 
-def test_absolute_interpreter_requires_pyvenv_cfg(tmp_path):
+def test_absolute_interpreter_requires_pyvenv_cfg(tmp_path, venv_stub):
     venv = tmp_path / ".venv"
     (venv / "bin").mkdir(parents=True)
     launcher = (str(venv / "bin" / "python"),)
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
 
     _, problem = E.xdist_environment_version(_config(tmp_path, launcher=launcher))
     assert problem is not None and "launcher python" in problem
 
-    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
-    site = venv / "lib" / "python3.12" / "site-packages"
-    site.mkdir(parents=True)
-    (site / "pytest_xdist-3.8.0.dist-info").mkdir()
+    venv_stub(tmp_path, xdist="3.8.0")
     assert E.xdist_environment_version(_config(tmp_path, launcher=launcher)) == ("3.8.0", None)
 
 
-def test_persea_shape_parallel_and_full_suite(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+def test_persea_shape_parallel_and_full_suite(tmp_path, venv_stub):
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\n'
            'addopts = \'-n 4 --dist=loadgroup -m "not extended_migration"\'\n')
-    _write(tmp_path / "tests" / "conftest.py",
+    write_file(tmp_path / "tests" / "conftest.py",
            "def pytest_collection_modifyitems(items):\n    return None\n"
            "\n"
            "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
-    _stub_venv(tmp_path)
+    venv_stub(tmp_path, xdist="3.8.0")
 
     result = E.check_config(_uv(tmp_path), project=".")
 
@@ -1408,7 +1384,7 @@ def test_persea_shape_parallel_and_full_suite(tmp_path):
 
 
 def test_full_suite_quotes_values_with_whitespace(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = \'-m "not slow"\'\n')
     (tmp_path / "tests").mkdir()
 
@@ -1434,7 +1410,7 @@ def test_narrowing_parts_match_bridge_text():
 
 
 def test_full_blocked_is_first_unavailable_suffix(tmp_path):
-    _write(tmp_path / "pyproject.toml",
+    write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-c other.ini"\n')
 
     result = E.check_config(_config(tmp_path, test_roots=(".",)), project=".")
@@ -1448,7 +1424,7 @@ def test_setup_field_and_caveat_line(tmp_path):
     setup = C.SetupConfig(argv=("uv", "sync", "--locked"),
                           required_paths=("tests",),
                           network=False, lifecycle_scripts=False)
-    _write(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
+    write_file(tmp_path / "tests" / "test_a.py", "def test_a():\n    assert True\n")
 
     result = E.check_config(_config(tmp_path, setup=setup), project=".")
 
@@ -1468,5 +1444,5 @@ def test_setup_field_and_caveat_line(tmp_path):
 ])
 def test_addopts_source_names_ini_family_file(tmp_path, name, text):
     """addopts_source reports the deciding INI-family file (DET3)."""
-    _write(tmp_path / name, text)
+    write_file(tmp_path / name, text)
     assert E.addopts_source(tmp_path) == name
