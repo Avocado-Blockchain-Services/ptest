@@ -16,6 +16,7 @@ import pytest
 
 from ptest import contracts as C
 from factories_repo import fake_git_marker
+from support import write_file, write_ptest_toml
 
 
 def _passed_cells(text: str) -> int:
@@ -326,25 +327,20 @@ def test_json_with_smoke_stays_machine_exact_and_never_runs(
 
 
 def test_missing_setup_skips_with_exact_command(
-        tmp_path, monkeypatch, capsys, case):
+        tmp_path, monkeypatch, capsys, case, monorepo):
     from ptest import cli, operations
 
     fake_git_marker(tmp_path)
-    web = tmp_path / "web"
-    (web / "tests").mkdir(parents=True)
-    (web / "tests" / "a.test.ts").write_text("export {};\n", encoding="utf-8")
-    (tmp_path / ".ptest.toml").write_text(
-        "version = 2\n\n[monorepo]\nchildren = [\"web\"]\n",
-        encoding="utf-8")
-    (web / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "dddddddddddddddddddddddddddddddd"\n'
-        "[runner]\nkind = \"vitest\"\nlauncher = [\"node\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
-        "[setup]\nargv = [\"npm\", \"ci\"]\n"
-        'required_paths = ["node_modules"]\n'
-        "network = true\nlifecycle_scripts = true\n",
-        encoding="utf-8")
+    root = monorepo(
+        {"web": {"kind": "vitest", "launcher": ("node",), "args": (),
+                 "full_args": (),
+                 "project_id": "dddddddddddddddddddddddddddddddd",
+                 "setup": {"argv": ("npm", "ci"),
+                           "required_paths": ("node_modules",),
+                           "network": True, "lifecycle_scripts": True}}},
+        parent=tmp_path, name=None,
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["web"]\n')
+    write_file(root / "web" / "tests" / "a.test.ts", "export {};\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(
@@ -414,42 +410,30 @@ def test_hostile_names_are_sanitized_in_smoke_output():
 
 
 def test_monorepo_reports_one_smoke_line_per_project(
-        tmp_path, monkeypatch, capsys, case):
+        tmp_path, monkeypatch, capsys, case, monorepo):
     from ptest import cli
 
     fake_git_marker(tmp_path)
-    api = tmp_path / "api"
-    (api / "tests").mkdir(parents=True)
-    (api / "tests" / "test_api.py").write_text(
-        "def test_api():\n    assert True\n", encoding="utf-8")
-    (api / "pyproject.toml").write_text(
-        "[tool.pytest.ini_options]\n"
-        "addopts = '-n 4 --dist=loadgroup -m \"not slow\"'\n",
-        encoding="utf-8")
-    (api / "tests" / "conftest.py").write_text(
-        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
-        encoding="utf-8")
-    (api / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"\n'
-        "[runner]\nkind = \"pytest\"\nlauncher = [\"python\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8")
-    web = tmp_path / "web"
-    (web / "tests").mkdir(parents=True)
-    (web / "tests" / "a.test.ts").write_text("export {};\n", encoding="utf-8")
-    (web / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "ffffffffffffffffffffffffffffffff"\n'
-        "[runner]\nkind = \"vitest\"\nlauncher = [\"node\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
-        "[setup]\nargv = [\"npm\", \"ci\"]\n"
-        'required_paths = ["node_modules"]\n'
-        "network = true\nlifecycle_scripts = true\n",
-        encoding="utf-8")
-    (tmp_path / ".ptest.toml").write_text(
-        "version = 2\n\n[monorepo]\nchildren = [\"api\", \"web\"]\n",
-        encoding="utf-8")
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",), "args": (),
+                 "full_args": (),
+                 "project_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+         "web": {"kind": "vitest", "launcher": ("node",), "args": (),
+                 "full_args": (),
+                 "project_id": "ffffffffffffffffffffffffffffffff",
+                 "setup": {"argv": ("npm", "ci"),
+                           "required_paths": ("node_modules",),
+                           "network": True, "lifecycle_scripts": True}}},
+        parent=tmp_path, name=None,
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api", "web"]\n')
+    write_file(root / "api" / "tests" / "test_api.py",
+               "def test_api():\n    assert True\n")
+    write_file(root / "api" / "pyproject.toml",
+               "[tool.pytest.ini_options]\n"
+               "addopts = '-n 4 --dist=loadgroup -m \"not slow\"'\n")
+    write_file(root / "api" / "tests" / "conftest.py",
+               "def pytest_sessionfinish(session, exitstatus):\n    return None\n")
+    write_file(root / "web" / "tests" / "a.test.ts", "export {};\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     calls = []
@@ -520,21 +504,6 @@ def test_real_failing_smoke_keeps_config_and_exit_zero(
 # --- setup gating (controller decision b): TTY offers setup, else skip -----
 
 
-def _pytest_toml_with_setup(*, setup_argv, required_paths):
-    import json as _json
-
-    return (
-        'version = 1\nproject_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
-        "[runner]\nkind = \"pytest\"\nlauncher = [\"python\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
-        "[setup]\n"
-        f"argv = {_json.dumps(list(setup_argv))}\n"
-        f"required_paths = {_json.dumps(list(required_paths))}\n"
-        "network = false\nlifecycle_scripts = false\n"
-    )
-
-
 def test_tty_setup_yes_runs_setup_through_ptest_then_passes(
         tmp_path, monkeypatch, capsys, case):
     """Uv-locked pytest with [setup]: TTY yes runs setup, then smoke passes."""
@@ -550,11 +519,12 @@ def test_tty_setup_yes_runs_setup_through_ptest_then_passes(
     (root / "setup.py").write_text(
         "from pathlib import Path\nPath('.setup-done').touch()\n",
         encoding="utf-8")
-    (root / ".ptest.toml").write_text(
-        _pytest_toml_with_setup(
-            setup_argv=[_sys.executable, "setup.py"],
-            required_paths=[".setup-done"]),
-        encoding="utf-8")
+    write_ptest_toml(
+        root, kind="pytest", launcher=("python",), args=(), full_args=(),
+        project_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        setup={"argv": [_sys.executable, "setup.py"],
+               "required_paths": [".setup-done"],
+               "network": False, "lifecycle_scripts": False})
     _fake_python_on_path(monkeypatch, root / "bin")
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
@@ -604,11 +574,12 @@ def test_consented_setup_runs_smoke_exactly_once_per_init(
     (root / "setup.py").write_text(
         "from pathlib import Path\nPath('.setup-done').touch()\n",
         encoding="utf-8")
-    (root / ".ptest.toml").write_text(
-        _pytest_toml_with_setup(
-            setup_argv=[_sys.executable, "setup.py"],
-            required_paths=[".setup-done"]),
-        encoding="utf-8")
+    write_ptest_toml(
+        root, kind="pytest", launcher=("python",), args=(), full_args=(),
+        project_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        setup={"argv": [_sys.executable, "setup.py"],
+               "required_paths": [".setup-done"],
+               "network": False, "lifecycle_scripts": False})
     _fake_python_on_path(monkeypatch, root / "bin")
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
@@ -642,33 +613,19 @@ def test_consented_setup_runs_smoke_exactly_once_per_init(
     assert (root / "counter.txt").read_text(encoding="utf-8") == "x\nx\n"
 
 
-def _vitest_toml_with_setup(*, launcher=("node",)):
-    import json as _json
-
-    return (
-        'version = 1\nproject_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n'
-        "[runner]\nkind = \"vitest\"\n"
-        f"launcher = {_json.dumps(list(launcher))}\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
-        "[setup]\nargv = [\"npm\", \"ci\"]\n"
-        'required_paths = ["node_modules"]\n'
-        "network = true\nlifecycle_scripts = true\n"
-    )
-
-
 def _npm_locked_vitest_repo(root):
+    """Npm-locked vitest repo: detection-only git marker, one test, one lock."""
     fake_git_marker(root)
-    tests = root / "tests"
-    tests.mkdir(exist_ok=True)
-    (tests / "a.test.ts").write_text(
-        "import { test, expect } from 'vitest';\n"
-        "test('a', () => { expect(1).toBe(1); });\n",
-        encoding="utf-8")
-    (root / "package-lock.json").write_text(
-        '{"name": "web", "lockfileVersion": 3}\n', encoding="utf-8")
-    (root / ".ptest.toml").write_text(
-        _vitest_toml_with_setup(), encoding="utf-8")
+    write_file(root / "tests" / "a.test.ts",
+               "import { test, expect } from 'vitest';\n"
+               "test('a', () => { expect(1).toBe(1); });\n")
+    write_file(root / "package-lock.json",
+               '{"name": "web", "lockfileVersion": 3}\n')
+    write_ptest_toml(
+        root, kind="vitest", launcher=("node",), args=(), full_args=(),
+        project_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        setup={"argv": ("npm", "ci"), "required_paths": ("node_modules",),
+               "network": True, "lifecycle_scripts": True})
 
 
 def test_tty_setup_no_skips_without_running(
@@ -798,11 +755,12 @@ def test_executability_and_smoke_lines_agree_on_setup_project(
     (tmp_path / "uv.lock").write_text("# fake uv lock\n", encoding="utf-8")
     (tmp_path / ".setup-done").write_text("done\n", encoding="utf-8")
     fake_git_marker(tmp_path)
-    (tmp_path / ".ptest.toml").write_text(
-        _pytest_toml_with_setup(
-            setup_argv=[_sys.executable, "setup.py"],
-            required_paths=[".setup-done"]),
-        encoding="utf-8")
+    write_ptest_toml(
+        tmp_path, kind="pytest", launcher=("python",), args=(), full_args=(),
+        project_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        setup={"argv": [_sys.executable, "setup.py"],
+               "required_paths": [".setup-done"],
+               "network": False, "lifecycle_scripts": False})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(
@@ -931,25 +889,20 @@ def test_short_queue_timeout_means_skip(tmp_path, monkeypatch, capsys, case):
 
 
 def test_monorepo_child_executes_via_preflight_children(
-        tmp_path, monkeypatch, capsys, case):
+        tmp_path, monkeypatch, capsys, case, monorepo):
     """Monorepo smoke resolves the child through preflight, then executes."""
     from ptest import cli, config as config_api
     from ptest import monorepo as monorepo_api
 
     fake_git_marker(tmp_path)
-    api = tmp_path / "api"
-    (api / "tests").mkdir(parents=True)
-    (api / "tests" / "test_api.py").write_text(
-        "def test_api():\n    assert True\n", encoding="utf-8")
-    (api / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "cccccccccccccccccccccccccccccccc"\n'
-        "[runner]\nkind = \"pytest\"\nlauncher = [\"python\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8")
-    (tmp_path / ".ptest.toml").write_text(
-        "version = 2\n\n[monorepo]\nchildren = [\"api\"]\n",
-        encoding="utf-8")
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",), "args": (),
+                 "full_args": (),
+                 "project_id": "cccccccccccccccccccccccccccccccc"}},
+        parent=tmp_path, name=None,
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api"]\n')
+    write_file(root / "api" / "tests" / "test_api.py",
+               "def test_api():\n    assert True\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     preflight_calls = []
@@ -976,25 +929,20 @@ def test_monorepo_child_executes_via_preflight_children(
 
 
 def test_monorepo_preflight_problem_skips_every_project(
-        tmp_path, monkeypatch, capsys, case):
+        tmp_path, monkeypatch, capsys, case, monorepo):
     """A preflight Problem skips all children; nothing executes."""
     from ptest import cli, operations
     from ptest import monorepo as monorepo_api
 
     fake_git_marker(tmp_path)
-    api = tmp_path / "api"
-    (api / "tests").mkdir(parents=True)
-    (api / "tests" / "test_api.py").write_text(
-        "def test_api():\n    assert True\n", encoding="utf-8")
-    (api / ".ptest.toml").write_text(
-        'version = 1\nproject_id = "dddddddddddddddddddddddddddddddd"\n'
-        "[runner]\nkind = \"pytest\"\nlauncher = [\"python\"]\nargs = []\n"
-        "full_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8")
-    (tmp_path / ".ptest.toml").write_text(
-        "version = 2\n\n[monorepo]\nchildren = [\"api\"]\n",
-        encoding="utf-8")
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",), "args": (),
+                 "full_args": (),
+                 "project_id": "dddddddddddddddddddddddddddddddd"}},
+        parent=tmp_path, name=None,
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api"]\n')
+    write_file(root / "api" / "tests" / "test_api.py",
+               "def test_api():\n    assert True\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 

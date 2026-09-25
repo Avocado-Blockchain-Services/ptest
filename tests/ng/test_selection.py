@@ -262,33 +262,27 @@ def test_snapshot_without_baseline_delta_cannot_hide_committed_changes(case):
 def test_choose_plan_is_pure_without_subprocess_or_test_imports(case, monkeypatch):
     import builtins
     import subprocess
-    import sys
     from ptest.selection import choose_plan
 
     config = case.config(selection_enabled=True, closed_inputs=True)
     snap = _snapshot(case, )
     history = _compatible_history(case, config, input_digest=snap.digest)
-    # Modules the harness (e.g. the ptest bridge on an xdist worker) already
-    # imported are exempt: re-importing them is not planning importing
-    # runner/test code.  Anything planning newly imports still fails, both
-    # here and in the module-diff below.
-    already = set(sys.modules)
     real_import = builtins.__import__
     def guarded_import(name, *args, **kwargs):
-        root = name.split(".", 1)[0]
-        if ((root in {"pytest", "conftest"} or root.startswith("test_"))
-                and root not in already):
+        if name in {"pytest", "conftest"} or name.startswith("test_"):
             raise AssertionError("static planning imported runner/test code")
         return real_import(name, *args, **kwargs)
     def forbidden(*args, **kwargs):
         raise AssertionError("static planning executed a subprocess")
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-    monkeypatch.setattr(subprocess, "Popen", forbidden)
-    assert choose_plan(config, snap, history, case.request()).execution == "none"
-    fresh = {module.split(".", 1)[0] for module in set(sys.modules) - already}
-    assert not (fresh & {"pytest", "conftest"} or
-                {module for module in fresh if module.startswith("test_")}), \
-        "static planning imported runner/test code"
+    # Scoped to the planning call only: the bridge's call-phase
+    # pytest_runtest_logreport lazy-imports pytest after the call returns,
+    # and a process-wide patch would turn that harness import into a
+    # worker INTERNALERROR under xdist.
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "__import__", guarded_import)
+        m.setattr(subprocess, "Popen", forbidden)
+        plan = choose_plan(config, snap, history, case.request())
+    assert plan.execution == "none"
 
 
 def test_changed_test_dependency_unions_all_dependent_groups(case):
