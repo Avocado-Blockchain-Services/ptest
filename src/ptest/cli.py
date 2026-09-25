@@ -35,7 +35,7 @@ _INSPECTION = frozenset({
     "doctor", "guide", "rules", "uninstall",
 })
 _EXECUTION_VALUE = frozenset({
-    "--base", "--workers", "--queue-timeout", "--result-json",
+    "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
 _EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow",
                              "-v", "--verbose", "-q", "--quiet"})
@@ -58,6 +58,7 @@ class ParsedArgs:
     base: str | None = None
     workers: int | None = None
     queue_timeout_s: float = C.DEFAULT_QUEUE_TIMEOUT_S
+    timeout_s: float | None = None
     no_setup: bool = False
     shadow: bool = False
     verbose: bool = False
@@ -186,6 +187,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     workers = None
     base = None
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
+    timeout = None
     no_setup = False
     shadow = False
     verbose = False
@@ -231,6 +233,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
             workers = _integer(value, lo=1, hi=64)
         elif token == "--queue-timeout":
             queue_timeout = _number(value, lo=1, hi=C.MAX_QUEUE_TIMEOUT_S)
+        elif token == "--timeout":
+            if timeout is not None:
+                raise _problem("invalid-config", "option cannot be repeated")
+            timeout = _number(value, lo=1, hi=C.MAX_COMPOUND_TIMEOUT_S)
         else:
             if result_path is not None:
                 raise _problem("invalid-config", "option cannot be repeated")
@@ -252,6 +258,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     return ParsedArgs(
         command=command, mode=mode, runner_argv=tail,
         base=base, workers=workers, queue_timeout_s=queue_timeout,
+        timeout_s=timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
         changed=changed, full=full, verbose=verbose, quiet=quiet,
     )
@@ -1051,6 +1058,7 @@ def _run_changed_baseline(parsed: ParsedArgs, root: Path,
             domain, config,
             C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
                          queue_timeout_s=parsed.queue_timeout_s,
+                         timeout_s=parsed.timeout_s,
                          fixture_domain=parsed.fixture_domain))
     except C.Problem as problem:
         print(f"{declaration}: baseline run skipped ({problem.code})")
@@ -2693,6 +2701,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                         result_path=parsed.result_path,
                         fixture_domain=parsed.fixture_domain,
                         probe=parsed.probe,
+                        timeout_s=parsed.timeout_s,
                     ),
                 )
                 for reason in result.reasons:
@@ -2825,6 +2834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         domain, child.config,
                         C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
                                      queue_timeout_s=parsed.queue_timeout_s,
+                                     timeout_s=parsed.timeout_s,
                                      no_setup=parsed.no_setup,
                                      result_path=parsed.result_path,
                                      fixture_domain=parsed.fixture_domain,
@@ -2858,7 +2868,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         continue
                     result = operations.execute(
                         domain, item.target.config,
-                        monorepo.child_changed_request(
+                        # monorepo.py is owned outside this change, so the CLI
+                        # timeout travels via replace() instead of a new
+                        # child_changed_request parameter.
+                        replace(monorepo.child_changed_request(
                             item.target, base=parsed.base,
                             workers=parsed.workers,
                             queue_timeout_s=parsed.queue_timeout_s,
@@ -2866,6 +2879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             result_path=parsed.result_path,
                             fixture_domain=parsed.fixture_domain,
                             verbose=parsed.verbose, quiet=parsed.quiet),
+                            timeout_s=parsed.timeout_s),
                     )
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
@@ -2881,6 +2895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 domain, routed.target.config,
                 C.RunRequest(mode=C.Mode.SCOPED, argv=routed.scopes,
                              workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
+                             timeout_s=parsed.timeout_s,
                              no_setup=parsed.no_setup,
                              shadow=parsed.shadow, result_path=parsed.result_path,
                              fixture_domain=parsed.fixture_domain,
@@ -2912,6 +2927,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             base=parsed.base,
             workers=parsed.workers,
             queue_timeout_s=parsed.queue_timeout_s,
+            timeout_s=parsed.timeout_s,
             no_setup=parsed.no_setup,
             shadow=parsed.shadow,
             result_path=parsed.result_path,

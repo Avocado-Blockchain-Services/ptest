@@ -20,7 +20,8 @@ import psutil
 from . import platform, scheduler
 from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
-    DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, GUARD_PROTOCOL_VERSION,
+    DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, DEFAULT_COMPOUND_TIMEOUT_S,
+    GUARD_PROTOCOL_VERSION,
     MAX_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
     decode_control_frame, decode_launch_manifest, encode_control_frame,
 )
@@ -39,6 +40,19 @@ def _problem(code: str, message: str) -> Problem:
 def _problem_payload(problem: Problem) -> dict:
     return {"code": problem.code, "message": problem.message,
             "phase": problem.phase, "retryable": problem.retryable}
+
+
+def _compound_limit_s(manifest: LaunchManifest) -> float:
+    """Effective compound deadline in seconds for one launch manifest."""
+    return min(manifest.compound_timeout_s or DEFAULT_COMPOUND_TIMEOUT_S,
+               MAX_COMPOUND_TIMEOUT_S)
+
+
+def _compound_timeout_message(manifest: LaunchManifest) -> str:
+    """Compound-scope expiry text: the limit plus how to raise it."""
+    return (f"compound execution deadline expired after "
+            f"{_compound_limit_s(manifest):.0f}s; raise it with --timeout SECONDS "
+            f"or [runner] timeout / full_timeout in .ptest.toml")
 
 
 @dataclass
@@ -242,7 +256,7 @@ class _Control:
             now + DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, compound_deadline)
         if deadline <= now:
             self.state.fail(_problem(
-                "execution-timeout", "compound execution deadline expired"))
+                "execution-timeout", _compound_timeout_message(self.manifest)))
             return False
         gate_token = secrets.token_hex(16)
         generation = self.manifest.grant.generation
@@ -329,7 +343,8 @@ def _ready(control: _Control, state: _State, deadline: float) -> bool:
     while control.pending and not state.spawn_closed:
         control.poll(_POLL_S)
     if time.monotonic() >= deadline and not state.spawn_closed:
-        state.fail(_problem("execution-timeout", "compound execution deadline expired"))
+        state.fail(_problem("execution-timeout",
+                            _compound_timeout_message(control.manifest)))
     return not state.spawn_closed
 
 
@@ -395,7 +410,14 @@ def _run_one(control: _Control, manifest: LaunchManifest, prepared,
         while state.child.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0 and state.cancel_signal is None:
-                state.fail(_problem("execution-timeout", timeout_scope + " execution deadline expired"))
+                if timeout_scope == "compound":
+                    state.fail(_problem(
+                        "execution-timeout",
+                        _compound_timeout_message(manifest)))
+                else:
+                    state.fail(_problem(
+                        "execution-timeout",
+                        timeout_scope + " execution deadline expired"))
             if state.cancel_signal is not None:
                 _cancel_and_reap(state, control, identity)
                 break
@@ -458,8 +480,7 @@ def run_guard(control_fd: int, manifest_fd: int) -> int:
             "pid": identity.pid, "birth": identity.birth, "uid": identity.uid, "pgid": identity.pgid,
         }})
         # None is the bounded default, not permission for an unlimited run.
-        compound_deadline = time.monotonic() + min(
-            manifest.compound_timeout_s or MAX_COMPOUND_TIMEOUT_S, MAX_COMPOUND_TIMEOUT_S)
+        compound_deadline = time.monotonic() + _compound_limit_s(manifest)
         if manifest.setup is not None:
             result = _run_one(control, manifest, manifest.setup,
                               manifest.attempt_ids[0],

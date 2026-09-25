@@ -7,6 +7,7 @@ native manifests without importing or executing repository code.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -275,10 +276,23 @@ def _command_bound(items: tuple[str, ...]) -> None:
         _fail()
 
 
+def _optional_timeout(table: dict, key: str) -> float | None:
+    if key not in table:
+        return None
+    value = table[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail()
+    result = float(value)
+    if not math.isfinite(result) or not 1 <= result <= C.MAX_COMPOUND_TIMEOUT_S:
+        _fail()
+    return result
+
+
 def _runner(data: object, root: Path) -> C.RunnerConfig:
     table = _table(data)
     _keys(table, {"kind", "launcher", "args", "full_args", "test_roots",
-                  "workers", "lifecycle"}, required={"kind", "launcher"})
+                  "workers", "lifecycle", "timeout", "full_timeout"},
+          required={"kind", "launcher"})
     kind_value = table["kind"]
     if not isinstance(kind_value, str):
         _fail()
@@ -303,10 +317,13 @@ def _runner(data: object, root: Path) -> C.RunnerConfig:
         _fail()
     if not isinstance(lifecycle, str):
         _fail()
+    timeout = _optional_timeout(table, "timeout")
+    full_timeout = _optional_timeout(table, "full_timeout")
     try:
         return C.RunnerConfig(
             kind=kind, launcher=launcher, args=args, full_args=full_args,
             test_roots=roots, workers=workers, lifecycle=lifecycle,
+            timeout_s=timeout, full_timeout_s=full_timeout,
         )
     except (TypeError, ValueError):
         _fail()
@@ -768,6 +785,10 @@ def _serialize_fresh(config: C.Config) -> bytes:
         f"workers = {runner.workers}",
         f"lifecycle = {_toml_string(runner.lifecycle)}",
     ]
+    if runner.timeout_s is not None:
+        lines.append(f"timeout = {runner.timeout_s:g}")
+    if runner.full_timeout_s is not None:
+        lines.append(f"full_timeout = {runner.full_timeout_s:g}")
     if config.setup is not None:
         setup = config.setup
         lines.extend([
