@@ -37,7 +37,3 @@ ptest = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests/ng"]
-addopts = "-n auto --dist loadgroup"
-
-[tool.coverage.run]
-data_file = ".venv/.coverage"
