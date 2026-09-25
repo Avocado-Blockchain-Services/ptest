@@ -353,8 +353,16 @@ def _mac(key: bytes, value: object) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _pytest_full_generated(path: str, included: set[str]) -> str | None:
-    """Return the source relation for one exact Pytest full-run byproduct."""
+def _pytest_tool_generated(path: str, included: set[str]) -> str | None:
+    """Return the source relation for one exact Pytest tool byproduct.
+
+    The native runner (cacheprovider) and the interpreter (bytecode,
+    assertion-rewrite cache) write these while a run executes, so they can
+    appear or change between the pre-launch and post-run snapshots of any
+    Pytest run, scoped or full.  Anything outside this exact allowlist —
+    unknown cache names, bytecode without its source in the snapshot —
+    returns None and stays a fingerprinted input (fail-closed).
+    """
     if path in {
         ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
         ".pytest_cache/v/cache/nodeids", ".pytest_cache/v/cache/lastfailed",
@@ -451,9 +459,14 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         present, deleted = _present_tracked(root, set(tracked), scan)
         candidate_paths = present | untracked | declared_ignored | undeclared_ignored
         generated = set()
-        if pytest_full_outputs:
+        # Tool byproducts are never source inputs, for scoped runs as well
+        # as full runs: the coordinator itself (editable install bytecode)
+        # and the native xdist controller/workers (cacheprovider entries,
+        # bytecode, assertion-rewrite cache) write them mid-run.  The digest
+        # protocol below is unchanged; only this classification is shared.
+        if config.runner.kind is C.RunnerKind.PYTEST:
             for path in untracked | undeclared_ignored:
-                relation = _pytest_full_generated(path, candidate_paths)
+                relation = _pytest_tool_generated(path, candidate_paths)
                 if relation is None:
                     continue
                 # Filtering is allowed only after the same no-follow regular

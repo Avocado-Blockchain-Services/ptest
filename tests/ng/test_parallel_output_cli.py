@@ -1035,10 +1035,16 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     assert main(("doctor", "--reviewer", "claude",
                  "--allow-model-review")) == 0
     human = capsys.readouterr()
-    assert "✓ Parallel execution" in human.out
+    # Terminal row shapes follow the doctor grid (see test_doctor_grid.py):
+    # per-project table rows plus grouped unknown/n/a lines.  The JSON
+    # half below owns statuses and citations; these pin the human rows.
+    assert "│ Parallel execution " in human.out
+    row = next(line for line in human.out.splitlines()
+               if "Parallel execution" in line)
+    assert "✓ ok" in row and "✗" not in row
     assert "? Parallel execution" not in human.out
-    assert "– Test selection" in human.out
-    assert ("? Test timing  no timing history yet: "
+    assert "– web: Test selection" in human.out
+    assert ("? api: Test timing — no timing history yet: "
             "run ptest --full once") in human.out
     assert "(the ptest config is not in the review evidence)" not in human.out
     assert "PRIVATE_STATE_SENTINEL_DET1" not in human.out

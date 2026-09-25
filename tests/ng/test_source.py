@@ -345,6 +345,61 @@ def test_pytest_full_digest_domain_is_execution_only_and_separate(case):
     assert normal.digest == expected
 
 
+def test_pytest_scoped_snapshot_excludes_tool_byproducts(case):
+    """Scoped pytest snapshots must tolerate cache and bytecode written mid-run.
+
+    The native runner (and the coordinator itself, via an editable install)
+    writes ``.pytest_cache`` entries and ``__pycache__`` bytecode while the
+    run executes.  Those tool byproducts are not source inputs: a scoped
+    snapshot taken before the run must match one taken after.
+    """
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / ".gitignore").write_text(".pytest_cache/\ntests/__pycache__/\nsrc/__pycache__/\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore native outputs")
+    before = snapshot(domain, config, None, None)
+    assert before.digest is not None
+    assert before.clean
+    cache = root / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (root / ".pytest_cache" / "CACHEDIR.TAG").write_text("cache")
+    (cache / "lastfailed").write_text("{}")
+    (cache / "nodeids").write_text("[]")
+    (root / "tests" / "__pycache__").mkdir()
+    (root / "tests" / "__pycache__" / "test_a.cpython-313-pytest-9.1.1.pyc").write_bytes(b"pyc")
+    (root / "src" / "__pycache__").mkdir()
+    (root / "src" / "__pycache__" / "a.cpython-313.pyc").write_bytes(b"pyc")
+    after = snapshot(domain, config, None, None)
+    assert after.digest is not None
+    assert after.digest == before.digest
+    assert after.clean
+    paths = {item.path for item in after.files}
+    assert ".pytest_cache/CACHEDIR.TAG" not in paths
+    assert ".pytest_cache/v/cache/lastfailed" not in paths
+    assert ".pytest_cache/v/cache/nodeids" not in paths
+    assert "tests/__pycache__/test_a.cpython-313-pytest-9.1.1.pyc" not in paths
+    assert "src/__pycache__/a.cpython-313.pyc" not in paths
+
+
+@pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
+                                  "tests/__pycache__/sourceless.cpython-313.pyc"])
+def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
+    """The scoped byproduct filter stays fail-closed on unknown shapes."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / ".gitignore").write_text(".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
+    target = root / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"output")
+    result = snapshot(domain, config, None, None)
+    assert path in {item.path for item in result.files}
+
+
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
                                   "tests/__pycache__/sourceless.cpython-313.pyc"])
 def test_pytest_full_snapshot_retains_nonstandard_cache_outputs(case, path):

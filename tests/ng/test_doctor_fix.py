@@ -443,7 +443,11 @@ def test_doctor_mentions_fix_when_config_out_of_date(
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     assert main(("doctor", "--offline")) == 0
-    assert "ptest doctor --fix" not in capsys.readouterr().out
+    # The staleness mention is gone once the config is up to date.  The
+    # grid's gap-driven "Next: ptest doctor --fix" line is separate
+    # contracted behavior (see test_doctor_grid.py), so this assertion
+    # targets the mention text rather than the bare command substring.
+    assert "config is out of date" not in capsys.readouterr().out
 
 
 def test_review_text_mentions_fix_when_config_out_of_date(

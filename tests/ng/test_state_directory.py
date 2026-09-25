@@ -151,12 +151,10 @@ def test_state_directory_scheduler_creates_only_local_private_state(
 
 
 def test_offline_doctor_with_local_state_is_read_only(
-        account, tmp_path, monkeypatch, capsys):
+        account, tmp_path, monkeypatch, capsys, ptest_project):
     from test_doctor_init_integration import _write_db_standalone_repo
 
-    root = tmp_path / "project"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "project")
     state = tmp_path / "state"
     # Subject: offline doctor must not create state.
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
@@ -172,12 +170,11 @@ def test_offline_doctor_with_local_state_is_read_only(
 
 
 def test_online_doctor_creates_local_review_cache_after_consent(
-        account, tmp_path, monkeypatch, capsys, state_dir_factory):
+        account, tmp_path, monkeypatch, capsys, state_dir_factory,
+        ptest_project):
     from test_doctor_init_integration import _prepare_review, _write_db_standalone_repo
 
-    root = tmp_path / "project"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "project")
     state = state_dir_factory()
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _prepare_review(monkeypatch, root, tmp_path / "bin")
@@ -362,12 +359,10 @@ def test_state_directory_outside_checkout_runs_without_exit_70(
 
 
 def test_doctor_review_with_state_inside_checkout_refuses_without_writing(
-        account, tmp_path, monkeypatch, capsys):
+        account, tmp_path, monkeypatch, capsys, ptest_project):
     from test_doctor_init_integration import _prepare_review, _write_db_standalone_repo
 
-    root = tmp_path / "project"
-    root.mkdir()
-    _write_db_standalone_repo(root)
+    root = _write_db_standalone_repo(ptest_project, tmp_path, "project")
     state = root / ".ptest-state"
     # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
