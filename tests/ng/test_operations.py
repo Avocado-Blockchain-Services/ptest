@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import support
 from ptest import contracts as C, config as config_api, operations, platform, scheduler
 
 
@@ -200,15 +201,7 @@ def _git_command_project(case, domain, *, args=()):
     root = _command_project(case, domain, args=args)
     (root / "runtime-input.txt").write_text("original input")
     (root / ".gitignore").write_text("ignored-input.txt\n")
-    env = {name: value for name, value in os.environ.items()
-           if not name.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
-    for argv in (("init",), ("add", "."), ("commit", "-m", "fixture")):
-        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", "-C", str(root), *argv),
-                       env=env, check=True, capture_output=True)
+    support.init_git_repo(root)
     return root
 
 
@@ -385,15 +378,7 @@ def _git_pytest_project(case, domain):
     config_path.write_text(config_path.read_text().replace(
         'args = ["-q"]', 'args = ["-q", "-p", "no:xdist"]'))
     (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
-    env = {name: value for name, value in os.environ.items()
-           if not name.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
-    for argv in (("init",), ("add", "."), ("commit", "-m", "fixture")):
-        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", "-C", str(root), *argv),
-                       env=env, check=True, capture_output=True)
+    support.init_git_repo(root)
     return root
 
 
@@ -904,6 +889,8 @@ def test_guard_launch_forwards_only_doctor_smoke_manifest(case, monkeypatch):
         "'hostile': os.environ.get('PTEST_HOSTILE_PROBE')}))\n",
         encoding="utf-8",
     )
+    # Payload only: the manifest path is echoed through the child env and
+    # asserted, never opened on disk.
     monkeypatch.setenv("PTEST_DOCTOR_SMOKE_MANIFEST", "/tmp/smoke-manifest.json")
     monkeypatch.setenv("PTEST_HOSTILE_PROBE", "must-not-cross-guard")
 
@@ -915,19 +902,6 @@ def test_guard_launch_forwards_only_doctor_smoke_manifest(case, monkeypatch):
     assert seen["hostile"] is None
 
 
-_FAKE_NODE_SCRIPT = (
-    "#!/usr/bin/env python3\n"
-    "import json, os, sys\n"
-    "from pathlib import Path\n"
-    "root = Path(os.getcwd())\n"
-    "(root / 'node-record.json').write_text(json.dumps(\n"
-    "    {'argv': sys.argv, 'cwd': os.getcwd()}))\n"
-    "with open(root / 'order.log', 'a') as log:\n"
-    "    log.write('node\\n')\n"
-    "exit_file = root / 'node-exit'\n"
-    "raise SystemExit(int(exit_file.read_text().strip()) if exit_file.exists() else 0)\n"
-)
-
 _SETUP_SCRIPT = (
     "from pathlib import Path\n"
     "Path('node_modules').mkdir(exist_ok=True)\n"
@@ -936,16 +910,10 @@ _SETUP_SCRIPT = (
 )
 
 
-def _fake_node(root: Path) -> str:
-    node = root / "node"
-    node.write_text(_FAKE_NODE_SCRIPT, encoding="utf-8")
-    node.chmod(0o755)
-    return str(node)
-
-
-def _vitest_project(case, domain, *, args=(), full_args=(), setup=False):
+def _vitest_project(case, domain, fake_exec_node, *, args=(), full_args=(),
+                    setup=False):
     root = case.project(domain, kind="vitest")
-    node = _fake_node(root)
+    node = str(fake_exec_node(root))
     project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
         'project_id = "', 1
     )[1].split('"', 1)[0]
@@ -978,9 +946,9 @@ def _node_record(root: Path) -> dict:
     return json.loads((root / "node-record.json").read_text(encoding="utf-8"))
 
 
-def test_vitest_scoped_executes_literal_exclusive_command(case):
+def test_vitest_scoped_executes_literal_exclusive_command(case, fake_exec_node):
     domain = case.domain()
-    root = _vitest_project(case, domain)
+    root = _vitest_project(case, domain, fake_exec_node)
 
     completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
 
@@ -995,9 +963,9 @@ def test_vitest_scoped_executes_literal_exclusive_command(case):
     assert result["plan"]["execution"] == "scoped"
 
 
-def test_vitest_failure_preserves_native_exit(case):
+def test_vitest_failure_preserves_native_exit(case, fake_exec_node):
     domain = case.domain()
-    root = _vitest_project(case, domain)
+    root = _vitest_project(case, domain, fake_exec_node)
     (root / "node-exit").write_text("1", encoding="utf-8")
 
     completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
@@ -1008,9 +976,9 @@ def test_vitest_failure_preserves_native_exit(case):
     assert result["runner_exit_code"] == 1
 
 
-def test_vitest_full_appends_full_args(case):
+def test_vitest_full_appends_full_args(case, fake_exec_node):
     domain = case.domain()
-    root = _vitest_project(case, domain,
+    root = _vitest_project(case, domain, fake_exec_node,
                            args=("--reporter", "verbose"), full_args=("--coverage",))
 
     completed = case.invoke(domain, root, timeout=20)
@@ -1022,9 +990,9 @@ def test_vitest_full_appends_full_args(case):
     assert _run_data(completed)["plan"]["execution"] == "full"
 
 
-def test_vitest_setup_runs_first_when_required_paths_missing(case):
+def test_vitest_setup_runs_first_when_required_paths_missing(case, fake_exec_node):
     domain = case.domain()
-    root = _vitest_project(case, domain, setup=True)
+    root = _vitest_project(case, domain, fake_exec_node, setup=True)
 
     completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
 
@@ -1033,9 +1001,9 @@ def test_vitest_setup_runs_first_when_required_paths_missing(case):
     assert (root / "node_modules").is_dir()
 
 
-def test_vitest_setup_is_skipped_once_current(case):
+def test_vitest_setup_is_skipped_once_current(case, fake_exec_node):
     domain = case.domain()
-    root = _vitest_project(case, domain, setup=True)
+    root = _vitest_project(case, domain, fake_exec_node, setup=True)
 
     assert case.invoke(domain, root, "--", "src/a.test.ts", timeout=20).code == 0
     assert case.invoke(domain, root, "--", "src/a.test.ts", timeout=20).code == 0
@@ -1043,12 +1011,12 @@ def test_vitest_setup_is_skipped_once_current(case):
     assert (root / "order.log").read_text(encoding="utf-8").splitlines() == ["setup", "node", "node"]
 
 
-def test_setup_summary_kind_matches_vitest_config(case):
+def test_setup_summary_kind_matches_vitest_config(case, fake_exec_node):
     from ptest import operations as ops_module
     from ptest.adapters import vitest as vitest_adapter
 
     domain = case.domain()
-    root = _vitest_project(case, domain, setup=True)
+    root = _vitest_project(case, domain, fake_exec_node, setup=True)
     config = config_api.resolve_config(root).config
     checkout = case.checkout(domain)
     plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=())
@@ -1084,12 +1052,12 @@ def test_native_go_cargo_execution_remains_deferred(case, kind):
     assert completed.result is None
 
 
-def test_monorepo_scope_routes_to_vitest_child(case):
+def test_monorepo_scope_routes_to_vitest_child(case, fake_exec_node):
     domain = case.domain()
     root = case.project(domain, kind="command")
     web = root / "web"
     web.mkdir()
-    node = _fake_node(web)
+    node = str(fake_exec_node(web))
     (web / ".ptest.toml").write_text(
         "version = 1\n"
         f'project_id = "{"cd" * 16}"\n'

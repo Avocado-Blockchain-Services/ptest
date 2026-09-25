@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+import support
 from ptest import agent_assessment as assessment
 from ptest import contracts as C
 from ptest import executability as exec_check
@@ -146,26 +147,6 @@ def _point_launcher_at_test_venv(root: Path) -> None:
     config.write_text("".join(lines), encoding="utf-8")
 
 
-def _commit(root: Path) -> None:
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("GIT_")}
-    env.update(
-        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-        GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-        GIT_AUTHOR_EMAIL="fixture@example.test",
-        GIT_COMMITTER_EMAIL="fixture@example.test",
-    )
-    for args in (("init",),
-                 ("config", "user.email", "fixture@example.test"),
-                 ("config", "user.name", "Fixture"),
-                 ("add", "."), ("commit", "-m", "initial")):
-        subprocess.run(
-            ("git", "-c", "core.hooksPath=" + os.devnull,
-             "-c", "commit.gpgsign=false", "-C", str(root), *args),
-            env=env, check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
 def _write_persea_shaped_monorepo(root: Path) -> None:
     """Uv-style api (stub-qualified xdist, ``-n 0``) plus vitest web."""
     api = root / "api"
@@ -264,64 +245,27 @@ def _write_fresh_xdist_project(root: Path) -> None:
     )
 
 
-def _install_fake_claude(bindir: Path) -> None:
-    """Claude-shaped fake answering one one-row reply per item request."""
-    script = "\n".join([
-        "#!" + sys.executable,
-        "import json, os, sys",
-        "here = os.path.dirname(os.path.abspath(sys.argv[0]))",
-        "if len(sys.argv) > 1 and sys.argv[1] == '--version':",
-        "    sys.stdout.write('claude-test 1.0\\n')",
-        "    sys.exit(0)",
-        "request = json.load(sys.stdin)",
-        "item_id = request['policy']['item']['id']",
-        "with open(os.path.join(here, 'argv.log'), 'a',",
-        "          encoding='utf-8') as handle:",
-        "    handle.write(json.dumps({'argv': sys.argv[1:],",
-        "                              'item': item_id}) + '\\n')",
-        "excerpts = request['excerpts']",
-        "if excerpts:",
-        "    first = excerpts[0]",
-        "    quote = first['text'].splitlines()[0][:512]",
-        "    reply = {'status': 'satisfied',",
-        "             'rationale': ('Reviewed ' + item_id + ' against '",
-        "                         'the cited excerpt lines.'),",
-        "             'evidence': [{'path': first['path'],",
-        "                           'start_line': first['start_line'],",
-        "                           'end_line': first['end_line'],",
-        "                           'sha256': first['sha256']}],",
-        "             'proof': [{'role': 'applicability',",
-        "                        'citation_index': 0, 'quote': quote},",
-        "                       {'role': 'mechanism',",
-        "                        'citation_index': 0, 'quote': quote}],",
-        "             'needs': [],",
-        "             'finding': None}",
-        "else:",
-        "    reply = {'status': 'unknown',",
-        "             'rationale': ('The bounded source evidence does not '",
-        "                         'establish this row.'),",
-        "             'evidence': [], 'finding': None,",
-        "             'proof': [], 'needs': []}",
-        "envelope = {'type': 'result', 'subtype': 'success',",
-        "            'is_error': False, 'num_turns': 1,",
-        "            'permission_denials': [],",
-        "            'result': json.dumps(reply)}",
-        "sys.stdout.write(json.dumps(envelope))",
-        "",
-    ])
-    bindir.mkdir(exist_ok=True)
-    executable = bindir / "claude"
-    executable.write_text(script, encoding="utf-8")
-    executable.chmod(0o755)
-
-
-def _prepare_review(monkeypatch, root: Path, bindir: Path) -> None:
+def _prepare_review(monkeypatch, root: Path, bindir: Path, fake_exec_claude) -> None:
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
-    _install_fake_claude(bindir)
+    fake_exec_claude(bin_dir=bindir)
     monkeypatch.setenv(
         "PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+
+
+def _empty_state(monkeypatch, isolated_env) -> None:
+    """Point doctor at an explicit empty per-test state domain.
+
+    The isolated home carries no coordination directory, so history
+    reads would fail validation and report "history unavailable".
+    An explicit empty domain reads as "no timing history yet" without
+    ever touching the real account state.
+    """
+    coordination = isolated_env.state_dir / "coordination"
+    coordination.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(coordination, 0o700)
+    monkeypatch.setenv("PTEST_STATE_DIR", str(isolated_env.state_dir))
 
 
 def _read_launches(bindir: Path) -> list:
@@ -385,7 +329,7 @@ def test_review_disclosure_unknown_model_and_missing_count_shapes(
 
 
 def test_doctor_decline_prints_short_disclosure_not_legal_text(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, fake_exec_claude):
     """Through main(): decline path shows the short disclosure only."""
     root = tmp_path / "decline"
     root.mkdir()
@@ -405,7 +349,7 @@ def test_doctor_decline_prints_short_disclosure_not_legal_text(
     (root / "tests" / "test_example.py").write_text(
         "def test_example():\n    assert True\n", encoding="utf-8")
     bindir = tmp_path / "bin"
-    _prepare_review(monkeypatch, root, bindir)
+    _prepare_review(monkeypatch, root, bindir, fake_exec_claude)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda: "no")
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -552,7 +496,7 @@ def test_parallel_end_to_end_four_workers_then_partial_grant(
     monkeypatch.chdir(root)
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
     capsys.readouterr()
-    _commit(root)
+    support.init_git_repo(root)
 
     env = {"T5_WORKER_MARKERS": str(markers)}
     full = case.invoke(domain_full, root, "--full",
@@ -625,7 +569,7 @@ def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
     capsys.readouterr()
     _point_launcher_at_test_venv(root)
-    _commit(root)
+    support.init_git_repo(root)
 
     full = case.invoke(domain, root, "--full", timeout=60)
     assert full.code == 0, full.stderr.decode()
@@ -633,7 +577,7 @@ def test_dist_each_full_passes_serially(case, tmp_path, monkeypatch,
 
 # ---- (c) Ctrl-C through the guard -------------------------------------------
 
-def test_ctrl_c_kills_parallel_workers(case, tmp_path):
+def test_ctrl_c_kills_parallel_workers(case, tmp_path, monkeypatch):
     import select
 
     # The checkout must live under the fixture domain, and the run phase
@@ -693,13 +637,9 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
     os.mkfifo(fifo)
 
     # Init through cli.main in-process (no result-json injection issue).
-    monkeypatch_cwd = os.getcwd()
-    os.chdir(root)
-    try:
-        assert main(("init", "--no-doctor", "--agents", "none")) == 0
-    finally:
-        os.chdir(monkeypatch_cwd)
-    _commit(root)
+    monkeypatch.chdir(root)
+    assert main(("init", "--no-doctor", "--agents", "none")) == 0
+    support.init_git_repo(root)
 
     child_env = {key: value for key, value in os.environ.items()}
     child_env["T5_WORKER_MARKERS"] = str(markers)
@@ -751,14 +691,16 @@ def test_ctrl_c_kills_parallel_workers(case, tmp_path):
 
 # ---- (d) doctor on a persea-shaped monorepo ----------------------------------
 
-def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
+def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys,
+                                     fake_exec_claude, isolated_env):
     from ptest.checklist import CATALOG
 
     root = tmp_path / "monorepo"
     root.mkdir()
     _write_persea_shaped_monorepo(root)
+    _empty_state(monkeypatch, isolated_env)
     bindir = tmp_path / "bin"
-    _prepare_review(monkeypatch, root, bindir)
+    _prepare_review(monkeypatch, root, bindir, fake_exec_claude)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
                        str(tmp_path / "locks"))
 
@@ -843,7 +785,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
 
 
 def test_doctor_fresh_xdist_project_parallel_satisfied(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, fake_exec_claude):
     """Doctor on a qualified 4-worker project: satisfied, no model call."""
     root = tmp_path / "fresh-doctor"
     root.mkdir()
@@ -852,7 +794,7 @@ def test_doctor_fresh_xdist_project_parallel_satisfied(
     assert main(("init", "--no-doctor", "--agents", "none")) == 0
     capsys.readouterr()
     bindir = tmp_path / "bin"
-    _prepare_review(monkeypatch, root, bindir)
+    _prepare_review(monkeypatch, root, bindir, fake_exec_claude)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
                        str(tmp_path / "locks"))
 
@@ -899,77 +841,8 @@ def _write_unconfigured_db_project(root: Path) -> None:
     )
 
 
-def _install_fake_claude_with_db_gap(bindir: Path) -> None:
-    """Claude-shaped fake answering a DB-002 gap, satisfied elsewhere."""
-    script = "\n".join([
-        "#!" + sys.executable,
-        "import json, os, sys",
-        "here = os.path.dirname(os.path.abspath(sys.argv[0]))",
-        "if len(sys.argv) > 1 and sys.argv[1] == '--version':",
-        "    sys.stdout.write('claude-test 1.0\\n')",
-        "    sys.exit(0)",
-        "request = json.load(sys.stdin)",
-        "item_id = request['policy']['item']['id']",
-        "with open(os.path.join(here, 'argv.log'), 'a',",
-        "          encoding='utf-8') as handle:",
-        "    handle.write(json.dumps({'argv': sys.argv[1:],",
-        "                              'item': item_id}) + '\\n')",
-        "excerpts = request['excerpts']",
-        "if excerpts:",
-        "    first = excerpts[0]",
-        "    quote = first['text'].splitlines()[0][:512]",
-        "    citation = {'path': first['path'],",
-        "                'start_line': first['start_line'],",
-        "                'end_line': first['end_line'],",
-        "                'sha256': first['sha256']}",
-        "    if item_id == 'DB-002':",
-        "        reply = {'status': 'gap',",
-        "                 'rationale': ('DB-002 shows the tests share one '",
-        "                               'database without isolation.'),",
-        "                 'evidence': [citation],",
-        "                 'proof': [{'role': 'applicability',",
-        "                            'citation_index': 0, 'quote': quote},",
-        "                           {'role': 'violation',",
-        "                            'citation_index': 0, 'quote': quote}],",
-        "                 'needs': [],",
-        "                 'finding': {",
-        "                     'summary': ('Tests share one database '",
-        "                                 'without isolation.'),",
-        "                     'suggested_change': ('Give each test its own '",
-        "                                          'isolated database.'),",
-        "                     'evidence': [citation]}}",
-        "    else:",
-        "        reply = {'status': 'satisfied',",
-        "                 'rationale': ('Reviewed ' + item_id + ' against '",
-        "                             'the cited excerpt lines.'),",
-        "                 'evidence': [citation],",
-        "                 'proof': [{'role': 'applicability',",
-        "                            'citation_index': 0, 'quote': quote},",
-        "                           {'role': 'mechanism',",
-        "                            'citation_index': 0, 'quote': quote}],",
-        "                 'needs': [],",
-        "                 'finding': None}",
-        "else:",
-        "    reply = {'status': 'unknown',",
-        "             'rationale': ('The bounded source evidence does not '",
-        "                         'establish this row.'),",
-        "             'evidence': [], 'finding': None,",
-        "             'proof': [], 'needs': []}",
-        "envelope = {'type': 'result', 'subtype': 'success',",
-        "            'is_error': False, 'num_turns': 1,",
-        "            'permission_denials': [],",
-        "            'result': json.dumps(reply)}",
-        "sys.stdout.write(json.dumps(envelope))",
-        "",
-    ])
-    bindir.mkdir(exist_ok=True)
-    executable = bindir / "claude"
-    executable.write_text(script, encoding="utf-8")
-    executable.chmod(0o755)
-
-
 def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, fake_exec_claude):
     """One safety gap (DB-002) keeps the safety-first parallel fix."""
     root = tmp_path / "db-gap-doctor"
     root.mkdir()
@@ -981,7 +854,7 @@ def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
-    _install_fake_claude_with_db_gap(bindir)
+    fake_exec_claude(bin_dir=bindir, db_gap=True)
     monkeypatch.setenv(
         "PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
@@ -1142,7 +1015,7 @@ def _write_det1_shaped_monorepo(root: Path) -> None:
 
 
 def test_doctor_det1_deterministic_rows_cite_child_config(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, fake_exec_claude, isolated_env):
     """DET1 twin: api parallel ✓ (4 workers), disabled selection is a gap.
 
     The child ``.ptest.toml`` files are tier-0 evidence, so no deterministic
@@ -1153,8 +1026,9 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     root = tmp_path / "det1-mono"
     root.mkdir()
     _write_det1_shaped_monorepo(root)
+    _empty_state(monkeypatch, isolated_env)
     bindir = tmp_path / "bin"
-    _prepare_review(monkeypatch, root, bindir)
+    _prepare_review(monkeypatch, root, bindir, fake_exec_claude)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR",
                        str(tmp_path / "locks"))
 

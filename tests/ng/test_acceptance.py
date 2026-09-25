@@ -197,10 +197,9 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
     assert evidence["promotable"] is False
 
 
-def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch):
-    candidate = tmp_path / "ptest"
-    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch, fake_exec):
+    candidate = fake_exec("ptest", "#!/usr/bin/python\nfrom ptest.cli import main\n",
+                          bin_dir=tmp_path)
     output = tmp_path.parent / f"{tmp_path.name}-raw-rejected"
 
     def launched(*args, **kwargs):
@@ -216,10 +215,10 @@ def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch):
     assert not output.exists()
 
 
-def test_benchmark_cli_rejects_mismatched_candidate_and_profile_before_launch(tmp_path, monkeypatch):
-    candidate = tmp_path / "ptest"
-    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+def test_benchmark_cli_rejects_mismatched_candidate_and_profile_before_launch(
+        tmp_path, monkeypatch, fake_exec):
+    candidate = fake_exec("ptest", "#!/usr/bin/python\nfrom ptest.cli import main\n",
+                          bin_dir=tmp_path)
     other = tmp_path / "other-ptest"
     other.write_bytes(candidate.read_bytes())
     other.chmod(other.stat().st_mode | stat.S_IXUSR)

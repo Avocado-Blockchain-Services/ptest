@@ -14,7 +14,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
@@ -135,12 +134,6 @@ def _run_bridge(root: Path, argv: list[str], *, execution: str,
     )
 
 
-def _write(root: Path, relpath: str, body: str) -> None:
-    path = root / relpath
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-
-
 _IDENTITY_TEST = (
     "import os\n"
     "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
@@ -171,22 +164,9 @@ def _worker_lines(root: Path) -> list[tuple[str, str, str, str]]:
     return [tuple(line.split(":")) for line in lines]  # type: ignore[misc]
 
 
-def _materialize_persea_fixture(root: Path) -> None:
-    shutil.copyfile(PARALLEL_FIXTURES / "pyproject.toml.txt",
-                    root / "pyproject.toml")
-    shutil.copyfile(PARALLEL_FIXTURES / "conftest.py.txt",
-                    root / "conftest.py")
-    tests = root / "tests"
-    tests.mkdir(exist_ok=True)
-    shutil.copyfile(PARALLEL_FIXTURES / "test_groups.py.txt",
-                    tests / "test_groups.py")
-
-
-def test_parallel_pass_four_workers_observed(tmp_path):
+def test_parallel_pass_four_workers_observed(tmp_path, fake_pytest_project):
     """Twin (a): a 4-worker pass completes with per-worker identity."""
-    root = tmp_path / "pass"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(8))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(8)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -213,14 +193,18 @@ def test_parallel_pass_four_workers_observed(tmp_path):
         assert prefix.startswith("pt_") and prefix.endswith(ptest_id)
 
 
-def test_parallel_fail_reports_native_failure(tmp_path):
+def test_parallel_fail_reports_native_failure(tmp_path, fake_pytest_project):
     """Twin (b): a 4-worker failure is complete with native-failure."""
-    root = tmp_path / "fail"
-    root.mkdir()
-    _write(root, "tests/test_bad.py",
-           _IDENTITY_TEST
+    root = fake_pytest_project(
+        tests={
+        "tests/test_bad.py": (
+_IDENTITY_TEST
            + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
-           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -234,17 +218,21 @@ def test_parallel_fail_reports_native_failure(tmp_path):
     assert twin.report["problem"] == "native-failure"
 
 
-def test_parallel_worker_crash_is_never_a_pass(tmp_path):
+def test_parallel_worker_crash_is_never_a_pass(tmp_path, fake_pytest_project):
     """Twin (c): a SIGKILLed worker means incomplete or failed, never 0."""
-    root = tmp_path / "crash"
-    root.mkdir()
-    _write(root, "tests/test_crash.py",
-           "import os, signal\n"
+    root = fake_pytest_project(
+        tests={
+        "tests/test_crash.py": (
+"import os, signal\n"
            + _IDENTITY_TEST
            + "\ndef test_kill_worker():\n"
            "    _record('kill')\n"
            "    os.kill(os.getpid(), signal.SIGKILL)\n"
-           + "\ndef test_ok():\n    _record('ok')\n    assert True\n")
+           + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -257,10 +245,8 @@ def test_parallel_worker_crash_is_never_a_pass(tmp_path):
         or twin.report.get("native_exit_code") not in (None, 0))
 
 
-def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path):
+def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path, fake_pytest_project):
     """Twin (d): loadgroup runs each xdist_group on one worker."""
-    root = tmp_path / "loadgroup"
-    root.mkdir()
     body = _IDENTITY_TEST
     for name in ("g1_a", "g1_b"):
         body += (f"\nimport pytest\n@pytest.mark.xdist_group('g1')\n"
@@ -271,7 +257,7 @@ def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path):
     for name in ("plain_a", "plain_b"):
         body += (f"\ndef test_{name}():\n    _record('{name}')\n"
                  "    assert True\n")
-    _write(root, "tests/test_groups.py", body)
+    root = fake_pytest_project(tests={"tests/test_groups.py": body}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "loadgroup", "-q", "-p", "no:cacheprovider",
@@ -288,7 +274,7 @@ def test_parallel_loadgroup_keeps_xdist_group_together(tmp_path):
     assert by_test["g2_a"] == by_test["g2_b"]
 
 
-def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
+def test_parallel_ctrl_c_leaves_no_survivors(tmp_path, fake_pytest_project):
     """Twin (e): SIGINT the bridge PID; exit fast, nothing survives.
 
     The bridge runs in the caller's process group (no new session), so only
@@ -298,12 +284,6 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
     """
     import select
 
-    root = (tmp_path / "interrupt").resolve()
-    root.mkdir()
-    markers = root / "markers"
-    markers.mkdir(exist_ok=True)
-    fifo = markers / "interrupt.fifo"
-    os.mkfifo(fifo)
     body = (
         "import os, time\n"
         "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
@@ -320,7 +300,12 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
     for name in ("a", "b", "c", "d"):
         body += (f"\ndef test_sleep_{name}():\n    _mark('{name}')\n"
                  "    time.sleep(30)\n")
-    _write(root, "tests/test_sleep.py", body)
+    root = fake_pytest_project(tests={"tests/test_sleep.py": body},
+                               git=False).resolve()
+    markers = root / "markers"
+    markers.mkdir(exist_ok=True)
+    fifo = markers / "interrupt.fifo"
+    os.mkfifo(fifo)
 
     reports = root / "reports"
     reports.mkdir(mode=0o700)
@@ -387,18 +372,23 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path):
         os.close(reader)
 
 
-def test_parallel_worker_deselect_runs_labelled(tmp_path):
+def test_parallel_worker_deselect_runs_labelled(tmp_path, fake_pytest_project):
     """Twin (f1): a worker-only modifyitems deselect runs labelled."""
-    root = tmp_path / "deselect"
-    root.mkdir()
-    _write(root, "tests/sub/conftest.py",
-           "def pytest_collection_modifyitems(items):\n"
+    root = fake_pytest_project(
+        tests={
+        "tests/sub/conftest.py": (
+"def pytest_collection_modifyitems(items):\n"
            "    items[:] = [item for item in items"
-           " if 'test_drop' not in item.nodeid]\n")
-    _write(root, "tests/sub/test_mixed.py",
-           _IDENTITY_TEST
+           " if 'test_drop' not in item.nodeid]\n"
+        ),
+        "tests/sub/test_mixed.py": (
+_IDENTITY_TEST
            + "\ndef test_keep():\n    _record('keep')\n    assert True\n"
-           + "\ndef test_drop():\n    _record('drop')\n    assert True\n")
+           + "\ndef test_drop():\n    _record('drop')\n    assert True\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -414,17 +404,22 @@ def test_parallel_worker_deselect_runs_labelled(tmp_path):
     assert [line[3] for line in lines] == ["keep"]
 
 
-def test_parallel_collection_finish_drop_is_refused(tmp_path):
+def test_parallel_collection_finish_drop_is_refused(tmp_path, fake_pytest_project):
     """Twin (f2): a collection_finish drop after the inventory is refused."""
-    root = tmp_path / "drop"
-    root.mkdir()
-    _write(root, "tests/sub/conftest.py",
-           "def pytest_collection_finish(session):\n"
-           "    del session.items[0]\n")
-    _write(root, "tests/sub/test_mixed.py",
-           _IDENTITY_TEST
+    root = fake_pytest_project(
+        tests={
+        "tests/sub/conftest.py": (
+"def pytest_collection_finish(session):\n"
+           "    del session.items[0]\n"
+        ),
+        "tests/sub/test_mixed.py": (
+_IDENTITY_TEST
            + "\ndef test_first():\n    _record('first')\n    assert True\n"
-           + "\ndef test_second():\n    _record('second')\n    assert True\n")
+           + "\ndef test_second():\n    _record('second')\n    assert True\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -439,20 +434,25 @@ def test_parallel_collection_finish_drop_is_refused(tmp_path):
         "message", "") for refusal in twin.refusals)
 
 
-def test_parallel_sessionfinish_forgery_is_refused(tmp_path):
+def test_parallel_sessionfinish_forgery_is_refused(tmp_path, fake_pytest_project):
     """Twin (g1): a controller sessionfinish forcing exit 0 is refused."""
-    root = tmp_path / "forgery"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "import pytest\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"import pytest\n"
            "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
            "def pytest_sessionfinish(session, exitstatus):\n"
            "    result = yield\n"
            "    session.exitstatus = 0\n"
-           "    return result\n")
-    _write(root, "tests/test_forged.py",
-           _IDENTITY_TEST
-           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+           "    return result\n"
+        ),
+        "tests/test_forged.py": (
+_IDENTITY_TEST
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -467,26 +467,31 @@ def test_parallel_sessionfinish_forgery_is_refused(tmp_path):
         "message", "") for refusal in twin.refusals)
 
 
-def test_parallel_worker_makereport_rewrite_is_refused(tmp_path):
+def test_parallel_worker_makereport_rewrite_is_refused(tmp_path, fake_pytest_project):
     """Twin (g2): a worker-only makereport hiding failures is refused.
 
     The worker refuses mid-collection, so its channel dies without a
     record; the controller fails closed. The native code is preserved
     (worker internal error), never remapped to a pass.
     """
-    root = tmp_path / "makereport"
-    root.mkdir()
-    _write(root, "tests/sub/conftest.py",
-           "import pytest\n"
+    root = fake_pytest_project(
+        tests={
+        "tests/sub/conftest.py": (
+"import pytest\n"
            "@pytest.hookimpl(wrapper=True, tryfirst=True)\n"
            "def pytest_runtest_makereport(item, call):\n"
            "    report = yield\n"
            "    if report.failed:\n"
            "        report.outcome = 'passed'\n"
-           "    return report\n")
-    _write(root, "tests/sub/test_hidden.py",
-           _IDENTITY_TEST
-           + "\ndef test_broken():\n    _record('broken')\n    assert False\n")
+           "    return report\n"
+        ),
+        "tests/sub/test_hidden.py": (
+_IDENTITY_TEST
+           + "\ndef test_broken():\n    _record('broken')\n    assert False\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -500,11 +505,19 @@ def test_parallel_worker_makereport_rewrite_is_refused(tmp_path):
     assert twin.refusals
 
 
-def test_parallel_persea_shaped_four_workers(tmp_path):
+def test_parallel_persea_shaped_four_workers(tmp_path, fake_pytest_project):
     """Twin (h): the persea-shaped fixture runs 4 workers, labelled."""
-    root = tmp_path / "persea"
-    root.mkdir()
-    _materialize_persea_fixture(root)
+    root = fake_pytest_project(
+        tests={
+            "pyproject.toml": (PARALLEL_FIXTURES / "pyproject.toml.txt").read_text(
+                encoding="utf-8"),
+            "conftest.py": (PARALLEL_FIXTURES / "conftest.py.txt").read_text(
+                encoding="utf-8"),
+            "tests/test_groups.py": (PARALLEL_FIXTURES / "test_groups.py.txt").read_text(
+                encoding="utf-8"),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-q", "-p", "no:cacheprovider", "tests"],
@@ -527,16 +540,14 @@ def test_parallel_persea_shaped_four_workers(tmp_path):
     assert by_test["alpha_one"] == by_test["alpha_two"]
 
 
-def test_parallel_coverage_passes_with_four_workers(tmp_path):
+def test_parallel_coverage_passes_with_four_workers(tmp_path, fake_pytest_project):
     """Twin (cov-a): basic parallel with --cov passes on 4 workers.
 
     RED for the coverage-under-xdist fallback: the parallel tier admits
     the frozen pytest-cov/coverage tuple, so the bridge must run workers
     instead of refusing the coverage hooks.
     """
-    root = tmp_path / "covpass"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(8))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(8)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -555,11 +566,11 @@ def test_parallel_coverage_passes_with_four_workers(tmp_path):
     assert {line[1] for line in lines} == {"w000", "w001", "w002", "w003"}
 
 
-def test_parallel_unqualified_xdist_refused_before_collection(tmp_path):
+def test_parallel_unqualified_xdist_refused_before_collection(
+        tmp_path, fake_pytest_project):
     """Twin (i): a stub xdist 0.0.0 refuses before any test collects."""
-    root = tmp_path / "stubxdist"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(2)},
+                               git=False)
     stub = root / "stub"
     dist_info = stub / "pytest_xdist-0.0.0.dist-info"
     dist_info.mkdir(parents=True)
@@ -583,11 +594,9 @@ def test_parallel_unqualified_xdist_refused_before_collection(tmp_path):
     assert not (root / "markers" / "workers.log").exists()
 
 
-def test_parallel_unsupported_dist_each_is_refused(tmp_path):
+def test_parallel_unsupported_dist_each_is_refused(tmp_path, fake_pytest_project):
     """Twin (j1): --dist each falls closed with a plain reason."""
-    root = tmp_path / "each"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(2)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "each", "-q", "-p", "no:cacheprovider",
@@ -602,11 +611,9 @@ def test_parallel_unsupported_dist_each_is_refused(tmp_path):
                in refusal.get("message", "") for refusal in twin.refusals)
 
 
-def test_parallel_remote_tx_is_refused(tmp_path):
+def test_parallel_remote_tx_is_refused(tmp_path, fake_pytest_project):
     """Twin (j2): a remote --tx transport fails closed with a plain reason."""
-    root = tmp_path / "remotetx"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(2)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--tx", "ssh=user@example.test", "-q",
@@ -620,14 +627,20 @@ def test_parallel_remote_tx_is_refused(tmp_path):
     assert twin.refusals
 
 
-def test_parallel_foreign_scheduler_hook_is_refused(tmp_path):
+def test_parallel_foreign_scheduler_hook_is_refused(tmp_path, fake_pytest_project):
     """Twin (k): a non-xdist scheduler hook is not owned by the grant."""
-    root = tmp_path / "scheduler"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "def pytest_xdist_make_scheduler(config, log):\n"
-           "    return None\n")
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"def pytest_xdist_make_scheduler(config, log):\n"
+           "    return None\n"
+        ),
+        "tests/test_ok.py": (
+_identity_tests(2)
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -642,11 +655,9 @@ def test_parallel_foreign_scheduler_hook_is_refused(tmp_path):
                in refusal.get("message", "") for refusal in twin.refusals)
 
 
-def test_parallel_empty_collection_is_exit_five(tmp_path):
+def test_parallel_empty_collection_is_exit_five(tmp_path, fake_pytest_project):
     """Twin (l): an empty node collection gives derived status 5."""
-    root = tmp_path / "empty"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(2)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -659,20 +670,25 @@ def test_parallel_empty_collection_is_exit_five(tmp_path):
     assert twin.report["native_exit_code"] == 5
 
 
-def test_parallel_differing_collections_are_refused(tmp_path):
+def test_parallel_differing_collections_are_refused(tmp_path, fake_pytest_project):
     """Twin (m): workers collecting different tests fail closed."""
-    root = tmp_path / "differ"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "import os\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"import os\n"
            "def pytest_collection_modifyitems(items):\n"
            "    if os.environ.get('PYTEST_XDIST_WORKER') == 'gw0':\n"
            "        items[:] = [item for item in items"
-           " if 'test_a' not in item.nodeid]\n")
-    _write(root, "tests/test_both.py",
-           _IDENTITY_TEST
+           " if 'test_a' not in item.nodeid]\n"
+        ),
+        "tests/test_both.py": (
+_IDENTITY_TEST
            + "\ndef test_a():\n    _record('a')\n    assert True\n"
-           + "\ndef test_b():\n    _record('b')\n    assert True\n")
+           + "\ndef test_b():\n    _record('b')\n    assert True\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -698,7 +714,7 @@ def _forgery_tests() -> str:
     )
 
 
-def test_parallel_worker_serialize_forgery_is_refused(tmp_path):
+def test_parallel_worker_serialize_forgery_is_refused(tmp_path, fake_pytest_project):
     """Twin (n1): a worker-only report-serialization rewrite is refused.
 
     The conftest hook exists only on workers (gated on PYTEST_XDIST_WORKER),
@@ -706,10 +722,10 @@ def test_parallel_worker_serialize_forgery_is_refused(tmp_path):
     worker-half transport check and the controller-side reconciliation,
     never an unlabelled pass.
     """
-    root = tmp_path / "serialize"
-    root.mkdir()
-    _write(root, "tests/sub/conftest.py",
-           "import os\n"
+    root = fake_pytest_project(
+        tests={
+        "tests/sub/conftest.py": (
+"import os\n"
            "if os.environ.get('PYTEST_XDIST_WORKER'):\n"
            "    import pytest\n"
            "    @pytest.hookimpl(wrapper=True, tryfirst=True)\n"
@@ -717,8 +733,14 @@ def test_parallel_worker_serialize_forgery_is_refused(tmp_path):
            "        data = yield\n"
            "        if isinstance(data, dict):\n"
            "            data['outcome'] = 'passed'\n"
-           "        return data\n")
-    _write(root, "tests/sub/test_mixed.py", _forgery_tests())
+           "        return data\n"
+        ),
+        "tests/sub/test_mixed.py": (
+_forgery_tests()
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -732,17 +754,17 @@ def test_parallel_worker_serialize_forgery_is_refused(tmp_path):
     assert twin.refusals
 
 
-def test_parallel_controller_deserialize_forgery_is_refused(tmp_path):
+def test_parallel_controller_deserialize_forgery_is_refused(tmp_path, fake_pytest_project):
     """Twin (n2): a controller-only report-deserialization rewrite is refused.
 
     The conftest hook exists only on the controller (absent on workers), so
     the refusal must come from the controller-side transport check, never
     an unlabelled pass.
     """
-    root = tmp_path / "deserialize"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "import os\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"import os\n"
            "if not os.environ.get('PYTEST_XDIST_WORKER'):\n"
            "    import pytest\n"
            "    @pytest.hookimpl(wrapper=True, tryfirst=True)\n"
@@ -750,8 +772,14 @@ def test_parallel_controller_deserialize_forgery_is_refused(tmp_path):
            "        report = yield\n"
            "        if report is not None and getattr(report, 'failed', False):\n"
            "            report.outcome = 'passed'\n"
-           "        return report\n")
-    _write(root, "tests/test_mixed.py", _forgery_tests())
+           "        return report\n"
+        ),
+        "tests/test_mixed.py": (
+_forgery_tests()
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -805,17 +833,24 @@ def _shadow_tests() -> str:
     )
 
 
-def test_parallel_shadow_module_at_checkout_root_is_neutralized(tmp_path):
+def test_parallel_shadow_module_at_checkout_root_is_neutralized(tmp_path, fake_pytest_project):
     """Twin (o1): a checkout-root ``pytest_bridge`` impostor cannot forge.
 
     The impostor rewrites outcomes in transit and writes a well-formed clean
     worker record. The run must surface the true native failure, never an
     unlabelled pass.
     """
-    root = tmp_path / "shadowroot"
-    root.mkdir()
-    _write(root, "pytest_bridge.py", _SHADOW_IMPOSTOR)
-    _write(root, "tests/test_mixed.py", _shadow_tests())
+    root = fake_pytest_project(
+        tests={
+        "pytest_bridge.py": (
+_SHADOW_IMPOSTOR
+        ),
+        "tests/test_mixed.py": (
+_shadow_tests()
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -829,18 +864,18 @@ def test_parallel_shadow_module_at_checkout_root_is_neutralized(tmp_path):
     assert twin.report["problem"] == "native-failure"
 
 
-def test_parallel_shadow_module_on_sys_path_is_neutralized(tmp_path):
+def test_parallel_shadow_module_on_sys_path_is_neutralized(
+        tmp_path, fake_pytest_project):
     """Twin (o2): a site-packages-style ``pytest_bridge`` shadow cannot forge.
 
     Same impostor as (o1), reached through the import path instead of the
     checkout root. The true native failure must surface.
     """
-    root = tmp_path / "shadowpath"
-    root.mkdir()
+    root = fake_pytest_project(tests={"tests/test_mixed.py": _shadow_tests()},
+                               git=False)
     stub = root / "stubpath"
     stub.mkdir()
     (stub / "pytest_bridge.py").write_text(_SHADOW_IMPOSTOR, encoding="utf-8")
-    _write(root, "tests/test_mixed.py", _shadow_tests())
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -855,23 +890,29 @@ def test_parallel_shadow_module_on_sys_path_is_neutralized(tmp_path):
     assert twin.report["problem"] == "native-failure"
 
 
-def test_parallel_conftest_import_time_worker_identity(tmp_path):
+def test_parallel_conftest_import_time_worker_identity(tmp_path, fake_pytest_project):
     """Twin (p): conftest import-time code sees distinct worker identities.
 
     The root conftest records ``PTEST_WORKER_ID`` at import time. Every
     worker must observe its own slot, not the shared ``w000`` seed.
     """
-    root = tmp_path / "importtime"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "import os\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"import os\n"
            "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
            "with open(os.path.join(MARKERS, 'import.log'), 'a',"
            " encoding='utf-8') as handle:\n"
            "    handle.write(os.environ.get('PYTEST_XDIST_WORKER', '-') + ':'\n"
            "        + os.environ.get('PTEST_WORKER_ID', '-') + ':'\n"
-           "        + os.environ.get('PTEST_RESOURCE_PREFIX', '-') + '\\n')\n")
-    _write(root, "tests/test_ok.py", _identity_tests(4))
+           "        + os.environ.get('PTEST_RESOURCE_PREFIX', '-') + '\\n')\n"
+        ),
+        "tests/test_ok.py": (
+_identity_tests(4)
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -894,24 +935,30 @@ def test_parallel_conftest_import_time_worker_identity(tmp_path):
         assert prefix.endswith(ptest_id)
 
 
-def test_parallel_collection_shortening_is_refused(tmp_path):
+def test_parallel_collection_shortening_is_refused(tmp_path, fake_pytest_project):
     """Twin (n3): a controller collection-finished pop is refused.
 
     A tryfirst conftest runs before the bridge's own tryfirst collection
     hook, so without a transport check the controller would record and
     schedule the shortened list and pass with a test unrun.
     """
-    root = tmp_path / "shorten"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "import os\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"import os\n"
            "if not os.environ.get('PYTEST_XDIST_WORKER'):\n"
            "    import pytest\n"
            "    @pytest.hookimpl(tryfirst=True)\n"
            "    def pytest_xdist_node_collection_finished(node, ids):\n"
            "        if len(ids) > 1:\n"
-           "            ids.pop()\n")
-    _write(root, "tests/test_mixed.py", _forgery_tests())
+           "            ids.pop()\n"
+        ),
+        "tests/test_mixed.py": (
+_forgery_tests()
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -926,7 +973,7 @@ def test_parallel_collection_shortening_is_refused(tmp_path):
         "message", "") for refusal in twin.refusals)
 
 
-def test_parallel_collection_error_is_complete_full(tmp_path):
+def test_parallel_collection_error_is_complete_full(tmp_path, fake_pytest_project):
     """Twin (q1): a broken import under xdist completes, full mode.
 
     Every worker collects the full suite, so each records one collection
@@ -934,9 +981,7 @@ def test_parallel_collection_error_is_complete_full(tmp_path):
     per-worker count (4) must not be compared against the deduped
     controller count (1): the run is a complete native failure.
     """
-    root = tmp_path / "collfull"
-    root.mkdir()
-    _write(root, "tests/test_broken.py", "import nonexistent_module_xyz\n")
+    root = fake_pytest_project(tests={"tests/test_broken.py": "import nonexistent_module_xyz\n"}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -950,11 +995,9 @@ def test_parallel_collection_error_is_complete_full(tmp_path):
     assert twin.report["problem"] == "native-failure"
 
 
-def test_parallel_collection_error_is_complete_scoped(tmp_path):
+def test_parallel_collection_error_is_complete_scoped(tmp_path, fake_pytest_project):
     """Twin (q2): a broken import under xdist completes, scoped mode."""
-    root = tmp_path / "collscoped"
-    root.mkdir()
-    _write(root, "tests/test_broken.py", "import nonexistent_module_xyz\n")
+    root = fake_pytest_project(tests={"tests/test_broken.py": "import nonexistent_module_xyz\n"}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -968,16 +1011,14 @@ def test_parallel_collection_error_is_complete_scoped(tmp_path):
     assert twin.report["problem"] == "native-failure"
 
 
-def test_parallel_inherited_xdist_worker_env_still_completes(tmp_path):
+def test_parallel_inherited_xdist_worker_env_still_completes(tmp_path, fake_pytest_project):
     """Twin (r): an inherited PYTEST_XDIST_WORKER does not refuse a pass.
 
     The controller must scrub the xdist worker variables before
     pytest.main; otherwise the ``-p`` import claims a worker identity on
     the controller and the valid run is refused.
     """
-    root = tmp_path / "inherited"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(4))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(4)}, git=False)
 
     twin = _run_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",

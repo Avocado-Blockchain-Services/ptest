@@ -23,6 +23,7 @@ import tomllib
 
 import pytest
 
+import support
 from ptest import config as config_api, contracts as C, operations, reports, scheduler
 
 
@@ -127,17 +128,6 @@ def _released(domain, count=1):
     leases = scheduler.reconcile(domain)
     assert len(leases) == count
     assert all(lease.state is C.LeaseState.RELEASED for lease in leases)
-
-
-def _commit_fixture(root):
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test")
-    for args in (("init",), ("add", "."), ("commit", "-m", "fixture")):
-        subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", *args],
-                       cwd=root, env=env, capture_output=True, check=True, timeout=5)
 
 
 @pytest.mark.parametrize("version", VERSIONS)
@@ -284,7 +274,7 @@ def test_q_py_select_real_coverage_baseline_then_exact_selected_file(case):
         'input_roots = ["project_module.py"]\n'
         'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     result_path = "ptest-result-q-py-select.json"
     baseline = case.invoke(domain, root, "--result-json", result_path, "--full", timeout=30)
     baseline_data = _data(baseline)
@@ -340,7 +330,7 @@ def test_q_py_select_parallel_coverage_baseline_then_parallel_selected(case):
         'input_roots = ["project_module.py"]\n'
         'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     result_path = "ptest-result-q-py-select-parallel.json"
     baseline = case.invoke(domain, root, "--result-json", result_path, "--full", timeout=60)
     baseline_data = _data(baseline)
@@ -387,7 +377,7 @@ def test_q_py_select_without_parallel_profile_runs_serial_with_baseline_reason(c
         'input_roots = ["project_module.py"]\n'
         'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     baseline = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-serial.json",
                            "--full", "--workers", "1", timeout=60)
     baseline_data = _data(baseline)
@@ -437,7 +427,7 @@ def test_q_py_scoped_coverage_uses_parallel_workers_without_baseline(case):
         'input_roots = ["project_module.py"]\n'
         'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     scoped = case.invoke(domain, root, "--result-json", "ptest-result-q-py-scoped-cov.json",
                          "--", "tests/test_native.py", timeout=60)
     scoped_data = _data(scoped)
@@ -467,7 +457,7 @@ def test_q_py_scoped_after_full_baseline_normalizes_owned_scope_identity(case):
         'tests = ["tests/test_native.py"] }]\n'
     )
     (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     baseline = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-scoped.json", "--full", timeout=30)
     baseline_data = _data(baseline)
@@ -510,7 +500,7 @@ def test_q_py_selected_runtime_drift_refuses_then_full_rebaselines(case):
         "__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n"
         "conftest.py\ndrift_plugin.py\n"
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     baseline = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-drift.json", "--full", timeout=30)
     baseline_data = _data(baseline)
@@ -532,7 +522,7 @@ def test_q_py_selected_runtime_drift_refuses_then_full_rebaselines(case):
     assert any(reason["code"] in {"report-invalid", "unsupported-capability"}
                for reason in selected_data["reasons"])
 
-    _commit_fixture(root)
+    support.init_git_repo(root)
     full = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-drift-full.json", "--full", timeout=30)
     full_data = _data(full)
@@ -561,14 +551,14 @@ def test_advanced_full_runtime_change_rebaselines_without_stale_expected_digest(
         'groups = [{ name = "native", sources = ["project_module.py"], '
         'tests = ["tests/test_native.py"] }]\n'
     )
-    _commit_fixture(root)
+    support.init_git_repo(root)
     first = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-runtime.json", "--full", timeout=30)
     first_data = _data(first)
     assert first.code == 0, first.stderr.decode()
     assert first_data["baseline_published"] is True
     config.write_text(config.read_text().replace("--cov-report=term", "--cov-report=term-missing"))
-    _commit_fixture(root)
+    support.init_git_repo(root)
     second = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-runtime-changed.json", "--full", timeout=30)
     second_data = _data(second)
@@ -1367,7 +1357,7 @@ def test_q_py_full_with_conftest_hook_runs_labelled(case):
     )
     (root / "tests" / "conftest.py").write_text(
         "def pytest_pycollect_makeitem():\n    pass\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(
         domain, root, "--result-json", "ptest-result-q-py-full-hook.json", "--full", timeout=30)
     data = _data(completed)

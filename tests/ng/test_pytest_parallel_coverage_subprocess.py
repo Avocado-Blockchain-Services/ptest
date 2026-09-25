@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 import time
@@ -128,12 +127,6 @@ def _run_advanced_bridge(root: Path, argv: list[str], *, execution: str,
         report, _refusals(completed.stderr))
 
 
-def _write(root: Path, relpath: str, body: str) -> None:
-    path = root / relpath
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-
-
 _IDENTITY_TEST = (
     "import os\n"
     "MARKERS = os.environ.get('PTEST_PARALLEL_MARKERS', '')\n"
@@ -164,11 +157,9 @@ def _worker_lines(root: Path) -> list[tuple[str, str, str, str]]:
     return [tuple(line.split(":")) for line in lines]  # type: ignore[misc]
 
 
-def test_parallel_coverage_complete_with_four_workers(tmp_path):
+def test_parallel_coverage_complete_with_four_workers(tmp_path, fake_pytest_project):
     """Advanced parallel with --cov: pass, 4 worker identities, coverage complete."""
-    root = tmp_path / "advpass"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(8))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(8)}, git=False)
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -197,11 +188,9 @@ def test_parallel_coverage_complete_with_four_workers(tmp_path):
     assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
 
 
-def test_parallel_coverage_idle_workers_still_complete(tmp_path):
+def test_parallel_coverage_idle_workers_still_complete(tmp_path, fake_pytest_project):
     """One test on four workers: idle workers still contribute coverage."""
-    root = tmp_path / "advidle"
-    root.mkdir()
-    _write(root, "tests/test_one.py", "def test_only():\n    assert True\n")
+    root = fake_pytest_project(tests={"tests/test_one.py": "def test_only():\n    assert True\n"}, git=False)
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -215,11 +204,9 @@ def test_parallel_coverage_idle_workers_still_complete(tmp_path):
     assert len(twin.report["workers"]) == 4
 
 
-def test_parallel_coverage_empty_collection_exits_five_complete(tmp_path):
+def test_parallel_coverage_empty_collection_exits_five_complete(tmp_path, fake_pytest_project):
     """All-deselected advanced parallel run: exit 5, terminal complete."""
-    root = tmp_path / "advempty"
-    root.mkdir()
-    _write(root, "tests/test_ok.py", _identity_tests(2))
+    root = fake_pytest_project(tests={"tests/test_ok.py": _identity_tests(2)}, git=False)
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -233,17 +220,21 @@ def test_parallel_coverage_empty_collection_exits_five_complete(tmp_path):
     assert twin.report["native_exit_code"] == 5
 
 
-def test_parallel_coverage_killed_worker_is_not_passed_and_incomplete(tmp_path):
+def test_parallel_coverage_killed_worker_is_not_passed_and_incomplete(tmp_path, fake_pytest_project):
     """A SIGKILLed worker under coverage: never passed, coverage incomplete."""
-    root = tmp_path / "advcrash"
-    root.mkdir()
-    _write(root, "tests/test_crash.py",
-           "import os, signal\n"
+    root = fake_pytest_project(
+        tests={
+        "tests/test_crash.py": (
+"import os, signal\n"
            + _IDENTITY_TEST
            + "\ndef test_kill_worker():\n"
            "    _record('kill')\n"
            "    os.kill(os.getpid(), signal.SIGKILL)\n"
-           + "\ndef test_ok():\n    _record('ok')\n    assert True\n")
+           + "\ndef test_ok():\n    _record('ok')\n    assert True\n"
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -257,12 +248,12 @@ def test_parallel_coverage_killed_worker_is_not_passed_and_incomplete(tmp_path):
     assert twin.report is None or twin.report["coverage"] == {"complete": False}
 
 
-def test_parallel_coverage_suppressed_worker_is_incomplete_but_passes(tmp_path):
+def test_parallel_coverage_suppressed_worker_is_incomplete_but_passes(tmp_path, fake_pytest_project):
     """One worker's coverage data suppressed: verdict passes, coverage incomplete."""
-    root = tmp_path / "advsuppress"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "def pytest_sessionfinish(session):\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"def pytest_sessionfinish(session):\n"
            "    config = session.config\n"
            "    if getattr(config, 'workerinput', None) is None:\n"
            "        return\n"
@@ -271,8 +262,14 @@ def test_parallel_coverage_suppressed_worker_is_incomplete_but_passes(tmp_path):
            "    try:\n"
            "        config.workeroutput.pop('cov_worker_node_id', None)\n"
            "    except AttributeError:\n"
-           "        pass\n")
-    _write(root, "tests/test_ok.py", _identity_tests(8))
+           "        pass\n"
+        ),
+        "tests/test_ok.py": (
+_identity_tests(8)
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -288,12 +285,12 @@ def test_parallel_coverage_suppressed_worker_is_incomplete_but_passes(tmp_path):
     assert twin.report["coverage"] == {"complete": False}
 
 
-def test_parallel_coverage_forged_worker_key_is_incomplete(tmp_path):
+def test_parallel_coverage_forged_worker_key_is_incomplete(tmp_path, fake_pytest_project):
     """A worker forging its coverage key: verdict passes, coverage incomplete."""
-    root = tmp_path / "advforge"
-    root.mkdir()
-    _write(root, "conftest.py",
-           "def pytest_sessionfinish(session):\n"
+    root = fake_pytest_project(
+        tests={
+        "conftest.py": (
+"def pytest_sessionfinish(session):\n"
            "    config = session.config\n"
            "    if getattr(config, 'workerinput', None) is None:\n"
            "        return\n"
@@ -302,8 +299,14 @@ def test_parallel_coverage_forged_worker_key_is_incomplete(tmp_path):
            "    try:\n"
            "        config.workeroutput['cov_worker_node_id'] = 'gw9'\n"
            "    except AttributeError:\n"
-           "        pass\n")
-    _write(root, "tests/test_ok.py", _identity_tests(8))
+           "        pass\n"
+        ),
+        "tests/test_ok.py": (
+_identity_tests(8)
+        ),
+        },
+        git=False,
+    )
 
     twin = _run_advanced_bridge(
         root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
@@ -318,18 +321,20 @@ def test_parallel_coverage_forged_worker_key_is_incomplete(tmp_path):
     assert twin.report["coverage"] == {"complete": False}
 
 
-def test_parallel_persea_shaped_coverage_runs_four_workers_labelled(tmp_path):
+def test_parallel_persea_shaped_coverage_runs_four_workers_labelled(
+        tmp_path, fake_pytest_project):
     """Persea-shaped addopts plus --cov: 4 workers and the project label."""
-    root = tmp_path / "perseacov"
-    root.mkdir()
-    shutil.copyfile(PARALLEL_FIXTURES / "pyproject.toml.txt",
-                    root / "pyproject.toml")
-    shutil.copyfile(PARALLEL_FIXTURES / "conftest.py.txt",
-                    root / "conftest.py")
-    tests = root / "tests"
-    tests.mkdir(exist_ok=True)
-    shutil.copyfile(PARALLEL_FIXTURES / "test_groups.py.txt",
-                    tests / "test_groups.py")
+    root = fake_pytest_project(
+        tests={
+            "pyproject.toml": (PARALLEL_FIXTURES / "pyproject.toml.txt").read_text(
+                encoding="utf-8"),
+            "conftest.py": (PARALLEL_FIXTURES / "conftest.py.txt").read_text(
+                encoding="utf-8"),
+            "tests/test_groups.py": (PARALLEL_FIXTURES / "test_groups.py.txt").read_text(
+                encoding="utf-8"),
+        },
+        git=False,
+    )
 
     twin = _run_advanced_bridge(
         root, ["-q", "-p", "no:cacheprovider",

@@ -676,6 +676,7 @@ def test_full_bridge_keeps_captured_roots_after_environment_mutation(bridge_env,
         plugin.pytest_configure(config)
 
 
+# Payload only: refused control values, never opened on disk.
 @pytest.mark.parametrize("value", ["-k hidden", "-x", "--deselect=tests/test_a.py::test_x",
                                     "-c alternate.ini", "--config-file=alternate.ini",
                                     "--rootdir=/tmp/other", "-qc alternate.ini",
@@ -687,6 +688,7 @@ def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monke
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config()))
 
 
+# Payload only: refused redirect values, never opened on disk.
 @pytest.mark.parametrize("value", [["-c", "alternate.ini"], ["--rootdir=/tmp/other"],
                                     ["-qc", "alternate.ini"], ["-vc", "alternate.ini"],
                                     ["-sc", "alternate.ini"], ["@args.txt"],
@@ -1251,6 +1253,7 @@ def test_full_bridge_preserves_safe_strict_overrides(bridge_env, overrides):
     next(hook)
 
 
+# Payload only: refused ini overrides, never opened on disk.
 @pytest.mark.parametrize("overrides", [
     ["addopts=-k hidden"],
     ["cache_dir=/tmp/other"],

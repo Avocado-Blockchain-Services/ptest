@@ -89,6 +89,8 @@ def test_pytest_setup_is_admitted_before_scheduler(case, monkeypatch):
         operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
 
 
+# xdist_group: real `uv lock`/`uv sync` share the machine uv cache.
+@pytest.mark.xdist_group("uv-cache")
 def test_normal_domain_setup_bootstraps_account_coordinator(case, monkeypatch, tmp_path):
     """A real uv setup can follow normal-domain coordinator initialization."""
     home = tmp_path / "account"
