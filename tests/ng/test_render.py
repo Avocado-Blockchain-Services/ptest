@@ -82,16 +82,17 @@ def test_agent_assessment_renders_score_header_facts_and_items():
     assert text.splitlines()[0] == "offline · 4 checks"
     assert ("api  pytest · runs ✓ · 4 workers · "
             "setup: uv sync --locked") in text
-    assert 'full suite = your pytest config: -m "not slow"' not in text
+    assert ('     full suite = your pytest config: -m "not slow"') in text
     assert "│ Test data factories" in text and "✓ ok" in text
     assert "— satisfied" not in text
     assert "│ Fixture state isolation" in text and "✗ gap" in text
-    assert "api · Fixture state isolation" in text
-    assert "      Share one module-global fixture." in text
-    assert "      → Build a per-test factory." in text
-    assert "api: CACHE-001 — review failed: timed out" in text
-    assert "– n/a" in text
-    assert "no selection for this runner." not in text
+    assert "✗ api · Fixture state isolation" in text
+    assert "  Share one module-global fixture." in text
+    assert "  → Build a per-test factory." in text
+    assert "? api: CACHE-001 — review failed: timed out" in text
+    assert "│ Test selection" in text and "– n/a" in text
+    assert "Not applicable" in text
+    assert "– api: Test selection — no selection for this runner." in text
     assert "Skipped without a model call" not in text
     assert "test_example" not in text
     assert ("Report: recommendations.md (created) — citations, fixes and "
@@ -145,47 +146,51 @@ def test_agent_assessment_golden_o4_shape_at_width_90():
         publication_status="created", width=90, repo="shop",
         provider="codex/gpt-5", duration_s=45, calls=9)
 
-    # Exact O.4 target block: header line, one facts line, one bordered
-    # table (general, parallel-safety, then Parallel execution rows),
+    # Exact O.4 target block: header line, facts plus the dim full-suite
+    # detail line, one rounded table (general, a labeled parallel-safety
+    # divider, then the single Parallel execution row), a footer tally,
     # per-gap findings, unknowns grouped by reason, the next command,
     # then the trailer.
     assert text == (
         "shop · codex/gpt-5 · 11 checks · 9 calls · 45s\n"
         "\n"
-        "api  pytest · runs ✓ · 4 workers · setup: uv sync --locked"
+        "api  pytest · runs ✓ · 4 workers · setup: uv sync --locked\n"
+        "     full suite = your pytest config: -m \"not slow\""
         "   (partial evidence)\n"
         "\n"
-        "┌─────────────────────────┬───────────┐\n"
-        "│ check                   │ api       │\n"
-        "├─────────────────────────┼───────────┤\n"
-        "│ Test data factories     │ ✓ ok      │\n"
-        "│ Test selection          │ ✓ ok      │\n"
-        "│ Test timing             │ ? unknown │\n"
-        "│ parallel safety                     │\n"
-        "│ Fixture state isolation │ ✓ ok      │\n"
-        "│ Database setup reuse    │ ✓ ok      │\n"
-        "│ Database isolation      │ ? unknown │\n"
-        "│ Cache isolation         │ ✓ ok      │\n"
-        "│ Files and ports         │ ✗ gap     │\n"
-        "│ Network isolation       │ ? unknown │\n"
-        "│ Child processes         │ ? unknown │\n"
-        "│ Deterministic time      │ ? unknown │\n"
-        "└─────────────────────────┴───────────┘\n"
+        "╭─────────────────────────┬──────────────────────────╮\n"
+        "│ check                   │ api                      │\n"
+        "├─────────────────────────┼──────────────────────────┤\n"
+        "│ Test data factories     │ ✓ ok                     │\n"
+        "│ Test selection          │ ✓ ok                     │\n"
+        "│ Test timing             │ ? unknown                │\n"
+        "├─ parallel safety ───────┼──────────────────────────┤\n"
+        "│ Fixture state isolation │ ✓ ok                     │\n"
+        "│ Database setup reuse    │ ✓ ok                     │\n"
+        "│ Database isolation      │ ? unknown                │\n"
+        "│ Cache isolation         │ ✓ ok                     │\n"
+        "│ Files and ports         │ ✗ gap                    │\n"
+        "│ Network isolation       │ ? unknown                │\n"
+        "│ Child processes         │ ? unknown                │\n"
+        "│ Deterministic time      │ ? unknown                │\n"
+        "├─────────────────────────┼──────────────────────────┤\n"
+        "│                         │ 5 ok · 1 gap · 5 unknown │\n"
+        "╰─────────────────────────┴──────────────────────────╯\n"
         "\n"
         "Gaps\n"
-        "api · Files and ports\n"
-        "      Writes reach /tmp directly.\n"
-        "      → Allocate an owned temp root.\n"
+        "✗ api · Files and ports\n"
+        "  Writes reach /tmp directly.\n"
+        "  → Allocate an owned temp root.\n"
         "\n"
         "Unknowns\n"
-        "api: Network isolation — "
+        "? api: Network isolation — "
         "The tests use httpx but no socket block was cited.\n"
-        "api: Child processes — "
+        "? api: Child processes — "
         "no subprocess usage in the admitted excerpts\n"
-        "api: Deterministic time — review failed: timed out\n"
-        "api: Database isolation — "
+        "? api: Deterministic time — review failed: timed out\n"
+        "? api: Database isolation — "
         "Row DB-002 judged unknown against excerpts.\n"
-        "api: Test timing — "
+        "? api: Test timing — "
         "no timing history yet: run ptest --full once\n"
         "\n"
         "Next: ptest doctor --fix\n"
@@ -265,10 +270,14 @@ def test_agent_assessment_parallel_item_follows_safety_group():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "│ parallel safety" in text
-    assert text.index("parallel safety") < text.index("│ Parallel execution")
-    assert "api · Parallel execution" in text
-    assert "→ Enable xdist." in text
+    # A single-item safety group takes a plain divider, not a labeled
+    # one; the single Parallel execution row needs no duplicate header.
+    assert "parallel safety" not in text
+    assert (text.index("│ Test data factories")
+            < text.index("│ Fixture state isolation")
+            < text.index("│ Parallel execution"))
+    assert "✗ api · Parallel execution" in text
+    assert "  → Enable xdist." in text
 
 
 def test_agent_assessment_parallel_item_renders_after_safety_block():
@@ -738,7 +747,7 @@ def test_grid_gap_finding_has_no_finding_line_cap():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
     wrapped = [item for item in text.splitlines()
-               if item.startswith("      word")]
+               if item.startswith("  word")]
     assert wrapped
     assert "…" not in text
     assert "[truncated]" not in text
@@ -812,8 +821,8 @@ def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
     assert "✓" not in text
 
 
-def test_na_verdict_renders_dim_cell_without_reason_prose():
-    """N/a reasons live in recommendations.md, not in grid cells."""
+def test_na_verdict_renders_dim_cell_and_grouped_reason():
+    """N/a reasons group into a dim section, wrapped whole, never cut."""
     from ptest.render import render_agent_assessment
 
     rationale = " ".join(f"token{i:03d}" for i in range(30))
@@ -831,7 +840,14 @@ def test_na_verdict_renders_dim_cell_without_reason_prose():
         publication_status="created", width=90)
     assert "…" not in text
     assert "– n/a" in text
-    assert "token000" not in text
+    assert "Not applicable" in text
+    section = text[text.index("Not applicable"):text.index("Next:")]
+    for index in range(30):
+        assert f"token{index:03d}" in section
+    dimmed = render_agent_assessment(
+        [child], _aa_workspace(), report_path="recommendations.md",
+        publication_status="created", width=90, color=True)
+    assert "\x1b[2m– api: Database isolation — " in dimmed
 
 
 def test_unknown_reason_wraps_fully_without_ellipsis():
@@ -923,6 +939,6 @@ def test_doctor_facts_line_wraps_between_atoms_at_width_60():
         publication_status="created", width=60)
     lines = text.splitlines()
     assert lines[2] == "api  pytest · runs ✓ · 4 workers"
-    assert lines[3] == ("    setup: uv sync --locked --group analysis "
+    assert lines[3] == ("     setup: uv sync --locked --group analysis "
                         "--group migration")
     assert not any(line.endswith("·") for line in lines)

@@ -227,13 +227,13 @@ def test_doctor_review_runs_one_haiku_call_per_item(
                for item in launches)
 
     human = capsys.readouterr()
-    assert ".  pytest · 9 ok · 2 gap · 1 unknown" in human.out
-    assert "runs: yes · parallel: no" in human.out
+    assert "9 ok · 2 gap · 1 unknown" in human.out
+    assert "runs ✓" in human.out
     for entry in CATALOG:
         assert entry.label in human.out
-    assert "✗ Test selection" in human.out
-    assert ("? Test timing  no timing history yet: "
-            "run ptest --full once") in human.out
+    assert "✗ . · Test selection" in human.out
+    assert "Test timing — " in human.out
+    assert "no timing history yet" in " ".join(human.out.split())
     assert "recommendations.md (created)" in human.out
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
@@ -276,7 +276,7 @@ def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
                  "--allow-model-review")) == 0
 
     human = capsys.readouterr()
-    assert "? Test data factories" in human.out
+    assert "? .: Test data factories — review failed:" in human.out
     assert "review failed: provider exited with an error" in human.out
     assert (root / "recommendations.md").is_file()
 

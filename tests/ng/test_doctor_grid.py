@@ -129,16 +129,24 @@ def test_grid_header_facts_and_single_table_at_width_100():
     assert ("web  pytest · runs ✓ · 4 workers · "
             "setup: uv sync --locked") in text
     # One table: exactly one top border and one header row.
-    assert text.count("┌") == 1
+    assert text.count("╭") == 1
     assert text.count("│ check") == 1
-    assert "│ Test data factories     │ ✓ ok      │ ✓ ok      │" in text
-    assert "│ Fixture state isolation │ ✗ gap     │ ✓ ok      │" in text
-    assert "│ parallel safety" in text
+    assert ("│ Test data factories     │ ✓ ok                     │ "
+            "✓ ok                     │") in text
+    assert ("│ Fixture state isolation │ ✗ gap                    │ "
+            "✓ ok                     │") in text
+    assert "├─ parallel safety ─" in text
     assert "│ Parallel execution" in text
-    assert text.index("│ parallel safety") < text.index(
+    assert text.index("parallel safety") < text.index(
         "│ Parallel execution")
+    # No duplicate header row for the single-item Parallel execution
+    # group: only the divider separates it from parallel safety.
+    assert "Parallel execution" not in text.split("Cache isolation")[0]
+    # One dim footer tally per project, separated by a rule.
+    assert ("│                         │ 2 ok · 2 gap · 3 unknown │ "
+            "5 ok · 0 gap · 2 unknown │") in text
     assert text.index("Test data factories") < text.index(
-        "│ parallel safety")
+        "parallel safety")
     for line in text.splitlines():
         assert len(line) <= 100, line
 
@@ -282,7 +290,7 @@ def test_grid_ascii_fallback_without_utf8_stdout():
     text = _grid(encoding="ascii")
 
     text.encode("ascii")  # raises on any non-ASCII leak
-    assert "┌" not in text and "│" not in text and "✓" not in text
+    assert "╭" not in text and "│" not in text and "✓" not in text
     assert "+-" in text
     assert "[ok]" in text and "[gap]" in text
 
@@ -302,13 +310,13 @@ def test_grid_narrow_terminal_stacks_one_table_per_project():
         duration_s=45, calls=9)
 
     # The three-column table cannot fit, so each project gets its own.
-    assert text.count("┌") == 3
-    first, second, third_table = text.split("┌")[1:]
+    assert text.count("╭") == 3
+    first, second, third_table = text.split("╭")[1:]
     assert "api" in first and "web" not in first and "cli" not in first
     assert "web" in second and "cli" not in second
     assert "cli" in third_table
     for line in text.splitlines():
-        if line[:1] in ("┌", "│", "├", "└"):
+        if line[:1] in ("╭", "│", "├", "╰"):
             assert len(line) <= 60, line
 
 
@@ -345,7 +353,7 @@ def test_grid_hostile_labels_and_scopes_stay_inert():
     assert "\u202e" not in text
     assert "&#" not in text
     assert "|" not in text.splitlines()[0]  # header cannot gain cells
-    table = text[text.index("┌"):text.index("┘")]
+    table = text[text.index("╭"):text.index("╯")]
     # The escaped label keeps every border on its own line.
     counts = {line.count("│") for line in table.splitlines()
               if line.startswith("│")}
@@ -367,10 +375,10 @@ def test_grid_long_labels_truncate_to_fit_single_table():
         publication_status="created", width=60, color=False,
         repo="shop", provider="offline", duration_s=3, calls=0)
 
-    assert text.count("┌") == 1
+    assert text.count("╭") == 1
     assert "…" in text
     for line in text.splitlines():
-        if line[:1] in ("┌", "│", "├", "└"):
+        if line[:1] in ("╭", "│", "├", "╰"):
             assert len(line) <= 60, line
 
 
@@ -381,9 +389,199 @@ def test_grid_empty_children_render_header_next_and_trailer():
         repo="shop", provider="offline", duration_s=3, calls=0)
 
     assert text.splitlines()[0] == "shop · offline · 0 checks · 0 calls · 3s"
-    assert "┌" not in text
+    assert "╭" not in text
     assert "Next: ptest --full" in text
     assert text.rstrip().endswith("and verification steps.")
+
+
+def test_grid_facts_show_full_suite_detail_on_second_line():
+    children = _two_projects()
+    children[0]["facts"] = _facts(
+        full_suite='your pytest config: -m "not slow"')
+    text = render_agent_assessment(
+        children, _workspace("api", "web"),
+        report_path="recommendations.md", publication_status="created",
+        width=100, color=False, repo="shop", provider="codex/gpt-5",
+        duration_s=45, calls=9)
+
+    lines = text.splitlines()
+    facts_at = next(index for index, line in enumerate(lines)
+                    if line.startswith("api  pytest"))
+    assert lines[facts_at + 1] == (
+        '     full suite = your pytest config: -m "not slow"')
+    # The sibling project without detail keeps a single facts line.
+    web_at = next(index for index, line in enumerate(lines)
+                  if line.startswith("web  pytest"))
+    assert lines[web_at + 1] == ""
+    assert lines[web_at + 2].startswith("╭")
+
+    dimmed = render_agent_assessment(
+        children, _workspace("api", "web"),
+        report_path="recommendations.md", publication_status="created",
+        width=100, color=True, repo="shop", provider="codex/gpt-5",
+        duration_s=45, calls=9)
+    assert ('\x1b[2m     full suite = your pytest config: -m "not slow"'
+            '\x1b[0m') in dimmed
+
+
+def test_grid_gaps_separate_blocks_with_aligned_hanging_indent():
+    text = _grid()
+
+    gaps = text[text.index("Gaps"):text.index("Unknowns")]
+    assert "  Share one module-global fixture." in gaps
+    assert "      Share one module-global fixture." not in gaps
+    assert "  → Build a per-test factory." in gaps
+    assert ("→ Build a per-test factory.\n"
+            "\n"
+            "✗ api · Parallel execution") in gaps
+
+
+def test_grid_unknowns_bullet_hang_aligns_under_reason_start():
+    rationale = " ".join(f"token{i:03d}" for i in range(30))
+    child = {
+        "scope": "api", "facts": _facts(),
+        "rows": [_row("DB-001", "unknown", label="Database setup reuse",
+                      rationale=rationale, evidence=[])],
+        "findings": [], "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _workspace("api"), report_path="recommendations.md",
+        publication_status="created", width=60, color=False,
+        repo="shop", provider="offline", duration_s=3, calls=0)
+
+    unknowns = text[text.index("Unknowns"):text.index("Next:")]
+    body = [line for line in unknowns.splitlines()[1:] if line]
+    assert body[0].startswith("? api: Database setup reuse — token")
+    hang = " " * len("? api: Database setup reuse — ")
+    assert len(body) > 1
+    for line in body[1:]:
+        assert line.startswith(hang), line
+
+
+def test_grid_not_applicable_groups_reasons_dim():
+    shared = "no legacy runner configured here"
+    child = {
+        "scope": "api", "facts": _facts(),
+        "rows": [
+            _row("SEL-1", "not-applicable", label="Check one",
+                 rationale=f"Skipped without a model call: {shared}."),
+            _row("SEL-2", "not-applicable", label="Check two",
+                 rationale=f"{shared}."),
+            _row("SEL-3", "not-applicable", label="Check three",
+                 rationale="Another distinct reason."),
+        ],
+        "findings": [], "limitations": [],
+    }
+    text = render_agent_assessment(
+        [child], _workspace("api"), report_path="recommendations.md",
+        publication_status="created", width=100, color=False,
+        repo="shop", provider="codex/gpt-5", duration_s=3, calls=1)
+
+    assert "Not applicable" in text
+    section = text[text.index("Not applicable"):text.index("Next:")]
+    assert ("– api: Check one, Check two — "
+            "no legacy runner configured here.") in section
+    assert "– api: Check three — Another distinct reason." in section
+
+    dimmed = render_agent_assessment(
+        [child], _workspace("api"), report_path="recommendations.md",
+        publication_status="created", width=100, color=True,
+        repo="shop", provider="codex/gpt-5", duration_s=3, calls=1)
+    assert "\x1b[2m– api: Check one, Check two — " in dimmed
+
+
+def test_grid_header_styles_repo_bold_rest_dim():
+    assert _grid().splitlines()[0] == (
+        "shop · codex/gpt-5 · 14 checks · 9 calls · 45s")
+    assert _grid(color=True).splitlines()[0] == (
+        "\x1b[1mshop\x1b[0m"
+        "\x1b[2m · codex/gpt-5 · 14 checks · 9 calls · 45s\x1b[0m")
+
+
+def test_grid_styled_cells_runs_marks_gaps_and_next():
+    text = _grid(color=True)
+
+    # Styling never changes the layout: one table, like the plain render.
+    assert text.count("╭") == 1
+    assert "runs \x1b[32m✓\x1b[0m" in text
+    assert ("\x1b[31m✗\x1b[0m "
+            "\x1b[1mapi · Fixture state isolation\x1b[0m") in text
+    assert "\x1b[36m→\x1b[0m Build a per-test factory." in text
+    assert ("\x1b[33m?\x1b[0m \x1b[1mapi: Test timing\x1b[0m"
+            "\x1b[2m — \x1b[0m") in text
+    assert "Next: \x1b[1mptest doctor --fix\x1b[0m" in text
+    assert "\x1b[2m2 ok · 2 gap · 3 unknown\x1b[0m" in text
+
+
+def test_grid_offline_renders_static_sections_in_grid_style():
+    from ptest import contracts as C
+    from ptest.doctor import RepositoryInspection, WorkspaceInspection
+
+    def _report(path_prefix, code=None):
+        findings = ()
+        if code is not None:
+            findings = (C.Finding(
+                code=code, severity="high", confidence="medium",
+                path=f"{path_prefix}/tests/cache_test.py", line=2,
+                evidence_type="static-pattern", consequence="consequence",
+                remediation="remediation", verification="verification"),)
+        return C.DoctorReport(
+            scope=(), readiness=(
+                C.Readiness(area="execution", state="unknown", reasons=()),
+                C.Readiness(area="parallel", state="unknown", reasons=()),
+                C.Readiness(area="selection", state="blocked", reasons=()),
+                C.Readiness(area="timing", state="unknown", reasons=()),
+            ), findings=findings, limits=C.DEFAULT_SCAN_LIMITS,
+            usage=C.ScanUsage(entries=3, files=1, file_bytes=10,
+                              total_bytes=10, findings=len(findings),
+                              output_bytes=10, elapsed_s=0.0, skipped=0,
+                              truncated=False),
+            limitations=(),
+        )
+
+    api_report = _report("api", "cache.global-flush")
+    workspace = WorkspaceInspection(
+        scope=(), repositories=(
+            RepositoryInspection(declaration="api", local_scope=None,
+                                 report=api_report, config_problem=None),
+            RepositoryInspection(declaration="web", local_scope=None,
+                                 report=_report("web"), config_problem=None),
+        ), aggregate=C.DoctorReport(
+            scope=(), readiness=(), findings=api_report.findings,
+            limits=C.DEFAULT_SCAN_LIMITS,
+            usage=C.ScanUsage(entries=6, files=2, file_bytes=20,
+                              total_bytes=20, findings=1, output_bytes=20,
+                              elapsed_s=0.0, skipped=0, truncated=False),
+            limitations=(),
+        ),
+    )
+    text = render_agent_assessment(
+        _two_projects(), workspace, report_path="recommendations.md",
+        publication_status="skipped", width=100, color=False,
+        repo="shop", provider="offline", duration_s=3, calls=0)
+
+    assert "Readiness" in text
+    assert "Scan coverage: complete; 2 files inspected." in text
+    assert "api: execution unknown · parallel unknown" in text
+    assert "Static findings" in text
+    assert "Findings: 1 total (1 high)" in text
+    assert ("- [api] high cache.global-flush: 1 finding "
+            "(e.g. api/tests/cache_test.py:2)") in text
+    assert "Worksheet" in text
+    assert "FIX-001" in text and "review not yet performed" in text
+    assert (text.index("╯") < text.index("Readiness")
+            < text.index("Static findings") < text.index("Worksheet")
+            < text.index("Next:"))
+    for line in text.splitlines():
+        assert len(line) <= 100, line
+
+    online = render_agent_assessment(
+        _two_projects(), workspace, report_path="recommendations.md",
+        publication_status="created", width=100, color=False,
+        repo="shop", provider="codex/gpt-5", duration_s=3, calls=1)
+    assert "Readiness" not in online
+    assert "Static findings" not in online
+    assert "Worksheet" not in online
 
 
 def test_grid_missing_cell_renders_blank_without_breaking_borders():
