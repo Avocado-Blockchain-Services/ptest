@@ -592,6 +592,19 @@ def test_monorepo_full_failure_total_carries_exit_and_hint_once(case):
         r"ptest: total · failed · \d+(\.\d+)?s \(exit 3\)", lines[-1]), lines
 
 
+def test_monorepo_full_two_failures_total_names_first_exit(case):
+    domain = case.domain()
+    root = _monorepo_root(domain, {"api": ("exit", "3"), "web": ("exit", "5")})
+
+    completed = case.invoke(domain, root, "--full", timeout=30)
+
+    assert completed.code == 3
+    lines = _ptest_lines(completed)
+    assert sum(1 for line in lines if line.startswith("ptest: failed")) == 2
+    assert re.fullmatch(
+        r"ptest: total · failed · \d+(\.\d+)?s \(exit 3\)", lines[-1]), lines
+
+
 def test_status_lines_are_identical_on_tty_and_non_tty():
     from ptest import progress
 

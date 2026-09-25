@@ -2310,6 +2310,27 @@ def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str,
     return tuple(dict.fromkeys(names))
 
 
+# Worst-of rank for a monorepo total: a cancelled or incomplete child
+# outranks a failed one, matching what each child's own end line says.
+_CHILD_STATUS_RANK = {
+    C.Status.PASSED: 0,
+    C.Status.NO_TESTS_NEEDED: 0,
+    C.Status.FAILED: 1,
+    C.Status.NOT_RUN: 2,
+    C.Status.INCOMPLETE: 3,
+    C.Status.CANCELLED: 4,
+}
+
+
+def _worst_status(statuses: list[C.Status]) -> C.Status:
+    """Worst child outcome for the total line; empty means all passed."""
+    worst = C.Status.PASSED
+    for status in statuses:
+        if _CHILD_STATUS_RANK[status] > _CHILD_STATUS_RANK[worst]:
+            worst = status
+    return worst
+
+
 def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
     """Sum per-child bridge counts for a monorepo total, or None if any are missing."""
     if not items or any(item is None for item in items):
@@ -2353,7 +2374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 domain, _state_anchor(resolution.root))
             children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             if parsed.full:
-                child_outcomes: list[tuple[int, C.Counts | None]] = []
+                child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
 
                 def run_full(child):
                     result = operations.execute(
@@ -2367,14 +2388,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
-                    child_outcomes.append((result.exit_code, result.counts))
+                    child_outcomes.append(
+                        (result.exit_code, result.status, result.counts))
                     return result.exit_code
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
                 total_counts = _summed_counts(
-                    [counts for _, counts in child_outcomes])
-                status = (C.Status.FAILED if code else C.Status.PASSED)
-                hint = status is not C.Status.PASSED and progress.claim_hint()
+                    [counts for _, _, counts in child_outcomes])
+                status = _worst_status(
+                    [outcome for _, outcome, _ in child_outcomes])
+                hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                                   C.Status.NOT_RUN)
+                        and progress.claim_hint())
                 progress.emit(progress.format_end(
                     status, counts=total_counts,
                     duration_s=time.monotonic() - started, exit_code=code,

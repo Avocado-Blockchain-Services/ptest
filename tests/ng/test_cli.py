@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -83,11 +84,55 @@ def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_fa
         "ptest.operations.execute",
         lambda domain, config, request: calls.append((config.config_path.parent.name, request.mode))
         or type("R", (), {"reasons": (), "exit_code": 9 if len(calls) == 1 else 3,
-                          "counts": None})(),
+                          "status": C.Status.FAILED, "counts": None})(),
     )
 
     assert main(("--full",)) == 9
     assert calls == [("api", C.Mode.FULL), ("web", C.Mode.FULL)]
+
+
+def test_monorepo_total_status_is_worst_of_child_outcomes():
+    from ptest.cli import _worst_status
+
+    assert _worst_status([]) is C.Status.PASSED
+    assert _worst_status([C.Status.PASSED, C.Status.PASSED]) is C.Status.PASSED
+    assert _worst_status([C.Status.PASSED, C.Status.FAILED]) is C.Status.FAILED
+    assert _worst_status([C.Status.FAILED, C.Status.INCOMPLETE]) is C.Status.INCOMPLETE
+    assert _worst_status([C.Status.FAILED, C.Status.CANCELLED]) is C.Status.CANCELLED
+    assert _worst_status(
+        [C.Status.INCOMPLETE, C.Status.CANCELLED]) is C.Status.CANCELLED
+
+
+def test_monorepo_full_total_names_worst_child_status_not_exit_code(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "web"]\n', encoding="utf-8")
+    for child, project_id in (("api", "ab"), ("web", "cd")):
+        root = tmp_path / child
+        root.mkdir()
+        (root / ".ptest.toml").write_text(
+            'version = 1\nproject_id = "' + project_id * 16 + '"\n'
+            '[runner]\nkind = "command"\nlauncher = ["true"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    outcomes = iter([
+        (3, C.Status.FAILED), (5, C.Status.INCOMPLETE),
+    ])
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda domain, config, request: (
+            lambda code, status: type(
+                "R", (), {"reasons": (), "exit_code": code,
+                          "status": status, "counts": None})())(*next(outcomes)),
+    )
+
+    assert main(("--full",)) == 3
+    err = capsys.readouterr().err
+    total = [line for line in err.splitlines() if line.startswith("ptest: total")]
+    assert len(total) == 1, err
+    assert re.fullmatch(
+        r"ptest: total · incomplete · \d+(\.\d+)?s \(exit 3\)"
+        r" · run with ptest -v for scheduling and setup details",
+        total[0]), err
 
 
 @pytest.mark.parametrize("scope", ["", "api", "web/x", "api/../x", "/api/x", "api\\x", "api/x", "api2/x"])
