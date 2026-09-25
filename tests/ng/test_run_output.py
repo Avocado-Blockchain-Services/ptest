@@ -474,6 +474,65 @@ def test_duration_and_timeout_shapes():
     assert progress.format_timeout(600.0) == "10m"
 
 
+# ---- Parallel xdist end-line counts (persea-shaped) -----------------------------
+
+def _xdist_project(case, domain, *, test_count=5):
+    root = case.project(domain, kind="pytest")
+    config_path = root / ".ptest.toml"
+    project_id = config_path.read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    config_path.write_text(
+        "version = 1\n"
+        f'project_id = "{project_id}"\n'
+        "[runner]\n"
+        'kind = "pytest"\n'
+        f"launcher = {json.dumps([sys.executable])}\n"
+        'args = ["-p", "no:cacheprovider"]\n'
+        "full_args = []\n"
+        'test_roots = ["tests"]\n'
+        "workers = 8\n"
+        'lifecycle = "cooperative-process-group"\n',
+        encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = ["-n", "4"]\n', encoding="utf-8")
+    (root / "tests").mkdir()
+    body = "".join(
+        f"def test_case_{index:02d}():\n    assert True\n" for index in range(test_count))
+    (root / "tests" / "test_logger.py").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_parallel_xdist_run_end_line_carries_counts(case):
+    domain = case.domain(slots=4, jobs=4)
+    root = _xdist_project(case, domain)
+
+    completed = case.invoke(domain, root, "tests/test_logger.py", timeout=120)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert "5 passed" in completed.stdout.decode("utf-8", "replace")
+    lines = _ptest_lines(completed)
+    assert lines[0] == f"ptest: {root.name} · pytest · 4 workers · tests/test_logger.py"
+    assert re.fullmatch(
+        r"ptest: passed · 5 tests · \d+(\.\d+)?s", lines[-1]), lines
+
+
+def test_parallel_xdist_failure_end_line_carries_counts(case):
+    domain = case.domain(slots=4, jobs=4)
+    root = _xdist_project(case, domain)
+    path = root / "tests" / "test_logger.py"
+    path.write_text(
+        path.read_text().replace("def test_case_04():\n    assert True\n",
+                                 "def test_case_04():\n    assert False\n"))
+
+    completed = case.invoke(domain, root, "tests/test_logger.py", timeout=120)
+
+    assert completed.code == 1, completed.stderr.decode()
+    lines = _ptest_lines(completed)
+    assert re.fullmatch(
+        r"ptest: failed · 1 failed, 4 passed · \d+(\.\d+)?s \(exit 1\)"
+        r" · run with ptest -v for scheduling and setup details",
+        lines[-1]), lines
+
+
 # ---- R6: json modes and hostile names ----------------------------------------
 
 def test_result_json_mode_leaves_stdout_to_the_runner(case):
@@ -590,6 +649,18 @@ def test_monorepo_full_failure_total_carries_exit_and_hint_once(case):
     assert web_end[0].endswith("run with ptest -v for scheduling and setup details")
     assert re.fullmatch(
         r"ptest: total · failed · \d+(\.\d+)?s \(exit 3\)", lines[-1]), lines
+
+
+def test_monorepo_scoped_start_line_shows_user_scope_from_root(case):
+    domain = case.domain()
+    root = _monorepo_root(domain, {"api": ("literal",), "web": ("literal",)})
+
+    completed = case.invoke(domain, root, "api/greet", timeout=20)
+
+    assert completed.code == 0
+    assert json.loads(completed.stdout) == ["greet"]
+    lines = _ptest_lines(completed)
+    assert lines[0] == "ptest: api · command · 1 worker · api/greet"
 
 
 def test_monorepo_full_two_failures_total_names_first_exit(case):

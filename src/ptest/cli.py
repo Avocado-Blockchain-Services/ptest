@@ -2413,7 +2413,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                              no_setup=parsed.no_setup,
                              shadow=parsed.shadow, result_path=parsed.result_path,
                              fixture_domain=parsed.fixture_domain,
-                             verbose=parsed.verbose, quiet=parsed.quiet),
+                             verbose=parsed.verbose, quiet=parsed.quiet,
+                             display_argv=parsed.runner_argv),
             )
             for reason in result.reasons:
                 print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)

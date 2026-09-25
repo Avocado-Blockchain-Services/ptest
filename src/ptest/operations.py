@@ -1845,11 +1845,16 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
 
 def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
                 request: C.RunRequest, plan: C.Plan, workers: int) -> None:
-    """One start line naming project, runner, workers and scope."""
+    """One start line naming project, runner, workers and scope.
+
+    The scope is shown as the user typed it (a monorepo route passes the
+    repo-root-relative scopes separately from the child-rebased argv).
+    """
     project = render.terminal_text(checkout.root.name)
     runner = config.runner.kind.value
-    full = not (request.mode is C.Mode.SCOPED and request.argv)
-    scope = "" if full else render.terminal_text(" ".join(request.argv))
+    shown = request.display_argv if request.display_argv is not None else request.argv
+    full = not (request.mode is C.Mode.SCOPED and shown)
+    scope = "" if full else render.terminal_text(" ".join(shown))
     fixed = len(f"ptest: {project} · {runner} · {workers} workers · ")
     scope = progress.fit_text(scope, fixed=fixed) if scope else scope
     progress.emit(progress.format_start(
@@ -2665,6 +2670,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         # An authenticated bridge refusal is not a native test
                         # failure. Retain the observed child code for diagnosis.
                         result = replace(result, exit_origin="ptest")
+                    elif native_report.test_counts is not None:
+                        # Parallel controller-reconciled test counts ride the
+                        # authenticated terminal report: the exit match above
+                        # already ties them to the observed child code, and
+                        # the bridge refuses anything it cannot reconcile.
+                        counts = native_report.test_counts
+                        result = replace(result, counts=C.Counts(
+                            collected=counts["collected"],
+                            executed=counts["executed"],
+                            passed=counts["passed"], failed=counts["failed"],
+                            skipped=counts["skipped"],
+                            unknown=counts["unknown"]))
             except C.Problem as problem:
                 code = (problem.code if problem.code in {
                     "capacity-exceeded", "report-invalid", "unsafe-path",

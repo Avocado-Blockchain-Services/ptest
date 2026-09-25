@@ -767,7 +767,8 @@ def _empty_narrowing() -> dict[str, Any]:
 def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
                   native_exit: int | None, bridge_exit: int,
                   complete: bool, problem: str | None,
-                  project_narrowing: dict[str, Any] | None = None) -> None:
+                  project_narrowing: dict[str, Any] | None = None,
+                  test_counts: dict[str, int] | None = None) -> None:
     payload = {
         "protocol": 1,
         **identity,
@@ -780,6 +781,7 @@ def _write_report(path: Path, identity: dict[str, str], *, runtime: str,
         "problem": problem,
         "project_narrowing": project_narrowing if isinstance(project_narrowing, dict)
         else _empty_narrowing(),
+        "test_counts": test_counts,
     }
     raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
     max_bytes, _, _, _ = _report_limits()
@@ -978,6 +980,13 @@ class OwnedPlugin:
         self._report_failures = 0
         self._collection_errors = 0
         self._testscollected: int | None = None
+        # Worker-half per-test outcomes (workers >= 2 only): node id to
+        # outcome, recorded worker-locally and shipped to the controller in
+        # the session-finish worker record. The controller merges the maps
+        # into terminal test counts; anything unvalidatable there fails
+        # closed, never passes.
+        self._worker_outcomes: dict[str, str] = {}
+        self._worker_outcome_bound: int | None = None
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -1680,6 +1689,48 @@ class OwnedPlugin:
         if bool(getattr(report, "failed", False)):
             self._collection_errors += 1
 
+    def _record_worker_outcome(self, report: Any) -> None:
+        """Record one worker-local test outcome for the controller merge.
+
+        Only the module-level worker-half hook calls this (the controller
+        never records here). The outcome vocabulary mirrors AdvancedPlugin
+        exactly; later phases overwrite earlier ones, so a call verdict
+        replaces its setup record and a teardown error replaces a pass.
+        """
+        try:
+            nodeid = str(getattr(report, "nodeid", ""))
+            phase = getattr(report, "when", "")
+            if not nodeid:
+                self._refuse("a parallel worker report has no test identity")
+                return
+            outcome: str | None = None
+            if phase == "call":
+                outcome = {
+                    "passed": "passed", "failed": "failed", "skipped": "skipped",
+                }.get(str(getattr(report, "outcome", "unknown")), "unknown")
+            elif phase == "setup":
+                if bool(getattr(report, "failed", False)):
+                    outcome = "error"
+                elif bool(getattr(report, "skipped", False)):
+                    outcome = "skipped"
+            elif phase == "teardown":
+                if bool(getattr(report, "failed", False)):
+                    outcome = "error"
+            if outcome is None:
+                return
+            if nodeid not in self._worker_outcomes:
+                if self._worker_outcome_bound is None:
+                    _, bound, _, _ = _report_limits()
+                    self._worker_outcome_bound = bound
+                if len(self._worker_outcomes) >= self._worker_outcome_bound:
+                    self._refuse("parallel worker outcomes exceed the report bound")
+                    return
+            self._worker_outcomes[nodeid] = outcome
+        except BridgeRefusal:
+            raise
+        except Exception:
+            self._refuse("a parallel worker outcome is unobservable")
+
     def derived_status(self) -> int | None:
         """Native exit status derived from observed outcomes, not the returned code.
 
@@ -1753,6 +1804,7 @@ class OwnedPlugin:
                 "conftest_hooks": narrowing["conftest_hooks"],
                 "notes": narrowing["notes"],
                 "refused": bool(self.refused),
+                "outcomes": dict(self._worker_outcomes),
             }
         except TypeError:
             self._refuse("a parallel worker was not observed by the bridge")
@@ -2114,6 +2166,9 @@ class AdvancedPlugin(OwnedPlugin):
         return hashlib.sha256(json.dumps(
             observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
+_WORKER_OUTCOMES = frozenset({"passed", "failed", "skipped", "error", "unknown"})
+
+
 def _valid_worker_record(record: Any, worker: str) -> bool:
     """True when a worker record is well-formed, matching, and unrefused."""
     if not isinstance(record, dict) or record.get("worker_id") != worker:
@@ -2131,7 +2186,49 @@ def _valid_worker_record(record: Any, worker: str) -> bool:
         if (not isinstance(value, list)
                 or any(not isinstance(item, str) for item in value)):
             return False
+    outcomes = record.get("outcomes")
+    if (not isinstance(outcomes, dict)
+            or any(not isinstance(nodeid, str) or not nodeid
+                   or item not in _WORKER_OUTCOMES
+                   for nodeid, item in outcomes.items())):
+        return False
     return True
+
+
+def _merge_worker_outcomes(plugin: OwnedPlugin, workers: int) -> dict[str, int] | None:
+    """Merge worker outcome maps into terminal test counts, or refuse.
+
+    Returns the counts dict, or None when the maps do not cover the
+    reconciled collection (counts stay absent rather than approximate).
+    Anything malformed or inconsistent is a refusal: unbound test ids,
+    tests recorded by two workers, or unknown outcome words.
+    """
+    expected = {f"gw{index}" for index in range(workers)}
+    if set(plugin._node_down) != expected:
+        _fail("a parallel worker was not observed by the bridge")
+    first = plugin._node_collections.get("gw0", ())
+    if any(plugin._node_collections.get(worker) != first for worker in expected):
+        _fail("parallel workers collected different tests")
+    collected = set(first)
+    merged: dict[str, str] = {}
+    for worker in sorted(expected):
+        _, record = plugin._node_down[worker]
+        outcomes = record.get("outcomes", {})
+        for nodeid, outcome in outcomes.items():
+            if nodeid not in collected:
+                _fail("parallel worker reported an uncollected test")
+            if nodeid in merged:
+                _fail("parallel workers reported the same test twice")
+            merged[nodeid] = outcome
+    if any(nodeid not in merged for nodeid in collected):
+        return None
+    passed = sum(1 for outcome in merged.values() if outcome == "passed")
+    failed = sum(1 for outcome in merged.values() if outcome == "failed")
+    skipped = sum(1 for outcome in merged.values() if outcome == "skipped")
+    unknown = len(merged) - passed - failed - skipped
+    return {"collected": len(collected), "executed": passed + failed,
+            "passed": passed, "failed": failed, "skipped": skipped,
+            "unknown": unknown}
 
 
 def _reconcile_parallel(plugin: OwnedPlugin, workers: int,
@@ -2205,6 +2302,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     complete = False
     problem: str | None = None
     narrowing_report = _empty_narrowing()
+    test_counts: dict[str, int] | None = None
     advanced_plugin: AdvancedPlugin | None = None
     advanced_runtime_identity = hashlib.sha256(b"unavailable").hexdigest()
     advanced_runtime_facts: dict[str, object] = {}
@@ -2341,7 +2439,12 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                 bridge_exit = 4 if native_exit in (0, 5) else native_exit
                 return bridge_exit
             narrowing_report = _parallel_narrowing_report(plugin)
+            # Terminal test counts from the merged worker outcome maps, so
+            # a parallel run can report what ran without reconstructing it
+            # from stdout. Absent when the maps do not cover the collection.
+            test_counts = _merge_worker_outcomes(plugin, workers)
         else:
+            test_counts = None
             # The label source of truth: what the bridge actually allowed.
             narrowing_report = plugin.allowed_narrowing()
         if advanced_plugin is not None:
@@ -2392,7 +2495,8 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                                   native_exit=native_exit if complete else None,
                                   bridge_exit=bridge_exit, complete=complete,
                                   problem=problem,
-                                  project_narrowing=narrowing_report)
+                                  project_narrowing=narrowing_report,
+                                  test_counts=test_counts)
             except BridgeRefusal:
                 # A descriptor/size refusal is an authenticated bridge
                 # refusal and must escape so the caller cannot mistake a
@@ -2551,6 +2655,7 @@ def pytest_runtest_logreport(report: Any) -> None:
     if plugin is None:
         return None
     plugin.pytest_runtest_logreport(report)
+    plugin._record_worker_outcome(report)
     return None
 
 

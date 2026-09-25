@@ -35,6 +35,7 @@ _FIELDS = frozenset({
     "protocol", "run_id", "nonce", "attempt_id", "runner",
     "observed_runtime_version", "execution_mode", "effective_profile",
     "terminal_complete", "native_exit_code", "bridge_exit_code", "problem",
+    "test_counts",
 })
 _ATTEMPT_FIELDS = _FIELDS | frozenset({
     "runtime_identity", "runtime_facts", "inventory", "workers", "coverage", "reporters",
@@ -213,6 +214,11 @@ def project_filter_label(narrowing: ProjectNarrowing) -> str | None:
     return "full (project-filtered: " + "; ".join(parts) + ")"
 
 
+_TEST_COUNT_FIELDS = frozenset({
+    "collected", "executed", "passed", "failed", "skipped", "unknown",
+})
+
+
 @dataclass(frozen=True, kw_only=True)
 class NativeTerminalReport:
     """The complete, private terminal record admitted by :func:`consume_report`."""
@@ -229,6 +235,7 @@ class NativeTerminalReport:
     native_exit_code: int | None
     bridge_exit_code: int
     problem: str | None = None
+    test_counts: dict | None = None
     project_narrowing: ProjectNarrowing = field(
         default_factory=lambda: ProjectNarrowing(
             narrowing=None, conftest_hooks=(), notes=()))
@@ -272,6 +279,15 @@ class NativeTerminalReport:
                 raise ValueError("incomplete terminal report requires bridge refusal")
             if self.native_exit_code not in (None, 0):
                 raise ValueError("bridge refusal cannot carry a native failure")
+        if self.test_counts is not None:
+            if (not isinstance(self.test_counts, dict)
+                    or set(self.test_counts) != _TEST_COUNT_FIELDS):
+                raise TypeError("terminal test counts have invalid fields")
+            for field in _TEST_COUNT_FIELDS:
+                value = self.test_counts[field]
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise TypeError("terminal test counts must be nonnegative integers")
+            object.__setattr__(self, "test_counts", dict(self.test_counts))
 
 
 @dataclass(frozen=True, kw_only=True)

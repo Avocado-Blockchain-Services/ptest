@@ -1055,6 +1055,7 @@ class RunRequest:
     probe: ProbeOptions | None = None
     verbose: bool = False
     quiet: bool = False
+    display_argv: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1075,6 +1076,10 @@ class RunRequest:
             raise TypeError("request.probe must be ProbeOptions or None")
         object.__setattr__(self, "verbose", _check_bool("request.verbose", self.verbose))
         object.__setattr__(self, "quiet", _check_bool("request.quiet", self.quiet))
+        if self.display_argv is not None:
+            object.__setattr__(self, "display_argv",
+                               _check_argv_tokens("request.display_argv", self.display_argv,
+                                                  allow_empty=True))
 
 
 @dataclass(frozen=True, kw_only=True)
