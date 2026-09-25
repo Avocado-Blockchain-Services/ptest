@@ -73,31 +73,38 @@ def fit_text(text: str, *, fixed: int, width: int | None = None) -> str:
     return text[:room - 1] + "…"
 
 
-def _plural(count: int, singular: str) -> str:
-    return f"{count} {singular}" if count == 1 else f"{count} {singular}s"
+def _prefix(*, color: bool = False) -> str:
+    return render.paint("ptest:", "dim", color=color)
+
+
+def _project(text: str, *, color: bool = False) -> str:
+    return render.paint(text, "bold", color=color)
 
 
 def format_start(*, project: str, runner: str, workers: int,
-                 scope: str, full: bool) -> str:
-    head = f"ptest: {project} · {runner}"
+                 scope: str, full: bool, color: bool = False) -> str:
+    head = f"{_prefix(color=color)} {_project(project, color=color)} · {runner}"
     if full:
         return f"{head} · full suite"
-    return f"{head} · {_plural(workers, 'worker')} · {scope}"
+    dimmed_scope = render.paint(scope, "dim", color=color) if scope else scope
+    return f"{head} · {C.plural(workers, 'worker')} · {dimmed_scope}"
 
 
 def format_waiting(*, needed: int, free: int | None, limit: int | None,
                    timeout_s: float, holders: str = "",
                    elapsed_s: float | None = None,
-                   position: int | None = None, hint: bool = False) -> str:
+                   position: int | None = None, hint: bool = False,
+                   color: bool = False) -> str:
     if limit is None or free is None:
         capacity = "capacity unknown"
     else:
         capacity = f"{free} of {limit} free"
-    need = _plural(needed, "slot")
+    need = C.plural(needed, "slot")
+    waiting = render.paint("waiting", "yellow", color=color)
     if elapsed_s is not None:
-        return (f"ptest: still waiting for {need} ({capacity})"
+        return (f"{_prefix(color=color)} still {waiting} for {need} ({capacity})"
                 f" · {format_duration(elapsed_s)}")
-    line = f"ptest: waiting for {need} ({capacity})"
+    line = f"{_prefix(color=color)} {waiting} for {need} ({capacity})"
     if holders:
         line += f" — in use by {holders}"
     line += f" · queue timeout {format_timeout(timeout_s)}"
@@ -108,23 +115,135 @@ def format_waiting(*, needed: int, free: int | None, limit: int | None,
     return line
 
 
-def format_setup_start(argv: tuple[str, ...] | list[str], *, reason: str) -> str:
-    return f"ptest: setup: {render.terminal_text(' '.join(argv))} ({reason})"
+def format_setup_start(argv: tuple[str, ...] | list[str], *, reason: str,
+                       color: bool = False) -> str:
+    return (f"{_prefix(color=color)} setup: "
+            f"{render.terminal_text(' '.join(argv))} ({reason})")
 
 
-def format_setup_done(setup_s: float | None) -> str:
+def format_setup_done(setup_s: float | None, *, color: bool = False) -> str:
     if setup_s is None:
-        return "ptest: setup done"
-    return f"ptest: setup done ({format_duration(setup_s)})"
+        return f"{_prefix(color=color)} setup done"
+    return f"{_prefix(color=color)} setup done ({format_duration(setup_s)})"
+
+
+def format_changed_selected(*, selected: int, total: int,
+                            changed_files: int) -> str:
+    """Changed-mode plan segment for a selected run.
+
+    ``selected``/``total`` count test files (the plan subset over the
+    distinct files of the baseline inventory); ``changed_files`` counts
+    distinct changed paths.
+    """
+    files = C.plural(changed_files, "file") + " changed"
+    return f"changed: {selected} of {total} test files ({files})"
+
+
+def format_changed_start(*, project: str, runner: str, segment: str,
+                         color: bool = False) -> str:
+    """Changed-mode start line: styled head like ``format_start``."""
+    return (f"{_prefix(color=color)} {_project(project, color=color)} · "
+            f"{runner} · {segment}")
+
+
+def format_no_changes(declaration: str, *, color: bool = False) -> str:
+    """Skip line for a monorepo child with no changes."""
+    return (f"{_prefix(color=color)} {_project(declaration, color=color)} "
+            "· no changes")
+
+
+def explain_changed_full_reason(reason: C.Reason | None, *,
+                                config_name: str | None = None,
+                                changed_path: str | None = None) -> str:
+    """Plain words for a changed-mode full-suite selection reason code."""
+    code = reason.code if reason is not None else ""
+    message = reason.message if reason is not None else ""
+    if code == "no-baseline":
+        return "no baseline yet (this run records one if it passes on a clean tree)"
+    if code == "selection-disabled":
+        return f"selection is off in {config_name or 'the config'} (ptest doctor --fix)"
+    if code == "policy-changed":
+        if changed_path is not None:
+            return f"{changed_path} is a full trigger"
+        return "a full trigger changed"
+    if code == "unknown-input":
+        if changed_path is not None:
+            return f"{changed_path} is outside the selection map"
+        return "changed inputs could not be classified"
+    if code == "incompatible-baseline":
+        if "policy" in message or "compatibility" in message:
+            return "policy changed"
+        return "baseline is not an ancestor of HEAD"
+    if code == "policy-invalid":
+        return "policy changed"
+    if code == "selection-shadow-quarantine":
+        return "selection is quarantined (full suite required)"
+    if code == "prior-failure":
+        return "a failed test requires a full run"
+    if code == "incomplete-inventory":
+        return "test inventory is incomplete"
+    if code == "full-gate-obligation":
+        return "a full run is required"
+    return "a full run is required"
+
+
+def _no_baseline_detail(result: C.RunResult) -> str:
+    """Plain words for why a full run recorded no baseline."""
+    counts = result.counts
+    failed = counts.failed if counts is not None else None
+    if result.status is not C.Status.PASSED:
+        if result.status is C.Status.FAILED:
+            if failed:
+                return C.plural(failed, "failure")
+            return "failed"
+        return "incomplete results"
+    before, after = result.input_before, result.input_after
+    if before is None or after is None:
+        return "incomplete results"
+    if before.digest != after.digest:
+        return "files changed during the run"
+    if not before.clean or not after.clean:
+        return "uncommitted changes"
+    if any(reason.code == "incomplete-inventory" for reason in result.reasons):
+        return "incomplete results"
+    if any(reason.code == "changed-during-run" for reason in result.reasons):
+        return "files changed during the run"
+    if any(reason.code == "unknown-input" for reason in result.reasons):
+        return "uncommitted changes"
+    return "not eligible for a baseline"
+
+
+def format_baseline_note(result: C.RunResult, *,
+                       color: bool = False) -> str:
+    """End-line note for a full run: baseline recorded, or why not."""
+    if result.baseline_published:
+        return f"{_prefix(color=color)} baseline recorded"
+    return (f"{_prefix(color=color)} no baseline recorded: "
+            f"{_no_baseline_detail(result)}")
 
 
 def format_setup_failed(*, exit_code: int | None = None,
-                        problem_code: str | None = None) -> str:
+                        problem_code: str | None = None,
+                        color: bool = False) -> str:
     if exit_code is not None:
-        return f"ptest: setup failed (exit {exit_code})"
+        return f"{_prefix(color=color)} setup failed (exit {exit_code})"
     if problem_code is not None:
-        return f"ptest: setup failed ({problem_code})"
-    return "ptest: setup failed"
+        return f"{_prefix(color=color)} setup failed ({problem_code})"
+    return f"{_prefix(color=color)} setup failed"
+
+
+def format_setup_run_start(project: str, argv: tuple[str, ...] | list[str], *,
+                           color: bool = False) -> str:
+    """Start line for a setup-only run: project-scoped, never a test run."""
+    return (f"{_prefix(color=color)} {_project(project, color=color)} · "
+            f"setup: {render.terminal_text(' '.join(argv))}")
+
+
+def format_setup_run_done(duration_s: float | None, *,
+                          color: bool = False) -> str:
+    """End line for a passing setup-only run."""
+    return (f"{_prefix(color=color)} setup done · "
+            f"{render.paint(format_duration(duration_s), 'dim', color=color)}")
 
 
 _VERDICTS = {
@@ -149,18 +268,30 @@ def format_counts(counts: C.Counts | None, status: C.Status) -> str | None:
         total = counts.executed
     if total is None:
         total = passed
-    return f"{total} tests"
+    return C.plural(total, "test")
+
+
+_VERDICT_STYLES = {
+    C.Status.PASSED: "green",
+    C.Status.FAILED: "red",
+    C.Status.INCOMPLETE: "red",
+    C.Status.CANCELLED: "yellow",
+}
 
 
 def format_end(status: C.Status, *, counts: C.Counts | None,
                duration_s: float | None, exit_code: int,
-               hint: bool = False, lead: str | None = None) -> str:
-    parts = [f"ptest: {lead}", _VERDICTS[status]] if lead else [
-        f"ptest: {_VERDICTS[status]}"]
+               hint: bool = False, lead: str | None = None,
+               color: bool = False) -> str:
+    verdict = render.paint(_VERDICTS[status], _VERDICT_STYLES.get(status, ""),
+                           color=color)
+    duration = render.paint(format_duration(duration_s), "dim", color=color)
+    parts = [f"{_prefix(color=color)} {lead}", verdict] if lead else [
+        f"{_prefix(color=color)} {verdict}"]
     segment = format_counts(counts, status)
     if segment is not None:
         parts.append(segment)
-    parts.append(format_duration(duration_s))
+    parts.append(duration)
     line = " · ".join(parts)
     if exit_code != 0:
         line += f" (exit {exit_code})"
@@ -169,7 +300,8 @@ def format_end(status: C.Status, *, counts: C.Counts | None,
     return line
 
 
-def format_timing(timings: C.Timings | None) -> str | None:
+def format_timing(timings: C.Timings | None, *,
+                  color: bool = False) -> str | None:
     if timings is None:
         return None
     parts = []
@@ -181,7 +313,7 @@ def format_timing(timings: C.Timings | None) -> str | None:
             parts.append(f"{label} {format_duration(value)}")
     if not parts:
         return None
-    return "ptest: -v timing: " + " · ".join(parts)
+    return f"{_prefix(color=color)} -v timing: " + " · ".join(parts)
 
 
 def holder_label(pid: int, *, proc_root: str = "/proc") -> str:
@@ -210,6 +342,10 @@ __all__ = [
     "reset", "claim_hint",
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
+    "format_changed_selected", "format_changed_start", "format_no_changes",
+    "explain_changed_full_reason",
+    "format_baseline_note",
     "format_setup_start", "format_setup_done", "format_setup_failed",
+    "format_setup_run_start", "format_setup_run_done",
     "format_end", "format_timing", "holder_label", "emit",
 ]

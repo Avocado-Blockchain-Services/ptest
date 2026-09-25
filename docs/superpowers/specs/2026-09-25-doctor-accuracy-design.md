@@ -21,6 +21,36 @@ regression/security/integration gates. No live model evaluation is performed and
 no comparative model-accuracy claim is made. This explicit user amendment takes
 precedence over evaluator references retained below from the original design.
 
+## Latest-base compatibility amendment — 2026-09-25
+
+This amendment supersedes earlier blanket statements below that monorepo
+selection is unsupported or that SELECT-001 is always N/A for a root
+dispatcher. The merged base implements root `ptest --changed`; preserve that
+dispatcher and evaluate SELECT-001 from each affected child's runner and
+selection policy. Enabled closed pytest inputs may satisfy selection, while
+disabled pytest selection remains a gap with explicit file/path scopes
+available. Missing baselines or unavailable Git evidence broaden affected
+child execution conservatively. Vitest has no ptest-owned per-test protocol:
+with an explicit base, root `ptest --changed --base REF` delegates an affected
+child to native `--changed REF`; without one, an affected Vitest child uses
+the full-suite fallback. Keep command-runner limitations accurate and retain
+the existing root-monorepo live `--probe` limitation; this amendment changes
+selection claims only.
+
+Reports retain trusted standalone scoped/full commands and root-based
+monorepo verification: use a validated child-prefixed path for a scoped
+check, otherwise root `ptest --full`. Include the ptest-owned suite identity
+(runner plus scoped/full profile status) from collected context only; do not
+publish model authority, paths, argv, environment values, or new public schema
+fields. Preserve the evaluator removal: no corpus, evaluation harness, or
+accuracy claim is in scope, and live model accuracy remains unmeasured.
+
+After the merge, focused ptest regressions must cover per-child policy,
+explicit-base Vitest delegation versus no-base fallback, routed scoped/full
+commands, safe suite identity without private-path/argv leakage, and retain
+the upstream dispatcher regressions. The merged, repaired tip requires one
+new integrated `ptest --full` gate.
+
 ## Outcome and decisions
 
 Make the existing cheap-model review useful by sending the runner's actual context, requiring narrower evidence-backed conclusions, and measuring errors with a small offline fixture corpus. Keep the provider, model-selection policy, execution runner, consent boundary, public assessment schema, and existing packet caps.

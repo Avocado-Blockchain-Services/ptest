@@ -126,20 +126,20 @@ def _checkout_identity(config: C.Config, resolution, declaration: str):
 
 def _select_answer(config: C.Config, cfg: str,
                    evidence: tuple[str, ...], *,
-                   parallel_active: bool = False,
-                   monorepo_dispatcher: bool = False) -> DeterministicAnswer:
+                   parallel_active: bool = False) -> DeterministicAnswer:
     runner = config.runner.kind.value
-    if monorepo_dispatcher:
-        return DeterministicAnswer(
-            item_id="SELECT-001", status="not-applicable",
-            reason=("root monorepo dispatcher has no --changed selection "
-                    "route; a child policy cannot enable that route"),
-            evidence_paths=evidence)
     if runner in ("vitest", "command"):
         return DeterministicAnswer(
             item_id="SELECT-001", status="not-applicable",
-            reason=(f"ptest has no automatic test selection for {runner}; "
-                    "every run is scoped or full"),
+            reason=(
+                "ptest does not own Vitest per-test selection; in root "
+                "monorepos, explicit-base ptest --changed --base REF "
+                "delegates an affected child to native --changed REF, "
+                "while without an explicit base an affected Vitest child "
+                "uses the full-suite fallback"
+                if runner == "vitest" else
+                "ptest has no automatic test selection for command runners; "
+                "every run is scoped or full"),
             evidence_paths=evidence)
     policy = config.selection
     if not policy.enabled:
@@ -544,8 +544,7 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
                        and parallel_fact != NOT_CONFIGURED_PARALLEL)
     answers = {
         "SELECT-001": _select_answer(
-            config, cfg, evidence, parallel_active=parallel_active,
-            monorepo_dispatcher=resolution.monorepo is not None),
+            config, cfg, evidence, parallel_active=parallel_active),
         "TIMING-001": timing,
     }
     if parallel is not None:

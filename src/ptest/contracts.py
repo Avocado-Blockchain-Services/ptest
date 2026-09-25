@@ -202,6 +202,16 @@ ATTEMPT_ID_PATTERN = re.compile(r"a(00[1-9]|010)")
 HEX_LOWER = frozenset("0123456789abcdef")
 
 
+def plural(count: int, singular: str) -> str:
+    """``1 test`` / ``2 tests``: every displayed count word agrees in number."""
+    if count == 1:
+        return f"{count} {singular}"
+    if (len(singular) > 1 and singular.endswith("y")
+            and singular[-2] not in "aeiou"):
+        return f"{count} {singular[:-1]}ies"
+    return f"{count} {singular}s"
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1056,6 +1066,7 @@ class RunRequest:
     verbose: bool = False
     quiet: bool = False
     display_argv: tuple[str, ...] | None = None
+    setup_only: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1076,6 +1087,7 @@ class RunRequest:
             raise TypeError("request.probe must be ProbeOptions or None")
         object.__setattr__(self, "verbose", _check_bool("request.verbose", self.verbose))
         object.__setattr__(self, "quiet", _check_bool("request.quiet", self.quiet))
+        object.__setattr__(self, "setup_only", _check_bool("request.setup_only", self.setup_only))
         if self.display_argv is not None:
             object.__setattr__(self, "display_argv",
                                _check_argv_tokens("request.display_argv", self.display_argv,

@@ -1132,8 +1132,9 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                             f"(xdist -n auto, --dist {tier.dist})")
                 parallel_short = "auto"
             else:
-                parallel = f"{tier.workers} workers (xdist, --dist {tier.dist})"
-                parallel_short = f"{tier.workers} workers"
+                parallel = (f"{C.plural(tier.workers, 'worker')} "
+                            f"(xdist, --dist {tier.dist})")
+                parallel_short = C.plural(tier.workers, "worker")
             parallel_fix = None
         elif tier.active and tier.reason == f"{cfg} sets -n 0":
             parallel = f"no — {tier.reason}"
@@ -1144,7 +1145,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
             else:
                 parallel_fix = (
                     f'remove "-n", "0" from [runner] args in {cfg} '
-                    f"to run {tier.workers} workers")
+                    f"to run {C.plural(tier.workers, 'worker')}")
         elif tier.active:
             parallel = f"no — {tier.reason}"
             parallel_short = "no"

@@ -330,9 +330,17 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         ),
         recipe=None,
         prompt=("Does test selection use declared closed inputs with a "
-                "conservative full fallback? Cite the selection policy and "
-                "triggers. Mark N/A only with evidence that selection is "
-                "disabled or absent. Absence of such evidence is unknown, "
+                "conservative full fallback? For pytest, assess each child's "
+                "selection policy: enabled closed inputs can satisfy this; "
+                "disabled or open policy is a gap, even when explicit "
+                "file/path scopes remain available. Root ptest --changed "
+                "uses each affected pytest child's policy. For Vitest, "
+                "ptest does not own per-test selection: an explicit-base "
+                "root ptest --changed --base REF delegates affected children "
+                "to native --changed REF, while no explicit base uses the "
+                "full-suite fallback. Cite policy, routing, and triggers. "
+                "Use N/A only when the runner has no ptest-owned selection "
+                "policy or per-test protocol; missing evidence is unknown, "
                 "never N/A."),
         path_patterns=(_PTEST_TOML, _CONFTEST, TEST_DIR, TEST_FILE,
                        SRC_DIR),

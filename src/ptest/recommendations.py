@@ -761,7 +761,9 @@ def _sentinel_section(children: list) -> str:
 
 def render_recommendations(
         run: object, *,
-        verification_scopes: tuple[str | None, ...] | None = None) -> bytes:
+        verification_scopes: tuple[str | None, ...] | None = None,
+        suite_identities: tuple[tuple[str, str, str], ...] | None = None
+        ) -> bytes:
     """Render the report with only caller-validated command routes.
 
     The CLI supplies ``verification_scopes`` after checking each route
@@ -787,6 +789,25 @@ def render_recommendations(
             None if scope is None else _check_scope(
                 scope, field="verification route")
             for scope in verification_scopes)
+    if suite_identities is None:
+        safe_identities = None
+    else:
+        if (not isinstance(suite_identities, tuple)
+                or len(suite_identities) != len(children)):
+            _fail("report-invalid",
+                  "suite identities must match the reviewed children")
+        allowed_runners = {"pytest", "vitest", "command", "unknown"}
+        allowed_statuses = {"resolved", "partial", "unavailable"}
+        checked_identities = []
+        for identity in suite_identities:
+            if (not isinstance(identity, tuple) or len(identity) != 3
+                    or any(not isinstance(value, str) for value in identity)
+                    or identity[0] not in allowed_runners
+                    or identity[1] not in allowed_statuses
+                    or identity[2] not in allowed_statuses):
+                _fail("report-invalid", "suite identity is not recognized")
+            checked_identities.append(identity)
+        safe_identities = tuple(checked_identities)
     out: list[str] = []
     out.append("# Test-quality recommendations (agent-reviewed)")
     out.append("")
@@ -816,6 +837,11 @@ def render_recommendations(
         out.append("")
         out.extend(_fact_bullets(child))
         out.append("")
+        if safe_identities is not None:
+            runner, scoped_status, full_status = safe_identities[child_index]
+            out.append(f"Suite identity: {runner} (scoped {scoped_status}; "
+                       f"full {full_status}).")
+            out.append("")
         out.append(f"Packet: {child['packet_sha256']}. Checklist: "
                    f"{_score_text(child['rows'])}.")
         out.append("")
@@ -870,14 +896,21 @@ def render_recommendations(
             for row in safety + parallel:
                 _emit(row)
     out.append(_sentinel_section(children))
-    out.append("## Root-monorepo live probe limitation")
+    out.append("## Changed-input selection and live probe")
     out.append("")
-    out.append("Root-monorepo live --probe permutations are unsupported: the "
-               "root dispatcher supports static doctor review only. Do not "
-               "invent a root probe flag. Configured worker settings are "
-               "reported as ptest facts; this static review does not prove "
-               "parallel isolation. Verify ordinary tests through the "
-               "validated ptest route above, then finish with the final gate.")
+    out.append("The root dispatcher applies each affected pytest child's "
+               "selection policy. Vitest has no ptest-owned per-test "
+               "selection protocol: `ptest --changed --base REF` delegates "
+               "an affected Vitest child to native `--changed REF`. Without "
+               "an explicit base, an affected Vitest child takes the "
+               "full-suite fallback. Missing baselines or uncertain change "
+               "inputs broaden selection safely. Root-monorepo live `--probe` "
+               "is unsupported because probe execution requires a standalone "
+               "configuration; do not invent a root probe flag. Configured "
+               "worker settings are reported as ptest facts; this static "
+               "review does not prove parallel isolation. Verify ordinary "
+               "tests through the validated ptest route above, then finish "
+               "with the final gate.")
     out.append("")
     out.append("## Final gate")
     out.append("")

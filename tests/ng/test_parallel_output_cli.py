@@ -810,7 +810,7 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys):
                  if line.startswith("Model review disclosure:"))
     disclosure_only = [
         line for line in disclosure_lines[start:]
-        if line.strip() and not line.startswith("doctor review:")]
+        if line.strip() and not line.startswith("doctor:")]
     assert len(disclosure_only) <= 3
 
     report = (root / "recommendations.md").read_text(encoding="utf-8")
@@ -1143,7 +1143,7 @@ def _write_det1_shaped_monorepo(root: Path) -> None:
 
 def test_doctor_det1_deterministic_rows_cite_child_config(
         tmp_path, monkeypatch, capsys):
-    """DET1 twin: api parallel ✓ (4 workers), monorepo selection n/a.
+    """DET1 twin: api parallel ✓ (4 workers), disabled selection is a gap.
 
     The child ``.ptest.toml`` files are tier-0 evidence, so no deterministic
     satisfied/gap row downgrades for a missing citation; citations carry the
@@ -1197,19 +1197,19 @@ def test_doctor_det1_deterministic_rows_cite_child_config(
     assert (parallel["evidence"][1]["start_line"],
             parallel["evidence"][1]["end_line"]) == (2, 2)
     selection = api_rows["SELECT-001"]
-    assert selection["status"] == "not-applicable"
+    assert selection["status"] == "gap"
     assert len(selection["evidence"]) == 1
     assert selection["evidence"][0]["path"] == "api/.ptest.toml"
     assert (selection["evidence"][0]["start_line"],
-            selection["evidence"][0]["end_line"]) == (3, 10)
+            selection["evidence"][0]["end_line"]) == (11, 12)
     findings = {finding["id"]: finding
                 for finding in by_scope["api"]["findings"]}
-    assert "SELECT-001" not in findings
+    assert "SELECT-001" in findings
     assert "PARALLEL-001" not in findings
     assert api_rows["TIMING-001"]["status"] == "unknown"
     assert "no timing history yet" in api_rows["TIMING-001"]["rationale"]
-    # Both children share a root dispatcher that does not expose `--changed`.
-    # This affirmative routing limitation justifies N/A for both child rows.
+    # The Vitest child has native changed selection only when an explicit
+    # base is supplied; ptest does not own its per-test protocol.
     web_rows = {row["id"]: row for row in by_scope["web"]["rows"]}
     assert web_rows["SELECT-001"]["status"] == "not-applicable"
     assert len(web_rows["SELECT-001"]["evidence"]) == 1

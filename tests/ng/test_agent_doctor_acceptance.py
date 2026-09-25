@@ -444,10 +444,10 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
         assert [row["id"] for row in child["rows"]] == list(
             C.AGENT_ASSESSMENT_CHECKLIST_IDS)
         assert child["score"] == {
-            "satisfied": 0, "applicable": 11, "percent": 0}
+            "satisfied": 0, "applicable": 12, "percent": 0}
         selection = next(row for row in child["rows"]
                          if row["id"] == "SELECT-001")
-        assert selection["status"] == "not-applicable"
+        assert selection["status"] == "gap"
         assert all(row["label"] for row in child["rows"])
         assert child["execution"]["status"] in ("executable", "caveat")
     assert public.data["publication"]["path"] == "recommendations.md"

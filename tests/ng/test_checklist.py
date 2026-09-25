@@ -103,6 +103,15 @@ def test_catalog_prompts_pin_gap_satisfied_unknown_standard():
         assert "absence of code is unknown" in lowered, entry.id
 
 
+def test_selection_prompt_distinguishes_pytest_policy_and_vitest_route():
+    prompt = next(entry.prompt.casefold() for entry in CATALOG
+                  if entry.id == "SELECT-001")
+    assert "pytest" in prompt and "selection policy" in prompt
+    assert "closed inputs" in prompt
+    assert "native --changed" in prompt
+    assert "full-suite fallback" in prompt
+
+
 def test_resource_item_routes_code_signals():
     import re
 

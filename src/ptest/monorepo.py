@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import contracts as C
+from .selection import _matches
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,3 +290,257 @@ def execute_full(children: tuple[ChildTarget, ...], execute_child: Callable[[Chi
         if code and not first_failure:
             first_failure = code
     return first_failure
+
+
+_GIT_TIMEOUT_S = 10.0
+
+
+def _git_blob(root: Path, *argv: str) -> bytes | None:
+    """Read one Git command with source.py's no-hook posture, or None."""
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("GIT_")}
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_LITERAL_PATHSPECS="1")
+    command = ("git", "-c", "core.hooksPath=" + os.devnull,
+               "-c", "submodule.recurse=false",
+               "-C", os.fspath(root), *argv)
+    try:
+        proc = subprocess.run(command, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env=env, timeout=_GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode:
+        return None
+    return proc.stdout
+
+
+def _repo_path(value: bytes) -> str | None:
+    """Validate one NUL-separated Git path (source._path rules), or None."""
+    try:
+        text = value.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return None
+    if (not text or text.startswith("/")
+            or any(ord(char) < 32 or ord(char) == 127 for char in text)
+            or any(part in ("", ".", "..") for part in text.split("/"))):
+        return None
+    return text
+
+
+def _nul_paths(raw: bytes) -> tuple[str, ...] | None:
+    if raw and not raw.endswith(b"\0"):
+        return None
+    paths = []
+    for record in raw.split(b"\0")[:-1]:
+        path = _repo_path(record)
+        if path is None:
+            return None
+        paths.append(path)
+    return tuple(paths)
+
+
+def worktree_changed_files(root: Path, base: str | None) -> tuple[str, ...] | None:
+    """Repo-relative changed paths vs base, plus uncommitted and untracked.
+
+    The committed range covers ``base..HEAD`` (empty when ``base`` is None,
+    i.e. the reference is HEAD itself); staged, unstaged, and untracked
+    (non-ignored) files are always included.  Returns None when local Git
+    evidence is unavailable or malformed: callers treat that as "every
+    child may be affected", the same fail-open full gate the selection
+    planner uses for ambiguity.
+    """
+    root = Path(root)
+    if base is not None and (not base or base.startswith("-") or "\0" in base):
+        return None
+    top = _git_blob(root, "rev-parse", "--show-toplevel")
+    if top is None:
+        return None
+    try:
+        if Path(os.fsdecode(top.strip())).resolve() != root.resolve():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    changed: list[str] = []
+    if base is not None:
+        committed = _git_blob(root, "diff", "--name-only", "-z",
+                              "--no-ext-diff", "--no-textconv",
+                              "--find-renames", base, "HEAD", "--")
+        if committed is None:
+            return None
+        paths = _nul_paths(committed)
+        if paths is None:
+            return None
+        changed.extend(paths)
+    worktree = _git_blob(root, "diff", "--name-only", "-z", "--no-ext-diff",
+                         "--no-textconv", "--find-renames", "HEAD", "--")
+    if worktree is None:
+        return None
+    paths = _nul_paths(worktree)
+    if paths is None:
+        return None
+    changed.extend(paths)
+    untracked = _git_blob(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked is None:
+        return None
+    paths = _nul_paths(untracked)
+    if paths is None:
+        return None
+    changed.extend(paths)
+    return tuple(sorted(set(changed)))
+
+
+@dataclass(frozen=True, slots=True)
+class ChangedChild:
+    """One child's --changed verdict: run it, or skip it as unaffected."""
+
+    target: ChildTarget
+    run: bool
+    vitest_changed: bool
+
+
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _child_baseline_head(domain: C.DomainPaths, child: ChildTarget) -> str | None:
+    """Recorded baseline commit for one child, or None (run the child)."""
+    from . import history
+    from .operations import _checkout
+
+    try:
+        if child.config is None:
+            return None
+        checkout = _checkout(child.config)
+        view = history.read_history(domain, checkout)
+        baseline = view.baseline
+        return baseline.head if baseline is not None else None
+    except Exception:
+        # Advisory read only: unknown history runs the child (fail closed).
+        return None
+
+
+def child_baseline_heads(domain: C.DomainPaths,
+                         children: tuple[ChildTarget, ...]) -> dict[str, str | None]:
+    """Best-effort recorded-baseline commits keyed by child declaration."""
+    return {child.declaration: _child_baseline_head(domain, child)
+            for child in children}
+
+
+def _committed_since(root: Path, older: str) -> tuple[str, ...] | None:
+    """Repo-relative paths committed between one baseline head and HEAD."""
+    if not _COMMIT_RE.fullmatch(older):
+        return None
+    raw = _git_blob(root, "diff", "--name-only", "-z", "--no-ext-diff",
+                    "--no-textconv", "--find-renames", older, "HEAD", "--")
+    if raw is None:
+        return None
+    return _nul_paths(raw)
+
+
+def _run_all(children: tuple[ChildTarget, ...],
+             base: str | None) -> tuple[ChangedChild, ...]:
+    return tuple(ChangedChild(child, True, _vitest_base(child, base) is not None)
+                 for child in children)
+
+
+def select_changed_children(root: Path, children: tuple[ChildTarget, ...],
+                            base: str | None,
+                            baseline_heads: dict[str, str | None] | None = None,
+                            ) -> tuple[ChangedChild, ...]:
+    """Decide per child whether root `ptest --changed` runs it.
+
+    With an explicit base the committed range is ``base..HEAD`` for every
+    child.  Without one, each child consults its recorded baseline: the
+    child runs unless its directory holds no worktree change AND no change
+    committed since its baseline head; a missing baseline (or unreadable
+    history) runs the child, since that run can record one.  In both
+    modes a child also runs when a changed file outside every child
+    directory is one of its full triggers (its selection
+    ``full_triggers`` plus the implicit ``.ptest.toml``; a changed root
+    manifest therefore runs every child).  Unavailable Git evidence runs
+    every child.  The ``vitest_changed`` flag marks the section-A.2
+    delegation (see ``child_changed_request``).
+    """
+    if base is not None:
+        changed = worktree_changed_files(root, base)
+        if changed is None:
+            return _run_all(children, base)
+        return tuple(
+            _classify(child, changed, changed, children, base)
+            for child in children)
+    worktree = worktree_changed_files(root, None)
+    if worktree is None or baseline_heads is None:
+        return _run_all(children, base)
+    committed: dict[str, tuple[str, ...] | None] = {}
+    for child in children:
+        head = baseline_heads.get(child.declaration)
+        committed[child.declaration] = (
+            None if head is None else _committed_since(root, head))
+    selected: list[ChangedChild] = []
+    for child in children:
+        own_range = committed[child.declaration]
+        if own_range is None:
+            selected.append(ChangedChild(child, True, False))
+            continue
+        relevant = worktree + own_range
+        selected.append(_classify(child, relevant, relevant, children, base))
+    return tuple(selected)
+
+
+def _classify(child: ChildTarget, own: tuple[str, ...], outside_pool: tuple[str, ...],
+              children: tuple[ChildTarget, ...], base: str | None) -> ChangedChild:
+    """Run one child when its own paths changed or an outside trigger did."""
+    triggers = ((child.config.selection.full_triggers
+                 if child.config is not None else ())
+                + (".ptest.toml",))
+    if any(_matches(path, (child.declaration,)) for path in own):
+        return ChangedChild(child, True, _vitest_base(child, base) is not None)
+    outside = [path for path in outside_pool
+               if not any(_matches(path, (other.declaration,)) for other in children)]
+    run = any(_matches(path, triggers) for path in outside)
+    return ChangedChild(child, run, run and _vitest_base(child, base) is not None)
+
+
+def _vitest_base(target: ChildTarget, base: str | None) -> str | None:
+    """Return base when this child should delegate to `vitest --changed`."""
+    if base is None or target.config is None:
+        return None
+    if target.config.runner.kind is not C.RunnerKind.VITEST:
+        return None
+    return base
+
+
+def child_changed_request(target: ChildTarget, *, base: str | None,
+                          workers: int | None = None,
+                          queue_timeout_s: float = C.DEFAULT_QUEUE_TIMEOUT_S,
+                          no_setup: bool = False,
+                          result_path: str | None = None,
+                          fixture_domain: Path | None = None,
+                          verbose: bool = False,
+                          quiet: bool = False) -> C.RunRequest:
+    """Build the section-A run request for one child that has changes.
+
+    DESIGN NOTE (section A.2): ptest owns no selection protocol for vitest
+    (the adapter runs one literal exclusive command), so a vitest child
+    cannot plan a file subset the way a qualified pytest child can.  When
+    an explicit base names the comparison ref — the simple case — delegate
+    to vitest's own `--changed <base>` via a scoped request carrying exactly
+    that argv, so only affected test files run.  Without a base there is no
+    ref to name, so the child runs in normal CHANGED (automatic) mode and
+    takes its full suite with the planner's reason.  Every other child runs
+    in CHANGED mode with --base passed through.
+    """
+    changed_base = _vitest_base(target, base)
+    if changed_base is not None:
+        return C.RunRequest(mode=C.Mode.SCOPED, argv=("--changed", changed_base),
+                            base=base, workers=workers,
+                            queue_timeout_s=queue_timeout_s, no_setup=no_setup,
+                            result_path=result_path,
+                            fixture_domain=fixture_domain,
+                            verbose=verbose, quiet=quiet)
+    return C.RunRequest(mode=C.Mode.AUTOMATIC, base=base, workers=workers,
+                        queue_timeout_s=queue_timeout_s, no_setup=no_setup,
+                        result_path=result_path,
+                        fixture_domain=fixture_domain,
+                        verbose=verbose, quiet=quiet)

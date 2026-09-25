@@ -466,6 +466,56 @@ def test_end_line_with_counts_shapes():
                        "run with ptest -v for scheduling and setup details")
 
 
+def test_end_line_uses_singular_test_count():
+    from ptest import progress
+
+    counts = C.Counts(collected=1, executed=1, passed=1, failed=0,
+                      skipped=0, unknown=0)
+    assert progress.format_end(
+        C.Status.PASSED, counts=counts, duration_s=3.6,
+        exit_code=0) == "ptest: passed · 1 test · 3.6s"
+
+
+def test_end_line_colors_verdict_on_tty_only(monkeypatch):
+    from ptest import progress
+
+    counts = C.Counts(collected=2, executed=2, passed=2, failed=0,
+                      skipped=0, unknown=0)
+    plain = progress.format_end(
+        C.Status.PASSED, counts=counts, duration_s=3.6, exit_code=0)
+    assert "\x1b" not in plain
+
+    tty = progress.format_end(
+        C.Status.PASSED, counts=counts, duration_s=3.6, exit_code=0,
+        color=True)
+    assert "\x1b[32mpassed\x1b[0m" in tty
+    assert "\x1b[2mptest:\x1b[0m" in tty
+
+    failed_line = progress.format_end(
+        C.Status.FAILED, counts=counts, duration_s=1.0, exit_code=1,
+        color=True)
+    assert "\x1b[31mfailed\x1b[0m" in failed_line
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert "\x1b" not in progress.format_end(
+        C.Status.PASSED, counts=counts, duration_s=3.6, exit_code=0,
+        color=True)
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")
+    assert "\x1b" not in progress.format_end(
+        C.Status.PASSED, counts=counts, duration_s=3.6, exit_code=0,
+        color=True)
+
+
+def test_setup_only_run_reads_as_setup():
+    from ptest import progress
+
+    assert (progress.format_setup_run_start("web", ("npm", "ci"))
+            == "ptest: web · setup: npm ci")
+    assert (progress.format_setup_run_done(5.9)
+            == "ptest: setup done · 5.9s")
+
+
 def test_duration_and_timeout_shapes():
     from ptest import progress
 
@@ -587,6 +637,38 @@ def test_setup_failure_prints_failed_line_with_exit(case):
     assert completed.code != 0
     lines = _ptest_lines(completed)
     assert "ptest: setup failed (exit 3)" in lines, lines
+
+
+def test_setup_failed_line_names_problem_for_zero_exit():
+    from ptest import operations
+
+    problem = operations._problem("state-unavailable", "guard trouble")
+    assert operations._setup_failed_line(
+        setup_raw=0, setup_problem=problem) == (
+        "ptest: setup failed (state-unavailable)")
+
+
+def test_setup_failed_line_keeps_exit_for_nonzero_exit():
+    from ptest import operations
+
+    assert operations._setup_failed_line(
+        setup_raw=3, setup_problem=None) == "ptest: setup failed (exit 3)"
+
+
+def test_setup_failed_line_uses_problem_code_without_exit():
+    from ptest import operations
+
+    problem = operations._problem("state-unavailable", "guard trouble")
+    assert operations._setup_failed_line(
+        setup_raw=None, setup_problem=problem) == (
+        "ptest: setup failed (state-unavailable)")
+
+
+def test_setup_failed_line_clean_setup_reports_done():
+    from ptest import operations
+
+    assert operations._setup_failed_line(
+        setup_raw=0, setup_problem=None) is None
 
 
 def test_queue_timeout_refusal_keeps_code_message_and_hint_once(case):

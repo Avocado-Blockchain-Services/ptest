@@ -681,6 +681,40 @@ def test_build_packets_use_each_v2_child_config_in_manifest_order(tmp_path):
     assert [packet.scope for packet in packets] == ["child-b", "child-a"]
 
 
+def test_monorepo_pytest_selection_answers_follow_each_child_policy(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+    from ptest import deterministic_items as DI
+
+    enabled = (_v1_config_text("11" * 16, "pytest")
+               + "[selection]\n"
+               "enabled = true\n"
+               "closed_inputs = true\n"
+               'input_roots = ["tests"]\n'
+               "full_triggers = []\n")
+    disabled = (_v1_config_text("22" * 16, "pytest")
+                + "[selection]\n"
+                "enabled = false\n"
+                "closed_inputs = false\n")
+    root = _monorepo_root(tmp_path, {"api": enabled, "web": disabled})
+    resolution = config_api.resolve_config(root)
+    workspace = doctor.inspect_workspace(
+        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
+    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
+
+    answers = {
+        packet.declaration: DI.answers_for(
+            _domain(root), resolution, packet)["SELECT-001"]
+        for packet in packets
+    }
+
+    assert answers["api"].status == "satisfied"
+    assert "closed inputs" in answers["api"].reason
+    assert answers["web"].status == "gap"
+    assert "disabled" in answers["web"].reason
+    assert "explicit file/path scopes still work" in answers["web"].reason
+
+
 @pytest.mark.parametrize("bad_config", [None, "malformed child config"])
 def test_build_packets_reject_child_without_valid_config_before_building_any(
         tmp_path, monkeypatch, bad_config):

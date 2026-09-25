@@ -1851,15 +1851,120 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
+def _setup_failed_line(*, setup_raw: int | None,
+                       setup_problem: C.Problem | None) -> str | None:
+    """Setup status line: None when the setup is clean, else the failure.
+
+    A zero exit with an attached problem names the problem code — a setup
+    that exits 0 is never printed as "setup failed (exit 0)".
+    """
+    if setup_raw == 0:
+        if setup_problem is None:
+            return None
+        return progress.format_setup_failed(problem_code=setup_problem.code)
+    return progress.format_setup_failed(
+        exit_code=setup_raw,
+        problem_code=(setup_problem.code
+                      if setup_raw is None and setup_problem is not None
+                      else None))
+
+
+def _changed_paths(snapshot: C.InputSnapshot) -> list[str]:
+    """Distinct changed paths (old/new merged) in first-seen order."""
+    paths: list[str] = []
+    for change in snapshot.changes:
+        for path in (change.old, change.new):
+            if path is not None and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _changed_trigger_path(config: C.Config,
+                          snapshot: C.InputSnapshot) -> str | None:
+    """First changed path that forces a full suite, if any."""
+    patterns = tuple(config.selection.full_triggers) + (".ptest.toml",)
+    for path in _changed_paths(snapshot):
+        if selection._matches(path, patterns):
+            return path
+    return None
+
+
+def _unmapped_changed_path(config: C.Config,
+                           snapshot: C.InputSnapshot) -> str | None:
+    """First changed path outside the declared selection map, if any."""
+    policy = config.selection
+    covered: set[str] = set(policy.no_tests)
+    for group in policy.groups:
+        covered.update(group.sources)
+        covered.update(group.tests)
+    triggers = tuple(policy.full_triggers) + (".ptest.toml",)
+    for change in snapshot.changes:
+        for path in (change.old, change.new):
+            if path is None:
+                continue
+            if selection._matches(path, triggers):
+                continue
+            if (change.kind in ("untracked", "ignored")
+                    and selection._matches(path, policy.non_input_outputs)):
+                continue
+            if not selection._matches(path, tuple(covered)):
+                return path
+    return None
+
+
 def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
-                request: C.RunRequest, plan: C.Plan, workers: int) -> None:
+                request: C.RunRequest, plan: C.Plan, workers: int,
+                snapshot: C.InputSnapshot | None = None,
+                history_view: C.HistoryView | None = None) -> None:
     """One start line naming project, runner, workers and scope.
 
     The scope is shown as the user typed it (a monorepo route passes the
     repo-root-relative scopes separately from the child-rebased argv).
+    In changed mode with a real selection plan, the line names the plan
+    instead: the selected subset size, or the full-suite reason in words.
     """
     project = render.terminal_text(checkout.root.name)
+    if request.setup_only:
+        progress.emit(progress.format_setup_run_start(
+            project, tuple(config.runner.launcher),
+            color=sys.stderr.isatty()), quiet=request.quiet)
+        return
     runner = config.runner.kind.value
+    if (request.mode is C.Mode.AUTOMATIC and plan.static_preview
+            and snapshot is not None and plan.execution in ("selected", "full")):
+        if plan.execution == "selected":
+            total = len(plan.files)
+            if history_view is not None and history_view.baseline is not None:
+                total = len({record.file for record
+                             in history_view.baseline.inventory.tests})
+            segment = progress.format_changed_selected(
+                selected=len(plan.files), total=total,
+                changed_files=len(_changed_paths(snapshot)))
+        else:
+            reason = plan.reasons[0] if plan.reasons else None
+            config_path = (config.config_path.name
+                           if config.config_path is not None else None)
+            if reason is not None and reason.code == "policy-changed":
+                changed_path = _changed_trigger_path(config, snapshot)
+            elif reason is not None and reason.code == "unknown-input":
+                changed_path = _unmapped_changed_path(config, snapshot)
+            else:
+                changed_path = None
+            segment = ("changed → full suite: "
+                       + progress.explain_changed_full_reason(
+                           reason,
+                           config_name=(render.terminal_text(config_path)
+                                        if config_path is not None else None),
+                           changed_path=(render.terminal_text(changed_path)
+                                         if changed_path is not None else None)))
+        progress.emit(progress.format_changed_start(
+            project=project, runner=runner, segment=segment,
+            color=sys.stderr.isatty()), quiet=request.quiet)
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
+                quiet=request.quiet)
+        return
     shown = request.display_argv if request.display_argv is not None else request.argv
     full = not (request.mode is C.Mode.SCOPED and shown)
     scope = "" if full else render.terminal_text(" ".join(shown))
@@ -1867,7 +1972,8 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
     scope = progress.fit_text(scope, fixed=fixed) if scope else scope
     progress.emit(progress.format_start(
         project=project, runner=runner, workers=workers,
-        scope=scope, full=full), quiet=request.quiet)
+        scope=scope, full=full, color=sys.stderr.isatty()),
+        quiet=request.quiet)
     if request.verbose:
         progress.emit(
             f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
@@ -1902,20 +2008,40 @@ def _waiting_snapshot(domain: C.DomainPaths,
     return in_use, limit, labels
 
 
+def _baseline_note(*, plan: C.Plan, advanced: bool,
+                   result: C.RunResult, color: bool = False) -> str | None:
+    """Baseline end-line note, for full runs that can publish a baseline.
+
+    Returns None for selected/scoped runs and for runners without the
+    history publication path, leaving their end lines unchanged.
+    """
+    if not advanced or plan.execution != "full":
+        return None
+    return progress.format_baseline_note(result, color=color)
+
+
 def _emit_end(request: C.RunRequest, result: C.RunResult,
-              run_mono: float) -> None:
+              run_mono: float, *, baseline_note: str | None = None) -> None:
     """One end line with ptest's own verdict, bridge counts, and duration."""
     if request.verbose:
-        line = progress.format_timing(result.timings)
+        line = progress.format_timing(result.timings,
+                                      color=sys.stderr.isatty())
         if line is not None:
             progress.emit(line, quiet=request.quiet)
+    elapsed_s = time.monotonic() - run_mono
+    if request.setup_only and result.status is C.Status.PASSED:
+        progress.emit(progress.format_setup_run_done(
+            elapsed_s, color=sys.stderr.isatty()), quiet=request.quiet)
+        return
     hint = (result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
                               C.Status.NOT_RUN)
             and progress.claim_hint())
     progress.emit(progress.format_end(
         result.status, counts=result.counts,
-        duration_s=time.monotonic() - run_mono, exit_code=result.exit_code,
-        hint=hint), quiet=request.quiet)
+        duration_s=elapsed_s, exit_code=result.exit_code,
+        hint=hint, color=sys.stderr.isatty()), quiet=request.quiet)
+    if baseline_note is not None:
+        progress.emit(baseline_note, quiet=request.quiet)
 
 
 def execute(domain: C.DomainPaths, config: C.Config,
@@ -2120,10 +2246,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
     started = _iso_now()
     run_mono = time.monotonic()
     _emit_start(checkout=checkout, config=config, request=request,
-                plan=plan, workers=requested_slots)
+                plan=plan, workers=requested_slots,
+                snapshot=planning_snapshot, history_view=history_view)
 
     def _finish(result: C.RunResult) -> C.RunResult:
-        _emit_end(request, result, run_mono)
+        _emit_end(request, result, run_mono,
+                  baseline_note=_baseline_note(
+                      plan=plan, advanced=advanced, result=result,
+                      color=sys.stderr.isatty()))
         return result
 
     signals = _Signals()
@@ -2391,17 +2521,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
             else C.Problem(**frames.setup_facts["problem"])
         )
         if frames.setup_facts is not None:
-            if setup_raw == 0 and setup_problem is None:
-                progress.emit(
-                    progress.format_setup_done(frames.setup_elapsed_s),
-                    quiet=request.quiet)
-            else:
-                progress.emit(progress.format_setup_failed(
-                    exit_code=setup_raw,
-                    problem_code=(setup_problem.code
-                                  if setup_raw is None and setup_problem is not None
-                                  else None)),
-                    quiet=request.quiet)
+            line = _setup_failed_line(setup_raw=setup_raw,
+                                      setup_problem=setup_problem)
+            progress.emit(
+                line if line is not None
+                else progress.format_setup_done(frames.setup_elapsed_s),
+                quiet=request.quiet)
         setup_failed = (
             frames.setup_facts is not None
             and (setup_raw != 0 or setup_problem is not None)
@@ -2832,7 +2957,7 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
         domain, setup_config,
         C.RunRequest(mode=C.Mode.SCOPED, argv=(),
                      queue_timeout_s=queue_timeout_s,
-                     fixture_domain=fixture_domain))
+                     fixture_domain=fixture_domain, setup_only=True))
     if result.status is C.Status.PASSED:
         setup_reason = _finish_setup(domain, config, checkout, before)
         if setup_reason is not None:

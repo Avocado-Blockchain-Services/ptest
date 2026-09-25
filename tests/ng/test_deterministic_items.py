@@ -219,9 +219,15 @@ def test_selection_non_pytest_runners_are_not_applicable(tmp_path,
     answers = DI.answers_for(domain, _resolution(tmp_path, config), packet)
     answer = answers["SELECT-001"]
     assert answer.status == "not-applicable"
-    assert answer.reason == (
-        f"ptest has no automatic test selection for {runner_kind}; "
-        "every run is scoped or full")
+    if runner_kind == "vitest":
+        assert "does not own Vitest per-test selection" in answer.reason
+        assert "delegates an affected child to native --changed REF" \
+            in answer.reason
+        assert "full-suite fallback" in answer.reason
+    else:
+        assert answer.reason == (
+            "ptest has no automatic test selection for command runners; "
+            "every run is scoped or full")
 
 
 def test_selection_gap_names_monorepo_cfg(tmp_path):
@@ -241,13 +247,15 @@ def test_selection_gap_names_monorepo_cfg(tmp_path):
     packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
     assert [packet.declaration for packet in packets] == ["api"]
     answers = DI.answers_for(_domain(tmp_path), resolution, packets[0])
-    assert answers["SELECT-001"].status == "not-applicable"
-    assert "root monorepo dispatcher has no --changed selection route" \
+    assert answers["SELECT-001"].status == "gap"
+    assert "automatic changed-input selection is disabled" \
         in answers["SELECT-001"].reason
+    assert "explicit file/path scopes still work" in \
+        answers["SELECT-001"].reason
     assert answers["SELECT-001"].evidence_paths == ("api/.ptest.toml",)
 
 
-def test_monorepo_selection_is_not_applicable_to_root_dispatcher(
+def test_monorepo_selection_uses_enabled_closed_pytest_policy(
         tmp_path):
     from ptest import deterministic_items as DI
     from ptest import agent_assessment as AA
@@ -268,9 +276,8 @@ def test_monorepo_selection_is_not_applicable_to_root_dispatcher(
     packet = AA.build_packets(workspace, resolution)[0]
 
     answer = DI.answers_for(_domain(tmp_path), resolution, packet)["SELECT-001"]
-    assert answer.status == "not-applicable"
-    assert "root monorepo dispatcher has no --changed selection route" \
-        in answer.reason
+    assert answer.status == "satisfied"
+    assert "selection is enabled with closed inputs" in answer.reason
     assert answer.evidence_paths == ("api/.ptest.toml",)
 
 

@@ -455,13 +455,34 @@ def test_report_labels_model_and_ptest_owned_deterministic_provenance():
     assert "Reviewer conclusion" not in out
 
 
-def test_final_gate_names_only_root_monorepo_live_probe_limit():
+def test_vitest_changed_report_distinguishes_delegation_and_full_fallback():
     from ptest.recommendations import render_recommendations
 
-    out = render_recommendations(_run()).decode("utf-8")
-    assert "root-monorepo live --probe permutations are unsupported" in out.lower()
-    assert "Worker parallelism and monorepo-root probe permutations are " \
-        "unsupported" not in out
+    out = render_recommendations(
+        _run(), suite_identities=(("vitest", "resolved", "partial"),)
+    ).decode("utf-8")
+    assert "root dispatcher supports static doctor review only" not in out
+    assert "Vitest has no ptest-owned per-test selection protocol" in out
+    assert ("`ptest --changed --base REF` delegates an affected Vitest child "
+            "to native `--changed REF`") in out
+    assert ("Without an explicit base, an affected Vitest child takes the "
+            "full-suite fallback") in out
+    assert ("Root-monorepo live `--probe` is unsupported because probe "
+            "execution requires a standalone configuration") in out
+
+
+def test_report_renders_only_safe_suite_identity_statuses():
+    from ptest.recommendations import render_recommendations
+
+    out = render_recommendations(
+        _run(children=[_child(scope="api/tests/test_sample.py")]),
+        suite_identities=(("vitest", "resolved", "partial"),),
+    ).decode("utf-8")
+    assert "Suite identity: vitest (scoped resolved; full partial)." in out
+    assert "vitest.config.ts" not in out
+    assert "--project" not in out
+    assert "ptest api" not in out
+    assert "ptest --full" in out
 
 
 def test_render_unresolved_gap_stays_unverified_with_next_step():

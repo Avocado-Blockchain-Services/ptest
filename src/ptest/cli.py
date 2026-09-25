@@ -21,7 +21,7 @@ from typing import Sequence
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, doctor_fix, executability, files, help as help_api, history
-from . import init_render, init_smoke
+from . import init_changed, init_render, init_smoke
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
 from . import render
@@ -97,6 +97,7 @@ class ParsedArgs:
     fix: bool = False
     doctor_request: bool | None = None
     smoke: bool | None = None
+    changed_setup: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,11 +275,23 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         review_concurrency = 4
         smoke: bool | None = None
         smoke_seen = no_smoke_seen = False
+        changed_setup: str | None = None
+        changed_setup_seen = False
         index = 0
         while index < len(args):
             token = args[index]
             if token == "--dry-run":
                 dry_run = True
+            elif token == "--changed-setup":
+                value, index = _value(args, index, token)
+                if changed_setup_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                changed_setup_seen = True
+                try:
+                    changed_setup = init_changed.parse_choice(value)
+                except C.Problem as problem:
+                    raise _problem(problem.code, problem.message) from None
+                continue
             elif token == "--reveal-command":
                 reveal = True
             elif token == "--runner":
@@ -385,6 +398,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             raise _problem("invalid-config", "init review cannot be combined with --json")
         if dry_run and (doctor_request is True or review_options_seen):
             raise _problem("invalid-config", "init review cannot be combined with --dry-run")
+        if "--json" in args and changed_setup is not None:
+            raise _problem("invalid-config", "init changed-setup cannot be combined with --json")
         return ParsedArgs(command=command, runner=runner, dry_run=dry_run,
                           reveal_command=reveal, json="--json" in args,
                           children=tuple(children), agents=agents,
@@ -398,7 +413,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           review_concurrency=review_concurrency,
                           review_concurrency_explicit=concurrency_seen,
                           doctor_request=doctor_request,
-                          smoke=smoke)
+                          smoke=smoke, changed_setup=changed_setup)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -927,7 +942,7 @@ def _render_init_footer_text(result, rules, *, parsed: ParsedArgs,
     """
     return init_render.render_init_footer(
         result, rules, dry_run=parsed.dry_run, smoke=smoke,
-        plans=plans, facts=facts)
+        plans=plans, facts=facts, color=sys.stdout.isatty())
 
 
 def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
@@ -973,6 +988,132 @@ def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
             results.append(init_smoke.run_plan(
                 domain, plan, fixture_domain=parsed.fixture_domain))
     return tuple(results)
+
+
+def _plan_targets(smoke_plans: tuple) -> tuple:
+    """``((declaration, config), ...)`` from the smoke plans.
+
+    The plans resolve the just-written (or pre-existing) configs, so
+    the coverage probe and the planner both see the current bytes
+    without a second child preflight.
+    """
+    return tuple(
+        (plan.project, plan.config)
+        for plan in smoke_plans if plan.config is not None)
+
+
+def _preview_targets(root: Path, result, parsed: ParsedArgs) -> tuple:
+    """``((declaration, probe config), ...)`` init would create, for dry-run.
+
+    Probe configs are built with the same ``_fresh_config`` init writes,
+    so the frozen-pair check previews the real outcome; nothing is read
+    from or written to disk.
+    """
+    if result.config is not None:
+        kind = result.config.runner_kind
+        if kind is not C.RunnerKind.PYTEST:
+            return ()
+        return ((".", config_api._fresh_config(
+            root, result.target, kind)),)
+    children = parsed.children or config_api._auto_monorepo_children(root)
+    targets = []
+    for declaration, kind in children:
+        if kind is not C.RunnerKind.PYTEST:
+            continue
+        child_root = root.joinpath(*declaration.split("/"))
+        targets.append((declaration, config_api._fresh_config(
+            child_root, child_root / ".ptest.toml", kind)))
+    return tuple(targets)
+
+
+def _run_changed_baseline(parsed: ParsedArgs, root: Path,
+                          declaration: str) -> None:
+    """Run one full baseline for a fresh `--changed` setup.
+
+    A failure never changes init's outcome or status: runner outcomes
+    surface through the normal run output, infrastructure problems
+    become one skip line.
+    """
+    from . import monorepo
+    resolution = config_api.resolve_config(root)
+    if declaration == ".":
+        config = resolution.config
+    else:
+        diagnosis = monorepo.diagnose_child(root, declaration)
+        config = diagnosis.config if diagnosis.kind == "ok" else None
+    if config is None:
+        print(f"{declaration}: baseline run skipped "
+              "(configuration is unavailable)")
+        return
+    try:
+        domain = platform.domain_paths(parsed.fixture_domain)
+        full = operations.execute(
+            domain, config,
+            C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
+                         queue_timeout_s=parsed.queue_timeout_s,
+                         fixture_domain=parsed.fixture_domain))
+    except C.Problem as problem:
+        print(f"{declaration}: baseline run skipped ({problem.code})")
+        return
+    for reason in full.reasons:
+        print(render.terminal_text(f"{reason.code}: {reason.message}"),
+              file=sys.stderr)
+
+
+def _run_changed_setup(parsed: ParsedArgs, cwd: Path, result,
+                       smoke_plans: tuple = ()) -> None:
+    """Post-smoke `--changed` setup: question, config draft, baseline run.
+
+    One line per pytest project; vitest and other runners are never
+    asked. `--json` never reaches here (rejected at parse); dry runs
+    preview only; existing configs point at `doctor --fix` and are
+    never rewritten.
+    """
+    if parsed.json:
+        return
+    if parsed.dry_run:
+        root = result.target.parent
+        for declaration, probe in _preview_targets(root, result, parsed):
+            project = render.terminal_text(declaration)
+            if init_changed.has_frozen_pair(probe):
+                print(init_changed.DRY_RUN_LINE.format(project=project))
+            else:
+                print(init_changed.NEEDS_COV_LINE.format(project=project))
+        return
+    root = config_api.resolve_config(cwd).root
+    targets = _plan_targets(smoke_plans)
+    if result.action is C.InitAction.EXISTING:
+        for declaration, config in targets:
+            if config.runner.kind is not C.RunnerKind.PYTEST:
+                continue
+            project = render.terminal_text(declaration)
+            if not init_changed.has_frozen_pair(config):
+                print(init_changed.NEEDS_COV_LINE.format(project=project))
+            elif not init_changed.selection_enabled(config):
+                print(init_changed.EXISTING_LINE.format(project=project))
+        return
+    for declaration, config in targets:
+        if config.runner.kind is not C.RunnerKind.PYTEST:
+            continue
+        project = render.terminal_text(declaration)
+        if not init_changed.has_frozen_pair(config):
+            print(init_changed.NEEDS_COV_LINE.format(project=project))
+            continue
+        choice = parsed.changed_setup
+        if choice is None:
+            if _interactive_review():
+                choice = init_changed.ask_choice(declaration)
+            else:
+                choice = init_changed.DEFAULT_CHOICE
+        if choice == "no":
+            continue
+        init_changed.apply_setup(
+            root, init_changed.SetupTarget(declaration, config))
+        if choice == "now":
+            print(init_changed.NOW_LINE.format(project=project))
+            _run_changed_baseline(parsed, root, declaration)
+        else:
+            print(init_changed.LATER_LINE.format(project=project))
 
 
 def _review_consent_problem() -> C.Problem:
@@ -1382,6 +1523,40 @@ def _recommendation_verification_scopes(workspace, resolution
     return tuple(scopes)
 
 
+def _recommendation_suite_identities(packets) -> tuple[tuple[str, str, str], ...]:
+    """Return bounded runner and config-status identities in packet order.
+
+    Config paths and argv remain private to the packet. This report-only
+    identity lets the reviewer distinguish the selected scoped and full
+    Vitest profiles without publishing source names or command details.
+    """
+    from . import review_context as RC
+
+    runners = frozenset({"pytest", "vitest", "command"})
+    statuses = frozenset({"resolved", "partial", "unavailable"})
+    identities = []
+    for packet in packets:
+        runner = getattr(packet, "runner_kind", None)
+        context = getattr(packet, "context", None)
+        if runner not in runners:
+            runner = "unknown"
+        fallback = getattr(context, "config_status", "unavailable")
+        if fallback not in statuses:
+            fallback = "unavailable"
+        profiles = getattr(context, "suite_profiles", ())
+        by_name = {
+            profile.name: profile.status
+            for profile in profiles
+            if isinstance(profile, RC.SuiteProfile)
+        } if isinstance(profiles, (tuple, list)) else {}
+        scoped = by_name.get("scoped", fallback)
+        full = by_name.get("full", fallback)
+        identities.append((runner,
+                           scoped if scoped in statuses else "unavailable",
+                           full if full in statuses else "unavailable"))
+    return tuple(identities)
+
+
 def _plan_item_reviews(packet, domain: C.DomainPaths,
                        resolution: C.ConfigResolution, *, facts=None):
     """Plan per-item reviews, answering deterministically where possible.
@@ -1746,18 +1921,16 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
 
     def emit_progress(phase: str, provider: str, project: str,
                       elapsed_s: float, emitted_at: float | None = None):
-        detail = " | ".join((
-            render.terminal_text(phase),
-            "provider=" + render.terminal_text(provider),
-            "project=" + render.terminal_text(project),
-            f"elapsed={max(0, int(elapsed_s))}s",
-        ))
+        line = (f"doctor: {render.terminal_text(phase)} "
+                f"{render.terminal_text(project)} with "
+                f"{render.terminal_text(provider)} · "
+                f"{max(0, int(elapsed_s))}s")
         if sys.stderr.isatty():
             spinner = "|/-\\"[int(max(0, elapsed_s)) % 4]
-            print(f"\r{spinner} doctor review: {detail}",
+            print(f"\r{spinner} {line}",
                   end="", file=sys.stderr, flush=True)
         else:
-            print("doctor review: " + detail, file=sys.stderr, flush=True)
+            print(line, file=sys.stderr, flush=True)
         last_progress_at[0] = (time.monotonic() if emitted_at is None
                                else emitted_at)
 
@@ -2004,7 +2177,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         report_payload = recommendations.render_recommendations(
             report_input,
             verification_scopes=_recommendation_verification_scopes(
-                workspace, resolution))
+                workspace, resolution),
+            suite_identities=_recommendation_suite_identities(packets))
         source_proof = [{
             "path": excerpt.path,
             "start_line": excerpt.start_line,
@@ -2033,7 +2207,8 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         else:
             sys.stdout.write(render.render_agent_assessment(
                 child_data, workspace, report_path=publication.path,
-                publication_status=publication.status))
+                publication_status=publication.status,
+                color=sys.stdout.isatty()))
             mention = _fix_mention(resolution)
             if mention is not None:
                 sys.stdout.write(mention + "\n")
@@ -2346,6 +2521,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     plans=smoke_plans, facts=facts)
                 if footer:
                     sys.stdout.write("\n" + footer)
+            _run_changed_setup(parsed, cwd, result, smoke_plans)
             offer_review = (
                 parsed.doctor_request is True
                 or (parsed.doctor_request is None and not parsed.json
@@ -2545,15 +2721,15 @@ def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str,
     if parsed.agents_explicit or json_output or not sys.stdin.isatty():
         return parsed.agents
     print("Install repository-local ptest guidance for which agents? "
-          "[none/claude,codex,opencode,gemini/all] (default: none):",
+          "[all/claude,codex,opencode,gemini/none] (default: all):",
           file=sys.stderr)
     try:
         choice = input().strip().lower()
     except EOFError:
         return ()
-    if not choice or choice == "none":
+    if choice == "none":
         return ()
-    if choice == "all":
+    if not choice or choice == "all":
         return agent_rules.SUPPORTED_AGENTS
     names = tuple(part.strip() for part in choice.split(","))
     if (any(not name for name in names)
@@ -2594,6 +2770,22 @@ def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
         if all(value is not None for value in values):
             summed[field] = sum(values)
     return C.Counts(**summed)
+
+
+def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | None]],
+                          started: float, code: int, *, quiet: bool) -> None:
+    """Emit the existing total line over per-child outcomes."""
+    total_counts = _summed_counts(
+        [counts for _, _, counts in child_outcomes])
+    status = _worst_status(
+        [outcome for _, outcome, _ in child_outcomes])
+    hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                       C.Status.NOT_RUN)
+            and progress.claim_hint())
+    progress.emit(progress.format_end(
+        status, counts=total_counts,
+        duration_s=time.monotonic() - started, exit_code=code,
+        hint=hint, lead="total", color=sys.stderr.isatty()), quiet=quiet)
 
 
 def _lease(item: C.LeaseView) -> dict:
@@ -2645,18 +2837,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return result.exit_code
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
-                total_counts = _summed_counts(
-                    [counts for _, _, counts in child_outcomes])
-                status = _worst_status(
-                    [outcome for _, outcome, _ in child_outcomes])
-                hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
-                                   C.Status.NOT_RUN)
-                        and progress.claim_hint())
-                progress.emit(progress.format_end(
-                    status, counts=total_counts,
-                    duration_s=time.monotonic() - started, exit_code=code,
-                    hint=hint, lead="total"), quiet=parsed.quiet)
+                _emit_monorepo_total(child_outcomes, started, code,
+                                     quiet=parsed.quiet)
                 return code
+            if parsed.changed:
+                changed_started = time.monotonic()
+                changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                first_failure = 0
+                heads = (monorepo.child_baseline_heads(domain, children)
+                         if parsed.base is None else None)
+                for item in monorepo.select_changed_children(
+                        resolution.root, children, parsed.base, heads):
+                    if not item.run:
+                        if not parsed.quiet:
+                            print(progress.format_no_changes(
+                                render.terminal_text(item.target.declaration),
+                                color=sys.stderr.isatty()), file=sys.stderr)
+                        changed_outcomes.append(
+                            (0, C.Status.NO_TESTS_NEEDED, None))
+                        continue
+                    result = operations.execute(
+                        domain, item.target.config,
+                        monorepo.child_changed_request(
+                            item.target, base=parsed.base,
+                            workers=parsed.workers,
+                            queue_timeout_s=parsed.queue_timeout_s,
+                            no_setup=parsed.no_setup,
+                            result_path=parsed.result_path,
+                            fixture_domain=parsed.fixture_domain,
+                            verbose=parsed.verbose, quiet=parsed.quiet),
+                    )
+                    for reason in result.reasons:
+                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+                    changed_outcomes.append(
+                        (result.exit_code, result.status, result.counts))
+                    if result.exit_code and not first_failure:
+                        first_failure = result.exit_code
+                _emit_monorepo_total(changed_outcomes, changed_started,
+                                     first_failure, quiet=parsed.quiet)
+                return first_failure
             routed = monorepo.route_scopes(parsed.runner_argv, children)
             result = operations.execute(
                 domain, routed.target.config,
