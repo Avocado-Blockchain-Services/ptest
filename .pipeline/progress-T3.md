@@ -18,10 +18,10 @@ directory, not a real test).
 | File | Before | After | ptest run |
 |------|--------|-------|-----------|
 | test_changed_explain.py | 33 | 33 | 78 passed (chunk with scopes/facts/compound) |
-| test_cli.py | 313 | 313 | pending |
+| test_cli.py | 313 | 313 | 313 passed |
 | test_compound_profiles.py | 26 | 26 | 78 passed (chunk) |
-| test_doctor_init_integration.py | 8 | 8 | pending |
-| test_executability.py | 134 | 134 | pending |
+| test_doctor_init_integration.py | 8 | 8 | 8 passed (after explicit-state fix) |
+| test_executability.py | 134 | 134 | 134 passed |
 | test_init.py | 59 | 59 | 80 passed (chunk with init_render) |
 | test_init_changed.py | 21 | 21 | 21 passed |
 | test_init_render.py | 21 | 21 | 80 passed (chunk with init) |
@@ -29,9 +29,9 @@ directory, not a real test).
 | test_monorepo_changed.py | 24 | 24 | 24 passed |
 | test_monorepo_scopes.py | 11 | 11 | 78 passed (chunk) |
 | test_project_facts.py | 8 | 8 | 78 passed (chunk) |
-| test_selection.py | 26 | 26 | 26 passed |
-| test_shadow.py | 37 | 37 | pending |
-| test_source.py | 65 | 65 | 65 passed at pytest level (wrapper handoff flaked, see below) |
+| test_selection.py | 26 | 26 | 26 passed ×3 consecutive runs |
+| test_shadow.py | 37 | 37 | 37 passed (21 passed + 16 pre-existing env skips for the unprovisioned frozen-cov python) |
+| test_source.py | 65 | 65 | 65 passed (clean wrapper rerun) |
 
 No skips, xfails, deletions, or weakened assertions. No `os.chdir` without
 monkeypatch, no `os.environ[...] =`, no `Path.home()`/`expanduser`, no fixed
@@ -122,6 +122,13 @@ A factories module imports only support, ptest and the stdlib.
 - `changed-during-run` (pycache) after edits: rerun once, per context pack.
 - `coordinator-unavailable` / `protocol-mismatch` / `guard handoff was
   incomplete`: slot contention with sibling task worktrees (T1/T4/T5 hold
-  all 4 slots for minutes). test_source showed `65 passed` at pytest level
-  with the wrapper handoff failing afterwards; to be re-confirmed with a
-  clean wrapper run when slots free.
+  all 4 slots for minutes). test_source once showed `65 passed` at pytest
+  level with the wrapper handoff failing afterwards; a later clean rerun
+  gave `ptest: passed · 65 tests`.
+- `test_doctor_init_integration.py::test_doctor_review_runs_one_haiku_call_per_item`
+  failed identically on the base file under the bundle (verified via a
+  temporary copy): the isolated domain root does not exist yet, so history
+  validation fails closed (`_answers_for` maps any `_timing_answer`
+  exception to "ptest history is unavailable"). Fixed with explicit empty
+  state (create `platform.domain_paths(None).root` at 0700) in the owned
+  file; the real account domain is never touched.

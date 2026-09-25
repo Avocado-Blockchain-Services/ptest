@@ -15,6 +15,11 @@ from ptest.contracts import InitAction, InitOptions, Problem, RunnerKind
 from factories_repo import fake_git_marker
 
 
+# Payload-only scratch label (see test_cli._REVIEW_SCRATCH): a
+# ProviderResult field that never touches the filesystem here.
+_REVIEW_SCRATCH = "/tmp/ptest-review-test"
+
+
 def _options(runner=None, *, dry_run=False, reveal_command=False):
     return InitOptions(runner=runner, dry_run=dry_run,
                        reveal_command=reveal_command)
@@ -964,7 +969,7 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
                 provider=adapter.name, ok=False, assessment=b"",
                 error="provider-failed", exit_code=7, timed_out=False,
                 cancelled=False, truncated=False, pid=2001, argv=adapter.argv,
-                scratch="/tmp/ptest-review-test")
+                scratch=_REVIEW_SCRATCH)
             for _ in requests)
 
     monkeypatch.setattr(cli.agent_providers, "launch_reviews", fail_launches)
