@@ -68,8 +68,11 @@ test_changed_explain, `Config.config_path` in test_compound_profiles).
   tomls → `monorepo` / `support.write_ptest_toml`; `inspection_project`
   overwrite → `write_ptest_toml`; fake `.git` markers → `fake_git_marker`;
   nine `scratch="/tmp/ptest-review-test"` payloads → `_REVIEW_SCRATCH`.
-- test_init.py: directory-variant fake marker → `fake_git_marker`
-  (worktree-file variant stays inline: distinct shape).
+- test_init.py: directory-variant fake marker and `_make_cli_init_repo`
+  marker → `fake_git_marker` (worktree-file variant stays inline:
+  distinct shape); `_write_child_config` deleted and the persea-shaped
+  monorepo test now composes the `monorepo` fixture (root manifest bytes
+  preserved via `root_toml`).
 
 Kept deliberately (out of T3 scope, seams recorded below):
 - `_fake_reviewer`, `_fake_qualified_profiles`, `_fake_cli_executable`,
