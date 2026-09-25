@@ -759,20 +759,8 @@ def _isolate_self_discovery(tmp_path, monkeypatch):
     from ptest import uninstall as uninstall_api
     monkeypatch.setattr(uninstall_api, "__file__", str(stub))
     monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    home = tmp_path / "isolated-home"
-    home.mkdir(exist_ok=True)
-    monkeypatch.setattr(
-        pwd, "getpwuid",
-        lambda uid: SimpleNamespace(pw_dir=str(home)))
-
-
-def _fake_home(tmp_path: Path, monkeypatch) -> Path:
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    monkeypatch.setattr(
-        pwd, "getpwuid",
-        lambda uid: SimpleNamespace(pw_dir=str(home)))
-    return home
+    # The passwd home stays on the conftest isolated_env (a tmp home);
+    # only the argv/package/PATH discovery sources are faked here.
 
 
 def _install_fixture(root: Path, bundle_id: str = "9" * 8) -> Path:
@@ -795,7 +783,6 @@ def _install_fixture(root: Path, bundle_id: str = "9" * 8) -> Path:
 def test_self_removes_fixture_install_root_but_keeps_foreign_symlink(
         case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -823,7 +810,6 @@ def test_self_removes_fixture_install_root_but_keeps_foreign_symlink(
 def test_self_detects_running_binary_inside_install_root(
         case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -849,7 +835,6 @@ def test_self_plans_only_the_argv_fixture_root_never_real_paths(
     planned root is printed before confirmation runs.
     """
     from ptest import uninstall as uninstall_api
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -872,7 +857,10 @@ def test_self_plans_only_the_argv_fixture_root_never_real_paths(
     monkeypatch.chdir(work)
     assert _uninstall(domain, "--self", "--yes") == 0
     out = capsys.readouterr().out
-    assert str(inst) in out
+    # The self-root line wraps on long tmp roots (xdist); rejoin the
+    # wrapped lines exactly as test_self_render_never_truncates_* does.
+    flat = "".join(line.strip() for line in out.splitlines())
+    assert str(inst) in flat
     assert not inst.exists()
 
 
@@ -885,7 +873,6 @@ def test_self_discovery_refuses_a_root_outside_test_tmp(
     becoming a plan that ``apply_self`` could execute.
     """
     from ptest import uninstall as uninstall_api
-    _fake_home(tmp_path, monkeypatch)
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir(exist_ok=True)
     try:
@@ -898,9 +885,9 @@ def test_self_discovery_refuses_a_root_outside_test_tmp(
 
 
 def test_self_refuses_a_root_without_install_layout(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, account_home):
     domain = case.domain()
-    home = _fake_home(tmp_path, monkeypatch)
+    home = account_home()
     bogus = home / ".local" / "ptest"
     bogus.mkdir(parents=True)
     (bogus / "notes.txt").write_text("user data\n", encoding="utf-8")
@@ -919,10 +906,10 @@ def test_self_refuses_a_root_without_install_layout(
 
 
 def test_self_prefers_a_valid_root_over_a_stale_candidate(
-        case, tmp_path, monkeypatch):
+        case, tmp_path, monkeypatch, account_home):
     from ptest import uninstall as uninstall_api
     domain = case.domain()
-    home = _fake_home(tmp_path, monkeypatch)
+    home = account_home()
     inst = home / ".local" / "ptest"
     inst.mkdir(parents=True)
     _install_fixture(inst)
@@ -944,7 +931,6 @@ def test_self_prefers_a_valid_root_over_a_stale_candidate(
 def test_self_with_no_install_root_reports_nothing_to_remove(
         case, tmp_path, monkeypatch, capsys):
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     monkeypatch.setenv("PATH", str(bindir))
@@ -1133,7 +1119,6 @@ def test_self_keeps_user_files_and_the_root(
     Only installer-created entries go; the user file and the root stay.
     """
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -1168,6 +1153,8 @@ def test_self_symlinked_home_still_removes_public_and_launcher_links(
     real.mkdir()
     home = tmp_path / "home"
     home.symlink_to(real, target_is_directory=True)
+    # Subject: the passwd home behind a symlink.  The factory only
+    # builds real directories, so this stays a direct patch.
     monkeypatch.setattr(
         pwd, "getpwuid",
         lambda uid: SimpleNamespace(pw_dir=str(home)))
@@ -1200,7 +1187,6 @@ def test_tty_self_consent_lists_kept_user_files(
     summary after; the kept `Documents/thesis.tex` must be listed.
     """
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -1534,7 +1520,8 @@ def test_dry_run_never_creates_or_writes_the_ledger(
 def test_self_render_never_truncates_root_or_link(tmp_path, monkeypatch):
     """U4-8: the install root and PATH link wrap instead of truncating."""
     from ptest import uninstall as uninstall_api
-    _fake_home(tmp_path, monkeypatch)
+    # The /tmp/ paths below are render-subject payloads; nothing is
+    # created on disk from them.
     long_root = Path("/tmp") / ("very-long-install-dir-name-" * 6)
     long_link = Path("/tmp") / ("very-long-link-dir-name-" * 6) / "ptest"
     plan = uninstall_api.RepoPlan(root=Path("/repo"),
@@ -1553,7 +1540,6 @@ def test_self_result_reports_kept_user_files(
         case, tmp_path, monkeypatch, capsys):
     """U4-8/U4-1: leftover user files are reported as kept in text output."""
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -1575,7 +1561,6 @@ def test_self_result_reports_kept_user_files(
 def test_plan_self_ignores_path_lookup_for_roots(tmp_path, monkeypatch):
     """U4-7: a root reachable only via PATH is never planned."""
     from ptest import uninstall as uninstall_api
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -1595,10 +1580,10 @@ def test_plan_self_ignores_path_lookup_for_roots(tmp_path, monkeypatch):
 
 
 def test_plan_self_roots_come_only_from_binary_or_default(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, account_home):
     """U4-7: PATH + the known launcher feed only the PATH-link check."""
     from ptest import uninstall as uninstall_api
-    home = _fake_home(tmp_path, monkeypatch)
+    home = account_home()
     inst = home / ".local" / "ptest"
     inst.mkdir(parents=True)
     _install_fixture(inst)
@@ -1680,7 +1665,6 @@ def test_self_refuses_when_a_bundle_entry_is_invalid(
         case, tmp_path, monkeypatch, capsys):
     """U4-1 twin: one bad .ptest-bundles entry refuses the whole --self."""
     domain = case.domain()
-    _fake_home(tmp_path, monkeypatch)
     inst = tmp_path / "inst"
     inst.mkdir()
     target = _install_fixture(inst)
@@ -1707,31 +1691,10 @@ def test_self_refuses_when_a_bundle_entry_is_invalid(
 
 # --- PTEST_STATE_DIR ----------------------------------------------------------
 
-def _fake_account(tmp_path: Path, monkeypatch) -> Path:
-    """Private account home whose `.local` must stay untouched by the run."""
-    home = tmp_path / "account"
-    home.mkdir(mode=0o700, exist_ok=True)
-    local = home / ".local"
-    local.mkdir(mode=0o770, exist_ok=True)
-    local.chmod(0o770)
-    monkeypatch.setattr(
-        pwd, "getpwuid",
-        lambda uid: SimpleNamespace(pw_dir=str(home)))
-    return home
-
-
-def _workspace_domain(monkeypatch, state: Path):
-    from ptest import platform as platform_api
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
-    return platform_api.domain_paths(None)
-
-
 def test_uninstall_text_states_workspace_state_location(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, state_dir_factory):
     """P3: the text plan names the inspected state dir + PTEST_STATE_DIR."""
-    _fake_account(tmp_path, monkeypatch)
-    state = tmp_path / "workspace-state"
-    _workspace_domain(monkeypatch, state)
+    state = state_dir_factory(name="workspace-state")
     root = tmp_path / "repo"
     root.mkdir()
     _git(root)
@@ -1745,11 +1708,9 @@ def test_uninstall_text_states_workspace_state_location(
 
 
 def test_uninstall_json_reports_workspace_state_location(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, state_dir_factory):
     """P3: the JSON plan carries domain_root/domain_from_env like where."""
-    _fake_account(tmp_path, monkeypatch)
-    state = tmp_path / "workspace-state"
-    _workspace_domain(monkeypatch, state)
+    state = state_dir_factory(name="workspace-state")
     root = tmp_path / "repo"
     root.mkdir()
     _git(root)
@@ -1788,7 +1749,8 @@ def test_uninstall_reports_fixture_domain_without_env_marker(
 
 
 def test_state_dir_workspace_domain_scoped_removal(
-        case, tmp_path, monkeypatch, capsys):
+        case, tmp_path, monkeypatch, capsys, account_home,
+        state_dir_factory):
     """P3 twin: only this checkout's entries go in the PTEST_STATE_DIR domain.
 
     Removed: this checkout's ``checkouts/<id>/`` dir and ledger rows.
@@ -1796,9 +1758,12 @@ def test_state_dir_workspace_domain_scoped_removal(
     checkout's dir + rows, coordination/ and the state dir itself, and
     the default account (fixture) domain, untouched.
     """
-    home = _fake_account(tmp_path, monkeypatch)
-    state = tmp_path / "workspace-state"
-    domain = _workspace_domain(monkeypatch, state)
+    home = account_home(name="account")
+    local = home / ".local"
+    local.mkdir(mode=0o770)
+    local.chmod(0o770)
+    state = state_dir_factory(name="workspace-state")
+    domain = platform_api.domain_paths(None)
     root = tmp_path / "repo-one"
     root.mkdir()
     _git(root)
