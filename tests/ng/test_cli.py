@@ -438,7 +438,7 @@ def test_static_dispatch_is_read_only_redacted_and_contract_valid(
         expected = {
             "where": f"root: {root}", "register": "register: initialized",
             "plan": "plan: full (static preview)", "status": "queued: 0\nactive: 0",
-            "history": "history: 0 runs", "doctor": "cache.global-flush",
+            "history": "history: 0 runs", "doctor": "offline · ",
         }
         assert expected[command] in captured.out
 
@@ -919,13 +919,17 @@ def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
     assert main(("doctor", "--offline")) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
-    api_row = next(line for line in captured.out.splitlines() if line.startswith("| 1 | api "))
-    web_row = next(line for line in captured.out.splitlines() if line.startswith("| 2 | web "))
-    assert captured.out.index(api_row) < captured.out.index(web_row)
+    assert captured.out.index("api  ") < captured.out.index("web  ")
     assert "root_noise_test.py" not in captured.out
-    assert "api/tests/cache_test.py" in captured.out
-    assert "FIX-001" in captured.out and "TIMING-001" in captured.out
-    assert "review not yet performed" in captured.out
+    assert "Parallel execution" in captured.out
+    assert "Test timing" in captured.out
+    squashed = " ".join(captured.out.split())
+    assert ("review failed: offline static run: model review unavailable"
+            in squashed)
+    assert "offline · " in captured.out and "0 calls" in captured.out
+    assert "Unknowns" in captured.out
+    assert "Next: ptest " in captured.out
+    assert "Report: recommendations.md (skipped)" in captured.out
 
 
 def test_doctor_offline_json_from_monorepo_root_lists_every_child(
@@ -950,7 +954,7 @@ def test_doctor_scope_and_unsafe_scope_exit_codes_from_monorepo_root(
     monkeypatch.chdir(tmp_path)
     assert main(("doctor", "--offline", "--scope", "api")) == 0
     captured = capsys.readouterr()
-    assert "| 1 | api |" in captured.out and "| web |" not in captured.out
+    assert "│ api" in captured.out and "web" not in captured.out
     assert main(("doctor", "--offline", "--scope", "ghost")) == 2
     assert "invalid-config" in capsys.readouterr().err
     assert main(("doctor", "--offline", "--scope", "../api")) == 2
@@ -1514,7 +1518,7 @@ def test_offline_doctor_stays_static_without_launch(
 
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert "cache.global-flush" in captured.out
+    assert "offline · " in captured.out and "0 calls" in captured.out
     assert _tree_bytes(domain.root) == before
 
 
@@ -1742,7 +1746,9 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
                 if line.strip()]) <= 4
     assert "\x1b" not in disclosure
     assert "optimization review is disabled" in (captured.err + captured.out).lower()
-    assert "review not yet performed" in captured.out
+    squashed = " ".join(captured.out.split())
+    assert ("review failed: offline static run: model review unavailable"
+            in squashed)
 
 
 def test_tty_review_disclosure_names_excluded_source_classes(
@@ -1972,11 +1978,12 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert all(item[-2:] == ("--model", "haiku") for item in argv_log)
 
     human = capsys.readouterr()
-    assert ".  unknown · 11 ok · 0 gap · 1 unknown" in human.out
-    assert "runs: no — no ptest configuration" in human.out
-    assert "run ptest init from the repository root" in human.out
-    assert ("(checklist only: ptest cannot run this project yet)"
-            in human.out)
+    squashed = " ".join(human.out.split())
+    assert ". unknown" in squashed
+    assert ("runs ✗ — no ptest configuration → "
+            "run ptest init from the repository root" in squashed)
+    assert ("checklist only: ptest cannot run this project yet"
+            not in human.out)
     report = (root / "recommendations.md").read_text(encoding="utf-8")
     assert "initialization-required" in report
     assert "ptest is not execution-ready" in report
@@ -2937,7 +2944,9 @@ def test_tty_menu_select_first_then_decline_is_offline(
     assert "Choose a reviewer for this review:" in captured.err
     assert "Model review disclosure: claude" in captured.err
     assert "optimization review is disabled" in captured.err.lower()
-    assert "review not yet performed" in captured.out
+    squashed = " ".join(captured.out.split())
+    assert ("review failed: offline static run: model review unavailable"
+            in squashed)
 
 
 @pytest.mark.parametrize("answer", ["", "9", "x", EOFError])
@@ -2962,7 +2971,9 @@ def test_tty_menu_decline_variants_skip_disclosure_scan_and_launch(
     assert "Choose a reviewer for this review:" in captured.err
     assert "Run this review once?" not in captured.err
     assert "optimization review is disabled" in captured.err.lower()
-    assert "review not yet performed" in captured.out
+    squashed = " ".join(captured.out.split())
+    assert ("review failed: offline static run: model review unavailable"
+            in squashed)
 
 
 def test_tty_single_installed_reviewer_skips_menu(

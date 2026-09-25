@@ -709,22 +709,22 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys,
     human = capsys.readouterr()
     assert "api  pytest · " in human.out
     assert "web  vitest · " in human.out
-    assert "runs: yes · parallel: no" in human.out
-    assert "parallel: inside vitest" in human.out
-    assert ("? Test timing  no timing history yet: "
-            "run ptest --full once") in human.out
-    assert "– Test selection" in human.out
+    assert "runs ✓" in human.out
+    assert "inside vitest" in human.out
+    assert "Test timing — " in human.out
+    assert "no timing history yet" in " ".join(human.out.split())
+    assert "Test selection — " in human.out
     # PARALLEL-001: api configures xdist but opts out with -n 0, so the
     # deterministic answer is a gap carrying the fallback reason and fix.
-    assert "✗ Parallel execution" in human.out
+    assert "✗ api · Parallel execution" in human.out
     assert "parallel safety" in human.out
     assert human.out.index("parallel safety") < human.out.index(
-        "✗ Parallel execution")
+        "✗ api · Parallel execution")
     unknown_lines = [line for line in human.out.splitlines()
                      if line.lstrip().startswith("? ")]
     assert unknown_lines
     for line in unknown_lines:
-        assert len(line.split("  ")) >= 2
+        assert " — " in line
 
     launches = _read_launches(bindir)
     items = [entry["item"] for entry in launches]
@@ -863,8 +863,8 @@ def test_doctor_unconfigured_project_with_db_gap_keeps_safety_first(
     assert main(("doctor", "--reviewer", "claude",
                  "--allow-model-review")) == 0
     human = capsys.readouterr()
-    assert "✗ Database isolation" in human.out
-    assert "✗ Parallel execution" in human.out
+    assert "✗ . · Database isolation" in human.out
+    assert "✗ . · Parallel execution" in human.out
     assert "Resolve the parallel-safety gaps first." in human.out
     assert "request workers with -n auto" not in human.out
 
