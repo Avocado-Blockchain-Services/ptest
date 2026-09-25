@@ -1136,7 +1136,6 @@ def _request(case, domain, label: str, *, slots: int = 1,
     )
 
 
-
 def test_budget_one_cannot_grant_two(case):
     domain = case.domain(slots=1, jobs=1)
     first = enqueue(domain, _request(case, domain, "first"))
