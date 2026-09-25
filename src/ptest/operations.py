@@ -1868,12 +1868,12 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
 
 def _waiting_snapshot(domain: C.DomainPaths,
                       run_id: str) -> tuple[int, int | None, str]:
-    """Best-effort (active runs, slot limit, holder labels); never raises."""
+    """Best-effort (slots in use, slot limit, holder labels); never raises."""
     try:
         leases = scheduler.reconcile(domain)
     except (C.Problem, OSError):
         return 0, None, ""
-    active = sum(1 for lease in leases
+    in_use = sum(lease.slots for lease in leases
                  if lease.run_id != run_id and lease.state not in {
                      C.LeaseState.RELEASED, C.LeaseState.CANCELLED})
     try:
@@ -1891,7 +1891,7 @@ def _waiting_snapshot(domain: C.DomainPaths,
     labels = ", ".join(progress.holder_label(holder.pid) for holder in holders[:3])
     if len(holders) > 3:
         labels += f" (+{len(holders) - 3} more)"
-    return active, limit, labels
+    return in_use, limit, labels
 
 
 def _emit_end(request: C.RunRequest, result: C.RunResult,
@@ -2163,9 +2163,11 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 first = not waited
                 waited = True
                 wait_last = elapsed
-                active, limit, holders = _waiting_snapshot(domain, run_id)
+                in_use, limit, holders = _waiting_snapshot(domain, run_id)
+                free = (max(0, limit - in_use)
+                        if limit is not None else None)
                 progress.emit(progress.format_waiting(
-                    active=active, limit=limit,
+                    needed=requested_slots, free=free, limit=limit,
                     timeout_s=request.queue_timeout_s, holders=holders,
                     elapsed_s=None if first else elapsed,
                     position=state.position if request.verbose else None,

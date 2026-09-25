@@ -85,18 +85,24 @@ def format_start(*, project: str, runner: str, workers: int,
     return f"{head} · {_plural(workers, 'worker')} · {scope}"
 
 
-def format_waiting(*, active: int, limit: int | None, timeout_s: float,
-                   holders: str = "", elapsed_s: float | None = None,
+def format_waiting(*, needed: int, free: int | None, limit: int | None,
+                   timeout_s: float, holders: str = "",
+                   elapsed_s: float | None = None,
                    position: int | None = None, hint: bool = False) -> str:
-    line = (f"ptest: waiting for a free slot — {active} runs active "
-            f"({'limit ' + str(limit) if limit is not None else 'limit unknown'}), "
-            f"queue timeout {format_timeout(timeout_s)}")
+    if limit is None or free is None:
+        capacity = "capacity unknown"
+    else:
+        capacity = f"{free} of {limit} free"
+    need = _plural(needed, "slot")
+    if elapsed_s is not None:
+        return (f"ptest: still waiting for {need} ({capacity})"
+                f" · {format_duration(elapsed_s)}")
+    line = f"ptest: waiting for {need} ({capacity})"
     if holders:
-        line += f" — held by {holders}"
+        line += f" — in use by {holders}"
+    line += f" · queue timeout {format_timeout(timeout_s)}"
     if position is not None:
         line += f" (position {position})"
-    if elapsed_s is not None:
-        line += f" (waiting {format_duration(elapsed_s)})"
     if hint:
         line += f" · {HINT}"
     return line
