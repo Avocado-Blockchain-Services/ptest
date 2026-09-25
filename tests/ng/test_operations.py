@@ -110,7 +110,10 @@ def test_command_success_preserves_literal_argv_and_streams(case):
 
     assert completed.code == 0
     assert json.loads(completed.stdout) == list(tokens)
-    assert completed.stderr == b""
+    # The runner wrote nothing: stderr carries only ptest's own status lines.
+    assert completed.stderr.decode().splitlines()
+    assert all(line.startswith("ptest:") for line in
+               completed.stderr.decode().splitlines())
     result = _run_data(completed)
     assert result["status"] == "passed"
     assert result["runner_exit_code"] == 0
@@ -128,7 +131,10 @@ def test_command_preserves_stdout_and_stderr_bytes(case):
 
     assert completed.code == 0
     assert completed.stdout == b"literal stdout\n"
-    assert completed.stderr == b"literal stderr\n"
+    # Runner bytes stream through untouched next to ptest's own status lines.
+    assert b"literal stderr\n" in completed.stderr
+    assert all(line in ("literal stderr",) or line.startswith("ptest:")
+               for line in completed.stderr.decode().splitlines())
 
 
 @pytest.mark.parametrize("raw, expected", [(23, 23), ("signal", 143)])

@@ -82,7 +82,8 @@ def test_root_full_preflights_all_children_then_runs_in_order_and_keeps_first_fa
     monkeypatch.setattr(
         "ptest.operations.execute",
         lambda domain, config, request: calls.append((config.config_path.parent.name, request.mode))
-        or type("R", (), {"reasons": (), "exit_code": 9 if len(calls) == 1 else 3})(),
+        or type("R", (), {"reasons": (), "exit_code": 9 if len(calls) == 1 else 3,
+                          "counts": None})(),
     )
 
     assert main(("--full",)) == 9

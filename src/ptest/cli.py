@@ -22,7 +22,7 @@ from . import agent_assessment, agent_providers, agent_rules, config as config_a
 from . import contracts as C
 from . import doctor, executability, files, help as help_api, history
 from . import init_render, init_smoke
-from . import operations, platform, recommendations, scheduler
+from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
 from . import render
 from .adapters import pytest as pytest_adapter
@@ -37,7 +37,8 @@ _INSPECTION = frozenset({
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--result-json",
 })
-_EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow"})
+_EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow",
+                             "-v", "--verbose", "-q", "--quiet"})
 _REVIEW_TOTAL_TIMEOUT_S = 1800
 _REVIEW_CONFIG_MAX_BYTES = 256 * 1024
 # Keep collection preflight aligned with the writer's child/file proof bound.
@@ -59,6 +60,8 @@ class ParsedArgs:
     queue_timeout_s: float = C.DEFAULT_QUEUE_TIMEOUT_S
     no_setup: bool = False
     shadow: bool = False
+    verbose: bool = False
+    quiet: bool = False
     result_path: str | None = None
     changed: bool = False
     full: bool = False
@@ -185,6 +188,8 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
     no_setup = False
     shadow = False
+    verbose = False
+    quiet = False
     result_path = None
     tail: tuple[str, ...] = ()
     index = 0
@@ -207,6 +212,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
                 full = True
             elif token == "--no-setup":
                 no_setup = True
+            elif token in ("-v", "--verbose"):
+                verbose = True
+            elif token in ("-q", "--quiet"):
+                quiet = True
             else:
                 shadow = True
             index += 1
@@ -244,7 +253,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
         command=command, mode=mode, runner_argv=tail,
         base=base, workers=workers, queue_timeout_s=queue_timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
-        changed=changed, full=full,
+        changed=changed, full=full, verbose=verbose, quiet=quiet,
     )
 
 
@@ -835,7 +844,13 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
     if json_output:
         sys.stdout.buffer.write(_document(kind, error=problem, domain=domain))
     else:
-        print(render.terminal_text(problem), file=sys.stderr)
+        # A refused run keeps its existing `code: message` line; when the
+        # run never got to show it, the line also carries the once-per-run
+        # verbosity hint. Machine documents stay byte-identical.
+        suffix = ""
+        if kind == "run" and progress.claim_hint():
+            suffix = f" · {progress.HINT}"
+        print(render.terminal_text(problem) + suffix, file=sys.stderr)
     if problem.code in {"review-timeout", "execution-timeout"}:
         return 124
     if problem.code in {"review-cancelled", "cancelled"}:
@@ -2295,6 +2310,19 @@ def _init_agents(parsed: ParsedArgs, *, json_output: bool = False) -> tuple[str,
     return tuple(dict.fromkeys(names))
 
 
+def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
+    """Sum per-child bridge counts for a monorepo total, or None if any are missing."""
+    if not items or any(item is None for item in items):
+        return None
+    fields = ("collected", "executed", "passed", "failed", "skipped", "unknown")
+    summed = {}
+    for field in fields:
+        values = [getattr(item, field) for item in items]
+        if all(value is not None for value in values):
+            summed[field] = sum(values)
+    return C.Counts(**summed)
+
+
 def _lease(item: C.LeaseView) -> dict:
     return {
         "run_id": item.run_id, "checkout_id": item.checkout_id,
@@ -2317,6 +2345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
         resolution = config_api.resolve_config(Path.cwd())
+        progress.reset()
         if resolution.monorepo is not None:
             from . import monorepo
             domain = platform.domain_paths(parsed.fixture_domain)
@@ -2324,6 +2353,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 domain, _state_anchor(resolution.root))
             children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             if parsed.full:
+                child_outcomes: list[tuple[int, C.Counts | None]] = []
+
                 def run_full(child):
                     result = operations.execute(
                         domain, child.config,
@@ -2331,12 +2362,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                                      queue_timeout_s=parsed.queue_timeout_s,
                                      no_setup=parsed.no_setup,
                                      result_path=parsed.result_path,
-                                     fixture_domain=parsed.fixture_domain),
+                                     fixture_domain=parsed.fixture_domain,
+                                     verbose=parsed.verbose, quiet=parsed.quiet),
                     )
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+                    child_outcomes.append((result.exit_code, result.counts))
                     return result.exit_code
-                return monorepo.execute_full(children, run_full)
+                started = time.monotonic()
+                code = monorepo.execute_full(children, run_full)
+                total_counts = _summed_counts(
+                    [counts for _, counts in child_outcomes])
+                status = (C.Status.FAILED if code else C.Status.PASSED)
+                hint = status is not C.Status.PASSED and progress.claim_hint()
+                progress.emit(progress.format_end(
+                    status, counts=total_counts,
+                    duration_s=time.monotonic() - started, exit_code=code,
+                    hint=hint, lead="total"), quiet=parsed.quiet)
+                return code
             routed = monorepo.route_scopes(parsed.runner_argv, children)
             result = operations.execute(
                 domain, routed.target.config,
@@ -2344,7 +2387,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                              workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
                              no_setup=parsed.no_setup,
                              shadow=parsed.shadow, result_path=parsed.result_path,
-                             fixture_domain=parsed.fixture_domain),
+                             fixture_domain=parsed.fixture_domain,
+                             verbose=parsed.verbose, quiet=parsed.quiet),
             )
             for reason in result.reasons:
                 print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
@@ -2376,6 +2420,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result_path=parsed.result_path,
             fixture_domain=parsed.fixture_domain,
             probe=parsed.probe,
+            verbose=parsed.verbose,
+            quiet=parsed.quiet,
         )
         result = operations.execute(domain, resolution.config, request)
         for reason in result.reasons:

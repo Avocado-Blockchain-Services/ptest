@@ -22,6 +22,7 @@ import time
 import tomllib
 import warnings
 from pathlib import Path
+from typing import NamedTuple
 
 import psutil
 
@@ -1295,6 +1296,50 @@ def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
                      for row in rows)
     except sqlite3.Error:
         _fail("coordinator-unavailable", "coordinator read failed", retryable=True)
+    finally:
+        conn.close()
+
+
+class QueueHolder(NamedTuple):
+    """One live slot holder for waiting-line display (all fields public)."""
+
+    run_id: str
+    pid: int
+    checkout_id: str
+
+
+def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, ...]:
+    """Best-effort read-only snapshot of live slot holders, oldest first.
+
+    Display-only: never raises for missing state, and never exposes more
+    than the owner's pid and checkout id (no argv, no secrets).
+    """
+    try:
+        conn, _ = _open_state(domain, create=False, read_only=True)
+    except Problem as exc:
+        if exc.code == "state-unavailable":
+            return ()
+        raise
+    try:
+        conn.execute("BEGIN")
+        rows = conn.execute(
+            "SELECT run_id, owner_pid, checkout_id FROM jobs WHERE state IN "
+            "('GRANTED','RUNNING','DRAINING','FINALIZING','CANCELLING','UNCERTAIN')"
+            " ORDER BY sequence LIMIT ?", (max(1, limit),)).fetchall()
+        holders = []
+        for row in rows:
+            try:
+                run_id = str(row["run_id"])
+                pid = int(row["owner_pid"])
+                checkout_id = str(row["checkout_id"])
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and checkout_id and run_id:
+                holders.append(QueueHolder(
+                    run_id=run_id, pid=pid, checkout_id=checkout_id))
+        return tuple(holders)
+    except sqlite3.Error:
+        return ()
     finally:
         conn.close()
 

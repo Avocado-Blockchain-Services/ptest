@@ -1,10 +1,10 @@
 # ptest rules for coding agents
 
-Run every test command through `ptest` from the repository root.
-Never invoke pytest, vitest, npm test, go test, or cargo test directly. For focused work, prefix
-the scope with its declared child, such as `ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files
-remain authoritative; never copy, merge, or rewrite them, and never bypass them by changing
-directories. Run `ptest init` from the repository root. Run `ptest --full` once after the integrated change.
+Run every test command through `ptest` from the repository root. Never invoke pytest, vitest, npm test,
+go test, or cargo test directly. For focused work, prefix the scope with its declared child, such as
+`ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files remain authoritative; never copy, merge, or
+rewrite them, and never bypass them by changing directories. Run `ptest init` from the repository root.
+Run `ptest --full` once after the integrated change. `ptest -v` adds run detail; `ptest -q` silences.
 
 Qualified pytest projects run xdist in parallel under ptest (one worker per `-n N`,
 or per granted slot for `-n auto`); unqualified projects run serially with ptest's

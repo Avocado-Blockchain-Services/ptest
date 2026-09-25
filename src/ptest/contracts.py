@@ -1053,6 +1053,8 @@ class RunRequest:
     result_path: str | None = None
     fixture_domain: Path | None = None
     probe: ProbeOptions | None = None
+    verbose: bool = False
+    quiet: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1071,6 +1073,8 @@ class RunRequest:
             object.__setattr__(self, "fixture_domain", _check_path("request.fixture_domain", self.fixture_domain))
         if self.probe is not None and not isinstance(self.probe, ProbeOptions):
             raise TypeError("request.probe must be ProbeOptions or None")
+        object.__setattr__(self, "verbose", _check_bool("request.verbose", self.verbose))
+        object.__setattr__(self, "quiet", _check_bool("request.quiet", self.quiet))
 
 
 @dataclass(frozen=True, kw_only=True)

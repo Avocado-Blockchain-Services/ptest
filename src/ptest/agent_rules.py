@@ -638,6 +638,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "078dc0339477537f34a3f5a6fa380cd794c942c50a015fbbc98613e5461b5096",
     # a86393c (initial snapshot).
     "5d6319fdc79f1819985afabe469ce7adb08bea27a11938b5dd0f0e3b179e7ea2",
+    # 5f12d84: guide before the run-output status lines.
+    "a9d5171f5023ffe732474be096d85e33cf5873f5b99469b61320ea3180f807a3",
 })
 
 
