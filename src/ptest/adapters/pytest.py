@@ -103,8 +103,14 @@ def compound_support(config: C.Config, *, qualified_profile: dict[str, str] | No
                  or not re.fullmatch(r"[0-9a-f]{64}", qualified_profile.get("evidence_digest", ""))))):
         return _unsupported(
             "pytest advanced selection and worker identity require consumed native qualification")
+    # Parallel identity comes only from consumed evidence: a stored profile
+    # earned by a parallel coverage run carries it, while a static catalog
+    # declaration or a serial run never does.
+    parallel_identity = (
+        qualified_profile.get("source") != "catalog"
+        and qualified_profile.get("parallel_identity") is True)
     return C.CompoundSupport(
-        selection=True, parallel_identity=False, profile="pytest-advanced-v1",
+        selection=True, parallel_identity=parallel_identity, profile="pytest-advanced-v1",
         limitations=(),
     )
 
@@ -411,12 +417,16 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
     controls += tuple(config.runner.test_roots if plan.execution == "full" else plan.files)
     reject_unowned_controls(controls, full=plan.execution == "full")
     native = tuple(config.runner.args)
+    generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
+    if grant.slots > 1 and plan.execution == "selected":
+        # The bridge binds selected files to the argv tail, so the owned
+        # worker count leads the file positionals.
+        native += ("-n", str(grant.slots))
     if plan.execution == "full":
         native += tuple(config.runner.full_args) + tuple(config.runner.test_roots)
     else:
         native += tuple(plan.files)
-    generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
-    if grant.slots > 1:
+    if grant.slots > 1 and plan.execution != "selected":
         native += ("-n", str(grant.slots))
     elif grant.slots == 1:
         native += _serial_suffix(config)

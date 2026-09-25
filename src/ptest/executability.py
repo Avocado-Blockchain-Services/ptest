@@ -19,6 +19,7 @@ from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
 from .runtime.pytest_bridge import (
+    _COVERAGE_TUPLE,
     cluster_narrow_name, full_ini_refusal_name, full_narrowing_text,
     full_redirect_name, full_refusal_name,
 )
@@ -444,17 +445,16 @@ def _has_maxprocesses(tokens: tuple[str, ...]) -> bool:
     return any(token.split("=", 1)[0] == "--maxprocesses" for token in tokens)
 
 
-def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]:
-    """Probe the qualified xdist install for ``config``'s launcher.
+def _project_venv(config: C.Config, dist: str) -> tuple[Path | None, str | None]:
+    """Resolve the project venv for native probes, else ``(None, reason)``.
 
-    Returns ``(version, None)`` when exactly one ``pytest_xdist`` dist-info
-    is found, else ``(None, reason)`` with an R6/R7/R8 fallback text.
-    Static and bounded: directory listings only, symlinks never followed.
+    ``dist`` names the distribution being probed for the unverifiable
+    launcher text. Static and bounded: no symlinks followed.
     """
     launcher = tuple(config.runner.launcher)
     name = Path(launcher[-1]).name if launcher else ""
     reason = (
-        f"ptest cannot verify pytest-xdist for launcher {name}; "
+        f"ptest cannot verify {dist} for launcher {name}; "
         "use an absolute interpreter or a uv launcher to run in parallel")
     root = _project_root(config, ".")
     venv: Path | None = None
@@ -477,23 +477,29 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
         venv = candidate
     else:
         return None, reason
+    return venv, None
+
+
+def _dist_info_versions(venv: Path | None, prefix: str) -> list[str] | None:
+    """Installed versions for one dist-info prefix, or None when unreadable.
+
+    Static and bounded: directory listings only, symlinks never followed.
+    An empty list means no install was found; a missing venv is
+    unreadable, so its callers keep their existing fallback text.
+    """
+    if venv is None:
+        return None
     try:
         with os.scandir(venv / "lib") as lib_scan:
             lib_entries = sorted(lib_scan, key=lambda entry: entry.name)
     except OSError:
-        return None, (
-            "pytest-xdist is not installed in the project environment yet; "
-            "ptest runs serially until setup installs it")
+        return None
     try:
         lib_stamp = os.lstat(venv / "lib")
     except OSError:
-        return None, (
-            "pytest-xdist is not installed in the project environment yet; "
-            "ptest runs serially until setup installs it")
+        return None
     if not stat.S_ISDIR(lib_stamp.st_mode) or stat.S_ISLNK(lib_stamp.st_mode):
-        return None, (
-            "pytest-xdist is not installed in the project environment yet; "
-            "ptest runs serially until setup installs it")
+        return None
     hits: list[str] = []
     examined = 0
     for entry in lib_entries:
@@ -514,7 +520,7 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
         except OSError:
             continue
         for item_name in names:
-            if not (item_name.startswith("pytest_xdist-")
+            if not (item_name.startswith(prefix)
                     and item_name.endswith(".dist-info")):
                 continue
             try:
@@ -522,7 +528,21 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
             except OSError:
                 continue
             if stat.S_ISDIR(item_stamp.st_mode) and not stat.S_ISLNK(item_stamp.st_mode):
-                hits.append(item_name)
+                hits.append(item_name[len(prefix):-len(".dist-info")])
+    return hits
+
+
+def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]:
+    """Probe the qualified xdist install for ``config``'s launcher.
+
+    Returns ``(version, None)`` when exactly one ``pytest_xdist`` dist-info
+    is found, else ``(None, reason)`` with an R6/R7/R8 fallback text.
+    Static and bounded: directory listings only, symlinks never followed.
+    """
+    venv, reason = _project_venv(config, "pytest-xdist")
+    if reason is not None:
+        return None, reason
+    hits = _dist_info_versions(venv, "pytest_xdist-")
     if not hits:
         return None, (
             "pytest-xdist is not installed in the project environment yet; "
@@ -531,16 +551,43 @@ def xdist_environment_version(config: C.Config) -> tuple[str | None, str | None]
         return None, (
             "more than one pytest-xdist install in the project environment; "
             "ptest runs serially")
-    return hits[0][len("pytest_xdist-"):-len(".dist-info")], None
+    return hits[0], None
+
+
+def coverage_environment_tuple(
+        config: C.Config) -> tuple[tuple[str | None, str | None], str | None]:
+    """Probe the frozen pytest-cov/coverage pair for ``config``'s launcher.
+
+    Returns ``((pytest_cov, coverage), None)`` when exactly one install of
+    each is found, else ``((None, None), reason)`` with a serial fallback
+    text. The pair only admits the parallel tier when it equals the frozen
+    ``pytest_bridge._COVERAGE_TUPLE``. Static and bounded: directory
+    listings only, symlinks never followed.
+    """
+    venv, reason = _project_venv(config, "pytest-cov")
+    if reason is not None:
+        return (None, None), reason
+    cov_hits = _dist_info_versions(venv, "pytest_cov-")
+    coverage_hits = _dist_info_versions(venv, "coverage-")
+    if not cov_hits or not coverage_hits:
+        return (None, None), (
+            "pytest-cov is not installed in the project environment yet; "
+            "ptest runs serially until setup installs it")
+    if len(cov_hits) > 1 or len(coverage_hits) > 1:
+        return (None, None), (
+            "more than one pytest-cov install in the project environment; "
+            "ptest runs serially")
+    return (cov_hits[0], coverage_hits[0]), None
 
 
 def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest:
     """Qualify ``config``'s checked-in pytest config for the parallel tier.
 
-    Config-level reasons (unsupported ``--dist``, ``--cov``,
-    ``--maxprocesses``) can be written into ``.ptest.toml`` as ``-n 0``;
-    environment reasons never can. Precedence is R1 through R9, then the
-    ptest-args ``-n 0`` opt-out row.
+    Config-level reasons (unsupported ``--dist``, ``--maxprocesses``) can
+    be written into ``.ptest.toml`` as ``-n 0``; environment reasons
+    (including a missing or unfrozen pytest-cov/coverage pair) never can.
+    ``--cov`` stays parallel when the frozen pair holds. Precedence is R1
+    through R9, then the ptest-args ``-n 0`` opt-out row.
     """
     root = _project_root(config, project)
     tokens = _pytest_addopts(root)
@@ -562,10 +609,19 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
             f"--dist {declared} is not supported; ptest runs serially",
             True, True)
     if _has_cov(tokens) or _has_cov(runner_args):
-        return ParallelRequest(
-            active, workers, auto, dist,
-            "coverage (--cov) under xdist is out of scope; ptest runs serially",
-            True, True)
+        found, problem = coverage_environment_tuple(config)
+        if problem is not None:
+            return ParallelRequest(
+                active, workers, auto, dist, problem, False, True)
+        if tuple(found) != tuple(_COVERAGE_TUPLE):
+            pytest_cov, coverage = found
+            return ParallelRequest(
+                active, workers, auto, dist,
+                f"pytest-cov {pytest_cov}/coverage {coverage} is outside the "
+                "frozen qualification tuple "
+                f"(ptest supports pytest-cov {_COVERAGE_TUPLE[0]} with "
+                f"coverage {_COVERAGE_TUPLE[1]}); ptest runs serially",
+                False, True)
     if _has_maxprocesses(tokens):
         return ParallelRequest(
             active, workers, auto, dist,

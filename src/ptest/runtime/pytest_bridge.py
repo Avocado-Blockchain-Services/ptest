@@ -918,15 +918,59 @@ _PARALLEL_TRANSPORT_HOOKS = (
 _BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio")
 
 
+def _coverage_plugin(loaded: Any) -> Any | None:
+    """The registered pytest-cov plugin, or None when absent.
+
+    Accepts pluggy ``(name, plugin)`` pairs or bare plugin objects.
+    Prefers the plugin that owns measured controller data (pytest-cov
+    exposes both its import module and the controller plugin under
+    distinct names); presence alone means coverage was requested
+    (pytest-cov only registers its plugin when ``--cov`` supplies a
+    source), and the frozen tuple gate in :meth:`OwnedPlugin._validate`
+    decides whether it may run.
+    """
+    try:
+        items = list(loaded)
+    except TypeError:
+        return None
+    fallback = None
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            name, plugin = item
+        else:
+            name, plugin = "", item
+        if plugin is None:
+            continue
+        normalized = str(name).replace("-", "_").lower()
+        module = str(getattr(plugin, "__name__", ""))
+        if not module:
+            plugin_type = type(plugin)
+            module = f"{plugin_type.__module__}.{plugin_type.__qualname__}"
+        if (normalized in {"_cov", "cov", "pytest_cov", "pytest_cov_plugin"}
+                or module == "pytest_cov" or module.startswith("pytest_cov.")):
+            if getattr(plugin, "cov_controller", None) is not None:
+                return plugin
+            if fallback is None:
+                fallback = plugin
+    return fallback
+
+
 class OwnedPlugin:
     """Additive profile gate; it neither replaces reporters nor parses addopts."""
 
+    # Hook modules owned by a serial grant. A parallel grant additionally
+    # owns ``pytest_cov`` (set in __init__): its hooks (runtestloop
+    # wrapper, runtest_call switch, xdist transport) are required for
+    # parallel coverage, while a serial grant keeps refusing them exactly
+    # as before.
     _approved_hook_modules = _BASIC_APPROVED_HOOK_MODULES
 
     def __init__(self, workers: int, execution: str | None = None,
                  roots: tuple[str, ...] | None = None,
                  runtime: str = "unknown") -> None:
         self.workers = workers
+        if workers >= 2:
+            self._approved_hook_modules = ("pytest_cov",) + _BASIC_APPROVED_HOOK_MODULES
         self.execution = execution if execution is not None else os.environ.get("PTEST_EXECUTION")
         # Capture the executor-owned checkout/config binding before project
         # imports can mutate the environment.
@@ -955,6 +999,11 @@ class OwnedPlugin:
         # node id seen in a forwarded runtest report.
         self._node_collections: dict[str, tuple[str, ...]] = {}
         self._node_down: dict[str, tuple[Any, Any]] = {}
+        # Coverage contributor per worker: the raw ``cov_worker_node_id``
+        # pytest-cov's DistMaster observes in ``node.workeroutput`` at
+        # worker finish. Only the controller reads it, and only the
+        # advanced profile consumes it (coverage completeness).
+        self._node_cov_ids: dict[str, Any] = {}
         self._reported_nodeids: set[str] = set()
         # Worker-half drop detection (workers >= 2 only): item identities
         # snapshotted after all modifyitems impls, against identities that
@@ -1119,6 +1168,9 @@ class OwnedPlugin:
                     continue
                 module = str(getattr(implementation.function, "__module__", "") or "")
                 if module.split(".", 1)[0] == "xdist" or module.startswith("_pytest."):
+                    continue
+                if any(module == prefix or module.startswith(prefix + ".")
+                       for prefix in self._approved_hook_modules):
                     continue
                 if name == "pytest_configure_node":
                     if (getattr(implementation, "wrapper", False)
@@ -1419,6 +1471,21 @@ class OwnedPlugin:
                 self._validate_parallel_controller_hooks(manager, accepted_hooks)
             if parallel and self.execution == "full":
                 self._validate_parallel_transport_hooks(manager, accepted_hooks)
+        if parallel and _coverage_plugin(loaded_plugins) is not None:
+            # Parallel coverage runs only under the frozen
+            # pytest-cov/coverage pair, mirroring the advanced profile's
+            # pre-flight gate. A serial grant never reaches here approved
+            # (pytest_cov stays unapproved there), so serial behavior is
+            # unchanged.
+            try:
+                pytest_cov = importlib.metadata.version("pytest-cov")
+                coverage = importlib.metadata.version("coverage")
+            except importlib.metadata.PackageNotFoundError:
+                self._refuse("the frozen pytest-cov/coverage tuple is unavailable")
+            if (pytest_cov, coverage) != _COVERAGE_TUPLE:
+                self._refuse(
+                    "pytest-cov/coverage versions are outside the frozen "
+                    "qualification tuple")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
         try:
@@ -1787,6 +1854,11 @@ class OwnedPlugin:
         except Exception:
             self._refuse("a parallel worker was not observed by the bridge")
         self._node_down[worker] = (error, record)
+        cov_worker = output.get("cov_worker_node_id") if isinstance(output, dict) else None
+        try:
+            self._node_cov_ids[worker] = copy.deepcopy(cov_worker)
+        except Exception:
+            self._refuse("a parallel worker was not observed by the bridge")
 
     def pytest_xdist_setupnodes(self, config: Any, specs: Any) -> None:
         """Check the final gateway boundary, before xdist creates any worker."""
@@ -1818,9 +1890,10 @@ class AdvancedPlugin(OwnedPlugin):
 
     The recorder is intentionally part of the bridge-owned plugin, so native
     test IDs and outcomes never have to be reconstructed from stdout/JUnit.
-    Parallel worker instrumentation is accepted only when a future supported
-    xdist hook supplies distinct identities; this implementation's serial
-    profile emits the actual executor-bound ``w000`` identity.
+    Under a parallel grant the inventory is built from the reconciled
+    per-worker collections (the controller never sees worker items), and
+    the report carries one executor-bound identity per observed worker;
+    a serial run emits the single ``w000`` identity.
     """
 
     def __init__(self, workers: int, execution: str | None = None,
@@ -1828,6 +1901,10 @@ class AdvancedPlugin(OwnedPlugin):
                  runtime: str = "unknown") -> None:
         super().__init__(workers, execution, roots)
         self.inventory: dict[str, dict[str, object]] = {}
+        # Parallel inventory source: the first observed worker collection.
+        # Later workers must match it exactly (refused otherwise); the
+        # end-of-run reconciliation re-verifies all of them.
+        self._parallel_collected: tuple[str, ...] | None = None
         self.collection_complete = False
         self.coverage_complete = False
         self.reporters_complete = False
@@ -1935,19 +2012,11 @@ class AdvancedPlugin(OwnedPlugin):
         terminal = None if manager is None else manager.get_plugin("terminalreporter")
         coverage_plugin = None
         if manager is not None:
-            for name, plugin in manager.list_name_plugin():
-                normalized = str(name).replace("-", "_").lower()
-                module = str(getattr(plugin, "__name__", ""))
-                if (normalized in {"_cov", "cov", "pytest_cov", "pytest_cov_plugin"}
-                        or module == "pytest_cov" or module.startswith("pytest_cov.")):
-                    # pytest-cov exposes both its import module and the
-                    # controller plugin under distinct names; only the
-                    # controller owns measured coverage data.
-                    if getattr(plugin, "cov_controller", None) is not None:
-                        coverage_plugin = plugin
-                        break
-                    if coverage_plugin is None:
-                        coverage_plugin = plugin
+            try:
+                loaded = manager.list_name_plugin()
+            except (AttributeError, TypeError):
+                loaded = ()
+            coverage_plugin = _coverage_plugin(loaded)
         controller = getattr(coverage_plugin, "cov_controller", None)
         coverage = getattr(controller, "cov", None)
         measured_files = None
@@ -1956,7 +2025,7 @@ class AdvancedPlugin(OwnedPlugin):
             measured_files = None if data is None else data.measured_files()
         except (AttributeError, OSError, TypeError, ValueError):
             measured_files = None
-        self.coverage_complete = bool(
+        measured = (
             measured_files is not None
             and isinstance(measured_files, (set, list, tuple))
             and bool(measured_files)
@@ -1968,6 +2037,21 @@ class AdvancedPlugin(OwnedPlugin):
                 == os.path.realpath(self.checkout_root)
                 for path in measured_files
             ))
+        if self.workers >= 2:
+            # Parallel coverage is complete only when the controller
+            # combined measured data AND every granted worker contributed
+            # its own data through pytest-cov's worker→controller path
+            # (``cov_worker_node_id`` in the finished worker's output,
+            # equal to its gateway id). A missing or forged key fails
+            # closed for selection qualification; the test verdict itself
+            # is untouched.
+            expected = {f"gw{index}" for index in range(self.workers)}
+            contributed = all(
+                self._node_cov_ids.get(worker) == worker
+                for worker in expected)
+            self.coverage_complete = bool(measured and contributed)
+        else:
+            self.coverage_complete = bool(measured)
         # A terminal reporter is considered observed only after it handled at
         # least one native test report; merely enabling reporters in config is
         # not a qualification signal.
@@ -2029,6 +2113,8 @@ class AdvancedPlugin(OwnedPlugin):
         self._terminal_observed = True
         self._note_native_report(report)
         nodeid = str(getattr(report, "nodeid", ""))
+        if nodeid:
+            self._reported_nodeids.add(nodeid)
         item = self.inventory.get(nodeid)
         if item is None:
             self._refuse("native outcome has no collected test identity")
@@ -2052,7 +2138,29 @@ class AdvancedPlugin(OwnedPlugin):
 
     def worker_identities(self) -> list[dict[str, str]]:
         if self.workers > 1:
-            self._refuse("native parallel worker identity is not qualified")
+            # Parallel identities derive from observed controller state:
+            # every granted gateway went down cleanly with a valid
+            # unrefused record (re-verified here, not just at
+            # reconciliation), and each slot carries the executor-bound
+            # resource prefix. A project cannot promote itself: the slot
+            # comes from xdist's own gateway id, qualified at setupnodes.
+            expected = {f"gw{index}" for index in range(self.workers)}
+            if set(self._node_down) != expected:
+                self._refuse("a parallel worker identity was not observed by the bridge")
+            prefix = os.environ.get("PTEST_RESOURCE_PREFIX", "")
+            if not isinstance(prefix, str) or not prefix.endswith("w000"):
+                self._refuse("native parallel worker identity is malformed")
+            stem = prefix[:-len("w000")]
+            identities = []
+            for index in range(self.workers):
+                worker = f"gw{index}"
+                error, record = self._node_down[worker]
+                if error is not None or not _valid_worker_record(record, worker):
+                    self._refuse("a parallel worker identity was not observed by the bridge")
+                slot = f"w{index:03d}"
+                identities.append({"worker_id": slot,
+                                   "resource_prefix": stem + slot})
+            return identities
         worker_id = os.environ.get("PTEST_WORKER_ID", "")
         prefix = os.environ.get("PTEST_RESOURCE_PREFIX", "")
         checkout_id = os.environ.get("PTEST_CHECKOUT_ID", "")
@@ -2066,11 +2174,68 @@ class AdvancedPlugin(OwnedPlugin):
             self._refuse("native worker identity is missing or malformed")
         return [{"worker_id": worker_id, "resource_prefix": prefix}]
 
+    def _parallel_test_file(self, nodeid: str) -> str:
+        """Checkout-relative file behind a collected ``nodeid``.
+
+        The controller never sees worker items, so the file segment is
+        recovered from the nodeid text: the longest leading ``::`` segment
+        that resolves to a file inside the checkout wins (a class or
+        parameter segment never does). Anything else fails closed.
+        """
+        try:
+            checkout_root = os.path.realpath(self.checkout_root or os.getcwd())
+        except (OSError, ValueError):
+            self._refuse("native test identity is outside the checkout")
+        parts = nodeid.split("::")
+        for width in range(len(parts) - 1, 0, -1):
+            candidate = "::".join(parts[:width])
+            if not candidate:
+                continue
+            resolved = (os.path.realpath(candidate) if os.path.isabs(candidate)
+                        else os.path.realpath(os.path.join(checkout_root, candidate)))
+            try:
+                inside = os.path.commonpath((checkout_root, resolved)) == checkout_root
+            except (OSError, ValueError):
+                continue
+            if not inside:
+                continue
+            try:
+                if os.path.isfile(resolved):
+                    return os.path.relpath(resolved, checkout_root).replace(os.sep, "/")
+            except (OSError, ValueError):
+                continue
+        self._refuse("native test identity is outside the checkout")
+
     def pytest_xdist_node_collection_finished(self, node: Any, ids: Any) -> None:
+        """Record one worker's collection and build the inventory from it.
+
+        The controller never observes worker items, so the first worker's
+        collection becomes the inventory; every later worker must match it
+        exactly, and the end-of-run reconciliation re-verifies all of them.
+        """
+        super().pytest_xdist_node_collection_finished(node, ids)
         worker = getattr(getattr(node, "gateway", None), "id", None)
-        if not isinstance(worker, str) or not re.fullmatch(r"gw[0-9]+", worker):
-            self._refuse("native parallel worker identity is malformed")
-        self._refuse("native parallel worker identity is not qualified")
+        collected = self._node_collections.get(worker) if isinstance(worker, str) else None
+        if collected is None:
+            self._refuse("a parallel worker was not observed by the bridge")
+        if self._parallel_collected is None:
+            seen: set[str] = set()
+            for nodeid in collected:
+                if not nodeid or nodeid in seen:
+                    self._refuse("duplicate or missing native test identity")
+                seen.add(nodeid)
+            for nodeid in collected:
+                path = self._parallel_test_file(nodeid)
+                if path == ".." or path.startswith("../") or path.startswith("/"):
+                    self._refuse("native test identity is outside the checkout")
+                self.inventory[nodeid] = {
+                    "id": nodeid, "file": path, "outcome": "unknown",
+                    "setup_s": None, "call_s": None, "teardown_s": None,
+                }
+            self._parallel_collected = collected
+            self.collection_complete = True
+        elif collected != self._parallel_collected:
+            self._refuse("parallel workers collected different tests")
 
     def runtime_facts(self, runtime: str) -> dict[str, object]:
         try:
@@ -2244,11 +2409,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                 binding is None or binding[1].get("effective_profile") != "advanced"):
             _fail("advanced pytest profile requires an authenticated report binding",
                   "unsupported-capability")
-        if profile == "advanced" and workers > 1:
-            _fail("pytest advanced worker identity is not qualified", "unsupported-capability")
         if profile == "advanced":
             _coverage_tuple()
-        if workers >= 2 and profile == "basic_serial":
+        if workers >= 2:
             # Parallel pre-flight, before pytest.main: qualify the xdist
             # install, expose this bridge on the workers' sys.path (frozen
             # by xdist at import), and load the worker half everywhere.
@@ -2281,9 +2444,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         # The one shared table covers the serial marks above plus the
         # parallel worker-half and controller observation hooks; for the
         # advanced profile plugin_type resolves the node-collection hook to
-        # the AdvancedPlugin override, which keeps refusing parallel
-        # identity. Extra marks on a serial run never fire, so serial
-        # behavior is unchanged.
+        # the AdvancedPlugin override, which records the collection and
+        # builds the inventory from it. Extra marks on a serial run never
+        # fire, so serial behavior is unchanged.
         plugin_type = AdvancedPlugin if profile == "advanced" else OwnedPlugin
         _mark_bridge_hooks(plugin_type)
         plugin = (plugin_type(workers, execution, roots, runtime)
@@ -2328,7 +2491,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
             problem = "bridge-refused"
             bridge_exit = 4 if native_exit in (0, 5) else native_exit
             return bridge_exit
-        if workers >= 2 and profile == "basic_serial":
+        if workers >= 2:
             # Parallel verdict from the controller's own observations, never
             # pytest's returned code. Anything unverifiable is
             # bridge-refused (incomplete), never PASSED.

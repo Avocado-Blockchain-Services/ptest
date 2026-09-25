@@ -2000,8 +2000,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 args=tuple(config.runner.args) + tuple(request.argv)))
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
-    if (tier is not None and not advanced
-            and tier.active and tier.reason is None):
+    # A qualified xdist pytest project requests its tier worker count on
+    # the basic path. An advanced full run may do the same: its complete
+    # coverage/worker evidence can earn the parallel-identity profile that
+    # later selected runs need. Anything advanced without that consumed
+    # proof stays serial unless the tier admits a full run.
+    tier_admits = tier is not None and tier.active and tier.reason is None
+    if tier_admits and (not advanced or plan.execution == "full"
+                        or support.parallel_identity):
         if tier.auto:
             requested_slots = scheduler.effective_limits(domain).max_slots
         elif tier.workers is not None:
@@ -2016,7 +2022,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             config.runner.workers,
             config.runner.workers if request.workers is None else request.workers,
         )
-    if advanced and not support.parallel_identity:
+    if (advanced and not support.parallel_identity
+            and (plan.execution != "full" or not tier_admits)):
         requested_slots = 1
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()

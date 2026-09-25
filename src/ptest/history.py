@@ -1314,8 +1314,8 @@ def publish_qualified_profile(
         raise _problem("unsupported-capability", "native qualification lacks a consumed authenticated binding")
     if not _evidence_passes(evidence):
         raise _problem("unsupported-capability", "native qualification evidence is incomplete")
-    if evidence.parallel_identity or evidence.runtime_identity is None:
-        raise _problem("unsupported-capability", "native qualification lacks serial runtime identity")
+    if evidence.runtime_identity is None:
+        raise _problem("unsupported-capability", "native qualification lacks runtime identity")
     if evidence.inventory is None or evidence.inventory.adapter != kind.value:
         raise _problem("unsupported-capability", "native qualification runner does not match inventory")
     profile = f"{kind.value}-advanced-v1"
@@ -1327,6 +1327,7 @@ def publish_qualified_profile(
         "runtime_identity": evidence.runtime_identity,
         "inventory_digest": evidence.inventory.digest,
         "evidence_digest": _qualified_profile_digest(evidence),
+        "parallel_identity": bool(evidence.parallel_identity),
     }
     raw = _json_bytes(payload).encode("utf-8")
     if len(raw) > _QUALIFIED_PROFILE_MAX_BYTES:
@@ -1363,7 +1364,11 @@ def read_qualified_profile(
         return None
     required = {"version", "runner", "profile", "attempt_id", "runtime_identity",
                 "inventory_digest", "evidence_digest"}
-    if (not isinstance(value, dict) or set(value) != required
+    # Files written before parallel qualification carry no
+    # ``parallel_identity`` key; they could only have been earned serially.
+    optional = {"parallel_identity"}
+    if (not isinstance(value, dict)
+            or not required <= set(value) <= required | optional
             or value.get("version") != 1
             or value.get("runner") != kind.value
             or value.get("profile") != f"{kind.value}-advanced-v1"
@@ -1374,9 +1379,13 @@ def read_qualified_profile(
             or not isinstance(value.get("inventory_digest"), str)
             or _DIGEST_RE.fullmatch(value["inventory_digest"]) is None
             or not isinstance(value.get("evidence_digest"), str)
-            or _DIGEST_RE.fullmatch(value["evidence_digest"]) is None):
+            or _DIGEST_RE.fullmatch(value["evidence_digest"]) is None
+            or ("parallel_identity" in value
+                and not isinstance(value["parallel_identity"], bool))):
         return None
-    return {key: value[key] for key in required if key != "version"}
+    record = {key: value[key] for key in required if key != "version"}
+    record["parallel_identity"] = bool(value.get("parallel_identity", False))
+    return record
 
 
 def next_sequence(

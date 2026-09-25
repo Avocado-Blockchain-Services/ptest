@@ -527,6 +527,34 @@ def test_parallel_persea_shaped_four_workers(tmp_path):
     assert by_test["alpha_one"] == by_test["alpha_two"]
 
 
+def test_parallel_coverage_passes_with_four_workers(tmp_path):
+    """Twin (cov-a): basic parallel with --cov passes on 4 workers.
+
+    RED for the coverage-under-xdist fallback: the parallel tier admits
+    the frozen pytest-cov/coverage tuple, so the bridge must run workers
+    instead of refusing the coverage hooks.
+    """
+    root = tmp_path / "covpass"
+    root.mkdir()
+    _write(root, "tests/test_ok.py", _identity_tests(8))
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests/test_ok.py"],
+        execution="scoped", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+
+    lines = _worker_lines(root)
+    assert len(lines) == 8
+    assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
+    assert {line[1] for line in lines} == {"w000", "w001", "w002", "w003"}
+
+
 def test_parallel_unqualified_xdist_refused_before_collection(tmp_path):
     """Twin (i): a stub xdist 0.0.0 refuses before any test collects."""
     root = tmp_path / "stubxdist"

@@ -94,6 +94,103 @@ def test_profile_promotion_requires_consumed_complete_evidence(case):
             domain, checkout, C.RunnerKind.PYTEST, substituted, binding=binding)
 
 
+def _parallel_facts():
+    return {
+        "runner": "pytest", "version": "9.1.1", "python": "fixture",
+        "implementation": "cpython", "cache_tag": "cpython-313",
+        "roots": ["tests"], "profile": "advanced", "plugins": [],
+        "dependencies": {}, "hooks": [], "effective_options": {},
+        "command_variants": [["python", "tests"], ["python", "tests"]],
+        "coverage": ["fixture-cov"], "reporters": ["fixture-reporter"],
+        "platform": {"system": "linux"},
+    }
+
+
+def test_parallel_coverage_evidence_promotes_profile_with_parallel_identity(case):
+    """A parallel coverage run qualifies selection and parallel identity."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    run_id, nonce = "cd" * 16, "ef" * 32
+    binding = allocate_report(domain, checkout, run_id=run_id, nonce=nonce,
+                              attempt_id="a001", runner="pytest",
+                              execution_mode="selected", effective_profile="advanced")
+    facts = _parallel_facts()
+    runtime_identity = hashlib.sha256(json.dumps(
+        facts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    workers = [{
+        "worker_id": f"w{index:03d}",
+        "resource_prefix": f"pt_{checkout.checkout_id[:8]}_{run_id}_a001_w{index:03d}",
+    } for index in range(4)]
+    _write_attempt_report(
+        binding.path, {"run_id": run_id, "nonce": nonce, "attempt_id": "a001",
+                       "execution_mode": "selected", "effective_profile": "advanced"},
+        runtime="9.1.1", native_exit=0, bridge_exit=0, complete=True,
+        problem=None, runtime_identity=runtime_identity, runtime_facts=facts,
+        inventory=[{"id": "tests/test.py::test_ok", "file": "tests/test.py",
+                    "outcome": "passed", "setup_s": 0.0, "call_s": 0.0,
+                    "teardown_s": 0.0}],
+        workers=workers,
+        coverage_complete=True, reporters_complete=True)
+    evidence = consume_attempt_report(binding)
+    assert evidence.parallel_identity is True
+    history.publish_qualified_profile(domain, checkout, C.RunnerKind.PYTEST, evidence,
+                                      binding=binding)
+    qualified = history.read_qualified_profile(domain, checkout, C.RunnerKind.PYTEST)
+    assert qualified is not None
+    support = pytest_adapter.compound_support(
+        _config(C.RunnerKind.PYTEST), qualified_profile=qualified)
+    assert support.profile == "pytest-advanced-v1"
+    assert support.selection is True
+    assert support.parallel_identity is True
+
+
+def test_serial_evidence_promotes_profile_without_parallel_identity(case):
+    """A serial coverage run qualifies selection but never parallel identity."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    run_id, nonce = "cd" * 16, "ef" * 32
+    binding = allocate_report(domain, checkout, run_id=run_id, nonce=nonce,
+                              attempt_id="a001", runner="pytest",
+                              execution_mode="selected", effective_profile="advanced")
+    facts = _parallel_facts()
+    runtime_identity = hashlib.sha256(json.dumps(
+        facts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    prefix = f"pt_{checkout.checkout_id[:8]}_{run_id}_a001_w000"
+    _write_attempt_report(
+        binding.path, {"run_id": run_id, "nonce": nonce, "attempt_id": "a001",
+                       "execution_mode": "selected", "effective_profile": "advanced"},
+        runtime="9.1.1", native_exit=0, bridge_exit=0, complete=True,
+        problem=None, runtime_identity=runtime_identity, runtime_facts=facts,
+        inventory=[{"id": "tests/test.py::test_ok", "file": "tests/test.py",
+                    "outcome": "passed", "setup_s": 0.0, "call_s": 0.0,
+                    "teardown_s": 0.0}],
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}],
+        coverage_complete=True, reporters_complete=True)
+    evidence = consume_attempt_report(binding)
+    assert evidence.parallel_identity is False
+    history.publish_qualified_profile(domain, checkout, C.RunnerKind.PYTEST, evidence,
+                                      binding=binding)
+    qualified = history.read_qualified_profile(domain, checkout, C.RunnerKind.PYTEST)
+    assert qualified is not None
+    support = pytest_adapter.compound_support(
+        _config(C.RunnerKind.PYTEST), qualified_profile=qualified)
+    assert support.profile == "pytest-advanced-v1"
+    assert support.selection is True
+    assert support.parallel_identity is False
+
+
+def test_catalog_declaration_grants_no_parallel_identity():
+    """A static catalog declaration is never worker-identity evidence."""
+    config = _config(C.RunnerKind.PYTEST,
+                     args=("--cov=project", "--cov-report=term"))
+    catalog = pytest_adapter.qualified_profile(config)
+    assert catalog is not None
+    support = pytest_adapter.compound_support(config, qualified_profile=dict(catalog))
+    assert support.profile == "pytest-advanced-v1"
+    assert support.selection is True
+    assert support.parallel_identity is False
+
+
 def test_forged_or_incomplete_evidence_cannot_promote_profile(case):
     domain = case.domain()
     checkout = case.checkout(domain)

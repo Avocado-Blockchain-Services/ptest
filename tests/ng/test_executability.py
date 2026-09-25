@@ -1009,7 +1009,8 @@ def _uv(tmp_path, **kwargs):
     return _config(tmp_path, **kwargs)
 
 
-def _stub_venv(root, *, version="3.8.0", extra=(), pythons=("python3.12",)):
+def _stub_venv(root, *, version="3.8.0", extra=(), pythons=("python3.12",),
+               cov=None):
     venv = root / ".venv"
     venv.mkdir(parents=True, exist_ok=True)
     (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
@@ -1017,9 +1018,16 @@ def _stub_venv(root, *, version="3.8.0", extra=(), pythons=("python3.12",)):
         site = venv / "lib" / py / "site-packages"
         site.mkdir(parents=True, exist_ok=True)
         (site / f"pytest_xdist-{version}.dist-info").mkdir(exist_ok=True)
+        if cov is not None:
+            (site / f"pytest_cov-{cov[0]}.dist-info").mkdir(exist_ok=True)
+            (site / f"coverage-{cov[1]}.dist-info").mkdir(exist_ok=True)
         for name in extra:
             (site / name).mkdir(exist_ok=True)
     return venv
+
+
+#: The frozen pytest-cov/coverage tuple the parallel tier admits.
+_FROZEN_COV = ("7.1.0", "7.15.0")
 
 
 def test_fact_keys_exact_order():
@@ -1184,7 +1192,8 @@ def test_parallel_remote_is_not_runnable(tmp_path):
     ("-n 4 --dist=each",
      "--dist each is not supported; ptest runs serially", True),
     ("-n 4 --cov",
-     "coverage (--cov) under xdist is out of scope; ptest runs serially", True),
+     "pytest-cov is not installed in the project environment yet; "
+     "ptest runs serially until setup installs it", False),
     ("-n 4 --maxprocesses=2",
      "--maxprocesses is not supported; ptest runs serially", True),
     ("-n 1",
@@ -1210,15 +1219,54 @@ def test_parallel_fallback_rows(tmp_path, addopts, reason, config_level):
     assert req.runs is True
 
 
-def test_parallel_cov_in_runner_args_falls_back(tmp_path):
+def test_parallel_cov_admitted_with_frozen_tuple(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n')
+    _stub_venv(tmp_path, cov=_FROZEN_COV)
+
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.active is True
+    assert req.workers == 4
+    assert req.reason is None
+
+    result = E.check_config(_uv(tmp_path), project=".")
+    assert result.parallel == "4 workers (xdist, --dist load)"
+    assert result.parallel_short == "4 workers"
+
+
+def test_parallel_cov_in_runner_args_admitted_with_frozen_tuple(tmp_path):
     _write(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4"\n')
+    _stub_venv(tmp_path, cov=_FROZEN_COV)
 
-    result = E.check_config(
-        _uv(tmp_path, full_args=("--cov",)), project=".")
+    req = E.parallel_request(_uv(tmp_path, full_args=("--cov",)), project=".")
+    assert req.active is True
+    assert req.reason is None
 
-    assert result.parallel == (
-        "no — coverage (--cov) under xdist is out of scope; ptest runs serially")
+
+def test_parallel_cov_version_mismatch_falls_back(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n')
+    _stub_venv(tmp_path, cov=("7.0.0", "7.16.1"))
+
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.active is True
+    assert req.reason == (
+        "pytest-cov 7.0.0/coverage 7.16.1 is outside the frozen qualification "
+        "tuple (ptest supports pytest-cov 7.1.0 with coverage 7.15.0); "
+        "ptest runs serially")
+    assert req.config_level is False
+    assert req.runs is True
+
+
+def test_parallel_cov_passes_through_to_later_config_rows(tmp_path):
+    _write(tmp_path / "pyproject.toml",
+           '[tool.pytest.ini_options]\naddopts = "--cov --maxprocesses=2 -n 4"\n')
+    _stub_venv(tmp_path, cov=_FROZEN_COV)
+
+    req = E.parallel_request(_uv(tmp_path), project=".")
+    assert req.reason == "--maxprocesses is not supported; ptest runs serially"
+    assert req.config_level is True
 
 
 def test_parallel_duplicate_dist_info_falls_back(tmp_path):
@@ -1287,7 +1335,8 @@ def test_parallel_ptest_n0_row_auto_fix(tmp_path):
     ("--dist=each --cov --maxprocesses=2 -n 4",
      "--dist each is not supported; ptest runs serially"),
     ("--cov --maxprocesses=2 -n 4",
-     "coverage (--cov) under xdist is out of scope; ptest runs serially"),
+     "pytest-cov is not installed in the project environment yet; "
+     "ptest runs serially until setup installs it"),
     ("--maxprocesses=2 -n 4", "--maxprocesses is not supported; ptest runs serially"),
     ("-n 1 --dist=load", "your pytest config asks for 1 worker"),
 ])
