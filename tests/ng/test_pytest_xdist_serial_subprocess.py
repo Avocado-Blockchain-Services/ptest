@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import tomllib
 from pathlib import Path
+
+import support
 
 FIXTURES = Path(__file__).parent / "fixtures" / "pytest" / "xdist_addopts"
 
@@ -61,22 +62,6 @@ def test_xdist_addopts_init_serial_then_scoped_run(case, monkeypatch):
     assert b"1 passed" in scoped.stdout
 
 
-def _commit(root: Path) -> None:
-    """Commit the materialized project: the full gate needs source identity."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(
-        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-        GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-        GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test",
-    )
-    for args in (("init",), ("config", "user.email", "fixture@example.test"),
-                 ("config", "user.name", "Fixture"), ("add", "."),
-                 ("commit", "-m", "initial")):
-        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", "-C", str(root), *args),
-                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
 def test_xdist_addopts_full_run_is_project_filtered_with_label(case, monkeypatch):
     """Section F: --full runs the checked-in suite and labels its filters."""
     from ptest import cli
@@ -90,7 +75,7 @@ def test_xdist_addopts_full_run_is_project_filtered_with_label(case, monkeypatch
 
     monkeypatch.chdir(root)
     assert cli.main(("init", "--no-doctor", "--agents", "none")) == 0
-    _commit(root)
+    support.init_git_repo(root)
 
     label = "full (project-filtered: -m not slow; conftest collection hook)"
     env = dict(os.environ)
@@ -125,7 +110,7 @@ def test_full_run_refuses_pytest_addopts_from_environment(case, monkeypatch):
 
     monkeypatch.chdir(root)
     assert cli.main(("init", "--no-doctor", "--agents", "none")) == 0
-    _commit(root)
+    support.init_git_repo(root)
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")

@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
-import subprocess
 
 import pytest
+
+import support
 
 
 @pytest.fixture(autouse=True)
@@ -20,22 +20,6 @@ def _clear_native_pytest_environment(monkeypatch):
         "PTEST_PYTEST_CONFIG_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
-
-
-def _commit_fixture(root):
-    """Make lifecycle evidence real: these tests must run from committed Git."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(
-        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-        GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-        GIT_AUTHOR_EMAIL="fixture@example.test", GIT_COMMITTER_EMAIL="fixture@example.test",
-    )
-    for args in (("init",), ("config", "user.email", "fixture@example.test"),
-                 ("config", "user.name", "Fixture"), ("add", "."),
-                 ("commit", "-m", "initial")):
-        subprocess.run(("git", "-c", "core.hooksPath=" + os.devnull,
-                        "-c", "commit.gpgsign=false", "-C", str(root), *args),
-                       env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def test_non_git_pytest_full_preserves_native_zero_but_is_incomplete(case):
@@ -82,7 +66,7 @@ def test_git_full_addopts_controls_are_ptest_refusals(case, source):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", env=env, timeout=20)
 
@@ -112,7 +96,7 @@ def test_git_full_checked_in_deselect_is_project_filtered(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -145,7 +129,7 @@ def test_git_pytest_full_allows_root_cache_and_assertion_bytecode(case):
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     first = case.invoke(domain, root, "--full", timeout=20)
     second = case.invoke(domain, root, "--full", timeout=20)
     assert first.code == second.code == 0
@@ -165,7 +149,7 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"nested/tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 70
     assert (nested / ".pytest_cache").is_dir()
@@ -204,7 +188,7 @@ def test_full_project_conftest_collection_hooks_run_labelled(case, hook_source):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -291,7 +275,7 @@ def test_full_forbidden_hook_forms_refuse_from_git(case, hook_source):
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -322,7 +306,7 @@ def test_full_collection_finish_mutation_keeps_cooperative_claim_limits(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\", \"removed.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -358,7 +342,7 @@ def test_full_setup_skip_keeps_cooperative_claim_limits(case):
         "kind = \"pytest\"\nlauncher = " + json.dumps([sys.executable]) + "\n"
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -390,7 +374,7 @@ def test_full_allows_terminal_summary_and_unconfigure_observation(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\", \"cleanup.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert b"terminal-observed" in completed.stdout
     assert (root / "cleanup.marker").read_text() == "done"
@@ -427,7 +411,7 @@ def test_no_selection_full_preserves_native_failure_after_known_input(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nenabled = false\nclosed_inputs = false\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 1
     assert completed.result["data"]["runner_exit_code"] == 1
@@ -451,7 +435,7 @@ def test_git_pytest_full_preserves_safe_strict_controls(case):
         "test_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
     assert completed.code == 0
     assert completed.result is not None
@@ -473,8 +457,11 @@ def test_git_full_arbitrary_override_ini_remains_refused(case, source):
     (root / "pytest.ini").write_text("[pytest]\ncache_dir = .pytest_cache\n")
     env = None
     if source == "env":
+        # Payload only: the run is refused before any child starts, so the
+        # cache_dir value never touches disk.
         env = {"PYTEST_ADDOPTS": "-o cache_dir=/tmp/elsewhere"}
     else:
+        # Payload only, as above: refused before any child starts.
         (root / "pytest.ini").write_text(
             "[pytest]\ncache_dir = .pytest_cache\naddopts = -o cache_dir=/tmp/elsewhere\n")
     (root / ".ptest.toml").write_text(
@@ -483,7 +470,7 @@ def test_git_full_arbitrary_override_ini_remains_refused(case, source):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", env=env, timeout=20)
     assert completed.code == 4
     assert b"ptest-bridge-refusal" in completed.stderr
@@ -508,7 +495,7 @@ def test_git_full_over_budget_fixture_is_incomplete_with_scan_limit(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
     with (root / "payload.bin").open("wb") as stream:
         stream.truncate(17 * 1024 * 1024)
     completed = case.invoke(domain, root, "--full", timeout=20)
@@ -547,7 +534,7 @@ def test_full_deep_conftest_hook_runs_labelled(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -582,7 +569,7 @@ def test_full_class_plugin_collection_hook_is_refused(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -614,7 +601,7 @@ def test_full_non_conftest_makeitem_hook_is_refused(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -639,7 +626,7 @@ def test_full_pytest_toml_addopts_runs_labelled(case):
         "def test_slow():\n    Path('b.marker').write_text('ran')\n")
     (root / "pytest.toml").write_text("[pytest]\naddopts = [\"-k\", \"not slow\"]\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -671,7 +658,7 @@ def test_full_reexported_collection_hook_is_refused(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -696,7 +683,7 @@ def test_full_ini_collect_only_is_refused(case):
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     (root / "pytest.ini").write_text("[pytest]\naddopts = --co\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -721,7 +708,7 @@ def test_full_ini_last_failed_is_refused(case):
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     (root / "pytest.ini").write_text("[pytest]\naddopts = --lf\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -750,7 +737,7 @@ def test_full_conftest_option_mutation_is_refused(case):
     (root / "pytest.ini").write_text(
         "[pytest]\nmarkers = slow: a slow test\naddopts = -m 'not slow'\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -786,7 +773,7 @@ def test_full_persea_shaped_suite_runs_with_combined_label(case):
         "[pytest]\nmarkers = extended_migration: a migration test\n"
         "addopts = -m 'not extended_migration'\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -819,7 +806,7 @@ def test_full_ini_python_files_runs_labelled(case):
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     (root / "pytest.ini").write_text("[pytest]\npython_files = check_*.py\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -851,7 +838,7 @@ def test_full_conftest_collect_ignore_runs_labelled(case):
         "from pathlib import Path\n"
         "def test_ignored():\n    Path('ignored.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -882,7 +869,7 @@ def test_full_collection_finish_drop_is_incomplete(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -913,7 +900,7 @@ def test_full_fixture_drop_is_incomplete(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -939,7 +926,7 @@ def test_full_deselect_all_exit_five_passes_through(case):
         "[pytest]\naddopts = --deselect=tests/test_native.py::test_a "
         "--deselect=tests/test_native.py::test_b\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -961,7 +948,7 @@ def test_full_normal_pass_runs_every_collected_item(case):
         "def test_a():\n    Path('a.marker').write_text('ran')\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -985,7 +972,7 @@ def test_full_maxfail_stop_after_failure_stays_failure(case):
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
     (root / "pytest.ini").write_text("[pytest]\naddopts = -x\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1018,7 +1005,7 @@ def test_full_conftest_sessionfinish_cleanup_runs_labelled(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"body.marker\", \"cleanup.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1053,7 +1040,7 @@ def test_full_sessionfinish_exitstatus_rewrite_is_refused(case):
         "args = [\"-q\", \"-p\", \"no:xdist\"]\nfull_args = []\ntest_roots = [\"tests\"]\nworkers = 1\n"
         "lifecycle = \"cooperative-process-group\"\n"
         "[selection]\nnon_input_outputs = [\"fail.marker\"]\n")
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1079,7 +1066,7 @@ def test_full_non_conftest_plugin_sessionfinish_is_refused(case):
         "from pathlib import Path\n"
         "def test_body():\n    Path('body.marker').write_text('ran')\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1115,7 +1102,7 @@ def test_full_sessionfinish_exit_call_forces_zero_is_refused(case):
         "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
         "    assert False\n")
     _round16_failing_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1145,7 +1132,7 @@ def test_full_sessionfinish_wrapper_rewrite_is_refused(case):
         "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
         "    assert False\n")
     _round16_failing_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1174,7 +1161,7 @@ def test_full_sessionfinish_old_wrapper_rewrite_is_refused(case):
         "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
         "    assert False\n")
     _round16_failing_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1203,7 +1190,7 @@ def test_full_unconfigure_exitstatus_reset_is_refused(case):
         "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
         "    assert False\n")
     _round16_failing_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1229,7 +1216,7 @@ def test_full_add_cleanup_exitstatus_reset_is_refused(case):
         "def test_fails():\n    Path('fail.marker').write_text('ran')\n"
         "    assert False\n")
     _round16_failing_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1255,7 +1242,7 @@ def test_full_xfail_and_skip_stay_passing(case):
         "def test_skipped():\n    assert False\n"
         "def test_ok():\n    assert True\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
@@ -1277,7 +1264,7 @@ def test_full_keyboard_interrupt_stays_runner_failure(case):
     (root / "tests" / "test_native.py").write_text(
         "def test_interrupted():\n    raise KeyboardInterrupt\n")
     _full_project_toml(root, project_id)
-    _commit_fixture(root)
+    support.init_git_repo(root)
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 

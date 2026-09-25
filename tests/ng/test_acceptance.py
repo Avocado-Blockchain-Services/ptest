@@ -123,10 +123,8 @@ def test_fixture_domain_is_explicit_and_nested(tmp_path):
     assert stat.S_IMODE(domain.stat().st_mode) & stat.S_IWOTH == 0
 
 
-def test_plan_only_acceptance_does_not_execute_or_claim_support(tmp_path):
-    candidate = tmp_path / "ptest"
-    candidate.write_text("#!/bin/sh\nexit 0\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+def test_plan_only_acceptance_does_not_execute_or_claim_support(tmp_path, fake_exec):
+    candidate = fake_exec("ptest", "#!/bin/sh\nexit 0\n", bin_dir=tmp_path)
     evidence = acceptance.run_acceptance(
         root=tmp_path,
         ptest=candidate,
@@ -139,10 +137,8 @@ def test_plan_only_acceptance_does_not_execute_or_claim_support(tmp_path):
     assert evidence["adoption"]["pytest"]["status"] == "blocked-unverified"
 
 
-def test_generic_exit_zero_candidate_cannot_promote_execute_mode(tmp_path):
-    candidate = tmp_path / "generic"
-    candidate.write_text("#!/bin/sh\nexit 0\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+def test_generic_exit_zero_candidate_cannot_promote_execute_mode(tmp_path, fake_exec):
+    candidate = fake_exec("generic", "#!/bin/sh\nexit 0\n", bin_dir=tmp_path)
     evidence = acceptance.run_acceptance(
         root=tmp_path,
         ptest=candidate,
@@ -197,10 +193,9 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
     assert evidence["promotable"] is False
 
 
-def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch):
-    candidate = tmp_path / "ptest"
-    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
+def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch, fake_exec):
+    candidate = fake_exec("ptest", "#!/usr/bin/python\nfrom ptest.cli import main\n",
+                          bin_dir=tmp_path)
     output = tmp_path.parent / f"{tmp_path.name}-raw-rejected"
 
     def launched(*args, **kwargs):
@@ -216,13 +211,11 @@ def test_benchmark_cli_rejects_raw_runner_before_launch(tmp_path, monkeypatch):
     assert not output.exists()
 
 
-def test_benchmark_cli_rejects_mismatched_candidate_and_profile_before_launch(tmp_path, monkeypatch):
-    candidate = tmp_path / "ptest"
-    candidate.write_text("#!/usr/bin/python\nfrom ptest.cli import main\n")
-    candidate.chmod(candidate.stat().st_mode | stat.S_IXUSR)
-    other = tmp_path / "other-ptest"
-    other.write_bytes(candidate.read_bytes())
-    other.chmod(other.stat().st_mode | stat.S_IXUSR)
+def test_benchmark_cli_rejects_mismatched_candidate_and_profile_before_launch(
+        tmp_path, monkeypatch, fake_exec):
+    candidate = fake_exec("ptest", "#!/usr/bin/python\nfrom ptest.cli import main\n",
+                          bin_dir=tmp_path)
+    other = fake_exec("other-ptest", candidate.read_text(), bin_dir=tmp_path)
     output = tmp_path.parent / f"{tmp_path.name}-mismatch-rejected"
 
     monkeypatch.setattr(benchmark, "run_command", lambda *a, **k: pytest.fail("launch before validation"))

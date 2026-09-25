@@ -88,6 +88,7 @@ def test_nonempty_plan_files_are_rejected(case):
         vitest_adapter.prepare(config, plan, _grant(), _attempt())
 
 
+# Payload only: rejected launcher values, never executed.
 @pytest.mark.parametrize("launcher", [("npm",), ("npx", "vitest"), ("node", "--inspect"),
                                       ("/tmp/not-node",), ("node", "node")])
 def test_non_node_launcher_is_rejected(case, launcher):

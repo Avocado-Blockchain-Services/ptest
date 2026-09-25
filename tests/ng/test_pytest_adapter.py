@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 import sys
@@ -561,6 +562,28 @@ def _install_fake_pytest(monkeypatch, main, version="9.1.1"):
     monkeypatch.setitem(sys.modules, "pytest", fake)
 
 
+_MISSING = object()
+
+
+@contextmanager
+def _hide_pytest_module():
+    """Hide the pytest module only for the guarded call.
+
+    Under xdist the bridge's report hooks run ``from pytest import ...``
+    for the test's own report, so a ``sys.modules["pytest"] = None``
+    window that outlives the call kills the worker. Restore before return.
+    """
+    saved = sys.modules.get("pytest", _MISSING)
+    sys.modules["pytest"] = None
+    try:
+        yield
+    finally:
+        if saved is _MISSING:
+            sys.modules.pop("pytest", None)
+        else:
+            sys.modules["pytest"] = saved
+
+
 def test_run_restores_project_imports_and_preserves_literal_argv_and_exit(bridge_env, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PTEST_EXECUTION", "scoped")
@@ -591,15 +614,13 @@ def test_run_rejects_unknown_pytest_before_native_execution(bridge_env, monkeypa
 
 def test_run_rejects_pypy_before_importing_pytest(bridge_env, monkeypatch):
     monkeypatch.setattr(sys, "implementation", SimpleNamespace(name="pypy"))
-    monkeypatch.setitem(sys.modules, "pytest", None)
-    with pytest.raises(RuntimeError, match="unsupported-capability.*CPython"):
+    with _hide_pytest_module(), pytest.raises(RuntimeError, match="unsupported-capability.*CPython"):
         pytest_bridge.run([])
 
 
 def test_run_rejects_unsupported_python_before_importing_pytest(bridge_env, monkeypatch):
     monkeypatch.setattr(sys, "version_info", (3, 10, 0))
-    monkeypatch.setitem(sys.modules, "pytest", None)
-    with pytest.raises(RuntimeError, match="unsupported-capability.*CPython"):
+    with _hide_pytest_module(), pytest.raises(RuntimeError, match="unsupported-capability.*CPython"):
         pytest_bridge.run([])
 
 
@@ -612,21 +633,18 @@ def test_run_rejects_bad_protocol_before_import(bridge_env, monkeypatch, tmp_pat
         if descriptor != "missing":
             path.write_text("invalid" if descriptor == "bad" else '{"protocol": 2}')
         monkeypatch.setenv("PTEST_BRIDGE_PROTOCOL", str(path))
-    monkeypatch.setitem(sys.modules, "pytest", None)
-    with pytest.raises(RuntimeError, match="protocol descriptor"):
+    with _hide_pytest_module(), pytest.raises(RuntimeError, match="protocol descriptor"):
         pytest_bridge.run([])
 
 
 @pytest.mark.parametrize("argv", ["tests", [42], [None]])
-def test_run_rejects_non_literal_argv_before_import(bridge_env, monkeypatch, argv):
-    monkeypatch.setitem(sys.modules, "pytest", None)
-    with pytest.raises(RuntimeError, match="string array"):
+def test_run_rejects_non_literal_argv_before_import(bridge_env, argv):
+    with _hide_pytest_module(), pytest.raises(RuntimeError, match="string array"):
         pytest_bridge.run(argv)
 
 
-def test_missing_pytest_is_a_controlled_bridge_refusal(bridge_env, monkeypatch):
-    monkeypatch.setitem(sys.modules, "pytest", None)
-    with pytest.raises(RuntimeError, match="pytest is unavailable"):
+def test_missing_pytest_is_a_controlled_bridge_refusal(bridge_env):
+    with _hide_pytest_module(), pytest.raises(RuntimeError, match="pytest is unavailable"):
         pytest_bridge.run([])
 
 
@@ -676,6 +694,7 @@ def test_full_bridge_keeps_captured_roots_after_environment_mutation(bridge_env,
         plugin.pytest_configure(config)
 
 
+# Payload only: refused control values, never opened on disk.
 @pytest.mark.parametrize("value", ["-k hidden", "-x", "--deselect=tests/test_a.py::test_x",
                                     "-c alternate.ini", "--config-file=alternate.ini",
                                     "--rootdir=/tmp/other", "-qc alternate.ini",
@@ -687,6 +706,7 @@ def test_full_bridge_rejects_addopts_controls_from_environment(bridge_env, monke
         next(pytest_bridge.OwnedPlugin(1).pytest_cmdline_main(_native_config()))
 
 
+# Payload only: refused redirect values, never opened on disk.
 @pytest.mark.parametrize("value", [["-c", "alternate.ini"], ["--rootdir=/tmp/other"],
                                     ["-qc", "alternate.ini"], ["-vc", "alternate.ini"],
                                     ["-sc", "alternate.ini"], ["@args.txt"],
@@ -1138,9 +1158,8 @@ def test_native_refusal_emits_safe_machine_distinguishable_marker(capsys):
 
 
 def test_script_entrypoint_returns_controlled_missing_pytest_error(bridge_env, monkeypatch, capsys):
-    monkeypatch.setitem(sys.modules, "pytest", None)
     monkeypatch.setattr(sys, "argv", [pytest_bridge.__file__])
-    with pytest.raises(SystemExit) as done:
+    with _hide_pytest_module(), pytest.raises(SystemExit) as done:
         runpy.run_path(pytest_bridge.__file__, run_name="__main__")
     assert done.value.code == 4
     stderr = capsys.readouterr().err
@@ -1251,6 +1270,7 @@ def test_full_bridge_preserves_safe_strict_overrides(bridge_env, overrides):
     next(hook)
 
 
+# Payload only: refused ini overrides, never opened on disk.
 @pytest.mark.parametrize("overrides", [
     ["addopts=-k hidden"],
     ["cache_dir=/tmp/other"],
