@@ -21,6 +21,15 @@ import pytest
 
 from ptest import contracts as C
 from ptest import doctor
+from factories_agents import (
+    agent_config as _config,
+    agent_domain as _domain,
+    agent_packet_for as _packet_for,
+    agent_packet_for as _packet_in_root,
+    agent_resolution as _resolution,
+    agent_v1_config_text as _v1_config_text,
+    agent_workspace as _workspace,
+)
 
 CHILD_PID = "ab" * 16
 EXPECTED_IDS = (
@@ -28,57 +37,6 @@ EXPECTED_IDS = (
     "RESOURCE-001", "NETWORK-001", "PROCESS-001", "TIME-001",
     "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
-
-
-def _config(pid=CHILD_PID, runner_kind=C.RunnerKind.PYTEST):
-    return C.Config(
-        runner=C.RunnerConfig(
-            kind=runner_kind, launcher=("uv",),
-            test_roots=("tests",),
-        ),
-        setup=None,
-        resources=C.ResourceConfig(),
-        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
-        project_id=pid,
-    )
-
-
-def _resolution(root: Path, config=None):
-    return C.ConfigResolution(
-        root=root, path=None,
-        config=config if config is not None else _config(),
-        monorepo=None, provenance=(), warnings=(), problem=None,
-    )
-
-
-def _domain(root: Path):
-    return C.DomainPaths(
-        root=root, machine_config=root / ".ptest" / "config.toml",
-        ledger=root / ".ptest" / "ledger",
-        marker=root / ".ptest" / "marker",
-        fixture=True, domain_id=None,
-    )
-
-
-def _workspace(root: Path, config=None):
-    resolution = _resolution(root, config)
-    return doctor.inspect_workspace(
-        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None), resolution
-
-
-def _v1_config_text(project_id: str, runner_kind: str) -> str:
-    return (
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        f'kind = "{runner_kind}"\n'
-        'launcher = ["true"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
-    )
 
 
 def _monorepo_root(root: Path, children: dict[str, str]) -> Path:
@@ -92,20 +50,6 @@ def _monorepo_root(root: Path, children: dict[str, str]) -> Path:
         child.mkdir(parents=True)
         (child / ".ptest.toml").write_text(config_text, encoding="utf-8")
     return root
-
-
-def _packet_for(root: Path, files: dict[str, str] | None = None):
-    """Build one standalone packet over a tmp project."""
-    from ptest import agent_assessment as AA
-
-    for rel, text in (files or {}).items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    workspace, resolution = _workspace(root)
-    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
-    assert len(packets) == 1
-    return packets[0]
 
 
 def test_standalone_scoped_packet_excludes_files_outside_selected_directory(
@@ -1619,20 +1563,6 @@ def test_plan_item_reviews_is_pure_without_filesystem(tmp_path, monkeypatch):
 
 
 # --- T4: one-row replies and child assembly -----------------------------------
-
-def _packet_in_root(root, files):
-    """Build one standalone packet over an explicit project root."""
-    from ptest import agent_assessment as AA
-
-    for rel, text in files.items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    workspace, resolution = _workspace(root)
-    packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
-    assert len(packets) == 1
-    return packets[0]
-
 
 def _subset_citation(packet, path, start=1, end=None):
     from ptest import agent_assessment as AA

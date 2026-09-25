@@ -7,7 +7,6 @@ provider CLI or a project test runner.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sys
 
@@ -15,30 +14,13 @@ import pytest
 
 from ptest import contracts as C
 from ptest.cli import main
-
-
-def _write_v1(root, project_id: str, *, runner: str = "command") -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        f'kind = "{runner}"\n'
-        'launcher = ["python"]\n'
-        'args = []\n'
-        'full_args = []\n'
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
-    tests = root / "tests"
-    tests.mkdir(exist_ok=True)
-    (tests / "test_cache.py").write_text(
-        "def test_cache_cleanup():\n"
-        "    cache.flushall()\n",
-        encoding="utf-8",
-    )
+from factories_agents import (
+    doctor_assessment_project,
+    doctor_install_fake_review,
+    doctor_patch_qualification,
+    doctor_qualification,
+    doctor_review,
+)
 
 
 def _write_v2(root, *, runner: str = "command") -> None:
@@ -48,7 +30,7 @@ def _write_v2(root, *, runner: str = "command") -> None:
         encoding="utf-8",
     )
     for name, prefix in (("api", "ab"), ("web", "cd")):
-        _write_v1(root / name, prefix * 16, runner=runner)
+        doctor_assessment_project(root / name, prefix * 16, runner=runner)
 
 
 def _tree_state(root):
@@ -64,126 +46,12 @@ def _tree_state(root):
     return state
 
 
-def _patch_qualification(monkeypatch, *, unavailable: bool = False):
-    from ptest.agent_providers import (
-        QualificationStatus,
-        ReviewerAdapter,
-    )
-
-    statuses = []
-
-    def qualification_status(name: str):
-        statuses.append(name)
-        return QualificationStatus(
-            name=name, qualified=True, argv=(name,), note="synthetic acceptance profile",
-        )
-
-    def resolve_reviewer(name: str, env):
-        if unavailable:
-            raise C.Problem(
-                code="provider-unavailable", message="synthetic provider unavailable",
-                phase="provider", retryable=False,
-            )
-        return ReviewerAdapter(
-            name=name, executable=f"/synthetic/{name}",
-            argv=(f"/synthetic/{name}",), qualified=True,
-            qualification_note="synthetic acceptance adapter",
-        )
-
-    monkeypatch.setattr("ptest.cli.agent_providers.qualification_status", qualification_status)
-    monkeypatch.setattr("ptest.cli.agent_providers.resolve_reviewer", resolve_reviewer)
-    return statuses
-
-
-def _one_row_assessment(request: bytes) -> bytes:
-    """Return one one-row reply with a cited cache-isolation gap row."""
-    body = json.loads(request)
-    item_id = body["policy"]["item"]["id"]
-    excerpts = body["excerpts"]
-    cache_id = next(row_id for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS
-                    if row_id.startswith("CACHE-"))
-    if not excerpts:
-        return json.dumps({
-            "status": "unknown",
-            "rationale": ("The item subset admitted no excerpts for "
-                          "this row."),
-            "evidence": [],
-            "finding": None,
-            "proof": [],
-            "needs": [],
-        }).encode("utf-8")
-    excerpt = excerpts[0]
-    citation = {
-        key: excerpt[key]
-        for key in ("path", "start_line", "end_line", "sha256")
-    }
-    is_gap = item_id == cache_id
-    quote = excerpt["text"].splitlines()[0][:512]
-    return json.dumps({
-        "status": "gap" if is_gap else "unknown",
-        "rationale": (
-            "The cited bounded source shows cache cleanup without evidence "
-            "that another owner remains isolated."
-            if is_gap else
-            "The supplied bounded evidence does not establish this criterion."
-        ),
-        "evidence": [citation] if is_gap else [],
-        "proof": ([{"role": "applicability", "citation_index": 0,
-                    "quote": quote},
-                   {"role": "violation", "citation_index": 0,
-                    "quote": quote}] if is_gap else []),
-        "needs": [],
-        "finding": ({
-            "summary": "Cache cleanup has no neighbor ownership assertion.",
-            "suggested_change": (
-                "Add an executable test that proves a neighbor cache key survives cleanup."
-            ),
-            "evidence": [citation],
-        } if is_gap else None),
-    }).encode("utf-8")
-
-
-def _install_fake_review(monkeypatch, *, cancelled: bool = False):
-    from ptest.agent_providers import ProviderResult
-
-    launches = []
-
-    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
-                    on_done=None,
-                    progress=None, deadline=None):
-        results = []
-        for request, schema in requests:
-            body = json.loads(request)
-            launches.append(
-                (adapter.name, body["packet"]["declaration"], timeout_s))
-            results.append(ProviderResult(
-                provider=adapter.name,
-                ok=not cancelled,
-                assessment=b"" if cancelled else _one_row_assessment(request),
-                error="cancelled" if cancelled else "",
-                exit_code=None if cancelled else 0,
-                timed_out=False,
-                cancelled=cancelled,
-                truncated=False,
-                pid=7301 + len(launches),
-                argv=adapter.argv,
-                scratch="/tmp/ptest-agent-doctor-acceptance",
-            ))
-            if on_done is not None:
-                on_done(len(results) - 1, results[-1])
-        return tuple(results)
-
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_reviews", launch_many)
-    return launches
-
-
 @pytest.mark.parametrize("topology", ["standalone", "v2-monorepo"])
 def test_static_doctor_modes_compose_without_review_or_report_writes(
         tmp_path, monkeypatch, capsys, topology):
     root = tmp_path / topology
     if topology == "standalone":
-        _write_v1(root, "ab" * 16)
+        doctor_assessment_project(root, "ab" * 16)
         expected_sources = ("tests/test_cache.py",)
     else:
         _write_v2(root)
@@ -224,7 +92,7 @@ def test_static_doctor_modes_compose_without_review_or_report_writes(
 
 
 def test_init_created_and_existing_configs_offer_review_but_decline_and_no_doctor_stay_offline(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, doctor_qualification):
     root = tmp_path / "init-project"
     root.mkdir()
     git = root / ".git"
@@ -237,7 +105,7 @@ def test_init_created_and_existing_configs_offer_review_but_decline_and_no_docto
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    statuses = _patch_qualification(monkeypatch)
+    statuses = doctor_qualification
     answers = iter(("codex", "no", "codex", "no"))
     inputs = []
 
@@ -301,7 +169,7 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
     from ptest.agent_providers import ReviewerAdapter
 
     root = tmp_path / "configured"
-    _write_v1(root, "ab" * 16)
+    doctor_assessment_project(root, "ab" * 16)
     real_inspect = doctor_api.inspect_workspace
     report = root / "recommendations.md"
     report.write_bytes(b"user-owned report; preserve exact bytes\n")
@@ -373,15 +241,15 @@ def test_non_tty_bare_doctor_requires_consent_before_resolution_and_preserves_re
 
 
 def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying_report(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, doctor_qualification, doctor_review):
     root = tmp_path / "review-monorepo"
     _write_v2(root, runner="pytest")
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "review-locks"))
-    statuses = _patch_qualification(monkeypatch)
-    launches = _install_fake_review(monkeypatch)
+    statuses = doctor_qualification
+    launches = doctor_review
     monkeypatch.setattr(
         "ptest.operations.execute",
         lambda *args, **kwargs: pytest.fail("doctor review executed project tests"),
@@ -476,17 +344,17 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
 def test_review_unavailable_or_cancelled_preserves_existing_report(
         tmp_path, monkeypatch, capsys, failure, expected_code, expected_exit):
     root = tmp_path / failure
-    _write_v1(root, "ef" * 16)
+    doctor_assessment_project(root, "ef" * 16)
     report = root / "recommendations.md"
     report.write_bytes(b"previous complete result\n")
     before = _tree_state(root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
-    _patch_qualification(monkeypatch, unavailable=(failure == "unavailable"))
+    doctor_patch_qualification(monkeypatch, unavailable=(failure == "unavailable"))
     launches = []
     if failure == "cancelled":
-        launches = _install_fake_review(monkeypatch, cancelled=True)
+        launches = doctor_install_fake_review(monkeypatch, cancelled=True)
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
                  "--json")) == expected_exit
@@ -502,7 +370,7 @@ def test_review_unavailable_or_cancelled_preserves_existing_report(
 
 
 def test_review_passes_heartbeat_progress_to_launch_reviews(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, doctor_qualification, doctor_review):
     """cli wires its throttled heartbeat into launch_reviews progress."""
     from ptest import cli as cli_module
 
@@ -513,8 +381,7 @@ def test_review_passes_heartbeat_progress_to_launch_reviews(
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv(
         "PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "hb-locks"))
-    _patch_qualification(monkeypatch)
-    _install_fake_review(monkeypatch)
+    _ = doctor_qualification, doctor_review
     seen = []
     fake = cli_module.agent_providers.launch_reviews
 
@@ -547,14 +414,13 @@ def test_doctor_removed_output_flags_are_unknown_options(argv):
 
 
 def test_doctor_json_emits_versioned_assessment_document(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, doctor_qualification, doctor_review):
     root = tmp_path / "json-review"
-    _write_v1(root, "ab" * 16)
+    doctor_assessment_project(root, "ab" * 16)
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("CI", raising=False)
-    _patch_qualification(monkeypatch)
-    _install_fake_review(monkeypatch)
+    _ = doctor_qualification, doctor_review
     monkeypatch.setattr(
         "ptest.operations.execute",
         lambda *args, **kwargs: pytest.fail("doctor review executed project tests"),
@@ -575,7 +441,7 @@ def test_doctor_json_emits_versioned_assessment_document(
 def test_doctor_offline_json_emits_assessment_document_without_review(
         tmp_path, monkeypatch, capsys):
     root = tmp_path / "offline-json"
-    _write_v1(root, "ab" * 16)
+    doctor_assessment_project(root, "ab" * 16)
     before = _tree_state(root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(

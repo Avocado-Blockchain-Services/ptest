@@ -14,6 +14,12 @@ import pytest
 
 from ptest import contracts as C
 from ptest import doctor
+from factories_agents import (
+    agent_domain as _domain,
+    agent_packet_for as _packet_for,
+    agent_resolution as _resolution,
+    agent_v1_config_text as _v1_config_text,
+)
 
 CHILD_PID = "ab" * 16
 
@@ -30,59 +36,6 @@ def _config(pid=CHILD_PID, runner_kind=C.RunnerKind.PYTEST, **selection):
         resources=C.ResourceConfig(),
         selection=C.SelectionPolicy(**policy),
         project_id=pid,
-    )
-
-
-def _resolution(root: Path, config=None):
-    return C.ConfigResolution(
-        root=root, path=None,
-        config=config if config is not None else _config(),
-        monorepo=None, provenance=(), warnings=(), problem=None,
-    )
-
-
-def _domain(root: Path):
-    return C.DomainPaths(
-        root=root, machine_config=root / ".ptest" / "config.toml",
-        ledger=root / ".ptest" / "ledger",
-        marker=root / ".ptest" / "marker",
-        fixture=True, domain_id=None,
-    )
-
-
-def _workspace(root: Path, config=None):
-    resolution = _resolution(root, config)
-    return doctor.inspect_workspace(
-        _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None), resolution
-
-
-def _packet_for(root: Path, files: dict[str, str] | None = None):
-    """Build one standalone packet over a tmp project."""
-    from ptest import agent_assessment as AA
-
-    for rel, text in (files or {}).items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    workspace, _ = _workspace(root)
-    packets = AA.build_packets(workspace, _resolution(root),
-                               AA.EvidenceLimits())
-    assert len(packets) == 1
-    return packets[0]
-
-
-def _v1_config_text(project_id: str, runner_kind: str) -> str:
-    return (
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        f'kind = "{runner_kind}"\n'
-        'launcher = ["true"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n'
     )
 
 

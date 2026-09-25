@@ -18,22 +18,13 @@ from pathlib import Path
 import pytest
 
 from ptest import contracts as C
+from support import write_ptest_toml
 
 
 def _write_v1(root: Path, project_id: str) -> None:
-    (root / ".ptest.toml").write_text(
-        "version = 1\n"
-        f'project_id = "{project_id}"\n'
-        "[runner]\n"
-        'kind = "command"\n'
-        'launcher = ["true"]\n'
-        "args = []\n"
-        "full_args = []\n"
-        'test_roots = ["tests"]\n'
-        "workers = 1\n"
-        'lifecycle = "cooperative-process-group"\n',
-        encoding="utf-8",
-    )
+    write_ptest_toml(root, kind="command", launcher=("true",), args=(),
+                     full_args=(), test_roots=("tests",), workers=1,
+                     project_id=project_id)
 
 
 def test_smoke_standalone_reports_bounded_worksheet_and_unknown_readiness(case):
