@@ -1228,17 +1228,18 @@ def test_doctor_parser_accepts_offline_json_combination():
     assert parsed.json is True
 
 
-def test_doctor_parser_accepts_fix_with_consent_flags():
-    parsed = parse_argv(("doctor", "--fix", "--offline", "--yes", "--dry-run"))
+def test_doctor_parser_accepts_fix_without_consent_flags():
+    parsed = parse_argv(("doctor", "--fix", "--offline", "--dry-run"))
 
     assert parsed.fix is True
-    assert parsed.fix_yes is True
     assert parsed.dry_run is True
     assert parsed.offline is True
+    assert not hasattr(parsed, "fix_yes")
 
 
 @pytest.mark.parametrize("argv", [
     ("doctor", "--yes"),
+    ("doctor", "--fix", "--yes"),
     ("doctor", "--dry-run"),
     ("doctor", "--fix", "--json"),
     ("doctor", "--fix", "--reviewer", "claude"),

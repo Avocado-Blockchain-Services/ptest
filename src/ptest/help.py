@@ -130,7 +130,7 @@ Offline static syntax (never launches a provider or writes a report):
                [--max-files N] [--max-file-bytes N] [--max-total-bytes N]
 
 Fix syntax (never runs a model review; static plan plus guarded write):
-  ptest doctor --fix [--offline] [--yes] [--dry-run]
+  ptest doctor --fix [--offline] [--dry-run]
 
 Probe syntax (EXECUTES tests and setup; not a static inspection; single-project v1 only):
   ptest doctor --probe --scope S [--repeat 1..5 (default 2)]
@@ -161,9 +161,9 @@ Notes:
 
   --fix diffs each `.ptest.toml` against the config ptest would write
   today plus deterministic fixes (stale `-n 0`, setup extras/groups,
-  a `[selection]` draft under coverage) and applies the diff with
-  consent: a TTY is asked once, non-interactive runs require --yes,
-  and --dry-run shows the diff only. Writes are atomic, never follow
+  a `[selection]` draft under coverage) and applies the diff directly:
+  the --fix flag itself is the consent, and --dry-run shows the diff
+  only. Writes are atomic, never follow
   symlinks, fail closed on concurrent edits, keep unmanaged settings
   byte-identical, and are idempotent. Model-review findings about test
   code are never applied.

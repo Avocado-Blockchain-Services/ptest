@@ -95,7 +95,6 @@ class ParsedArgs:
     review_concurrency_explicit: bool = False
     offline: bool = False
     fix: bool = False
-    fix_yes: bool = False
     doctor_request: bool | None = None
     smoke: bool | None = None
 
@@ -469,8 +468,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         model_seen = concurrency_seen = False
         allow_model_review = offline = False
         offline_seen = False
-        fix = fix_yes = fix_dry = False
-        fix_seen = yes_seen = dry_seen = False
+        fix = fix_dry = False
+        fix_seen = dry_seen = False
         review_timeout_s = 300
         review_model = None
         review_concurrency = 4
@@ -543,11 +542,6 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "option cannot be repeated")
                 fix_seen = True
                 fix = True
-            elif token == "--yes":
-                if yes_seen:
-                    raise _problem("invalid-config", "option cannot be repeated")
-                yes_seen = True
-                fix_yes = True
             elif token == "--dry-run":
                 if dry_seen:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -588,7 +582,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if probe:
             if scope is None:
                 raise _problem("invalid-config", "doctor probe requires --scope")
-            if fix or fix_yes or fix_dry:
+            if fix or fix_dry:
                 raise _problem("invalid-config", "doctor probe cannot combine with --fix")
             if json_output:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
@@ -615,9 +609,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             if (reviewer_seen or allow_seen or timeout_seen or model_seen
                     or concurrency_seen):
                 raise _problem("invalid-config", "--fix never runs a model review")
-            return ParsedArgs(command=command, fix=fix, fix_yes=fix_yes,
+            return ParsedArgs(command=command, fix=fix,
                               dry_run=fix_dry, offline=offline)
-        if fix_yes or fix_dry:
+        if fix_dry:
             raise _problem("invalid-config", "fix options require --fix")
         return ParsedArgs(command=command, json=json_output,
                           scope=scope, reviewer=reviewer,
@@ -1940,20 +1934,11 @@ def _fix_mention(resolution: C.ConfigResolution) -> str | None:
     return None
 
 
-def _fix_consented(targets: str) -> bool | None:
-    """Ask once on a TTY; True yes, False no, None when not interactive."""
-    if not sys.stdin.isatty():
-        return None
-    print(f"Apply these changes to {targets}? [y/N]", file=sys.stderr)
-    try:
-        answer = input().strip().lower()
-    except EOFError:
-        return False
-    return answer in {"y", "yes"}
-
-
 def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
-    """Show the config diff and, with consent, write it. Never reviews."""
+    """Show the config diff and apply it. Never reviews, never asks.
+
+    The ``--fix`` flag itself is the consent; ``--dry-run`` previews only.
+    """
     plan = doctor_fix.plan_all(resolution.root, resolution)
     if plan.refusals:
         refusal = plan.refusals[0]
@@ -1964,15 +1949,6 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
     sys.stdout.write(doctor_fix.render_diff(plan))
     if parsed.dry_run:
         return 0
-    if not parsed.fix_yes:
-        consented = _fix_consented(
-            ", ".join(item.rel for item in plan.files))
-        if consented is None:
-            raise _problem("confirmation-required",
-                           "non-interactive fix requires --yes")
-        if not consented:
-            print("fix declined", file=sys.stderr)
-            return 1
     updated = doctor_fix.apply_plan(resolution.root, plan)
     for rel in updated:
         print(f"updated {rel}")

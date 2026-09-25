@@ -1,4 +1,4 @@
-"""Acceptance for `ptest doctor --fix`: plan, consent, safe apply, mention."""
+"""Acceptance for `ptest doctor --fix`: plan, direct apply, mention."""
 from __future__ import annotations
 
 import os
@@ -138,7 +138,7 @@ def test_fix_drops_stale_n0_when_parallel_tier_qualifies(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     out = capsys.readouterr().out
     assert "updated .ptest.toml" in out
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
@@ -170,7 +170,7 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert '+args = ["--cov", "pkg", "--cov-report", "term"]' in out
     assert "serial" not in out.lower()
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert '"-n", "0"' not in raw
@@ -184,7 +184,7 @@ def test_fix_adds_missing_group_to_setup_argv(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert 'argv = ["uv", "sync", "--locked", "--group", "dev"]' in raw
     capsys.readouterr()
@@ -206,7 +206,7 @@ def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):
     # Dry run writes nothing.
     assert 'enabled = false' in (root / ".ptest.toml").read_text(encoding="utf-8")
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert "enabled = true" in raw
     assert "closed_inputs = true" in raw
@@ -221,11 +221,11 @@ def test_fix_appends_missing_selection_table_at_eof(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert "\n[selection]\nenabled = true\nclosed_inputs = true\n" in raw
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     assert "config is up to date" in capsys.readouterr().out
 
 
@@ -248,7 +248,7 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
     assert "closed_inputs = true" not in out
     assert '"libs/mylib"' in out
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     assert "enabled = true" in raw
@@ -268,7 +268,7 @@ def test_fix_handles_quoted_table_header_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
@@ -287,7 +287,7 @@ def test_fix_handles_quoted_key_without_duplication(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
     tomllib.loads(raw)
@@ -308,7 +308,7 @@ def test_fix_preserves_unmanaged_settings_byte_for_byte(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     lines = (root / ".ptest.toml").read_text(encoding="utf-8").splitlines()
     assert "# a user comment" in lines
@@ -328,7 +328,7 @@ def test_fix_refuses_symlinked_config(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 2
+    assert main(("doctor", "--fix")) == 2
     captured = capsys.readouterr()
     assert "symlink" in captured.err or "unsafe-path" in captured.err
     assert target.read_bytes() == target.read_bytes()
@@ -354,12 +354,26 @@ def test_fix_refuses_concurrent_change(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(files_module, "read_regular", raced_read)
 
-    assert main(("doctor", "--fix", "--yes")) == 2
+    assert main(("doctor", "--fix")) == 2
     captured = capsys.readouterr()
     assert "changed" in captured.err
 
 
-def test_fix_non_tty_without_yes_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_fix_rejects_yes_flag_as_unknown_option(
+        tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "noyes")
+    _write_config(root, args=("-n", "0"))
+    before = (root / ".ptest.toml").read_bytes()
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--yes")) == 2
+    captured = capsys.readouterr()
+    assert "unknown inspection option" in captured.err
+    assert (root / ".ptest.toml").read_bytes() == before
+
+
+def test_fix_applies_without_asking_on_non_tty(tmp_path, monkeypatch, capsys):
     root = _write_pytest_project(tmp_path / "quiet")
     _write_config(root, args=("-n", "0"))
     before = (root / ".ptest.toml").read_bytes()
@@ -367,13 +381,13 @@ def test_fix_non_tty_without_yes_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix")) == 2
-    captured = capsys.readouterr()
-    assert "--yes" in captured.err + captured.out
-    assert (root / ".ptest.toml").read_bytes() == before
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    assert "\nargs = []\n" in (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert (root / ".ptest.toml").read_bytes() != before
 
 
-def test_fix_tty_consent_applies_and_declines(tmp_path, monkeypatch, capsys):
+def test_fix_applies_without_prompt_on_tty(tmp_path, monkeypatch, capsys):
     root = _write_pytest_project(tmp_path / "tty")
     _write_config(root, args=("-n", "0"))
     before = (root / ".ptest.toml").read_bytes()
@@ -381,16 +395,16 @@ def test_fix_tty_consent_applies_and_declines(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     _no_review(monkeypatch)
 
-    monkeypatch.setattr("builtins.input", lambda: "y")
-    assert main(("doctor", "--fix")) == 0
-    prompt_out = capsys.readouterr()
-    assert "Apply these changes to" in prompt_out.err + prompt_out.out
-    assert (root / ".ptest.toml").read_bytes() != before
+    def _no_input(*args, **kwargs):
+        raise AssertionError("doctor --fix asked a question")
 
-    (root / ".ptest.toml").write_bytes(before)
-    monkeypatch.setattr("builtins.input", lambda: "n")
-    assert main(("doctor", "--fix")) == 1
-    assert (root / ".ptest.toml").read_bytes() == before
+    monkeypatch.setattr("builtins.input", _no_input)
+    assert main(("doctor", "--fix")) == 0
+    captured = capsys.readouterr()
+    assert "updated .ptest.toml" in captured.out
+    assert "[y/N]" not in captured.err + captured.out
+    assert "Apply these changes to" not in captured.err + captured.out
+    assert (root / ".ptest.toml").read_bytes() != before
 
 
 def test_fix_second_run_reports_up_to_date(tmp_path, monkeypatch, capsys):
@@ -399,9 +413,9 @@ def test_fix_second_run_reports_up_to_date(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     assert "config is up to date" in capsys.readouterr().out
 
 
@@ -418,7 +432,7 @@ def test_fix_covers_monorepo_children_and_leaves_dispatcher(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     out = capsys.readouterr().out
     assert "updated api/.ptest.toml" in out
     assert (root / ".ptest.toml").read_bytes() == before_root
@@ -437,7 +451,7 @@ def test_doctor_mentions_fix_when_config_out_of_date(
     assert "config is out of date" in out
     assert "ptest doctor --fix" in out
 
-    assert main(("doctor", "--fix", "--yes")) == 0
+    assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     assert main(("doctor", "--offline")) == 0
     assert "ptest doctor --fix" not in capsys.readouterr().out
@@ -513,6 +527,6 @@ def test_fix_combines_with_offline_and_never_reviews(
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
-    assert main(("doctor", "--fix", "--offline", "--yes")) == 0
+    assert main(("doctor", "--fix", "--offline")) == 0
     assert "\nargs = []\n" in (root / ".ptest.toml").read_text(encoding="utf-8")
     capsys.readouterr()

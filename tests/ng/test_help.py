@@ -68,7 +68,7 @@ def test_help_topic_contents_are_command_specific(tmp_path, monkeypatch, capsys)
     monkeypatch.chdir(tmp_path)
     expectations = {
         "init": ("--runner", "--agents", "--dry-run"),
-        "doctor": ("--probe", "--scope", "--fix", "--yes", "--dry-run"),
+        "doctor": ("--probe", "--scope", "--fix", "--dry-run"),
         "run": ("--full",),
         "rules": ("--apply",),
         "guide": ("--write",),
