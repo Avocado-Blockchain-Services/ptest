@@ -20,7 +20,7 @@ from typing import Sequence
 
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
-from . import doctor, executability, files, help as help_api, history
+from . import doctor, doctor_fix, executability, files, help as help_api, history
 from . import init_render, init_smoke
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
@@ -94,6 +94,8 @@ class ParsedArgs:
     review_concurrency: int = 4
     review_concurrency_explicit: bool = False
     offline: bool = False
+    fix: bool = False
+    fix_yes: bool = False
     doctor_request: bool | None = None
     smoke: bool | None = None
 
@@ -467,6 +469,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         model_seen = concurrency_seen = False
         allow_model_review = offline = False
         offline_seen = False
+        fix = fix_yes = fix_dry = False
+        fix_seen = yes_seen = dry_seen = False
         review_timeout_s = 300
         review_model = None
         review_concurrency = 4
@@ -534,6 +538,21 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "option cannot be repeated")
                 offline_seen = True
                 offline = True
+            elif token == "--fix":
+                if fix_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                fix_seen = True
+                fix = True
+            elif token == "--yes":
+                if yes_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                yes_seen = True
+                fix_yes = True
+            elif token == "--dry-run":
+                if dry_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                dry_seen = True
+                fix_dry = True
             elif token == "--probe":
                 if probe:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -569,6 +588,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if probe:
             if scope is None:
                 raise _problem("invalid-config", "doctor probe requires --scope")
+            if fix or fix_yes or fix_dry:
+                raise _problem("invalid-config", "doctor probe cannot combine with --fix")
             if json_output:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
             if (reviewer_seen or allow_seen or timeout_seen
@@ -588,6 +609,16 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         if (reviewer_seen or allow_seen or timeout_seen or model_seen
                 or concurrency_seen) and offline:
             raise _problem("invalid-config", "review options cannot combine with --offline")
+        if fix:
+            if json_output or scope is not None or limits:
+                raise _problem("invalid-config", "--fix takes no output, scope, or scan-limit options")
+            if (reviewer_seen or allow_seen or timeout_seen or model_seen
+                    or concurrency_seen):
+                raise _problem("invalid-config", "--fix never runs a model review")
+            return ParsedArgs(command=command, fix=fix, fix_yes=fix_yes,
+                              dry_run=fix_dry, offline=offline)
+        if fix_yes or fix_dry:
+            raise _problem("invalid-config", "fix options require --fix")
         return ParsedArgs(command=command, json=json_output,
                           scope=scope, reviewer=reviewer,
                           reviewer_explicit=reviewer_seen,
@@ -1864,6 +1895,9 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             sys.stdout.write(render.render_agent_assessment(
                 child_data, workspace, report_path=publication.path,
                 publication_status=publication.status))
+            mention = _fix_mention(resolution)
+            if mention is not None:
+                sys.stdout.write(mention + "\n")
         return False
     except C.Problem:
         if sys.stderr.isatty():
@@ -1885,6 +1919,66 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
     else:
         sys.stdout.write(render.render_doctor(
             workspace.aggregate, workspace=workspace))
+        mention = _fix_mention(resolution)
+        if mention is not None:
+            sys.stdout.write(mention + "\n")
+
+
+def _fix_mention(resolution: C.ConfigResolution) -> str | None:
+    """Name ``ptest doctor --fix`` when the plan would change something.
+
+    Best effort only: planning is read-only, but a refusal here must
+    never break doctor output, so every planning failure means silence.
+    """
+    try:
+        plan = doctor_fix.plan_all(resolution.root, resolution)
+    except Exception:
+        return None
+    if plan.change_count:
+        return (f"config is out of date: {plan.change_count} changes — "
+                "run ptest doctor --fix to review them")
+    return None
+
+
+def _fix_consented(targets: str) -> bool | None:
+    """Ask once on a TTY; True yes, False no, None when not interactive."""
+    if not sys.stdin.isatty():
+        return None
+    print(f"Apply these changes to {targets}? [y/N]", file=sys.stderr)
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
+    """Show the config diff and, with consent, write it. Never reviews."""
+    plan = doctor_fix.plan_all(resolution.root, resolution)
+    if plan.refusals:
+        refusal = plan.refusals[0]
+        raise _problem(refusal.code, f"{refusal.rel}: {refusal.message}")
+    if not plan.files:
+        print("config is up to date")
+        return 0
+    sys.stdout.write(doctor_fix.render_diff(plan))
+    if parsed.dry_run:
+        return 0
+    if not parsed.fix_yes:
+        consented = _fix_consented(
+            ", ".join(item.rel for item in plan.files))
+        if consented is None:
+            raise _problem("confirmation-required",
+                           "non-interactive fix requires --yes")
+        if not consented:
+            print("fix declined", file=sys.stderr)
+            return 1
+    updated = doctor_fix.apply_plan(resolution.root, plan)
+    for rel in updated:
+        print(f"updated {rel}")
+    if doctor_fix.selection_enabled_by(plan):
+        print("run ptest --full once to record a baseline")
+    return 0
 
 
 _OFFLINE_UNKNOWN_REASON = "offline static run: model review unavailable"
@@ -2286,6 +2380,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return 0
         if command == "doctor":
             domain = platform.domain_paths(parsed.fixture_domain)
+            if parsed.fix:
+                return _run_doctor_fix(parsed, resolution)
             if parsed.probe is not None:
                 if resolution.config is None:
                     raise resolution.problem or _problem(

@@ -68,12 +68,26 @@ Section L (output-mode collapse):
 - `docs/legacy-index.md` deleted; only live-doc `legacy` mentions swept
   (historical specs/designs under docs/ keep their wording).
 
-Section F (`doctor --fix`):
-- Fix planning reuses init's config generator (`init_render`/`config`
-  resolution path) to compute the config ptest would write today; the fix
-  diffs that against each existing `.ptest.toml` and appends deterministic
-  item fixes (stale `-n 0`, setup argv extras, selection draft under --cov).
-- Consent/safety mirror existing precedents: TTY `[y/N]`, `--yes`,
-  `--dry-run`, `files.publish_atomic`-style temp+rename without symlink
-  following, fail closed on concurrent change, byte-identical unmanaged
-  settings, idempotent second run.
+Section F (`doctor --fix`, new module `src/ptest/doctor_fix.py`):
+- Planning reuses init's own logic rather than duplicating it: the stale
+  `-n 0` call is the exact `parallel_request` "sets -n 0" outcome (every
+  other tier input qualifies), and the setup baseline comes from
+  `config._fresh_config`. Only the three specified change sets are ever
+  planned; a missing `[setup]` table is not added.
+- Setup extras apply only to an `uv sync` argv naming no group/extra when
+  exactly one optional extra or dependency group carries pytest while the
+  main dependencies omit it; otherwise fail closed with no change.
+- The selection draft fires on `--cov`/`--cov-report` present in the
+  effective runner args, drafts `input_roots` from test roots plus `src/`
+  and `full_triggers` from files present on disk, and is marked by a
+  separate DRAFT section in the diff output (never written to the file).
+- Consent/safety mirror existing precedents: TTY
+  `Apply these changes to <files>? [y/N]`, `--yes`, `--dry-run`, atomic
+  temp+rename keeping the exact mode, no symlink following, fail closed
+  per file on planning-time vs write-time identity/bytes mismatch (no
+  cross-file atomicity), byte-identical unmanaged settings via line
+  surgery, idempotent second run (`config is up to date`).
+- F5 mention (`config is out of date: N changes — run ptest doctor --fix
+  to review them`, N = field changes) is appended to both human text
+  outputs only; planning failures there stay silent so doctor output
+  never breaks, while `doctor --fix` itself reports refusals loudly.

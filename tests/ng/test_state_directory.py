@@ -159,8 +159,11 @@ def test_offline_doctor_with_local_state_is_read_only(
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.chdir(root)
 
-    assert main(("doctor", "--json")) == 0
-    assert json.loads(capsys.readouterr().out)["error"] is None
+    assert main(("doctor", "--offline", "--json")) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["error"] is None
+    assert document["kind"] == "agent-assessment"
+    assert document["data"]["provider"]["name"] == "offline"
     assert not state.exists()
     assert not (root / "recommendations.md").exists()
 

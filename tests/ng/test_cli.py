@@ -1228,6 +1228,30 @@ def test_doctor_parser_accepts_offline_json_combination():
     assert parsed.json is True
 
 
+def test_doctor_parser_accepts_fix_with_consent_flags():
+    parsed = parse_argv(("doctor", "--fix", "--offline", "--yes", "--dry-run"))
+
+    assert parsed.fix is True
+    assert parsed.fix_yes is True
+    assert parsed.dry_run is True
+    assert parsed.offline is True
+
+
+@pytest.mark.parametrize("argv", [
+    ("doctor", "--yes"),
+    ("doctor", "--dry-run"),
+    ("doctor", "--fix", "--json"),
+    ("doctor", "--fix", "--reviewer", "claude"),
+    ("doctor", "--fix", "--allow-model-review"),
+    ("doctor", "--fix", "--scope", "tests"),
+    ("doctor", "--fix", "--max-files", "3"),
+    ("doctor", "--probe", "--scope", "tests/a.py", "--fix"),
+])
+def test_doctor_parser_rejects_fix_misuse(argv):
+    with pytest.raises(C.Problem):
+        parse_argv(argv)
+
+
 @pytest.mark.parametrize("reviewer", ["gemini", "CLAUDE", "all", "none"])
 def test_doctor_parser_rejects_unsupported_reviewer(reviewer):
     with pytest.raises(C.Problem):
