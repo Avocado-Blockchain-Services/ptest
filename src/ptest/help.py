@@ -183,8 +183,9 @@ Notes:
   requests the machine's slot count; ``ptest --workers W`` caps it). The
   scheduler grants what is free and the run serializes with ``-n 0`` when
   only one slot is granted or xdist cannot be verified; ``-n 0`` in
-  [runner] args opts out of parallel runs. Coverage (--cov) under xdist
-  is out of scope and always runs serially.
+  [runner] args opts out of parallel runs. Coverage (--cov) runs in
+  parallel under xdist when the project environment holds the qualified
+  pytest-cov/coverage pair, and serially otherwise.
 
   --probe requires --scope and a single-project v1 configuration, cannot
   combine output modes or static scan limits, and probe options require

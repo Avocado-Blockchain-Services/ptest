@@ -46,21 +46,47 @@ def _interpreter(version="9.1.1"):
 
 def _coverage_launcher():
     supplied = os.environ.get("PTEST_TEST_PYTHON_9_1_1_COV")
-    if not supplied:
-        pytest.skip("unqualified: set PTEST_TEST_PYTHON_9_1_1_COV to a preprovisioned frozen coverage tuple")
+    if supplied:
+        candidates = [supplied]
+    else:
+        # The dev environment itself carries the frozen tuple (test extra),
+        # so the suite interpreter qualifies when no override is set. An
+        # explicitly set override keeps its strict probe (a mismatch skips
+        # rather than silently falling back).
+        candidates = [sys.executable]
+    for candidate in candidates:
+        try:
+            checked = subprocess.run(
+                [candidate, "-c", (
+                    "import pytest, pytest_cov, coverage; "
+                    "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
+                )], capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({exc})")
+        if checked.returncode == 0 and checked.stdout.strip() == "9.1.1 7.1.0 7.15.0":
+            return (candidate,)
+    if supplied:
+        detail = (checked.stderr.strip() or checked.stdout.strip() or "tuple probe failed")[-240:]
+        pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({detail})")
+    pytest.skip("unqualified: set PTEST_TEST_PYTHON_9_1_1_COV to a preprovisioned frozen coverage tuple")
+
+
+def _parallel_coverage_launcher():
+    """A frozen-tuple interpreter that also carries qualified xdist."""
+    launcher = _coverage_launcher()
     try:
         checked = subprocess.run(
-            [supplied, "-c", (
-                "import pytest, pytest_cov, coverage; "
-                "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
+            [launcher[0], "-c", (
+                "import xdist; print(xdist.__version__)"
             )], capture_output=True, text=True, timeout=5, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({exc})")
-    if checked.returncode != 0 or checked.stdout.strip() != "9.1.1 7.1.0 7.15.0":
-        detail = (checked.stderr.strip() or checked.stdout.strip() or "tuple probe failed")[-240:]
-        pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({detail})")
-    return (supplied,)
+        pytest.skip(f"unqualified: pytest-xdist fixture unavailable ({exc})")
+    if checked.returncode != 0 or checked.stdout.strip() != "3.8.0":
+        detail = (checked.stderr.strip() or checked.stdout.strip() or "xdist probe failed")[-240:]
+        pytest.skip(f"unqualified: qualified pytest-xdist unavailable ({detail})")
+    return launcher
 
 
 def _project(case, domain, *, version="9.1.1", args=(), conftest="",
@@ -159,10 +185,43 @@ def test_real_blocked_xdist_is_not_an_active_plugin(case):
     assert (root / "tests-ran").exists()
 
 
+def _nocov_launcher():
+    """A pytest 9.1.1 interpreter WITHOUT pytest-cov (missing-tuple fixture).
+
+    Provisioned outside the checkout (the dev environment itself now
+    carries the frozen tuple)::
+
+        nocov_env=$(mktemp -d /tmp/ptest-qpy-nocov-XXXXXX)
+        uv venv "$nocov_env" --python 3.14
+        uv pip install --python "$nocov_env/bin/python" "pytest==9.1.1"
+        PTEST_TEST_PYTHON_9_1_1_NOCOV="$nocov_env/bin/python" \
+          ptest tests/ng/test_pytest_scoped_subprocess.py \
+          -k test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed -q
+    """
+    supplied = os.environ.get("PTEST_TEST_PYTHON_9_1_1_NOCOV")
+    if not supplied:
+        pytest.skip("unqualified: set PTEST_TEST_PYTHON_9_1_1_NOCOV to a pytest 9.1.1 interpreter without pytest-cov")
+    try:
+        checked = subprocess.run(
+            [supplied, "-c", (
+                "import pytest; print(pytest.__version__); "
+                "import pytest_cov"
+            )], capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"unqualified: no-cov fixture unavailable ({exc})")
+    if checked.returncode == 0 or "No module named 'pytest_cov'" not in checked.stderr:
+        pytest.skip("unqualified: no-cov fixture carries pytest-cov")
+    if checked.stdout.strip() != "9.1.1":
+        pytest.skip(f"unqualified: no-cov fixture is not pytest 9.1.1 ({checked.stdout.strip()})")
+    return (supplied,)
+
+
 def test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed(case):
     """Catalog admission is reachable; absent pytest-cov is not qualification evidence."""
     domain = case.domain()
-    root = _project(case, domain, args=("--cov=project_module", "--cov-report=term"))
+    root = _project(case, domain, launcher=_nocov_launcher(),
+                    args=("--cov=project_module", "--cov-report=term"))
     (root / ".ptest.toml").write_text(
         (root / ".ptest.toml").read_text().replace("workers = 8", "workers = 1"))
     result = case.invoke(domain, root, "--", "tests", timeout=10)
@@ -251,6 +310,54 @@ def test_q_py_select_real_coverage_baseline_then_exact_selected_file(case):
     assert fallback.code == 4, fallback.stderr.decode()
     assert fallback_data["plan"]["execution"] == "full"
     assert fallback_data["baseline_published"] is False
+
+
+def test_q_py_select_parallel_coverage_baseline_then_parallel_selected(case):
+    """A parallel coverage baseline qualifies selection that selects in parallel.
+
+    The fixture enables xdist (-n 4) with the frozen pytest-cov/coverage
+    tuple: the --full baseline runs on 4 workers with complete coverage,
+    publishes a parallel-identity profile, and the later --changed run
+    selects exact files on 4 workers.
+    """
+    domain = case.domain(slots=4, jobs=4)
+    launcher = _parallel_coverage_launcher()
+    root = _project(case, domain, launcher=launcher)
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\naddopts = '-n 4 --dist=load'\n",
+        encoding="utf-8")
+    (root / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(launcher))}\n'
+        'args = ["-s", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py", "tests/test_extra.py"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nenabled = true\nclosed_inputs = true\n'
+        'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", "tests/__pycache__", "ptest-result-q-py-select-parallel.json", "ptest-result-q-py-select-parallel-selected.json"]\n'
+        'input_roots = ["project_module.py"]\n'
+        'groups = [{ name = "native", sources = ["project_module.py"], tests = ["tests/test_native.py"] }]\n'
+    )
+    _commit_fixture(root)
+    result_path = "ptest-result-q-py-select-parallel.json"
+    baseline = case.invoke(domain, root, "--result-json", result_path, "--full", timeout=60)
+    baseline_data = _data(baseline)
+    assert baseline.code == 0, baseline.stderr.decode()
+    assert baseline_data["status"] == "passed"
+    assert baseline_data["baseline_published"] is True
+    assert baseline_data["full_gate_eligible"] is True
+    assert baseline_data["granted_workers"] == 4
+    (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
+    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-parallel-selected.json", "--changed", timeout=60)
+    selected_data = _data(selected)
+    assert selected.code == 0, selected.stderr.decode()
+    assert selected_data["status"] == "passed"
+    assert selected_data["plan"]["execution"] == "selected"
+    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
+    assert selected_data["granted_workers"] == 4
+    assert selected_data["source_valid"] is True
 
 
 def test_q_py_scoped_after_full_baseline_normalizes_owned_scope_identity(case):
@@ -1163,7 +1270,7 @@ def test_q_py_full_with_conftest_hook_runs_labelled(case):
         f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
         f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
         'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
-        'full_args = []\ntest_roots = ["tests"]\nworkers = 8\n'
+        'full_args = []\ntest_roots = ["tests/test_native.py"]\nworkers = 8\n'
         'lifecycle = "cooperative-process-group"\n'
         '[selection]\nenabled = true\nclosed_inputs = true\n'
         'non_input_outputs = ["tests-ran", ".coverage", ".pytest_cache", "__pycache__", '
@@ -1180,6 +1287,10 @@ def test_q_py_full_with_conftest_hook_runs_labelled(case):
     data = _data(completed)
     label = "full (project-filtered: conftest collection hook)"
     assert completed.code == 0, completed.stderr.decode()
+    # workers = 8 is ignored for pytest without a tier admission: the
+    # unadmitted advanced full run requests a single serial slot.
+    assert data["granted_workers"] == 1
+    assert data["command"]["workers"] == 1
     assert label in completed.stderr.decode()
     assert data["status"] == "passed"
     assert any(reason["code"] == "project-filtered" and reason["message"] == label

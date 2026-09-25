@@ -687,11 +687,12 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         launcher = ("uv", "run", "--locked", "--no-sync", "python") \
             if locked else ("python",)
         # A fresh pytest config serializes xdist only for config-level
-        # parallel-tier fallbacks (unsupported --dist, --cov,
-        # --maxprocesses): neutralize those with "-n 0". Environment
-        # reasons (missing/unqualified xdist) can change with uv sync, so
-        # they are reported, never written. Qualified projects keep empty
-        # args and run workers per granted slot.
+        # parallel-tier fallbacks (unsupported --dist, --maxprocesses):
+        # neutralize those with "-n 0". Environment reasons
+        # (missing/unqualified xdist, or a missing/unfrozen
+        # pytest-cov/coverage pair) can change with uv sync, so they are
+        # reported, never written. Qualified projects keep empty args and
+        # run workers per granted slot.
         _serial_fallback = _executability.pytest_xdist_active(root)
         setup = None
         if locked:

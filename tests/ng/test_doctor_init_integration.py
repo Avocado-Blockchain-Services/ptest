@@ -356,13 +356,13 @@ def test_doctor_review_computes_executability_once(
     assert len(configs) == 1
 
 
-def test_doctor_select_fix_states_serial_tradeoff_on_parallel_project(
+def test_doctor_select_fix_orders_coverage_profile_on_parallel_project(
         tmp_path, monkeypatch, capsys):
-    """Twin: cli.main doctor on an xdist project never just orders --cov.
+    """Twin: cli.main doctor on an xdist project orders the coverage profile.
 
-    SELECT-001's fix on a parallel-active project states the serial
-    tradeoff plainly; telling the user to just add --cov would break
-    PARALLEL-001 (coverage runs serially under ptest).
+    SELECT-001's fix on a parallel-active project names --cov/--cov-report
+    and a [selection] policy; coverage runs in parallel, so there is no
+    serial tradeoff to state.
     """
     root = tmp_path / "parallel-select"
     root.mkdir()
@@ -393,17 +393,18 @@ def test_doctor_select_fix_states_serial_tradeoff_on_parallel_project(
                  "--allow-model-review")) == 0
 
     flat = " ".join(capsys.readouterr().out.split())
-    assert "add --cov" not in flat
-    assert "runs serially under ptest" in flat
+    assert "add --cov" in flat
+    assert "[selection]" in flat
+    assert "runs serially under ptest" not in flat
 
 
-def test_doctor_qualified_cov_states_same_tradeoff_both_items(
+def test_doctor_qualified_cov_states_no_tradeoff_both_items(
         tmp_path, monkeypatch, capsys):
     """Twin: qualified xdist + --cov in runner args stays consistent.
 
-    SELECT-001 states the serial tradeoff (never just orders --cov) and
-    PARALLEL-001 names [runner] args with the selection cost; neither
-    says pytest configuration for the runner args setting.
+    SELECT-001 names the [selection] policy and PARALLEL-001 is satisfied;
+    neither states a serial tradeoff nor says pytest configuration for the
+    runner args setting.
     """
     root = tmp_path / "qualified-cov"
     root.mkdir()
@@ -434,8 +435,8 @@ def test_doctor_qualified_cov_states_same_tradeoff_both_items(
                  "--allow-model-review")) == 0
 
     flat = " ".join(capsys.readouterr().out.split())
-    assert "add --cov" not in flat
-    assert "runs serially under ptest" in flat
-    assert "accept serial runs" in flat
-    assert "turns off ptest's test selection" in flat
+    assert "[selection]" in flat
+    assert "runs serially under ptest" not in flat
+    assert "accept serial runs" not in flat
+    assert "turns off ptest's test selection" not in flat
     assert "pytest configuration" not in flat

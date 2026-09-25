@@ -169,8 +169,8 @@ def _select_fix(config: C.Config, cfg: str, *,
                 parallel_active: bool = False) -> str:
     """Concrete fix naming the closed-inputs policy (and coverage first).
 
-    When the parallel tier is active, coverage would serialize the run,
-    so the fix states that tradeoff instead of ordering ``--cov``.
+    A parallel project takes the same coverage profile as a serial one:
+    there is no serial tradeoff to state.
     """
     from .adapters import pytest as pytest_adapter
 
@@ -182,9 +182,9 @@ def _select_fix(config: C.Config, cfg: str, *,
            f"full_triggers in {cfg}.")
     if config.runner.kind is C.RunnerKind.PYTEST:
         if parallel_active:
-            fix += (" Test selection needs the coverage profile, which "
-                    "runs serially under ptest; keep parallel runs and "
-                    "skip selection, or enable it and accept serial runs.")
+            fix += (" Test selection needs the coverage profile: add --cov "
+                    f"and --cov-report to runner args and a [selection] "
+                    f"policy in {cfg}.")
         elif not qualified:
             fix += (" For pytest without the coverage catalog profile, first "
                     "add --cov and --cov-report to runner args.")
@@ -269,15 +269,17 @@ def _timing_answer(domain: C.DomainPaths, config: C.Config, resolution,
         evidence_paths=())
 
 
-#: Serial-fallback reasons that come from the environment (xdist not
-#: installed yet, multiple installs, unqualified version, unverifiable
-#: launcher) rather than the pytest configuration. These get an
-#: environment fix, never a "clear the serial fallback" config fix.
+#: Serial-fallback reasons that come from the environment (xdist or the
+#: pytest-cov/coverage pair not installed yet, multiple installs,
+#: unqualified version, unverifiable launcher) rather than the pytest
+#: configuration. These get an environment fix, never a "clear the serial
+#: fallback" config fix.
 _ENVIRONMENT_PARALLEL_MARKERS: tuple[str, ...] = (
     "pytest-xdist is not installed",
     "more than one pytest-xdist",
     "is not qualified",
     "cannot verify pytest-xdist",
+    "pytest-cov",
 )
 
 #: Trailing executability phrase stripped from the serial reason before
@@ -306,6 +308,18 @@ def _parallel_environment_fix(facts: dict, serial_reason: str,
         return ("set [runner] launcher to an absolute interpreter or "
                 '["uv", "run", "--locked", "--no-sync", "python"] '
                 f"in {cfg}")
+    if "pytest-cov" in serial_reason:
+        frozen = executability_api._COVERAGE_TUPLE
+        pair = f"pytest-cov {frozen[0]} with coverage {frozen[1]}"
+        if "cannot verify pytest-cov" in serial_reason:
+            return ("set [runner] launcher to an absolute interpreter or "
+                    '["uv", "run", "--locked", "--no-sync", "python"] '
+                    f"in {cfg}")
+        setup = facts.get("setup")
+        if isinstance(setup, str) and setup.strip():
+            return (f"run the project setup ({setup}) "
+                    "so ptest can use pytest-cov with coverage")
+        return f"install {pair}"
     qualified = ", ".join(sorted(
         executability_api.XDIST_QUALIFIED_VERSIONS))
     if "is not qualified" in serial_reason:
@@ -325,9 +339,7 @@ def _parallel_unknown(runner: str) -> str:
 
 
 def _parallel_answer(facts: dict | None, runner: str,
-                     evidence: tuple[str, ...], cfg: str, *,
-                     cov_in_runner_args: bool = False,
-                     ) -> DeterministicAnswer:
+                     evidence: tuple[str, ...], cfg: str) -> DeterministicAnswer:
     """Build the PARALLEL-001 answer from one child's executability facts.
 
     The not-configured answer always plans the safe provisional fix
@@ -375,15 +387,6 @@ def _parallel_answer(facts: dict | None, runner: str,
                 fix = (facts.get("parallel_fix")
                        or _parallel_environment_fix(
                            facts, serial_reason, cfg))
-            elif "--cov" in serial_reason:
-                if cov_in_runner_args:
-                    where = f"[runner] args in {cfg}"
-                else:
-                    where = "the pytest addopts"
-                fix = (facts.get("parallel_fix") or facts.get("runs_fix")
-                       or f"Remove --cov from {where} to run with xdist "
-                       f"workers; removing it turns off ptest's test "
-                       f"selection.")
             else:
                 fix = (facts.get("parallel_fix") or facts.get("runs_fix")
                        or f"Clear the serial fallback in the pytest "
@@ -465,13 +468,7 @@ def parallel_answer_for(domain: C.DomainPaths,
             except Exception:
                 facts = None
         runner = config.runner.kind.value
-        runner_args = (tuple(config.runner.args)
-                       + tuple(config.runner.full_args))
-        cov_in_runner_args = any(
-            token == "--cov" or token.startswith("--cov=")
-            for token in runner_args)
-        answer = _parallel_answer(facts, runner, evidence, cfg,
-                                  cov_in_runner_args=cov_in_runner_args)
+        answer = _parallel_answer(facts, runner, evidence, cfg)
         if answer.status == "satisfied" and runner == "pytest" and evidence:
             source = _addopts_source(config, resolution, declaration)
             if source is not None and source in excerpt_paths:

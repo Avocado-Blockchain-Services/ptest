@@ -30,11 +30,12 @@ config enables xdist: `-n N` requests N workers, `-n auto` requests one
 worker per granted slot, and `ptest --workers W` caps the request. The
 scheduler grants the slots that are free; a smaller grant runs fewer
 workers and a single slot runs serially with a generated `-n 0`. When
-xdist cannot be verified (unsupported `--dist`, coverage `--cov`,
-unqualified pytest-xdist, or an unverifiable launcher), ptest falls back
-to serial and says why. `ptest init` writes `-n 0` only for config-level
-reasons; `-n 0` in `[runner] args` opts out of parallel runs. Coverage
-(`--cov`) under xdist is out of scope and always runs serially. Vitest
+xdist cannot be verified (unsupported `--dist`, an unqualified
+pytest-xdist or pytest-cov/coverage pair, or an unverifiable launcher),
+ptest falls back to serial and says why. `ptest init` writes `-n 0` only
+for config-level reasons; `-n 0` in `[runner] args` opts out of parallel
+runs. Coverage (`--cov`) runs in parallel under xdist when the project
+environment holds the qualified pytest-cov/coverage pair. Vitest
 executes as one exclusive `vitest run` command through the project-local
 Vitest CLI and manages its own workers; declared `[setup]` (such as
 `npm ci`) runs first when its required paths are missing or the lockfile changed.

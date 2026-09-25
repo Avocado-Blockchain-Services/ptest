@@ -511,6 +511,6 @@ def test_doctor_help_carries_full_legal_disclosure_and_parallel_tier(
         "-n auto",
         "ptest --workers",
         "-n 0",
-        "coverage (--cov) under xdist is out of scope",
+        "coverage (--cov) runs in parallel under xdist",
     ):
         assert marker.lower() in lowered, marker

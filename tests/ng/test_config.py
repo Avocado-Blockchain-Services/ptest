@@ -774,7 +774,6 @@ def _fresh_pytest_args(root, target_name=".ptest.toml"):
     ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "--maxprocesses=4"\n'),
     ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-n 4 --dist=each"\n'),
     ("pytest.ini", "[pytest]\naddopts = --dist=each\n"),
-    ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n'),
 ])
 def test_fresh_pytest_config_disables_config_level_fallback_serially(
         tmp_path, filename, content):
@@ -797,10 +796,11 @@ def test_fresh_pytest_config_disables_config_level_fallback_serially(
     ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-n 4 -p no:xdist"\n'),
     ("pytest.ini", "[pytest]\naddopts = -q\n"),
     ("pyproject.toml", "[project]\ndependencies = []\n"),
+    ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n'),
 ])
 def test_fresh_pytest_config_without_config_level_fallback_keeps_empty_args(
         tmp_path, filename, content):
-    """Environment fallbacks (missing/unqualified xdist) are reported, never written."""
+    """Environment fallbacks (missing/unqualified xdist, missing/unfrozen coverage) are reported, never written."""
     (tmp_path / filename).write_text(content, encoding="utf-8")
 
     assert _fresh_pytest_args(tmp_path) == ()

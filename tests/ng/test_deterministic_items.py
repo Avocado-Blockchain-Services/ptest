@@ -251,12 +251,12 @@ def test_select_gap_finding_prose_is_trusted_plain_text(tmp_path):
     assert "`" not in answer.finding_summary + answer.finding_change
 
 
-def test_select_fix_states_serial_tradeoff_when_parallel_active(tmp_path):
-    """SELECT-001 fix on a parallel-active project: tradeoff, no --cov order.
+def test_select_fix_orders_coverage_profile_when_parallel_active(tmp_path):
+    """SELECT-001 fix on a parallel-active project: coverage profile, no tradeoff.
 
-    Following the fix must not break PARALLEL-001: under ptest --cov
-    forces serial runs, so the fix states the tradeoff plainly instead
-    of instructing the user to just add --cov.
+    Coverage runs in parallel under ptest, so a parallel project gets the
+    same coverage-profile order as a serial one: --cov/--cov-report plus a
+    [selection] policy, with no serial tradeoff.
     """
     from ptest import deterministic_items as DI
 
@@ -269,10 +269,12 @@ def test_select_fix_states_serial_tradeoff_when_parallel_active(tmp_path):
         _resolution(tmp_path, _parallel_config(tmp_path)), packet)
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
-    assert "--cov" not in answer.finding_change
-    assert "runs serially under ptest" in answer.finding_change
-    assert "keep parallel runs" in answer.finding_change
-    assert "accept serial runs" in answer.finding_change
+    assert "add --cov" in answer.finding_change
+    assert "--cov-report" in answer.finding_change
+    assert "[selection]" in answer.finding_change
+    assert "runs serially under ptest" not in answer.finding_change
+    assert "keep parallel runs" not in answer.finding_change
+    assert "accept serial runs" not in answer.finding_change
 
 
 def test_select_fix_keeps_cov_guidance_when_not_parallel(tmp_path):
@@ -284,31 +286,30 @@ def test_select_fix_keeps_cov_guidance_when_not_parallel(tmp_path):
     assert "--cov" in answer.finding_change
 
 
-def test_select_fix_states_tradeoff_when_parallel_active_and_qualified(
+def test_select_fix_orders_selection_policy_when_parallel_active_and_qualified(
         tmp_path):
-    """Qualified xdist + --cov in runner args still states the tradeoff.
+    """Qualified xdist + --cov in runner args names the [selection] policy.
 
-    The coverage profile qualifies, yet xdist is active and ptest runs
-    coverage serially: the SELECT-001 fix must state the serial tradeoff
-    instead of staying silent, or it contradicts the PARALLEL-001 fix.
+    The coverage profile qualifies and xdist stays parallel: the
+    SELECT-001 fix orders the [selection] policy with no serial tradeoff.
     """
     config = _parallel_config(
         tmp_path, args=("--cov", "pkg", "--cov-report", "term"))
     answers = _parallel_answers_for(tmp_path, addopts="-n 4", config=config)
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
-    assert "runs serially under ptest" in answer.finding_change
-    assert "keep parallel runs" in answer.finding_change
-    assert "accept serial runs" in answer.finding_change
-    assert "add --cov" not in answer.finding_change
+    assert "[selection]" in answer.finding_change
+    assert "runs serially under ptest" not in answer.finding_change
+    assert "keep parallel runs" not in answer.finding_change
+    assert "accept serial runs" not in answer.finding_change
 
 
-def test_parallel_coverage_fix_names_runner_args_and_selection_cost(
+def test_parallel_coverage_fix_installs_frozen_tuple_from_runner_args(
         tmp_path):
-    """PARALLEL-001 R3 with --cov in runner args names it, not addopts.
+    """PARALLEL-001 with --cov but no frozen tuple names the install.
 
-    Removing --cov turns off test selection, so the fix states that cost
-    plainly and never says pytest configuration for a runner args setting.
+    The stub venv holds qualified xdist but no pytest-cov, so the gap fix
+    installs the frozen pair instead of telling the user to remove --cov.
     """
     config = _parallel_config(
         tmp_path, args=("--cov", "pkg", "--cov-report", "term"))
@@ -316,19 +317,16 @@ def test_parallel_coverage_fix_names_runner_args_and_selection_cost(
         tmp_path, addopts="-n 4", config=config)["PARALLEL-001"]
     assert answer.status == "gap"
     assert answer.finding_change == (
-        "Remove --cov from [runner] args in .ptest.toml to run with xdist "
-        "workers; removing it turns off ptest's test selection.")
-    assert "pytest configuration" not in answer.finding_change
+        "install pytest-cov 7.1.0 with coverage 7.15.0")
 
 
-def test_parallel_coverage_fix_names_pytest_addopts_twin(tmp_path):
-    """Twin: --cov in pytest addopts names the addopts, same cost."""
+def test_parallel_coverage_fix_installs_frozen_tuple_from_addopts_twin(tmp_path):
+    """Twin: --cov in pytest addopts names the same install."""
     answer = _parallel_answers_for(
         tmp_path, addopts="-n 4 --cov")["PARALLEL-001"]
     assert answer.status == "gap"
     assert answer.finding_change == (
-        "Remove --cov from the pytest addopts to run with xdist workers; "
-        "removing it turns off ptest's test selection.")
+        "install pytest-cov 7.1.0 with coverage 7.15.0")
 
 
 def test_timing_without_history_is_unknown(tmp_path):
