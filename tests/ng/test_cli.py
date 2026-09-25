@@ -3581,3 +3581,46 @@ def test_summarize_review_failures_orders_counts_and_bounds_reasons():
     many = [row(f"reason-{index}") for index in range(10)]
     summary = _summarize_review_failures(many)
     assert "+5 more reasons" in summary
+
+
+def _forbid_admission(monkeypatch):
+    monkeypatch.setattr(
+        "ptest.operations.scheduler.enqueue",
+        lambda *args, **kwargs: pytest.fail("unknown command admitted a run"),
+    )
+
+
+@pytest.mark.parametrize(("word", "suggestion"), [
+    ("install", "ptest init"), ("setup", "ptest init"),
+    ("unistall", "ptest uninstall"), ("stauts", "ptest status"),
+    ("frobnicate", None),
+])
+def test_unknown_command_word_says_so_and_shows_help(
+        word, suggestion, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _forbid_admission(monkeypatch)
+    assert main((word,)) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    first = captured.err.splitlines()[0]
+    assert first.startswith(f'ptest: unknown command "{word}"')
+    if suggestion is None:
+        assert "Did you mean" not in first
+    else:
+        assert f'Did you mean "{suggestion}"?' in first
+    assert "Getting started:" in captured.err
+    assert "unsupported-capability" not in captured.err
+
+
+def test_existing_path_word_stays_runner_data(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "install").mkdir()
+    assert parse_argv(("install",)).runner_argv == ("install",)
+
+
+@pytest.mark.parametrize("argv", [("--", "install"), ("tests/a.py",),
+                                  ("test_a.py",), ("-k", "install")])
+def test_non_command_shapes_stay_runner_data(argv, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    expected = argv[1:] if argv[0] == "--" else argv
+    assert parse_argv(argv).runner_argv == expected

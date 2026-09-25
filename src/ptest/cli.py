@@ -5,9 +5,11 @@ the typed capability boundary until the scheduler/guard orchestration lands.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -618,6 +620,30 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     raise _problem("invalid-config", "unknown command")
 
 
+_COMMAND_WORD = re.compile(r"[a-z][a-z-]{0,31}")
+# Words people reach for that mean an existing command.
+_COMMAND_ALIASES = {"install": "init", "setup": "init", "configure": "init"}
+
+
+class _UnknownCommand(C.Problem):
+    """A bare word that is neither a command nor an existing test path."""
+
+    def __init__(self, word: str) -> None:
+        commands = sorted(_INSPECTION | {"help", "changed"})
+        guess = _COMMAND_ALIASES.get(word) or next(
+            iter(difflib.get_close_matches(word, commands, n=1, cutoff=0.7)), None)
+        hint = f' Did you mean "ptest {guess}"?' if guess else ""
+        super().__init__(code="invalid-config", phase="cli",
+                         message=f'unknown command "{word}".{hint}')
+
+
+def _looks_like_unknown_command(token: str) -> bool:
+    # Only a plain lowercase word that names no existing path: runner tails,
+    # test paths and node ids keep flowing to the runner unchanged.
+    return (_COMMAND_WORD.fullmatch(token) is not None
+            and not os.path.lexists(token))
+
+
 def _parse_args(args: tuple[str, ...], prefix: _CliPrefix) -> ParsedArgs:
     if any(not isinstance(token, str) for token in args):
         raise _problem("invalid-config", "arguments must be strings")
@@ -658,6 +684,8 @@ def _parse_args(args: tuple[str, ...], prefix: _CliPrefix) -> ParsedArgs:
         parsed = ParsedArgs(command="help")
     elif remaining and remaining[0] == "--version":
         parsed = ParsedArgs(command="version")
+    elif remaining and _looks_like_unknown_command(remaining[0]):
+        raise _UnknownCommand(remaining[0])
     else:
         parsed = _parse_execution(remaining)
     return replace(parsed, fixture_domain=prefix.fixture_domain)
@@ -2353,6 +2381,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         for reason in result.reasons:
             print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
         return result.exit_code
+    except _UnknownCommand as problem:
+        print(render.terminal_text(f"ptest: {problem.message}"), file=sys.stderr)
+        print(file=sys.stderr)
+        print(help_api.overview(), file=sys.stderr)
+        return 2
     except C.Problem as problem:
         kind = prefix.command or "run"
         return _emit_error(problem, kind=kind, json_output=json_requested)

@@ -253,15 +253,28 @@ def route_scopes(scopes: tuple[str, ...], children: tuple[ChildTarget, ...]) -> 
     if not scopes:
         raise _problem("a monorepo scope is required")
     by_name = {child.declaration: child for child in children}
+    # Declarations are validated manifest names, safe to show.
+    where = " or ".join(f'"{name}/..."' for name in by_name)
     selected: str | None = None
     rebased: list[str] = []
     for scope in scopes:
-        parts = _safe_segments(scope)
+        # Shell completion adds a trailing "/" and people type "./"; both
+        # name the same path.
+        while scope.startswith("./"):
+            scope = scope[2:]
+        scope = scope.rstrip("/")
+        try:
+            parts = _safe_segments(scope)
+        except C.Problem:
+            raise _problem("test paths must be relative to the repository root, "
+                           'without ".." (for example "api/tests")') from None
         child_name = parts[0]
         if len(parts) < 2 or child_name not in by_name:
-            raise _problem("scope must select one declared monorepo child")
+            raise _problem(f"name a test path inside a project: {where}; "
+                           'to run every project use "ptest --full"')
         if selected is not None and selected != child_name:
-            raise _problem("scopes must select one monorepo child")
+            raise _problem("run one project at a time: all paths must be "
+                           f"inside the same project ({where})")
         selected = child_name
         rebased.append("/".join(parts[1:]))
     assert selected is not None
