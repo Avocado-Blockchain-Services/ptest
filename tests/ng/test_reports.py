@@ -69,6 +69,7 @@ def _payload(**overrides):
         "native_exit_code": 0,
         "bridge_exit_code": 0,
         "problem": None,
+        "test_counts": None,
         "project_narrowing": {
             "narrowing": None, "conftest_hooks": [], "notes": []},
     }

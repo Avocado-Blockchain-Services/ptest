@@ -40,6 +40,15 @@ executes as one exclusive `vitest run` command through the project-local
 Vitest CLI and manages its own workers; declared `[setup]` (such as
 `npm ci`) runs first when its required paths are missing or the lockfile changed.
 
+While a run executes, ptest narrates itself on stderr with short
+`ptest:`-prefixed status lines: a start line, a waiting line when
+admission queues, setup lines, and an end line with ptest's own verdict,
+counts, and duration. Runner output is untouched. `ptest -v` adds
+scheduling and setup detail and also makes pytest/vitest verbose;
+`ptest -q` silences ptest's own lines while errors and refusals still
+print. Machine documents (`--json`, `--result-json`) never carry status
+lines. See `ptest help run`.
+
 `ptest doctor` review sends one cheap-model call per checklist item that
 needs one after consent; timing, selection and parallel execution items
 are answered from ptest's own facts with no model call. The model is the

@@ -249,8 +249,8 @@ location; the plan names that location as `state: ...`, with
 _RUN = """Running tests: scoped iteration and the integrated full gate, from the repository root.
 
 Syntax (ptest options precede scoped/native arguments):
-  ptest [--workers 1..64] [<scoped paths>...]
-  ptest --changed | --full [--workers 1..64]
+  ptest [--workers 1..64] [-v | --verbose] [-q | --quiet] [<scoped paths>...]
+  ptest --changed | --full [--workers 1..64] [-v] [-q]
   ptest [--queue-timeout 1..86400 (default 1800)] [--base X]
         [--no-setup] [--shadow] [--result-json PATH] [-- SCOPES...]
   e.g. ptest --workers 2 tests/test_example.py  # only with verified isolation and adapter support
@@ -259,7 +259,10 @@ Notes:
   Standalone v1 only: the scoped form passes runner arguments literally;
   everything from the first native token (or --) reaches the runner
   untouched, e.g. ptest -- -k slow. An explicit -- still preserves
-  parsing. From a monorepo root, scoped paths must be child-prefixed
+  parsing. -v/--verbose and -q/--quiet are ptest options only before
+  the scope: ptest -v tests/a.py is ptest-verbose, while
+  ptest tests/a.py -v leaves -v as runner data (pytest verbose only).
+  From a monorepo root, scoped paths must be child-prefixed
   paths selecting exactly one child (e.g. api/tests/test_example.py);
   arbitrary runner flags are rejected by root scope validation. --changed
   and --full are mutually exclusive; both reject runner narrowing. --base
@@ -267,7 +270,22 @@ Notes:
   --full preflights all children, then runs them sequentially with output
   preserved, returning the first nonzero exit after all children finish.
   Exit status mirrors the outcome: 0 passes, nonzero fails; only --full
-  completes the change, a scoped green is iteration."""
+  completes the change, a scoped green is iteration.
+
+Run output (stderr; runner stdout/stderr stay untouched):
+  ptest prints short ptest:-prefixed status lines: a start line naming
+  project, runner, workers and scope; a waiting line when admission
+  queues (with the active runs, the limit, and the holders when known);
+  setup lines naming the setup command and its state; and an end line
+  with ptest's own verdict, bridge counts, and duration (one per child
+  plus a total for root --full). Refusals keep their code: message line.
+  A failure or refusal names ptest -v once per run; a clean pass never
+  does. -v adds detail lines (admission and grant, queue position, setup
+  state and command, the runner command, per-phase timings, the scope
+  decision) and also forwards -v to pytest/vitest. -q suppresses ptest's
+  own status lines; errors and refusals still print. --json and
+  --result-json documents are unchanged; status lines never go to
+  stdout."""
 
 _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra runtime).
 

@@ -883,6 +883,7 @@ def test_bridge_writes_private_terminal_report_after_native_exit(tmp_path, monke
         "native_exit_code": 23,
         "bridge_exit_code": 23,
         "problem": "native-failure",
+        "test_counts": None,
         "project_narrowing": {"conftest_hooks": [], "narrowing": None,
                               "notes": []},
     }

@@ -24,8 +24,8 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import (config as config_api, executability, files, history, platform, render, reports,
-               scheduler, selection, source)
+from . import (config as config_api, executability, files, history, platform, progress, render,
+               reports, scheduler, selection, source)
 from .runners import adapter_for
 
 
@@ -187,6 +187,11 @@ def _effective_config(config: C.Config, request: C.RunRequest,
     runner = replace(config.runner, workers=grant.slots)
     if plan.execution == "scoped":
         runner = replace(runner, args=runner.args + tuple(request.argv))
+    if (request.verbose
+            and config.runner.kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST)):
+        # -v in ptest's option position also makes the runner verbose. Only
+        # pytest/vitest take it; literal command argv is never rewritten.
+        runner = replace(runner, args=tuple(runner.args) + ("-v",))
     # The caller's Config remains the source/policy authority.  This private
     # copy is only for binding the one admitted command argv.
     return replace(config, runner=runner)
@@ -1846,6 +1851,73 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             signal.signal(signum, handler)
 
 
+def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
+                request: C.RunRequest, plan: C.Plan, workers: int) -> None:
+    """One start line naming project, runner, workers and scope.
+
+    The scope is shown as the user typed it (a monorepo route passes the
+    repo-root-relative scopes separately from the child-rebased argv).
+    """
+    project = render.terminal_text(checkout.root.name)
+    runner = config.runner.kind.value
+    shown = request.display_argv if request.display_argv is not None else request.argv
+    full = not (request.mode is C.Mode.SCOPED and shown)
+    scope = "" if full else render.terminal_text(" ".join(shown))
+    fixed = len(f"ptest: {project} · {runner} · {workers} workers · ")
+    scope = progress.fit_text(scope, fixed=fixed) if scope else scope
+    progress.emit(progress.format_start(
+        project=project, runner=runner, workers=workers,
+        scope=scope, full=full), quiet=request.quiet)
+    if request.verbose:
+        progress.emit(
+            f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
+            quiet=request.quiet)
+
+
+def _waiting_snapshot(domain: C.DomainPaths,
+                      run_id: str) -> tuple[int, int | None, str]:
+    """Best-effort (slots in use, slot limit, holder labels); never raises."""
+    try:
+        leases = scheduler.reconcile(domain)
+    except (C.Problem, OSError):
+        return 0, None, ""
+    in_use = sum(lease.slots for lease in leases
+                 if lease.run_id != run_id and lease.state not in {
+                     C.LeaseState.RELEASED, C.LeaseState.CANCELLED})
+    try:
+        limit = scheduler.effective_limits(domain).max_slots
+    except (C.Problem, OSError):
+        limit = None
+    try:
+        holders = [holder for holder in scheduler.queue_holders(domain)
+                   if holder.run_id != run_id]
+    except (C.Problem, OSError):
+        holders = []
+    # Holder labels stay whole: each is bounded and escaped by
+    # holder_label, and the names are mandated line content. Only the
+    # unbounded caller-controlled scope/argv segments are width-fit.
+    labels = ", ".join(progress.holder_label(holder.pid) for holder in holders[:3])
+    if len(holders) > 3:
+        labels += f" (+{len(holders) - 3} more)"
+    return in_use, limit, labels
+
+
+def _emit_end(request: C.RunRequest, result: C.RunResult,
+              run_mono: float) -> None:
+    """One end line with ptest's own verdict, bridge counts, and duration."""
+    if request.verbose:
+        line = progress.format_timing(result.timings)
+        if line is not None:
+            progress.emit(line, quiet=request.quiet)
+    hint = (result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                              C.Status.NOT_RUN)
+            and progress.claim_hint())
+    progress.emit(progress.format_end(
+        result.status, counts=result.counts,
+        duration_s=time.monotonic() - run_mono, exit_code=result.exit_code,
+        hint=hint), quiet=request.quiet)
+
+
 def execute(domain: C.DomainPaths, config: C.Config,
             request: C.RunRequest) -> C.RunResult:
     """Run one admitted command and return its typed outcome."""
@@ -2006,6 +2078,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
             config, runner=replace(
                 config.runner,
                 args=tuple(config.runner.args) + tuple(request.argv)))
+    if (request.verbose
+            and config.runner.kind in (C.RunnerKind.PYTEST, C.RunnerKind.VITEST)):
+        # The forwarded -v joins the same effective args the adapter binds.
+        tier_config = replace(
+            tier_config, runner=replace(
+                tier_config.runner,
+                args=tuple(tier_config.runner.args) + ("-v",)))
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
     # A qualified xdist pytest project requests its tier worker count on
@@ -2039,6 +2118,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
         requested_slots = 1
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()
+    run_mono = time.monotonic()
+    _emit_start(checkout=checkout, config=config, request=request,
+                plan=plan, workers=requested_slots)
+
+    def _finish(result: C.RunResult) -> C.RunResult:
+        _emit_end(request, result, run_mono)
+        return result
+
     signals = _Signals()
     previous = {}
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -2061,14 +2148,22 @@ def execute(domain: C.DomainPaths, config: C.Config,
             fixture=domain.fixture,
         )
         ticket = scheduler.enqueue(domain, admission)
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v admission: requested {requested_slots} "
+                f"slot{'s' if requested_slots != 1 else ''}"
+                f"{', exclusive' if not native_runner else ''}",
+                quiet=request.quiet)
+        waited = False
+        wait_last = 0.0
         while True:
             state = scheduler.poll(domain, ticket)
             if signals.number is not None and state.state in {
                     C.LeaseState.QUEUED, C.LeaseState.GRANTED}:
                 if scheduler.cancel_pending(domain, ticket, owner):
-                    return _export(domain, checkout, request, _cancel_result(
+                    return _finish(_export(domain, checkout, request, _cancel_result(
                         run_id, checkout, request, plan, command,
-                        signals.number, time.monotonic() - enqueued_at))
+                        signals.number, time.monotonic() - enqueued_at)))
                 raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
             if state.state is C.LeaseState.GRANTED:
                 grant = state.grant
@@ -2081,17 +2176,38 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 raise state.problem
             if time.monotonic() >= admission.deadline:
                 raise _problem("queue-timeout", "admission queue timeout", retryable=True)
+            elapsed = time.monotonic() - enqueued_at
+            if elapsed >= progress.WAIT_FIRST_S and (
+                    not waited or elapsed - wait_last >= progress.WAIT_REPEAT_S):
+                first = not waited
+                waited = True
+                wait_last = elapsed
+                in_use, limit, holders = _waiting_snapshot(domain, run_id)
+                free = (max(0, limit - in_use)
+                        if limit is not None else None)
+                progress.emit(progress.format_waiting(
+                    needed=requested_slots, free=free, limit=limit,
+                    timeout_s=request.queue_timeout_s, holders=holders,
+                    elapsed_s=None if first else elapsed,
+                    position=state.position if request.verbose else None,
+                    hint=first and progress.claim_hint()), quiet=request.quiet)
             time.sleep(min(C.SCHEDULER_POLL_S, max(0, admission.deadline - time.monotonic())))
         if grant is None:
             raise _problem("ownership-uncertain", "scheduler grant was incomplete")
         queue_s = time.monotonic() - enqueued_at
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v grant: {grant.slots} "
+                f"slot{'s' if grant.slots != 1 else ''} "
+                f"after {progress.format_duration(queue_s)}",
+                quiet=request.quiet)
         # A signal delivered in the narrow GRANTED window must cancel before
         # any guard is spawned. A failed CAS cannot authorize another launch.
         if signals.number is not None:
             if scheduler.cancel_pending(domain, ticket, owner):
-                return _export(domain, checkout, request, _cancel_result(
+                return _finish(_export(domain, checkout, request, _cancel_result(
                     run_id, checkout, request, plan, command,
-                    signals.number, time.monotonic() - enqueued_at))
+                    signals.number, time.monotonic() - enqueued_at)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         if native_runner:
             # The queue can outlive edits to the command, resource locks, or
@@ -2150,6 +2266,28 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # rejection must release the granted lease without a child.
             scheduler.cancel_pending(domain, ticket, owner)
             raise
+        if request.verbose:
+            runner_argv = render.terminal_text(" ".join(prepared.argv))
+            fixed = len("ptest: -v runner: ")
+            progress.emit(
+                f"ptest: -v runner: {progress.fit_text(runner_argv, fixed=fixed)}",
+                quiet=request.quiet)
+        if setup_prepared is None:
+            if request.verbose:
+                setup_skip = ("none declared" if config.setup is None
+                              else "current")
+                progress.emit(f"ptest: -v setup: skipped ({setup_skip})",
+                              quiet=request.quiet)
+        else:
+            try:
+                stored = _stored_setup_fingerprint(domain, checkout)
+            except (C.Problem, OSError):
+                # The same read succeeded inside _setup_prepared moments
+                # ago; a display re-read must never fail the admitted run.
+                stored = "<unreadable>"
+            setup_reason = "first run" if stored is None else "inputs changed"
+            progress.emit(progress.format_setup_start(
+                setup_prepared.argv, reason=setup_reason), quiet=request.quiet)
         if native_runner:
             try:
                 report_binding = reports.allocate_report(
@@ -2175,8 +2313,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                                env_updates=prepared.env_updates + report_env)
         if signals.number is not None:
             if scheduler.cancel_pending(domain, ticket, owner):
-                return _export(domain, checkout, request, _cancel_result(
-                    run_id, checkout, request, plan, command, signals.number, queue_s))
+                return _finish(_export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, plan, command, signals.number, queue_s)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         # Capture the initial identity after exclusive admission and queue wait,
         # immediately before launching the admitted command.
@@ -2193,8 +2331,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise
         if signals.number is not None:
             if scheduler.cancel_pending(domain, ticket, owner):
-                return _export(domain, checkout, request, _cancel_result(
-                    run_id, checkout, request, plan, command, signals.number, queue_s))
+                return _finish(_export(domain, checkout, request, _cancel_result(
+                    run_id, checkout, request, plan, command, signals.number, queue_s)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
         gate_snapshot: C.InputSnapshot | None = None
 
@@ -2238,13 +2376,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
             except C.Problem:
                 reasons += (_reason("ownership-uncertain", "pending grant remains unconfirmed"),)
             status, code, origin, number = _outcome(None, signals.number, None, True)
-            return _export(domain, checkout, request, _result(
+            return _finish(_export(domain, checkout, request, _result(
                 run_id=run_id, checkout=checkout, request=request, plan=plan,
                 command=command, status=status, phase="execution", started=started,
                 runner_code=None, exit_code=code, origin=origin, signal_number=number,
                 granted=grant, reasons=reasons,
                 limitations=_source_limitations(input_before),
-                input_before=input_before, queue_s=queue_s))
+                input_before=input_before, queue_s=queue_s)))
         setup_raw = (None if frames.setup_facts is None
                      else frames.setup_facts["raw_exit_code"])
         setup_problem = (
@@ -2252,6 +2390,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
             or frames.setup_facts["problem"] is None
             else C.Problem(**frames.setup_facts["problem"])
         )
+        if frames.setup_facts is not None:
+            if setup_raw == 0 and setup_problem is None:
+                progress.emit(
+                    progress.format_setup_done(frames.setup_elapsed_s),
+                    quiet=request.quiet)
+            else:
+                progress.emit(progress.format_setup_failed(
+                    exit_code=setup_raw,
+                    problem_code=(setup_problem.code
+                                  if setup_raw is None and setup_problem is not None
+                                  else None)),
+                    quiet=request.quiet)
         setup_failed = (
             frames.setup_facts is not None
             and (setup_raw != 0 or setup_problem is not None)
@@ -2361,7 +2511,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     scheduler.cancel_pending(domain, ticket, owner)
                 except C.Problem:
                     result = _incomplete(result, _reason("ownership-uncertain", "pending grant remains unconfirmed"))
-            return _export(domain, checkout, request, result)
+            return _finish(_export(domain, checkout, request, result))
         # Only authenticated DRAINING plus guard reap permits this proof. Take
         # the post-run snapshot while the lease is held, before finalization.
         input_after = _capture_source(
@@ -2543,6 +2693,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         # An authenticated bridge refusal is not a native test
                         # failure. Retain the observed child code for diagnosis.
                         result = replace(result, exit_origin="ptest")
+                    elif native_report.test_counts is not None:
+                        # Parallel controller-reconciled test counts ride the
+                        # authenticated terminal report: the exit match above
+                        # already ties them to the observed child code, and
+                        # the bridge refuses anything it cannot reconcile.
+                        counts = native_report.test_counts
+                        result = replace(result, counts=C.Counts(
+                            collected=counts["collected"],
+                            executed=counts["executed"],
+                            passed=counts["passed"], failed=counts["failed"],
+                            skipped=counts["skipped"],
+                            unknown=counts["unknown"]))
             except C.Problem as problem:
                 code = (problem.code if problem.code in {
                     "capacity-exceeded", "report-invalid", "unsafe-path",
@@ -2626,11 +2788,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 reports.cleanup_report(report_binding)
 
         result = _export(domain, checkout, request, result, finalize=finalize)
-        return replace(
+        result = replace(
             result,
             timings=replace(result.timings, finalization_s=(
                 time.monotonic() - finalization_started)),
         )
+        return _finish(result)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
