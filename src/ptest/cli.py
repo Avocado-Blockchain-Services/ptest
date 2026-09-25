@@ -1232,6 +1232,7 @@ def _resolve_review_model(adapter, cache_root: Path,
 
 def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
                               *, ask: bool = True, calls: int | None = None,
+                              followups: int | None = None,
                               concurrency: int = 4,
                               model: str | None = None) -> bool:
     """Short pre-consent disclosure: at most three lines, then the prompt.
@@ -1263,8 +1264,13 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
                 if chosen else
                 "model chosen from the provider list after consent "
                 "(one extra call sends only that list).")
+        planned_followups = calls if followups is None else followups
+        if isinstance(planned_followups, bool) or not isinstance(
+                planned_followups, int) or planned_followups < 0:
+            raise TypeError("followups must be a nonnegative int or None")
         first = (f"Model review disclosure: {provider} gets bounded source "
-                 f"excerpts from {project}: {calls} calls, "
+                 f"excerpts from {project}: {calls} initial item calls, "
+                 f"up to {planned_followups} evidence follow-ups, "
                  f"{concurrency} at a time, {tail}")
     disclosure = "\n".join((
         first,
@@ -1305,6 +1311,75 @@ def _execution_facts(resolution: C.ConfigResolution,
     """Map each project to its public executability fact for review children."""
     items = _items if _items is not None else _resolution_items(resolution)
     return {item.project: item.to_public() for item in items}
+
+
+def _literal_runner_scope(candidate: str) -> bool:
+    """True only when one argv token parses as an ordinary scoped run."""
+    try:
+        parsed = parse_argv((candidate,))
+    except (C.Problem, _UnknownCommand):
+        return False
+    return (parsed.command is None
+            and parsed.mode is C.Mode.SCOPED
+            and parsed.runner_argv == (candidate,)
+            and not parsed.changed and not parsed.full)
+
+
+def _recommendation_verification_scopes(workspace, resolution
+                                        ) -> tuple[str | None, ...]:
+    """Return only test paths accepted by the ptest command router.
+
+    A whole child has no narrow root route, so its report must use
+    ``ptest --full``. Monorepo candidates are checked by the same
+    ``route_scopes`` function used for execution; standalone scopes were
+    already path-validated by ``doctor.inspect_workspace`` and are checked
+    again against its path grammar here.
+    """
+    repositories = tuple(workspace.repositories)
+    if resolution.monorepo is None:
+        scopes = []
+        for repository in repositories:
+            scope = repository.local_scope
+            try:
+                checked = doctor._workspace_scope_value(scope)
+            except C.Problem:
+                scopes.append(None)
+                continue
+            scopes.append(
+                checked if checked is not None
+                and _literal_runner_scope(checked) else None)
+        return tuple(scopes)
+
+    from . import monorepo
+
+    targets = tuple(
+        monorepo.ChildTarget(
+            declaration=repository.declaration,
+            directory=Path(resolution.root) / repository.declaration,
+            config=repository.config,
+        )
+        for repository in repositories
+        if isinstance(repository.config, C.Config)
+    )
+    scopes: list[str | None] = []
+    for repository in repositories:
+        local_scope = repository.local_scope
+        if local_scope is None or not isinstance(repository.config, C.Config):
+            scopes.append(None)
+            continue
+        candidate = f"{repository.declaration}/{local_scope}"
+        try:
+            routed = monorepo.route_scopes((candidate,), targets)
+        except C.Problem:
+            scopes.append(None)
+            continue
+        if (routed.target.declaration != repository.declaration
+                or routed.scopes != (local_scope,)):
+            scopes.append(None)
+            continue
+        scopes.append(
+            candidate if _literal_runner_scope(candidate) else None)
+    return tuple(scopes)
 
 
 def _plan_item_reviews(packet, domain: C.DomainPaths,
@@ -1726,6 +1801,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                     adapter, resolution,
                     ask=(interactive and not preconsented),
                     calls=calls, concurrency=parsed.review_concurrency,
+                    followups=calls,
                     model=declared):
                 return _declined_review_output(parsed, resolution, domain)
             ensure_deadline()
@@ -1738,6 +1814,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             if model is not None:
                 effective = agent_providers.with_model(adapter, model)
         assessments = []
+        completed_reviews = []
         for packet, reviews in zip(packets, plans):
             ensure_deadline()
             pending = [(review.request, review.schema)
@@ -1768,25 +1845,77 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 except KeyboardInterrupt:
                     raise _problem("review-cancelled", "review was cancelled") from None
                 ensure_deadline()
-            replies = []
+            replies: list[bytes | str | None] = [None] * len(reviews)
             cursor = 0
-            for review in reviews:
+            for index, review in enumerate(reviews):
                 if review.request is None:
-                    replies.append(None)
                     continue
                 result = results[cursor]
                 cursor += 1
                 reason = _review_failure_reason(result)
-                replies.append(result.assessment if reason is None else reason)
+                replies[index] = result.assessment if reason is None else reason
+
+            final_reviews = list(reviews)
+            followup_jobs = []
+            for index, review in enumerate(reviews):
+                initial_reply = replies[index]
+                if review.request is None or not isinstance(
+                        initial_reply, (bytes, bytearray)):
+                    continue
+                next_review, failure = agent_assessment.plan_followup_review(
+                    packet, review, bytes(initial_reply))
+                if failure is not None:
+                    replies[index] = failure
+                elif next_review is not None:
+                    followup_jobs.append((index, next_review))
+
+            if followup_jobs:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _problem("review-timeout",
+                                   "total review deadline expired")
+                timeout_s = min(parsed.review_timeout_s, int(remaining))
+                if timeout_s < 1:
+                    raise _problem("review-timeout",
+                                   "total review deadline expired")
+                followup_pending = [(review.request, review.schema)
+                                    for _index, review in followup_jobs]
+                progress("requesting evidence", adapter.name, packet.scope,
+                         time.monotonic() - started)
+                try:
+                    ensure_deadline()
+                    followup_results = agent_providers.launch_reviews(
+                        effective, followup_pending, timeout_s,
+                        concurrency=parsed.review_concurrency,
+                        on_done=lambda index, result, scope=packet.scope: progress(
+                            "requesting evidence", adapter.name, scope,
+                            time.monotonic() - started),
+                        progress=lambda _event: heartbeat())
+                except C.Problem as problem:
+                    if problem.code == "review-cancelled":
+                        raise _problem("review-cancelled",
+                                       "review was cancelled") from None
+                    raise
+                except KeyboardInterrupt:
+                    raise _problem("review-cancelled",
+                                   "review was cancelled") from None
+                ensure_deadline()
+                for (index, followup_review), result in zip(
+                        followup_jobs, followup_results):
+                    final_reviews[index] = followup_review
+                    reason = _review_failure_reason(result)
+                    replies[index] = result.assessment if reason is None else reason
             progress("validating", adapter.name, packet.scope,
                      time.monotonic() - started)
             ensure_deadline()
             assessments.append(_assemble_with_parallel(
-                packet, reviews, tuple(replies)))
+                packet, tuple(final_reviews), tuple(replies)))
+            completed_reviews.append(tuple(final_reviews))
             ensure_deadline()
 
         reviewed_rows = [(review, row)
-                         for reviews, assessment in zip(plans, assessments)
+                         for reviews, assessment in zip(completed_reviews,
+                                                        assessments)
                          for review, row in zip(reviews, assessment.rows)
                          if review.request is not None]
         if reviewed_rows and all(row.rationale.startswith(
@@ -1859,7 +1988,10 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         report_input = C.PublicDocument(
             kind="agent-assessment", ptest_version=C.PTEST_VERSION,
             domain=None, data=draft_data, error=None)
-        report_payload = recommendations.render_recommendations(report_input)
+        report_payload = recommendations.render_recommendations(
+            report_input,
+            verification_scopes=_recommendation_verification_scopes(
+                workspace, resolution))
         source_proof = [{
             "path": excerpt.path,
             "start_line": excerpt.start_line,

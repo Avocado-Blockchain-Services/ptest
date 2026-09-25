@@ -43,6 +43,9 @@ _PROMPT_STANDARD = (
     " Return gap only with a cited concrete violation; return satisfied "
     "only when the evidence shows the guaranteeing mechanism; otherwise "
     "return unknown with one sentence naming the missing evidence. "
+    "Check admitted shared setup and counterevidence before a gap. Qualify "
+    "claims to the assessed evidence scope; missing or incomplete setup "
+    "cannot establish suite-wide satisfaction or non-applicability. "
     "Absence of code is unknown, never a guess."
 )
 _MANIFEST = (r"(?i)(?:^|/)(?:pyproject\.toml|package\.json|requirements"
@@ -79,11 +82,12 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         verification="Scoped ptest proves original assertions and inventory remain.",
         recipe="factories",
         prompt=("Do fixtures or factories create fresh test records without "
-                "weakening assertions? Cite fixture or factory definitions "
-                "and their callers showing fresh records and specific "
-                "assertions. Mark N/A only with evidence that no test in "
-                "scope uses records at all. Absence of such evidence is "
-                "unknown, never N/A."),
+                "weakening assertions? Trace a concrete factory through its "
+                "caller and cite both the creation and caller assertions. "
+                "A factory name or definition alone proves nothing; check "
+                "whether callers reuse mutable records or weaken assertions. "
+                "Use N/A only with affirmative evidence that record creation "
+                "cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST,
                        r"(?i)(?:^|/)[^/]*(?:fixture|factor)[^/]*$",
                        TEST_DIR, TEST_FILE, SRC_DIR),
@@ -99,13 +103,16 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         evidence="Cite fixture lifetime, mutation, and reset boundaries.",
         recommendation="Replace shared mutable state or prove deterministic reset.",
         example="Reuse recipes/factories.md.",
-        verification="Run scoped order/worker permutations through ptest.",
+        verification=("Mutate one fixture instance, then verify the next "
+                      "instance is independent while original assertions "
+                      "and inventory remain."),
         recipe="factories",
         prompt=("Is mutable fixture state isolated or reset for every test? "
-                "Cite fixture lifetimes, mutation points, and reset "
-                "boundaries. Mark N/A only with evidence that no shared "
-                "mutable fixture state exists in scope. Absence of such "
-                "evidence is unknown, never N/A."),
+                "Trace the fixture lifetime, mutations, and reset boundary. "
+                "A module-scoped immutable object is not a shared-state gap; "
+                "a mutable object needs a per-test reset or fresh owner. "
+                "Use N/A only with affirmative evidence that mutable shared "
+                "fixture state cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST,
                        r"(?i)(?:^|/)[^/]*(?:fixture|factor)[^/]*$",
                        TEST_DIR, TEST_FILE, SRC_DIR),
@@ -122,13 +129,16 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         evidence="Cite setup scope and cost.",
         recommendation="Prefer one owned database/schema template per run/worker; no ORM is mandated.",
         example="Reuse recipes/databases.md.",
-        verification="Measured scoped ptest run shows setup reuse without semantic loss.",
+        verification=("Count database/schema setup calls across at least two "
+                      "tests and confirm expensive run/worker-owned setup is "
+                      "reused without weakening assertions."),
         recipe="databases",
-        prompt=("Is expensive database, server, or schema setup reused per "
-                "run or worker instead of per test? Cite setup scope and "
-                "cost evidence. Mark N/A only with evidence that no "
-                "database, server, or schema setup exists in the admitted "
-                "evidence. Absence of such evidence is unknown, never N/A."),
+        prompt=("Is expensive database, server, or schema initialization "
+                "reused per run or worker rather than invoked per test? "
+                "Trace the actual creation/schema operation to its caller "
+                "and fixture scope. Importing a database library or resetting "
+                "records does not prove repeated server or schema creation. "
+                "Missing setup evidence is unknown, never N/A."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
@@ -139,7 +149,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                        r"|truncate|connect\s*\(|Column\s*\(|sessionmaker"
                        r"|create_engine",),
         scanner_codes=("db.per-test-initialization", "db.cleanup-ownership"),
-        skip="no-database",
+        skip=None,
     ),
     ChecklistEntry(
         id="DB-002",
@@ -151,10 +161,11 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         verification="Neighbor database/schema sentinel survives concurrent teardown.",
         recipe="databases",
         prompt=("Do database identities, records, and cleanup have explicit "
-                "run or worker ownership? Cite name derivation and teardown "
-                "boundaries. Mark N/A only with evidence that no database "
-                "identities, records, or namespaces exist in the admitted "
-                "evidence. Absence of such evidence is unknown, never N/A."),
+                "run or worker ownership? Trace the namespace/name helper "
+                "through each caller to teardown. A hardcoded prefix alone "
+                "does not prove collision if a helper adds run or worker "
+                "identity. Check shared setup and counterevidence; missing "
+                "ownership evidence is unknown, never N/A."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*(?:migration|models?|database|db)[^/]*$"),
@@ -165,7 +176,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                        r"|truncate|connect\s*\(|Column\s*\(|sessionmaker"
                        r"|create_engine",),
         scanner_codes=("db.per-test-initialization", "db.cleanup-ownership"),
-        skip="no-database",
+        skip=None,
     ),
     ChecklistEntry(
         id="CACHE-001",
@@ -181,17 +192,18 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         verification="Neighbor key survives concurrent cleanup.",
         recipe="cache",
         prompt=("Are Redis, Valkey, and other mutable caches namespaced and "
-                "cleaned by owner? Cite key prefixes and deletion paths. "
-                "Mark N/A only with evidence that no mutable cache client "
-                "exists in the admitted evidence. Absence of such evidence "
-                "is unknown, never N/A."),
+                "cleaned by owner? Trace the key prefix, cleanup target, and "
+                "any proven exclusive disposable-service boundary. Client "
+                "construction alone does not prove unowned deletion; a "
+                "global flush is safe only when exclusivity is established. "
+                "Missing ownership evidence is unknown, never N/A."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML,
                        r"(?i)(?:^|/)[^/]*cach[^/]*$"),
         text_patterns=(r"(?i)redis|valkey|memcach|aiocache|cachetools"
                        r"|flushall|flushdb|clear_all|invalidate|\bcache\b",),
         scanner_codes=("cache.global-flush",),
-        skip="no-cache",
+        skip=None,
     ),
     ChecklistEntry(
         id="RESOURCE-001",
@@ -203,9 +215,10 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         verification="Concurrent scoped runs use distinct paths/ports and preserve a neighbor sentinel.",
         recipe="files-ports",
         prompt=("Are writable files and listening ports uniquely owned and "
-                "released? Cite temp roots and port allocation. Mark N/A "
-                "only with evidence that tests create no files and bind no "
-                "ports. Absence of such evidence is unknown, never N/A."),
+                "released? Trace the writable path or bind through allocation "
+                "and release. Fixture-provided temporary paths and OS port "
+                "0 are ownership mechanisms; fixed paths/ports need a proven "
+                "owner. Missing setup or cleanup evidence is unknown."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"\bopen\s*\(", r"Path\s*\(",
@@ -225,13 +238,16 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         evidence="Cite clients, targets, and denial/fake boundary.",
         recommendation="Do not require a live service for ordinary tests.",
         example="Reuse recipes/time-network.md.",
-        verification="Scoped ptest succeeds under network denial or against the declared local fake.",
+        verification=("Exercise an unexpected request through the configured "
+                      "test setup and confirm denial intercepts it while "
+                      "allowed local fake requests still work."),
         recipe="time-network",
         prompt=("Is external network denied or replaced by a declared "
-                "isolated fake? Cite clients, targets, and the denial or "
-                "fake boundary. Mark N/A only with evidence that no network "
-                "client or target exists in scope. Absence of such evidence "
-                "is unknown, never N/A."),
+                "isolated fake? Trace the active client's interception or "
+                "denial boundary through configured shared setup. An external "
+                "URL beneath a global mock is not proof of live traffic. "
+                "Missing or incomplete setup is unknown, not suite-wide "
+                "satisfaction."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR, _MANIFEST,
                        _PTEST_TOML),
         text_patterns=(r"https?://",
@@ -252,10 +268,11 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         example="Reuse recipes/processes.md.",
         verification="Cancellation leaves no owned descendant and does not affect a neighbor process.",
         recipe="processes",
-        prompt=("Do child processes stay owned, joined, cancelled, and "
-                "reaped? Cite spawn and teardown paths. Mark N/A only with "
-                "evidence that no child process is spawned in scope. Absence "
-                "of such evidence is unknown, never N/A."),
+        prompt=("Do test-created child processes stay owned, joined, "
+                "cancelled, and reaped? Trace an actual spawn to wait, cancel, "
+                "and reap paths. Runner/provider worker declarations alone "
+                "do not prove an orphan test process. Missing lifecycle "
+                "evidence is unknown."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"subprocess|asyncio\.create_subprocess|Popen"
@@ -276,10 +293,12 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         example="Reuse recipes/time-network.md.",
         verification="Scoped ptest repeats without wall-clock waiting or race-dependent outcome.",
         recipe="time-network",
-        prompt=("Are clocks and synchronization deterministic? Cite clock "
-                "injection and barriers. Mark N/A only with evidence that no "
-                "clock read, sleep, or synchronization exists in scope. "
-                "Absence of such evidence is unknown, never N/A."),
+        prompt=("Are clocks and synchronization deterministic? Determine "
+                "whether a wall-clock delay or read controls an assertion or "
+                "synchronization, and whether fake timers or shared setup "
+                "intercept it. A sleep-like name alone is not a gap. Cite the "
+                "clock use, synchronization role, and any counterevidence; "
+                "missing setup is unknown."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"(?i)sleep|monotonic|datetime|timezone|freeze_time"
                        r"|freezegun|deadline|timeout|clock",),

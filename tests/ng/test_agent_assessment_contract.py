@@ -784,10 +784,12 @@ def test_deterministic_gap_and_satisfied_rows_validate(tmp_path):
     answers = {
         "SELECT-001": DI.DeterministicAnswer(
             item_id="SELECT-001", status="gap",
-            reason="selection is disabled in .ptest.toml",
+            reason=("automatic changed-input selection is disabled in "
+                    ".ptest.toml; explicit file/path scopes still work"),
             evidence_paths=(".ptest.toml",),
-            finding_summary=("Selection is disabled in .ptest.toml, so every "
-                             "run executes the full suite."),
+            finding_summary=("Automatic changed-input selection is disabled "
+                             "in .ptest.toml; explicit file/path scopes "
+                             "still work."),
             finding_change=("Enable selection with closed inputs, input "
                             "roots, and full triggers in .ptest.toml.")),
         "TIMING-001": DI.DeterministicAnswer(

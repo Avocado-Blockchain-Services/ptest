@@ -1,0 +1,2 @@
+def make_db():
+    return {"rows": []}

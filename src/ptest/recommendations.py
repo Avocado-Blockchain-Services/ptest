@@ -51,9 +51,10 @@ identity is NOT source identity.
 Durability: the temp-write/fchmod/fsync/atomic-replace/parent-sync
 contract is enforced; a parent-directory fsync failure fails closed
 (``state-unavailable``) after a best-effort restore of the prior
-complete report. Scope text is allowlist-validated so the deterministic
-root-based ``ptest <scope>`` template, table cell, and heading cannot be
-altered by model input. Lock acquisition never silently degrades: an
+complete report. Displayed scope is allowlist-validated. Verification argv
+comes from private CLI routing context checked by ptest's dispatcher; without
+it, the report uses root ``ptest --full``. Model input cannot select a
+command. Lock acquisition never silently degrades: an
 unavailable lock path or lock open fails closed with
 ``coordinator-unavailable``/``report-conflict`` and no publication.
 
@@ -136,63 +137,6 @@ FOOTER = (
     "> source, implement only recommendations you approve, record the actual ptest\n"
     "> command/cwd/exit/output for each verification, and finish with `ptest --full`.\n"
 )
-
-# Regression sketches keyed by checklist family. Ordinary test code only;
-# never shell. Each must fail before the repair and pass after.
-_REGRESSION_SKETCH = {
-    "FIX": (
-        "Adapt the fixture/factory paths to the cited files. This test must "
-        "fail before the repair and pass after:\n"
-        "```python\n"
-        "def test_factory_records_keep_assertions_owned():\n"
-        "    first = make_record()  # cited factory\n"
-        "    second = make_record()  # must be independent, not shared state\n"
-        "    assert first is not second\n"
-        "    assert first.payload == second.payload\n"
-        "```"
-    ),
-    "DB": (
-        "Adapt the database/schema names to the cited files. This test must "
-        "fail before the repair and pass after:\n"
-        "```python\n"
-        "def test_teardown_preserves_neighbor_sentinel_owned_db():\n"
-        "    mine = create_owned_database()  # run/worker-owned name\n"
-        "    neighbor = create_sentinel_database()  # another owner, must survive\n"
-        "    teardown_owned_database(mine)  # must remove only owned names\n"
-        "    assert sentinel_database_exists(neighbor)\n"
-        "```"
-    ),
-    "CACHE": (
-        "Adapt the key prefix to the cited files. This test must fail before "
-        "the repair and pass after:\n"
-        "```python\n"
-        "def test_cache_cleanup_preserves_neighbor_sentinel_owned():\n"
-        "    write_owned_key(\"run/<run-id>/probe\", b\"1\")\n"
-        "    write_sentinel_key(\"run/neighbor/probe\", b\"1\")  # must survive\n"
-        "    cleanup_owned_keys(\"run/<run-id>/\")  # never a global flush\n"
-        "    assert read_sentinel_key(\"run/neighbor/probe\") == b\"1\"\n"
-        "```"
-    ),
-    "RESOURCE": (
-        "Adapt the temp-root/port allocation to the cited files. This test "
-        "must fail before the repair and pass after:\n"
-        "```python\n"
-        "def test_writable_targets_are_owned_and_released():\n"
-        "    first = allocate_owned_scratch()  # run/worker temp root\n"
-        "    neighbor = allocate_sentinel_scratch()  # must survive release\n"
-        "    release_owned_scratch(first)  # must remove only owned paths\n"
-        "    assert sentinel_scratch_exists(neighbor)\n"
-        "```"
-    ),
-    "OTHER": (
-        "Adapt the cited files. This test must fail before the repair and "
-        "pass after:\n"
-        "```python\n"
-        "def test_reviewed_behavior_holds_owned():\n"
-        "    assert observed_behavior_matches_cited_evidence()\n"
-        "```"
-    ),
-}
 
 _SENTINEL_FAMILIES = ("DB", "CACHE", "RESOURCE")
 
@@ -597,15 +541,16 @@ def _parallel_safety_heading() -> str:
             "verdict.\n")
 
 
-def _verify_block(scope: str, root_label: str) -> str:
-    # ``scope`` arrives validated via _check_scope; rendering quotes and
-    # escapes deterministically so the root-based argv cannot be altered
-    # by model input. The argv is shown on its own indented code line
-    # (never inside a backtick span) so doctor-safe scopes carrying
-    # backticks cannot terminate Markdown inline code.
-    argv = _shell_scope(scope)
-    scope_note = ("repository root scope" if scope == "."
-                  else f"scope {_md_scope(scope)}")
+def _verify_block(root_label: str, verification_scope: str | None) -> str:
+    # ``verification_scope`` is private routing context supplied only after
+    # CLI validation. Display scope alone never authorizes a command.
+    argv = ("ptest --full" if verification_scope is None
+            else _shell_scope(verification_scope))
+    if verification_scope is None:
+        scope_note = "repository root full suite (no safe narrower route)"
+    else:
+        scope_note = ("repository root scope" if verification_scope == "."
+                      else f"scope {_md_scope(verification_scope)}")
     return (
         f"Verify with ptest only (deterministic, root-based; never a "
         f"model-provided shell command):\n"
@@ -630,15 +575,6 @@ def _recipe_line(recipe_id: str | None) -> str:
                 "recipe; follow the specific change below).")
     return (f"Canonical recipe: `recipes/{recipe_id}.md` (packaged with "
             f"ptest; reuse it, do not invent tooling).")
-
-
-def _sketch_for(row_id: str) -> str:
-    family = row_id.split("-", 1)[0] if "-" in row_id else "OTHER"
-    if family in ("DB", "CACHE", "RESOURCE"):
-        return _REGRESSION_SKETCH[family]
-    if family == "FIX":
-        return _REGRESSION_SKETCH["FIX"]
-    return _REGRESSION_SKETCH["OTHER"]
 
 
 def _item_heading(row: dict) -> str:
@@ -675,6 +611,7 @@ def _status_section(row: dict) -> str:
     """Compact report section for one non-gap row."""
     status = row["status"]
     rationale = row["rationale"]
+    reason, by_ptest = _strip_answer_prefix(rationale)
     lines = [_item_heading(row), ""]
     dropped = _dropped_line(row)
     if dropped is not None:
@@ -684,14 +621,10 @@ def _status_section(row: dict) -> str:
         lines.append("Status: satisfied.")
         lines.append("")
     elif status == "unknown":
-        reason, by_ptest = _strip_answer_prefix(rationale)
         lines.append("Status: unknown.")
         lines.append("")
         lines.append(f"Reason: {reason}")
         lines.append("")
-        if by_ptest:
-            lines.append("(answered by ptest without a model call)")
-            lines.append("")
     elif rationale.startswith(SKIP_PREFIX):
         reason = rationale[len(SKIP_PREFIX):]
         lines.append("Status: not applicable (skipped without a model call).")
@@ -699,17 +632,28 @@ def _status_section(row: dict) -> str:
         lines.append(f"Reason: {reason}")
         lines.append("")
     elif rationale.startswith(PTEST_ANSWER_PREFIX):
-        reason = rationale[len(PTEST_ANSWER_PREFIX):]
         lines.append("Status: not applicable.")
         lines.append("")
         lines.append(f"Reason: {reason}")
-        lines.append("")
-        lines.append("(answered by ptest without a model call)")
         lines.append("")
     else:
         lines.append("Status: not applicable.")
         lines.append("")
         lines.append(f"Rationale: {rationale}")
+        lines.append("")
+    if by_ptest:
+        lines.append("Source: ptest configuration/history fact "
+                     "(not execution proof).")
+        lines.append("")
+    elif rationale.startswith(SKIP_PREFIX):
+        lines.append("Source: ptest dependency fact (not execution proof).")
+        lines.append("")
+    elif rationale.startswith(FAILED_PREFIX):
+        lines.append("Source: provider response unavailable; no review "
+                     "conclusion was produced.")
+        lines.append("")
+    else:
+        lines.append("Source: model review — not execution proof.")
         lines.append("")
     if row["evidence"]:
         lines.append("Evidence:")
@@ -717,14 +661,15 @@ def _status_section(row: dict) -> str:
         for citation in row["evidence"]:
             lines.append(f"- {_citation_text(citation)}")
         if status == "satisfied":
-            lines.append(f"- Why it matters: {rationale}")
+            lines.append(f"- Why it matters: {reason}")
         lines.append("")
     return "\n".join(lines)
 
 
-def _finding_section(row: dict, finding: dict | None, scope: str,
-                     root_label: str) -> str:
+def _finding_section(row: dict, finding: dict | None, root_label: str,
+                     verification_scope: str | None) -> str:
     row_id = row["id"]
+    rationale, by_ptest = _strip_answer_prefix(row["rationale"])
     lines = [_item_heading(row), ""]
     dropped = _dropped_line(row)
     if dropped is not None:
@@ -732,8 +677,8 @@ def _finding_section(row: dict, finding: dict | None, scope: str,
         lines.append("")
     citations = row["evidence"] if finding is None else finding["evidence"]
     if finding is None:
-        lines.append(f"Reviewer conclusion: gap recorded for `{row_id}` with "
-                     f"no reviewer finding supplied. This item is unresolved.")
+        lines.append(f"No finding was supplied for gap `{row_id}`. This item "
+                     "remains unresolved and unverified.")
         lines.append("")
         lines.append("Bounded evidence-gathering next step: re-run the "
                      "consented review for this scope so the reviewer can "
@@ -741,12 +686,13 @@ def _finding_section(row: dict, finding: dict | None, scope: str,
                      "and propose a change through the normal review flow. "
                      "Keep this item unverified until then.")
         lines.append("")
-        why = row["rationale"]
+        why = rationale if by_ptest else row["rationale"]
     else:
-        lines.append(f"Reviewer conclusion (not execution proof): "
-                     f"{finding['summary']}")
+        source = ("ptest configuration/history fact (not execution proof)"
+                  if by_ptest else "model review — not execution proof")
+        lines.append(f"{source}: {finding['summary']}")
         lines.append("")
-        why = row["rationale"]
+        why = rationale if by_ptest else row["rationale"]
     lines.append("Evidence (exact collected identity and why it matters):")
     lines.append("")
     for citation in citations:
@@ -767,11 +713,13 @@ def _finding_section(row: dict, finding: dict | None, scope: str,
                  "the full test inventory. Scoped ptest must show the same "
                  "test inventory before and after the change.")
     lines.append("")
-    lines.append(f"Regression (must fail before the repair, pass after):")
+    catalog_entry = next((entry for entry in checklist_api.CATALOG
+                          if entry.id == row_id), None)
+    if catalog_entry is not None:
+        lines.append("Verification focus (catalog; not run): "
+                     + catalog_entry.verification)
     lines.append("")
-    lines.append(_sketch_for(row_id))
-    lines.append("")
-    lines.append(_verify_block(scope, root_label))
+    lines.append(_verify_block(root_label, verification_scope))
     return "\n".join(lines)
 
 
@@ -797,8 +745,9 @@ def _sentinel_section(children: list) -> str:
                  "scoped to owned names only;")
     lines.append("- run the owned teardown/cleanup and assert the neighbor "
                  "sentinel still exists with identical bytes;")
-    lines.append("- run the checks through supported ptest "
-                 "(`ptest <scope>` per finding, then `ptest --full`).")
+    lines.append("- run the checks through supported ptest, using a validated "
+                 "root-relative path for a narrow finding or `ptest --full` "
+                 "for a whole-child finding.")
     lines.append("")
     lines.append(f"Affected criteria: {', '.join(sorted(set(wanted)))}.")
     lines.append("")
@@ -810,8 +759,15 @@ def _sentinel_section(children: list) -> str:
     return "\n".join(lines)
 
 
-def render_recommendations(run: object) -> bytes:
-    """Render the ``recommendations.md`` body (without marker) as bytes."""
+def render_recommendations(
+        run: object, *,
+        verification_scopes: tuple[str | None, ...] | None = None) -> bytes:
+    """Render the report with only caller-validated command routes.
+
+    The CLI supplies ``verification_scopes`` after checking each route
+    against the real dispatcher. Without that private routing context, the
+    report uses the safe root ``ptest --full`` command.
+    """
     if run is None or isinstance(run, (bytes, str, int, float, bool)):
         raise TypeError(
             "run must be a PublicDocument (kind agent-assessment), a mapping "
@@ -820,6 +776,17 @@ def render_recommendations(run: object) -> bytes:
     normalized = _normalize_run(run)
     provider = normalized["provider"]
     children = normalized["children"]
+    if verification_scopes is None:
+        safe_scopes = (None,) * len(children)
+    else:
+        if (not isinstance(verification_scopes, tuple)
+                or len(verification_scopes) != len(children)):
+            _fail("report-invalid",
+                  "verification routes must match the reviewed children")
+        safe_scopes = tuple(
+            None if scope is None else _check_scope(
+                scope, field="verification route")
+            for scope in verification_scopes)
     out: list[str] = []
     out.append("# Test-quality recommendations (agent-reviewed)")
     out.append("")
@@ -844,7 +811,7 @@ def render_recommendations(run: object) -> bytes:
                    f"{child['packet_sha256']} | "
                    f"{_score_text(child['rows'])} |")
     out.append("")
-    for child in children:
+    for child_index, child in enumerate(children):
         out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")
         out.extend(_fact_bullets(child))
@@ -883,8 +850,9 @@ def render_recommendations(run: object) -> bytes:
                 out.append("")
                 return
             out.append(_finding_section(
-                row, child["findings"].get(row["id"]), child["scope"],
-                root_label="repository root"))
+                row, child["findings"].get(row["id"]),
+                root_label="repository root",
+                verification_scope=safe_scopes[child_index]))
             out.append("")
 
         main = [row for row in child["rows"]
@@ -902,14 +870,14 @@ def render_recommendations(run: object) -> bytes:
             for row in safety + parallel:
                 _emit(row)
     out.append(_sentinel_section(children))
-    out.append("## Parallel permutations beyond current ptest")
+    out.append("## Root-monorepo live probe limitation")
     out.append("")
-    out.append("Worker parallelism and monorepo-root probe permutations are "
-               "unsupported: current ptest cannot execute those permutations "
-               "today. Do not invent flags for them. Harness regression: "
-               "encode the isolation property as an ordinary test and run it "
-               "through supported ptest (`ptest <scope>` for the affected "
-               "scope), then finish with the final gate below.")
+    out.append("Root-monorepo live --probe permutations are unsupported: the "
+               "root dispatcher supports static doctor review only. Do not "
+               "invent a root probe flag. Configured worker settings are "
+               "reported as ptest facts; this static review does not prove "
+               "parallel isolation. Verify ordinary tests through the "
+               "validated ptest route above, then finish with the final gate.")
     out.append("")
     out.append("## Final gate")
     out.append("")

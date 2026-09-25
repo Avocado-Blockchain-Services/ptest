@@ -1,0 +1,8 @@
+import pytest
+
+from helpers import make_db
+
+
+@pytest.fixture
+def db():
+    return make_db()

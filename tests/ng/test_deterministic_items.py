@@ -158,9 +158,13 @@ def test_selection_disabled_pytest_is_gap_with_cfg(tmp_path):
     answer = answers["SELECT-001"]
     assert answer.item_id == "SELECT-001"
     assert answer.status == "gap"
-    assert answer.reason == "selection is disabled in .ptest.toml"
+    assert answer.reason == (
+        "automatic changed-input selection is disabled in .ptest.toml; "
+        "explicit file/path scopes still work")
     assert answer.evidence_paths == (".ptest.toml",)
     assert answer.finding_summary is not None
+    assert "explicit file/path scopes still work" in answer.finding_summary
+    assert "every run executes the full suite" not in answer.finding_summary
     assert answer.finding_change is not None
     assert ".ptest.toml" in answer.finding_change
 
@@ -173,7 +177,8 @@ def test_selection_open_inputs_is_gap(tmp_path):
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
     assert answer.reason == (
-        "selection inputs are not declared closed in .ptest.toml")
+        "automatic selection falls back to the full suite because inputs "
+        "are not declared closed in .ptest.toml")
 
 
 def test_selection_enabled_without_input_roots_is_gap(tmp_path):
@@ -183,7 +188,8 @@ def test_selection_enabled_without_input_roots_is_gap(tmp_path):
     answer = answers["SELECT-001"]
     assert answer.status == "gap"
     assert answer.reason == (
-        "selection inputs are not declared closed in .ptest.toml")
+        "automatic selection falls back to the full suite because inputs "
+        "are not declared closed in .ptest.toml")
 
 
 def test_selection_closed_is_satisfied_with_counts(tmp_path):
@@ -235,8 +241,37 @@ def test_selection_gap_names_monorepo_cfg(tmp_path):
     packets = AA.build_packets(workspace, resolution, AA.EvidenceLimits())
     assert [packet.declaration for packet in packets] == ["api"]
     answers = DI.answers_for(_domain(tmp_path), resolution, packets[0])
-    assert answers["SELECT-001"].reason == (
-        "selection is disabled in api/.ptest.toml")
+    assert answers["SELECT-001"].status == "not-applicable"
+    assert "root monorepo dispatcher has no --changed selection route" \
+        in answers["SELECT-001"].reason
+    assert answers["SELECT-001"].evidence_paths == ("api/.ptest.toml",)
+
+
+def test_monorepo_selection_is_not_applicable_to_root_dispatcher(
+        tmp_path):
+    from ptest import deterministic_items as DI
+    from ptest import agent_assessment as AA
+    from ptest import config as config_api
+
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    child = tmp_path / "api"
+    child.mkdir()
+    (child / ".ptest.toml").write_text(
+        _v1_config_text(CHILD_PID, "pytest")
+        + "[selection]\nenabled = true\nclosed_inputs = true\n"
+        + 'input_roots = ["tests"]\n',
+        encoding="utf-8")
+    resolution = config_api.resolve_config(tmp_path)
+    workspace = doctor.inspect_workspace(
+        _domain(tmp_path), resolution, C.DEFAULT_SCAN_LIMITS, None)
+    packet = AA.build_packets(workspace, resolution)[0]
+
+    answer = DI.answers_for(_domain(tmp_path), resolution, packet)["SELECT-001"]
+    assert answer.status == "not-applicable"
+    assert "root monorepo dispatcher has no --changed selection route" \
+        in answer.reason
+    assert answer.evidence_paths == ("api/.ptest.toml",)
 
 
 def test_select_gap_finding_prose_is_trusted_plain_text(tmp_path):

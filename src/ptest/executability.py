@@ -18,6 +18,19 @@ from . import contracts as C
 from .adapters.pytest import reject_unowned_controls, require_python_launcher
 from .adapters.vitest import VITEST_ENTRY, VITEST_EXCLUSIVE_NOTE
 from .files import read_regular
+from .review_context import (
+    _CompiledGlob,
+    _MAX_BRACE_EXPANSIONS,
+    _VITEST_CONFIG_NAMES,
+    _compile_glob,
+    _expand_braces,
+    _glob_match,
+    _glob_to_regex,
+    _has_extglob,
+    _is_key,
+    _js_tokens,
+    _test_block_arrays,
+)
 from .runtime.pytest_bridge import (
     _COVERAGE_TUPLE,
     cluster_narrow_name, full_ini_refusal_name, full_narrowing_text,
@@ -228,28 +241,37 @@ def _toml_pytest_addopts(raw: bytes) -> tuple[str, ...]:
     return _split_addopts(section["addopts"])
 
 
-def _pytest_addopts_with_source(root: Path) -> tuple[str | None, tuple[str, ...]]:
-    """Checked-in addopts plus the deciding file (same walk as pytest).
+def _pytest_config_with_addopts(root: Path, *, read=None
+                                ) -> tuple[str | None, tuple[str, ...]]:
+    """Select the first eligible pytest config and its literal addopts.
 
-    First pytest section wins: pytest.toml, pytest.ini, pyproject, tox.ini,
-    setup.cfg. Mirrors pytest 9's ``findpaths`` order
-    (``pytest.toml``/``.pytest.toml`` first, then ``pytest.ini``/``.pytest.ini``):
-    the first file carrying pytest configuration decides the checked-in
-    addopts. The source is the filename only when that file defines a
-    nonempty addopts; otherwise None.
+    ``read`` optionally supplies a caller-owned, bounded ``(name, limit)``
+    reader. This lets review-context parsing share pytest's config selection
+    rules while charging reads to its single candidate ledger.
     """
+    def get(name: str) -> bytes | None:
+        if read is None:
+            return _read(root, name)
+        try:
+            raw = read(name, _MAX_BYTES + 1)
+        except Exception:
+            return None
+        if not isinstance(raw, bytes) or len(raw) > _MAX_BYTES:
+            return None
+        return raw
+
     for name in ("pytest.toml", ".pytest.toml"):
-        raw = _read(root, name)
+        raw = get(name)
         if raw is not None:
             tokens = _toml_pytest_addopts(raw) or ()
-            return (name if tokens else None, tokens)
+            return name, tokens
     for name, section in (("pytest.ini", "pytest"), (".pytest.ini", "pytest")):
-        raw = _read(root, name)
+        raw = get(name)
         if raw is not None:
             found = _ini_addopts(raw, section)
             if found is not None:
-                return (name if found else None, found)
-    raw = _read(root, "pyproject.toml")
+                return name, found
+    raw = get("pyproject.toml")
     if raw is not None:
         try:
             parsed = tomllib.loads(raw.decode("utf-8"))
@@ -262,22 +284,32 @@ def _pytest_addopts_with_source(root: Path) -> tuple[str | None, tuple[str, ...]
                 ini_options = section.get("ini_options", {})
                 if isinstance(ini_options, dict) and "addopts" in ini_options:
                     tokens = _split_addopts(ini_options["addopts"])
-                    return ("pyproject.toml" if tokens else None, tokens)
+                    return "pyproject.toml", tokens
                 if "addopts" in section:
                     tokens = _split_addopts(section["addopts"])
-                    return ("pyproject.toml" if tokens else None, tokens)
-                return (None, ())
-    raw = _read(root, "tox.ini")
+                    return "pyproject.toml", tokens
+                return "pyproject.toml", ()
+    raw = get("tox.ini")
     if raw is not None:
         found = _ini_addopts(raw, "pytest")
         if found is not None:
-            return ("tox.ini" if found else None, found)
-    raw = _read(root, "setup.cfg")
+            return "tox.ini", found
+    raw = get("setup.cfg")
     if raw is not None:
         found = _ini_addopts(raw, "tool:pytest")
         if found is not None:
-            return ("setup.cfg" if found else None, found)
+            return "setup.cfg", found
     return (None, ())
+
+
+def _pytest_addopts_with_source(root: Path) -> tuple[str | None, tuple[str, ...]]:
+    """Checked-in addopts plus the deciding file (same walk as pytest).
+
+    The source is named only when the selected pytest config declares
+    nonempty addopts; an empty or absent option list returns ``None``.
+    """
+    source, tokens = _pytest_config_with_addopts(root)
+    return (source if tokens else None), tokens
 
 
 def _pytest_addopts(root: Path) -> tuple[str, ...]:
@@ -884,11 +916,6 @@ _VITEST_DEFAULT_EXCLUDE = (
     "**/.{idea,git,cache,output,temp}/**",
     "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build}.config.*",
 )
-_VITEST_CONFIG_NAMES = (
-    "vitest.config.ts", "vitest.config.js", "vitest.config.mjs",
-    "vitest.config.mts", "vite.config.ts", "vite.config.js",
-    "vite.config.mjs", "vite.config.mts",
-)
 _PLAYWRIGHT_CONFIG_NAMES = (
     "playwright.config.ts", "playwright.config.js",
     "playwright.config.mjs", "playwright.config.mts",
@@ -897,163 +924,6 @@ _PLAYWRIGHT_IMPORT = "@playwright/test"
 _HEAD_BYTES = 4096
 
 
-def _js_tokens(text: str) -> list:
-    """Lex a JS/TS config into braces, strings, idents and punctuation.
-
-    Static only: nothing is executed. Comments are dropped, template
-    literals are opaque, and regex literals are skipped so a ``{`` inside
-    one cannot corrupt brace-depth tracking. Non-literal values (spreads,
-    identifiers, calls) surface as punctuation/idents and are ignored by
-    the array readers below.
-    """
-    tokens: list = []
-    i, n = 0, len(text)
-    last: tuple | None = None
-    while i < n:
-        ch = text[i]
-        if ch in " \t\r\n\v\f":
-            i += 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            end = text.find("\n", i + 2)
-            i = n if end < 0 else end + 1
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            end = text.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-        elif ch == "/" and i + 1 < n and text[i + 1] not in ("/", "*") \
-                and (last is None or last in (
-                    ("punct", "="), ("punct", "("), ("punct", ","),
-                    ("punct", ":"), ("punct", "["), ("punct", "!"),
-                    ("punct", "&"), ("punct", "|"), ("punct", "?"),
-                    ("punct", "{"))):
-            # Regex literal, not division: skip it including classes/escapes.
-            j = i + 1
-            in_class = False
-            while j < n:
-                c = text[j]
-                if c == "\\":
-                    j += 2
-                    continue
-                if c == "[":
-                    in_class = True
-                elif c == "]":
-                    in_class = False
-                elif c == "/" and not in_class:
-                    j += 1
-                    break
-                elif c == "\n":
-                    break
-                j += 1
-            i = j
-        elif ch in ("'", '"'):
-            j = i + 1
-            out: list[str] = []
-            closed = False
-            while j < n:
-                c = text[j]
-                if c == "\\" and j + 1 < n:
-                    out.append(text[j + 1])
-                    j += 2
-                    continue
-                if c == ch:
-                    closed = True
-                    j += 1
-                    break
-                if c == "\n":
-                    break
-                out.append(c)
-                j += 1
-            if closed:
-                last = ("string", "".join(out))
-                tokens.append(last)
-            i = j
-        elif ch == "`":
-            j = i + 1
-            depth = 0
-            while j < n:
-                c = text[j]
-                if c == "\\":
-                    j += 2
-                    continue
-                if c == "$" and j + 1 < n and text[j + 1] == "{":
-                    depth += 1
-                    j += 2
-                    continue
-                if c == "}" and depth:
-                    depth -= 1
-                    j += 1
-                    continue
-                if c == "`" and not depth:
-                    j += 1
-                    break
-                j += 1
-            i = j
-        elif ch in "{}[]():,=":
-            last = ("punct", ch)
-            tokens.append(last)
-            i += 1
-        elif ch.isalpha() or ch in "_$":
-            j = i + 1
-            while j < n and (text[j].isalnum() or text[j] in "_$"):
-                j += 1
-            last = ("ident", text[i:j])
-            tokens.append(last)
-            i = j
-        else:
-            i += 1
-    return tokens
-
-
-def _is_key(token: tuple, *names: str) -> bool:
-    """True for an ident or quoted-string object key with one of ``names``."""
-    return token[0] in ("ident", "string") and token[1] in names
-
-
-def _test_block_arrays(text: str) -> tuple[list[str], list[str]]:
-    """Literal ``exclude``/``include`` strings from every ``test: {...}`` block.
-
-    Only keys one level inside ``test:`` are read, so nested ``include``
-    arrays (coverage, typecheck) are ignored along with every non-literal
-    value. Keys may be quoted (``"test"``, ``'exclude'``). Unknown or
-    absent blocks yield empty lists.
-    """
-    tokens = _js_tokens(text)
-    n = len(tokens)
-    excludes: list[str] = []
-    includes: list[str] = []
-    index = 0
-    while index + 2 < n:
-        if _is_key(tokens[index], "test") \
-                and tokens[index + 1] == ("punct", ":") \
-                and tokens[index + 2] == ("punct", "{"):
-            depth = 1
-            index += 3
-            while index < n and depth > 0:
-                token = tokens[index]
-                if token == ("punct", "{"):
-                    depth += 1
-                elif token == ("punct", "}"):
-                    depth -= 1
-                elif depth == 1 and _is_key(token, "exclude", "include") \
-                        and index + 2 < n \
-                        and tokens[index + 1] == ("punct", ":") \
-                        and tokens[index + 2] == ("punct", "["):
-                    target = excludes if token[1] == "exclude" else includes
-                    brackets = 1
-                    index += 3
-                    while index < n and brackets > 0:
-                        item = tokens[index]
-                        if item == ("punct", "["):
-                            brackets += 1
-                        elif item == ("punct", "]"):
-                            brackets -= 1
-                        elif item[0] == "string" and brackets >= 1:
-                            target.append(item[1])
-                        index += 1
-                    continue
-                index += 1
-            continue
-        index += 1
-    return excludes, includes
 
 
 def _playwright_test_dir(root: Path) -> str:
@@ -1077,161 +947,6 @@ def _playwright_test_dir(root: Path) -> str:
     return "e2e"
 
 
-_EXTGLOB_MARKERS = ("?(", "*(", "+(", "@(", "!(")
-
-
-def _has_extglob(pattern: str) -> bool:
-    """True when the glob uses extglob groups vitest supports natively.
-
-    The static matcher cannot evaluate these, so the caller treats the
-    pattern as unknown: an unknown include accepts, an unknown exclude
-    is ignored.
-    """
-    return any(marker in pattern for marker in _EXTGLOB_MARKERS)
-
-
-_MAX_BRACE_EXPANSIONS = 256
-"""Cap on brace-expansion products per config glob; beyond it the glob is unknown."""
-
-
-def _expand_braces(pattern: str) -> list[str] | None:
-    """Expand every ``{a,b}`` group, including nested ones.
-
-    Unbalanced braces and singletons (``{a}``) are left literal.
-    Returns None when expansion exceeds ``_MAX_BRACE_EXPANSIONS``: the
-    glob is then unknown (an unknown include accepts, an unknown
-    exclude is ignored).
-    """
-    expanded = [pattern]
-    while True:
-        for index, item in enumerate(expanded):
-            start = item.find("{")
-            if start < 0:
-                continue
-            depth = 0
-            end = -1
-            for pos in range(start, len(item)):
-                if item[pos] == "{":
-                    depth += 1
-                elif item[pos] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = pos
-                        break
-            if end < 0:
-                continue
-            parts: list[str] = []
-            current: list[str] = []
-            nested = 0
-            for char in item[start + 1:end]:
-                if char == "{":
-                    nested += 1
-                elif char == "}":
-                    nested -= 1
-                if char == "," and nested == 0:
-                    parts.append("".join(current))
-                    current = []
-                else:
-                    current.append(char)
-            parts.append("".join(current))
-            if len(parts) == 1:
-                continue
-            expanded[index:index + 1] = [
-                item[:start] + part + item[end + 1:] for part in parts]
-            if len(expanded) > _MAX_BRACE_EXPANSIONS:
-                return None
-            break
-        else:
-            return expanded
-
-
-def _glob_to_regex(pattern: str) -> str:
-    """Translate one brace-free glob to an anchored regex.
-
-    ``**/`` is zero or more directories, ``**`` is anything, ``*`` never
-    crosses ``/``, ``?`` is one non-separator, and ``[...]`` classes pass
-    through (``[!...]`` becomes negation).
-    """
-    out: list[str] = ["^"]
-    index, end = 0, len(pattern)
-    while index < end:
-        char = pattern[index]
-        if char == "*":
-            if pattern[index:index + 3] == "**/":
-                out.append("(?:[^/]+/)*")
-                index += 3
-            elif pattern[index:index + 2] == "**":
-                out.append(".*")
-                index += 2
-            else:
-                out.append("[^/]*")
-                index += 1
-        elif char == "?":
-            out.append("[^/]")
-            index += 1
-        elif char == "[":
-            close = pattern.find("]", index + 1)
-            if close < 0:
-                out.append(re.escape(char))
-                index += 1
-            else:
-                body = pattern[index + 1:close]
-                if body.startswith("!"):
-                    body = "^" + body[1:]
-                out.append("[" + body + "]")
-                index = close + 1
-        else:
-            out.append(re.escape(char))
-            index += 1
-    out.append("$")
-    return "".join(out)
-
-
-_CompiledGlob = tuple[re.Pattern[str], ...] | None
-"""One config glob, expanded and compiled; None means unknown.
-
-Unknown covers extglob groups, brace explosions past
-``_MAX_BRACE_EXPANSIONS``, and invalid classes such as ``[z-a]``.
-"""
-
-
-def _compile_glob(pattern: str) -> _CompiledGlob:
-    """Expand and compile one config glob; None means unknown.
-
-    Unknown globs never match here; the candidate filter decides (an
-    unknown include accepts, an unknown exclude is ignored).
-    """
-    cleaned = pattern.strip().removeprefix("./")
-    if not cleaned:
-        return ()
-    expanded = _expand_braces(cleaned)
-    if expanded is None:
-        return None
-    compiled: list[re.Pattern[str]] = []
-    for item in expanded:
-        if _has_extglob(item):
-            continue
-        try:
-            compiled.append(re.compile(_glob_to_regex(item)))
-        except re.error:
-            continue
-    if not compiled:
-        return None
-    return tuple(compiled)
-
-
-def _glob_match(pattern: str, rel: str) -> bool:
-    """Match one config glob against a project-relative posix path.
-
-    Anchored, so ``e2e/**`` never matches ``src/e2e/x.spec.ts``. Unknown
-    patterns (extglob groups, brace explosions, invalid classes) never
-    match here; the candidate filter decides (unknown include accepts,
-    unknown exclude is ignored).
-    """
-    compiled = _compile_glob(pattern)
-    if compiled is None:
-        return False
-    return any(rx.match(rel) for rx in compiled)
 
 
 def _vitest_filters(

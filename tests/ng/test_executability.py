@@ -952,14 +952,16 @@ def test_glob_brace_explosion_is_unknown():
 
 
 def test_glob_brace_explosion_compiles_nothing(tmp_path, monkeypatch):
+    from ptest import review_context as RC
+
     calls: list[str] = []
-    real = E._glob_to_regex
+    real = RC._glob_to_regex
 
     def counting(pattern):
         calls.append(pattern)
         return real(pattern)
 
-    monkeypatch.setattr(E, "_glob_to_regex", counting)
+    monkeypatch.setattr(RC, "_glob_to_regex", counting)
 
     assert E._glob_match("{a,b}" * 16, "src/a.test.ts") is False
     assert calls == []
@@ -981,14 +983,16 @@ def test_vitest_globs_compiled_once_per_filters_call(tmp_path, monkeypatch):
         test_body="    include: ['src/**/*.test.ts'],\n    exclude: ['e2e/**'],")
     _vitest_unit(tmp_path, "src/a.test.ts")
 
+    from ptest import review_context as RC
+
     calls: list[str] = []
-    real = E._glob_to_regex
+    real = RC._glob_to_regex
 
     def counting(pattern):
         calls.append(pattern)
         return real(pattern)
 
-    monkeypatch.setattr(E, "_glob_to_regex", counting)
+    monkeypatch.setattr(RC, "_glob_to_regex", counting)
 
     excludes, includes, test_dir = E._vitest_filters(tmp_path)
     compiled_at_filter = len(calls)

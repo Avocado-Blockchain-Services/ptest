@@ -126,8 +126,15 @@ def _checkout_identity(config: C.Config, resolution, declaration: str):
 
 def _select_answer(config: C.Config, cfg: str,
                    evidence: tuple[str, ...], *,
-                   parallel_active: bool = False) -> DeterministicAnswer:
+                   parallel_active: bool = False,
+                   monorepo_dispatcher: bool = False) -> DeterministicAnswer:
     runner = config.runner.kind.value
+    if monorepo_dispatcher:
+        return DeterministicAnswer(
+            item_id="SELECT-001", status="not-applicable",
+            reason=("root monorepo dispatcher has no --changed selection "
+                    "route; a child policy cannot enable that route"),
+            evidence_paths=evidence)
     if runner in ("vitest", "command"):
         return DeterministicAnswer(
             item_id="SELECT-001", status="not-applicable",
@@ -138,22 +145,23 @@ def _select_answer(config: C.Config, cfg: str,
     if not policy.enabled:
         return DeterministicAnswer(
             item_id="SELECT-001", status="gap",
-            reason=f"selection is disabled in {cfg}",
+            reason=(f"automatic changed-input selection is disabled in "
+                    f"{cfg}; explicit file/path scopes still work"),
             evidence_paths=evidence,
             finding_summary=(
-                f"Selection is disabled in {cfg}, so every run executes "
-                "the full suite and scoped runs cannot narrow to changed "
-                "inputs."),
+                f"Automatic changed-input selection is disabled in {cfg}; "
+                "explicit file/path scopes still work."),
             finding_change=_select_fix(config, cfg,
                                        parallel_active=parallel_active))
     if not policy.closed_inputs or not policy.input_roots:
         return DeterministicAnswer(
             item_id="SELECT-001", status="gap",
-            reason=f"selection inputs are not declared closed in {cfg}",
+            reason=(f"automatic selection falls back to the full suite "
+                    f"because inputs are not declared closed in {cfg}"),
             evidence_paths=evidence,
             finding_summary=(
-                f"Selection inputs are not declared closed in {cfg}, so "
-                "an unknown input cannot widen to the full suite."),
+                f"Selection inputs are not declared closed in {cfg}; "
+                "automatic selection must use the full-suite fallback."),
             finding_change=_select_fix(config, cfg,
                                        parallel_active=parallel_active))
     return DeterministicAnswer(
@@ -536,7 +544,8 @@ def _answers_for(domain: C.DomainPaths, resolution: C.ConfigResolution,
                        and parallel_fact != NOT_CONFIGURED_PARALLEL)
     answers = {
         "SELECT-001": _select_answer(
-            config, cfg, evidence, parallel_active=parallel_active),
+            config, cfg, evidence, parallel_active=parallel_active,
+            monorepo_dispatcher=resolution.monorepo is not None),
         "TIMING-001": timing,
     }
     if parallel is not None:

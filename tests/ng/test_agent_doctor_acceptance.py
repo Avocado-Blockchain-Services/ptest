@@ -109,6 +109,8 @@ def _one_row_assessment(request: bytes) -> bytes:
                           "this row."),
             "evidence": [],
             "finding": None,
+            "proof": [],
+            "needs": [],
         }).encode("utf-8")
     excerpt = excerpts[0]
     citation = {
@@ -116,6 +118,7 @@ def _one_row_assessment(request: bytes) -> bytes:
         for key in ("path", "start_line", "end_line", "sha256")
     }
     is_gap = item_id == cache_id
+    quote = excerpt["text"].splitlines()[0][:512]
     return json.dumps({
         "status": "gap" if is_gap else "unknown",
         "rationale": (
@@ -125,6 +128,11 @@ def _one_row_assessment(request: bytes) -> bytes:
             "The supplied bounded evidence does not establish this criterion."
         ),
         "evidence": [citation] if is_gap else [],
+        "proof": ([{"role": "applicability", "citation_index": 0,
+                    "quote": quote},
+                   {"role": "violation", "citation_index": 0,
+                    "quote": quote}] if is_gap else []),
+        "needs": [],
         "finding": ({
             "summary": "Cache cleanup has no neighbor ownership assertion.",
             "suggested_change": (
@@ -410,18 +418,19 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     rendered = body.decode("utf-8")
     for proof in (
         "Execution verification: not run",
-        "test_cache_cleanup_preserves_neighbor_sentinel_owned",
+        "Verification focus (catalog; not run): Neighbor key survives "
+        "concurrent cleanup.",
         "cross-owner reads, overwrites, and deletes",
         "Observed command: (blank)",
         "Observed cwd: (blank)",
         "Observed exit status: (blank)",
         "Observed output: (blank)",
         "Status: unverified",
-        "ptest api",
-        "ptest web",
         "ptest --full",
     ):
         assert proof in rendered
+    assert "ptest api" not in rendered
+    assert "ptest web" not in rendered
 
     assert main((*review_argv, "--json")) == 0
     public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
@@ -435,7 +444,11 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     for child in public.data["children"]:
         assert [row["id"] for row in child["rows"]] == list(
             C.AGENT_ASSESSMENT_CHECKLIST_IDS)
-        assert child["score"] == {"satisfied": 0, "applicable": 12, "percent": 0}
+        assert child["score"] == {
+            "satisfied": 0, "applicable": 11, "percent": 0}
+        selection = next(row for row in child["rows"]
+                         if row["id"] == "SELECT-001")
+        assert selection["status"] == "not-applicable"
         assert all(row["label"] for row in child["rows"])
         assert child["execution"]["status"] in ("executable", "caveat")
     assert public.data["publication"]["path"] == "recommendations.md"

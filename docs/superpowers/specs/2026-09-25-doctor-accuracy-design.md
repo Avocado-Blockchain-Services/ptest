@@ -6,6 +6,21 @@ Base: `988616f7aef871994ecf33cc8fb41bd89b586120`. User authorized execution via 
 
 This combined spec/design and two-milestone implementation plan is the current task brief. It amends the 2026-09-23 one-call-per-item contract only for the disclosed bounded follow-up, and supersedes absence-based DB/cache N/A shortcuts. It preserves the 2026-09-25 doctor-v3 amendment: no extra consent question and no changes to --fix behavior.
 
+## User scope amendment — 2026-09-25
+
+The user rejected building an evaluator as excessive for this task. Section 4
+(Offline accuracy evaluation), evaluator/label/adjudication ownership, and all
+acceptance or measurement requirements that depend on that component are removed
+from this feature. Do not create the evaluation script, evaluator tests, saved
+model-response corpus, or label-review framework. Retain synthetic source
+fixtures that exercise the actual context/protocol regression tests.
+
+The remaining scope is runner-aware bounded evidence collection, the private
+claim/follow-up protocol and prompts, deterministic report corrections, and their
+regression/security/integration gates. No live model evaluation is performed and
+no comparative model-accuracy claim is made. This explicit user amendment takes
+precedence over evaluator references retained below from the original design.
+
 ## Outcome and decisions
 
 Make the existing cheap-model review useful by sending the runner's actual context, requiring narrower evidence-backed conclusions, and measuring errors with a small offline fixture corpus. Keep the provider, model-selection policy, execution runner, consent boundary, public assessment schema, and existing packet caps.

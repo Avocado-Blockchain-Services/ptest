@@ -32,6 +32,70 @@ def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, m
     assert calls[0][2].argv == ("tests/unit",)
 
 
+def test_report_verification_scopes_follow_dispatcher_route_validation(
+        tmp_path):
+    from ptest import config as config_api
+    from ptest import doctor
+    from ptest import monorepo
+    from ptest.cli import _recommendation_verification_scopes
+
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    child = tmp_path / "api"
+    (child / "tests" / "unit").mkdir(parents=True)
+    (child / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + "ab" * 16 + '"\n'
+        '[runner]\nkind = "command"\nlauncher = ["true"]\n',
+        encoding="utf-8")
+    resolution = config_api.resolve_config(tmp_path)
+    domain = C.DomainPaths(
+        root=tmp_path, machine_config=tmp_path / ".ptest" / "config.toml",
+        ledger=tmp_path / ".ptest" / "ledger",
+        marker=tmp_path / ".ptest" / "marker",
+        fixture=True, domain_id=None)
+
+    whole = doctor.inspect_workspace(
+        domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+    children = monorepo.preflight_children(tmp_path, resolution.monorepo)
+    with pytest.raises(C.Problem, match="name a test path inside a project"):
+        monorepo.route_scopes(("api",), children)
+    assert _recommendation_verification_scopes(whole, resolution) == (None,)
+
+    nested = doctor.inspect_workspace(
+        domain, resolution, C.DEFAULT_SCAN_LIMITS, "api/tests")
+    assert _recommendation_verification_scopes(nested, resolution) == (
+        "api/tests",)
+    assert monorepo.route_scopes(("api/tests",), children).scopes == (
+        "tests",)
+
+
+@pytest.mark.parametrize("scope", ["doctor", "--changed"])
+def test_report_standalone_route_rejects_cli_command_and_flag_tokens(
+        tmp_path, scope):
+    from ptest import config as config_api
+    from ptest import doctor
+    from ptest.cli import _recommendation_verification_scopes
+
+    (tmp_path / ".ptest.toml").write_text(
+        'version = 1\nproject_id = "' + "cd" * 16 + '"\n'
+        '[runner]\nkind = "command"\nlauncher = ["true"]\n',
+        encoding="utf-8")
+    (tmp_path / scope).mkdir()
+    resolution = config_api.resolve_config(tmp_path)
+    domain = C.DomainPaths(
+        root=tmp_path, machine_config=tmp_path / ".ptest" / "config.toml",
+        ledger=tmp_path / ".ptest" / "ledger",
+        marker=tmp_path / ".ptest" / "marker",
+        fixture=True, domain_id=None)
+    workspace = doctor.inspect_workspace(
+        domain, resolution, C.DEFAULT_SCAN_LIMITS, scope)
+
+    parsed = parse_argv((scope,))
+    assert parsed.command is not None or parsed.runner_argv != (scope,)
+    assert _recommendation_verification_scopes(workspace, resolution) == (
+        None,)
+
+
 def test_init_from_monorepo_root_creates_dispatcher_without_cd(tmp_path, monkeypatch, capsys):
     marker = tmp_path / ".git"
     marker.mkdir()
@@ -1050,7 +1114,6 @@ def test_tty_human_init_colors_banner_only_without_no_color(
 @pytest.mark.parametrize("no_color", [False, True])
 def test_hostile_repository_name_cannot_inject_terminal_structure(
         tmp_path, monkeypatch, capsys, no_color):
-    import re
     import sys
 
     root = tmp_path / "project\x1b[2J\r\nforged"
@@ -1830,7 +1893,7 @@ def _fake_cli_executable(tmp_path, monkeypatch, name="claude"):
     monkeypatch.setenv("PATH", str(executable.parent))
 
 
-def _one_row_reply(request, *, status="unknown"):
+def _one_row_reply(request, *, status="unknown", needs=()):
     """One-row per-item reply citing the item request's own subset."""
     body = json.loads(request)
     excerpts = body["excerpts"]
@@ -1841,11 +1904,27 @@ def _one_row_reply(request, *, status="unknown"):
             "path", "start_line", "end_line", "sha256")}]
     if status in ("satisfied", "gap", "not-applicable") and not evidence:
         status = "unknown"
+    proof = []
+    if evidence:
+        quote = excerpts[0]["text"].splitlines()[0][:512]
+        roles = (("applicability", "mechanism") if status == "satisfied"
+                 else ("applicability", "violation")
+                 if status == "gap"
+                 else ("applicability",)
+                 if status == "not-applicable" else ())
+        proof = [{"role": role, "citation_index": 0, "quote": quote}
+                 for role in roles]
+    finding = ({"summary": "A concrete violation is present.",
+                "suggested_change": "Keep cleanup within its owner.",
+                "evidence": evidence}
+               if status == "gap" else None)
     return json.dumps({
         "status": status,
         "rationale": "The bounded source evidence does not establish this row.",
         "evidence": evidence,
-        "finding": None,
+        "finding": finding,
+        "proof": proof,
+        "needs": list(needs),
     }).encode("utf-8")
 
 
@@ -2424,6 +2503,93 @@ def test_custom_report_conflict_preserves_user_content_after_complete_review(
 
 
 
+def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
+        inspection_project, tmp_path, monkeypatch, capsys):
+    import sys
+    from ptest import cli
+    from ptest.agent_providers import ProviderResult
+
+    _, root = inspection_project
+    for index in range(25):
+        (root / "tests" / f"test_extra_{index:02d}.py").write_text(
+            f"def test_extra_{index}():\n    assert True\n",
+            encoding="utf-8")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
+    _fake_cli_executable(tmp_path, monkeypatch)
+    _fake_qualified_profiles(monkeypatch)
+    monkeypatch.setattr(cli, "_REVIEW_TOTAL_TIMEOUT_S", 30)
+    clock = [100.0]
+    # cli and assessment share Python's time module; patch its clock once so
+    # packet collection and provider scheduling observe one deadline.
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+
+    real_build = cli.agent_assessment.build_packets
+    build_calls = []
+
+    def build_packets(*args, **kwargs):
+        build_calls.append(1)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(cli.agent_assessment, "build_packets", build_packets)
+    launch_calls = []
+    requested_ids = []
+
+    def launch_many(adapter, requests, timeout_s, *, concurrency=4,
+                    on_done=None, progress=None):
+        bodies = [json.loads(request.decode("utf-8")) for request, _ in requests]
+        phase = bodies[0]["packet"]["phase"]
+        launch_calls.append((adapter, timeout_s, concurrency, bodies))
+        results = []
+        for (request, _schema), body in zip(requests, bodies):
+            if (phase == "initial"
+                    and body["policy"]["item"]["id"] == "FIX-001"):
+                inventory = body["packet"]["omission_inventory"]
+                assert inventory
+                opaque_id = inventory[0]["id"]
+                requested_ids.append(opaque_id)
+                reply = _one_row_reply(request, status="unknown",
+                                       needs=(opaque_id,))
+            elif phase == "evidence-followup":
+                assert build_calls == [1], "follow-up must not recollect"
+                reply = _one_row_reply(request, status="satisfied")
+            else:
+                reply = _one_row_reply(request, status="unknown")
+            result = ProviderResult(
+                provider=adapter.name, ok=True, assessment=reply, error="",
+                exit_code=0, timed_out=False, cancelled=False,
+                truncated=False, pid=9000 + len(results),
+                argv=adapter.argv, scratch="/tmp/ptest-review-test")
+            results.append(result)
+            if on_done is not None:
+                on_done(len(results) - 1, result)
+        if phase == "initial":
+            clock[0] += 3.0
+        return tuple(results)
+
+    monkeypatch.setattr(cli.agent_providers, "launch_reviews", launch_many)
+    assert main(("doctor", "--reviewer", "claude", "--allow-model-review",
+                 "--review-concurrency", "2", "--json")) == 0
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.data is not None
+    rows = {row["id"]: row["status"]
+            for row in document.data["children"][0]["rows"]}
+    assert rows["FIX-001"] == "satisfied"
+    assert len(launch_calls) == 2
+    initial, followup = launch_calls
+    assert len(initial[3]) > 1
+    assert len(followup[3]) == 1
+    assert followup[3][0]["packet"]["phase"] == "evidence-followup"
+    assert requested_ids
+    assert initial[0] is followup[0]
+    assert initial[0].argv == followup[0].argv
+    assert initial[2] == followup[2] == 2
+    assert followup[1] < initial[1]
+    assert build_calls == [1, 1]
+
+
 def test_total_review_deadline_prevents_late_provider_launch(
         inspection_project, tmp_path, monkeypatch, capsys):
     import sys
@@ -2932,7 +3098,7 @@ def _native_replay_executable(bindir, name):
         "assert item_id in " + repr(list(C.AGENT_ASSESSMENT_CHECKLIST_IDS)),
         "reply = {'status': 'unknown',",
         "        'rationale': 'The bounded source evidence does not establish this row.',",
-        "        'evidence': [], 'finding': None}",
+        "        'evidence': [], 'finding': None, 'proof': [], 'needs': []}",
         "payload = json.dumps(reply)",
     ])
     if name == "claude":
@@ -2966,7 +3132,6 @@ def test_native_envelope_end_to_end_publishes_report(
     provider's native envelope; review runs non-interactively and
     writes recommendations.md.
     """
-    import re
     import sys
 
     root = tmp_path / "project"
@@ -3085,14 +3250,14 @@ def _recorded_replay_executable(bindir, name, reply):
     ("claude", "claude-e2e-raw-assessment-3.json"),
     ("codex", "codex-e2e-raw-assessment-1.json"),
 ])
-def test_recorded_round4_replies_publish_report(
+def test_recorded_round4_replies_without_private_proof_are_rejected(
         tmp_path, monkeypatch, capsys, provider, reply):
-    """End-to-end replay of both round-4 real replies publishes the report.
+    """Historical provider recordings keep their original proof provenance.
 
-    Each fake executable replays its vendored real rows one item at a
-    time (CLI per-item assembly/render path); review runs
-    non-interactively and writes recommendations.md carrying ptest's own
-    partial-evidence limitation for the root scope.
+    These real replies predate protocol v2, so replaying them through the
+    current validator must fail without publishing a report. The synthetic
+    envelope may rebind public citations to current request excerpts, but it
+    does not invent private proof or needs fields.
     """
     import re
     import sys
@@ -3110,15 +3275,12 @@ def test_recorded_round4_replies_publish_report(
     monkeypatch.setenv("PATH", str(bindir))
 
     assert main(("doctor", "--reviewer", provider,
-                 "--allow-model-review")) == 0
+                 "--allow-model-review", "--json")) == 2
 
-    capsys.readouterr()
-    report = root / "recommendations.md"
-    assert report.is_file()
-    marker, body = report.read_bytes().split(b"\n", 1)
-    assert re.fullmatch(rb"<!-- ptest-recommendations v1 sha256=[0-9a-f]{64} -->",
-                        marker) is not None
-    assert "partial-evidence" in body.decode("utf-8")
+    document = C.decode_public_document(capsys.readouterr().out)
+    assert document.data is None
+    assert document.error.code == "provider-failed"
+    assert not (root / "recommendations.md").exists()
 
 
 # ---- T6: review model flags, resolution helpers, disclosure seam ---------
@@ -3424,8 +3586,9 @@ def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
         concurrency=2, model="gpt-5.6-luna") is True
     captured = capsys.readouterr()
     assert captured.err.startswith("Model review disclosure: codex")
-    assert ("gets bounded source excerpts from project: 11 calls, "
-            "2 at a time, model gpt-5.6-luna.") in captured.err
+    assert ("gets bounded source excerpts from project: 11 initial item "
+            "calls, up to 11 evidence follow-ups, 2 at a time, model "
+            "gpt-5.6-luna.") in captured.err
 
 
 def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import types
 from pathlib import Path
@@ -333,7 +334,7 @@ def test_render_unknown_rows_report_reason_and_ptest_note():
         _run(children=[_child(rows=rows, findings=[])])).decode("utf-8")
     assert ("Reason: no timing history yet: run ptest --full once") in out
     assert "Answered by ptest" not in out
-    assert "(answered by ptest without a model call)" in out
+    assert "ptest configuration/history fact (not execution proof)" in out
 
 
 def test_render_parallel_safety_group_before_parallel_item():
@@ -378,7 +379,7 @@ def test_render_has_blank_observed_fields_and_unverified():
 def test_render_uses_only_deterministic_ptest_commands():
     from ptest.recommendations import render_recommendations
     out = render_recommendations(_run()).decode("utf-8")
-    assert "ptest child-a" in out
+    assert "ptest child-a" not in out
     assert "ptest --full" in out
     for forbidden in FORBIDDEN_COMMANDS:
         assert forbidden not in out
@@ -402,10 +403,65 @@ def test_render_preserves_assertions_coverage_inventory_clause():
     assert "inventory" in out
 
 
-def test_render_regression_must_fail_before_fix():
+def test_render_uses_catalog_verification_without_invented_test_functions():
     from ptest.recommendations import render_recommendations
+    from ptest.checklist import CATALOG
+
     out = render_recommendations(_run()).decode("utf-8").lower()
-    assert "must fail before" in out
+    assert "must fail before the repair" not in out
+    assert "def test_factory_records_keep_assertions_owned" not in out
+    verification = next(entry.verification for entry in CATALOG
+                        if entry.id == "FIX-002").lower()
+    assert "verification focus (catalog; not run):" in out
+    assert verification in out
+
+
+def test_scoped_commands_require_trusted_route_and_fall_back_to_full():
+    from ptest.recommendations import render_recommendations
+
+    whole_child = _run(children=[_child(scope="api")])
+    whole = render_recommendations(whole_child).decode("utf-8")
+    assert "ptest api" not in whole
+    assert "ptest --full" in whole
+
+    safe_scope = "api/tests/test_api.py"
+    scoped_run = _run(children=[_child(scope=safe_scope)])
+    untrusted = render_recommendations(scoped_run).decode("utf-8")
+    assert f"ptest {safe_scope}" not in untrusted
+    trusted = render_recommendations(
+        scoped_run, verification_scopes=(safe_scope,)).decode("utf-8")
+    assert f"ptest {safe_scope}" in trusted
+    command_blocks = re.findall(
+        r"(?m)^- command \([^\n]+\):\n[ \t]+([^\n]+)$", trusted)
+    assert command_blocks == [f"ptest {safe_scope}"]
+
+
+def test_report_labels_model_and_ptest_owned_deterministic_provenance():
+    from ptest.recommendations import render_recommendations
+    from ptest.agent_assessment import PTEST_ANSWER_PREFIX
+
+    rows = _mixed_rows()
+    rows = [(_row("SELECT-001", "gap",
+                   rationale=PTEST_ANSWER_PREFIX
+                   + "automatic changed-input selection is disabled",
+                   evidence=[_citation()]) if row["id"] == "SELECT-001"
+              else row) for row in rows]
+    findings = [_finding("FIX-002"), _finding(
+        "SELECT-001", summary="Selection is disabled.")]
+    out = render_recommendations(
+        _run(children=[_child(rows=rows, findings=findings)])).decode("utf-8")
+    assert "ptest configuration/history fact (not execution proof)" in out
+    assert "model review — not execution proof" in out
+    assert "Reviewer conclusion" not in out
+
+
+def test_final_gate_names_only_root_monorepo_live_probe_limit():
+    from ptest.recommendations import render_recommendations
+
+    out = render_recommendations(_run()).decode("utf-8")
+    assert "root-monorepo live --probe permutations are unsupported" in out.lower()
+    assert "Worker parallelism and monorepo-root probe permutations are " \
+        "unsupported" not in out
 
 
 def test_render_unresolved_gap_stays_unverified_with_next_step():
@@ -793,10 +849,12 @@ def test_render_rejects_scope_command_markdown_injection():
     from ptest.contracts import Problem
     # Doctor-safe scopes render quoted/escaped instead of being rejected.
     out = render_recommendations(
-        _run(children=[_child(scope="a b")])).decode("utf-8")
+        _run(children=[_child(scope="a b")]),
+        verification_scopes=("a b",)).decode("utf-8")
     assert "ptest 'a b'" in out
     out = render_recommendations(
-        _run(children=[_child(scope="a|b")])).decode("utf-8")
+        _run(children=[_child(scope="a|b")]),
+        verification_scopes=("a|b",)).decode("utf-8")
     assert "a\\|b" in out
     # Actual controls and traversal are still rejected.
     for hostile in ("a\nptest --full", "a\x00b", "../up", "/abs", "a\\b"):
@@ -897,7 +955,8 @@ def test_publish_parent_symlink_swap_fails_closed_and_preserves(
 def test_render_accepts_doctor_safe_scope_with_spaces():
     from ptest.recommendations import render_recommendations
     out = render_recommendations(
-        _run(children=[_child(scope="web app")])).decode("utf-8")
+        _run(children=[_child(scope="web app")]),
+        verification_scopes=("web app",)).decode("utf-8")
     assert "web app" in out
     assert "ptest 'web app'" in out  # deterministic shell quoting
     assert "ptest --full" in out  # final gate preserved
@@ -907,10 +966,12 @@ def test_render_scope_shell_markdown_escaping_and_control_rejection():
     from ptest.recommendations import render_recommendations
     from ptest.contracts import Problem
     out = render_recommendations(
-        _run(children=[_child(scope="a;b")])).decode("utf-8")
+        _run(children=[_child(scope="a;b")]),
+        verification_scopes=("a;b",)).decode("utf-8")
     assert "ptest 'a;b'" in out
     out = render_recommendations(
-        _run(children=[_child(scope="a|b")])).decode("utf-8")
+        _run(children=[_child(scope="a|b")]),
+        verification_scopes=("a|b",)).decode("utf-8")
     assert "a\\|b" in out  # table cell stays one column
     # Actual controls and traversal are still rejected.
     for hostile in ("a\nptest --full", "a\x00b", "a\x1bb", "../up",
@@ -1349,7 +1410,8 @@ def test_render_backtick_scope_markdown_safe_single_command():
     for scope in ("a`b", "a;b|c$d`e", "a'b\"c", "web app"):
         argv = f"ptest {shlex.quote(scope)}"
         out = render_recommendations(
-            _run(children=[_child(scope=scope)])).decode("utf-8")
+            _run(children=[_child(scope=scope)]),
+            verification_scopes=(scope,)).decode("utf-8")
         # shlex-quoted argv stays visible as one command ...
         assert argv in out
         # ... but never inside a variable backtick span ...

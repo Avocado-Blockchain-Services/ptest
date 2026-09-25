@@ -1,0 +1,3 @@
+def test_insert(db):
+    db["rows"].append(1)
+    assert db["rows"] == [1]

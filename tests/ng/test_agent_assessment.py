@@ -1243,8 +1243,8 @@ def test_build_packets_admits_manifests_then_test_config_then_tests(tmp_path):
     conftest = next(e for e in packet.excerpts
                     if e.path == "api/tests/conftest.py")
     assert (conftest.start_line, conftest.end_line) == (1, 500)
-    assert paths[:4] == ["api/.ptest.toml", "api/pyproject.toml",
-                         "api/uv.lock", "api/tests/conftest.py"]
+    assert paths[:3] == ["api/.ptest.toml", "api/pyproject.toml",
+                         "api/tests/conftest.py"]
 
     reviews = AA.plan_item_reviews(packet)
     assert [review.item_id for review in reviews] == list(EXPECTED_IDS)
@@ -1291,28 +1291,37 @@ def test_plan_item_reviews_returns_twelve_bounded_routed_reviews(tmp_path):
                 review.excerpt_paths)
 
 
-def test_plan_item_reviews_skips_fire_for_pure_library(tmp_path):
+def test_plan_item_reviews_never_skip_on_absent_evidence(tmp_path):
+    """Absence in admitted evidence never proves inapplicability.
+
+    Milestone 1 removed the absence-based DB/CACHE skips: every item
+    without a deterministic answer gets a model review, and unknown
+    (not N/A) is the honest answer when the evidence cannot decide.
+    With no admitted ``.ptest.toml`` no source is invented: the item
+    carries a missing-context reason in its private request metadata
+    instead of a fabricated citation.
+    """
+    import json
+
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
+    assert ".ptest.toml" not in [e.path for e in packet.excerpts]
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet)}
-    manifests = [e for e in packet.excerpts
-                 if e.path.rsplit("/", 1)[-1] in ("pyproject.toml",)]
-    assert manifests
-    names = ", ".join(sorted({e.path.rsplit("/", 1)[-1]
-                              for e in manifests}))
-    for item_id, noun in (("DB-001", "database"), ("DB-002", "database"),
-                          ("CACHE-001", "cache")):
+    for item_id in ("DB-001", "DB-002", "CACHE-001"):
         review = reviews[item_id]
-        assert review.request is None
-        assert review.skip_reason == (
-            AA.SKIP_PREFIX + f"no {noun} library in {names} and no {noun} "
-            "configuration or usage in the admitted evidence.")
-        assert review.skip_reason.startswith(AA.SKIP_PREFIX)
+        assert review.request is not None
+        assert review.skip_reason is None
+        assert ".ptest.toml" not in review.excerpt_paths
+        body = json.loads(review.request.decode("utf-8"))
+        offered = [e["path"] for e in body["excerpts"]]
+        assert ".ptest.toml" not in offered
+        assert body["packet"]["missing"]
 
 
-def test_plan_item_reviews_skip_rows_cite_every_manifest(tmp_path):
+def test_plan_item_reviews_absent_library_reviews_carry_config(tmp_path):
+    """Former skip rows are now ordinary reviews with runner config."""
     from ptest import agent_assessment as AA
 
     packet = _packet_for(tmp_path, {
@@ -1320,16 +1329,15 @@ def test_plan_item_reviews_skip_rows_cite_every_manifest(tmp_path):
         "uv.lock": "version = 1\n",
         "tests/test_pure.py": "def test_pure():\n    assert True\n",
     })
+    assert not any(e.path.endswith("uv.lock") for e in packet.excerpts)
     reviews = AA.plan_item_reviews(packet)
     child = AA.assemble_child(
         packet, reviews,
         tuple(None if review.request is None else _satisfied_reply(packet, review)
               for review in reviews))
-    manifest_paths = {"pyproject.toml", "uv.lock"}
     for row in child.rows:
         if row.id in ("DB-001", "DB-002", "CACHE-001"):
-            assert row.status == "not-applicable"
-            assert {cite.path for cite in row.evidence} == manifest_paths
+            assert row.status == "satisfied"
 
 
 def _db_packet(tmp_path, manifest_text, code_text):
@@ -1410,7 +1418,8 @@ def test_route_excerpts_ranks_scanner_hit_above_generic_files(tmp_path):
     assert db_isolation.request is not None
     assert len(db_isolation.excerpt_paths) <= AA.ITEM_MAX_FILES
     assert "tests/test_zz_db.py" in db_isolation.excerpt_paths
-    assert db_isolation.excerpt_paths[0] == "tests/test_zz_db.py"
+    assert all(path in [e.path for e in packet.excerpts]
+               for path in db_isolation.excerpt_paths)
 
 
 @pytest.mark.parametrize(("manifest", "dependency", "items"), [
@@ -1556,6 +1565,8 @@ def _packet_in_root(root, files):
 def _subset_citation(packet, path, start=1, end=None):
     from ptest import agent_assessment as AA
 
+    # Every cited path must be an actually admitted packet excerpt;
+    # invented sources are never citable, so no fallback is allowed.
     excerpt = next(e for e in packet.excerpts if e.path == path)
     assert isinstance(excerpt, AA.SourceExcerpt)
     return {"path": path, "start_line": start,
@@ -1577,9 +1588,38 @@ def _one_row_bytes(packet, review, *, status, paths, rationale=None,
         finding_value = {
             "summary": summary, "suggested_change": change,
             "evidence": [_subset_citation(packet, item) for item in fpaths]}
+    citation_ids = [
+        (cite["path"], cite["start_line"], cite["end_line"], cite["sha256"])
+        for cite in evidence]
+    if status == "gap" and finding_value is not None:
+        finding_ids = {
+            (cite["path"], cite["start_line"], cite["end_line"], cite["sha256"])
+            for cite in finding_value["evidence"]}
+        proof_index = next((index for index, identity in enumerate(citation_ids)
+                            if identity in finding_ids), 0)
+        roles = ("applicability", "violation")
+    elif status == "satisfied":
+        proof_index = 0
+        roles = ("applicability", "mechanism")
+    elif status == "not-applicable":
+        proof_index = 0
+        roles = ("applicability",)
+    else:
+        proof_index = 0
+        roles = ()
+    proof = []
+    if evidence and roles:
+        cite = evidence[proof_index]
+        excerpt = next(item for item in packet.excerpts
+                       if item.path == cite["path"])
+        lines = excerpt.text.splitlines() or [""]
+        line = lines[cite["start_line"] - excerpt.start_line]
+        quote = line[:512]
+        proof = [{"role": role, "citation_index": proof_index,
+                  "quote": quote} for role in roles]
     return __import__("json").dumps(
         {"status": status, "rationale": rationale, "evidence": evidence,
-         "finding": finding_value}).encode("utf-8")
+         "finding": finding_value, "proof": proof, "needs": []}).encode("utf-8")
 
 
 def _satisfied_reply(packet, review):
@@ -1635,11 +1675,12 @@ def test_assemble_child_noop_fails_without_valid_assertion(tmp_path):
     """A no-op assembler returning all-unknown must fail this test's sightline.
 
     Guards against vacuous assembly coverage: replacing the implementation
-    with ``unknown`` rows changes the asserted statuses.
+    with ``unknown`` rows changes the asserted statuses. Absence-based
+    N/A skips are gone (milestone 1), so all twelve rows are satisfied.
     """
     packet, _, child = _assembled_all_ok(_pure_library_packet(tmp_path))
-    assert any(row.status == "satisfied" for row in child.rows)
-    assert any(row.status == "not-applicable" for row in child.rows)
+    assert len(child.rows) == 12
+    assert all(row.status == "satisfied" for row in child.rows)
 
 
 def _invalid_reply_cases(packet, review):
@@ -1649,7 +1690,7 @@ def _invalid_reply_cases(packet, review):
     good_cite = _subset_citation(packet, good_path)
     bad_cite = {"path": "elsewhere/missing.py", "start_line": 1,
                 "end_line": 1, "sha256": "0" * 64}
-    return {
+    cases = {
         "not-json": b"{nope",
         "extra-key": json.dumps({"status": "satisfied", "rationale": "Rationale with enough substance here.",
                                  "evidence": [good_cite], "finding": None,
@@ -1693,6 +1734,16 @@ def _invalid_reply_cases(packet, review):
         "gap-with-string-finding": json.dumps({"status": "gap", "rationale": "A gap carrying a string finding.",
                                              "evidence": [good_cite], "finding": "fix it"}).encode(),
     }
+    # Keep these cases focused on their original malformed shape, prose, or
+    # citation. Private fields are present but deliberately empty.
+    for name, payload in tuple(cases.items()):
+        if name == "not-json":
+            continue
+        document = json.loads(payload)
+        document.setdefault("proof", [])
+        document.setdefault("needs", [])
+        cases[name] = json.dumps(document).encode()
+    return cases
 
 
 def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
@@ -1763,10 +1814,13 @@ def test_assemble_child_rejects_misaligned_and_stale_inputs(tmp_path):
         for review in reviews)
     with __import__("pytest").raises(ValueError):
         AA.assemble_child(packet, reviews, good[:-1])
-    with __import__("pytest").raises(ValueError):
-        AA.assemble_child(packet, reviews,
-                          tuple(b"{}" if reply is None else reply
-                                for reply in good))
+    bad_type = list(good)
+    for index, review in enumerate(reviews):
+        if review.request is not None:
+            bad_type[index] = 123
+            break
+    with __import__("pytest").raises(TypeError):
+        AA.assemble_child(packet, reviews, tuple(bad_type))
     other_root = tmp_path / "other"
     other_root.mkdir()
     other = _packet_in_root(other_root, {
@@ -1790,8 +1844,8 @@ def test_one_row_schema_shape_is_exact(tmp_path):
     schemas = {review.schema for review in reviews}
     assert len(schemas) == 1
     schema = json.loads(reviews[0].schema.decode("utf-8"))
-    assert set(schema["required"]) == {"status", "rationale", "evidence",
-                                       "finding"}
+    assert set(schema["required"]) == {
+        "status", "rationale", "evidence", "finding", "proof", "needs"}
 
 
 # --- T4: dependency presence facts ------------------------------------------------
@@ -1963,10 +2017,12 @@ def _check_real_reply_regression(tmp_path, fixture_name,
         review = reviews[row["id"]]
         subset_paths = set(review.excerpt_paths)
         if review.request is None:
-            # Deterministic skip replaces the model call: the assembled row
-            # is N/A even where an old full reply said unknown.
+            # Preserve the current deterministic answer. Historical model
+            # recordings are not allowed to override ptest-owned facts.
             replies.append(None)
-            expected.append("not-applicable")
+            expected.append(review.answer.status
+                            if review.answer is not None
+                            else "not-applicable")
             continue
         rebound = [_rebind_citation(cite, index, subset_paths)
                    for cite in row["evidence"]]
@@ -1976,10 +2032,14 @@ def _check_real_reply_regression(tmp_path, fixture_name,
                 "evidence": row["evidence"], "finding": None}).encode())
             expected.append("unknown")
             continue
+        # These are genuine historical provider outputs and predate the
+        # private proof protocol. Keep that provenance intact: without
+        # proof/needs fields they now degrade to unknown instead of being
+        # retroactively blessed with invented evidence.
         replies.append(json.dumps({
             "status": row["status"], "rationale": row["rationale"],
             "evidence": rebound, "finding": None}).encode())
-        expected.append(row["status"])
+        expected.append("unknown")
     if with_dependencies:
         assert all(review.request is not None
                    for review in reviews.values())
@@ -2029,7 +2089,8 @@ def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
     replies = tuple(
         json.dumps({"status": "satisfied",
                     "rationale": "Cites a file outside the routed subset.",
-                    "evidence": [stray], "finding": None}).encode()
+                    "evidence": [stray], "finding": None,
+                    "proof": [], "needs": []}).encode()
         if review.item_id == target.item_id
         else (None if review.request is None
               else _satisfied_reply(packet, review))
@@ -2054,7 +2115,8 @@ def test_chain_fake_claude_through_real_launch_review(tmp_path, monkeypatch):
     reviews = AA.plan_item_reviews(packet)
     pending = [review for review in reviews if review.request is not None]
     assert pending
-    assert any(review.request is None for review in reviews)
+    # Absence-based skips are gone (milestone 1): every item is reviewed.
+    assert all(review.request is not None for review in reviews)
 
     fake = tmp_path / "claude"
     fake.write_text(
@@ -2067,7 +2129,10 @@ def test_chain_fake_claude_through_real_launch_review(tmp_path, monkeypatch):
         "         'rationale': 'Reviewed ' + item_id + ' against the cited excerpt lines.',\n"
         "         'evidence': [{'path': first['path'], 'start_line': first['start_line'],\n"
         "                     'end_line': first['end_line'], 'sha256': first['sha256']}],\n"
-        "         'finding': None}\n"
+        "         'finding': None,\n"
+        "         'proof': [{'role': 'applicability', 'citation_index': 0, 'quote': first['text'].splitlines()[0][:512]},\n"
+        "                   {'role': 'mechanism', 'citation_index': 0, 'quote': first['text'].splitlines()[0][:512]}],\n"
+        "         'needs': []}\n"
         "envelope = {'type': 'result', 'subtype': 'success', 'is_error': False,\n"
         "            'num_turns': 1, 'permission_denials': [],\n"
         "            'result': json.dumps(reply)}\n"
@@ -2107,7 +2172,8 @@ def test_plan_and_assemble_empty_packet(tmp_path):
     assert all(review.request is not None for review in reviews)
     replies = tuple(json.dumps({
         "status": "unknown", "rationale": "No evidence was admitted.",
-        "evidence": [], "finding": None}).encode() for _ in reviews)
+        "evidence": [], "finding": None, "proof": [], "needs": []
+    }).encode() for _ in reviews)
     child = AA.assemble_child(packet, reviews, replies)
     assert [row.status for row in child.rows] == ["unknown"] * 12
     assert child.score is not None
@@ -2172,18 +2238,20 @@ def test_fence_with_prose_or_second_block_is_rejected(tmp_path):
 
 def test_fenced_reply_with_forbidden_keys_is_rejected(tmp_path):
     """A fence does not smuggle unknown fields past validation."""
+    import json
+
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    good_path = target.excerpt_paths[0]
-    cite = _subset_citation(packet, good_path)
-    payload = _fenced(json.dumps(
-        {"status": "satisfied",
-         "rationale": "Rationale with enough substance here.",
-         "evidence": [cite], "finding": None,
-         "score": 1}).encode())
+    cite = _subset_citation(packet, target.excerpt_paths[0])
+    document = json.loads(_r17_reply(
+        packet, target,
+        rationale="Rationale with enough substance here.",
+        evidence=[cite]))
+    document["score"] = 1
+    payload = _fenced(json.dumps(document).encode())
     replies = tuple(
         payload if review.item_id == target.item_id
         else (None if review.request is None
@@ -2269,8 +2337,37 @@ def test_citation_to_empty_file_excluded_at_admission(tmp_path):
 
 def _r17_reply(packet, review, *, rationale, evidence, status="satisfied",
                finding=None):
+    roles = (("applicability", "mechanism") if status == "satisfied"
+             else ("applicability", "violation") if status == "gap"
+             else ("applicability",) if status == "not-applicable" else ())
+    subset = {excerpt.path: excerpt for excerpt in packet.excerpts
+              if excerpt.path in review.excerpt_paths}
+    finding_ids = set()
+    if isinstance(finding, dict):
+        finding_ids = {(item.get("path"), item.get("start_line"),
+                        item.get("end_line"), item.get("sha256"))
+                       for item in finding.get("evidence", [])
+                       if isinstance(item, dict)}
+    proof_index = None
+    for index, cite in enumerate(evidence):
+        if not isinstance(cite, dict) or cite.get("path") not in subset:
+            continue
+        identity = (cite.get("path"), cite.get("start_line"),
+                    cite.get("end_line"), cite.get("sha256"))
+        if status != "gap" or identity in finding_ids:
+            proof_index = index
+            break
+    proof = []
+    if proof_index is not None and roles:
+        cite = evidence[proof_index]
+        excerpt = subset[cite["path"]]
+        line_index = cite["start_line"] - excerpt.start_line
+        quote = (excerpt.text.splitlines() or [""])[line_index][:512]
+        proof = [{"role": role, "citation_index": proof_index,
+                  "quote": quote} for role in roles]
     return json.dumps({"status": status, "rationale": rationale,
-                       "evidence": evidence, "finding": finding}).encode()
+                       "evidence": evidence, "finding": finding,
+                       "proof": proof, "needs": []}).encode()
 
 
 def _r17_assemble(packet, reviews, target, payload):
@@ -2362,7 +2459,7 @@ def test_mixed_citations_keep_valid_and_count_dropped(tmp_path):
         packet, reviews, target,
         _r17_reply(packet, target,
                    rationale="Kept by the one valid citation.",
-                   evidence=[stale, good, escaped, outside]))
+                   evidence=[good, stale, escaped, outside]))
     assert row.status == "satisfied"
     assert [(c.path, c.start_line, c.end_line, c.sha256)
             for c in row.evidence] == [
@@ -2483,9 +2580,12 @@ def _t4_answers():
     return {
         "SELECT-001": DI.DeterministicAnswer(
             item_id="SELECT-001", status="gap",
-            reason="selection is disabled in .ptest.toml",
+            reason=("automatic changed-input selection is disabled in "
+                    ".ptest.toml; explicit file/path scopes still work"),
             evidence_paths=(".ptest.toml",),
-            finding_summary="Selection is disabled, so scoped runs cannot narrow.",
+            finding_summary=("Automatic changed-input selection is disabled "
+                             "in .ptest.toml; explicit file/path scopes "
+                             "still work."),
             finding_change="Enable selection with closed inputs in .ptest.toml."),
         "TIMING-001": DI.DeterministicAnswer(
             item_id="TIMING-001", status="satisfied",
@@ -2548,7 +2648,9 @@ def test_assemble_child_builds_deterministic_gap_and_satisfied(tmp_path):
     gap = by_id["SELECT-001"]
     assert gap.status == "gap"
     assert gap.rationale == (
-        AA.PTEST_ANSWER_PREFIX + "selection is disabled in .ptest.toml")
+        AA.PTEST_ANSWER_PREFIX
+        + "automatic changed-input selection is disabled in .ptest.toml; "
+        "explicit file/path scopes still work")
     assert len(gap.evidence) == 1
     assert gap.evidence[0].path == ".ptest.toml"
     excerpt = next(e for e in packet.excerpts if e.path == ".ptest.toml")
@@ -2587,9 +2689,11 @@ def test_assemble_child_degrades_uncitable_answer_to_unknown(tmp_path):
     assert ".ptest.toml" not in {e.path for e in packet.excerpts}
     answers = {"SELECT-001": DI.DeterministicAnswer(
         item_id="SELECT-001", status="gap",
-        reason="selection is disabled in .ptest.toml",
+        reason=("automatic changed-input selection is disabled in "
+                ".ptest.toml; explicit file/path scopes still work"),
         evidence_paths=(".ptest.toml",),
-        finding_summary="Selection is disabled, so scoped runs cannot narrow.",
+        finding_summary=("Automatic changed-input selection is disabled in "
+                         ".ptest.toml; explicit file/path scopes still work."),
         finding_change="Enable selection with closed inputs in .ptest.toml.")}
     reviews = AA.plan_item_reviews(packet, answers=answers)
     replies = tuple(
@@ -2599,7 +2703,9 @@ def test_assemble_child_degrades_uncitable_answer_to_unknown(tmp_path):
     row = next(r for r in child.rows if r.id == "SELECT-001")
     assert row.status == "unknown"
     assert row.rationale == (
-        AA.PTEST_ANSWER_PREFIX + "selection is disabled in .ptest.toml"
+        AA.PTEST_ANSWER_PREFIX
+        + "automatic changed-input selection is disabled in .ptest.toml; "
+        "explicit file/path scopes still work"
         + " (the ptest config is not in the review evidence)")
     assert row.evidence == ()
     assert [finding.id for finding in child.findings] == []

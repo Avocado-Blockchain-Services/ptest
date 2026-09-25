@@ -41,10 +41,12 @@ import re
 import stat
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import contracts as C
+from . import review_context as RC
+from . import review_protocol as RP
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 from .deterministic_items import DeterministicAnswer
 from .checklist import SRC_DIR as _GENERIC_SRC_DIR_PATTERN
@@ -69,32 +71,6 @@ _DEFAULT_PACKET_PROMPT_BYTES = (
     MAX_PROMPT_BYTES - _REQUEST_OVERHEAD_RESERVE_BYTES)
 MAX_PAYLOAD_BYTES = 512 * 1024
 MAX_WALK_ENTRIES = 20000
-
-# Directories never descended into (doctor admission classes plus agent
-# instruction/configuration locations and ptest private runtime state).
-_EXCLUDED_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".pipeline", ".superpowers", "graphify-out",
-    ".ptest",
-    ".claude", ".agents", ".codex", ".opencode", ".gemini",
-    ".venv", "venv", "node_modules", "__pycache__",
-    "build", "dist", "target", "coverage", ".coverage",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".next",
-    ".ssh", ".aws", ".gnupg",
-})
-# Agent/pipeline artifacts that are never admitted even outside excluded
-# directories: patch files and ptest's own published report.
-_EXCLUDED_SUFFIXES = (".diff", ".patch")
-_EXCLUDED_BASENAMES = frozenset({"recommendations.md"})
-# Files never admitted at any level: agent instructions plus the private
-# credential names doctor already recognizes.
-_EXCLUDED_FILES = frozenset({
-    "AGENTS.md", "CLAUDE.md", "GEMINI.md",
-    ".npmrc", ".netrc", ".pypirc",
-})
-_PRIVATE_NAME = re.compile(
-    r"(?:^\.env(?:\.|$)|\.(?:pem|key|p12|pfx)$|^id_|"
-    r"^(?:secrets?|credentials?)(?:[._-]|$))", re.I)
-_GENERATED_NAME = re.compile(r"\.(?:min|generated)\.")
 
 # Dependency declaration/lock filenames observed statically (presence and
 # bounded text only; never installed, executed, or imported).
@@ -302,6 +278,7 @@ class SourceExcerpt:
     end_line: int
     sha256: str
     text: str
+    complete: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path",
@@ -318,6 +295,8 @@ class SourceExcerpt:
                            _check_hex(self.sha256, "excerpt.sha256", 64))
         if not isinstance(self.text, str):
             raise TypeError("excerpt.text must be str")
+        if not isinstance(self.complete, bool):
+            raise TypeError("excerpt.complete must be bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +338,7 @@ class EvidencePacket:
     truncated_count: int
     file_count: int
     byte_count: int
+    context: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "declaration",
@@ -397,6 +377,14 @@ class EvidencePacket:
                 raise TypeError(f"packet.{field} must be int")
             if value < 0:
                 raise ValueError(f"packet.{field} must be >= 0")
+        context = self.context
+        if context is None:
+            # Compatibility default: packets built before review context
+            # existed describe a runner with no collected configuration.
+            context = RC.empty_context(self.runner_kind)
+        if not isinstance(context, RC.ReviewContext):
+            raise TypeError("packet.context must be a ReviewContext")
+        object.__setattr__(self, "context", context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,11 +527,12 @@ class ChildAssessment:
 
 
 def _excluded_name(name: str) -> bool:
-    return (name in _EXCLUDED_DIRS or name in _EXCLUDED_FILES
-            or name in _EXCLUDED_BASENAMES
-            or name.endswith(_EXCLUDED_SUFFIXES)
-            or bool(_PRIVATE_NAME.search(name))
-            or bool(_GENERATED_NAME.search(name)))
+    """Compatibility wrapper for the shared collector exclusion policy."""
+    # Whole-child traversal uses the empty string as its root-scope
+    # sentinel; path-level context checks reject empty targets separately.
+    if name == "":
+        return False
+    return RC.is_excluded_name(name)
 
 
 def _review_checkpoint(deadline: float | None,
@@ -661,14 +650,16 @@ def _packet_body(declaration: str, project_id: str, scope: str,
                  excerpts: list[SourceExcerpt],
                  dependencies: tuple[DependencyFact, ...],
                  runner_kind: str, excluded: int, truncated: int,
-                 byte_count: int) -> dict:
+                 byte_count: int,
+                 context: RC.ReviewContext | None = None) -> dict:
     return {
         "declaration": declaration,
         "project_id": project_id,
         "scope": scope,
         "excerpts": [{"path": e.path, "start_line": e.start_line,
                       "end_line": e.end_line, "sha256": e.sha256,
-                      "text": e.text} for e in excerpts],
+                      "text": e.text, "complete": e.complete}
+                     for e in excerpts],
         "dependencies": [{"ecosystem": d.ecosystem, "status": d.status,
                           "ref_path": d.ref_path, "detail": d.detail}
                          for d in dependencies],
@@ -677,7 +668,20 @@ def _packet_body(declaration: str, project_id: str, scope: str,
         "truncated_count": truncated,
         "file_count": len(excerpts),
         "byte_count": byte_count,
+        "context": (RC.context_body(context)
+                    if context is not None else None),
     }
+
+
+def packet_hash(packet: EvidencePacket) -> str:
+    """Canonical SHA-256 identity of a packet, including its context."""
+    if not isinstance(packet, EvidencePacket):
+        raise TypeError("packet must be EvidencePacket")
+    return _packet_identity(_packet_body(
+        packet.declaration, packet.project_id, packet.scope,
+        list(packet.excerpts), packet.dependencies, packet.runner_kind,
+        packet.excluded_count, packet.truncated_count, packet.byte_count,
+        packet.context))
 
 
 # Project-local environment inspection bounds. Metadata is read without
@@ -973,12 +977,71 @@ def _present_on_disk(child_root: Path | None, name: str) -> bool:
     return stat.S_ISREG(stamp.st_mode)
 
 
+# Bounded probe distinguishing a present text lock (a presence fact, its
+# body never admitted) from an unreadable one. Raw lock bodies are not
+# review excerpts and must not consume setup/test evidence allowance.
+_LOCK_PROBE_LIMIT = 8192
+
+
+def _probe_lock(child_root: Path, name: str, ref: str,
+                state: _AdmissionState | None,
+                limits: EvidenceLimits | None) -> DependencyFact:
+    """Presence fact for an on-disk-but-unadmitted lock file.
+
+    Text locks stay ``locked`` facts without their bodies entering the
+    packet; binary or unreadable locks stay ``uninspectable``. The probe
+    read is debited to the shared per-child ledger when one is given.
+    """
+    raw: bytes | None = None
+    read_limit = _LOCK_PROBE_LIMIT + 1
+    if state is not None and limits is not None:
+        remaining = (limits.max_candidate_bytes_per_child
+                     - state.candidate_bytes_read)
+        if (state.candidate_files_read
+                >= limits.max_candidate_files_per_child or remaining <= 0):
+            read_limit = 0
+        else:
+            read_limit = min(read_limit, remaining)
+            # Reserve before opening: failed and partial reads still consume
+            # the shared candidate ledger conservatively.
+            state.candidate_files_read += 1
+            state.candidate_bytes_read += read_limit
+    if read_limit > 0:
+        try:
+            raw = read_regular(child_root, name, read_limit)
+        except C.Problem:
+            raw = None
+        if raw is not None and state is not None and limits is not None:
+            state.candidate_bytes_read -= read_limit - len(raw)
+            # A cap-limited prefix cannot establish that the lock is text.
+            if read_limit < _LOCK_PROBE_LIMIT + 1 and len(raw) == read_limit:
+                raw = None
+    text = raw is not None and b"\x00" not in raw
+    if text:
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = False
+    if not text:
+        return DependencyFact(
+            ecosystem=_LOCKS[name], status="uninspectable", ref_path=None,
+            detail=f"{name} is present but was not admitted to the review "
+                   "packet.")
+    return DependencyFact(
+        ecosystem=_LOCKS[name], status="locked",
+        ref_path=ref,
+        detail=f"Authoritative lock {name}; provenance lockfile, "
+               "content not admitted to the review packet.")
+
+
 def _dependency_facts(names: set[str], prefix: str,
                       scoped_paths: dict[str, str] | None = None, *,
                       child_root: Path | None = None,
                       package_json_text: str | None = None,
                       deadline: float | None = None,
-                      progress: Callable[[], None] | None = None) -> tuple:
+                      progress: Callable[[], None] | None = None,
+                      state: _AdmissionState | None = None,
+                      limits: EvidenceLimits | None = None) -> tuple:
     """Static declaration/lock facts plus safe project-local env metadata."""
     def ref_path(name: str) -> str:
         if scoped_paths is not None:
@@ -1015,17 +1078,24 @@ def _dependency_facts(names: set[str], prefix: str,
                        "content unexecuted."))
             continue
         # Only the lock the ecosystem actually uses is reported: sibling
-        # locks are never listed as missing beside the one in use. Lock
-        # admission is not disk presence: a lock on disk but outside the
-        # packet is uninspectable, and only an absent lock is missing.
+        # locks are never listed as missing beside the one in use. Raw
+        # lock bodies are never admitted as excerpts; a present text lock
+        # stays a ``locked`` presence fact (its body unadmitted), an
+        # unreadable one stays ``uninspectable``, and only an absent lock
+        # is missing. Selected-scope reviews never probe outside-scope
+        # content, so presence without admission stays uninspectable.
         on_disk = sorted(name for name, kind in _LOCKS.items()
                          if kind == want
                          and _present_on_disk(child_root, name))
         if on_disk:
-            facts.append(DependencyFact(
-                ecosystem=want, status="uninspectable", ref_path=None,
-                detail=f"{on_disk[0]} is present but was not admitted to "
-                       "the review packet."))
+            if scoped_paths is not None or child_root is None:
+                facts.append(DependencyFact(
+                    ecosystem=want, status="uninspectable", ref_path=None,
+                    detail=f"{on_disk[0]} is present but was not admitted "
+                           "to the review packet."))
+                continue
+            facts.append(_probe_lock(child_root, on_disk[0],
+                                     ref_path(on_disk[0]), state, limits))
             continue
         want_locks = [name for name, kind in _LOCKS.items()
                       if kind == want]
@@ -1201,46 +1271,70 @@ def _admit_candidate(state: _AdmissionState, child_root: Path, rel: str,
                      prefix: str, limits: EvidenceLimits,
                      max_candidate_read: int, remaining_after: int, *,
                      deadline: float | None = None,
-                     progress: Callable[[], None] | None = None) -> bool:
+                     progress: Callable[[], None] | None = None,
+                     cache: dict[str, bytes] | None = None) -> bool:
     """Admit one candidate file into the packet state.
 
     ``remaining_after`` counts the unprocessed candidates after this one and
     accounts bulk truncation when a budget is exhausted. Returns False when
-    intake must stop entirely.
+    intake must stop entirely. ``cache`` reuses bounded bytes already read
+    by context collection (already debited to the shared ledger) instead
+    of reading the file a second time.
     """
     if len(state.excerpts) >= limits.max_files_per_child:
         state.truncated += 1
         return True
-    if (state.candidate_files_read >= limits.max_candidate_files_per_child
-            or state.candidate_bytes_read >= limits.max_candidate_bytes_per_child):
-        state.truncated += remaining_after + 1
-        return False
-    read_limit = min(
-        max_candidate_read,
-        limits.max_candidate_bytes_per_child - state.candidate_bytes_read)
-    if read_limit <= 0:
-        state.truncated += remaining_after + 1
-        return False
-    state.candidate_files_read += 1
-    # Reserve the maximum this bounded read could consume. If the read
-    # raises after a partial OS read, the reservation remains conservative.
-    state.candidate_bytes_read += read_limit
-    try:
-        # The shared no-follow reader is byte-bounded to one excerpt plus
-        # one sentinel byte. Check immediately around its bounded read;
-        # individual OS read calls cannot be interrupted by this layer.
-        raw = read_regular(child_root, rel, read_limit)
-    except C.Problem:
+    cached = cache.get(rel) if cache is not None else None
+    # Reuse context bytes already within the current read bound: the
+    # context reader debited them once, so admission must not charge or
+    # re-read them. A limit-sized entry behaves exactly like a fresh
+    # bound-sized read of the same bytes (truncation accounting below
+    # still applies); smaller entries are provably complete.
+    from_cache = cached is not None and len(cached) <= max_candidate_read
+    if from_cache:
+        # Context collection already read (and debited) these bounded
+        # bytes; reuse them without a second ledger charge.
+        raw = cached
         _review_checkpoint(deadline, progress)
-        state.skipped += 1
-        return True
-    state.candidate_bytes_read -= read_limit - len(raw)
+    else:
+        if (state.candidate_files_read
+                >= limits.max_candidate_files_per_child
+                or state.candidate_bytes_read
+                >= limits.max_candidate_bytes_per_child):
+            state.truncated += 1
+            return True
+        read_limit = min(
+            max_candidate_read,
+            limits.max_candidate_bytes_per_child - state.candidate_bytes_read)
+        if read_limit <= 0:
+            state.truncated += 1
+            return True
+        state.candidate_files_read += 1
+        # Reserve the maximum this bounded read could consume. If the read
+        # raises after a partial OS read, the reservation remains
+        # conservative.
+        state.candidate_bytes_read += read_limit
+        try:
+            # The shared no-follow reader is byte-bounded to one excerpt
+            # plus one sentinel byte. Check immediately around its bounded
+            # read; individual OS read calls cannot be interrupted by this
+            # layer.
+            raw = read_regular(child_root, rel, read_limit)
+        except C.Problem:
+            _review_checkpoint(deadline, progress)
+            state.skipped += 1
+            return True
+        state.candidate_bytes_read -= read_limit - len(raw)
+        # Cached context bytes keep the ledger charge context collection
+        # already debited; only fresh reads settle a reservation here.
     _review_checkpoint(deadline, progress)
     # A candidate-budget-limited read may be a valid prefix. Do not admit
     # it as a complete excerpt; mark this file and the unread tail partial.
-    if read_limit < max_candidate_read and len(raw) == read_limit:
-        state.truncated += remaining_after + 1
-        return False
+    # (Complete cached bytes are never a budget-limited prefix.)
+    if not from_cache and read_limit < max_candidate_read \
+            and len(raw) == read_limit:
+        state.truncated += 1
+        return True
     chunk, was_cut = _truncate_to_valid_utf8(
         raw, limits.max_bytes_per_file)
     if was_cut and raw and not chunk:
@@ -1270,13 +1364,293 @@ def _admit_candidate(state: _AdmissionState, child_root: Path, rel: str,
     excerpt = SourceExcerpt(
         path=excerpt_path, start_line=1,
         end_line=len(lines),
-        sha256=hashlib.sha256(chunk).hexdigest(), text=text)
+        sha256=hashlib.sha256(chunk).hexdigest(), text=text,
+        complete=not was_cut)
     state.excerpts.append(excerpt)
     state.paths.setdefault(rel.rsplit("/", 1)[-1], excerpt_path)
     state.byte_count += len(chunk)
     if _admission_tier(rel) == 2:
         state.tier2_texts[rel] = text
     return True
+
+
+# Root-level runner configuration and dependency declaration basenames:
+# the child ``.ptest.toml``, the effective pytest configuration sources,
+# and small dependency declarations come first so the file cap can never
+# starve configured context.
+_RUNNER_CONFIG_BASENAMES = frozenset({
+    "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini",
+    "pyproject.toml", "tox.ini", "setup.cfg",
+})
+_DECLARATION_BASENAMES = frozenset({
+    "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
+})
+_CONTEXT_PRIORITY_ROLES = frozenset({"config", "setup", "fixture", "helper"})
+
+
+def _context_priority(rel: str, role_of: dict,
+                      linked: set[str]) -> int:
+    """Admission priority: config first, then closure, tests, the rest."""
+    base = rel.rsplit("/", 1)[-1]
+    if "/" not in rel and (
+            rel == ".ptest.toml"
+            or base in _RUNNER_CONFIG_BASENAMES
+            or base in _DECLARATION_BASENAMES
+            or fnmatch.fnmatchcase(base, "requirements*.txt")):
+        return 0
+    if (role_of.get(rel) in _CONTEXT_PRIORITY_ROLES
+            or base == "conftest.py" or rel in linked):
+        return 1
+    if _admission_tier(rel) == 2:
+        return 2
+    return 3
+
+
+def _regular_no_follow(root: Path, rel: str) -> bool:
+    """True for a regular non-symlink file below ``root`` (lstat only)."""
+    try:
+        stamp = os.lstat(root / rel)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode)
+
+
+def _collect_packet_context(*, child_root: Path, scan_start: str,
+                            runner_kind: str, runner_args: tuple,
+                            runner_full_args: tuple,
+                            test_roots: tuple, regular: list,
+                            state: _AdmissionState, limits: EvidenceLimits,
+                            max_candidate_read: int,
+                            cache: dict[str, bytes],
+                            deadline: float | None,
+                            progress: Callable[[], None] | None
+                            ) -> RC.ReviewContext:
+    """Collect bounded runner context on the shared per-child ledger.
+
+    Every parser and relation-discovery read goes through ``reader`` and
+    is debited to ``state``; admitted files later reuse the cached bytes
+    instead of reading twice.
+    """
+    def reader(rel: str, limit: int) -> bytes:
+        _review_checkpoint(deadline, progress)
+        if RC.is_excluded_path(rel):
+            raise MemoryError("excluded context path")
+        cached = cache.get(rel)
+        if cached is not None:
+            return cached
+        # The bounded walker already supplies the regular, in-scope file
+        # inventory. Reject missing imports before reserving/opening so a
+        # forest of unresolved module candidates cannot consume byte budget.
+        if rel not in available_regular:
+            raise FileNotFoundError(rel)
+        if (state.candidate_files_read
+                >= limits.max_candidate_files_per_child
+                or state.candidate_bytes_read
+                >= limits.max_candidate_bytes_per_child):
+            raise MemoryError("candidate budget exhausted")
+        remaining = (limits.max_candidate_bytes_per_child
+                     - state.candidate_bytes_read)
+        requested = min(limit, max_candidate_read, remaining)
+        if requested <= 0:
+            raise MemoryError("candidate byte budget exhausted")
+        state.candidate_files_read += 1
+        state.candidate_bytes_read += requested
+        raw = read_regular(child_root, rel, requested)
+        state.candidate_bytes_read -= requested - len(raw)
+        if requested < min(limit, max_candidate_read) and len(raw) == requested:
+            raise MemoryError("candidate byte budget exhausted")
+        _review_checkpoint(deadline, progress)
+        cache[rel] = raw
+        return raw
+
+    rels = {rel for rel, _size in regular}
+    available_regular = rels
+    # Pay once for the highest-priority child facts before graph traversal;
+    # admission can later reuse these same bounded bytes even if import
+    # closure reaches the candidate cap.
+    priority = [".ptest.toml"]
+    priority.extend(sorted(rel for rel in rels if "/" not in rel and (
+        rel in RC._VITEST_CONFIG_NAMES
+        or rel in _RUNNER_CONFIG_BASENAMES
+        or rel in _DECLARATION_BASENAMES
+        or fnmatch.fnmatchcase(rel, "requirements*.txt"))))
+    for rel in dict.fromkeys(priority):
+        if rel in rels:
+            try:
+                reader(rel, max_candidate_read)
+            except (C.Problem, FileNotFoundError, MemoryError):
+                # The normal parser reports uncollected/partial context. A
+                # failed bounded prewarm retains its conservative debit.
+                continue
+    # Seeds trace fixture/import links from a bounded sample of tests;
+    # unbounded seeding would burn the shared candidate budget that
+    # admission still needs.
+    seeds = tuple(sorted(rel for rel in rels
+                         if _admission_tier(rel) == 2)[:RC.CONTEXT_MAX_FILES])
+    if runner_kind == "vitest":
+        configs = {rel for rel in rels
+                   if "/" not in rel
+                   and rel in RC._VITEST_CONFIG_NAMES}
+        context = RC.collect_vitest_context(
+            child_root, scan_start, tuple(runner_args), reader, configs,
+            seeds, tuple(test_roots),
+            full_argv=RC.effective_argv(tuple(runner_args),
+                                        tuple(runner_full_args)))
+        if scan_start:
+            missing = list(context.missing)
+            seen = set(missing)
+            for name in RC._VITEST_CONFIG_NAMES:
+                if _regular_no_follow(child_root, name):
+                    entry = (name, "outside-selected-scope")
+                    if entry not in seen \
+                            and len(missing) < RC._CONTEXT_MISSING_CAP:
+                        seen.add(entry)
+                        missing.append(entry)
+            if len(missing) != len(context.missing):
+                context = RC.replace(context, missing=tuple(missing))
+    elif runner_kind == "pytest":
+        configs = {rel for rel in rels
+                   if rel.rsplit("/", 1)[-1] in _RUNNER_CONFIG_BASENAMES
+                   or rel.rsplit("/", 1)[-1] == "conftest.py"}
+        context = RC.collect_pytest_context(
+            child_root, scan_start, reader, configs, seeds,
+            tuple(test_roots))
+        if scan_start:
+            # Ancestor setup is outside the selected scope: record its
+            # presence (lstat only, never read) instead of collecting it.
+            missing = list(context.missing)
+            seen = set(missing)
+            parts = scan_start.split("/")
+            for depth in range(len(parts) - 1, -1, -1):
+                ancestor = "/".join(parts[:depth])
+                rel = (f"{ancestor}/conftest.py" if ancestor
+                       else "conftest.py")
+                if _regular_no_follow(child_root, rel):
+                    entry = (rel, "outside-selected-scope")
+                    if entry not in seen \
+                            and len(missing) < RC._CONTEXT_MISSING_CAP:
+                        seen.add(entry)
+                        missing.append(entry)
+            if len(missing) != len(context.missing):
+                context = RC.replace(context, missing=tuple(missing))
+    else:
+        context = RC.empty_context(runner_kind)
+    return context
+
+
+def _profile_label(profile: tuple[str, ...]) -> str:
+    """Per-profile membership label: ``excluded`` only when provable.
+
+    A resolved profile without positional filters excludes a
+    pattern-matched path; positional filters and unsupported or ambiguous
+    argv keep membership unresolved (never conclusively excluded).
+    """
+    if RC.argv_membership_status(profile) != "resolved":
+        return "unknown"
+    if any(not token.startswith("-") and token != "run"
+           for token in profile):
+        return "unknown"
+    return "excluded"
+
+
+def _conclusive_suite_skips(*, runner_kind: str, context: RC.ReviewContext,
+                            rels: set[str], role_of: dict,
+                            linked: set[str], runner_args: tuple,
+                            runner_full_args: tuple) -> set[str]:
+    """Child-relative test files conclusively excluded from the suite.
+
+    Only literal, resolved configuration excludes: unknown or partial
+    configuration never proves exclusion, and helpers linked by active
+    tests stay admissible even under an excluded directory.
+
+    Exclusion authority belongs to the selected configuration parse,
+    not to the whole traversal closure: seed reads that hit caps leave
+    explicit missing reasons but do not poison the literal exclude
+    patterns already parsed from the admitted config. Only a
+    config-attributed parse/selection failure (dynamic, ambiguous,
+    unreadable, or out-of-scope configuration) withholds exclusion.
+    """
+    if runner_kind not in ("vitest", "pytest"):
+        return set()
+    if context.config_status == "unavailable":
+        return set()
+    if runner_kind == "vitest" and context.suite_profiles:
+        def excluded_in_profile(rel: str, profile) -> bool:
+            return (profile.status == "resolved"
+                    and any(RC._glob_match(pattern, rel)
+                            for pattern in profile.excludes))
+
+        skipped: set[str] = set()
+        for rel in rels:
+            if _admission_tier(rel) != 2 or rel in linked \
+                    or role_of.get(rel) in _CONTEXT_PRIORITY_ROLES:
+                continue
+            if not all(excluded_in_profile(rel, profile)
+                       for profile in context.suite_profiles):
+                continue
+            if all(RC.argv_membership_status(profile_argv) == "resolved"
+                   for profile_argv in (
+                       RC.effective_argv(tuple(runner_args), ()),
+                       RC.effective_argv(tuple(runner_args),
+                                         tuple(runner_full_args)))):
+                skipped.add(rel)
+        return skipped
+    authoritative = set(context.config_paths) | {"config"}
+    if any(path in authoritative and reason in (
+            "dynamic-config", "ambiguous-config", "read-limit",
+            "depth-limit", "unresolved-import", "not-collected",
+            "outside-selected-scope", "unsupported-argv")
+           for path, reason in context.missing):
+        return set()
+    patterns = [entry for entry in context.known_excluded]
+    if runner_kind == "vitest":
+        def matches(rel: str) -> bool:
+            return any(RC._glob_match(pattern, rel)
+                       for pattern in patterns)
+    else:
+        def matches(rel: str) -> bool:
+            for pattern in patterns:
+                stripped = pattern.rstrip("/")
+                if rel == stripped \
+                        or rel.startswith(stripped + "/") \
+                        or RC._glob_match(pattern, rel):
+                    return True
+            return False
+
+    scoped = RC.effective_argv(tuple(runner_args), ())
+    full = RC.effective_argv(tuple(runner_args), tuple(runner_full_args))
+    skipped: set[str] = set()
+    for rel in rels:
+        if _admission_tier(rel) != 2:
+            continue
+        if rel in linked or role_of.get(rel) in _CONTEXT_PRIORITY_ROLES:
+            continue
+        if not matches(rel):
+            continue
+        if RC.conclusively_excluded(
+                rel, (_profile_label(scoped),),
+                (_profile_label(full),)):
+            skipped.add(rel)
+    return skipped
+
+
+def runner_config_excerpt(packet: EvidencePacket) -> SourceExcerpt | None:
+    """Admitted ``.ptest.toml`` excerpt, or None when not admitted.
+
+    Only actually collected and admitted source excerpts may be offered
+    or cited. When the checked-in ``.ptest.toml`` is absent, filtered,
+    or over budget, callers must expose a missing-context reason and
+    carry trusted effective runner facts in private request metadata;
+    they must never invent a SourceExcerpt under its file path.
+    """
+    if not isinstance(packet, EvidencePacket):
+        raise TypeError("packet must be EvidencePacket")
+    prefix = "" if packet.declaration == "." else packet.declaration + "/"
+    path = f"{prefix}.ptest.toml"
+    for excerpt in packet.excerpts:
+        if excerpt.path == path:
+            return excerpt
+    return None
 
 
 def _build_one_packet(root: Path, repo, resolution,
@@ -1303,6 +1677,13 @@ def _build_one_packet(root: Path, repo, resolution,
             regular.append((entry[1], entry[2]))
         else:
             skipped += 1
+    # Raw lockfile bodies are never review excerpts; dependency presence
+    # facts below still distinguish present locks from missing ones.
+    regular = [(rel, size) for rel, size in regular
+               if rel.rsplit("/", 1)[-1] not in _LOCKS]
+    skipped += sum(1 for entry in entries
+                   if entry[0] == "file"
+                   and entry[1].rsplit("/", 1)[-1] in _LOCKS)
     regular.sort(key=lambda item: item[0])
     _review_checkpoint(deadline, progress)
     prefix = "" if declaration == "." else declaration + "/"
@@ -1310,50 +1691,7 @@ def _build_one_packet(root: Path, repo, resolution,
     state = _AdmissionState()
     max_candidate_read = min(limits.max_bytes_per_file,
                              limits.max_bytes_per_child) + 1
-    # Admission order is (tier, path): manifests and locks first so the file
-    # cap can never starve test configuration, then test configuration
-    # before test files, then CI. Imported source (tier 4) resolves from the
-    # admitted test texts between the two phases; everything else trails.
-    early = sorted(
-        ((_admission_tier(rel), rel) for rel, _size in regular)
-    )
-    early = [item for item in early if item[0] <= 3]
-    later_all = sorted(
-        rel for rel, _size in regular
-        if _admission_tier(rel) > 3)
-    _review_checkpoint(deadline, progress)
-    early_halted = False
-    for position, (_tier, rel) in enumerate(early):
-        _review_checkpoint(deadline, progress)
-        if not _admit_candidate(
-                state, child_root, rel, prefix, limits, max_candidate_read,
-                len(early) - 1 - position + len(later_all),
-                deadline=deadline, progress=progress):
-            early_halted = True
-            later_all = []
-            break
-    _review_checkpoint(deadline, progress)
-    if not early_halted:
-        tier4 = frozenset(
-            _resolve_tier4(state.tier2_texts, set(later_all)))
-        late = sorted(
-            ((_admission_tier(rel, tier4), rel)
-             for rel in later_all))
-    else:
-        late = []
-    for position, (_tier, rel) in enumerate(late):
-        _review_checkpoint(deadline, progress)
-        if not _admit_candidate(
-                state, child_root, rel, prefix, limits, max_candidate_read,
-                len(late) - 1 - position,
-                deadline=deadline, progress=progress):
-            break
-    _review_checkpoint(deadline, progress)
-    excerpts = state.excerpts
-    paths = state.paths
-    byte_count = state.byte_count
-    truncated = state.truncated
-    skipped += state.skipped
+    cache: dict[str, bytes] = {}
 
     config = repo.config
     if declaration == "." and config is None:
@@ -1363,9 +1701,96 @@ def _build_one_packet(root: Path, repo, resolution,
     if config is not None:
         runner_kind = config.runner.kind.value
         project_id = config.project_id
+        runner_args = tuple(config.runner.args)
+        runner_full_args = tuple(config.runner.full_args)
+        test_roots = tuple(config.runner.test_roots)
     else:
         runner_kind = "unknown"
         project_id = "0" * 32
+        runner_args = ()
+        runner_full_args = ()
+        test_roots = ()
+
+    context = _collect_packet_context(
+        child_root=child_root, scan_start=scan_start,
+        runner_kind=runner_kind, runner_args=runner_args,
+        runner_full_args=runner_full_args, test_roots=test_roots,
+        regular=regular, state=state, limits=limits,
+        max_candidate_read=max_candidate_read, cache=cache,
+        deadline=deadline, progress=progress)
+    role_of = dict(context.roles)
+    linked = {target for _source, target, _kind in context.relations}
+    _review_checkpoint(deadline, progress)
+
+    # Files conclusively excluded by a resolved active-suite rule are
+    # inventoried, never admitted as ordinary active tests.
+    suite_skips = _conclusive_suite_skips(
+        runner_kind=runner_kind, context=context,
+        rels={rel for rel, _size in regular}, role_of=role_of,
+        linked=linked, runner_args=runner_args,
+        runner_full_args=runner_full_args)
+    if suite_skips:
+        skipped += len(suite_skips)
+        extra = [rel for rel in sorted(suite_skips)
+                 if rel not in context.known_excluded]
+        if extra:
+            room = RC._KNOWN_EXCLUDED_CAP - len(context.known_excluded)
+            context = RC.replace(
+                context,
+                known_excluded=tuple(context.known_excluded
+                                     + tuple(extra[:max(room, 0)])))
+    regular = [(rel, size) for rel, size in regular
+               if rel not in suite_skips]
+    _review_checkpoint(deadline, progress)
+
+    # Admission order is (context priority, tier, path): the child
+    # ``.ptest.toml``, effective runner configuration, and small
+    # dependency declarations first so the file cap can never starve
+    # configured context; configured setup/conftest/plugin/helper closure
+    # before sampled tests; everything else trails. Imported source
+    # (tier 4) additionally resolves from the admitted test texts between
+    # the two phases.
+    ordered = sorted(
+        ((_context_priority(rel, role_of, linked),
+          _admission_tier(rel), rel) for rel, _size in regular)
+    )
+    early = [item for item in ordered if item[0] <= 2]
+    later_all = [item[2] for item in ordered if item[0] > 2]
+    _review_checkpoint(deadline, progress)
+    early_halted = False
+    for position, (_priority, _tier, rel) in enumerate(early):
+        _review_checkpoint(deadline, progress)
+        if not _admit_candidate(
+                state, child_root, rel, prefix, limits, max_candidate_read,
+                len(early) - 1 - position + len(later_all),
+                deadline=deadline, progress=progress, cache=cache):
+            early_halted = True
+            later_all = []
+            break
+    _review_checkpoint(deadline, progress)
+    if not early_halted:
+        tier4 = frozenset(
+            _resolve_tier4(state.tier2_texts, set(later_all)))
+        late = sorted(
+            ((_context_priority(rel, role_of, linked),
+              _admission_tier(rel, tier4), rel)
+             for rel in later_all))
+    else:
+        late = []
+    for position, (_priority, _tier, rel) in enumerate(late):
+        _review_checkpoint(deadline, progress)
+        if not _admit_candidate(
+                state, child_root, rel, prefix, limits, max_candidate_read,
+                len(late) - 1 - position,
+                deadline=deadline, progress=progress, cache=cache):
+            break
+    _review_checkpoint(deadline, progress)
+    excerpts = state.excerpts
+    paths = state.paths
+    byte_count = state.byte_count
+    truncated = state.truncated
+    skipped += state.skipped
+
     package_json_text: str | None = None
     manifest_path = f"{prefix}package.json"
     for excerpt in excerpts:
@@ -1376,14 +1801,14 @@ def _build_one_packet(root: Path, repo, resolution,
     dependencies = _dependency_facts(
         set(paths), prefix, paths if scan_start else None,
         child_root=child_root, package_json_text=package_json_text,
-        deadline=deadline, progress=progress)
+        deadline=deadline, progress=progress, state=state, limits=limits)
     _review_checkpoint(deadline, progress)
 
     # Enforce the prompt cap by dropping trailing excerpts; coverage counts
     # stay explicit so partial evidence is visible, not silent.
     body = _packet_body(declaration, project_id, scope, excerpts,
                         dependencies, runner_kind, skipped, truncated,
-                        byte_count)
+                        byte_count, context)
     while excerpts:
         _review_checkpoint(deadline, progress)
         body_bytes = json.dumps(
@@ -1397,17 +1822,18 @@ def _build_one_packet(root: Path, repo, resolution,
         truncated += 1
         body = _packet_body(declaration, project_id, scope,
                             excerpts, dependencies, runner_kind, skipped,
-                            truncated, byte_count)
+                            truncated, byte_count, context)
         _review_checkpoint(deadline, progress)
     _review_checkpoint(deadline, progress)
-    digest = _packet_identity(body)
-    _review_checkpoint(deadline, progress)
-    return EvidencePacket(
+    packet = EvidencePacket(
         declaration=declaration, project_id=project_id, scope=scope,
-        packet_sha256=digest, excerpts=tuple(excerpts),
+        packet_sha256="0" * 64, excerpts=tuple(excerpts),
         dependencies=dependencies, runner_kind=runner_kind,
         excluded_count=skipped, truncated_count=truncated,
-        file_count=len(excerpts), byte_count=byte_count)
+        file_count=len(excerpts), byte_count=byte_count, context=context)
+    digest = packet_hash(packet)
+    _review_checkpoint(deadline, progress)
+    return replace(packet, packet_sha256=digest)
 
 
 def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
@@ -1432,6 +1858,8 @@ def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
 
 ITEM_MAX_FILES = 24
 ITEM_MAX_BYTES = 256 * 1024
+ITEM_INITIAL_MAX_FILES = 20
+ITEM_INITIAL_MAX_BYTES = 192 * 1024
 SKIP_PREFIX = "Skipped without a model call: "
 FAILED_PREFIX = "Review failed: "
 PTEST_ANSWER_PREFIX = "Answered by ptest: "
@@ -1512,8 +1940,21 @@ _ITEM_INSTRUCTION = (
     "Answer exactly one checklist item with one JSON object matching "
     "response_schema; return JSON only, with no markdown fence or "
     "surrounding prose. Judge the single item in this request against its "
-    "criterion using only the listed excerpts; cite excerpts with their "
-    "root-relative paths, line ranges, and content identities. Use "
+    "criterion using only the listed excerpts and metadata; cite excerpts "
+    "with their root-relative paths, line ranges, and content identities. "
+    "The private proof array has at most four entries; each entry names "
+    "applicability, mechanism, violation, or counterevidence, indexes one "
+    "evidence citation, and quotes an exact substring from its cited lines "
+    "of at most 512 UTF-8 bytes. Satisfied needs applicability and mechanism "
+    "proof; gap needs applicability and violation proof, and the violation "
+    "citation must also appear in finding evidence; not-applicable needs "
+    "affirmative applicability proof. Unknown may request at most four "
+    "opaque IDs from packet.omission_inventory in needs, and only when the "
+    "missing excerpt could resolve the named uncertainty. On an evidence-"
+    "followup request, needs must be empty. Do not invent IDs, paths, "
+    "quotes, or execution results. Check shared setup and counterevidence "
+    "before claiming a gap; incomplete or missing setup cannot prove a "
+    "suite-wide result. Use "
     "satisfied only with cited evidence that the criterion holds, gap only "
     "with cited evidence plus a finding, not-applicable only with a "
     "specific rationale citing affirmative excerpt evidence that the item "
@@ -1544,6 +1985,8 @@ class ItemReview:
     excerpt_paths: tuple[str, ...]
     skip_reason: str | None
     answer: object | None = None
+    followup_inventory: tuple[RP.OmittedExcerpt, ...] = ()
+    followup_phase: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id:
@@ -1574,6 +2017,14 @@ class ItemReview:
         if self.answer is not None and not isinstance(
                 self.answer, DeterministicAnswer):
             raise TypeError("review.answer must be DeterministicAnswer or None")
+        inventory = self.followup_inventory
+        if not isinstance(inventory, (tuple, list)) or any(
+                not isinstance(entry, RP.OmittedExcerpt) for entry in inventory):
+            raise TypeError(
+                "review.followup_inventory must contain omitted excerpts")
+        object.__setattr__(self, "followup_inventory", tuple(inventory))
+        if not isinstance(self.followup_phase, bool):
+            raise TypeError("review.followup_phase must be bool")
         set_count = ((self.request is not None)
                      + (self.skip_reason is not None)
                      + (self.answer is not None))
@@ -1584,7 +2035,7 @@ class ItemReview:
 
 def one_row_schema() -> bytes:
     """Return the one-row response schema bytes, identical for every item."""
-    return json.dumps(_ONE_ROW_SCHEMA_OBJECT, sort_keys=True,
+    return json.dumps(RP.private_schema(_ONE_ROW_SCHEMA_OBJECT), sort_keys=True,
                       separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
@@ -1606,37 +2057,6 @@ def _manifest_excerpts(packet: EvidencePacket) -> list[SourceExcerpt]:
             if _admission_tier(
                 _child_relative(excerpt.path, packet.declaration)) == 0
             and excerpt.path.rsplit("/", 1)[-1] != ".ptest.toml"]
-
-
-def _skip_reason(packet: EvidencePacket, entry,
-                 code_index: dict[str, frozenset]) -> str | None:
-    """Deterministic N/A rationale, or None when the item needs a call."""
-    kind = entry.skip
-    if kind is None:
-        return None
-    manifests = _manifest_excerpts(packet)
-    if not manifests:
-        return None
-    if kind == "no-database":
-        library_re, usage_re = _DB_LIBRARY_RE, _DB_USAGE_RE
-        prefix, noun = "db.", "database"
-    elif kind == "no-cache":
-        library_re, usage_re = _CACHE_LIBRARY_RE, _CACHE_USAGE_RE
-        prefix, noun = "cache.", "cache"
-    else:  # pragma: no cover - catalog skip values are closed
-        raise ValueError(f"checklist {entry.id} has an unknown skip rule")
-    if any(library_re.search(manifest.text) for manifest in manifests):
-        return None
-    if any(usage_re.search(excerpt.text) for excerpt in packet.excerpts):
-        return None
-    for excerpt in packet.excerpts:
-        if any(code.startswith(prefix)
-               for code in code_index.get(excerpt.path, ())):
-            return None
-    names = ", ".join(sorted({manifest.path.rsplit("/", 1)[-1]
-                              for manifest in manifests}))
-    return (SKIP_PREFIX + f"no {noun} library in {names} and no {noun} "
-            "configuration or usage in the admitted evidence.")
 
 
 # Broad directory patterns that admit almost every test/src file. Ranked
@@ -1689,19 +2109,58 @@ def _fixture_first_paths(routed: list[SourceExcerpt]) -> list[SourceExcerpt]:
     return first + rest
 
 
+def _mandatory_context_excerpts(
+        packet: EvidencePacket) -> list[SourceExcerpt]:
+    """Admitted runner config + setup/helper closure, in packet order.
+
+    Mandatory context is seeded before item-specific sampling so the
+    effective runner configuration and its configured setup/helper
+    closure reach every applicable item regardless of that item's regex
+    matches. Only actually admitted excerpts are seeded: the admitted
+    ``.ptest.toml``, admitted excerpts on the context's config paths
+    (the selected Vitest configuration), and admitted excerpts carrying
+    a setup/helper context role. Selected-scope reviews keep their
+    privacy boundary and seed nothing.
+    """
+    if packet.scope != packet.declaration:
+        return []
+    context = packet.context
+    if not isinstance(context, RC.ReviewContext):
+        return []
+    prefix = "" if packet.declaration == "." else packet.declaration + "/"
+    wanted = {f"{prefix}.ptest.toml"}
+    wanted.update(prefix + rel for rel in context.config_paths)
+    roles = dict(context.roles)
+    mandatory: list[SourceExcerpt] = []
+    for excerpt in packet.excerpts:
+        rel = (excerpt.path[len(prefix):]
+               if prefix and excerpt.path.startswith(prefix)
+               else excerpt.path)
+        if excerpt.path in wanted \
+                or roles.get(rel) in ("setup", "helper"):
+            mandatory.append(excerpt)
+    return mandatory
+
+
 def _route_excerpts(packet: EvidencePacket, entry,
-                    code_index: dict[str, frozenset]) -> list[SourceExcerpt]:
+                    code_index: dict[str, frozenset]
+                    ) -> tuple[list[SourceExcerpt], list[str]]:
     """Route the item's evidence subset, ranked before capping.
 
-    Eligibility is unchanged: a path-pattern, text-pattern, or scanner-code
-    hit admits the excerpt. Rank order is conftest excerpts defining a
-    fixture used by the routed tests first, then scanner-code hits, then
-    text-pattern hits, then item-specific path matches (conftest,
-    fixture/factory, db/migration/cache names, manifests, .ptest.toml),
-    then generic test/src directory matches. Packet order is kept within
-    each rank, and the ITEM_MAX_FILES / ITEM_MAX_BYTES caps apply to the
-    ranked order so key evidence cannot be starved by generic matches.
+    Mandatory admitted runner context (the admitted ``.ptest.toml``,
+    the selected Vitest configuration, and the admitted setup/helper
+    closure) is seeded first so it reaches every applicable item even
+    when the item has no path/text hit on it. Item-specific sampling
+    then fills the remaining ITEM_MAX_FILES / ITEM_MAX_BYTES budget:
+    eligibility is a path-pattern, text-pattern, or scanner-code hit,
+    ranked with fixture-defining conftests first, then scanner-code
+    hits, then text-pattern hits, then item-specific path matches, then
+    generic test/src directory matches. Packet order is kept within
+    each rank. Returns ``(chosen, omitted)`` where ``omitted`` holds
+    the paths cut by the item caps so metadata stays honest.
     """
+    mandatory = _mandatory_context_excerpts(packet)
+    mandatory_paths = {excerpt.path for excerpt in mandatory}
     specific_res = [re.compile(pattern) for pattern in entry.path_patterns
                     if pattern not in _GENERIC_PATH_PATTERN_STRINGS]
     generic_res = [re.compile(pattern) for pattern in entry.path_patterns
@@ -1710,6 +2169,8 @@ def _route_excerpts(packet: EvidencePacket, entry,
     wanted = set(entry.scanner_codes)
     ranked: list[tuple[tuple[bool, bool, bool], SourceExcerpt]] = []
     for excerpt in packet.excerpts:
+        if excerpt.path in mandatory_paths:
+            continue
         codes = set(code_index.get(excerpt.path, ()))
         scanner_hit = bool(wanted & codes)
         text_hit = any(pattern.search(excerpt.text) for pattern in text_res)
@@ -1723,27 +2184,182 @@ def _route_excerpts(packet: EvidencePacket, entry,
                        excerpt))
     # Stable sort: packet order is kept within each rank.
     ranked.sort(key=lambda item: item[0])
-    ordered = _fixture_first_paths([excerpt for _, excerpt in ranked])
+    ordered = list(mandatory)
+    ordered.extend(_closure_first_paths(
+        packet, _fixture_first_paths([excerpt for _, excerpt in ranked])))
     routed: list[SourceExcerpt] = []
     total = 0
     for excerpt in ordered:
-        if len(routed) >= ITEM_MAX_FILES:
+        if len(routed) >= ITEM_INITIAL_MAX_FILES:
             break
         size = len(excerpt.text.encode("utf-8"))
-        if total + size > ITEM_MAX_BYTES:
+        if total + size > ITEM_INITIAL_MAX_BYTES:
             continue
         routed.append(excerpt)
         total += size
-    return routed
+    chosen = {excerpt.path for excerpt in routed}
+    # The follow-up inventory may request any other already-admitted packet
+    # source, including one with no first-pass regex hit. Such omissions are
+    # explicit unknowns, never claims that a path is absent.
+    omitted = [excerpt.path for excerpt in packet.excerpts
+               if excerpt.path not in chosen]
+    return routed, omitted
+
+
+def _closure_first_paths(packet: EvidencePacket,
+                         ordered: list[SourceExcerpt]
+                         ) -> list[SourceExcerpt]:
+    """Rank configured setup/fixture/helper closure before sampled tests.
+
+    Mandatory runner context itself is seeded first by
+    :func:`_mandatory_context_excerpts`; here the admitted closure
+    (context roles plus conftest basenames, with fixture-defining
+    conftests already first) outranks generic matches in the sampled
+    tail. Stable: packet order is kept within each rank.
+    """
+    roles: dict = {}
+    context = packet.context
+    if isinstance(context, RC.ReviewContext):
+        roles = dict(context.roles)
+    prefix = "" if packet.declaration == "." else packet.declaration + "/"
+
+    def is_closure(excerpt: SourceExcerpt) -> bool:
+        path = excerpt.path
+        rel = (path[len(prefix):] if prefix and path.startswith(prefix)
+               else path)
+        return (roles.get(rel) in _CONTEXT_PRIORITY_ROLES
+                or rel.rsplit("/", 1)[-1] == "conftest.py")
+
+    return sorted(ordered, key=lambda excerpt: (not is_closure(excerpt),))
+
+
+def _omission_inventory(packet: EvidencePacket, item_id: str,
+                        omitted: list[str]) -> tuple[RP.OmittedExcerpt, ...]:
+    roles = dict(packet.context.roles) if isinstance(
+        packet.context, RC.ReviewContext) else {}
+    by_path = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    inventory = []
+    for path in omitted:
+        excerpt = by_path.get(path)
+        if excerpt is None or RC.is_excluded_path(
+                _child_relative(path, packet.declaration)):
+            continue
+        relative = _child_relative(path, packet.declaration)
+        role = roles.get(relative)
+        if role not in RC._CONTEXT_ROLES:
+            role = "test" if _admission_tier(relative) == 2 else "source"
+        inventory.append(RP.OmittedExcerpt(
+            opaque_id=RP.opaque_id(packet.packet_sha256, item_id, path,
+                                   excerpt.sha256),
+            excerpt=excerpt, role=role))
+    return tuple(inventory)
+
+
+def _item_context_metadata(
+        packet: EvidencePacket, omitted: list[str], item_id: str,
+        *, phase: str = "initial") -> dict:
+    """Private request metadata: trusted runner facts and honest omissions.
+
+    Carries the effective runner kind, config resolution status, bounded
+    missing-evidence reasons, safe suite exclusions, packet coverage
+    counts, and the item paths cut by the item caps. Omission means
+    unknown, never absence. Secret/private names never appear here:
+    every value derives from already-admitted excerpts or the context
+    inventory, both of which exclude secrets before discovery.
+    """
+    context = packet.context
+    if isinstance(context, RC.ReviewContext):
+        config_status = context.config_status
+        missing = [[path, reason] for path, reason in context.missing]
+        known_excluded = list(context.known_excluded)
+    else:
+        config_status = "unavailable"
+        missing = []
+        known_excluded = []
+    # An absent, filtered, or over-budget ``.ptest.toml`` is a
+    # missing-context reason, never an invented source: when no admitted
+    # excerpt carries its path, the request says so explicitly.
+    prefix = "" if packet.declaration == "." else packet.declaration + "/"
+    toml_path = f"{prefix}.ptest.toml"
+    if not any(excerpt.path == toml_path for excerpt in packet.excerpts) \
+            and not any(path == toml_path for path, _reason in missing):
+        if packet.scope != packet.declaration:
+            missing.append([toml_path, "outside-selected-scope"])
+        else:
+            missing.append([toml_path, "not-collected"])
+    admitted_paths = {excerpt.path for excerpt in packet.excerpts}
+    if isinstance(context, RC.ReviewContext):
+        for rel in (*context.config_paths,
+                    *(path for path, role in context.roles
+                      if role in ("setup", "fixture", "helper"))):
+            path = prefix + rel
+            if path not in admitted_paths and not any(
+                    entry[0] == path for entry in missing):
+                if len(missing) < RC._CONTEXT_MISSING_CAP:
+                    missing.append([path, "not-collected"])
+    inventory = _omission_inventory(packet, item_id, omitted)
+    return {"protocol_version": RP.PROTOCOL_VERSION,
+            "phase": phase,
+            "packet_sha256": packet.packet_sha256,
+            "scope": packet.scope,
+            "project_id": packet.project_id,
+            "declaration": packet.declaration,
+            "runner_kind": packet.runner_kind,
+            "config_status": config_status,
+            "config_paths": [
+                ("" if packet.declaration == "."
+                 else packet.declaration + "/") + path
+                for path in (context.config_paths
+                             if isinstance(context, RC.ReviewContext)
+                             else ())],
+            "active_roots": list(context.active_roots)
+            if isinstance(context, RC.ReviewContext) else [],
+            "context_roles": [
+                {"path": ("" if packet.declaration == "."
+                          else packet.declaration + "/") + path,
+                 "role": role}
+                for path, role in (context.roles
+                                   if isinstance(context, RC.ReviewContext)
+                                   else ())],
+            "relations": [list(relation)
+                          for relation in (context.relations
+                                           if isinstance(context, RC.ReviewContext)
+                                           else ())],
+            "suite_profiles": [
+                {"name": profile.name,
+                 "config_path": profile.config_path,
+                 "status": profile.status,
+                 "includes": list(profile.includes),
+                 "excludes": list(profile.excludes)}
+                for profile in (context.suite_profiles
+                                if isinstance(context, RC.ReviewContext)
+                                else ())],
+            "missing": missing,
+            "known_excluded": known_excluded,
+            "file_count": packet.file_count,
+            "byte_count": packet.byte_count,
+            "excluded_count": packet.excluded_count,
+            "truncated_count": packet.truncated_count,
+            "omitted": list(omitted),
+            "omission_inventory": [entry.public_inventory()
+                                   for entry in inventory]}
 
 
 def _encode_item_request(packet: EvidencePacket, entry, routed,
-                         schema_bytes: bytes) -> tuple[bytes, list]:
-    """Encode one item request; shrink excerpts until it fits its bound."""
+                         schema_bytes: bytes,
+                         omitted: list[str] | None = None
+                         ) -> tuple[bytes, list, list[str]]:
+    """Encode one item request; shrink excerpts until it fits its bound.
+
+    Returns ``(request, chosen, omitted)``: further excerpts dropped to
+    fit the prompt cap are appended to the omission inventory before
+    hashing/dispatch so truncation stays explicit.
+    """
     from .agent_providers import PROMPT_INPUT_MAX_BYTES
 
     schema_object = json.loads(schema_bytes.decode("utf-8"))
     chosen = list(routed)
+    dropped = list(omitted or [])
     while True:
         payload = {
             "policy": {
@@ -1756,23 +2372,27 @@ def _encode_item_request(packet: EvidencePacket, entry, routed,
                 "response_schema": schema_object,
                 "statuses": sorted(_VALID_STATUSES),
             },
-            "packet": {"packet_sha256": packet.packet_sha256,
-                       "scope": packet.scope,
-                       "project_id": packet.project_id,
-                       "declaration": packet.declaration},
+            "packet": _item_context_metadata(
+                packet, dropped, entry.id),
             "excerpts": [{"path": excerpt.path,
                           "start_line": excerpt.start_line,
                           "end_line": excerpt.end_line,
                           "sha256": excerpt.sha256,
+                          "role": dict(packet.context.roles).get(
+                              _child_relative(excerpt.path,
+                                              packet.declaration),
+                              "source"),
+                          "completeness": ("complete" if excerpt.complete
+                                           else "partial"),
                           "text": excerpt.text} for excerpt in chosen],
         }
         request = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=True).encode("utf-8")
         if len(request) <= PROMPT_INPUT_MAX_BYTES - len(schema_bytes):
-            return request, chosen
+            return request, chosen, dropped
         if not chosen:
-            return request, chosen
-        chosen.pop()
+            return request, chosen, dropped
+        dropped.append(chosen.pop().path)
 
 
 def _plan_one(packet: EvidencePacket, entry,
@@ -1790,21 +2410,22 @@ def _plan_one(packet: EvidencePacket, entry,
                               scope=packet.scope, request=None,
                               schema=schema_bytes, excerpt_paths=(),
                               skip_reason=None, answer=answer)
-    routed = _route_excerpts(packet, entry, code_index)
-    reason = _skip_reason(packet, entry, code_index)
-    if reason is not None:
-        return ItemReview(item_id=entry.id, label=entry.label,
-                          scope=packet.scope, request=None,
-                          schema=schema_bytes,
-                          excerpt_paths=tuple(e.path for e in routed),
-                          skip_reason=reason)
-    request, chosen = _encode_item_request(packet, entry, routed,
-                                           schema_bytes)
+    # Absence in admitted evidence never proves inapplicability: every
+    # item without a deterministic answer gets a model review. Admitted
+    # runner context is seeded ahead of the item-specific evidence
+    # subset; absent, filtered, or over-budget config surfaces as a
+    # missing-context reason in the request metadata, never as an
+    # invented source.
+    routed, omitted = _route_excerpts(packet, entry, code_index)
+    request, chosen, omitted = _encode_item_request(
+        packet, entry, routed, schema_bytes, omitted)
     return ItemReview(item_id=entry.id, label=entry.label,
                       scope=packet.scope, request=request,
                       schema=schema_bytes,
                       excerpt_paths=tuple(e.path for e in chosen),
-                      skip_reason=None)
+                      skip_reason=None,
+                      followup_inventory=_omission_inventory(
+                          packet, entry.id, omitted))
 
 
 def plan_item_reviews(packet: EvidencePacket,
@@ -1830,7 +2451,8 @@ def plan_item_reviews(packet: EvidencePacket,
                  for entry in _CHECKLIST_CATALOG)
 
 
-_ONE_ROW_KEYS = frozenset({"status", "rationale", "evidence", "finding"})
+_ONE_ROW_KEYS = frozenset({
+    "status", "rationale", "evidence", "finding", "proof", "needs"})
 _ONE_ROW_FINDING_KEYS = frozenset(
     {"summary", "suggested_change", "evidence"})
 _ONE_ROW_CITATION_KEYS = frozenset({
@@ -1956,7 +2578,9 @@ def _bind_one_row_citations(items: object, subset: dict,
     return tuple(citations), dropped
 
 
-def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
+def _validate_one_row(reply: bytes, subset: dict, entry, *,
+                      offered_ids: set[str] | frozenset[str] = frozenset(),
+                      followup: bool = False) -> tuple:
     """Validate one one-row reply; return (AssessmentRow, Finding | None)."""
     if len(reply) > MAX_PAYLOAD_BYTES:
         raise _invalid_reply("reply exceeds its bound")
@@ -1988,6 +2612,7 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
         raise _invalid_reply("reply needs a specific not-applicable rationale")
     raw_finding = document["finding"]
     finding = None
+    finding_evidence: tuple[Citation, ...] = ()
     if status == "gap":
         if not isinstance(raw_finding, dict):
             raise _invalid_reply("gap reply needs a finding")
@@ -2007,10 +2632,70 @@ def _validate_one_row(reply: bytes, subset: dict, entry) -> tuple:
                           evidence=finding_evidence)
     elif raw_finding is not None:
         raise _invalid_reply("non-gap reply must carry finding null")
+    def identities(citations):
+        return {(citation.path, citation.start_line, citation.end_line,
+                 citation.sha256) for citation in citations}
+    try:
+        RP.validate_private_fields(document, subset, set(offered_ids),
+                                  followup=followup,
+                                  valid_evidence=identities(evidence),
+                                  valid_finding_evidence=(
+                                      identities(finding_evidence)
+                                      if status == "gap" else None))
+    except (TypeError, ValueError) as exc:
+        raise _invalid_reply("private proof is invalid: " + str(exc)) from None
     row = AssessmentRow(id=entry.id, status=status, rationale=rationale,
                         evidence=evidence, label=entry.label,
                         dropped_citations=dropped)
     return row, finding
+
+
+def plan_followup_review(packet: EvidencePacket, review: ItemReview,
+                         reply: bytes) -> tuple[ItemReview | None, str | None]:
+    """Plan the one allowed packet-only evidence follow-up, if requested.
+
+    Returns ``(review, None)`` for one eligible follow-up, ``(None, None)``
+    when the first valid row needs no more evidence, and ``(None, reason)``
+    when a valid request cannot fit the frozen-packet bounds.
+    """
+    if not isinstance(packet, EvidencePacket) or not isinstance(review, ItemReview):
+        raise TypeError("packet and review have invalid types")
+    if not isinstance(reply, (bytes, bytearray)):
+        return None, None
+    if review.followup_phase or not review.followup_inventory:
+        return None, None
+    known = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    subset = {path: known[path] for path in review.excerpt_paths}
+    entry = _CATALOG_BY_ID.get(review.item_id)
+    if entry is None:
+        return None, None
+    try:
+        row, _finding = _validate_one_row(
+            bytes(reply), subset, entry,
+            offered_ids={item.opaque_id for item in review.followup_inventory})
+        if row.status != "unknown":
+            return None, None
+        document = json.loads(_unwrap_single_fence(
+            bytes(reply).decode("utf-8")))
+        needs = RP.validate_private_fields(
+            document, subset,
+            {item.opaque_id for item in review.followup_inventory})
+    except (C.Problem, UnicodeDecodeError, ValueError, TypeError):
+        return None, None
+    if not needs:
+        return None, None
+    from .agent_providers import PROMPT_INPUT_MAX_BYTES
+    try:
+        request, paths = RP.build_followup_request(
+            bytes(review.request), review.followup_inventory, needs,
+            max_request_bytes=PROMPT_INPUT_MAX_BYTES - len(review.schema))
+    except (TypeError, ValueError):
+        return None, "requested packet evidence could not fit the follow-up bounds"
+    next_review = replace(
+        review, request=request,
+        excerpt_paths=review.excerpt_paths + paths,
+        followup_inventory=(), followup_phase=True)
+    return next_review, None
 
 
 def _skip_child_row(packet: EvidencePacket, entry,
@@ -2264,6 +2949,9 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
         raise TypeError("replies must be a tuple")
     if len(reviews) != len(replies):
         raise ValueError("reviews and replies must align")
+    # Every offered/cited source identity comes from the frozen packet:
+    # only actually collected and admitted excerpts may be offered or
+    # cited, so citations to absent or unadmitted files fail validation.
     known = {excerpt.path: excerpt for excerpt in packet.excerpts}
     for review in reviews:
         if review.item_id not in _CATALOG_BY_ID:
@@ -2273,6 +2961,19 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
             raise C.Problem(code="stale-evidence",
                             message="item reviews belong to another packet",
                             phase=_PHASE, retryable=False)
+        for offered in review.followup_inventory:
+            excerpt = known.get(offered.excerpt.path)
+            expected_id = RP.opaque_id(
+                packet.packet_sha256, review.item_id, offered.excerpt.path,
+                offered.excerpt.sha256)
+            if (excerpt is None or excerpt.sha256 != offered.excerpt.sha256
+                    or offered.opaque_id != expected_id
+                    or offered.excerpt.path in review.excerpt_paths
+                    or RC.is_excluded_path(_child_relative(
+                        offered.excerpt.path, packet.declaration))):
+                raise C.Problem(code="stale-evidence",
+                                message="follow-up inventory is stale",
+                                phase=_PHASE, retryable=False)
     rows: list[AssessmentRow] = []
     findings: list[Finding] = []
     for review, reply in zip(reviews, replies):
@@ -2302,7 +3003,11 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
             raise TypeError("replies must be bytes, str, or None")
         subset = {path: known[path] for path in review.excerpt_paths}
         try:
-            row, finding = _validate_one_row(bytes(reply), subset, entry)
+            row, finding = _validate_one_row(
+                bytes(reply), subset, entry,
+                offered_ids={offered.opaque_id
+                             for offered in review.followup_inventory},
+                followup=review.followup_phase)
         except C.Problem as exc:
             # Untrusted model shapes must never abort the child assembly:
             # any validation failure becomes an unknown row carrying its
@@ -2335,7 +3040,7 @@ def _require_exact_keys(item: object, allowed: frozenset,
     """Require exactly the allowed keys: missing and unknown both fail."""
     if not isinstance(item, dict):
         raise _fail("invalid-assessment", f"{ctx} must be an object")
-    for key in allowed:
+    for key in sorted(allowed):
         if key not in item:
             raise _fail("invalid-assessment",
                         f"{ctx} is missing {key!r}")
@@ -2349,7 +3054,7 @@ __all__ = [
     "EvidenceLimits", "SourceExcerpt", "DependencyFact", "EvidencePacket",
     "Citation", "AssessmentRow", "Finding", "Score", "ChildAssessment",
     "ItemReview",
-    "build_packets", "score",
+    "build_packets", "score", "packet_hash", "runner_config_excerpt",
     "plan_item_reviews", "assemble_child", "one_row_schema",
     "MAX_FILES_PER_CHILD", "MAX_BYTES_PER_CHILD", "MAX_BYTES_PER_FILE",
     "MAX_PROMPT_BYTES",
