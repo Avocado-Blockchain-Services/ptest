@@ -6,30 +6,30 @@ import os
 import stat
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
 from ptest import config as config_api, contracts as C, operations, platform, scheduler
 from ptest.cli import main
+from support import init_git_repo
 
 
 @pytest.fixture
-def account(monkeypatch, tmp_path):
-    home = tmp_path / "account"
-    home.mkdir(mode=0o700)
+def account(account_home):
+    """Private account home whose `.local` must stay untouched by the run."""
+    home = account_home(name="account")
     local = home / ".local"
     local.mkdir(mode=0o770)
     local.chmod(0o770)
-    monkeypatch.setattr(platform.pwd, "getpwuid",
-                        lambda uid: SimpleNamespace(pw_dir=str(home)))
     return home
 
 
 def test_state_directory_resolves_without_touching_account_or_creating_state(
-        account, tmp_path, monkeypatch):
-    state = tmp_path / "local state"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+        account, state_dir_factory):
+    # The factory exports PTEST_STATE_DIR; remove the dir so the test
+    # still proves resolution creates nothing.
+    state = state_dir_factory(name="local state")
+    state.rmdir()
 
     domain = platform.domain_paths(None)
 
@@ -45,6 +45,9 @@ def test_state_directory_resolves_without_touching_account_or_creating_state(
 
 @pytest.mark.parametrize("value", ["", "relative", "~/state", "/", "/tmp/../state", "/tmp/state\n"])
 def test_state_directory_rejects_invalid_paths(account, monkeypatch, value):
+    # The env value itself is the subject here (never hits disk), so it
+    # stays a literal setenv instead of going through state_dir_factory.
+    # (The /tmp/ entries are rejected-string payloads, not paths used.)
     monkeypatch.setenv("PTEST_STATE_DIR", value)
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
@@ -54,11 +57,9 @@ def test_state_directory_rejects_invalid_paths(account, monkeypatch, value):
 
 @pytest.mark.parametrize("mode", [0o755, 0o770, 0o777])
 def test_state_directory_rejects_existing_nonprivate_root_without_chmod(
-        account, tmp_path, monkeypatch, mode):
-    state = tmp_path / "state"
-    state.mkdir()
+        account, state_dir_factory, mode):
+    state = state_dir_factory()
     state.chmod(mode)
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
     assert caught.value.code == "unsafe-path"
@@ -74,6 +75,7 @@ def test_state_directory_rejects_symlink_components(
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
     state = link if target == "root" else link / "state"
+    # Subject: the symlink in the value.  The factory cannot build links.
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
@@ -83,6 +85,7 @@ def test_state_directory_rejects_symlink_components(
 
 def test_state_directory_requires_existing_owned_parent(account, tmp_path, monkeypatch):
     state = tmp_path / "missing" / "state"
+    # Subject: a value whose parent chain does not exist.
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
@@ -94,6 +97,7 @@ def test_state_directory_rejects_writable_parent(account, tmp_path, monkeypatch)
     parent = tmp_path / "shared"
     parent.mkdir()
     parent.chmod(0o770)
+    # Subject: the writable parent (and that nothing is created in it).
     monkeypatch.setenv("PTEST_STATE_DIR", str(parent / "state"))
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
@@ -103,21 +107,20 @@ def test_state_directory_rejects_writable_parent(account, tmp_path, monkeypatch)
 
 def test_fixture_domain_takes_precedence_over_state_environment(case, monkeypatch):
     domain = case.domain()
+    # Subject: precedence over an invalid env value.
     monkeypatch.setenv("PTEST_STATE_DIR", "invalid-relative-path")
     assert platform.domain_paths(domain.root) == domain
 
 
 @pytest.mark.parametrize("name", ["machine.toml", "coordination", "coordination/domain.json"])
 def test_state_directory_rejects_unsafe_existing_metadata(
-        account, tmp_path, monkeypatch, name):
-    state = tmp_path / "state"
-    state.mkdir(mode=0o700)
+        account, state_dir_factory, name):
+    state = state_dir_factory()
     if name.startswith("coordination/"):
         (state / "coordination").mkdir(mode=0o700)
     target = state / name
     target.write_text("foreign metadata")
     target.chmod(0o644)
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     with pytest.raises(C.Problem) as caught:
         platform.domain_paths(None)
     assert caught.value.code == "unsafe-path"
@@ -125,9 +128,8 @@ def test_state_directory_rejects_unsafe_existing_metadata(
 
 
 def test_state_directory_scheduler_creates_only_local_private_state(
-        account, tmp_path, monkeypatch):
-    state = tmp_path / "state"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+        account, tmp_path, state_dir_factory):
+    state = state_dir_factory()
     domain = platform.domain_paths(None)
     owner = platform.process_identity(os.getpid())
     assert owner is not None
@@ -156,6 +158,7 @@ def test_offline_doctor_with_local_state_is_read_only(
     root.mkdir()
     _write_db_standalone_repo(root)
     state = tmp_path / "state"
+    # Subject: offline doctor must not create state.
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.chdir(root)
 
@@ -169,14 +172,13 @@ def test_offline_doctor_with_local_state_is_read_only(
 
 
 def test_online_doctor_creates_local_review_cache_after_consent(
-        account, tmp_path, monkeypatch, capsys):
+        account, tmp_path, monkeypatch, capsys, state_dir_factory):
     from test_doctor_init_integration import _prepare_review, _write_db_standalone_repo
 
     root = tmp_path / "project"
     root.mkdir()
     _write_db_standalone_repo(root)
-    state = tmp_path / "state"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    state = state_dir_factory()
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _prepare_review(monkeypatch, root, tmp_path / "bin")
 
@@ -188,11 +190,10 @@ def test_online_doctor_creates_local_review_cache_after_consent(
 
 
 def test_state_directory_reaches_guard_and_preserves_runner_exit_status(
-        tmp_path, monkeypatch):
+        tmp_path, state_dir_factory):
     root = tmp_path / "project"
     root.mkdir()
-    state = tmp_path / "state"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    state = state_dir_factory()
     (root / ".ptest.toml").write_text(
         'version = 1\nproject_id = "abababababababababababababababab"\n'
         '[runner]\nkind = "command"\n'
@@ -223,30 +224,14 @@ def _write_trivial_command_project(root):
         encoding="utf-8")
 
 
-def _git_init_fixture(root):
-    env = {name: value for name, value in os.environ.items()
-           if not name.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
-               GIT_AUTHOR_EMAIL="fixture@example.test",
-               GIT_COMMITTER_EMAIL="fixture@example.test")
-    prefix = ("git", "-c", "core.hooksPath=" + os.devnull,
-              "-c", "commit.gpgsign=false", "-C", str(root))
-    subprocess.run((*prefix, "init"), env=env, check=True,
-                   capture_output=True)
-    subprocess.run((*prefix, "add", "."), env=env, check=True,
-                   capture_output=True)
-    subprocess.run((*prefix, "commit", "-m", "fixture"), env=env,
-                   check=True, capture_output=True)
-
-
 def test_state_directory_inside_checkout_refuses_before_admission(
         account, tmp_path, monkeypatch, capsys):
     root = tmp_path / "repo"
     root.mkdir()
     _write_trivial_command_project(root)
-    _git_init_fixture(root)
+    init_git_repo(root, message="fixture")
     state = root / ".ptest-state"
+    # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     domain = platform.domain_paths(None)
     config = config_api.resolve_config(root).config
@@ -295,8 +280,9 @@ def test_state_directory_at_monorepo_root_refuses_before_any_child_runs(
     root = tmp_path / "repo"
     root.mkdir()
     _write_monorepo(root)
-    _git_init_fixture(root)
+    init_git_repo(root, message="fixture")
     state = root / ".ptest-state"
+    # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.chdir(root)
 
@@ -314,8 +300,9 @@ def test_state_directory_inside_later_child_refuses_before_first_child_runs(
     root = tmp_path / "repo"
     root.mkdir()
     _write_monorepo(root)
-    _git_init_fixture(root)
+    init_git_repo(root, message="fixture")
     state = root / "b" / ".ptest-state"
+    # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.chdir(root)
 
@@ -334,8 +321,9 @@ def test_state_directory_at_git_root_refuses_nested_config(
     sub = root / "sub"
     sub.mkdir(parents=True)
     _write_trivial_command_project(sub)
-    _git_init_fixture(root)
+    init_git_repo(root, message="fixture")
     state = root / ".ptest-state"
+    # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     domain = platform.domain_paths(None)
     config = config_api.resolve_config(sub).config
@@ -356,13 +344,12 @@ def test_state_directory_at_git_root_refuses_nested_config(
 
 
 def test_state_directory_outside_checkout_runs_without_exit_70(
-        account, tmp_path, monkeypatch):
+        account, tmp_path, state_dir_factory):
     root = tmp_path / "repo"
     root.mkdir()
     _write_trivial_command_project(root)
-    _git_init_fixture(root)
-    state = tmp_path / "state-outside"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    init_git_repo(root, message="fixture")
+    state = state_dir_factory(name="state-outside")
     domain = platform.domain_paths(None)
     config = config_api.resolve_config(root).config
     assert config is not None
@@ -382,6 +369,7 @@ def test_doctor_review_with_state_inside_checkout_refuses_without_writing(
     root.mkdir()
     _write_db_standalone_repo(root)
     state = root / ".ptest-state"
+    # Subject: placement inside the checkout (and that nothing is created).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _prepare_review(monkeypatch, root, tmp_path / "bin")
@@ -424,6 +412,7 @@ def test_where_and_status_note_env_selected_domain(
     root.mkdir()
     _write_trivial_command_project(root)
     state = tmp_path / "state-outside"
+    # Subject: the env-selected domain (and that status creates nothing).
     monkeypatch.setenv("PTEST_STATE_DIR", str(state))
     monkeypatch.chdir(root)
 

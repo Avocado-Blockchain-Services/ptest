@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import pwd
 import stat
 import sys
 from types import SimpleNamespace
@@ -16,15 +17,10 @@ from ptest.contracts import Problem
 
 
 def _account_home(monkeypatch, home):
-    monkeypatch.setattr(P.pwd, "getpwuid", lambda uid: SimpleNamespace(
-        pw_dir=str(home)))
+    """Point the passwd home at ``home``; platform tests read real ext4."""
+    from support import patch_account_home
+    patch_account_home(monkeypatch, home)
     monkeypatch.setattr(P, "_filesystem_type", lambda path: "ext4")
-
-
-def _make_account_home(tmp_path):
-    home = tmp_path / "account"
-    home.mkdir(mode=0o700)
-    return home
 
 
 class _FakeNativeProcess:
@@ -52,8 +48,9 @@ class _FakeSysctlByName:
         return self.result
 
 
-def test_domain_ignores_home_and_xdg(monkeypatch, tmp_path):
-    _account_home(monkeypatch, _make_account_home(tmp_path))
+def test_domain_ignores_home_and_xdg(monkeypatch, account_home):
+    home = account_home(name="account")
+    _account_home(monkeypatch, home)
     before = P.domain_paths(None)
     monkeypatch.setenv("HOME", "/unused/tui-home")
     monkeypatch.setenv("XDG_STATE_HOME", "/unused/tui-state")
@@ -61,13 +58,15 @@ def test_domain_ignores_home_and_xdg(monkeypatch, tmp_path):
 
 
 def test_explicit_state_directory_moves_domain_and_leaves_default_untouched(
-        monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+        monkeypatch, account_home, state_dir_factory):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     default = P.domain_paths(None)
 
-    state = tmp_path / "explicit-state"
-    monkeypatch.setenv("PTEST_STATE_DIR", str(state))
+    # The factory exports PTEST_STATE_DIR; remove the dir so the test
+    # still proves resolution creates nothing.
+    state = state_dir_factory(name="explicit-state")
+    state.rmdir()
     selected = P.domain_paths(None)
 
     assert selected.root == state / "coordination"
@@ -84,8 +83,8 @@ def test_explicit_state_directory_moves_domain_and_leaves_default_untouched(
     assert not (home / ".config").exists()
 
 
-def test_normal_domain_resolves_account_paths_without_creating(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_resolves_account_paths_without_creating(monkeypatch, account_home):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
 
     result = P.domain_paths(None)
@@ -100,8 +99,8 @@ def test_normal_domain_resolves_account_paths_without_creating(monkeypatch, tmp_
     assert not (home / ".config").exists()
 
 
-def test_normal_domain_ignores_legacy_siblings_and_preserves_modes(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_ignores_legacy_siblings_and_preserves_modes(monkeypatch, account_home):
+    home = account_home(name="account")
     local = home / ".local"
     state = local / "state"
     state_ptest = state / "ptest"
@@ -135,8 +134,8 @@ def test_normal_domain_ignores_legacy_siblings_and_preserves_modes(monkeypatch, 
             for path in modes} == modes
 
 
-def test_normal_domain_accepts_existing_private_coordination(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_accepts_existing_private_coordination(monkeypatch, account_home):
+    home = account_home(name="account")
     root = home / ".local" / "state" / "ptest" / "coordination"
     root.parent.mkdir(parents=True, mode=0o755)
     root.mkdir(mode=0o700)
@@ -150,8 +149,8 @@ def test_normal_domain_accepts_existing_private_coordination(monkeypatch, tmp_pa
     assert P.domain_paths(None).root == root
 
 
-def test_macos_domain_uses_account_application_support(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_macos_domain_uses_account_application_support(monkeypatch, account_home):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     monkeypatch.setattr(P.sys, "platform", "darwin")
     monkeypatch.setattr(P, "_filesystem_type", lambda path: "apfs")
@@ -165,8 +164,8 @@ def test_macos_domain_uses_account_application_support(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o770])
-def test_normal_domain_rejects_wrong_coordination_mode(monkeypatch, tmp_path, mode):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_wrong_coordination_mode(monkeypatch, account_home, mode):
+    home = account_home(name="account")
     root = home / ".local" / "state" / "ptest" / "coordination"
     root.parent.mkdir(parents=True, mode=0o755)
     root.mkdir(mode=mode)
@@ -176,8 +175,8 @@ def test_normal_domain_rejects_wrong_coordination_mode(monkeypatch, tmp_path, mo
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_existing_machine_file_wrong_mode(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_existing_machine_file_wrong_mode(monkeypatch, account_home):
+    home = account_home(name="account")
     parent = home / ".config" / "ptest"
     parent.mkdir(parents=True, mode=0o755)
     machine = parent / "machine.toml"
@@ -189,8 +188,8 @@ def test_normal_domain_rejects_existing_machine_file_wrong_mode(monkeypatch, tmp
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_symlink_component(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_symlink_component(monkeypatch, tmp_path, account_home):
+    home = account_home(name="account")
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o700)
     (home / ".local").symlink_to(outside, target_is_directory=True)
@@ -200,8 +199,8 @@ def test_normal_domain_rejects_symlink_component(monkeypatch, tmp_path):
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_machine_config_symlink_component(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_machine_config_symlink_component(monkeypatch, tmp_path, account_home):
+    home = account_home(name="account")
     outside = tmp_path / "outside-config"
     outside.mkdir(mode=0o700)
     (home / ".config").symlink_to(outside, target_is_directory=True)
@@ -211,8 +210,8 @@ def test_normal_domain_rejects_machine_config_symlink_component(monkeypatch, tmp
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_group_writable_parent(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_group_writable_parent(monkeypatch, account_home):
+    home = account_home(name="account")
     local = home / ".local"
     local.mkdir(mode=0o770)
     os.chmod(local, 0o770)
@@ -222,12 +221,19 @@ def test_normal_domain_rejects_group_writable_parent(monkeypatch, tmp_path):
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_foreign_account_home(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_foreign_account_home(monkeypatch, account_home):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     real_uid = os.getuid()
+    # Capture while the uid is still real: the fixture home record the
+    # factory installed.  The subject here IS a foreign uid, which the
+    # factory deliberately does not fake (it only repoints the current
+    # uid), so serve the same record for the forged uid below and let
+    # the ownership check, not name resolution, reject it.
+    record = pwd.getpwuid(real_uid)
     monkeypatch.setattr(P.os, "getuid", lambda: real_uid + 1)
     monkeypatch.setattr(P.os, "geteuid", lambda: real_uid + 1)
+    monkeypatch.setattr(P.pwd, "getpwuid", lambda uid: record)
 
     with pytest.raises(Problem, match="unsafe-path"):
         P.domain_paths(None)
@@ -235,8 +241,8 @@ def test_normal_domain_rejects_foreign_account_home(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("filesystem", ["nfs", "overlay", None])
 def test_normal_domain_rejects_unknown_or_network_filesystem(
-        monkeypatch, tmp_path, filesystem):
-    home = _make_account_home(tmp_path)
+        monkeypatch, account_home, filesystem):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     monkeypatch.setattr(P, "_filesystem_type", lambda path: filesystem)
 
@@ -245,8 +251,8 @@ def test_normal_domain_rejects_unknown_or_network_filesystem(
 
 
 def test_normal_domain_rejects_mismatched_real_and_effective_uid(
-        monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+        monkeypatch, account_home):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     monkeypatch.setattr(P.os, "geteuid", lambda: os.getuid() + 1)
 
@@ -254,8 +260,8 @@ def test_normal_domain_rejects_mismatched_real_and_effective_uid(
         P.domain_paths(None)
 
 
-def test_normal_domain_rejects_unsupported_os(monkeypatch, tmp_path):
-    home = _make_account_home(tmp_path)
+def test_normal_domain_rejects_unsupported_os(monkeypatch, account_home):
+    home = account_home(name="account")
     _account_home(monkeypatch, home)
     monkeypatch.setattr(P.sys, "platform", "win32")
 
