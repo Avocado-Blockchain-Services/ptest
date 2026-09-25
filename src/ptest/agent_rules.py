@@ -152,12 +152,12 @@ def _pre_gate_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
-def _provider_text(provider: str) -> bytes:
-    """Current generated skill: front matter plus a short guide pointer.
+def _pre_changed_provider_text(provider: str) -> bytes:
+    """Exact skill bytes before the `--changed` default loop.
 
-    Shared guidance (merge gate, graph refresh, scopes) lives only in
-    `docs/ptest-agent.md`; the skill just points at it so the two can
-    never duplicate or drift.
+    The short pointer shipped until the `--changed`-as-default-loop
+    change; recognized as previous managed content so it upgrades in
+    place, like `_previous_provider_text`.
     """
     description = _PROVIDER_DESCRIPTIONS[provider]
     return (
@@ -170,6 +170,28 @@ def _provider_text(provider: str) -> bytes:
         "\n"
         "Before running or changing tests, read `docs/ptest-agent.md` (relative to\n"
         "the repository root). Run tests only through `ptest` from the repository root.\n"
+    ).encode("utf-8")
+
+
+def _provider_text(provider: str) -> bytes:
+    """Current generated skill: front matter plus a short guide pointer.
+
+    Shared guidance (merge gate, graph refresh, scopes, the `--full`
+    gate) lives only in `docs/ptest-agent.md`; the skill just points
+    at it so the two can never duplicate or drift. The body stays
+    within four lines and names only the `--changed` default loop.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
+        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n"
     ).encode("utf-8")
 
 
@@ -215,7 +237,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
     if current == _legacy_provider_text(provider):
         return relative, target, current, "legacy"
     if current in (_previous_provider_text(provider),
-                   _pre_gate_provider_text(provider)):
+                   _pre_gate_provider_text(provider),
+                   _pre_changed_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -606,6 +629,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "5d6319fdc79f1819985afabe469ce7adb08bea27a11938b5dd0f0e3b179e7ea2",
     # 5f12d84: guide before the run-output status lines.
     "a9d5171f5023ffe732474be096d85e33cf5873f5b99469b61320ea3180f807a3",
+    # 42bf3be: guide before the --changed default loop.
+    "0e30bbbc2462dbe178c50ab60c219e2bcb071400f80812fcf89cca99294ad0b2",
 })
 
 

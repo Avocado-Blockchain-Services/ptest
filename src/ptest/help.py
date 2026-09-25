@@ -15,6 +15,7 @@ Getting started:
 
 Running tests from the repository root:
   ptest tests/test_example.py     # scoped: smallest relevant scope
+  ptest --changed                 # default loop: only what the change touches
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
@@ -60,6 +61,7 @@ Syntax:
              [--allow-model-review] [--review-timeout SECONDS]
              [--review-model MODEL] [--review-concurrency 1..8]
              [--smoke | --no-smoke]
+             [--changed-setup now|later|no]
 
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
@@ -78,7 +80,14 @@ Notes:
   TTY asks once naming the files. --dry-run and --json never run smoke;
   a smoke failure keeps the written config and the exit status. Declared
   setup never runs silently: a TTY is asked once per project before its
-  smoke test, and non-interactive smoke skips with the setup command."""
+  smoke test, and non-interactive smoke skips with the setup command.
+  After the smoke step, init offers ptest --changed setup once per
+  pytest project whose environment holds the frozen pytest-cov/coverage
+  pair: now writes --cov/--cov-report plus the [selection] draft and
+  runs ptest --full for the baseline, later writes the same draft for
+  a later baseline, no leaves selection off. --changed-setup
+  now|later|no answers non-interactively (default: later); existing
+  configs are never rewritten (see ptest doctor --fix)."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 
@@ -316,10 +325,12 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    exactly one child; arbitrary runner flags are rejected by root scope
    validation.
 
-3. Iterate scoped, then gate full:
+3. Loop changed, then gate full:
+     ptest --changed               # default loop after each edit
      ptest api/tests/test_example.py  # monorepo; standalone example in step 2
      ptest --full                  # once, after the change is integrated
-   A scoped green is iteration only; only --full completes the change.
+   A scoped or changed green is iteration only; only --full completes the
+   change. The first --changed may run everything to record a baseline.
    Concurrency (e.g. --workers N) requires verified isolation and adapter
    support. Standalone v1 passes runner arguments literally: everything
    from the first native token or -- passes through untouched. Exit status

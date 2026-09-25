@@ -365,7 +365,8 @@ def _decide_skill(rel: str, provider: str):
         managed = raw in (agent_rules._provider_text(provider),
                           agent_rules._legacy_provider_text(provider),
                           agent_rules._previous_provider_text(provider),
-                          agent_rules._pre_gate_provider_text(provider))
+                          agent_rules._pre_gate_provider_text(provider),
+                          agent_rules._pre_changed_provider_text(provider))
         if managed:
             return PlanEntry(
                 REMOVE, rel, "managed skill", "unlink", rel=rel, expect=raw)

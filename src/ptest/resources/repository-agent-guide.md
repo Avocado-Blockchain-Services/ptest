@@ -1,10 +1,11 @@
 # ptest rules for coding agents
 
 Run every test command through `ptest` from the repository root. Never invoke pytest, vitest, npm test,
-go test, or cargo test directly. For focused work, prefix the scope with its declared child, such as
-`ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files remain authoritative; never copy, merge, or
-rewrite them, and never bypass them by changing directories. Run `ptest init` from the repository root.
-Run `ptest --full` once after the integrated change. `ptest -v` adds run detail; `ptest -q` silences.
+go test, or cargo test directly. After each edit run the default loop `ptest --changed`; to target one
+test, prefix the scope with its declared child, such as `ptest api/tests/ng/test_x.py`. Child `.ptest.toml`
+files remain authoritative; never copy, merge, or rewrite them. Run `ptest init` from the repository root.
+Run `ptest --full` once after the integrated change; the first `ptest --changed` may run everything to
+record a baseline. `ptest -v` adds run detail; `ptest -q` silences.
 
 Qualified pytest projects run xdist in parallel under ptest (one worker per `-n N`,
 or per granted slot for `-n auto`); unqualified projects run serially with ptest's
@@ -40,6 +41,5 @@ repairing code. Preserve assertions, coverage, test inventory, and unrelated use
 Report the exact ptest command, result, remaining failures, and untested scope.
 
 Requesting doctor, guide, or a prompt grants assessment authority only. Source repair requires
-a separate user instruction; never treat an assessment as permission to edit or a filled
-worksheet as updated ptest readiness. Fill one copy per repository from direct evidence,
-keeping `unknown` until each row has evidence.
+a separate user instruction; never treat an assessment as permission to edit or a filled worksheet as
+updated ptest readiness. Fill one copy per repository from direct evidence, keeping `unknown` until each row has evidence.

@@ -2,8 +2,8 @@
 
 ptest is a local-first test coordinator. Normal test execution is local and
 model-independent; no cloud account, model API, or remote service is required
-to run tests. Run `ptest init`, then use `ptest <scoped paths>` or
-`ptest --full`.
+to run tests. Run `ptest init`, then loop `ptest --changed` after each edit,
+target one test with `ptest <scoped paths>`, and finish with `ptest --full`.
 
 Doctor has an explicit offline static mode (`--offline`) and a separately
 consented CLI review design. `ptest doctor --json` emits the versioned
