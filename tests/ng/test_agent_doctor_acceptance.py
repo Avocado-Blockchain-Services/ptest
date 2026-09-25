@@ -184,12 +184,10 @@ def test_static_doctor_modes_compose_without_review_or_report_writes(
     root = tmp_path / topology
     if topology == "standalone":
         _write_v1(root, "ab" * 16)
-        expected_sources = ("tests/test_cache.py",)
     else:
         _write_v2(root)
         (root / "root_noise_test.py").write_text(
             "cache.flushall()\n", encoding="utf-8")
-        expected_sources = ("api/tests/test_cache.py", "web/tests/test_cache.py")
     monkeypatch.chdir(root)
     monkeypatch.setattr(
         "ptest.cli.agent_providers.resolve_reviewer",
@@ -203,12 +201,16 @@ def test_static_doctor_modes_compose_without_review_or_report_writes(
 
     assert main(("doctor", "--offline")) == 0
     human = capsys.readouterr()
-    assert "ptest doctor" in human.out
     assert human.err == ""
-    for source in expected_sources:
-        assert source in human.out
+    assert "offline · " in human.out and "0 calls" in human.out
+    assert "Unknowns" in human.out
+    squashed = " ".join(human.out.split())
+    assert ("review failed: offline static run: model review unavailable"
+            in squashed)
+    assert "Next: ptest " in human.out
+    assert "Report: recommendations.md (skipped)" in human.out
     if topology == "v2-monorepo":
-        assert human.out.index("| 1 | api ") < human.out.index("| 2 | web ")
+        assert human.out.index("api  ") < human.out.index("web  ")
         assert "root_noise_test.py" not in human.out
 
     assert main(("doctor", "--offline", "--json")) == 0
@@ -393,11 +395,11 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert "api" in human.out and "web" in human.out
     assert human.out.index("api") < human.out.index("web")
     assert "recommendations.md" in human.out
-    assert "api  pytest · " in human.out and "web  pytest · " in human.out
-    assert human.out.index("api  pytest · ") < human.out.index(
-        "web  pytest · ")
-    assert re.search(r"api  pytest · \d+ ok · \d+ gap · \d+ unknown",
-                     human.out)
+    assert "api  pytest · runs " in human.out
+    assert "web  pytest · runs " in human.out
+    assert human.out.index("api  pytest · runs ") < human.out.index(
+        "web  pytest · runs ")
+    assert re.search(r"· \d+ checks? · \d+ calls? · \d+s", human.out)
     assert "Report: recommendations.md (created)" in human.out
     declarations = [item[1] for item in launches]
     api_count = declarations.count("api")

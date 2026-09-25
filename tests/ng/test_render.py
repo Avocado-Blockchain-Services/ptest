@@ -79,21 +79,24 @@ def test_agent_assessment_renders_score_header_facts_and_items():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "api  pytest · 1 ok · 1 gap · 1 unknown · 1 n/a" in text
-    assert "  runs: yes · parallel: 4 workers · setup: uv sync" in text
-    assert 'full suite = your pytest config: -m "not slow"' in text
-    assert "✓ Test data factories" in text
+    assert text.splitlines()[0] == "offline · 4 checks"
+    assert ("api  pytest · runs ✓ · 4 workers · "
+            "setup: uv sync --locked") in text
+    assert 'full suite = your pytest config: -m "not slow"' not in text
+    assert "│ Test data factories" in text and "✓ ok" in text
     assert "— satisfied" not in text
-    assert "✗ Fixture state isolation" in text
+    assert "│ Fixture state isolation" in text and "✗ gap" in text
+    assert "api · Fixture state isolation" in text
     assert "      Share one module-global fixture." in text
     assert "      → Build a per-test factory." in text
-    assert "? CACHE-001  review failed: timed out" in text
-    assert ("– Test selection  no selection "
-            "for this runner.") in text
+    assert "api: CACHE-001 — review failed: timed out" in text
+    assert "– n/a" in text
+    assert "no selection for this runner." not in text
     assert "Skipped without a model call" not in text
     assert "test_example" not in text
     assert ("Report: recommendations.md (created) — citations, fixes and "
             "verification steps.") in text
+    assert "Next: ptest doctor --fix" in text
     assert "Project |" not in text
     for leaked in ("&#", "&lt;", "&gt;", "&amp;"):
         assert leaked not in text
@@ -139,29 +142,53 @@ def test_agent_assessment_golden_o4_shape_at_width_90():
 
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
-        publication_status="created", width=90)
+        publication_status="created", width=90, repo="shop",
+        provider="codex/gpt-5", duration_s=45, calls=9)
 
-    # Exact O.4 target block: header at column 0, facts indented 2, a
-    # blank line, aligned satisfied columns, every item row indented 2
-    # with gap detail at 6, then the trailer.
+    # Exact O.4 target block: header line, one facts line, one bordered
+    # table (general, parallel-safety, then Parallel execution rows),
+    # per-gap findings, unknowns grouped by reason, the next command,
+    # then the trailer.
     assert text == (
-        "api  pytest · 5 ok · 1 gap · 5 unknown   (partial evidence)\n"
-        "  runs: yes · parallel: 4 workers · setup: uv sync --locked\n"
-        "  full suite = your pytest config: -m \"not slow\"\n"
+        "shop · codex/gpt-5 · 11 checks · 9 calls · 45s\n"
         "\n"
-        "  ✓ Test data factories  ✓ Test selection\n"
-        "  ? Test timing  no timing history yet: run ptest --full once\n"
+        "api  pytest · runs ✓ · 4 workers · setup: uv sync --locked"
+        "   (partial evidence)\n"
         "\n"
-        "  parallel safety\n"
-        "  ✓ Fixture state isolation (1 citation dropped)  ✓ Database setup reuse\n"
-        "  ✓ Cache isolation\n"
-        "  ✗ Files and ports\n"
+        "┌─────────────────────────┬───────────┐\n"
+        "│ check                   │ api       │\n"
+        "├─────────────────────────┼───────────┤\n"
+        "│ Test data factories     │ ✓ ok      │\n"
+        "│ Test selection          │ ✓ ok      │\n"
+        "│ Test timing             │ ? unknown │\n"
+        "│ parallel safety                     │\n"
+        "│ Fixture state isolation │ ✓ ok      │\n"
+        "│ Database setup reuse    │ ✓ ok      │\n"
+        "│ Database isolation      │ ? unknown │\n"
+        "│ Cache isolation         │ ✓ ok      │\n"
+        "│ Files and ports         │ ✗ gap     │\n"
+        "│ Network isolation       │ ? unknown │\n"
+        "│ Child processes         │ ? unknown │\n"
+        "│ Deterministic time      │ ? unknown │\n"
+        "└─────────────────────────┴───────────┘\n"
+        "\n"
+        "Gaps\n"
+        "api · Files and ports\n"
         "      Writes reach /tmp directly.\n"
         "      → Allocate an owned temp root.\n"
-        "  ? Network isolation  The tests use httpx but no socket block was cited.\n"
-        "  ? Child processes  no subprocess usage in the admitted excerpts\n"
-        "  ? Deterministic time  review failed: timed out\n"
-        "  ? Database isolation  Row DB-002 judged unknown against excerpts.\n"
+        "\n"
+        "Unknowns\n"
+        "api: Network isolation — "
+        "The tests use httpx but no socket block was cited.\n"
+        "api: Child processes — "
+        "no subprocess usage in the admitted excerpts\n"
+        "api: Deterministic time — review failed: timed out\n"
+        "api: Database isolation — "
+        "Row DB-002 judged unknown against excerpts.\n"
+        "api: Test timing — "
+        "no timing history yet: run ptest --full once\n"
+        "\n"
+        "Next: ptest doctor --fix\n"
         "\n"
         "Report: recommendations.md (created) — citations, fixes and "
         "verification steps.\n"
@@ -190,11 +217,10 @@ def test_agent_assessment_falls_back_to_execution_without_facts():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "api  pytest · 1 ok · 0 gap · 1 unknown" in text
-    assert "runs: no — no tests found → add a test file" in text
-    assert "checklist only: ptest cannot run this project yet" in text
-    assert "✓ FIX-001" in text
-    assert "? DB-001  Row DB-001 judged unknown." in text
+    assert "api  pytest · runs ✗ — no tests found → add a test file" in text
+    assert "checklist only: ptest cannot run this project yet" not in text
+    assert "│ FIX-001" in text and "✓ ok" in text
+    assert "api: DB-001 — Row DB-001 judged unknown." in text
     assert "(review failed" not in text
 
 
@@ -214,7 +240,7 @@ def test_agent_assessment_unknown_model_uses_first_sentence():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "? DB-001  First finding sentence." in text
+    assert "api: DB-001 — First finding sentence." in text
     assert "Second sentence" not in text
 
 
@@ -239,8 +265,9 @@ def test_agent_assessment_parallel_item_follows_safety_group():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "  parallel safety" in text
-    assert text.index("parallel safety") < text.index("✗ Parallel execution")
+    assert "│ parallel safety" in text
+    assert text.index("parallel safety") < text.index("│ Parallel execution")
+    assert "api · Parallel execution" in text
     assert "→ Enable xdist." in text
 
 
@@ -266,7 +293,8 @@ def test_agent_assessment_parallel_item_renders_after_safety_block():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "\n\n  ✗ Parallel execution\n" in text
+    assert "│ Parallel execution " in text
+    assert text.index("│ Parallel execution ") < text.index("✗ gap")
 
 
 def test_agent_assessment_no_safety_header_without_safety_rows():
@@ -305,10 +333,10 @@ def test_agent_assessment_no_color_uses_bracket_icons(monkeypatch):
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "[ok] Test data factories" in text
-    assert "[gap] Fixture state isolation" in text
-    assert "[?] DB-001  review failed: timed out" in text
-    assert "[n/a] Test selection  no cache." in text
+    assert "│ Test data factories" in text and "[ok]" in text
+    assert "api · Fixture state isolation" in text and "[gap]" in text
+    assert "api: DB-001 — review failed: timed out" in text
+    assert "[?]" in text and "[n/a]" in text
     assert "✓" not in text
     assert "✗" not in text
     assert "–" not in text
@@ -339,6 +367,7 @@ def test_agent_assessment_neutralizes_hostile_model_text():
     assert "<script" not in text
     assert "https://example.invalid" not in text
     assert "Fixture / 'isolation'" in text
+    assert "api · Fixture / 'isolation'" in text
     assert "\u202e" not in text
     for leaked in ("&#", "&lt;", "&gt;", "&amp;", "|"):
         assert leaked not in text
@@ -368,7 +397,7 @@ def test_agent_assessment_dependency_wording_passes_through_verbatim():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
 
-    assert "1 ok · 0 gap · 0 unknown   (partial evidence)" in text
+    assert "api  pytest · runs ✓   (partial evidence)" in text
     details = text[text.index("Dependencies:"):text.index("Report:")]
     assert ("uv.lock is present but was not admitted to the review packet"
             in " ".join(details.split()))
@@ -419,13 +448,13 @@ def test_agent_assessment_header_names_runner_or_unknown():
     text = render_agent_assessment(
         [child], standalone, report_path="recommendations.md",
         publication_status="created", width=90)
-    assert ".  pytest · 0 ok · 0 gap · 0 unknown" in text
+    assert ".  pytest · runs ✓" in text
 
     mismatched = render_agent_assessment(
         [{**child, "scope": "other"}], _aa_workspace(),
         report_path="recommendations.md", publication_status="created",
         width=90)
-    assert "other  unknown · 0 ok" in mismatched
+    assert "other  unknown · runs ✓" in mismatched
 
 
 def test_agent_assessment_output_bounded_and_lists_every_scope():
@@ -459,8 +488,8 @@ def test_agent_assessment_output_bounded_and_lists_every_scope():
 
     assert len(text.encode("utf-8")) <= 256 * 1024
     for index in range(256):
-        assert f"child-{index:03d}  unknown · 11 ok" in text
-    assert text.count("11 ok · 0 gap · 0 unknown") == 256
+        assert f"child-{index:03d}  pytest · runs ✓" in text
+    assert text.count("runs ✓") == 256
     assert "recommendations.md" in text
     assert text.rstrip().endswith("and verification steps.")
 
@@ -486,7 +515,7 @@ def test_agent_assessment_oversized_input_keeps_every_scope_and_trailer():
 
     assert len(text.encode("utf-8")) <= 256 * 1024
     for index in range(60):
-        assert f"proj-{index:03d}  unknown · 0 ok · 11 gap" in text
+        assert f"proj-{index:03d}  pytest · runs ✓" in text
     assert "findings omitted; see recommendations.md" in text
     assert "recommendations.md" in text
     assert text.rstrip().endswith("and verification steps.")
@@ -689,10 +718,11 @@ def test_render_doctor_supports_direct_report_callers_without_workspace():
 # --- Round 17 twins: word-boundary truncation with ellipsis -----------------
 
 
-def test_finding_line_truncates_at_word_boundary_with_ellipsis():
+def test_grid_gap_finding_has_no_finding_line_cap():
+    """Gap findings wrap whole: no word-boundary ellipsis truncation."""
     from ptest.render import render_agent_assessment
 
-    words = " ".join(f"word{i:03d}" for i in range(200))
+    words = " ".join(f"word{i:03d}" for i in range(100))
     child = {
         "scope": "api",
         "score": {"satisfied": 0, "applicable": 1, "percent": 0},
@@ -710,15 +740,11 @@ def test_finding_line_truncates_at_word_boundary_with_ellipsis():
     wrapped = [item for item in text.splitlines()
                if item.startswith("      word")]
     assert wrapped
-    assert "[truncated]" not in "".join(wrapped)
+    assert "…" not in text
+    assert "[truncated]" not in text
     content = " ".join(item.strip() for item in wrapped)
-    assert len(content.encode("utf-8")) <= 512
-    line = content
-    # Word-boundary cut: the token before the ellipsis is a whole source word
-    # (a mid-word cut would leave a fragment like "wor").
-    import re
-
-    assert re.fullmatch(r"word\d{3}", line[:-1].rsplit(" ", 1)[-1])
+    for index in range(100):
+        assert f"word{index:03d}" in content
 
 
 def test_truncate_utf8_bytes_cjk_cuts_at_word_boundary():
@@ -743,44 +769,51 @@ def test_truncate_utf8_bytes_accented_latin_cuts_at_word_boundary():
 
 
 def test_assessment_item_line_shows_dropped_citations():
-    row = _aa_row("DB-001", "satisfied", label="Database isolation")
+    row = _aa_row("DB-001", "gap", label="Database isolation",
+                  rationale="Shared state.")
     row["dropped_citations"] = 2
     plain = _aa_row("FIX-001", "satisfied", label="Plain label")
     child = {
         "scope": "api",
-        "score": {"satisfied": 2, "applicable": 2, "percent": 100},
+        "score": {"satisfied": 1, "applicable": 2, "percent": 50},
         "rows": [row, plain],
-        "findings": [],
+        "findings": [{"id": "DB-001", "summary": "Shared.",
+                      "suggested_change": "Isolate.",
+                      "recipe_id": None, "evidence": [_aa_citation()]}],
         "limitations": [],
     }
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    assert "✓ Database isolation (2 citations dropped)" in text
-    assert "✓ Plain label" in text
+    assert "api · Database isolation (2 citations dropped)" in text
+    assert "│ Plain label" in text and "✓ ok" in text
     assert "— satisfied" not in text
 
 
 def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
-    row = _aa_row("DB-001", "satisfied", label="Database isolation")
+    row = _aa_row("DB-001", "gap", label="Database isolation",
+                  rationale="Shared state.")
     row["dropped_citations"] = 1
     child = {
         "scope": "api",
-        "score": {"satisfied": 1, "applicable": 1, "percent": 100},
+        "score": {"satisfied": 0, "applicable": 1, "percent": 0},
         "rows": [row],
-        "findings": [],
+        "findings": [{"id": "DB-001", "summary": "Shared.",
+                      "suggested_change": "Isolate.",
+                      "recipe_id": None, "evidence": [_aa_citation()]}],
         "limitations": [],
     }
     text = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created")
-    assert ("[ok] Database isolation "
+    assert ("api · Database isolation "
             "(1 citation dropped)") in text
     assert "✓" not in text
 
 
-def test_na_rationale_wraps_fully_without_ellipsis():
+def test_na_verdict_renders_dim_cell_without_reason_prose():
+    """N/a reasons live in recommendations.md, not in grid cells."""
     from ptest.render import render_agent_assessment
 
     rationale = " ".join(f"token{i:03d}" for i in range(30))
@@ -797,8 +830,8 @@ def test_na_rationale_wraps_fully_without_ellipsis():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90)
     assert "…" not in text
-    for index in range(30):
-        assert f"token{index:03d}" in text
+    assert "– n/a" in text
+    assert "token000" not in text
 
 
 def test_unknown_reason_wraps_fully_without_ellipsis():
@@ -847,8 +880,8 @@ def test_assessment_colors_icons_on_tty_only(monkeypatch):
     tty = render_agent_assessment(
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=90, color=True)
-    assert "\x1b[32m✓\x1b[0m" in tty
-    assert "\x1b[31m✗\x1b[0m" in tty
+    assert "\x1b[32m✓ ok\x1b[0m" in tty
+    assert "\x1b[31m✗ gap\x1b[0m" in tty
 
     monkeypatch.setenv("NO_COLOR", "1")
     dimmed = render_agent_assessment(
@@ -875,13 +908,12 @@ def test_hostile_fact_characters_never_reach_doctor_raw():
     assert csi not in text
 
 
-def test_doctor_full_suite_breaks_between_atoms_at_width_60():
-    """The persea full-suite fact wraps at ', ' boundaries, never mid-command."""
+def test_doctor_facts_line_wraps_between_atoms_at_width_60():
+    """The single grid facts line wraps between atoms, never mid-atom."""
     child = {
         "scope": "api",
         "facts": _aa_facts(
-            full_suite='your pytest config: -m "not extended_migration", '
-                       "conftest.py hooks"),
+            setup="uv sync --locked --group analysis --group migration"),
         "rows": [_aa_row("FIX-001", "satisfied", label="ok")],
         "findings": [],
         "limitations": [],
@@ -890,7 +922,7 @@ def test_doctor_full_suite_breaks_between_atoms_at_width_60():
         [child], _aa_workspace(), report_path="recommendations.md",
         publication_status="created", width=60)
     lines = text.splitlines()
-    assert '  full suite = your pytest config: -m "not extended_migration",' \
-        in lines
-    assert "    conftest.py hooks" in lines
-    assert not any(line.endswith('-m "not') for line in lines)
+    assert lines[2] == "api  pytest · runs ✓ · 4 workers"
+    assert lines[3] == ("    setup: uv sync --locked --group analysis "
+                        "--group migration")
+    assert not any(line.endswith("·") for line in lines)

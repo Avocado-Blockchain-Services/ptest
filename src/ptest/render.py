@@ -8,12 +8,9 @@ import re
 
 from . import checklist as checklist_api
 from . import contracts as C
-from .agent_assessment import FAILED_PREFIX, SKIP_PREFIX
+from .agent_assessment import FAILED_PREFIX
 from .project_facts import (
     check_facts,
-    detail_atoms,
-    detail_lines,
-    summary_atoms,
     terminal_width,
     wrap_atoms,
     wrap_words,
@@ -71,13 +68,6 @@ def paint(text: str, style: str, *, color: bool = False) -> str:
     if code is None:
         return text
     return f"\x1b[{code}m{text}\x1b[0m"
-
-# One gap finding line (summary plus suggested change) never costs more than
-# this many UTF-8 bytes; longer model prose is cut with a marker so a single
-# verbose finding cannot crowd out other projects. Residual over-budget
-# variable lines are omitted whole with an explicit omission marker, while
-# every project header, score line and the trailer are always kept.
-_AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES = 512
 
 # Literal mirror of agent_assessment.PTEST_ANSWER_PREFIX (T3 never imports
 # it; T5 asserts equality). This module only reads the review-flow
@@ -195,13 +185,57 @@ def _fit_lines_with_omission(lines: list[str], budget: int,
     return kept
 
 
-def _assessment_icons() -> dict:
-    """One icon per checklist status, with a bracket fallback for NO_COLOR."""
-    if "NO_COLOR" in os.environ:
+_GRID_STATUS_WORDS = {
+    "satisfied": "ok",
+    "gap": "gap",
+    "unknown": "unknown",
+    "not-applicable": "n/a",
+}
+
+
+def _grid_ascii(encoding: str | None) -> bool:
+    """True when stdout cannot carry UTF-8 box drawing and glyphs."""
+    if encoding is None:
+        return False
+    return encoding.lower().replace("_", "-") not in ("utf-8", "utf8")
+
+
+def _grid_glyphs(*, bracket: bool) -> dict:
+    """Cell icons: glyphs, or bracket words without color/UTF-8."""
+    if bracket:
         return {"satisfied": "[ok]", "gap": "[gap]", "unknown": "[?]",
                 "not-applicable": "[n/a]"}
     return {"satisfied": "✓", "gap": "✗", "unknown": "?",
             "not-applicable": "–"}
+
+
+def _grid_borders(*, ascii_only: bool) -> dict:
+    """Box-drawing table borders, or ASCII when stdout is not UTF-8."""
+    if ascii_only:
+        return {"tl": "+", "tm": "+", "tr": "+", "ml": "+", "mm": "+",
+                "mr": "+", "bl": "+", "bm": "+", "br": "+", "h": "-",
+                "v": "|"}
+    return {"tl": "┌", "tm": "┬", "tr": "┐", "ml": "├", "mm": "┼",
+            "mr": "┤", "bl": "└", "bm": "┴", "br": "┘", "h": "─",
+            "v": "│"}
+
+
+def _grid_status_key(status: object) -> str:
+    """Normalize any row status to a known grid cell key."""
+    return status if status in _GRID_STATUS_WORDS else "unknown"
+
+
+def _grid_cell(status: object, glyphs: dict, *, bracket: bool) -> str:
+    """One grid cell: glyph plus word, or the bracket icon alone."""
+    key = _grid_status_key(status)
+    if bracket:
+        return glyphs[key]
+    return f"{glyphs[key]} {_GRID_STATUS_WORDS[key]}"
+
+
+def _grid_text(value: object) -> str:
+    """Terminal-safe header text that cannot add table cells."""
+    return terminal_text(value).replace("|", "/")
 
 
 def _assessment_runner(scope: str, workspace) -> str:
@@ -231,40 +265,68 @@ def _child_facts(child) -> dict | None:
     return check_facts(child.get("facts")) or None
 
 
-def _fallback_atoms(child) -> tuple[list[str], bool]:
-    """Summary atoms from ``child["execution"]``; bool is not-runnable."""
-    execution = child.get("execution") if isinstance(child, dict) else None
-    if not isinstance(execution, dict):
-        return ["runs: yes"], False
-    status = execution.get("status")
-    raw_detail = execution.get("detail", "")
-    detail = _agent_assessment_prose(
-        raw_detail if isinstance(raw_detail, str) else "")
-    raw_fix = execution.get("fix", "")
-    fix = _agent_assessment_prose(raw_fix if isinstance(raw_fix, str) else "")
-    if status == "not-executable":
-        if fix:
-            return [f"runs: no — {detail} → {fix}"], True
-        if detail:
-            return [f"runs: no — {detail}"], True
-        return ["runs: no"], True
-    return ["runs: yes"], False
+def _grid_duration(seconds: object) -> str | None:
+    """Short duration for the grid header, or None when unusable."""
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not 0 <= seconds < 1e9 or seconds != seconds):
+        return None
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}m{total % 60:02d}s"
 
 
-def _child_fact_lines(child, width: int) -> tuple[list[str], bool]:
-    """Indented fact lines for one child; bool is not-runnable."""
+def _grid_runs_atom(runnable: bool, glyphs: dict, *, ascii_only: bool,
+                    detail: str = "", fix: str = "") -> str:
+    """One runs atom: ``runs ✓`` or ``runs ✗`` with an optional reason."""
+    mark = glyphs["satisfied"] if runnable else glyphs["gap"]
+    atom = f"runs {mark}"
+    if runnable:
+        return atom
+    if detail:
+        atom += f" {'-' if ascii_only else '—'} {detail}"
+    if fix:
+        atom += f" {'->' if ascii_only else '→'} {fix}"
+    return atom
+
+
+def _grid_facts_atoms(child, runner: str, glyphs: dict, *,
+                      ascii_only: bool) -> list[str]:
+    """Facts atoms for one grid facts line: runner, runs, parallel, setup."""
     facts = _child_facts(child)
     if facts is None:
-        atoms, not_runnable = _fallback_atoms(child)
-        return wrap_atoms(atoms, width, indent="  ", hang="    "), not_runnable
-    atoms = [_agent_assessment_prose(atom) for atom in summary_atoms(facts)]
-    lines = wrap_atoms(atoms, width, indent="  ", hang="    ")
-    for detail in detail_lines(facts):
-        atoms = [_agent_assessment_prose(atom)
-                 for atom in detail_atoms(detail)]
-        lines.extend(wrap_atoms(atoms, width, indent="  ", hang="    ",
-                                sep=" "))
-    return lines, not facts.get("runs", True)
+        execution = child.get("execution") if isinstance(child, dict) else None
+        detail = ""
+        fix = ""
+        runnable = True
+        if isinstance(execution, dict):
+            runnable = execution.get("status") != "not-executable"
+            raw_detail = execution.get("detail", "")
+            detail = _agent_assessment_prose(
+                raw_detail if isinstance(raw_detail, str) else "")
+            raw_fix = execution.get("fix", "")
+            fix = _agent_assessment_prose(
+                raw_fix if isinstance(raw_fix, str) else "")
+        return [_grid_text(runner),
+                _grid_runs_atom(runnable, glyphs, ascii_only=ascii_only,
+                                detail=detail, fix=fix)]
+    runner_name = facts.get("runner") or runner
+    atoms = [_grid_text(runner_name),
+             _grid_runs_atom(facts.get("runs", True), glyphs,
+                             ascii_only=ascii_only,
+                             detail=_agent_assessment_prose(
+                                 facts.get("runs_reason") or ""),
+                             fix=_agent_assessment_prose(
+                                 facts.get("runs_fix") or ""))]
+    short = facts.get("parallel_short")
+    if short is None:
+        short = facts.get("parallel")
+    if isinstance(short, str) and short:
+        atoms.append(_agent_assessment_prose(short))
+    setup = facts.get("setup")
+    if isinstance(setup, str) and setup:
+        atoms.append(f"setup: {_agent_assessment_prose(setup)}")
+    return atoms
 
 
 def _child_limitation_suffix(child) -> tuple[bool, bool]:
@@ -282,36 +344,60 @@ def _child_limitation_suffix(child) -> tuple[bool, bool]:
     return partial, not_runnable
 
 
-def _assessment_head_line(child, runner: str, *,
-                          color: bool = False) -> str:
-    """Score header: scope, runner, ok/gap/unknown/n-a counts, suffixes."""
+def _grid_row_ids(children: list) -> tuple[list[str], list[str], list[str]]:
+    """(general, safety, parallel) row ids in checklist catalog order."""
+    catalog = [entry.id for entry in checklist_api.CATALOG]
+    rank = {row_id: index for index, row_id in enumerate(catalog)}
+    seen: list[str] = []
+    for child in children:
+        rows = child.get("rows", []) if isinstance(child, dict) else []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_id = row.get("id")
+            if isinstance(row_id, str) and row_id not in seen:
+                seen.append(row_id)
+    general = [row_id for row_id in seen
+               if row_id not in _PARALLEL_SAFETY_IDS
+               and row_id != _PARALLEL_ITEM_ID]
+    general.sort(key=lambda row_id: (rank.get(row_id, len(rank)), row_id))
+    safety = [row_id for row_id in catalog
+              if row_id in _PARALLEL_SAFETY_IDS and row_id in seen]
+    parallel = [_PARALLEL_ITEM_ID] if _PARALLEL_ITEM_ID in seen else []
+    return general, safety, parallel
+
+
+def _grid_child_info(child) -> dict:
+    """Scope, per-id statuses/labels and findings for one grid column."""
+    scope = (child.get("scope", "unknown")
+             if isinstance(child, dict) else "unknown")
     rows = child.get("rows", []) if isinstance(child, dict) else []
     if not isinstance(rows, list):
         rows = []
-    counts = {"satisfied": 0, "gap": 0, "unknown": 0, "not-applicable": 0}
+    statuses: dict = {}
+    labels: dict = {}
+    ordered: list = []
     for row in rows:
-        status = row.get("status") if isinstance(row, dict) else None
-        if status in counts:
-            counts[status] += 1
-        else:
-            counts["unknown"] += 1
-    scope = (child.get("scope", "unknown")
-             if isinstance(child, dict) else "unknown")
-    head = (f"{paint(terminal_text(scope), 'bold', color=color)}  "
-            f"{terminal_text(runner)} · "
-            f"{counts['satisfied']} ok · {counts['gap']} gap · "
-            f"{counts['unknown']} unknown")
-    if counts["not-applicable"]:
-        head += f" · {counts['not-applicable']} n/a"
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or row_id in statuses:
+            continue
+        statuses[row_id] = row.get("status")
+        labels[row_id] = _row_label(row)
+        ordered.append(row)
+    findings = child.get("findings", []) if isinstance(child, dict) else []
+    by_id = {}
+    if isinstance(findings, list):
+        for finding in findings:
+            if (isinstance(finding, dict)
+                    and finding.get("id") not in by_id):
+                by_id[finding["id"]] = finding
     partial, _ = _child_limitation_suffix(child)
-    facts = _child_facts(child)
-    not_runnable = (not facts.get("runs", True)) if facts is not None else \
-        _fallback_atoms(child)[1]
-    if partial:
-        head += "   (partial evidence)"
-    if not_runnable:
-        head += ("   (checklist only: ptest cannot run this project yet)")
-    return head
+    return {"scope": scope, "statuses": statuses, "labels": labels,
+            "ordered": ordered, "by_id": by_id, "partial": partial}
 
 
 def _dropped_suffix(row: dict) -> str:
@@ -354,16 +440,28 @@ def _unknown_reason(row: dict) -> str:
     return _first_sentence(_agent_assessment_prose(rationale))
 
 
-def _na_reason(row: dict) -> str:
-    """Full reason for one n/a row; wrapped by the caller, never cut."""
-    rationale = row.get("rationale", "")
-    if not isinstance(rationale, str):
-        rationale = ""
-    for prefix in (SKIP_PREFIX, PTEST_ANSWER_PREFIX):
-        if rationale.startswith(prefix):
-            rationale = rationale[len(prefix):]
-            break
-    return _agent_assessment_prose(rationale)
+def _grid_facts_line(child, runner: str, glyphs: dict, *,
+                      ascii_only: bool, width: int) -> list[str]:
+    """One wrapped facts line per project, with a partial-evidence suffix."""
+    scope = (child.get("scope", "unknown")
+             if isinstance(child, dict) else "unknown")
+    atoms = _grid_facts_atoms(child, runner, glyphs, ascii_only=ascii_only)
+    separator = " - " if ascii_only else " · "
+    lines = wrap_atoms(atoms, width, indent=f"{_grid_text(scope)}  ",
+                       hang="    ", sep=separator)
+    if _child_limitation_suffix(child)[0]:
+        lines[-1] += "   (partial evidence)"
+    return lines
+
+
+def _shrink_text(text: str, room: int, *, ascii_only: bool) -> str:
+    """Cut a label to ``room`` characters, marking the cut explicitly."""
+    if len(text) <= room:
+        return text
+    marker = "..." if ascii_only else "…"
+    if room <= len(marker):
+        return marker[:room] if room > 0 else ""
+    return text[:room - len(marker)] + marker
 
 
 _ICON_STYLES = {
@@ -374,35 +472,155 @@ _ICON_STYLES = {
 }
 
 
-def _paint_icon(line: str, icon: str, status: str, *, color: bool) -> str:
-    """Paint the leading icon of an already-laid-out line.
+def _grid_table_lines(sections, labels, columns, glyphs, borders, *,
+                      bracket: bool = False, color: bool = False,
+                      ascii_only: bool = False, width: int = 80,
+                      shrink: bool = True) -> list[str]:
+    """One bordered table: rows are checks, columns are projects.
 
-    Layout math always runs on the plain text; painting the fixed
-    leading token afterwards keeps columns aligned.
+    ``sections`` pairs an optional spanning group label with row ids;
+    ``columns`` holds ``{"scope", "statuses"}`` per project. Labels and
+    scopes shrink with an explicit marker when the table must fit (pass
+    ``shrink=False`` to measure the natural width for stacking);
+    verdict cells are never truncated. Layout math runs on plain text
+    and ANSI styles land on fixed parts afterwards.
     """
-    if not line.startswith(f"  {icon} "):
-        return line
-    rest = line[2 + len(icon):]
-    return f"  {paint(icon, _ICON_STYLES[status], color=color)}{rest}"
+    vertical = paint(borders["v"], "dim", color=color)
+
+    def plain_cell(statuses: dict, row_id: str) -> str:
+        status = statuses.get(row_id)
+        if status is None:
+            return ""
+        return _grid_cell(status, glyphs, bracket=bracket)
+
+    ids = [row_id for _, group in sections for row_id in group]
+    label_w = max([len("check")] + [len(labels[row_id]) for row_id in ids])
+    cell_floors = []
+    proj_w = []
+    for column in columns:
+        floor = max([0] + [len(plain_cell(column["statuses"], row_id))
+                           for row_id in ids])
+        cell_floors.append(floor)
+        proj_w.append(max(len(column["scope"]), floor))
+    widths = [label_w, *proj_w]
+    if shrink and sum(w + 2 for w in widths) + len(widths) + 1 > width:
+        over = sum(w + 2 for w in widths) + len(widths) + 1 - width
+        cut = min(over, label_w - 4)
+        label_w = label_w - cut
+        over -= cut
+        for index in range(len(proj_w)):
+            if over <= 0:
+                break
+            cut = min(over, proj_w[index] - cell_floors[index])
+            proj_w[index] -= cut
+            over -= cut
+        widths = [label_w, *proj_w]
+    shown_labels = {row_id: _shrink_text(labels[row_id], label_w,
+                                         ascii_only=ascii_only)
+                    for row_id in ids}
+    shown_scopes = [_shrink_text(column["scope"], room, ascii_only=ascii_only)
+                    for column, room in zip(columns, proj_w)]
+
+    def show(text: str, room: int, style: str | None) -> str:
+        if text and style:
+            return paint(text, style, color=color) + " " * (room - len(text))
+        return text.ljust(room)
+
+    def row_line(cells: list[str], styles: list) -> str:
+        parts = [vertical]
+        for text, room, style in zip(cells, widths, styles):
+            parts.append(" " + show(text, room, style) + " ")
+            parts.append(vertical)
+        return "".join(parts)
+
+    def border(left: str, middle: str, right: str) -> str:
+        return paint(left + middle.join(borders["h"] * (room + 2)
+                                        for room in widths) + right,
+                     "dim", color=color)
+
+    lines = [border(borders["tl"], borders["tm"], borders["tr"]),
+             row_line(["check", *shown_scopes],
+                      ["bold"] * (len(columns) + 1)),
+             border(borders["ml"], borders["mm"], borders["mr"])]
+    for span, group in sections:
+        if span is not None and group:
+            room = sum(widths) + 3 * (len(widths) - 1)
+            lines.append(vertical + " " + show(
+                _shrink_text(span, room, ascii_only=ascii_only), room,
+                "dim") + " " + vertical)
+        for row_id in group:
+            cells = [shown_labels[row_id]]
+            styles: list = [None]
+            for column in columns:
+                status = column["statuses"].get(row_id)
+                if status is None:
+                    cells.append("")
+                    styles.append(None)
+                else:
+                    cells.append(plain_cell(column["statuses"], row_id))
+                    styles.append(_ICON_STYLES[_grid_status_key(status)])
+            lines.append(row_line(cells, styles))
+    lines.append(border(borders["bl"], borders["bm"], borders["br"]))
+    return lines
 
 
-def _reason_lines(icon: str, status: str, label: str, reason: str,
-                  suffix: str, width: int, *, color: bool) -> list[str]:
-    """One headed line plus word-wrapped continuation lines.
+def _grid_gap_lines(infos: list, *, ascii_only: bool, width: int) -> list[str]:
+    """Per-gap blocks: project · label, the finding, → the fix.
 
-    The full reason is kept: continuation lines hang under the label
-    like gap findings, and the suffix rides the last line.
+    Findings are wrapped, never truncated; the full text stays on the
+    terminal exactly as it appears in recommendations.md.
     """
-    if not reason:
-        return [_paint_icon(f"  {icon} {label}{suffix}", icon, status,
-                            color=color)]
-    # wrap_words rejoins on single spaces, so the two-space label/reason
-    # separator is restored on the headed line after wrapping.
-    lines = wrap_words(f"{icon} {label} {reason}", width, indent="  ",
-                       hang="      ")
-    lines[0] = lines[0].replace(f"{icon} {label} ", f"{icon} {label}  ", 1)
-    lines[-1] += suffix
-    return [_paint_icon(line, icon, status, color=color) for line in lines]
+    mid = " - " if ascii_only else " · "
+    arrow = "->" if ascii_only else "→"
+    lines = []
+    for info in infos:
+        scope = _grid_text(info["scope"])
+        for row in info["ordered"]:
+            if _grid_status_key(row.get("status")) != "gap":
+                continue
+            lines.append(f"{scope}{mid}{_row_label(row)}"
+                         f"{_dropped_suffix(row)}")
+            finding = info["by_id"].get(row.get("id"))
+            if finding is None:
+                lines.append("      no finding recorded; "
+                             "see recommendations.md.")
+                continue
+            summary = _agent_assessment_prose(finding.get("summary", ""))
+            change = _agent_assessment_prose(
+                finding.get("suggested_change", ""))
+            if summary:
+                lines.extend(wrap_words(summary, width, indent="      ",
+                                        hang="      "))
+            if change:
+                lines.extend(wrap_words(f"{arrow} {change}", width,
+                                        indent="      ", hang="      "))
+    return lines
+
+
+def _grid_unknown_lines(infos: list, *, ascii_only: bool,
+                        width: int) -> list[str]:
+    """Unknowns grouped by reason: one wrapped line per project and reason."""
+    dash = "-" if ascii_only else "—"
+    groups: dict = {}
+    order: list = []
+    for info in infos:
+        scope = _grid_text(info["scope"])
+        for row in info["ordered"]:
+            if _grid_status_key(row.get("status")) != "unknown":
+                continue
+            reason = _unknown_reason(row)
+            key = (scope, reason)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(_row_label(row))
+    lines = []
+    for scope, reason in order:
+        head = f"{scope}: {', '.join(groups[(scope, reason)])}"
+        if reason:
+            head += f" {dash} {reason}"
+        lines.extend(wrap_words(head, width, indent="", hang="  "))
+    return lines
 
 
 def _row_label(row: dict) -> str:
@@ -412,200 +630,135 @@ def _row_label(row: dict) -> str:
     return label or "unknown"
 
 
-def _satisfied_columns(cells: list[str], width: int, *, icon: str,
-                       color: bool = False) -> list[str]:
-    """Pack ``✓ Label`` cells into width-fitting aligned columns.
-
-    Every cell is padded to the common column width so cells in one
-    column start at the same offset; only the last cell on a line is
-    left unpadded (no trailing whitespace). Oversize cells overflow
-    rather than split, like every other atom. Icons are painted after
-    padding so ANSI codes never disturb the columns.
-    """
-    if not cells:
-        return []
-    column = max(len(cell) for cell in cells)
-
-    def render(chunk: list[str]) -> str:
-        return ("  " + "  ".join(
-            item.ljust(column) for item in chunk)).rstrip()
-
-    lines: list[str] = []
-    chunk: list[str] = []
-    for cell in cells:
-        if chunk and len(render([*chunk, cell])) > width:
-            lines.append(render(chunk))
-            chunk = []
-        chunk.append(cell)
-    if chunk:
-        lines.append(render(chunk))
-    if not colors_enabled(color):
-        return lines
-    boundary = re.compile("(^|  )" + re.escape(icon) + " ")
-    tinted = paint(icon, _ICON_STYLES["satisfied"], color=color)
-    return [boundary.sub(lambda match: match.group(1) + tinted + " ", line)
-            for line in lines]
-
-
-def _gap_lines(row: dict, by_id: dict, icons: dict, width: int, *,
-               color: bool = False) -> list[str]:
-    """One gap line plus the wrapped finding detail under it."""
-    label = _row_label(row)
-    lines = [_paint_icon(f"  {icons['gap']} {label}{_dropped_suffix(row)}",
-                         icons["gap"], "gap", color=color)]
-    finding = by_id.get(row.get("id"))
-    if finding is None:
-        lines.append("      no finding recorded; see recommendations.md.")
-        return lines
-    summary = _agent_assessment_prose(finding.get("summary", ""))
-    change = _agent_assessment_prose(finding.get("suggested_change", ""))
-    if summary:
-        capped = _truncate_utf8_bytes(
-            summary, _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES)
-        lines.extend(wrap_words(capped, width, indent="      ",
-                                hang="      "))
-    if change:
-        capped = _truncate_utf8_bytes(
-            f"→ {change}", _AGENT_ASSESSMENT_FINDING_LINE_MAX_BYTES)
-        lines.extend(wrap_words(capped, width, indent="      ",
-                                hang="      "))
-    return lines
-
-
-def _block_lines(rows: list[dict], by_id: dict, icons: dict,
-                 width: int, *, color: bool = False) -> list[str]:
-    """Item lines for one group: satisfied columns, then wrapped rows."""
-    satisfied = [f"{icons['satisfied']} {_row_label(row)}"
-                 f"{_dropped_suffix(row)}"
-                 for row in rows if row.get("status") == "satisfied"]
-    lines = []
-    if satisfied:
-        lines.extend(_satisfied_columns(satisfied, width, icon=icons["satisfied"],
-                                        color=color))
-    for row in rows:
-        status = row.get("status")
-        if status == "satisfied":
-            continue
-        label = _row_label(row)
-        suffix = _dropped_suffix(row)
-        if status == "gap":
-            lines.extend(_gap_lines(row, by_id, icons, width, color=color))
-        elif status == "not-applicable":
-            lines.extend(_reason_lines(icons["not-applicable"],
-                                       "not-applicable", label,
-                                       _na_reason(row), suffix, width,
-                                       color=color))
-        else:
-            lines.extend(_reason_lines(icons["unknown"], "unknown", label,
-                                       _unknown_reason(row), suffix, width,
-                                       color=color))
-    return lines
-
-
-def _assessment_item_lines(child, icons: dict, width: int, *,
-                           color: bool = False) -> list[str]:
-    """Compact item lines with the parallel-safety group set apart.
-
-    PARALLEL-001 renders on its own line after the safety block, never
-    inside the safety grid.
-    """
-    rows = child.get("rows", []) if isinstance(child, dict) else []
-    if not isinstance(rows, list):
-        rows = []
-    rows = [row for row in rows if isinstance(row, dict)]
-    findings = child.get("findings", []) if isinstance(child, dict) else []
-    by_id = {}
-    if isinstance(findings, list):
-        for finding in findings:
-            if (isinstance(finding, dict)
-                    and finding.get("id") not in by_id):
-                by_id[finding["id"]] = finding
-    main = [row for row in rows
-            if row.get("id") not in _PARALLEL_SAFETY_IDS
-            and row.get("id") != _PARALLEL_ITEM_ID]
-    safety = [row for row in rows
-              if row.get("id") in _PARALLEL_SAFETY_IDS]
-    parallel = [row for row in rows
-                if row.get("id") == _PARALLEL_ITEM_ID]
-    lines = _block_lines(main, by_id, icons, width, color=color)
-    if safety:
-        if lines:
-            lines.append("")
-        lines.append(paint("  parallel safety", "dim", color=color))
-        lines.extend(_block_lines(safety, by_id, icons, width, color=color))
-    if parallel:
-        if lines:
-            lines.append("")
-        lines.extend(_block_lines(parallel, by_id, icons, width, color=color))
-    return lines
-
-
 def render_agent_assessment(children, workspace, *, report_path: str,
                             publication_status: str,
                             width: int | None = None,
-                            color: bool = False) -> str:
-    """Render one headed block per project with item verdicts and findings.
+                            color: bool = False, repo: str | None = None,
+                            provider: str | None = None,
+                            duration_s: float | None = None,
+                            calls: int | None = None,
+                            encoding: str | None = None) -> str:
+    """Render the doctor grid: one checklist table across projects.
 
-    Each block carries a score header, plain-language fact lines, and the
-    compact item verdicts. Findings sit directly under their gap line and
-    every unknown carries its short reason; citations live only in
-    ``recommendations.md``. Terminal output never carries Markdown tables
-    or HTML entities.
+    Columns are projects, rows are checklist items grouped general, then
+    a parallel-safety group, then Parallel execution. One facts line per
+    project sits above the table; per-gap findings, unknowns grouped by
+    reason, the single next command and the report pointer sit below.
+    Terminal output never carries Markdown tables or HTML entities.
     """
     resolved = terminal_width(width)
-    icons = _assessment_icons()
-    head_sections = []
-    variable_sections = []
-    for child in children:
-        scope = (child.get("scope", "unknown")
-                 if isinstance(child, dict) else "unknown")
-        runner = _assessment_runner(scope, workspace)
-        fact_lines, _ = _child_fact_lines(child, resolved)
-        head = [_assessment_head_line(child, runner, color=color)]
-        head.extend(fact_lines)
-        head_sections.append("\n".join(head))
-        variable_sections.append(
-            _assessment_item_lines(child, icons, resolved, color=color))
+    ascii_only = _grid_ascii(encoding)
+    bracket = ascii_only or "NO_COLOR" in os.environ
+    glyphs = _grid_glyphs(bracket=bracket)
+    borders = _grid_borders(ascii_only=ascii_only)
+    mid = " - " if ascii_only else " · "
+    dash = "-" if ascii_only else "—"
+    children = list(children)
+    infos = [_grid_child_info(child) for child in children]
+    runners = [_assessment_runner(info["scope"], workspace) for info in infos]
 
+    parts = []
+    if repo is not None:
+        parts.append(_grid_text(repo))
+    parts.append(_grid_text(provider) if provider is not None else "offline")
+    parts.append(C.plural(sum(len(info["statuses"]) for info in infos),
+                          "check"))
+    if isinstance(calls, int) and not isinstance(calls, bool):
+        parts.append(C.plural(calls, "call"))
+    duration = _grid_duration(duration_s)
+    if duration is not None:
+        parts.append(duration)
+    header = paint(mid.join(parts), "bold", color=color)
+
+    facts_block = []
+    for child, runner in zip(children, runners):
+        facts_block.extend(_grid_facts_line(child, runner, glyphs,
+                                            ascii_only=ascii_only,
+                                            width=resolved))
+
+    general, safety, parallel = _grid_row_ids(children)
+    labels: dict = {}
+    for info in infos:
+        for row_id, label in info["labels"].items():
+            labels.setdefault(row_id, label)
+    columns = [{"scope": _grid_text(info["scope"]),
+                "statuses": info["statuses"]} for info in infos]
+    groups = [(None, general)]
+    if safety:
+        groups.append(("parallel safety", safety))
+    if parallel:
+        groups.append(("Parallel execution", parallel))
+    def make_table(cols, *, shrink=True) -> list[str]:
+        return _grid_table_lines(groups, labels, cols, glyphs, borders,
+                                 bracket=bracket, color=color,
+                                 ascii_only=ascii_only, width=resolved,
+                                 shrink=shrink)
+
+    tables = []
+    if columns:
+        if len(columns) == 1:
+            tables.append(make_table(columns))
+        else:
+            natural = make_table(columns, shrink=False)
+            if max(len(line) for line in natural) <= resolved:
+                tables.append(make_table(columns))
+            else:
+                for column in columns:
+                    tables.append(make_table([column]))
+
+    gap_lines = _grid_gap_lines(infos, ascii_only=ascii_only, width=resolved)
+    unknown_lines = _grid_unknown_lines(infos, ascii_only=ascii_only,
+                                        width=resolved)
     dependency_details = _agent_dependency_detail_lines(children, resolved)
+    any_gap = any(_grid_status_key(status) == "gap"
+                  for info in infos
+                  for status in info["statuses"].values())
+    next_line = paint(
+        f"Next: {'ptest doctor --fix' if any_gap else 'ptest --full'}",
+        "bold", color=color)
     trailer = (f"Report: {terminal_text(report_path)} "
-               f"({terminal_text(publication_status)}) — citations, fixes "
-               f"and verification steps.")
-    # Headers, score lines and the trailer are mandatory: the variable item
-    # and dependency lines share whatever the byte bound leaves over, split
-    # evenly per project so one verbose child cannot crowd out the rest.
-    # Sections join with "\n\n" and the output ends with "\n". The spare
-    # two bytes per project below are the blank line joining a head to
-    # its kept items.
-    section_count = (len(head_sections) + (1 if dependency_details else 0)
-                     + 1)
-    fixed = (sum(len(section.encode("utf-8")) for section in head_sections)
-             + len(trailer.encode("utf-8"))
-             + 2 * (section_count - 1) + 1)
-    variable_budget = (_AGENT_ASSESSMENT_MAX_BYTES - fixed
-                       - 2 * len(head_sections))
-    siblings = max(1, len(variable_sections))
-    sections = []
-    for head, item_lines in zip(head_sections, variable_sections):
-        kept = _fit_lines_with_omission(
-            item_lines, max(0, variable_budget) // siblings,
-            lambda count: f"  [{C.plural(count, 'finding')} omitted; "
-                          "see recommendations.md]")
-        # A blank line separates the fact lines from the item verdicts.
-        sections.append(head if not kept else "\n".join((head, "", *kept)))
+               f"({terminal_text(publication_status)}) {dash} citations, "
+               f"fixes and verification steps.")
+
+    # Header, facts, tables, next and trailer are mandatory: gaps,
+    # unknowns and dependency details share whatever the byte bound
+    # leaves over. Sections join with "\n\n" and the output ends
+    # with "\n".
+    sections = [header]
+    if facts_block:
+        sections.append("\n".join(facts_block))
+    sections.extend("\n".join(table) for table in tables)
+    committed = (sum(len(section.encode("utf-8")) for section in sections)
+                 + len(next_line.encode("utf-8"))
+                 + len(trailer.encode("utf-8"))
+                 + 2 * (len(sections) + 1) + 1)
+    variable = []
+    if gap_lines:
+        variable.append(
+            ([paint("Gaps", "bold", color=color), *gap_lines],
+             lambda count: f"  [{C.plural(count, 'finding')} omitted; "
+                           "see recommendations.md]"))
+    if unknown_lines:
+        variable.append(
+            ([paint("Unknowns", "bold", color=color), *unknown_lines],
+             lambda count: f"[{C.plural(count, 'unknown')} omitted; "
+                           "see recommendations.md]"))
     if dependency_details:
-        committed = (sum(len(section.encode("utf-8")) for section in sections)
-                     + len(trailer.encode("utf-8"))
-                     + 2 * (len(sections) + 1) + 1)
-        header_cost = len("Dependencies:".encode("utf-8")) + 1
-        kept_dependencies = _fit_lines_with_omission(
-            dependency_details,
-            max(0, _AGENT_ASSESSMENT_MAX_BYTES - committed - header_cost),
-            lambda count: (f"[{C.plural(count, 'dependency detail')} omitted; "
-                           "see recommendations.md for full limitations]"))
-        sections.append("\n".join(("Dependencies:", *kept_dependencies)))
-    sections.append(trailer)
-    return "\n\n".join(sections) + "\n"
+        variable.append(
+            (["Dependencies:", *dependency_details],
+             lambda count: (f"[{C.plural(count, 'dependency detail')} "
+                            "omitted; see recommendations.md for full "
+                            "limitations]")))
+    share = max(0, _AGENT_ASSESSMENT_MAX_BYTES - committed)
+    share //= max(1, len(variable))
+    for lines, marker in variable:
+        sections.append("\n".join(_fit_lines_with_omission(lines, share,
+                                                           marker)))
+    sections.extend((next_line, trailer))
+    text = "\n\n".join(sections) + "\n"
+    if ascii_only:
+        text = text.encode("ascii", errors="backslashreplace").decode("ascii")
+    return text
 
 
 def render_json(document: C.PublicDocument) -> bytes:

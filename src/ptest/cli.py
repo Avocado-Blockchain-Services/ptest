@@ -1999,6 +1999,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 effective = agent_providers.with_model(adapter, model)
         assessments = []
         completed_reviews = []
+        followup_calls = 0
         for packet, reviews in zip(packets, plans):
             ensure_deadline()
             pending = [(review.request, review.schema)
@@ -2091,6 +2092,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                     final_reviews[index] = followup_review
                     reason = _review_failure_reason(result)
                     replies[index] = result.assessment if reason is None else reason
+                followup_calls += len(followup_jobs)
             progress("validating", adapter.name, packet.scope,
                      time.monotonic() - started)
             ensure_deadline()
@@ -2208,7 +2210,11 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
             sys.stdout.write(render.render_agent_assessment(
                 child_data, workspace, report_path=publication.path,
                 publication_status=publication.status,
-                color=sys.stdout.isatty()))
+                color=sys.stdout.isatty(), repo=resolution.root.name,
+                provider=(f"{adapter.name}/{model or 'provider-default'}"),
+                duration_s=time.monotonic() - started,
+                calls=calls + followup_calls,
+                encoding=sys.stdout.encoding))
             mention = _fix_mention(resolution)
             if mention is not None:
                 sys.stdout.write(mention + "\n")
@@ -2225,14 +2231,21 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
 
 def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
                           domain: C.DomainPaths) -> None:
+    started = time.monotonic()
     workspace = doctor.inspect_workspace(domain, resolution,
                                          _doctor_limits(parsed), parsed.scope)
     if parsed.json:
         sys.stdout.buffer.write(_doctor_offline_assessment_json(
             resolution, domain, workspace))
     else:
-        sys.stdout.write(render.render_doctor(
-            workspace.aggregate, workspace=workspace))
+        child_data, _limitations, publication = _offline_assessment_parts(
+            resolution, domain, workspace)
+        sys.stdout.write(render.render_agent_assessment(
+            child_data, workspace, report_path=publication["path"],
+            publication_status=publication["status"],
+            color=sys.stdout.isatty(), repo=resolution.root.name,
+            provider="offline", duration_s=time.monotonic() - started,
+            calls=0, encoding=sys.stdout.encoding))
         mention = _fix_mention(resolution)
         if mention is not None:
             sys.stdout.write(mention + "\n")
@@ -2280,14 +2293,16 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
 _OFFLINE_UNKNOWN_REASON = "offline static run: model review unavailable"
 
 
-def _doctor_offline_assessment_json(
-        resolution: C.ConfigResolution,
-        domain: C.DomainPaths, workspace) -> bytes:
-    """Build the versioned assessment document from static facts only.
+def _offline_assessment_parts(resolution: C.ConfigResolution,
+                              domain: C.DomainPaths, workspace):
+    """Shared offline children, limitations and publication record.
 
-    No provider is launched and no report is written: deterministic items
-    are answered from ptest's own facts while every item needing a model
-    call becomes an ``unknown`` row carrying the offline reason.
+    Both ``--json`` and the terminal grid render from these parts, so the
+    versioned document and the terminal table always describe the same
+    assessment. No provider is launched and no report is written:
+    deterministic items are answered from ptest's own facts while every
+    item needing a model call becomes an ``unknown`` row carrying the
+    offline reason.
     """
     packets = agent_assessment.build_packets(workspace, resolution)
     if not packets:
@@ -2316,6 +2331,18 @@ def _doctor_offline_assessment_json(
     limitations = _assessment_limitations(packets, top_level=True)
     if initialization_blocker is not None:
         limitations.insert(0, dict(initialization_blocker))
+    publication = {"status": "skipped",
+                   "path": "recommendations.md",
+                   "sha256": "0" * 64}
+    return child_data, limitations, publication
+
+
+def _doctor_offline_assessment_json(
+        resolution: C.ConfigResolution,
+        domain: C.DomainPaths, workspace) -> bytes:
+    """Build the versioned assessment document from static facts only."""
+    child_data, limitations, publication = _offline_assessment_parts(
+        resolution, domain, workspace)
     document = C.PublicDocument(
         kind="agent-assessment", ptest_version=C.PTEST_VERSION,
         domain=_domain_public(domain),
@@ -2326,9 +2353,7 @@ def _doctor_offline_assessment_json(
                          "profile": "ptest-offline-v1"},
             "children": child_data,
             "limitations": limitations,
-            "publication": {"status": "skipped",
-                            "path": "recommendations.md",
-                            "sha256": "0" * 64},
+            "publication": publication,
         },
         error=None)
     return render.render_json(document)
