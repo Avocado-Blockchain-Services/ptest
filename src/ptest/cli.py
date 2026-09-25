@@ -2451,6 +2451,22 @@ def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
     return C.Counts(**summed)
 
 
+def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | None]],
+                          started: float, code: int, *, quiet: bool) -> None:
+    """Emit the existing total line over per-child outcomes."""
+    total_counts = _summed_counts(
+        [counts for _, _, counts in child_outcomes])
+    status = _worst_status(
+        [outcome for _, outcome, _ in child_outcomes])
+    hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                       C.Status.NOT_RUN)
+            and progress.claim_hint())
+    progress.emit(progress.format_end(
+        status, counts=total_counts,
+        duration_s=time.monotonic() - started, exit_code=code,
+        hint=hint, lead="total"), quiet=quiet)
+
+
 def _lease(item: C.LeaseView) -> dict:
     return {
         "run_id": item.run_id, "checkout_id": item.checkout_id,
@@ -2500,18 +2516,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return result.exit_code
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
-                total_counts = _summed_counts(
-                    [counts for _, _, counts in child_outcomes])
-                status = _worst_status(
-                    [outcome for _, outcome, _ in child_outcomes])
-                hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
-                                   C.Status.NOT_RUN)
-                        and progress.claim_hint())
-                progress.emit(progress.format_end(
-                    status, counts=total_counts,
-                    duration_s=time.monotonic() - started, exit_code=code,
-                    hint=hint, lead="total"), quiet=parsed.quiet)
+                _emit_monorepo_total(child_outcomes, started, code,
+                                     quiet=parsed.quiet)
                 return code
+            if parsed.changed:
+                changed_started = time.monotonic()
+                changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                first_failure = 0
+                for item in monorepo.select_changed_children(
+                        resolution.root, children, parsed.base):
+                    if not item.run:
+                        if not parsed.quiet:
+                            print(f"ptest: {item.target.declaration} · no changes",
+                                  file=sys.stderr)
+                        changed_outcomes.append(
+                            (0, C.Status.NO_TESTS_NEEDED, None))
+                        continue
+                    result = operations.execute(
+                        domain, item.target.config,
+                        monorepo.child_changed_request(
+                            item.target, base=parsed.base,
+                            workers=parsed.workers,
+                            queue_timeout_s=parsed.queue_timeout_s,
+                            no_setup=parsed.no_setup,
+                            result_path=parsed.result_path,
+                            fixture_domain=parsed.fixture_domain,
+                            verbose=parsed.verbose, quiet=parsed.quiet),
+                    )
+                    for reason in result.reasons:
+                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+                    changed_outcomes.append(
+                        (result.exit_code, result.status, result.counts))
+                    if result.exit_code and not first_failure:
+                        first_failure = result.exit_code
+                _emit_monorepo_total(changed_outcomes, changed_started,
+                                     first_failure, quiet=parsed.quiet)
+                return first_failure
             routed = monorepo.route_scopes(parsed.runner_argv, children)
             result = operations.execute(
                 domain, routed.target.config,
