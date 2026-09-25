@@ -299,6 +299,12 @@ def test_v2_review_emits_capabilities_first_public_assessment_and_self_verifying
     assert "ptest api" not in rendered
     assert "ptest web" not in rendered
 
+    # Bundle-isolation workaround: the first run records history in the
+    # test-private state dir, which the second run would otherwise read
+    # (different TIMING-001 reason, "replaced" instead of "unchanged").
+    # A fresh state dir keeps the re-publication verdict about the report
+    # bytes, not about ambient history evolving between the runs.
+    monkeypatch.setenv("PTEST_STATE_DIR", str(tmp_path / "rerun-state"))
     assert main((*review_argv, "--json")) == 0
     public = C.decode_public_document(capsys.readouterr().out.encode("utf-8"))
     assert public.kind == "agent-assessment" and public.error is None

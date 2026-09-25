@@ -6,7 +6,7 @@ Registered through ``tests/ng/conftest.py`` ``pytest_configure`` (never via
 function-scoped; every resource a fixture creates lives under the test's
 ``tmp_path``.  Module-level builder functions take explicit paths so
 module-level test helpers can delegate without fixture threading; their
-explicit keyword-only signatures reject unknown overrides with ``TypeError``.
+explicit signatures reject unknown overrides with ``TypeError``.
 
 * ``fake_provider_bin`` / ``fake_provider``: fake ``claude``/``codex`` CLI
   executables with scripted responses.  ``fake_provider_bin`` pins ``PATH``
@@ -32,11 +32,11 @@ from support import (
     ptest_toml_text,
     write_executable,
     write_file,
+    write_ptest_toml,
 )
 
 AGENT_CHILD_PID = "ab" * 16
 AGENT_CITATION_SHA = "ef" * 32
-AGENT_PACKET_SHA = "cd" * 32
 
 AGENT_RECORD_RECIPES = {
     "FIX-001": "factories", "FIX-002": "factories",
