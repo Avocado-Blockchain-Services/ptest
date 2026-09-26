@@ -69,13 +69,14 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert first.changed is True
     assert second.changed is False
     guide = (tmp_path / "docs" / "ptest-agent.md").read_text(encoding="utf-8")
-    assert "Reuse expensive server/schema setup per run or worker" in guide
+    assert "Reuse expensive server/schema setup once per run or worker" in guide
     assert "never globally flush caches" in guide
     assert "ptest --full" in guide
     assert "repository root" in guide
     assert "ptest api/" in guide
-    assert "-n 0" in guide
-    assert "vitest run" in guide
+    assert "--again" in guide
+    assert "joined the running full run" in guide
+    assert "## Exit codes" in guide
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
@@ -163,12 +164,19 @@ def test_repository_guide_states_assessment_only_authority():
     assert "separate user instruction" in guide
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
-    assert "Run `ptest --full` once after the integrated change" in guide
     assert "one initial call per model-assessed item" in flat
     assert "one bounded verification for each valid reply" in flat
-    assert "timing, selection and parallel-execution items use ptest's own facts" in flat.lower()
-    assert "`ptest doctor --offline` is static" in guide
-    assert len(guide.splitlines()) <= 45
+    assert "ptest --full" in guide
+    assert "--again" in guide
+    for section in ("## The loop", "## Monorepo",
+                    "## Reading ptest output", "## Exit codes",
+                    "## Test-quality rules", "## Reporting"):
+        assert section in guide
+    assert "`ptest doctor --offline` is static and sends nothing" in flat
+    assert "It uses requested models Codex `gpt-6-sol` and Claude `opus` by default" in flat
+    assert "Timing, selection, and parallel-execution items use ptest's own facts" in flat
+    assert "omitted decisive callers or failure paths remain unknown" in flat
+    assert len(guide.splitlines()) <= 100
 
 
 def test_local_repair_guide_has_no_repo_internal_workflow():
@@ -578,7 +586,8 @@ def test_rollback_leaves_same_byte_file_swapped_between_read_and_replace(
 
 
 
-def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path):
+def test_generated_skill_names_the_loop_without_duplicated_guidance(tmp_path):
+    """New skill contract: short, no duplicated tables, must contain the loop."""
     result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
 
     assert result.changed is True
@@ -591,13 +600,41 @@ def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path
         head = text.split("---", 2)[1]
         assert "description:" in head
         body = text.split("---", 2)[2].strip("\n").splitlines()
-        assert len(body) <= 4
+        assert len(body) <= 15
+        # The loop: bare ptest, one scoped path, the full gate.
+        assert "`ptest`" in text
+        assert "`ptest <path>`" in text
+        assert "ptest --full" in text
+        # The three never-rules.
+        assert "Never invoke pytest, vitest, or npm test directly" in text
+        assert "Never cd into a child" in text
+        assert "Never rerun `ptest --full` without a change" in text
+        # Shared tables live only in the guide: no markdown tables here.
+        assert not any(line.lstrip().startswith("|") for line in body)
         assert "docs/ptest-agent.md" in text
+        assert "output" in text.lower()
         assert "run tests only through `ptest` from the repository root" in text.lower()
         # Merge/graphify guidance lives only in the guide, never in skills.
         assert "graphify" not in text
         assert "fast-forward" not in text
-        assert "ptest --full" not in text
+
+
+def test_skill_description_fires_on_test_and_code_intents(tmp_path):
+    """Each provider frontmatter must trigger on test/code intents."""
+    result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
+
+    assert result.changed is True
+    for relative in (".claude/skills/ptest/SKILL.md",
+                     ".agents/skills/ptest/SKILL.md",
+                     ".opencode/skills/ptest/SKILL.md",
+                     ".gemini/skills/ptest/SKILL.md"):
+        text = (tmp_path / relative).read_text(encoding="utf-8")
+        head = text.split("---", 2)[1]
+        description = next(line for line in head.splitlines()
+                           if line.startswith("description:")).lower()
+        for token in ("run", "add", "change", "verif", "test",
+                      "code", "pytest", "vitest", "npm test"):
+            assert token in description, (relative, token)
 
 
 def test_previous_managed_skill_upgrades_in_place(tmp_path):
@@ -665,6 +702,114 @@ def test_pre_gate_managed_skill_upgrades_in_place(tmp_path):
     assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
 
 
+def test_changed_loop_managed_skill_upgrades_in_place(tmp_path):
+    """The short `--changed`-loop skill shipped at c183837 upgrades too.
+
+    Exact bytes of ``c183837:src/ptest/agent_rules.py`` `_provider_text`
+    ("claude"): the short pointer naming the `--changed` default loop,
+    before the agent-docs rewrite. Real-world twin: repos initialised by
+    ptest between c183837 and the rewrite hold exactly these bytes and
+    `ptest init` must upgrade them in place, not raise already-exists.
+    """
+    from ptest.agent_rules import _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    changed_loop = (
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
+        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n"
+    ).encode("utf-8")
+    (target / "SKILL.md").write_bytes(changed_loop)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
+def test_every_shipped_skill_version_recognised_as_managed():
+    """Every skill template ever shipped must upgrade, not conflict.
+
+    Renders `_provider_text` of every commit that changed
+    ``src/ptest/agent_rules.py`` (via `git show` + exec of the template
+    functions in isolation) and requires each version, for every
+    provider, to be byte-identical to one of the currently recognised
+    managed templates (current, legacy, or a previous helper).
+    Skips with a clear reason when git history is unavailable.
+    """
+    import ast
+    import subprocess
+
+    import ptest.agent_rules as rules_module
+
+    anchor = Path(__file__).resolve().parent
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=anchor, capture_output=True, text=True,
+            check=True).stdout.strip()
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--",
+             "src/ptest/agent_rules.py"],
+            cwd=toplevel, capture_output=True, text=True,
+            check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("git history for agent_rules is unavailable")
+    if not commits:
+        pytest.skip("git history for agent_rules is unavailable")
+    helpers = [
+        obj for name, obj in vars(rules_module).items()
+        if name.endswith("_provider_text")
+        and name != "_provider_target" and callable(obj)
+    ]
+    assert helpers, "no recognised skill templates found"
+    providers = ("claude", "codex", "opencode", "gemini")
+    known = {provider: {fn(provider) for fn in helpers}
+             for provider in providers}
+    missing = []
+    for commit in commits:
+        try:
+            raw = subprocess.run(
+                ["git", "show",
+                 f"{commit}:src/ptest/agent_rules.py"],
+                cwd=toplevel, capture_output=True, check=True).stdout.decode("utf-8")
+        except subprocess.CalledProcessError:
+            pytest.skip(f"git history for agent_rules is unreadable at {commit}")
+        tree = ast.parse(raw)
+        stmts = [
+            node for node in tree.body
+            if (isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in (
+                    "_PROVIDER_DESCRIPTIONS", "_OLD_PROVIDER_DESCRIPTIONS")
+                for target in node.targets))
+            or (isinstance(node, ast.FunctionDef)
+                and "provider_text" in node.name
+                and node.name != "_provider_target")
+        ]
+        namespace: dict = {}
+        exec(compile(ast.Module(body=stmts, type_ignores=[]),
+                     f"{commit}:src/ptest/agent_rules.py", "exec"),
+             namespace)
+        if "_provider_text" not in namespace:
+            continue
+        for provider in providers:
+            if namespace["_provider_text"](provider) not in known[provider]:
+                missing.append(f"{commit[:7]} {provider}")
+    assert not missing, (
+        "shipped skill versions missing from the recognised managed set: "
+        + ", ".join(missing))
+
+
 def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
     import hashlib
 
@@ -704,6 +849,9 @@ def test_previous_hashes_cover_main_pre_change_guide():
 
     assert "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6" in rules_module._PREVIOUS_GUIDE_SHA256S
     assert "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "f151ca5d379597b20a4dbe97e064139660d973e4169869ff23a245e564253af0" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "09e59492e026c83bc8e51268bfd18e64b978736531e3a27b80a0a580ee1127ec" in rules_module._PREVIOUS_GUIDE_SHA256S
     current = rules_module._guide()
     assert hashlib.sha256(current).hexdigest() not in rules_module._PREVIOUS_GUIDE_SHA256S
     assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"

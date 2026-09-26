@@ -37,7 +37,7 @@ _INSPECTION = frozenset({
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
-_EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow",
+_EXECUTION_BOOL = frozenset({"--changed", "--full", "--again", "--no-setup", "--shadow",
                              "-v", "--verbose", "-q", "--quiet"})
 _REVIEW_TOTAL_TIMEOUT_S = 1800
 _REVIEW_CONFIG_MAX_BYTES = 256 * 1024
@@ -66,6 +66,7 @@ class ParsedArgs:
     result_path: str | None = None
     changed: bool = False
     full: bool = False
+    again: bool = False
     json: bool = False
     reveal_command: bool = False
     dry_run: bool = False
@@ -184,6 +185,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     mode = C.Mode.AUTOMATIC
     changed = command == "changed"
     full = False
+    again = False
     workers = None
     base = None
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
@@ -212,6 +214,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
                 if changed or full:
                     raise _problem("invalid-config", "execution modes cannot be combined")
                 full = True
+            elif token == "--again":
+                if again:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                again = True
             elif token == "--no-setup":
                 no_setup = True
             elif token in ("-v", "--verbose"):
@@ -241,12 +247,16 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
             if result_path is not None:
                 raise _problem("invalid-config", "option cannot be repeated")
             result_path = value
+    if again and not full:
+        raise _problem("invalid-config", "--again requires --full")
     if full:
         if base is not None:
             raise _problem("invalid-config", "--base is unavailable with --full")
         mode = C.Mode.FULL
-        if tail:
-            raise _problem("invalid-config", "full execution cannot accept runner narrowing")
+        # A runner tail with --full is accepted here and routed at
+        # dispatch: at a monorepo root a whole-child scope runs that one
+        # child's full gate, anything else (and any standalone tail) is
+        # rejected in plain words there.
     elif changed:
         mode = C.Mode.AUTOMATIC
         if tail:
@@ -260,7 +270,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
         base=base, workers=workers, queue_timeout_s=queue_timeout,
         timeout_s=timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
-        changed=changed, full=full, verbose=verbose, quiet=quiet,
+        changed=changed, full=full, again=again, verbose=verbose, quiet=quiet,
     )
 
 
@@ -1383,9 +1393,10 @@ def _recommendation_verification_scopes(workspace, resolution
                                         ) -> tuple[str | None, ...]:
     """Return only test paths accepted by the ptest command router.
 
-    A whole child has no narrow root route, so its report must use
-    ``ptest --full``. Monorepo candidates are checked by the same
-    ``route_scopes`` function used for execution; standalone scopes were
+    A whole child verifies with ``ptest --full`` (a bare child name
+    would also route, but the report keeps the integrated gate).
+    Monorepo candidates are checked by the same ``route_scopes``
+    function used for execution; standalone scopes were
     already path-validated by ``doctor.inspect_workspace`` and are checked
     again against its path grammar here.
     """
@@ -2768,30 +2779,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                 domain, _state_anchor(resolution.root))
             children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             if parsed.full:
-                child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                def child_full_request() -> C.RunRequest:
+                    return C.RunRequest(
+                        mode=C.Mode.FULL, workers=parsed.workers,
+                        queue_timeout_s=parsed.queue_timeout_s,
+                        timeout_s=parsed.timeout_s,
+                        no_setup=parsed.no_setup,
+                        result_path=parsed.result_path,
+                        fixture_domain=parsed.fixture_domain,
+                        verbose=parsed.verbose, quiet=parsed.quiet,
+                        again=parsed.again)
 
                 def run_full(child):
                     result = operations.execute(
-                        domain, child.config,
-                        C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
-                                     queue_timeout_s=parsed.queue_timeout_s,
-                                     timeout_s=parsed.timeout_s,
-                                     no_setup=parsed.no_setup,
-                                     result_path=parsed.result_path,
-                                     fixture_domain=parsed.fixture_domain,
-                                     verbose=parsed.verbose, quiet=parsed.quiet),
-                    )
+                        domain, child.config, child_full_request())
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     child_outcomes.append(
                         (result.exit_code, result.status, result.counts))
+                    return result.exit_code
+                child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                if parsed.runner_argv:
+                    # `ptest --full <child>` runs that one child's full
+                    # gate exactly as the per-child part of root --full
+                    # (already-verified, --again and join included); the
+                    # integrated total line stays with plain --full.
+                    target = monorepo.resolve_full_child(
+                        parsed.runner_argv, children)
+                    result = operations.execute(
+                        domain, target.config, child_full_request())
+                    for reason in result.reasons:
+                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     return result.exit_code
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
                 _emit_monorepo_total(child_outcomes, started, code,
                                      quiet=parsed.quiet)
                 return code
-            if parsed.changed:
+            # Bare `ptest` at a monorepo root is the cheap loop: no scope
+            # and no mode flag selects the same changed path as --changed.
+            # (Both arrive here as AUTOMATIC with no runner tail; scoped
+            # paths arrive as SCOPED and keep their route below.)
+            if parsed.changed or parsed.mode is C.Mode.AUTOMATIC:
                 changed_started = time.monotonic()
                 changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
                 first_failure = 0
@@ -2861,6 +2890,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise resolution.problem or _problem(
                 "initialization-required", "project configuration is required",
             )
+        if parsed.full and parsed.runner_argv:
+            # A standalone full gate takes no scope; narrowing belongs
+            # to a scoped run. The monorepo branch above routes whole
+            # children before reaching here.
+            from . import monorepo
+            raise _problem("invalid-config", monorepo.FULL_SCOPE_MESSAGE)
         domain = platform.domain_paths(parsed.fixture_domain)
         request = C.RunRequest(
             mode=parsed.mode,
@@ -2876,6 +2911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe=parsed.probe,
             verbose=parsed.verbose,
             quiet=parsed.quiet,
+            again=parsed.again,
         )
         result = operations.execute(domain, resolution.config, request)
         for reason in result.reasons:

@@ -324,18 +324,19 @@ def test_repository_guide_default_loop_is_changed():
 
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    assert len(guide.splitlines()) <= 45
-    assert "After each edit run the default loop `ptest --changed`" in guide
-    assert "Run `ptest --full` once after the integrated change" in guide
-    assert "first `ptest --changed` may run everything" in guide
-    assert "record a baseline" in guide
+    assert len(guide.splitlines()) <= 100
+    assert "| After each edit | `ptest` (bare `ptest` runs the changed tests) |" in guide
+    assert "| Integrated change, before handoff | `ptest --full` once |" in guide
+    assert "the first run records a baseline" in guide
+    assert "baseline recorded" in guide
 
 
 def test_skill_template_defaults_to_changed():
     import ptest.agent_rules as rules_module
 
     text = rules_module._provider_text("claude").decode("utf-8")
-    assert "ptest --changed" in text
+    assert "`ptest` after each edit runs the changed tests" in text
+    assert "`ptest --full` once before handoff" in text
     assert "docs/ptest-agent.md" in text
 
 
@@ -380,9 +381,9 @@ def test_getting_started_shows_changed():
     from ptest import help as help_api
     from pathlib import Path as _Path
 
-    assert "ptest --changed" in help_api.overview()
+    assert "default loop: only what the change touches (= --changed)" in help_api.overview()
     agents = help_api.topic("agents")
-    assert agents is not None and "ptest --changed" in agents
+    assert agents is not None and "bare ptest runs the changed tests" in agents
     readme = (_Path(__file__).resolve().parent.parent.parent
               / "README.md").read_text(encoding="utf-8")
-    assert "ptest --changed" in readme
+    assert "`ptest` runs the changed tests" in readme

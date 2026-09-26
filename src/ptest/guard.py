@@ -299,17 +299,19 @@ def _signal_group(identity, signum: int) -> None:
     os.killpg(identity.pgid, signum)
 
 
-def _group_needs_cleanup(identity) -> bool:
-    """Bounded observation for cancellation effort, NEVER an absence proof.
+def _scan_group_once(identity) -> bool | None:
+    """One bounded process-table pass: True/False, or None when incomplete.
 
-    Only a caller's post-reap ESRCH probe can prove group absence. A racing fork
-    or inaccessible snapshot retains that obligation even after this says no.
+    True is positive evidence (a live same-group member was observed) and
+    False requires a complete scan with no live member. None proves
+    nothing: the scan hit its count/deadline bound or the table was
+    momentarily unobservable.
     """
     deadline = time.monotonic() + _POLL_S
     try:
         for count, proc in enumerate(psutil.process_iter()):
             if count >= _MAX_GROUP_SCAN or time.monotonic() >= deadline:
-                return True
+                return None
             if proc.pid == identity.pid:
                 continue
             try:
@@ -318,10 +320,34 @@ def _group_needs_cleanup(identity) -> bool:
             except (ProcessLookupError, psutil.NoSuchProcess):
                 continue
             except (OSError, psutil.Error):
-                return True
+                return None
     except (OSError, psutil.Error):
-        return True
+        return None
     return False
+
+
+# An incomplete scan proves nothing, but a transient scheduling stall under
+# a parallel suite can exhaust the per-scan budget while the group is
+# already quiescent. Retry a bounded number of times before failing
+# closed, so load spikes cannot flip run verdicts. Fail-closed is
+# preserved: False still requires one complete scan with no live member,
+# and an observed member still reports True on the first pass.
+_CLEANUP_SCAN_ATTEMPTS = 3
+
+
+def _group_needs_cleanup(identity) -> bool:
+    """Bounded observation for cancellation effort, NEVER an absence proof.
+
+    Only a caller's post-reap ESRCH probe can prove group absence. A racing fork
+    or inaccessible snapshot retains that obligation even after this says no.
+    """
+    for _ in range(_CLEANUP_SCAN_ATTEMPTS):
+        verdict = _scan_group_once(identity)
+        if verdict is False:
+            return False
+        if verdict is True:
+            return True
+    return True
 
 
 def _cancel_and_reap(state: _State, control: _Control, identity) -> None:

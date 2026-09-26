@@ -2,8 +2,11 @@
 
 ptest is a local-first test coordinator. Normal test execution is local and
 model-independent; no cloud account, model API, or remote service is required
-to run tests. Run `ptest init`, then loop `ptest --changed` after each edit,
-target one test with `ptest <scoped paths>`, and finish with `ptest --full`.
+to run tests. Run `ptest init`, then loop bare `ptest` after each edit (bare
+`ptest` runs the changed tests), target one test with `ptest <scoped paths>`,
+and finish with `ptest --full`. `--full` skips already-verified inputs
+(`--again` forces them), and a duplicate full run joins the running full run
+instead of starting a second one.
 
 Doctor has an explicit offline static mode (`--offline`) and a separately
 consented CLI review design. `ptest doctor --json` emits the versioned
@@ -18,6 +21,9 @@ reviewer to use (one is used directly; declining shows offline output).
 Choosing agents with
 `ptest init --agents` installs guidance only and does not authorize model
 review. See `ptest help doctor` for details; agents start at `ptest help agents`.
+The installed `docs/ptest-agent.md` lists every ptest output line and exit
+code with the action for each; runner internals (parallel tiers, setup,
+`-v`/`-q`) are documented here and in `ptest help run`.
 
 `ptest init` reports per-project status: each configured project shows its
 runner, whether it runs, its parallel workers, and its setup, and the
@@ -105,3 +111,27 @@ location (the plan names it as `state: ...`).
 `ptest uninstall --self` also removes the local installation (only
 installer-created entries; anything else inside the root is kept). See
 `ptest help uninstall` for details.
+
+## Checking agent guidance
+
+`scripts/agent_eval.py` checks whether LLMs can use ptest from its installed
+guidance: it builds a scratch monorepo in a temp dir from the current guide
+plus skill bytes (the same bytes `ptest init` installs), prompts each subject
+with 13 scenarios (`evals/agent-usage/scenarios.toml`), extracts the JSON
+answers, and scores them. It prints a compact subject × scenario table and
+exits 0 only if every subject passes every scenario. Stdlib only; `--dry-run`
+prints the prompt and repo path without calling any model:
+
+```sh
+.venv/bin/python scripts/agent_eval.py --dry-run
+```
+
+Live subjects are command templates with `{prompt}`, `{prompt_file}`, and
+`{repo}` placeholders (run without a shell); canned answer files can be
+scored with no model at all:
+
+```sh
+.venv/bin/python scripts/agent_eval.py \
+  --subject "haiku=claude -p --model haiku {prompt}" \
+  --answers-file "muse=tests/ng/fixtures/agent_eval/answers-muse.json"
+```

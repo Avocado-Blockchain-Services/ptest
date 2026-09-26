@@ -38,6 +38,146 @@ def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, m
     assert calls[0][2].argv == ("tests/unit",)
 
 
+def test_bare_child_name_dispatches_scoped_run_over_child_test_roots(
+        tmp_path, monkeypatch, monorepo):
+    monorepo(
+        {"web": {"kind": "pytest", "launcher": ("python",),
+                 "test_roots": ["tests"], "project_id": "cd" * 16}},
+        parent=tmp_path, name=None)
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr("ptest.operations.execute", lambda domain, config, request: calls.append((domain, config, request)) or type("R", (), {"reasons": (), "exit_code": 0})())
+
+    assert main(("web",)) == 0
+    assert len(calls) == 1
+    request = calls[0][2]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests",)
+    assert request.display_argv == ("web",)
+
+
+def test_bare_child_name_with_trailing_slash_dispatches_scoped_run(
+        tmp_path, monkeypatch, monorepo):
+    monorepo(
+        {"web": {"kind": "pytest", "launcher": ("python",),
+                 "test_roots": ["tests"], "project_id": "cd" * 16}},
+        parent=tmp_path, name=None)
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr("ptest.operations.execute", lambda domain, config, request: calls.append((domain, config, request)) or type("R", (), {"reasons": (), "exit_code": 0})())
+
+    assert main(("web/",)) == 0
+    assert len(calls) == 1
+    request = calls[0][2]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests",)
+
+
+def _full_monorepo(tmp_path, monorepo):
+    monorepo(
+        {"api": {"kind": "pytest", "launcher": ("python",),
+                 "test_roots": ["tests"], "project_id": "ab" * 16},
+         "web": {"kind": "command", "launcher": ("true",), "args": (),
+                 "full_args": (), "project_id": "cd" * 16}},
+        parent=tmp_path, name=None)
+
+
+def _mock_execute(monkeypatch):
+    calls = []
+    monkeypatch.setattr("ptest.operations.execute", lambda domain, config, request: calls.append((domain, config, request)) or type("R", (), {"reasons": (), "exit_code": 0})())
+    return calls
+
+
+def test_full_bare_child_runs_only_that_childs_gate(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "web")) == 0
+    assert len(calls) == 1
+    request = calls[0][2]
+    assert request.mode is C.Mode.FULL
+    assert request.argv == ()
+    assert "ptest: total" not in capsys.readouterr().err
+
+
+def test_full_child_with_trailing_slash_runs_gate(
+        tmp_path, monkeypatch, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "web/")) == 0
+    assert len(calls) == 1
+    assert calls[0][2].mode is C.Mode.FULL
+
+
+def test_full_exact_test_root_runs_that_childs_gate(
+        tmp_path, monkeypatch, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "api/tests")) == 0
+    assert len(calls) == 1
+    request = calls[0][2]
+    assert request.mode is C.Mode.FULL
+    assert request.argv == ()
+
+
+def test_full_child_again_reaches_only_that_gate(
+        tmp_path, monkeypatch, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "--again", "web")) == 0
+    assert len(calls) == 1
+    assert calls[0][2].mode is C.Mode.FULL
+    assert calls[0][2].again is True
+
+
+@pytest.mark.parametrize("argv", [
+    ("--full", "api/tests/test_x.py"),
+    ("--full", "api/tests/unit"),
+    ("--full", "-k", "slow"),
+])
+def test_full_partial_scope_is_rejected_with_next_step(
+        tmp_path, monkeypatch, capsys, monorepo, argv):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(argv) == 2
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "--full runs a whole project" in err
+    assert "ptest api/tests/test_x.py" in err
+
+
+def test_full_two_children_are_rejected_as_one_project(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "api", "web")) == 2
+    assert calls == []
+    assert "one project at a time" in capsys.readouterr().err
+
+
+def test_full_with_scope_outside_a_monorepo_is_rejected_with_next_step(
+        tmp_path, monkeypatch, capsys):
+    write_ptest_toml(tmp_path, kind="command", launcher=("true",), args=(),
+                     full_args=(), project_id="ab" * 16)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("--full", "tests/test_x.py")) == 2
+    err = capsys.readouterr().err
+    assert "--full runs a whole project" in err
+
+
 def test_report_verification_scopes_follow_dispatcher_route_validation(
         tmp_path, monorepo):
     from ptest import config as config_api
@@ -61,8 +201,9 @@ def test_report_verification_scopes_follow_dispatcher_route_validation(
     whole = doctor.inspect_workspace(
         domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
     children = monorepo_api.preflight_children(tmp_path, resolution.monorepo)
-    with pytest.raises(C.Problem, match="name a test path inside a project"):
-        monorepo_api.route_scopes(("api",), children)
+    bare = monorepo_api.route_scopes(("api",), children)
+    assert bare.target.declaration == "api"
+    assert bare.scopes == ()
     assert _recommendation_verification_scopes(whole, resolution) == (None,)
 
     nested = doctor.inspect_workspace(
@@ -274,10 +415,13 @@ def test_runner_looking_flags_never_resume_ptest_parsing(argv):
     assert parsed.runner_argv == argv
 
 
-def test_full_rejects_literal_narrowing_tail():
-    with pytest.raises(C.Problem) as exc:
-        parse_argv(("--full", "--", "-k", "slow"))
-    assert exc.value.code == "invalid-config"
+def test_full_defers_tail_routing_to_dispatch():
+    # Monorepo `ptest --full <child>` routes at dispatch; rejection of
+    # anything else (here a runner tail) happens there, in plain words --
+    # see the full-gate dispatch twins below.
+    parsed = parse_argv(("--full", "--", "-k", "slow"))
+    assert parsed.mode is C.Mode.FULL
+    assert parsed.runner_argv == ("-k", "slow")
 
 
 def test_changed_rejects_runner_tail():

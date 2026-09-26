@@ -1,45 +1,99 @@
 # ptest rules for coding agents
 
-Run tests through `ptest` from the repository root; never invoke pytest, vitest, npm test,
-go test, or cargo test directly. After each edit run the default loop `ptest --changed`;
-target a child with its declared prefix, such as `ptest api/tests/ng/test_x.py`. Child `.ptest.toml` files
-remain authoritative; never copy, merge, or rewrite them. Run `ptest init` at the root.
-Run `ptest --full` once after the integrated change; the first `ptest --changed` may run everything to record a baseline.
+Run every test command through `ptest` from the repository root (the directory
+holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
+`go test`, or `cargo test` directly.
 
-Qualified pytest projects run xdist in parallel under ptest (one worker per `-n N`, or
-per granted slot for `-n auto`); unqualified projects run serially with ptest's generated `-n 0`.
-`ptest init` writes `-n 0` into a new config only for static fallbacks; it never rewrites an existing config.
-Keep `-n N`, `--dist`, `--tx` out of ptest args; `-n 0` opts out of the parallel tier.
-Vitest runs one exclusive `vitest run` and manages its own workers. Declared `[setup]`
-(such as `npm ci`) runs first when required paths are missing or the lockfile changed.
+## The loop
 
-`ptest doctor` asks consent before review, then makes one initial call per model-assessed
-item and one bounded verification for each valid reply, including OK replies. Timing,
-selection and parallel-execution items use ptest's own facts. Defaults are requested
-models Codex `gpt-6-sol` and Claude `opus`, unless explicitly overridden. Reviews cover
-cited reachable units; omitted decisive callers or failure paths remain unknown.
-`ptest doctor --offline` is static and sends nothing.
+| Situation | Command |
+|---|---|
+| After each edit | `ptest` (bare `ptest` runs the changed tests) |
+| One test file | `ptest <path>` |
+| All tests of one project | `ptest <child>`, e.g. `ptest web` |
+| Integrated change, before handoff | `ptest --full` once |
+| Integrated gate for one project | `ptest --full <child>` |
+| Force a full rerun over already-verified inputs | `ptest --full --again` |
 
-Keep tests fast and deterministic. Use factories/builders for test records and small fixtures
-(function by default; session only for expensive read-only infrastructure), with no mutable shared fixture state.
-Every record has an owner that cleans it up. Inspect tests
-above 0.5 seconds; optimize ordinary tests at 2 seconds; investigate tests above 3 seconds
-unless an integration boundary justifies them. See `ptest guide` recipes:
-factories, databases, cache, files-ports, processes, time-network.
+A scoped or changed green is iteration only; only `ptest --full` completes the
+change. Never rerun `ptest --full` without a change: `--full` skips
+already-verified inputs, and a duplicate full run joins the running full run
+instead of starting a second one.
 
-Reuse expensive server/schema setup per run or worker; a fresh SQLite database
-or mutable instance per test/use can provide clear ownership. Namespace shared database
-records by overlapping run or worker owners. Namespace shared external caches by their
-overlapping owners; a fresh per-test/per-use instance can own local cache state. Delete
-only owned records; never globally flush caches or drop databases by name alone.
-Avoid shared fixed paths, fixed ports, detached children, live network targets and
+## Monorepo
+
+Always run from the monorepo root. Prefix scopes with the owning child, such
+as `ptest api/tests/test_example.py`. Never cd into a child to run tests.
+Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite
+them.
+
+## Reading ptest output
+
+ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
+`ptest -q` silences ptest lines (errors still print).
+
+| Line | Meaning | What to do |
+|---|---|---|
+| `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
+| `changed: N of M test files` | changed mode selected N tests | Nothing; this is the normal loop. |
+| `changed → full suite: <reason>` | changed mode ran everything: no baseline yet, selection off, a full trigger changed, or inputs outside the selection map | Nothing; the first run records a baseline if it passes on a clean tree. |
+| `web · no changes` | that child is untouched (one line per untouched child) | Nothing. |
+| `waiting for N slots … in use by …` | queued behind other runs | Wait; do not start another run. |
+| `setup: …` | declared setup (such as `npm ci`) is running | Wait. |
+| `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
+| `passed · N tests` | green | Continue; a scoped green is iteration only. |
+| `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
+| `baseline recorded` | the full run saved its baseline | Nothing. |
+| `no baseline recorded: <why>` | the run was fine but could not save a baseline (failures, uncommitted changes, or files changed during the run) | Failures: fix the code and rerun. Otherwise do nothing and just report it; the user's next commit plus `ptest --full` records it. Do not commit yourself for this. |
+| `already verified … --again` | `--full` skipped already-verified inputs | Nothing; pass `--again` to force them. |
+| `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
+| `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
+| `execution-timeout …` | the run exceeded its budget | Raise with `--timeout`, rerun. |
+| `queue-timeout` | admission never completed | Rerun; report it if it repeats. |
+| `unsafe-path` | a path is unsafe | Fix the path, rerun. |
+| `unknown command …` | bad command | Fix the command (exit 2). |
+
+## Exit codes
+
+| Code | Meaning | Action |
+|---|---|---|
+| 0 | pass | Done; only `--full` completes the change. |
+| 1 | test failure | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
+| 2 | usage or config error | Fix the command or config. |
+| 70 | incomplete: ptest could not prove the result | Rerun once alone; report it if it repeats. |
+| 75 | queue or coordinator unavailable | Wait, then rerun. |
+| 124 | timeout | Raise with `--timeout`, rerun. |
+| 130 | cancelled | Rerun if still needed. |
+
+## Test-quality rules
+
+Use factories/builders for test records; keep fixtures small and scoped
+(function by default; session only for expensive read-only infrastructure)
+with no mutable shared fixture state. Every created record has an owner that cleans it up.
+Inspect tests above 0.5 seconds; optimize ordinary tests at 2 seconds and investigate anything above 3 seconds
+unless a documented integration boundary says otherwise. See `ptest guide` recipes: factories,
+databases, cache, files-ports, processes, time-network.
+
+Reuse expensive server/schema setup once per run or worker. A fresh SQLite
+database or mutable instance per test/use can provide clear ownership. Namespace
+shared database records and external caches by overlapping owners; a fresh
+per-test/per-use instance can own local cache state. Delete only owned records;
+never globally flush caches or drop a database by name alone. Avoid shared
+fixed paths, fixed ports, detached children, live network targets, and
 wall-clock sleeps for synchronization.
 
-Treat findings as hypotheses, not suite-wide certificates. Claims cover cited reachable
-callers and mechanisms; omitted decisive callers or failure paths remain unknown.
-Preserve assertions, coverage, test inventory and unrelated user changes. Report the
-exact ptest command, result, remaining failures and untested scope.
+## Reporting
 
-Requesting doctor, guide or a prompt grants assessment authority only. Source repair
-requires a separate user instruction; never treat assessment as permission to edit or
-a filled worksheet as updated ptest readiness. Keep `unknown` until each row has evidence.
+`ptest doctor` asks consent, then makes one initial call per model-assessed item
+and one bounded verification for each valid reply, including `OK`. It uses
+requested models Codex `gpt-6-sol` and Claude `opus` by default; overrides are
+explicit. `ptest doctor --offline` is static and sends nothing. Reviews cover
+cited reachable units only; omitted decisive callers or failure paths remain
+unknown. Timing, selection, and parallel-execution items use ptest's own facts.
+
+Requesting doctor, guide, or a prompt grants assessment authority only. Source
+repair requires a separate user instruction; never treat an assessment as
+permission to edit. Treat findings as hypotheses, not proof; verify the cause
+and callers before repairing. Preserve assertions, coverage, test inventory,
+and unrelated user changes. Report the exact ptest command, the final ptest
+end line, the remaining failures, and the untested scope.

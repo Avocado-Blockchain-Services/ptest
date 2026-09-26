@@ -152,6 +152,18 @@ def format_no_changes(declaration: str, *, color: bool = False) -> str:
             "· no changes")
 
 
+def format_already_verified(short_sha: str, age_s: float,
+                            *, color: bool = False) -> str:
+    """Skip line for a full run whose baseline already covers the inputs."""
+    return (f"{_prefix(color=color)} already verified at {short_sha} "
+            f"({format_duration(age_s)} ago) — ptest --full --again to rerun")
+
+
+def format_joined_full_run(pid: int, *, color: bool = False) -> str:
+    """Join line for a full run that coalesced onto an admitted one."""
+    return f"{_prefix(color=color)} joined the running full run (pid {pid})"
+
+
 def explain_changed_full_reason(reason: C.Reason | None, *,
                                 config_name: str | None = None,
                                 changed_path: str | None = None) -> str:
@@ -343,6 +355,7 @@ __all__ = [
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
     "format_changed_selected", "format_changed_start", "format_no_changes",
+    "format_already_verified", "format_joined_full_run",
     "explain_changed_full_reason",
     "format_baseline_note",
     "format_setup_start", "format_setup_done", "format_setup_failed",

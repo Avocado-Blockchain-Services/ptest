@@ -251,36 +251,97 @@ def preflight_children(root_dir: Path, manifest: MonorepoManifest) -> tuple[Chil
     return tuple(targets)
 
 
+def _child_test_roots(child: ChildTarget) -> tuple[str, ...]:
+    """Configured test roots of one child: the scope of a bare child run."""
+    if child.config is None:
+        return ()
+    return tuple(child.config.runner.test_roots)
+
+
+def _normalize_scope(scope: str) -> str:
+    """Strip ``./`` prefixes and a trailing ``/`` (shell completion)."""
+    while scope.startswith("./"):
+        scope = scope[2:]
+    return scope.rstrip("/")
+
+
 def route_scopes(scopes: tuple[str, ...], children: tuple[ChildTarget, ...]) -> RoutedChildRequest:
     if not scopes:
         raise _problem("a monorepo scope is required")
     by_name = {child.declaration: child for child in children}
     # Declarations are validated manifest names, safe to show.
     where = " or ".join(f'"{name}/..."' for name in by_name)
+    whole = " or ".join(f'"{name}"' for name in by_name)
     selected: str | None = None
     rebased: list[str] = []
     for scope in scopes:
-        # Shell completion adds a trailing "/" and people type "./"; both
-        # name the same path.
-        while scope.startswith("./"):
-            scope = scope[2:]
-        scope = scope.rstrip("/")
+        scope = _normalize_scope(scope)
         try:
             parts = _safe_segments(scope)
         except C.Problem:
             raise _problem("test paths must be relative to the repository root, "
                            'without ".." (for example "api/tests")') from None
         child_name = parts[0]
-        if len(parts) < 2 or child_name not in by_name:
-            raise _problem(f"name a test path inside a project: {where}; "
+        if child_name not in by_name:
+            raise _problem(f"name a test path inside a project: {where}, "
+                           f'or a whole project: {whole}; '
                            'to run every project use "ptest --full"')
         if selected is not None and selected != child_name:
             raise _problem("run one project at a time: all paths must be "
                            f"inside the same project ({where})")
         selected = child_name
-        rebased.append("/".join(parts[1:]))
+        if len(parts) == 1:
+            # A bare child name runs that child's own tests: its
+            # configured test roots as a scoped run, never the full
+            # gate (which stays `ptest --full` only).
+            rebased.extend(_child_test_roots(by_name[child_name]))
+        else:
+            rebased.append("/".join(parts[1:]))
     assert selected is not None
     return RoutedChildRequest(target=by_name[selected], scopes=tuple(rebased))
+
+
+#: Rejection when --full names anything but one whole child project.
+FULL_SCOPE_MESSAGE = ("--full runs a whole project; to run part of it use "
+                      "`ptest <path>` (e.g. ptest api/tests/test_x.py)")
+
+
+def resolve_full_child(scopes: tuple[str, ...],
+                       children: tuple[ChildTarget, ...]) -> ChildTarget:
+    """Map ``ptest --full <scope>...`` to the one child whose full gate runs.
+
+    A scope selects a whole child when it is the bare declared name (with
+    or without a trailing ``/``) or exactly that child's configured test
+    root (``api/tests`` when ``api`` roots at ``tests``). Anything else --
+    a file, a subdirectory, an unknown name, a runner flag -- is rejected
+    in plain words, as are whole scopes from more than one child.
+    """
+    if not scopes:
+        raise _problem("a monorepo scope is required")
+    by_name = {child.declaration: child for child in children}
+    # Declarations are validated manifest names, safe to show.
+    where = " or ".join(f'"{name}/..."' for name in by_name)
+    selected: str | None = None
+    for scope in scopes:
+        scope = _normalize_scope(scope)
+        try:
+            parts = _safe_segments(scope)
+        except C.Problem:
+            raise _problem(FULL_SCOPE_MESSAGE) from None
+        child_name = parts[0]
+        child = by_name.get(child_name)
+        if child is None:
+            raise _problem(FULL_SCOPE_MESSAGE)
+        if len(parts) > 1:
+            roots = _child_test_roots(child)
+            if len(roots) != 1 or "/".join(parts[1:]) != roots[0]:
+                raise _problem(FULL_SCOPE_MESSAGE)
+        if selected is not None and selected != child_name:
+            raise _problem("run one project at a time: all paths must be "
+                           f"inside the same project ({where})")
+        selected = child_name
+    assert selected is not None
+    return by_name[selected]
 
 
 def execute_full(children: tuple[ChildTarget, ...], execute_child: Callable[[ChildTarget], int]) -> int:

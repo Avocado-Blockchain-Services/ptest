@@ -1,0 +1,81 @@
+# Repeatable "can LLMs use ptest from its guidance?" eval kit.
+#
+# Each scenario carries its prompt text plus machine-checkable expectations:
+# - expect_commands: regex list; at least one effective command must match one
+#   of them. An answer of [] or ["none"] (any case) counts as "no command".
+# - expect_none: when true the answer must give no command at all.
+# - no_command_ok: when true an empty answer passes without an expect check,
+#   but any command given must still match expect_commands and avoid forbid.
+# - forbid: regex list; no effective command may match any of them.
+# - action_all: every regex must appear in the one-sentence action
+#   (case-insensitive). action_any: at least one must appear.
+#
+# Global forbids (runner-misuse that is wrong in every scenario) live in
+# scripts/agent_eval.py; scenario-level forbids below cover scenario-local
+# mistakes such as --full or cd where they are not expected.
+
+[scenarios.S1]
+prompt = "You just edited api/app/billing.py (changed the tax rate). Verify your change."
+expect_commands = ["^ptest$"]
+forbid = ["--full", "--again", "--timeout", "^cd\\b", "\\bcd\\s"]
+
+[scenarios.S2]
+prompt = "You only want to run the billing test file."
+expect_commands = ["^ptest api/tests/test_billing\\.py$"]
+forbid = ["--full", "--again", "^cd\\b", "\\bcd\\s"]
+
+[scenarios.S3]
+prompt = "You have finished the task and are about to hand it off to the user."
+expect_commands = ["^ptest --full$"]
+forbid = ["--again", "--timeout"]
+
+[scenarios.S4]
+prompt = "Your test run printed: `ptest: api · pytest · 4 workers · changed → full suite: no baseline yet (this run records one if it passes on a clean tree)` and is still running."
+expect_none = true
+
+[scenarios.S5]
+prompt = "Your test run printed: `ptest: waiting for 4 slots (2 of 4 free) — in use by ptest (pid 4312) · queue timeout 30m` and nothing else yet."
+expect_none = true
+
+[scenarios.S6]
+prompt = "Your test run ended with: `ptest: incomplete · 3m2s (exit 70)` followed by `protocol-mismatch: guard handoff was incomplete`."
+expect_commands = ["^ptest$"]
+forbid = ["--full", "--again"]
+action_all = ["report"]
+action_any = ["once", "alone", "rerun", "repeat"]
+
+[scenarios.S7]
+prompt = "Your test run ended with: `ptest: failed · 2 failed, 40 passed · 12.4s (exit 1)`."
+expect_commands = ["^ptest$"]
+no_command_ok = true
+forbid = ["--full", "--again"]
+action_any = ["code", "weaken", "fix", "bug"]
+
+[scenarios.S8]
+prompt = "Five minutes ago `ptest --full` passed. You changed nothing since. The user says \"run the whole suite again, to be sure\"."
+expect_commands = ["^ptest --full --again$"]
+
+[scenarios.S9]
+prompt = "Your full run ended: `ptest: passed · 812 tests · 3m1s` then `no baseline recorded: uncommitted changes`."
+expect_none = true
+forbid = ["\\bcommit\\b"]
+action_all = ["baseline"]
+action_any = ["commit"]
+
+[scenarios.S10]
+prompt = "Your full run ended: `execution-timeout: compound execution deadline expired after 600s (default)` (exit 124)."
+expect_commands = ["^ptest --full --timeout \\S+$"]
+
+[scenarios.S11]
+prompt = "The user asks: \"run the web tests with npm test\"."
+expect_commands = ["^ptest web$"]
+forbid = ["--full", "npm"]
+
+[scenarios.S12]
+prompt = "You are in <repo>/api and want to run tests/test_billing.py."
+expect_commands = ["^ptest api/tests/test_billing\\.py$"]
+forbid = ["--full", "\\bcd\\s+api\\b", "^cd api\\b"]
+
+[scenarios.S13]
+prompt = "You want to run the complete integrated gate for only the api project."
+expect_commands = ["^ptest --full api$"]

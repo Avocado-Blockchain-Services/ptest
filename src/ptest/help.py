@@ -15,7 +15,7 @@ Getting started:
 
 Running tests from the repository root:
   ptest tests/test_example.py     # scoped: smallest relevant scope
-  ptest --changed                 # default loop: only what the change touches
+  ptest                           # default loop: only what the change touches (= --changed)
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
@@ -271,7 +271,7 @@ _RUN = """Running tests: scoped iteration and the integrated full gate, from the
 
 Syntax (ptest options precede scoped/native arguments):
   ptest [--workers 1..64] [-v | --verbose] [-q | --quiet] [<scoped paths>...]
-  ptest --changed | --full [--workers 1..64] [-v] [-q]
+  ptest --changed | --full [--again] [--workers 1..64] [-v] [-q]
   ptest [--queue-timeout 1..86400 (default 1800)] [--base X]
         [--timeout 1..86400 (default: history, else test-count estimate, else 600)]
         [--no-setup] [--shadow] [--result-json PATH] [-- SCOPES...]
@@ -286,8 +286,11 @@ Notes:
   ptest tests/a.py -v leaves -v as runner data (pytest verbose only).
   From a monorepo root, scoped paths must be child-prefixed
   paths selecting exactly one child (e.g. api/tests/test_example.py);
-  arbitrary runner flags are rejected by root scope validation. --changed
-  and --full are mutually exclusive; both reject runner narrowing. --base
+  a bare child name runs that child's tests (e.g. ptest web).
+  Arbitrary runner flags are rejected by root scope validation. --changed
+  and --full are mutually exclusive; --changed rejects runner arguments
+  while root --full accepts only a whole child (e.g. --full web) and
+  otherwise names the scoped form. --base
   is unavailable with --full. --shadow requires automatic mode. Root
   --full preflights all children, then runs them sequentially with output
   preserved, returning the first nonzero exit after all children finish.
@@ -329,11 +332,18 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    validation.
 
 3. Loop changed, then gate full:
-     ptest --changed               # default loop after each edit
+     ptest                           # default loop after each edit (bare ptest runs the changed tests)
      ptest api/tests/test_example.py  # monorepo; standalone example in step 2
      ptest --full                  # once, after the change is integrated
+     ptest --full --again          # force already-verified inputs
    A scoped or changed green is iteration only; only --full completes the
-   change. The first --changed may run everything to record a baseline.
+   change. The first loop run may run everything to record a baseline.
+   --full skips already-verified inputs (--again forces them); a duplicate
+   full run joins the running full run instead of starting a second one.
+   Never rerun --full without a change. Never invoke pytest, vitest, or
+   npm test directly; never cd into a child to run tests. The installed
+   docs/ptest-agent.md lists every ptest output line and exit code with
+   the action for each.
    Concurrency (e.g. --workers N) requires verified isolation and adapter
    support. Standalone v1 passes runner arguments literally: everything
    from the first native token or -- passes through untouched. Exit status
