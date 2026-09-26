@@ -11,6 +11,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from ptest import contracts as C
 
 
@@ -258,6 +260,113 @@ def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, c
     assert calls == []
     out = capsys.readouterr().out
     assert "--cov" in out or "would" in out
+
+
+_CHANGED_MARKERS = ("--changed", "config already exists", "would set up",
+                     "baseline", "selection drafted")
+
+
+def _changed_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines()
+            if any(marker in line for marker in _CHANGED_MARKERS)]
+
+
+@pytest.mark.parametrize("choice", ["no", "later", "now"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_changed_setup_preview_matches_real_run(
+        tmp_path, monkeypatch, capsys, venv_stub, choice, existing):
+    """Twins: dry-run preview describes exactly what the real run does."""
+    from ptest import init_changed
+    from ptest.cli import main
+
+    _pytest_repo(tmp_path, venv_stub)
+    monkeypatch.chdir(tmp_path)
+    calls: list = []
+    _stub_execute(monkeypatch, calls)
+
+    if existing:
+        assert main(_init_argv("--changed-setup", "no")) == 0
+        before = (tmp_path / ".ptest.toml").read_bytes()
+        capsys.readouterr()
+        calls.clear()
+    else:
+        before = None
+
+    assert main(_init_argv("--changed-setup", choice, "--dry-run")) == 0
+    if existing:
+        assert (tmp_path / ".ptest.toml").read_bytes() == before
+    else:
+        assert not (tmp_path / ".ptest.toml").exists()
+    assert calls == []
+    preview_lines = _changed_lines(capsys.readouterr().out)
+
+    assert main(_init_argv("--changed-setup", choice)) == 0
+    real_lines = _changed_lines(capsys.readouterr().out)
+
+    if choice == "no":
+        assert preview_lines == []
+        assert real_lines == []
+    elif existing:
+        expected = [init_changed.EXISTING_LINE.format(project=".")]
+        assert preview_lines == expected
+        assert real_lines == expected
+    else:
+        assert preview_lines == [init_changed.DRY_RUN_LINE.format(project=".")]
+        if choice == "later":
+            assert real_lines == [init_changed.LATER_LINE.format(project=".")]
+        else:
+            assert real_lines == [init_changed.NOW_LINE.format(project=".")]
+            assert len(calls) == 1
+            assert calls[0].mode is C.Mode.FULL
+    if existing:
+        assert (tmp_path / ".ptest.toml").read_bytes() == before
+        assert calls == []
+    elif choice in ("later", "now"):
+        assert "--cov" in _runner_args(tmp_path)
+        assert _selection(tmp_path).get("enabled") is True
+    else:
+        assert "--cov" not in _runner_args(tmp_path)
+
+
+def test_changed_setup_monorepo_preview_matches_real_run(
+        tmp_path, monkeypatch, capsys, venv_stub, monorepo):
+    """Reported shape: existing dispatcher children honour the choice."""
+    from ptest import init_changed
+    from ptest.cli import main
+    from ptest.runtime.pytest_bridge import _COVERAGE_TUPLE
+
+    pytest_cov, coverage = _COVERAGE_TUPLE
+    uv_launcher = ("uv", "run", "--locked", "--no-sync", "python")
+    root = monorepo(
+        {"api": {"kind": "pytest", "launcher": uv_launcher,
+                 "project_id": "ab" * 16},
+         "job": {"kind": "pytest", "launcher": uv_launcher,
+                 "project_id": "cd" * 16}},
+        parent=tmp_path, name="mono",
+        root_toml='version = 2\n\n[monorepo]\nchildren = ["api", "job"]\n')
+    venv_stub(root, pytest_cov=pytest_cov, coverage=coverage)
+    venv_stub(root / "api", pytest_cov=pytest_cov, coverage=coverage)
+    venv_stub(root / "job", pytest_cov=pytest_cov, coverage=coverage)
+    monkeypatch.chdir(root)
+    before = {child: (root / child / ".ptest.toml").read_bytes()
+              for child in ("api", "job")}
+
+    def _run(*extra: str):
+        argv = ("init", "--agents", "none", "--no-doctor", "--no-smoke",
+                *extra)
+        assert main(argv) == 0
+        return _changed_lines(capsys.readouterr().out)
+
+    assert _run("--changed-setup", "no", "--dry-run") == []
+    assert _run("--changed-setup", "no") == []
+
+    expected = [init_changed.EXISTING_LINE.format(project=child)
+                for child in ("api", "job")]
+    assert _run("--changed-setup", "later", "--dry-run") == expected
+    assert _run("--changed-setup", "later") == expected
+
+    for child in ("api", "job"):
+        assert (root / child / ".ptest.toml").read_bytes() == before[child]
 
 
 def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatch, capsys, venv_stub):
