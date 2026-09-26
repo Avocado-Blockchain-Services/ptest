@@ -92,29 +92,20 @@ def _install_fake_claude(bindir):
         "    pass",
         "if '*' in fail or item_id in fail:",
         "    sys.exit(3)",
-        "excerpts = request['excerpts']",
-        "if excerpts:",
-        "    first = excerpts[0]",
-        "    quote = first['text'].splitlines()[0][:512]",
+        "units = request['units']",
+        "if units:",
+        "    first = units[0]",
         "    reply = {'status': 'satisfied',",
         "             'rationale': ('Reviewed ' + item_id + ' against '",
-        "                         'the cited excerpt lines.'),",
-        "             'evidence': [{'path': first['path'],",
-        "                           'start_line': first['start_line'],",
-        "                           'end_line': first['end_line'],",
-        "                           'sha256': first['sha256']}],",
-        "             'proof': [{'role': 'applicability',",
-        "                        'citation_index': 0, 'quote': quote},",
-        "                       {'role': 'mechanism',",
-        "                        'citation_index': 0, 'quote': quote}],",
+        "                         'the selected source unit.'),",
+        "             'evidence': [first['id']],",
         "             'needs': [],",
         "             'finding': None}",
         "else:",
         "    reply = {'status': 'unknown',",
         "             'rationale': ('The bounded source evidence does not '",
         "                         'establish this row.'),",
-        "             'evidence': [], 'finding': None,",
-        "             'proof': [], 'needs': []}",
+        "             'evidence': [], 'finding': None, 'needs': []}",
         "envelope = {'type': 'result', 'subtype': 'success',",
         "            'is_error': False, 'num_turns': 1,",
         "            'permission_denials': [],",
@@ -164,7 +155,7 @@ def test_init_persea_shaped_monorepo_reports_projects_and_fix(
     assert "parallel: inside vitest" in out
 
 
-def test_doctor_review_runs_one_haiku_call_per_item(
+def test_doctor_review_verifies_each_valid_opus_item_reply(
         tmp_path, monkeypatch, capsys, ptest_project):
     from ptest.checklist import CATALOG
     from ptest import platform
@@ -187,19 +178,21 @@ def test_doctor_review_runs_one_haiku_call_per_item(
     assert main(argv) == 0
 
     launches = _read_launches(bindir)
-    # Deterministic answers take no model call; every other item takes
-    # exactly one provider request.
+    # Deterministic answers take no model call; each of the nine model rows
+    # gets an initial call and one independent verification.
     launched = {item["item"] for item in launches}
     assert "TIMING-001" not in launched
     assert "SELECT-001" not in launched
     assert launched == {entry.id for entry in CATALOG} - {
         "TIMING-001", "SELECT-001", "PARALLEL-001"}
-    assert len(launches) == len(launched) == 9
-    assert all(item["argv"][-2:] == ["--model", "haiku"]
+    assert len(launches) == 2 * len(launched) == 18
+    assert all(sum(item["item"] == row for item in launches) == 2
+               for row in launched)
+    assert all(item["argv"][-2:] == ["--model", "opus"]
                for item in launches)
 
     human = capsys.readouterr()
-    assert "9 ✓  2 ✗  1 ?" in human.out
+    assert "12 checks · 18 calls" in human.out
     assert "runs ✓" in human.out
     for entry in CATALOG:
         assert entry.label in human.out
@@ -230,7 +223,7 @@ def test_doctor_review_runs_one_haiku_call_per_item(
     }
     assert all(row["label"] for row in child["rows"])
     assert document.data["provider"]["profile"] == (
-        "ptest-item-review-v1 model=haiku")
+        "ptest-source-id-v3 requested-model=opus")
 
 
 def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
@@ -246,7 +239,7 @@ def test_doctor_review_contains_single_item_failure(tmp_path, monkeypatch,
                  "--allow-model-review")) == 0
 
     human = capsys.readouterr()
-    assert "? .: Test data factories\n" in human.out
+    assert "Test data factories" in human.out
     assert "    review failed: provider exited with an error" in human.out
     assert (root / "recommendations.md").is_file()
 

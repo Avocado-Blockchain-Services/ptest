@@ -36,13 +36,15 @@ TEST_FILE = r"(?i)(?:^|/)test_[^/]*\.py$|[^/]*_test\.py$|\.test\.|\.spec\."
 SRC_DIR = r"(?:^|/)src(?:/|$)"
 _CONFTEST = r"(?:^|/)conftest\.py$"
 
-# Evidence standard shared by every item prompt: a gap needs a cited
-# concrete violation, satisfied needs the guaranteeing mechanism, and
-# anything less is unknown with the missing evidence named.
+# Evidence standard shared by every item prompt: judge a cited, representative
+# reachable mechanism within the supplied scope; never imply suite-wide proof.
 _PROMPT_STANDARD = (
     " Return gap only with a cited concrete violation; return satisfied "
-    "only when the evidence shows the guaranteeing mechanism; otherwise "
-    "return unknown with one sentence naming the missing evidence. "
+    "only when cited evidence shows a mechanism sufficient for the "
+    "representative, reachable path in the assessed scope; otherwise return "
+                "unknown with one sentence naming the missing evidence, such as an "
+    "untraced caller, consumer, or cleanup path. Use 'not shown in the supplied units' for a gap in "
+    "evidence; do not say it cannot be verified. "
     "Check admitted shared setup and counterevidence before a gap. Qualify "
     "claims to the assessed evidence scope; missing or incomplete setup "
     "cannot establish suite-wide satisfaction or non-applicability. "
@@ -99,7 +101,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
     ChecklistEntry(
         id="FIX-002",
         label="Fixture state isolation",
-        criterion="Mutable fixture state is isolated or reset for every test.",
+        criterion="Mutable fixture state is owned or reset between the reviewed uses.",
         evidence="Cite fixture lifetime, mutation, and reset boundaries.",
         recommendation="Replace shared mutable state or prove deterministic reset.",
         example="Reuse recipes/factories.md.",
@@ -107,8 +109,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                       "instance is independent while original assertions "
                       "and inventory remain."),
         recipe="factories",
-        prompt=("Is mutable fixture state isolated or reset for every test? "
-                "Trace the fixture lifetime, mutations, and reset boundary. "
+        prompt=("Is mutable fixture state owned or reset between the "
+                "representative uses shown? Trace the fixture lifetime, "
+                "mutations, and reset boundary in actual reachable callers. "
                 "A module-scoped immutable object is not a shared-state gap; "
                 "a mutable object needs a per-test reset or fresh owner. "
                 "Use N/A only with affirmative evidence that mutable shared "
@@ -149,22 +152,27 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                        r"|typeorm|knex|mongoose|pymongo|DATABASE_URL"
                        r"|database_url|create_all|drop_database|drop_all"
                        r"|truncate|connect\s*\(|Column\s*\(|sessionmaker"
-                       r"|create_engine",),
+                       r"|create_engine|\.execute\s*\(",),
         scanner_codes=("db.per-test-initialization", "db.cleanup-ownership"),
         skip=None,
     ),
     ChecklistEntry(
         id="DB-002",
         label="Database isolation",
-        criterion="Database identities, records, and cleanup have explicit run/worker ownership.",
+        criterion="Database identities, records, and cleanup have explicit ownership for the reviewed paths.",
         evidence="Cite name derivation and teardown.",
         recommendation="Remove only owned records/namespaces; never infer ownership from a test-like name.",
         example="Reuse recipes/databases.md.",
         verification="Neighbor database/schema sentinel survives concurrent teardown.",
         recipe="databases",
         prompt=("Do database identities, records, and cleanup have explicit "
-                "run or worker ownership? Trace the namespace/name helper "
-                "through each caller to teardown. A hardcoded prefix alone "
+                "ownership in the representative paths shown? A fresh "
+                "SQLite database or instance per test/use can establish "
+                "isolation; shared mutable services need identities scoped "
+                "to the overlapping run or worker owners. "
+                "Trace the namespace/name helper from an actual reachable "
+                "caller through teardown; do not infer every caller from one "
+                "sample. A hardcoded prefix alone "
                 "does not prove collision if a helper adds run or worker "
                 "identity. Check shared setup and counterevidence; missing "
                 "ownership evidence is unknown, never N/A. Use N/A only with "
@@ -178,7 +186,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                        r"|typeorm|knex|mongoose|pymongo|DATABASE_URL"
                        r"|database_url|create_all|drop_database|drop_all"
                        r"|truncate|connect\s*\(|Column\s*\(|sessionmaker"
-                       r"|create_engine",),
+                       r"|create_engine|\.execute\s*\(",),
         scanner_codes=("db.per-test-initialization", "db.cleanup-ownership"),
         skip=None,
     ),
@@ -214,14 +222,15 @@ CATALOG: tuple[ChecklistEntry, ...] = (
     ChecklistEntry(
         id="RESOURCE-001",
         label="Files and ports",
-        criterion="Writable files and listening ports are uniquely owned and released.",
+        criterion="Representative writable files and listening ports are uniquely owned and released.",
         evidence="Cite temp-root and port allocation.",
         recommendation="Use run/worker temp roots and OS-assigned ports.",
         example="Reuse recipes/files-ports.md.",
         verification="Concurrent scoped runs use distinct paths/ports and preserve a neighbor sentinel.",
         recipe="files-ports",
-        prompt=("Are writable files and listening ports uniquely owned and "
-                "released? Trace the writable path or bind through allocation "
+        prompt=("Are the representative writable files and listening ports "
+                "shown uniquely owned and released? Trace each shown writable "
+                "path or bind through allocation "
                 "and release. Fixture-provided temporary paths and OS port "
                 "0 are ownership mechanisms; fixed paths/ports need a proven "
                 "owner. Missing setup or cleanup evidence is unknown. Use "
@@ -242,7 +251,7 @@ CATALOG: tuple[ChecklistEntry, ...] = (
     ChecklistEntry(
         id="NETWORK-001",
         label="Network isolation",
-        criterion="External network is denied or replaced by a declared isolated fake.",
+        criterion="External network used by the representative callers is denied or replaced by an isolated fake.",
         evidence="Cite clients, targets, and denial/fake boundary.",
         recommendation="Do not require a live service for ordinary tests.",
         example="Reuse recipes/time-network.md.",
@@ -250,8 +259,9 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                       "test setup and confirm denial intercepts it while "
                       "allowed local fake requests still work."),
         recipe="time-network",
-        prompt=("Is external network denied or replaced by a declared "
-                "isolated fake? Trace the active client's interception or "
+        prompt=("For the representative callers shown, is external network "
+                "denied or replaced by an isolated fake? Trace the active "
+                "client's interception or "
                 "denial boundary through configured shared setup. An external "
                 "URL beneath a global mock is not proof of live traffic. "
                 "Missing or incomplete setup is unknown, not suite-wide "
@@ -271,13 +281,13 @@ CATALOG: tuple[ChecklistEntry, ...] = (
     ChecklistEntry(
         id="PROCESS-001",
         label="Child processes",
-        criterion="Child processes remain owned, joined, cancelled, and reaped.",
+        criterion="Representative child processes remain owned, joined, cancelled, and reaped.",
         evidence="Cite spawn and teardown paths.",
         recommendation="Keep descendants in the owned foreground process group; do not detach.",
         example="Reuse recipes/processes.md.",
         verification="Cancellation leaves no owned descendant and does not affect a neighbor process.",
         recipe="processes",
-        prompt=("Do test-created child processes stay owned, joined, "
+        prompt=("Do the representative test-created child processes stay owned, joined, "
                 "cancelled, and reaped? Trace an actual spawn to wait, cancel, "
                 "and reap paths. Runner/provider worker declarations alone "
                 "do not prove an orphan test process. Missing lifecycle "
@@ -313,7 +323,10 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR),
         text_patterns=(r"(?i)sleep|monotonic|datetime|timezone|freeze_time"
-                       r"|freezegun|deadline|timeout|clock",),
+                       r"|freezegun|deadline|timeout|clock|threading\s*\.\s*Timer"
+                       r"|\bTimer\s*\(|threading\s*\.\s*(?:Event|Barrier|Condition)"
+                       r"|\b(?:Event|Barrier|Condition)\s*\(|asyncio\s*\.\s*Event"
+                       r"|asyncio\s*\.\s*wait_for|call_later\s*|\.wait\s*\(",),
         scanner_codes=("time.blocking-sleep",),
         skip=None,
     ),
@@ -400,8 +413,8 @@ CATALOG: tuple[ChecklistEntry, ...] = (
 
 # Every item prompt carries the same evidence standard. Applied here (not
 # repeated in each literal) so no item can miss it: gap needs a cited
-# concrete violation, satisfied needs the guaranteeing mechanism, and
-# anything less is unknown naming the missing evidence.
+# concrete violation, satisfied needs a sufficient cited mechanism in scope,
+# and anything less is unknown naming the missing evidence.
 CATALOG = tuple(
     replace(entry, prompt=entry.prompt + _PROMPT_STANDARD)
     for entry in CATALOG

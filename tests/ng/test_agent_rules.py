@@ -69,8 +69,8 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert first.changed is True
     assert second.changed is False
     guide = (tmp_path / "docs" / "ptest-agent.md").read_text(encoding="utf-8")
-    assert "one database per worker per run" in guide
-    assert "Never use global cache flush" in guide
+    assert "Reuse expensive server/schema setup per run or worker" in guide
+    assert "never globally flush caches" in guide
     assert "ptest --full" in guide
     assert "repository root" in guide
     assert "ptest api/" in guide
@@ -164,9 +164,9 @@ def test_repository_guide_states_assessment_only_authority():
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
     assert "Run `ptest --full` once after the integrated change" in guide
-    assert "one cheap-model call per checklist item that needs one" in flat
-    assert "timing, selection and parallel execution" in flat
-    assert "items skip the model" in flat
+    assert "one initial call per model-assessed item" in flat
+    assert "one bounded verification for each valid reply" in flat
+    assert "timing, selection and parallel-execution items use ptest's own facts" in flat.lower()
     assert "`ptest doctor --offline` is static" in guide
     assert len(guide.splitlines()) <= 45
 

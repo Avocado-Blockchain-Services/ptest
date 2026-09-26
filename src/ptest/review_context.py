@@ -16,6 +16,8 @@ Missing-evidence reasons: ``not-collected``, ``outside-selected-scope``,
 """
 from __future__ import annotations
 
+import ast
+import fnmatch
 import os
 import re
 import stat
@@ -27,7 +29,7 @@ from pathlib import Path
 
 from .files import read_regular
 
-CONTEXT_MAX_FILES = 32
+CONTEXT_MAX_FILES = 64
 """Bound on files touched by one context-collection traversal."""
 
 _CONTEXT_MAX_DEPTH = 3
@@ -452,6 +454,8 @@ _VITEST_CONFIG_NAMES = (
     "vite.config.mjs", "vite.config.mts",
 )
 """Supported Vitest/Vite config basenames, in discovery order."""
+_VITEST_DEFAULT_TEST_FILE = re.compile(
+    r"(?i)(?:^|/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]sx?)$")
 
 
 # --- immutable context metadata ----------------------------------------------
@@ -595,6 +599,7 @@ def context_body(context: ReviewContext) -> dict:
             "status": profile.status,
             "includes": list(profile.includes),
             "excludes": list(profile.excludes),
+            "expansive": profile.expansive,
         } for profile in context.suite_profiles],
     }
 
@@ -792,6 +797,7 @@ class SuiteProfile:
     status: str
     includes: tuple[str, ...] = ()
     excludes: tuple[str, ...] = ()
+    expansive: bool = False
 
     def __post_init__(self) -> None:
         if self.name not in ("scoped", "full"):
@@ -808,6 +814,8 @@ class SuiteProfile:
                    for value in values):
                 raise ValueError(f"suite_profile.{field} entries are invalid")
             object.__setattr__(self, field, tuple(values))
+        if not isinstance(self.expansive, bool):
+            raise TypeError("suite_profile.expansive must be bool")
 
 
 def parse_config_text(text: str) -> SuitePatterns:
@@ -1250,11 +1258,6 @@ def _parse_pytest_addopts(addopts: str | tuple[str, ...] | list[str]
         return [], True
     found: list[str] = []
     dynamic = False
-    membership_options = {
-        "-k", "-m", "--ignore", "--ignore-glob", "--deselect", "-c",
-        "--confcutdir", "--rootdir", "--pyargs", "--doctest-modules",
-        "--doctest-glob", "--override-ini",
-    }
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -1271,13 +1274,228 @@ def _parse_pytest_addopts(addopts: str | tuple[str, ...] | list[str]
                 dynamic = True
             elif normalized not in found:
                 found.append(normalized)
-        elif option in membership_options:
+        elif option in _PYTEST_NARROW_OPTIONS:
             dynamic = True
             if not separator and index + 1 < len(tokens) \
                     and not tokens[index + 1].startswith("-"):
                 index += 1
+        elif option in _PYTEST_NEUTRAL_OPTIONS \
+                or token in _PYTEST_NEUTRAL_OPTIONS:
+            if not separator and option in _PYTEST_NEUTRAL_VALUE_OPTIONS:
+                if index + 1 < len(tokens) \
+                        and not tokens[index + 1].startswith("-"):
+                    index += 1
+                elif option not in _PYTEST_OPTIONAL_VALUE_OPTIONS:
+                    dynamic = True
+        else:
+            # Unknown options can change collection or load custom plugins.
+            dynamic = True
+            if token.startswith("-") and not separator \
+                    and index + 1 < len(tokens) \
+                    and not tokens[index + 1].startswith("-"):
+                index += 1
         index += 1
     return found, dynamic
+
+
+def _pytest_config_options(text: str, config_path: str
+                           ) -> tuple[dict[str, tuple[str, ...]], bool]:
+    """Read literal collection settings without importing/evaluating config."""
+    basename = config_path.rsplit("/", 1)[-1]
+    options: dict[str, object] = {}
+    dynamic = False
+    if basename in ("pyproject.toml", "pytest.toml", ".pytest.toml"):
+        try:
+            data = tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, TypeError):
+            return {}, True
+        if basename == "pyproject.toml":
+            tool = data.get("tool", {})
+            owner = tool.get("pytest", {}) if isinstance(tool, dict) else None
+            section = (owner.get("ini_options", {})
+                       if isinstance(owner, dict) else None)
+        else:
+            section = data.get("pytest", data)
+        if not isinstance(section, dict):
+            return {}, True
+        options = section
+    else:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            return {}, True
+        section_name = "tool:pytest" if basename == "setup.cfg" else "pytest"
+        if not parser.has_section(section_name):
+            return {}, False
+        options = dict(parser.items(section_name))
+
+    result: dict[str, tuple[str, ...]] = {}
+    for key in ("testpaths", "python_files", "norecursedirs"):
+        value = options.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, str):
+            try:
+                values = tuple(shlex.split(value, comments=True))
+            except ValueError:
+                dynamic = True
+                continue
+        elif isinstance(value, (tuple, list)) and all(
+                isinstance(item, str) for item in value):
+            values = tuple(value)
+        else:
+            dynamic = True
+            continue
+        if len(values) > _CONTEXT_MAX_LINKS_PER_FILE or any(
+                len(item) > 256 for item in values):
+            dynamic = True
+            continue
+        result[key] = values
+    return result, dynamic
+
+
+def _pytest_seed_excluded(seed: str, options: dict[str, tuple[str, ...]],
+                          ignore_options: list[str],
+                          explicit_paths: tuple[str, ...] = (), *,
+                          default_selectors_known: bool = True) -> bool:
+    """Apply supported pytest path/name rules to one child-relative file."""
+    basename = seed.rsplit("/", 1)[-1]
+    explicitly_selected = any(
+        seed == selected or seed.startswith(selected.rstrip("/") + "/")
+        for selected in explicit_paths)
+    if explicit_paths and not explicitly_selected:
+        return True
+    if not explicitly_selected:
+        python_files = options.get("python_files")
+        if python_files is None and default_selectors_known:
+            python_files = ("test_*.py", "*_test.py")
+        if python_files is not None and not any(
+                fnmatch.fnmatchcase(basename, pattern)
+                for pattern in python_files):
+            return True
+        roots = options.get("testpaths", ())
+        if roots and not any(
+                seed == root or seed.startswith(root.rstrip("/") + "/")
+                for root in roots):
+            return True
+    for directory in seed.split("/")[:-1]:
+        if any(fnmatch.fnmatchcase(directory, pattern)
+               for pattern in options.get("norecursedirs", ())):
+            return True
+    for pattern in ignore_options:
+        if (fnmatch.fnmatchcase(seed, pattern)
+                or seed == pattern.rstrip("/")
+                or seed.startswith(pattern.rstrip("/") + "/")):
+            return True
+    return False
+
+
+def _pytest_seed_candidate(seed: str, options: dict[str, tuple[str, ...]],
+                           explicit_paths: tuple[str, ...]) -> bool:
+    """Require a positive path/name signal before tracing a test caller."""
+    basename = seed.rsplit("/", 1)[-1]
+    explicitly_selected = any(
+        seed == selected or seed.startswith(selected.rstrip("/") + "/")
+        for selected in explicit_paths)
+    if explicit_paths and not explicitly_selected:
+        return False
+    roots = options.get("testpaths", ())
+    if roots and not explicitly_selected and not any(
+            seed == root or seed.startswith(root.rstrip("/") + "/")
+            for root in roots):
+        return False
+    if explicitly_selected and any(
+            seed == selected and seed.endswith(".py")
+            for selected in explicit_paths):
+        return True
+    patterns = options.get("python_files", ("test_*.py", "*_test.py"))
+    return any(fnmatch.fnmatchcase(basename, pattern)
+               for pattern in patterns)
+
+
+_PYTEST_NEUTRAL_OPTIONS = frozenset({
+    "--cov", "--cov-report", "--cov-config", "--cov-branch",
+    "--cov-append", "--no-cov", "--maxfail", "--durations",
+    "--tb", "--color", "--capture", "--show-capture", "--junitxml",
+    "--html", "--self-contained-html", "--strict-markers", "--strict-config",
+    "--disable-warnings", "--continue-on-collection-errors",
+    "--self-contained-html", "-x", "-q",
+    "-v", "-s", "-ra", "-rA",
+    # pytest-xdist controls scheduling and worker count; these do not alter
+    # which test modules pytest collects.
+    "-n", "--numprocesses", "--dist", "--max-worker-restart",
+})
+_PYTEST_NEUTRAL_VALUE_OPTIONS = frozenset({
+    "--cov", "--cov-report", "--cov-config", "--maxfail", "--durations", "--tb",
+    "--color", "--capture", "--show-capture", "--junitxml", "--html",
+    "-n", "--numprocesses", "--dist", "--max-worker-restart",
+})
+_PYTEST_OPTIONAL_VALUE_OPTIONS = frozenset({"--cov"})
+_PYTEST_EXPANSIVE_OPTIONS = frozenset({
+    "-c", "--override-ini", "--pyargs", "--doctest-modules",
+    "--doctest-glob", "--rootdir", "--confcutdir",
+})
+_PYTEST_NARROW_OPTIONS = frozenset({"-k", "-m", "--deselect"})
+
+
+def _pytest_argv_ignores(argv: tuple[str, ...]
+                         ) -> tuple[list[str], bool, tuple[str, ...], bool]:
+    """Read literal ignores and explicit paths; classify unknown options."""
+    ignores: list[str] = []
+    dynamic = False
+    explicit: list[str] = []
+    can_expand = False
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if not isinstance(token, str):
+            return ignores, True, tuple(explicit), True
+        option, separator, value = token.partition("=")
+        if option in ("--ignore", "--ignore-glob"):
+            if not separator:
+                index += 1
+                if index >= len(argv) or argv[index].startswith("-"):
+                    dynamic = True
+                    continue
+                value = argv[index]
+            normalized = _normalize_ref(value)
+            if normalized is None or _is_sensitive(normalized):
+                dynamic = True
+            elif normalized not in ignores:
+                ignores.append(normalized)
+        elif option in _PYTEST_NEUTRAL_OPTIONS \
+                or token in _PYTEST_NEUTRAL_OPTIONS:
+            if not separator and option in _PYTEST_NEUTRAL_VALUE_OPTIONS:
+                if index + 1 < len(argv) \
+                        and not argv[index + 1].startswith("-"):
+                    index += 1
+                elif option not in _PYTEST_OPTIONAL_VALUE_OPTIONS:
+                    dynamic = True
+        elif option in _PYTEST_NARROW_OPTIONS:
+            dynamic = True
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    can_expand = True
+        elif token.startswith("-"):
+            dynamic = True
+            can_expand = True
+            if not separator and index + 1 < len(argv) \
+                    and not argv[index + 1].startswith("-"):
+                index += 1
+        else:
+            # Positional selectors, including explicit test paths, may narrow
+            # the active set. Safe literal paths take precedence over config
+            # testpaths/python_files; node selectors retain uncertainty.
+            candidate = token.split("::", 1)[0]
+            normalized = _normalize_ref(candidate)
+            if normalized is None:
+                dynamic = True
+            else:
+                explicit.append(normalized)
+        index += 1
+    return ignores, dynamic, tuple(dict.fromkeys(explicit)), can_expand
 
 
 def parse_pytest_ignores(text: str, config_path: str = "pytest.ini") -> list[str]:
@@ -1335,13 +1553,13 @@ def _python_spec_targets(module: str, level: int,
         else:
             targets.extend([f"{anchor}/__init__.py"] if anchor else [])
     else:
+        targets.extend([f"{relative}.py", f"{relative}/__init__.py",
+                        f"src/{relative}.py",
+                        f"src/{relative}/__init__.py"])
         if "/" in from_rel:
             anchor = from_rel.rsplit("/", 1)[0]
             targets.extend([f"{anchor}/{relative}.py",
                             f"{anchor}/{relative}/__init__.py"])
-        targets.extend([f"{relative}.py", f"{relative}/__init__.py",
-                        f"src/{relative}.py",
-                        f"src/{relative}/__init__.py"])
     return [target for target in dict.fromkeys(targets) if target]
 
 
@@ -1561,14 +1779,39 @@ def collect_vitest_context(root: Path, scope: str, argv: tuple,
             profile_status = "partial"
         profiles.append(SuiteProfile(
             name=name, config_path=selected, status=profile_status,
-            includes=includes, excludes=excludes))
+            includes=includes, excludes=excludes,
+            expansive=(argv_membership_status(profile_argv) != "resolved")))
+    # Resolve suite membership before a seed can contribute setup/import
+    # edges. Vitest's omitted include option has a default filename glob; a
+    # directory such as __tests__ alone does not make every helper a test.
     for seed in seeds:
-        if isinstance(seed, str) and seed:
+        if not isinstance(seed, str) or not seed:
+            continue
+
+        def profile_matches(profile):
+            included = (any(_glob_match(pattern, seed)
+                            for pattern in profile.includes)
+                        if profile.includes else
+                        _VITEST_DEFAULT_TEST_FILE.search(seed) is not None)
+            excluded = any(_glob_match(pattern, seed)
+                           for pattern in profile.excludes)
+            return included and not excluded
+
+        excluded_everywhere = bool(profiles) and all(
+            profile.status == "resolved" and not profile_matches(profile)
+            for profile in profiles)
+        if excluded_everywhere:
+            collector.note_missing(seed, "excluded-suite")
+            if seed not in known_excluded:
+                known_excluded.append(seed)
+            continue
+        if any(profile_matches(profile) for profile in profiles):
             work.append((seed, "test", 0))
 
     _follow_js_links(collector, reader, work)
 
-    final = ("partial" if collector.missing
+    final = ("partial" if any(reason != "excluded-suite"
+                               for _path, reason in collector.missing)
              or any(profile.status != "resolved" for profile in profiles)
              else "resolved")
     return _collect_finish(
@@ -1762,16 +2005,71 @@ def _python_links(text: str) -> tuple[list, list[str], bool]:
             else:
                 truncated = True
     params: list[str] = []
-    for match in _PY_TEST_PARAMS_RE.finditer(text):
-        for chunk in match.group(1).split(","):
-            name = chunk.strip().split(":")[0].split("=")[0].strip()
-            name = name.lstrip("*")
-            if name.isidentifier():
-                if len(params) < _CONTEXT_MAX_LINKS_PER_FILE:
-                    params.append(name)
-                else:
-                    truncated = True
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        tree = None
+        truncated = True
+    if tree is not None:
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    or not node.name.startswith("test_"):
+                continue
+            arguments = (*node.args.posonlyargs, *node.args.args,
+                         *node.args.kwonlyargs)
+            for argument in arguments:
+                if argument.arg not in params:
+                    if len(params) < _CONTEXT_MAX_LINKS_PER_FILE:
+                        params.append(argument.arg)
+                    else:
+                        truncated = True
     return modules, params, truncated
+
+
+def _fixture_definition_params(text: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Literal parameter names for statically decorated pytest fixtures."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ()
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorated = any(
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and isinstance(decorator.func.value, ast.Name)
+            and decorator.func.value.id == "pytest"
+            and decorator.func.attr == "fixture"
+            or isinstance(decorator, ast.Attribute)
+            and isinstance(decorator.value, ast.Name)
+            and decorator.value.id == "pytest"
+            and decorator.attr == "fixture"
+            for decorator in node.decorator_list)
+        if not decorated:
+            continue
+        args = (*node.args.posonlyargs, *node.args.args,
+                *node.args.kwonlyargs)
+        found.append((node.name, tuple(argument.arg for argument in args)))
+    return tuple(found)
+
+
+def _python_import_aliases(text: str) -> dict[str, tuple[str, int, str]]:
+    """Return local aliases from ``from module import name as alias``."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}
+    aliases: dict[str, tuple[str, int, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = node.module or ""
+        for imported in node.names:
+            local = imported.asname or imported.name
+            aliases[local] = (module, node.level, imported.name)
+    return aliases
 
 
 def _conftest_fixtures(text: str) -> set[str]:
@@ -1825,7 +2123,9 @@ def _pytest_plugins_literals(text: str) -> tuple[list[str], bool]:
 def collect_pytest_context(root: Path, scope: str, reader,
                            candidates: set[str],
                            seeds: tuple[str, ...] = (),
-                           test_roots: tuple[str, ...] = ()) -> ReviewContext:
+                           test_roots: tuple[str, ...] = (), *,
+                           argv: tuple[str, ...] = (),
+                           full_argv: tuple[str, ...] = ()) -> ReviewContext:
     """Collect bounded pytest context: conftests, plugins, fixture links.
 
     ``candidates`` holds known child-relative conftest/config/plugin
@@ -1843,6 +2143,9 @@ def collect_pytest_context(root: Path, scope: str, reader,
         raise TypeError("seeds must be a tuple")
     if not isinstance(test_roots, (tuple, list)):
         raise TypeError("test_roots must be a tuple")
+    if not isinstance(argv, (tuple, list)) or not isinstance(
+            full_argv, (tuple, list)):
+        raise TypeError("argv profiles must be tuples")
     collector = _Collector(scope)
     config_paths: list[str] = []
     known_excluded: list[str] = []
@@ -1893,6 +2196,76 @@ def collect_pytest_context(root: Path, scope: str, reader,
         collector.note_missing("config", "read-limit")
         status = "partial"
 
+    pytest_options: dict[str, tuple[str, ...]] = {}
+    options_dynamic = False
+    if selected_config is not None:
+        config_raw = _cached_read(collector, reader, selected_config)
+        if config_raw is not None:
+            try:
+                config_text = config_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                config_text = ""
+            pytest_options, options_dynamic = _pytest_config_options(
+                config_text, selected_config)
+            if options_dynamic:
+                collector.note_missing(selected_config, "dynamic-config")
+                status = "partial"
+
+    profile_args = (tuple(argv), effective_argv(tuple(argv),
+                                                 tuple(full_argv)))
+    profile_ignores: list[list[str]] = []
+    profile_dynamic: list[bool] = []
+    profile_explicit: list[tuple[str, ...]] = []
+    profile_can_expand: list[bool] = []
+    configured_ignores, config_argv_dynamic = _parse_pytest_addopts(
+        pytest_addopts)
+    if isinstance(pytest_addopts, str):
+        try:
+            config_tokens = tuple(shlex.split(pytest_addopts, comments=False,
+                                              posix=True))
+        except ValueError:
+            config_tokens = ()
+            config_argv_dynamic = True
+    elif isinstance(pytest_addopts, (tuple, list)):
+        config_tokens = tuple(pytest_addopts)
+    else:
+        config_tokens = ()
+        config_argv_dynamic = True
+    (_config_ignores, _config_dynamic, _config_explicit,
+     config_can_expand) = _pytest_argv_ignores(config_tokens)
+    for profile_argv in profile_args:
+        (argv_ignores, argv_dynamic, explicit_paths,
+         can_expand) = _pytest_argv_ignores(profile_argv)
+        profile_ignores.append(list(dict.fromkeys(
+            configured_ignores + argv_ignores)))
+        profile_dynamic.append(config_argv_dynamic or argv_dynamic)
+        profile_explicit.append(tuple(dict.fromkeys(
+            (*_config_explicit, *explicit_paths))))
+        profile_can_expand.append(can_expand or config_can_expand)
+    if any(profile_dynamic):
+        collector.note_missing("config", "unsupported-argv")
+        status = "partial"
+
+    active_seeds: list[str] = []
+    for seed in seed_paths:
+        excluded_in_all = (
+            bool(profile_ignores)
+            and all(not can_expand and not config_read_failures
+                    and _pytest_seed_excluded(
+                        seed, pytest_options, ignores, explicit,
+                        default_selectors_known=not options_dynamic)
+                    for ignores, explicit, can_expand in zip(
+                        profile_ignores, profile_explicit,
+                        profile_can_expand)))
+        if excluded_in_all:
+            collector.note_missing(seed, "excluded-suite")
+            if seed not in known_excluded:
+                known_excluded.append(seed)
+        elif any(_pytest_seed_candidate(seed, pytest_options, explicit)
+                 for explicit in profile_explicit):
+            active_seeds.append(seed)
+    seed_paths = tuple(active_seeds)
+
     def register_fixtures(text: str, source: str, anchor: str,
                           kind: str) -> None:
         scope_dir = anchor.rpartition("/")[0]
@@ -1901,6 +2274,32 @@ def collect_pytest_context(root: Path, scope: str, reader,
             entries = fixture_defs.setdefault(name, [])
             if entry not in entries:
                 entries.append(entry)
+
+    def register_imported_fixtures(text: str, source: str) -> None:
+        """Resolve active local fixture aliases without importing modules."""
+        scope_dir = source.rpartition("/")[0]
+        for alias, (module, level, original) in _python_import_aliases(
+                text).items():
+            for target in _python_spec_targets(module, level, source):
+                resolved = _try_one_target(reader, collector, target)
+                if resolved is None:
+                    continue
+                raw = _cached_read(collector, reader, resolved)
+                if raw is None:
+                    continue
+                try:
+                    target_text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if original not in _conftest_fixtures(target_text):
+                    continue
+                entry = (resolved, scope_dir, "imported")
+                entries = fixture_defs.setdefault(alias, [])
+                if entry not in entries:
+                    entries.append(entry)
+                collector.note_relation(source, resolved, "local-import")
+                collector.note_role(resolved, "fixture")
+                break
 
     closure_roots: list[tuple[str, int, str]] = [
         (rel, 0, "fixture") for rel in ordered
@@ -1945,6 +2344,7 @@ def collect_pytest_context(root: Path, scope: str, reader,
         except UnicodeDecodeError:
             continue
         register_fixtures(text, rel, rel, "conftest")
+        register_imported_fixtures(text, rel)
         plugins, dynamic = _pytest_plugins_literals(text)
         if dynamic:
             collector.note_missing(rel, "dynamic-config")
@@ -1961,6 +2361,11 @@ def collect_pytest_context(root: Path, scope: str, reader,
             else:
                 collector.note_missing(rel, "unresolved-import")
 
+    # Preserve positive suite membership even when the context-read budget
+    # is exhausted before later candidates are traversed. This role is a
+    # syntactic/configured candidate label, never an execution claim.
+    for seed in seed_paths:
+        collector.note_role(seed, "test")
     queue: list[tuple[str, int, str]] = closure_roots + [
         (seed, 0, "test") for seed in seed_paths]
     seen: set[str] = set()
@@ -1978,13 +2383,47 @@ def collect_pytest_context(root: Path, scope: str, reader,
         except UnicodeDecodeError:
             continue
         modules, params, truncated = _python_links(text)
+        fixture_params = _fixture_definition_params(text)
         if truncated:
             collector.note_missing(rel, "item-limit")
         plugin_anchor = plugin_anchors.get(rel)
         if plugin_anchor is not None:
             register_fixtures(text, rel, plugin_anchor, "plugin")
+            register_imported_fixtures(text, rel)
+        elif role in ("fixture", "helper"):
+            register_fixtures(text, rel, rel, "imported")
+
+        aliases = _python_import_aliases(text) if role == "test" else {}
         for name in params if role == "test" else ():
             if name in _PYTEST_BUILTINS or name in ("self", "cls"):
+                continue
+            imported = aliases.get(name)
+            if imported is not None:
+                module, level, original = imported
+                owner = None
+                for target in _python_spec_targets(module, level, rel):
+                    resolved = _try_one_target(reader, collector, target)
+                    if resolved is None:
+                        continue
+                    imported_raw = _cached_read(collector, reader, resolved)
+                    if imported_raw is None:
+                        continue
+                    try:
+                        imported_text = imported_raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    if original in _conftest_fixtures(imported_text):
+                        owner = resolved
+                        register_fixtures(imported_text, resolved, resolved,
+                                          "imported")
+                        collector.note_role(resolved, "fixture")
+                        collector.note_relation(rel, resolved, "fixture-use")
+                        if (depth + 1 <= _CONTEXT_MAX_DEPTH
+                                and resolved not in seen):
+                            queue.append((resolved, depth + 1, "fixture"))
+                        break
+                if owner is None:
+                    collector.note_missing(rel, "unresolved-import")
                 continue
             owner = _find_fixture_owner(
                 collector, name, rel, fixture_defs)
@@ -1992,6 +2431,16 @@ def collect_pytest_context(root: Path, scope: str, reader,
                 collector.note_relation(rel, owner, "fixture-use")
             else:
                 collector.note_missing(rel, "unresolved-import")
+        for fixture_name, dependencies in fixture_params:
+            for dependency in dependencies:
+                if dependency in _PYTEST_BUILTINS:
+                    continue
+                owner = _find_fixture_owner(
+                    collector, dependency, rel, fixture_defs)
+                if owner is not None:
+                    collector.note_relation(rel, owner, "fixture-use")
+                else:
+                    collector.note_missing(rel, "unresolved-import")
         if depth >= _CONTEXT_MAX_DEPTH:
             if modules:
                 collector.note_missing(rel, "depth-limit")
@@ -2023,12 +2472,27 @@ def collect_pytest_context(root: Path, scope: str, reader,
             else:
                 queue.append((resolved, depth + 1, child_role))
 
-    if status == "resolved" and collector.missing:
+    if status == "resolved" and any(
+            reason != "excluded-suite" for _path, reason in collector.missing):
         status = "partial"
     if not config_paths and not collector.roles:
         status = "unavailable"
-    return _collect_finish("pytest", scope, _sanitize_roots(test_roots),
-                           collector, config_paths, known_excluded, status)
+    active_roots = (pytest_options.get("testpaths", ())
+                    if selected_config is not None else ())
+    suite_profiles = tuple(SuiteProfile(
+        name=name, config_path=selected_config,
+        status=("partial" if profile_dynamic[index] or options_dynamic
+                or nested_configs or config_read_failures
+                else "resolved"),
+        includes=(profile_explicit[index] or active_roots),
+        excludes=tuple(profile_ignores[index]),
+        expansive=bool(
+            profile_can_expand[index] or config_read_failures
+            or (options_dynamic and not pytest_options.get("testpaths"))))
+        for index, name in enumerate(("scoped", "full")))
+    return _collect_finish("pytest", scope, _sanitize_roots(active_roots),
+                           collector, config_paths, known_excluded, status,
+                           suite_profiles)
 
 
 def _try_one_target(reader, collector: _Collector,
@@ -2067,7 +2531,7 @@ def _find_fixture_owner(collector: _Collector, name: str, seed: str,
     while True:
         scoped = [entry for entry in entries if entry[1] == directory]
         direct = sorted({source for source, _scope, kind in scoped
-                         if kind == "conftest"})
+                         if kind in ("conftest", "imported")})
         if direct:
             return direct[0] if len(direct) == 1 else None
         plugins = sorted({source for source, _scope, kind in scoped

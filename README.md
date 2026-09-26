@@ -51,20 +51,23 @@ scheduling and setup detail and also makes pytest/vitest verbose;
 print. Machine documents (`--json`, `--result-json`) never carry status
 lines. See `ptest help run`.
 
-`ptest doctor` review sends one cheap-model call per checklist item that
-needs one after consent; timing, selection and parallel execution items
-are answered from ptest's own facts with no model call. The model is the
-cheapest adequate one:
-`--review-model` (or `PTEST_REVIEW_MODEL`) wins, otherwise claude uses
-its haiku alias and codex picks from its model list with one extra call
-that sends only the model list; the choice is cached per provider and
-CLI version. `--review-concurrency` (1-8, default 4) bounds parallel
-calls. Before the prompt, ptest prints at most three short disclosure
-lines (what is sent, provider and model, call count, `--offline`); the
-full disclosure text lives in `ptest doctor --help`.
-`ptest doctor --offline` is static and sends nothing. Model citations live
-in `recommendations.md`; the terminal shows a compact checklist with a
-reason on every unknown row.
+`ptest doctor` review makes an initial model call for each checklist item
+that needs one after consent, then independently verifies each valid reply
+once, including satisfied and not-applicable answers. Timing, selection
+and parallel execution items use ptest's own facts with no model call. The
+default requested models are Codex `gpt-6-sol` and Claude `opus`; an explicit
+`--review-model` or `PTEST_REVIEW_MODEL` overrides that choice. The selected
+model must pass the provider's normal qualification. `--review-concurrency`
+(1-8, default 4) bounds parallel calls. Before the prompt, ptest prints at
+most three short disclosure lines with the requested model and the maximum
+initial-plus-verification call count; full disclosure is in
+`ptest doctor --help`.
+Reviews cite opaque IDs for automatically selected setup, representative
+callers, helpers and cleanup. Findings cover only cited, reachable evidence;
+an omitted decisive caller or failure path remains unknown. A review is not a
+suite-wide execution certificate. `ptest doctor --offline` is static and
+sends nothing. The terminal shows a compact checklist with a reason on every
+unknown row.
 
 For normal use, download a verified release archive and run `./install.sh`; see
 [docs/installation.md](docs/installation.md). The installer validates bundled

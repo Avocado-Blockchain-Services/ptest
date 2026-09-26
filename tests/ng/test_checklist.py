@@ -98,7 +98,7 @@ def test_catalog_prompts_pin_gap_satisfied_unknown_standard():
     for entry in CATALOG:
         lowered = entry.prompt.casefold()
         assert "gap only with a cited concrete violation" in lowered, entry.id
-        assert "satisfied only when the evidence shows the guaranteeing mechanism" in lowered, entry.id
+        assert "satisfied only when cited evidence shows a mechanism sufficient" in lowered, entry.id
         assert "one sentence naming the missing evidence" in lowered, entry.id
         assert "absence of code is unknown" in lowered, entry.id
 

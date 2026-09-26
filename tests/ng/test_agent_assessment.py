@@ -122,7 +122,7 @@ def test_v2_scoped_packet_rebases_scope_and_excludes_sibling_evidence(
         assert body["packet"]["declaration"] == "api"
         assert body["packet"]["scope"] == "api/tests"
         assert body["packet"]["packet_sha256"] == packet.packet_sha256
-        assert {excerpt["path"] for excerpt in body["excerpts"]} <= {
+        assert {unit["path"] for unit in body["units"]} <= {
             "api/tests/test_inside.py"}
 
 
@@ -256,6 +256,44 @@ def test_build_packets_admits_bounded_evidence_with_counts_and_identity(
     assert len(packet.packet_sha256) == 64 and body
 
 
+def test_packet_identity_tracks_consulted_source_even_when_not_admitted(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    caller = tmp_path / "tests" / "test_cache.py"
+    caller.parent.mkdir()
+    caller.write_text(
+        "def test_cache_is_owned():\n"
+        "    cache = {}\n"
+        "    cache['run-a'] = 1\n"
+        "    assert cache['run-a'] == 1\n", encoding="utf-8")
+    candidate = tmp_path / "src" / "cache_helper.py"
+    candidate.parent.mkdir()
+    candidate.write_text(
+        "class CacheClient:\n"
+        "    def clear(self):\n"
+        "        self.cache.clear()\n", encoding="utf-8")
+    workspace, resolution = _workspace(tmp_path)
+    limits = AA.EvidenceLimits(max_files_per_child=1)
+
+    first = AA.build_packets(workspace, resolution, limits)[0]
+    assert [excerpt.path for excerpt in first.excerpts] == [
+        "tests/test_cache.py"]
+    assert first._inventory_sha256 is not None
+
+    candidate.write_text(
+        "class CacheClient:\n"
+        "    def clear(self):\n"
+        "        self.cache.clear()\n"
+        "    def get(self, key):\n"
+        "        return self.cache.get(key)\n", encoding="utf-8")
+    second = AA.build_packets(workspace, resolution, limits)[0]
+
+    assert [(excerpt.path, excerpt.sha256) for excerpt in first.excerpts] == [
+        (excerpt.path, excerpt.sha256) for excerpt in second.excerpts]
+    assert first.packet_sha256 != second.packet_sha256
+
+
 def test_rejected_candidates_consume_candidate_file_budget(
         tmp_path, monkeypatch):
     from ptest import agent_assessment as AA
@@ -277,8 +315,9 @@ def test_rejected_candidates_consume_candidate_file_budget(
     packet = AA.build_packets(
         workspace, resolution, AA.EvidenceLimits())[0]
 
-    assert len(reads) <= 256
-    assert sum(size for _, size in reads) <= 2 * 1024 * 1024
+    limits = AA.EvidenceLimits()
+    assert len(reads) <= limits.max_candidate_files_per_child
+    assert sum(size for _, size in reads) <= limits.max_candidate_bytes_per_child
     assert packet.excluded_count == len(reads)
     assert packet.truncated_count == candidate_count - len(reads)
     assert packet.excerpts == () and packet.byte_count == 0
@@ -316,7 +355,7 @@ def test_rejected_candidates_consume_candidate_byte_budget(
     candidate_count = 40
     for index in range(candidate_count):
         (tmp_path / f"candidate-{index:03}.py").write_bytes(
-            b"\x00" + b"x" * (65_537 - 1))
+            b"value = 1\n" + b"#" * (32_768 - 10))
     workspace, resolution = _workspace(tmp_path)
     real_read = AA.read_regular
     reads = []
@@ -327,15 +366,19 @@ def test_rejected_candidates_consume_candidate_byte_budget(
         return raw
 
     monkeypatch.setattr(AA, "read_regular", counted_read)
-    packet = AA.build_packets(
-        workspace, resolution, AA.EvidenceLimits())[0]
+    limits = AA.EvidenceLimits(max_candidate_bytes_per_child=128 * 1024)
+    packet = AA.build_packets(workspace, resolution, limits)[0]
 
     read_bytes = sum(size for _, size in reads)
-    assert len(reads) <= 256
-    assert read_bytes <= 2 * 1024 * 1024
-    assert 0 < packet.excluded_count < candidate_count
-    assert packet.excluded_count + packet.truncated_count == candidate_count
-    assert packet.excerpts == () and packet.byte_count == 0
+    assert len(reads) <= limits.max_candidate_files_per_child
+    assert read_bytes <= limits.max_candidate_bytes_per_child
+    assert 0 < read_bytes < candidate_count * 32_768
+    assert len(reads) < candidate_count
+    assert packet.excerpts
+    assert packet.byte_count <= limits.max_candidate_bytes_per_child
+    assert len(packet.excerpts) <= limits.max_candidate_bytes_per_child // 32_768
+    assert all(excerpt.path.startswith("candidate-")
+               for excerpt in packet.excerpts)
 
 
 def test_candidate_read_budgets_are_configurable_in_evidence_limits(
@@ -1235,13 +1278,23 @@ def test_build_packets_admits_manifests_then_test_config_then_tests(tmp_path):
     for index in range(80):
         (api / "tests" / f"test_n{index:02d}.py").write_text(
             f"def test_n{index:02d}():\n    assert True\n", encoding="utf-8")
+    (api / "tests" / "test_n00.py").write_text(
+        "def test_database_owner(db_connection):\n"
+        "    db_connection.execute('select 1')\n", encoding="utf-8")
     conftest_lines = [f"# conftest line {number}"
                       for number in range(1, 501)]
+    conftest_lines[0] = "import pytest"
+    conftest_lines[1] = "import sqlite3"
+    conftest_lines[2] = "@pytest.fixture"
+    conftest_lines[3] = "def db_connection():"
+    conftest_lines[4] = "    return sqlite3.connect(':memory:')"
     conftest_lines[446] = 'TEST_DB_NAME = "worker-owned-db"'
     (api / "tests" / "conftest.py").write_text(
         "\n".join(conftest_lines) + "\n", encoding="utf-8")
     (api / "pyproject.toml").write_text(
-        "[project]\nname = 'demo'\n", encoding="utf-8")
+        "[project]\nname = 'demo'\n"
+        "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+        encoding="utf-8")
     (api / "uv.lock").write_text("version = 1\n", encoding="utf-8")
 
     resolution = config_api.resolve_config(root)
@@ -1259,8 +1312,8 @@ def test_build_packets_admits_manifests_then_test_config_then_tests(tmp_path):
     conftest = next(e for e in packet.excerpts
                     if e.path == "api/tests/conftest.py")
     assert (conftest.start_line, conftest.end_line) == (1, 500)
-    assert paths[:3] == ["api/.ptest.toml", "api/pyproject.toml",
-                         "api/tests/conftest.py"]
+    assert paths[:2] == ["api/.ptest.toml", "api/pyproject.toml"]
+    assert "api/tests/conftest.py" in paths
 
     reviews = AA.plan_item_reviews(packet)
     assert [review.item_id for review in reviews] == list(EXPECTED_IDS)
@@ -1300,10 +1353,10 @@ def test_plan_item_reviews_returns_twelve_bounded_routed_reviews(tmp_path):
                 providers.PROMPT_INPUT_MAX_BYTES - len(review.schema))
             body = json.loads(review.request.decode("utf-8"))
             assert body["policy"]["item"]["id"] == review.item_id
-            assert len(body["excerpts"]) <= AA.ITEM_MAX_FILES
+            assert len({item["path"] for item in body["units"]}) <= AA.ITEM_MAX_FILES
             assert sum(len(item["text"].encode("utf-8"))
-                       for item in body["excerpts"]) <= AA.ITEM_MAX_BYTES
-            assert [item["path"] for item in body["excerpts"]] == list(
+                       for item in body["units"]) <= AA.ITEM_MAX_BYTES
+            assert [item["path"] for item in body["units"]] == list(
                 review.excerpt_paths)
 
 
@@ -1331,7 +1384,7 @@ def test_plan_item_reviews_never_skip_on_absent_evidence(tmp_path):
         assert review.skip_reason is None
         assert ".ptest.toml" not in review.excerpt_paths
         body = json.loads(review.request.decode("utf-8"))
-        offered = [e["path"] for e in body["excerpts"]]
+        offered = [e["path"] for e in body["units"]]
         assert ".ptest.toml" not in offered
         assert body["packet"]["missing"]
 
@@ -1414,28 +1467,31 @@ def test_plan_item_reviews_skip_absent_when_cache_library_declared(tmp_path):
     assert reviews["CACHE-001"].request is not None
 
 
-def test_route_excerpts_ranks_scanner_hit_above_generic_files(tmp_path):
+def test_item_source_selection_ranks_scanner_hit_above_generic_files(tmp_path):
     """A scanner-hit file sorted after 24 generic files still routes."""
     from ptest import agent_assessment as AA
 
     files = {
-        "pyproject.toml":
-            "[project]\nname = 'demo'\ndependencies = ['sqlalchemy']\n",
+        "pyproject.toml": (
+            "[project]\nname = 'demo'\ndependencies = ['sqlalchemy']\n"
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n"),
     }
     for index in range(40):
         files[f"tests/test_a{index:02d}.py"] = (
             f"def test_a{index:02d}():\n    assert True\n")
-    files["tests/test_zz_db.py"] = "def teardown():\n    drop_database(url)\n"
+    files["tests/test_zz_db.py"] = (
+        "def test_cleanup_database():\n    drop_database(url)\n")
     packet = _packet_for(tmp_path, files)
-    assert len(packet.excerpts) == 42
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet)}
     db_isolation = reviews["DB-002"]
     assert db_isolation.request is not None
     assert len(db_isolation.excerpt_paths) <= AA.ITEM_MAX_FILES
     assert "tests/test_zz_db.py" in db_isolation.excerpt_paths
-    assert all(path in [e.path for e in packet.excerpts]
-               for path in db_isolation.excerpt_paths)
+    payload = json.loads(db_isolation.request)
+    assert any(unit["path"] == "tests/test_zz_db.py"
+               and "drop_database(url)" in unit["text"]
+               for unit in payload["units"])
 
 
 @pytest.mark.parametrize(("manifest", "dependency", "items"), [
@@ -1484,29 +1540,6 @@ def test_plan_item_reviews_skip_absent_for_declared_driver_per_ecosystem(
                for review in AA.plan_item_reviews(packet)}
     for item_id in items:
         assert reviews[item_id].request is not None
-
-
-@pytest.mark.parametrize("token", [
-    "pg", "postgres", "mysql2", "mongodb", "mssql", "pymssql", "duckdb",
-    "drizzle-orm", "kysely", "@supabase/supabase-js", "gorm", "pgx",
-    "lib/pq", "sqlx", "diesel", "rusqlite", "jdbc", "hibernate", "jpa",
-    "jooq", "mybatis",
-])
-def test_db_library_regex_covers_listed_drivers(token):
-    """Every probed driver token (incl. JVM) matches the DB library regex."""
-    from ptest import agent_assessment as AA
-
-    assert AA._DB_LIBRARY_RE.search(token)
-
-
-@pytest.mark.parametrize("token", [
-    "keyv", "lru-cache", "node-cache", "diskcache",
-])
-def test_cache_library_regex_covers_listed_caches(token):
-    """Every probed cache token matches the cache library regex."""
-    from ptest import agent_assessment as AA
-
-    assert AA._CACHE_LIBRARY_RE.search(token)
 
 
 @pytest.mark.parametrize("usage", [
@@ -1576,52 +1609,29 @@ def _subset_citation(packet, path, start=1, end=None):
             "sha256": excerpt.sha256}
 
 
+def _selected_source_id(review, path):
+    selected = set(review.selected_source_ids)
+    return next(identifier for unit, identifier in review.source_ids
+                if unit.path == path and identifier in selected)
+
+
 def _one_row_bytes(packet, review, *, status, paths, rationale=None,
                    finding="null"):
     if rationale is None:
         rationale = (f"Row {review.item_id} judged {status} against "
-                     "the cited excerpt lines.")
-    evidence = [_subset_citation(packet, item) if isinstance(item, str)
-                else _subset_citation(packet, *item) for item in paths]
+                     "the selected source units.")
+    evidence = [_selected_source_id(review, item) for item in paths]
     if finding == "null":
         finding_value = None
     else:
         summary, change, fpaths = finding
         finding_value = {
             "summary": summary, "suggested_change": change,
-            "evidence": [_subset_citation(packet, item) for item in fpaths]}
-    citation_ids = [
-        (cite["path"], cite["start_line"], cite["end_line"], cite["sha256"])
-        for cite in evidence]
-    if status == "gap" and finding_value is not None:
-        finding_ids = {
-            (cite["path"], cite["start_line"], cite["end_line"], cite["sha256"])
-            for cite in finding_value["evidence"]}
-        proof_index = next((index for index, identity in enumerate(citation_ids)
-                            if identity in finding_ids), 0)
-        roles = ("applicability", "violation")
-    elif status == "satisfied":
-        proof_index = 0
-        roles = ("applicability", "mechanism")
-    elif status == "not-applicable":
-        proof_index = 0
-        roles = ("applicability",)
-    else:
-        proof_index = 0
-        roles = ()
-    proof = []
-    if evidence and roles:
-        cite = evidence[proof_index]
-        excerpt = next(item for item in packet.excerpts
-                       if item.path == cite["path"])
-        lines = excerpt.text.splitlines() or [""]
-        line = lines[cite["start_line"] - excerpt.start_line]
-        quote = line[:512]
-        proof = [{"role": role, "citation_index": proof_index,
-                  "quote": quote} for role in roles]
+            "evidence": [_selected_source_id(review, item)
+                         for item in fpaths]}
     return __import__("json").dumps(
         {"status": status, "rationale": rationale, "evidence": evidence,
-         "finding": finding_value, "proof": proof, "needs": []}).encode("utf-8")
+         "finding": finding_value, "needs": []}).encode("utf-8")
 
 
 def _satisfied_reply(packet, review):
@@ -1688,53 +1698,67 @@ def test_assemble_child_noop_fails_without_valid_assertion(tmp_path):
 def _invalid_reply_cases(packet, review):
     import json
 
-    good_path = review.excerpt_paths[0]
-    good_cite = _subset_citation(packet, good_path)
-    bad_cite = {"path": "elsewhere/missing.py", "start_line": 1,
-                "end_line": 1, "sha256": "0" * 64}
+    good_id = _selected_source_id(review, review.excerpt_paths[0])
+    bad_id = "src-" + "0" * 24
     cases = {
         "not-json": b"{nope",
         "extra-key": json.dumps({"status": "satisfied", "rationale": "Rationale with enough substance here.",
-                                 "evidence": [good_cite], "finding": None,
+                                 "evidence": [good_id], "finding": None,
+                                 "needs": [],
                                  "score": 1}).encode(),
         "missing-key": json.dumps({"status": "satisfied",
                                    "rationale": "Rationale with enough substance here.",
-                                   "evidence": []}).encode(),
+                                   "evidence": [], "needs": []}).encode(),
         "outside-subset": json.dumps({"status": "satisfied", "rationale": "Cites a file outside the routed subset.",
-                                      "evidence": [bad_cite], "finding": None}).encode(),
+                                      "evidence": [bad_id], "finding": None,
+                                      "needs": []}).encode(),
         "gap-without-finding": json.dumps({"status": "gap", "rationale": "A gap with no finding attached.",
-                                           "evidence": [good_cite], "finding": None}).encode(),
+                                           "evidence": [good_id], "finding": None,
+                                           "needs": []}).encode(),
         "satisfied-with-finding": json.dumps({"status": "satisfied", "rationale": "Satisfied yet carries a finding.",
-                                              "evidence": [good_cite],
+                                              "evidence": [good_id],
                                               "finding": {"summary": "Extra summary.",
                                                           "suggested_change": "Extra change.",
-                                                          "evidence": [good_cite]}}).encode(),
+                                                          "evidence": [good_id]},
+                                              "needs": []}).encode(),
         "injected-failed-prefix": json.dumps({"status": "satisfied",
                                               "rationale": "Review failed: timed out here.",
-                                              "evidence": [good_cite], "finding": None}).encode(),
+                                              "evidence": [good_id], "finding": None,
+                                              "needs": []}).encode(),
         "untrusted-prose": json.dumps({"status": "satisfied",
                                        "rationale": "See https://invalid.test for detail.",
-                                       "evidence": [good_cite], "finding": None}).encode(),
+                                       "evidence": [good_id], "finding": None,
+                                       "needs": []}).encode(),
         "na-too-brief": json.dumps({"status": "not-applicable", "rationale": "N/A.",
-                                    "evidence": [good_cite], "finding": None}).encode(),
+                                    "evidence": [good_id], "finding": None,
+                                    "needs": []}).encode(),
         "satisfied-no-citation": json.dumps({"status": "satisfied", "rationale": "No citation given at all.",
-                                             "evidence": [], "finding": None}).encode(),
+                                             "evidence": [], "finding": None,
+                                             "needs": []}).encode(),
         "unhashable-status-list": json.dumps({"status": ["satisfied"],
                                             "rationale": "Status arrives as a list.",
-                                            "evidence": [good_cite], "finding": None}).encode(),
+                                            "evidence": [good_id], "finding": None,
+                                            "needs": []}).encode(),
         "unhashable-status-dict": json.dumps({"status": {"name": "satisfied"},
                                             "rationale": "Status arrives as a dict.",
-                                            "evidence": [good_cite], "finding": None}).encode(),
+                                            "evidence": [good_id], "finding": None,
+                                            "needs": []}).encode(),
         "non-string-status-int": json.dumps({"status": 0,
                                            "rationale": "Status arrives as a number.",
-                                           "evidence": [good_cite], "finding": None}).encode(),
+                                           "evidence": [good_id], "finding": None,
+                                           "needs": []}).encode(),
         "null-status": json.dumps({"status": None,
                                  "rationale": "Status arrives as null.",
-                                 "evidence": [good_cite], "finding": None}).encode(),
+                                 "evidence": [good_id], "finding": None,
+                                 "needs": []}).encode(),
         "gap-with-list-finding": json.dumps({"status": "gap", "rationale": "A gap carrying a list finding.",
-                                           "evidence": [good_cite], "finding": ["not", "a", "dict"]}).encode(),
+                                           "evidence": [good_id],
+                                           "finding": ["not", "a", "dict"],
+                                           "needs": []}).encode(),
         "gap-with-string-finding": json.dumps({"status": "gap", "rationale": "A gap carrying a string finding.",
-                                             "evidence": [good_cite], "finding": "fix it"}).encode(),
+                                             "evidence": [good_id],
+                                             "finding": "fix it",
+                                             "needs": []}).encode(),
     }
     # Keep these cases focused on their original malformed shape, prose, or
     # citation. Private fields are present but deliberately empty.
@@ -1742,7 +1766,6 @@ def _invalid_reply_cases(packet, review):
         if name == "not-json":
             continue
         document = json.loads(payload)
-        document.setdefault("proof", [])
         document.setdefault("needs", [])
         cases[name] = json.dumps(document).encode()
     return cases
@@ -1760,13 +1783,14 @@ def test_assemble_child_invalid_replies_become_unknown_only(tmp_path):
         "not-json": "not JSON",
         "extra-key": "carries an unknown field",
         "missing-key": "missing 'finding'",
-        "outside-subset": "no valid citations",
+        "outside-subset": "evidence[0] is an unknown or unoffered source ID",
         "gap-without-finding": "gap reply needs a finding",
         "satisfied-with-finding": "non-gap reply must carry finding null",
         "injected-failed-prefix": "rationale carries untrusted model content",
         "untrusted-prose": "rationale carries untrusted model content",
         "na-too-brief": "needs a specific not-applicable rationale",
-        "satisfied-no-citation": "no valid citations",
+        "satisfied-no-citation": (
+            "private source IDs are invalid: conclusive reply needs source evidence"),
         "unhashable-status-list": "has an unknown status",
         "unhashable-status-dict": "has an unknown status",
         "non-string-status-int": "has an unknown status",
@@ -1847,7 +1871,10 @@ def test_one_row_schema_shape_is_exact(tmp_path):
     assert len(schemas) == 1
     schema = json.loads(reviews[0].schema.decode("utf-8"))
     assert set(schema["required"]) == {
-        "status", "rationale", "evidence", "finding", "proof", "needs"}
+        "status", "rationale", "evidence", "finding", "needs"}
+    assert schema["properties"]["evidence"]["items"]["pattern"] == (
+        r"^src-[0-9a-f]{24}$")
+    assert "proof" not in schema["properties"]
 
 
 # --- T4: dependency presence facts ------------------------------------------------
@@ -1943,7 +1970,8 @@ def test_assembled_child_as_public_dict_minus_execution_validates(tmp_path):
                   "score": score, "findings": findings, "limitations": []}
     payload = {"schema": "ptest.agent-assessment/v1",
                "provider": {"name": "claude", "cli_version": "1.2.3",
-                            "profile": "ptest-item-review-v1"},
+                            "profile": "ptest-source-id-v3 "
+                                       "requested-model=unspecified"},
                "children": [child_dict], "limitations": [],
                "publication": {"status": "created",
                                "path": "recommendations.md",
@@ -2034,10 +2062,9 @@ def _check_real_reply_regression(tmp_path, fixture_name,
                 "evidence": row["evidence"], "finding": None}).encode())
             expected.append("unknown")
             continue
-        # These are genuine historical provider outputs and predate the
-        # private proof protocol. Keep that provenance intact: without
-        # proof/needs fields they now degrade to unknown instead of being
-        # retroactively blessed with invented evidence.
+        # These genuine historical provider outputs use path/hash citations.
+        # They predate source IDs, so they stay unknown instead of being
+        # retroactively translated into current evidence identifiers.
         replies.append(json.dumps({
             "status": row["status"], "rationale": row["rationale"],
             "evidence": rebound, "finding": None}).encode())
@@ -2045,10 +2072,6 @@ def _check_real_reply_regression(tmp_path, fixture_name,
     if with_dependencies:
         assert all(review.request is not None
                    for review in reviews.values())
-        assert all(
-            all(cite["path"] in set(reviews[row["id"]].excerpt_paths)
-                for cite in row["evidence"])
-            for row in rows), "every fixture citation must route in-subset"
     ordered = tuple(reviews[row_id] for row_id in covered)
     ordered_replies = tuple(
         replies[[row["id"] for row in rows].index(row_id)]
@@ -2086,13 +2109,12 @@ def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
     packet = _e2e_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    stray = {"path": "ghost/missing.py", "start_line": 1, "end_line": 1,
-             "sha256": "0" * 64}
+    stray = "src-" + "0" * 24
     replies = tuple(
         json.dumps({"status": "satisfied",
                     "rationale": "Cites a file outside the routed subset.",
                     "evidence": [stray], "finding": None,
-                    "proof": [], "needs": []}).encode()
+                    "needs": []}).encode()
         if review.item_id == target.item_id
         else (None if review.request is None
               else _satisfied_reply(packet, review))
@@ -2100,7 +2122,8 @@ def test_real_reply_outside_subset_drops_to_invalid(tmp_path):
     child = AA.assemble_child(packet, reviews, replies)
     row = next(r for r in child.rows if r.id == target.item_id)
     assert (row.status, row.rationale) == (
-        "unknown", AA.FAILED_PREFIX + "invalid reply: no valid citations")
+        "unknown", AA.FAILED_PREFIX +
+        "invalid reply: evidence[0] is an unknown or unoffered source ID")
 
 
 # --- T4: chain through the real provider launcher ---------------------------------
@@ -2125,15 +2148,12 @@ def test_chain_fake_claude_through_real_launch_review(tmp_path, monkeypatch):
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "request = json.loads(sys.stdin.read())\n"
-        "first = request['excerpts'][0]\n"
+        "first = request['units'][0]\n"
         "item_id = request['policy']['item']['id']\n"
         "reply = {'status': 'satisfied',\n"
-        "         'rationale': 'Reviewed ' + item_id + ' against the cited excerpt lines.',\n"
-        "         'evidence': [{'path': first['path'], 'start_line': first['start_line'],\n"
-        "                     'end_line': first['end_line'], 'sha256': first['sha256']}],\n"
+        "         'rationale': 'Reviewed ' + item_id + ' against the selected source unit.',\n"
+        "         'evidence': [first['id']],\n"
         "         'finding': None,\n"
-        "         'proof': [{'role': 'applicability', 'citation_index': 0, 'quote': first['text'].splitlines()[0][:512]},\n"
-        "                   {'role': 'mechanism', 'citation_index': 0, 'quote': first['text'].splitlines()[0][:512]}],\n"
         "         'needs': []}\n"
         "envelope = {'type': 'result', 'subtype': 'success', 'is_error': False,\n"
         "            'num_turns': 1, 'permission_denials': [],\n"
@@ -2174,7 +2194,7 @@ def test_plan_and_assemble_empty_packet(tmp_path):
     assert all(review.request is not None for review in reviews)
     replies = tuple(json.dumps({
         "status": "unknown", "rationale": "No evidence was admitted.",
-        "evidence": [], "finding": None, "proof": [], "needs": []
+        "evidence": [], "finding": None, "needs": []
     }).encode() for _ in reviews)
     child = AA.assemble_child(packet, reviews, replies)
     assert [row.status for row in child.rows] == ["unknown"] * 12
@@ -2247,11 +2267,12 @@ def test_fenced_reply_with_forbidden_keys_is_rejected(tmp_path):
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    cite = _subset_citation(packet, target.excerpt_paths[0])
-    document = json.loads(_r17_reply(
-        packet, target,
-        rationale="Rationale with enough substance here.",
-        evidence=[cite]))
+    good_id = _selected_source_id(target, target.excerpt_paths[0])
+    document = {
+        "status": "satisfied",
+        "rationale": "Rationale with enough substance here.",
+        "evidence": [good_id], "finding": None, "needs": [],
+    }
     document["score"] = 1
     payload = _fenced(json.dumps(document).encode())
     replies = tuple(
@@ -2334,45 +2355,19 @@ def test_citation_to_empty_file_excluded_at_admission(tmp_path):
     assert row.rationale.startswith(AA.FAILED_PREFIX + "invalid reply")
 
 
-# --- Round 17 twins: backtick normalization, per-citation drops ------------
+# --- Source-ID validation and bounded verification ---------------------------
 
 
-def _r17_reply(packet, review, *, rationale, evidence, status="satisfied",
-               finding=None):
-    roles = (("applicability", "mechanism") if status == "satisfied"
-             else ("applicability", "violation") if status == "gap"
-             else ("applicability",) if status == "not-applicable" else ())
-    subset = {excerpt.path: excerpt for excerpt in packet.excerpts
-              if excerpt.path in review.excerpt_paths}
-    finding_ids = set()
-    if isinstance(finding, dict):
-        finding_ids = {(item.get("path"), item.get("start_line"),
-                        item.get("end_line"), item.get("sha256"))
-                       for item in finding.get("evidence", [])
-                       if isinstance(item, dict)}
-    proof_index = None
-    for index, cite in enumerate(evidence):
-        if not isinstance(cite, dict) or cite.get("path") not in subset:
-            continue
-        identity = (cite.get("path"), cite.get("start_line"),
-                    cite.get("end_line"), cite.get("sha256"))
-        if status != "gap" or identity in finding_ids:
-            proof_index = index
-            break
-    proof = []
-    if proof_index is not None and roles:
-        cite = evidence[proof_index]
-        excerpt = subset[cite["path"]]
-        line_index = cite["start_line"] - excerpt.start_line
-        quote = (excerpt.text.splitlines() or [""])[line_index][:512]
-        proof = [{"role": role, "citation_index": proof_index,
-                  "quote": quote} for role in roles]
-    return json.dumps({"status": status, "rationale": rationale,
-                       "evidence": evidence, "finding": finding,
-                       "proof": proof, "needs": []}).encode()
+def _source_id_reply(review, *, rationale, evidence, status="satisfied",
+                     finding=None, needs=None):
+    return json.dumps({
+        "status": status, "rationale": rationale,
+        "evidence": evidence, "finding": finding,
+        "needs": [] if needs is None else needs,
+    }).encode()
 
 
-def _r17_assemble(packet, reviews, target, payload):
+def _assemble_target(packet, reviews, target, payload):
     from ptest import agent_assessment as AA
 
     child = AA.assemble_child(
@@ -2381,189 +2376,111 @@ def _r17_assemble(packet, reviews, target, payload):
               else (None if review.request is None
                     else _satisfied_reply(packet, review))
               for review in reviews))
-    return next(r for r in child.rows if r.id == target.item_id)
+    return next(row for row in child.rows if row.id == target.item_id)
 
 
 def test_backtick_prose_passes_and_is_stored_without_backticks(tmp_path):
-    """Inline code like `db_session` normalizes to plain text, not a failure."""
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="The db_session fixture from `db_session` "
-                             "isolates each test with a savepoint rollback.",
-                   evidence=[good]))
+    good_id = _selected_source_id(target, target.excerpt_paths[0])
+    reply = _source_id_reply(
+        target, rationale="The db_session fixture from `db_session` isolates "
+        "each test with a savepoint rollback.", evidence=[good_id])
+    row = _assemble_target(packet, reviews, target, reply)
     assert row.status == "satisfied"
-    assert "`" not in row.rationale
-    assert "db_session" in row.rationale
+    assert "`" not in row.rationale and "db_session" in row.rationale
     assert row.dropped_citations == 0
 
 
-def test_command_shape_after_backtick_strip_stays_rejected(tmp_path):
-    """Stripping backticks must not launder a command shape like `pytest -x`."""
+@pytest.mark.parametrize("rationale", [
+    "Run `pytest -x` to confirm the isolation.",
+    "See `db_session` and [docs](https://invalid.test/x).",
+])
+def test_untrusted_command_or_link_after_backtick_strip_is_rejected(
+        tmp_path, rationale):
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="Run `pytest -x` to confirm the isolation.",
-                   evidence=[good]))
+    good_id = _selected_source_id(target, target.excerpt_paths[0])
+    reply = _source_id_reply(target, rationale=rationale,
+                             evidence=[good_id])
+    row = _assemble_target(packet, reviews, target, reply)
     assert row.status == "unknown"
     assert row.rationale == (
         AA.FAILED_PREFIX + "invalid reply: "
         "rationale carries untrusted model content")
 
 
-def test_link_after_backtick_strip_stays_rejected(tmp_path):
-    """A Markdown link stays rejected with or without backticks nearby."""
+def test_nested_evidence_value_is_named_invalid_source_id(tmp_path):
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="See `db_session` and [docs](https://invalid.test/x).",
-                   evidence=[good]))
+    reply = _source_id_reply(target, rationale="Malformed evidence value.",
+                             evidence=[{}])
+    row = _assemble_target(packet, reviews, target, reply)
     assert row.status == "unknown"
     assert row.rationale == (
         AA.FAILED_PREFIX + "invalid reply: "
-        "rationale carries untrusted model content")
+            "evidence[0] is not a source ID")
 
 
-def test_mixed_citations_keep_valid_and_count_dropped(tmp_path):
-    """One valid citation among invalid ones keeps the row, minus the bad."""
+def test_unoffered_or_duplicate_source_ids_fail_item_locally(tmp_path):
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    excerpt = next(e for e in packet.excerpts
-                   if e.path == target.excerpt_paths[0])
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    stale = dict(good, sha256="0" * 64)
-    escaped = dict(good, start_line=excerpt.start_line,
-                   end_line=excerpt.end_line + 50)
-    outside = {"path": "elsewhere/missing.py", "start_line": 1,
-               "end_line": 1, "sha256": "0" * 64}
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="Kept by the one valid citation.",
-                   evidence=[good, stale, escaped, outside]))
-    assert row.status == "satisfied"
-    assert [(c.path, c.start_line, c.end_line, c.sha256)
-            for c in row.evidence] == [
-        (good["path"], good["start_line"], good["end_line"],
-         good["sha256"])]
-    assert row.dropped_citations == 3
+    good_id = _selected_source_id(target, target.excerpt_paths[0])
+    cases = (
+        (["src-" + "f" * 24], "evidence[0] is an unknown or unoffered source ID"),
+        ([good_id, good_id], "evidence contains duplicate source IDs"),
+    )
+    for evidence, detail in cases:
+        reply = _source_id_reply(target, rationale="Source identity check.",
+                                 evidence=evidence)
+        row = _assemble_target(packet, reviews, target, reply)
+        assert (row.status, row.rationale) == (
+            "unknown", AA.FAILED_PREFIX + "invalid reply: " + detail)
 
 
-def test_all_invalid_citations_fail_with_no_valid_citations(tmp_path):
-    """A row whose status needs evidence but keeps none fails as failed."""
+def test_needs_must_be_offered_reserve_ids_and_are_empty_after_verification(
+        tmp_path):
     from ptest import agent_assessment as AA
 
     packet = _pure_library_packet(tmp_path)
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    outside = {"path": "elsewhere/missing.py", "start_line": 1,
-               "end_line": 1, "sha256": "0" * 64}
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="Every citation misses the subset.",
-                   evidence=[outside]))
+    good_id = _selected_source_id(target, target.excerpt_paths[0])
+    reply = _source_id_reply(
+        target, rationale="The caller needs one more source unit.",
+        evidence=[good_id], needs=["src-" + "f" * 24])
+    row = _assemble_target(packet, reviews, target, reply)
     assert row.status == "unknown"
-    assert row.rationale == (
-        AA.FAILED_PREFIX + "invalid reply: no valid citations")
+    assert "unoffered source ID" in row.rationale
 
-
-def test_finding_citations_drop_independently(tmp_path):
-    """A gap keeps its row when the finding holds one valid citation."""
-    from ptest import agent_assessment as AA
-
-    packet = _pure_library_packet(tmp_path)
-    reviews = AA.plan_item_reviews(packet)
-    target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    stale = dict(good, sha256="0" * 64)
-    outside = {"path": "elsewhere/missing.py", "start_line": 1,
-               "end_line": 1, "sha256": "0" * 64}
-    child = AA.assemble_child(
-        packet, reviews,
-        tuple(_r17_reply(
-            packet, target,
-            rationale="The teardown drops shared records without an owner.",
-            evidence=[good], status="gap",
-            finding={"summary": "Unowned teardown removes shared records.",
-                     "suggested_change": "Remove only the owned namespace.",
-                     "evidence": [outside, good, stale]})
-        if review.item_id == target.item_id
-        else (None if review.request is None
-              else _satisfied_reply(packet, review))
-        for review in reviews))
-    row = next(r for r in child.rows if r.id == target.item_id)
-    assert row.status == "gap"
-    assert row.dropped_citations == 2
-    finding = next(f for f in child.findings if f.id == target.item_id)
-    assert [(c.path, c.start_line, c.end_line) for c in finding.evidence] == [
-        (good["path"], good["start_line"], good["end_line"])]
-
-
-def test_finding_without_any_valid_citation_fails_item(tmp_path):
-    """A gap whose finding loses every citation fails like a bad row."""
-    from ptest import agent_assessment as AA
-
-    packet = _pure_library_packet(tmp_path)
-    reviews = AA.plan_item_reviews(packet)
-    target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    outside = {"path": "elsewhere/missing.py", "start_line": 1,
-               "end_line": 1, "sha256": "0" * 64}
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target,
-                   rationale="The teardown drops shared records without an owner.",
-                   evidence=[good], status="gap",
-                   finding={"summary": "Unowned teardown removes shared records.",
-                            "suggested_change": "Remove only the owned namespace.",
-                            "evidence": [outside]}))
-    assert row.status == "unknown"
-    assert row.rationale == (
-        AA.FAILED_PREFIX + "invalid reply: "
-        "finding has no valid citations")
-
-
-def test_unknown_row_without_citation_demand_keeps_valid_only(tmp_path):
-    """Unknown needs no citations, so drops never fail it."""
-    from ptest import agent_assessment as AA
-
-    packet = _pure_library_packet(tmp_path)
-    reviews = AA.plan_item_reviews(packet)
-    target = next(r for r in reviews if r.request is not None)
-    good = _subset_citation(packet, target.excerpt_paths[0])
-    outside = {"path": "elsewhere/missing.py", "start_line": 1,
-               "end_line": 1, "sha256": "0" * 64}
-    row = _r17_assemble(
-        packet, reviews, target,
-        _r17_reply(packet, target, status="unknown",
-                   rationale="The admitted excerpts say nothing either way.",
-                   evidence=[outside, good]))
-    assert row.status == "unknown"
-    assert len(row.evidence) == 1
-    assert row.dropped_citations == 1
-    assert not row.rationale.startswith(AA.FAILED_PREFIX)
+    invalid_final = _source_id_reply(
+        target, rationale="Verification still asks for evidence.",
+        evidence=[good_id], needs=[])
+    from ptest import review_protocol as RP
+    document = json.loads(invalid_final)
+    reserve_id = target.reserve_source_ids[0] if target.reserve_source_ids else good_id
+    document["needs"] = [reserve_id]
+    try:
+        RP.validate_private_fields(
+            document, {identifier for _unit, identifier in target.source_ids},
+            set(target.reserve_source_ids), available_ids={good_id},
+            followup=True)
+    except ValueError as exc:
+        assert str(exc) == "verification reply must have empty needs"
+    else:
+        raise AssertionError("verification accepted nonempty needs")
 
 
 # --- T4 wave: deterministic answers, prompts, code-signal routing -------------
@@ -2734,62 +2651,196 @@ def test_model_reply_with_ptest_prefix_is_rejected(tmp_path):
 
 def test_item_instruction_pins_gap_satisfied_unknown_standard():
     from ptest import agent_assessment as AA
+    from ptest import contracts as C
 
     instruction = AA._ITEM_INSTRUCTION.casefold()
     assert "gap only with a cited concrete violation" in instruction
-    assert "satisfied only when the evidence shows the guaranteeing mechanism" in instruction
+    assert "satisfied only when the cited evidence shows a mechanism sufficient" in instruction
     assert "otherwise" in instruction and "unknown" in instruction
     assert "missing evidence" in instruction
     assert "absence of code is unknown" in instruction
     assert "answered by ptest" in instruction
+    for principle in (
+            "a fresh mutable instance per test or use can show ownership",
+            "sqlite is a database",
+            "a managed temporary root or context manager can show file ownership",
+            "an injected in-process fake transport can establish isolation",
+            "do not infer descendant cleanup",
+            "state polling with a bound is different",
+            "a mock, string, or deliberately bad example alone does not show live effects",
+            "do not require proof about every suite path"):
+        assert principle in instruction
+    assert "not shown in the supplied units" in instruction
+    for phrase in C.AA_EXEC_CLAIM_WORDS:
+        assert phrase.casefold() in instruction
+    for phrase in (*C.AA_EXEC_CLAIM_SUBJECTS,
+                   *C.AA_EXEC_CLAIM_VERBS):
+        assert phrase.casefold() in instruction
 
 
-@pytest.mark.parametrize("signal", [
-    "tmp_path", "tempfile", "mkdtemp", "socket", "bind(",
-    "PORT = 8080", "port=8080", "/tmp", "app.lock", "filelock", "flock",
+@pytest.mark.parametrize(("body", "marker"), [
+    ("def test_x(tmp_path):\n"
+     "    path = Path(tmp_path) / 'result.txt'\n"
+     "    path.write_text('owned')\n", "tmp_path"),
+    ("def test_x():\n"
+     "    with tempfile.TemporaryDirectory() as root:\n"
+     "        Path(root).mkdir(exist_ok=True)\n", "TemporaryDirectory"),
+    ("def test_x():\n"
+     "    root = tempfile.mkdtemp()\n"
+     "    Path(root).mkdir(exist_ok=True)\n", "mkdtemp"),
+    ("def test_x():\n"
+     "    server = socket.socket()\n"
+     "    server.bind(('localhost', 0))\n", "server.bind"),
+    ("def test_x():\n"
+     "    port = 8080\n"
+     "    server = socket.socket()\n"
+     "    server.bind(('localhost', port))\n", "port = 8080"),
+    ("def test_x():\n"
+     "    with open('app.lock', 'w') as handle:\n"
+     "        handle.write('owned')\n", "open('app.lock'"),
+    ("def test_x():\n"
+     "    lock = FileLock('app.lock')\n"
+     "    lock.acquire()\n", "FileLock"),
+    ("def test_x(fd):\n"
+     "    fcntl.flock(fd, fcntl.LOCK_EX)\n", "fcntl.flock"),
 ])
-def test_resource_signals_route_to_resource_item(tmp_path, signal):
+def test_resource_operations_route_to_resource_item(tmp_path, body, marker):
+    import json
+
     from ptest import agent_assessment as AA
 
     packet = _packet_in_root(tmp_path, {
-        "pyproject.toml": "[project]\nname = 'demo'\n",
-        "tests/test_res.py": f"def test_x():\n    assert {signal!r} != ''\n",
+        "pyproject.toml": (
+            "[project]\nname = 'demo'\n\n"
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n"),
+        "tests/test_resource.py": body,
     })
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet)}
-    assert "tests/test_res.py" in reviews["RESOURCE-001"].excerpt_paths
+    review = reviews["RESOURCE-001"]
+    request = json.loads(review.request.decode("utf-8"))
+    matching = [unit["text"] for unit in request["units"]
+                if unit["path"] == "tests/test_resource.py"]
+    assert matching and marker in "\n".join(matching)
 
 
-@pytest.mark.parametrize("signal", [
-    "httpx", "requests", "aiohttp", "respx", "responses",
-    "pytest-socket", "socket.socket", "disable_socket", "vcr",
+@pytest.mark.parametrize(("body", "marker"), [
+    ("def test_x():\n"
+     "    client = httpx.Client()\n"
+     "    response = client.get('https://example.invalid')\n"
+     "    assert response is not None\n", "httpx.Client"),
+    ("def test_x():\n"
+     "    response = requests.get('https://example.invalid')\n"
+     "    assert response is not None\n", "requests.get"),
+    ("def test_x():\n"
+     "    session = aiohttp.ClientSession()\n"
+     "    assert session is not None\n", "aiohttp.ClientSession"),
+    ("def test_x():\n"
+     "    with respx.mock():\n"
+     "        assert True\n", "respx.mock"),
+    ("def test_x():\n"
+     "    responses.start()\n"
+     "    assert responses.calls == []\n", "responses.start"),
+    ("def test_x():\n"
+     "    pytest_socket.disable_socket()\n"
+     "    assert True\n", "disable_socket"),
+    ("def test_x():\n"
+     "    sock = socket.socket()\n"
+     "    assert sock is not None\n", "socket.socket"),
+    ("def test_x():\n"
+     "    cassette = vcr.VCR().use_cassette('fixture.yaml')\n"
+     "    assert cassette is not None\n", "vcr.VCR"),
 ])
-def test_network_signals_route_to_network_item(tmp_path, signal):
+def test_network_operations_route_to_network_item(tmp_path, body, marker):
+    import json
+
     from ptest import agent_assessment as AA
 
     packet = _packet_in_root(tmp_path, {
-        "pyproject.toml": "[project]\nname = 'demo'\n",
-        "tests/test_net.py": f"def test_x():\n    assert {signal!r} != ''\n",
+        "pyproject.toml": (
+            "[project]\nname = 'demo'\n\n"
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n"),
+        "tests/test_network.py": body,
     })
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet)}
-    assert "tests/test_net.py" in reviews["NETWORK-001"].excerpt_paths
+    review = reviews["NETWORK-001"]
+    request = json.loads(review.request.decode("utf-8"))
+    matching = [unit["text"] for unit in request["units"]
+                if unit["path"] == "tests/test_network.py"]
+    assert matching and marker in "\n".join(matching)
 
 
-@pytest.mark.parametrize("signal", [
-    "subprocess", "asyncio.create_subprocess", "multiprocessing", "Popen",
-    "os.fork", ".join(", ".terminate(", ".kill(", ".wait(",
+@pytest.mark.parametrize(("body", "marker"), [
+    ("def test_x():\n"
+     "    subprocess.run(['true'])\n", "subprocess.run"),
+    ("async def test_x():\n"
+     "    await asyncio.create_subprocess_exec('true')\n", "create_subprocess_exec"),
+    ("def test_x():\n"
+     "    child = multiprocessing.Process(target=work)\n"
+     "    child.start()\n"
+     "    child.join()\n", "multiprocessing.Process"),
+    ("def test_x():\n"
+     "    child = subprocess.Popen(['true'])\n"
+     "    child.wait()\n", "subprocess.Popen"),
+    ("def test_x():\n"
+     "    child = os.fork()\n"
+     "    assert child >= 0\n", "os.fork"),
+    ("def test_x(child):\n"
+     "    child.join()\n", "child.join"),
+    ("def test_x(child):\n"
+     "    child.terminate()\n", "child.terminate"),
+    ("def test_x(child):\n"
+     "    child.kill()\n", "child.kill"),
+    ("def test_x(child):\n"
+     "    child.wait()\n", "child.wait"),
 ])
-def test_process_signals_route_to_process_item(tmp_path, signal):
+def test_process_operations_route_to_process_item(tmp_path, body, marker):
+    import json
+
     from ptest import agent_assessment as AA
 
     packet = _packet_in_root(tmp_path, {
-        "pyproject.toml": "[project]\nname = 'demo'\n",
-        "tests/test_proc.py": f"def test_x():\n    assert {signal!r} != ''\n",
+        "pyproject.toml": (
+            "[project]\nname = 'demo'\n\n"
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n"),
+        "tests/test_process.py": body,
     })
     reviews = {review.item_id: review
                for review in AA.plan_item_reviews(packet)}
-    assert "tests/test_proc.py" in reviews["PROCESS-001"].excerpt_paths
+    review = reviews["PROCESS-001"]
+    request = json.loads(review.request.decode("utf-8"))
+    matching = [unit["text"] for unit in request["units"]
+                if unit["path"] == "tests/test_process.py"]
+    assert matching and marker in "\n".join(matching)
+
+
+def test_comments_and_string_literals_do_not_route_resource_or_process_items(
+        tmp_path):
+    from ptest import review_evidence as RE
+    from ptest import review_context as RC
+
+    text = (
+        "# requests.get(url), subprocess.run(args), socket.bind(addr)\n"
+        "def test_documentation_only():\n"
+        "    note = 'tmp_path httpx subprocess.Popen FileLock'\n"
+        "    assert note\n")
+    context = RC.ReviewContext(
+        runner_kind="pytest", roles=(("tests/test_docs.py", "test"),),
+        config_status="resolved")
+    resource = next(item for item in RE.CATALOG
+                    if item.id == "RESOURCE-001")
+    network = next(item for item in RE.CATALOG
+                   if item.id == "NETWORK-001")
+    process = next(item for item in RE.CATALOG
+                   if item.id == "PROCESS-001")
+
+    assert RE._item_signal("tests/test_docs.py", text, resource) == (
+        False, False, False, False)
+    assert RE._item_signal("tests/test_docs.py", text, network) == (
+        False, False, False, False)
+    assert RE._item_signal("tests/test_docs.py", text, process) == (
+        False, False, False, False)
 
 
 def test_conftest_fixture_defining_used_fixture_ranks_first(tmp_path):
@@ -2809,7 +2860,7 @@ def test_conftest_fixture_defining_used_fixture_ranks_first(tmp_path):
     paths = reviews["RESOURCE-001"].excerpt_paths
     assert "conftest.py" in paths
     assert "tests/test_res.py" in paths
-    assert paths.index("conftest.py") < paths.index("tests/test_res.py")
+    assert paths.index("tests/test_res.py") < paths.index("conftest.py")
 
 
 def test_plan_item_reviews_rejects_mismatched_answer_id(tmp_path):

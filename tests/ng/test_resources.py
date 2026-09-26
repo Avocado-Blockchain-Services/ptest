@@ -15,7 +15,8 @@ from fixtures.doctor.ownership import CacheClient, WorkerDatabases
 def test_agent_guide_contains_local_nonexecuting_repair_workflow():
     guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
     assert "Do not launch an agent" in guide
-    assert "one database per worker per run" in guide
+    assert "reuse expensive server/schema/template setup per run or worker" in guide
+    assert "fresh lightweight SQLite database or mutable instance per test/use" in guide
     assert "never use global flush" in guide
     assert guide.index("scoped `ptest` command") < guide.index("one `ptest --full` final gate")
     assert "static doctor currently has no validated per-test history timing\ninput" in guide
@@ -31,10 +32,10 @@ def test_agent_guide_contains_local_nonexecuting_repair_workflow():
             "files-ports, processes, time-network." in flat)
 
 
-def test_agent_guide_describes_doctor_v2_first():
+def test_agent_guide_describes_sampled_review_first():
     guide = files("ptest").joinpath("resources", "agent-guide.md").read_text(encoding="utf-8")
     first = " ".join(guide.split("\n\n")[1].split())
-    assert "one cheap-model call per checklist item" in first
+    assert "an initial call and one bounded independent verification" in first
     assert "--offline" in first and "static" in first
 
 
@@ -59,9 +60,13 @@ def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
     assert "opts out of the parallel tier" in guide
     assert "which ptest adds when the project enables xdist" not in guide
     assert "vitest run" in guide
-    assert ("one cheap-model call per checklist item that needs one"
-            in " ".join(guide.split()))
-    assert "one database per worker per run" in guide
+    flat = " ".join(guide.split())
+    assert "one initial call per model-assessed item" in flat
+    assert "one bounded verification for each valid reply" in flat
+    assert "fresh SQLite database or mutable instance per test/use" in flat
+    assert "Namespace shared external caches by their overlapping owners" in flat
+    assert "fresh per-test/per-use instance can own local cache state" in flat
+    assert "never globally flush caches" in flat
     assert "assessment authority only" in guide
     # ptest-repo-internal workflow (merge gate, graph refresh) must never
     # ship to other people's repositories.

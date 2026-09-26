@@ -832,6 +832,11 @@ def render_recommendations(
                    f"{child['packet_sha256']} | "
                    f"{_score_text(child['rows'])} |")
     out.append("")
+    out.append("Review conclusions cover only cited, reachable mechanisms in "
+               "the supplied source units. An omitted decisive caller, "
+               "consumer, or cleanup path remains unknown; this is not a "
+               "suite-wide execution result.")
+    out.append("")
     for child_index, child in enumerate(children):
         out.append(f"## Scope {_md_scope(child['scope'])}")
         out.append("")

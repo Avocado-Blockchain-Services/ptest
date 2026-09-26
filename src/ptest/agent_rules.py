@@ -631,6 +631,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "a9d5171f5023ffe732474be096d85e33cf5873f5b99469b61320ea3180f807a3",
     # 42bf3be: guide before the --changed default loop.
     "0e30bbbc2462dbe178c50ab60c219e2bcb071400f80812fcf89cca99294ad0b2",
+    # c183837 (also the c01a4f8 base): guide before sampled evidence review.
+    "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa",
 })
 
 
