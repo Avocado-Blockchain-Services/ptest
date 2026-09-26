@@ -1,0 +1,54 @@
+{
+  "S1": {
+    "commands": ["ptest"],
+    "action": "Run bare `ptest` from the repository root, which runs only the changed tests covering the edit to api/app/billing.py."
+  },
+  "S2": {
+    "commands": ["ptest api/tests/test_billing.py"],
+    "action": "Run `ptest` from the repository root scoped to the billing test file, prefixed with its owning child (api), without cd-ing into api."
+  },
+  "S3": {
+    "commands": ["ptest --full"],
+    "action": "Run `ptest --full` once before handoff, since only a full run completes the integrated change (a scoped/changed green is iteration only)."
+  },
+  "S4": {
+    "commands": ["none"],
+    "action": "Do nothing and wait for the end line; changed mode escalating to the full suite because there's no baseline yet is normal and the first run will record one if it passes on a clean tree."
+  },
+  "S5": {
+    "commands": ["none"],
+    "action": "Wait for the queued run to be admitted; do not start another ptest run while it's waiting for a free slot."
+  },
+  "S6": {
+    "commands": ["ptest"],
+    "action": "Rerun the same ptest command once, alone (not concurrently with other runs), since exit 70 / protocol-mismatch means ptest could not prove the result; if it repeats, report it rather than changing code."
+  },
+  "S7": {
+    "commands": ["ptest"],
+    "action": "Fix the underlying bug causing the 2 failing tests (never weaken, skip, or delete tests/assertions to get green), then rerun `ptest` to confirm."
+  },
+  "S8": {
+    "commands": ["ptest --full --again"],
+    "action": "Explain that ptest --full skips already-verified inputs on an unchanged tree, so a plain rerun would just join/no-op; use `ptest --full --again` to force a genuine rerun if reassurance is truly wanted."
+  },
+  "S9": {
+    "commands": ["none"],
+    "action": "Nothing to fix — tell the user the run passed but no baseline was recorded solely because the tree has uncommitted changes; never commit just to get a baseline recorded."
+  },
+  "S10": {
+    "commands": ["ptest --full --timeout <higher-value>"],
+    "action": "Rerun with a raised `--timeout` since exit 124 means the run exceeded its execution-timeout budget."
+  },
+  "S11": {
+    "commands": ["ptest web"],
+    "action": "Tell the user web tests must go through ptest, not npm test directly, and run `ptest web` to run all tests for the web child."
+  },
+  "S12": {
+    "commands": ["cd /home/ingmar/worktrees/ptest/cc-agent-eval/repo", "ptest api/tests/test_billing.py"],
+    "action": "Never cd into a child to run tests — return to the repository root and run `ptest api/tests/test_billing.py` with the api prefix instead."
+  },
+  "S13": {
+    "commands": ["ptest --full api"],
+    "action": "Run `ptest --full api` to run the complete integrated gate scoped to just the api project."
+  }
+}

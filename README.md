@@ -103,3 +103,27 @@ location (the plan names it as `state: ...`).
 `ptest uninstall --self` also removes the local installation (only
 installer-created entries; anything else inside the root is kept). See
 `ptest help uninstall` for details.
+
+## Checking agent guidance
+
+`scripts/agent_eval.py` checks whether LLMs can use ptest from its installed
+guidance: it builds a scratch monorepo in a temp dir from the current guide
+plus skill bytes (the same bytes `ptest init` installs), prompts each subject
+with 13 scenarios (`evals/agent-usage/scenarios.toml`), extracts the JSON
+answers, and scores them. It prints a compact subject × scenario table and
+exits 0 only if every subject passes every scenario. Stdlib only; `--dry-run`
+prints the prompt and repo path without calling any model:
+
+```sh
+.venv/bin/python scripts/agent_eval.py --dry-run
+```
+
+Live subjects are command templates with `{prompt}`, `{prompt_file}`, and
+`{repo}` placeholders (run without a shell); canned answer files can be
+scored with no model at all:
+
+```sh
+.venv/bin/python scripts/agent_eval.py \
+  --subject "haiku=claude -p --model haiku {prompt}" \
+  --answers-file "muse=tests/ng/fixtures/agent_eval/answers-muse.json"
+```
