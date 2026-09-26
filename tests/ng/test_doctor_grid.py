@@ -147,6 +147,11 @@ def test_grid_header_facts_and_single_table_at_width_100():
     assert "│ 5 ✓  2 ?  │" in text
     assert text.index("Test data factories") < text.index(
         "parallel safety")
+    flat = " ".join(text.split())
+    assert ("Review scope: cited reachable mechanisms only; omitted decisive "
+            "callers remain unknown." in flat)
+    assert ("Report: recommendations.md (created) — citations, fixes and "
+            "verification steps." in flat)
     for line in text.splitlines():
         assert len(line) <= 100, line
 
@@ -266,7 +271,8 @@ def test_grid_next_fix_with_gaps_and_full_without():
 def test_grid_report_trailer_closes_output():
     text = _grid()
 
-    assert text.rstrip().endswith(
+    flat = " ".join(text.split())
+    assert flat.endswith(
         "Report: recommendations.md (created) — citations, fixes and "
         "verification steps.")
     assert text.endswith("\n") and not text.endswith("\n\n")

@@ -169,7 +169,7 @@ def test_offline_doctor_with_local_state_is_read_only(
     assert not (root / "recommendations.md").exists()
 
 
-def test_online_doctor_creates_local_review_cache_after_consent(
+def test_online_doctor_does_not_create_legacy_model_cache_after_consent(
         account, tmp_path, monkeypatch, capsys, state_dir_factory,
         ptest_project):
     from test_doctor_init_integration import _prepare_review, _write_db_standalone_repo
@@ -180,7 +180,7 @@ def test_online_doctor_creates_local_review_cache_after_consent(
     _prepare_review(monkeypatch, root, tmp_path / "bin")
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
-    assert (state / "coordination" / "review-models").is_dir()
+    assert not (state / "coordination" / "review-models").exists()
     assert (root / "recommendations.md").is_file()
     assert not (account / ".config").exists()
     assert list((account / ".local").iterdir()) == []
