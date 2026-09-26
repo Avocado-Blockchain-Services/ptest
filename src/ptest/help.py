@@ -327,11 +327,18 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    validation.
 
 3. Loop changed, then gate full:
-     ptest --changed               # default loop after each edit
+     ptest                           # default loop after each edit (bare ptest runs the changed tests)
      ptest api/tests/test_example.py  # monorepo; standalone example in step 2
      ptest --full                  # once, after the change is integrated
+     ptest --full --again          # force already-verified inputs
    A scoped or changed green is iteration only; only --full completes the
-   change. The first --changed may run everything to record a baseline.
+   change. The first loop run may run everything to record a baseline.
+   --full skips already-verified inputs (--again forces them); a duplicate
+   full run joins the running full run instead of starting a second one.
+   Never rerun --full without a change. Never invoke pytest, vitest, or
+   npm test directly; never cd into a child to run tests. The installed
+   docs/ptest-agent.md lists every ptest output line and exit code with
+   the action for each.
    Concurrency (e.g. --workers N) requires verified isolation and adapter
    support. Standalone v1 passes runner arguments literally: everything
    from the first native token or -- passes through untouched. Exit status
