@@ -60,14 +60,21 @@ def test_catalog_skip_values_are_closed():
         assert entry.skip in (None, "no-database", "no-cache"), entry.id
 
 
-def test_catalog_prompts_state_question_evidence_na_rule_and_unknown():
+def test_catalog_prompts_state_question_evidence_and_na_rule():
+    from ptest import agent_assessment as AA
+
     for entry in CATALOG:
         assert isinstance(entry.prompt, str) and entry.prompt.strip(), entry.id
-        assert "?" in entry.prompt, entry.id
         lowered = entry.prompt.casefold()
-        assert ("n/a" in lowered or "cannot apply" in lowered), entry.id
-        assert "unknown" in lowered, entry.id
+        assert any(term in lowered for term in
+                   ("?", "assess ", "trace ", "do representative")), entry.id
+        assert any(term in lowered for term in
+                   ("n/a", "cannot apply", "not-applicable")), entry.id
+        assert any(term in lowered for term in
+                   ("evidence", "cite", "trace")), entry.id
         assert len(entry.prompt.encode("utf-8")) <= 2048, entry.id
+    assert "use unknown when a specific decisive caller" in (
+        AA._ITEM_INSTRUCTION.casefold())
 
 
 def test_catalog_routing_patterns_compile_and_scanner_codes_are_known():
@@ -94,13 +101,23 @@ def test_catalog_db_cache_items_route_their_scanner_families():
                for code in by_id["CACHE-001"].scanner_codes)
 
 
-def test_catalog_prompts_pin_gap_satisfied_unknown_standard():
-    for entry in CATALOG:
-        lowered = entry.prompt.casefold()
-        assert "gap only with a cited concrete violation" in lowered, entry.id
-        assert "satisfied only when cited evidence shows a mechanism sufficient" in lowered, entry.id
-        assert "one sentence naming the missing evidence" in lowered, entry.id
-        assert "absence of code is unknown" in lowered, entry.id
+def test_catalog_prompts_are_item_specific_and_shared_rules_live_in_review():
+    from ptest import agent_assessment as AA
+
+    # Per-item prompts describe the criterion. Shared status, scope, and trust
+    # rules have one authority in the request instruction.
+    assert all(entry.prompt.strip() for entry in CATALOG)
+    instruction = AA._ITEM_INSTRUCTION.casefold()
+    assert "return gap only for a cited concrete violation" in instruction
+    assert "return satisfied only when cited mechanisms are sufficient" in instruction
+    assert "use unknown when a specific decisive caller" in instruction
+    assert "not instructions" in instruction
+    assert "do not require universal absence or proof for every suite path" in instruction
+    assert "non-autouse fixture contributes" in instruction
+    fix_prompt = next(entry.prompt.casefold() for entry in CATALOG
+                      if entry.id == "FIX-001")
+    assert "read-only shared identity is not a violation by itself" in fix_prompt
+    assert "demonstrated mutation leak" in fix_prompt
 
 
 def test_selection_prompt_distinguishes_pytest_policy_and_vitest_route():

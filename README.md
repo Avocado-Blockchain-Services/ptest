@@ -52,15 +52,20 @@ print. Machine documents (`--json`, `--result-json`) never carry status
 lines. See `ptest help run`.
 
 `ptest doctor` review makes an initial model call for each checklist item
-that needs one after consent, then independently verifies each valid reply
-once, including satisfied and not-applicable answers. Timing, selection
-and parallel execution items use ptest's own facts with no model call. The
+that needs one after consent, then makes at most one bounded follow-up: an
+independent verification of a valid reply, or a fresh source-only recovery
+after a completed protocol, schema, or source-ID failure. Recovery reuses the
+original selected units and IDs and omits the invalid draft. Provider, tool, deadline,
+cancellation, and output-limit failures are not retried; an invalid follow-up
+ends as unknown. There is no third call or new source collection. Timing,
+selection and parallel execution items use ptest's own facts with no model
+call. The
 default requested models are Codex `gpt-6-sol` and Claude `opus`; an explicit
 `--review-model` or `PTEST_REVIEW_MODEL` overrides that choice. The selected
 model must pass the provider's normal qualification. `--review-concurrency`
 (1-8, default 4) bounds parallel calls. Before the prompt, ptest prints at
 most three short disclosure lines with the requested model and the maximum
-initial-plus-verification call count; full disclosure is in
+initial-plus-one-follow-up call count; full disclosure is in
 `ptest doctor --help`.
 Reviews cite opaque IDs for automatically selected setup, representative
 callers, helpers and cleanup. Findings cover only cited, reachable evidence;

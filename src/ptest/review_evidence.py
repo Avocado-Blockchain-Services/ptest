@@ -51,6 +51,18 @@ _TIME_SPECIFIC_RE = re.compile(
     r"|\b(?:Timer|Event|Barrier|Condition)\s*\(|"
     r"asyncio\s*\.\s*(?:Event|wait_for)\s*\(|call_later\s*\(|"
     r"\b(?:monotonic|freeze_time|freezegun)\b)")
+_PROCESS_BOUNDARY_RE = re.compile(
+    r"(?i)(?:\btimeout\s*=|\bexcept\b|finally\s*:|\.cancel\s*\(|"
+    r"\.terminate\s*\(|\.kill\s*\(|\.wait\s*\(|\.communicate\s*\(|"
+    r"process_group|start_new_session|setsid)")
+_DB_QUALIFIED_CALL_RE = re.compile(
+    r"(?i)(?:sqlite3?|aiosqlite|psycopg\w*|asyncpg|sqlalchemy)\.connect$|"
+    r"(?:connection|conn|session|engine|database|db)\.execute$|"
+    r"(?:create_engine|create_all|sessionmaker)$")
+_WRITE_METHODS = frozenset({
+    "mkdir", "write_text", "write_bytes", "touch", "open", "unlink",
+    "rmdir", "rename", "replace",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,11 +418,16 @@ def static_local_invocation_targets(path: str, text: str,
 def _item_signal(path: str, text: str, entry,
                  cache: dict | None = None) -> tuple[bool, bool, bool, bool]:
     """Return concrete-call, body-hit, cleanup and criterion-specific signals."""
-    key = (path, id(entry))
+    key = ("item-signal", path, id(entry), text)
     if cache is not None and key in cache:
         return cache[key]
-    source_key = ("source-analysis", path)
+    source_key = ("source-analysis", path, text)
     source = cache.get(source_key) if cache is not None else None
+    if source is None and cache is not None:
+        owner = cache.get(("python-owner-summary-text", path, text))
+        if owner is not None:
+            source = (owner["code"], owner["searchable"],
+                      owner["call_names"], None)
     if source is None:
         code = _executable_text(path, text)
         searchable = code
@@ -452,6 +469,281 @@ def _item_signal(path: str, text: str, entry,
     return result
 
 
+def _strong_item_operation(path: str, text: str, entry,
+                           signal_cache: dict | None = None) -> bool:
+    """Recognize concrete operations that disambiguate catalog word hits."""
+    if entry is None or entry.id not in {
+            "DB-001", "DB-002", "CACHE-001", "PROCESS-001",
+            "FIX-001", "RESOURCE-001"}:
+        return False
+    key = ("strong-item-operation", path, id(entry), text)
+    if signal_cache is not None and key in signal_cache:
+        return signal_cache[key]
+    result = False
+    if path.endswith(".py"):
+        owner = (signal_cache or {}).get(
+            ("python-owner-summary-text", path, text))
+        if owner is not None:
+            aliases = (signal_cache or {}).get(
+                ("python-import-aliases", path, owner["source_text"]))
+            if aliases is None:
+                aliases = _python_import_aliases(
+                    path, owner["source_text"], owner["tree"], signal_cache)
+            result = _strong_owner_operation(
+                path, entry, owner, aliases)
+            if signal_cache is not None:
+                signal_cache[key] = result
+            return result
+        analysis = (signal_cache or {}).get(("source-analysis", path, text))
+        if analysis is None:
+            code = _executable_text(path, text)
+            searchable = code + "\n" + _python_identifier_text(code)
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
+                tree = None
+            call_names = (() if tree is None else tuple(
+                _call_name(node.func) for node in ast.walk(tree)
+                if isinstance(node, ast.Call)))
+            analysis = (code, searchable, call_names, tree)
+            if signal_cache is not None:
+                signal_cache[("source-analysis", path, text)] = analysis
+        code, _searchable, call_names, tree = analysis
+        imported_aliases = (_python_import_aliases(
+            path, text, tree, signal_cache) if tree is not None else {})
+        if entry.id in {"DB-001", "DB-002"}:
+            for name in call_names:
+                normalized = _python_identifier_text(name).lower()
+                if (_DB_QUALIFIED_CALL_RE.search(name)
+                        or ("." not in name and re.search(
+                            r"\b(?:databases?|db)\b", normalized))):
+                    result = True
+                    break
+        elif entry.id == "CACHE-001":
+            result = any(
+                "." not in name and re.search(
+                    r"\bcache\b", _python_identifier_text(name).lower())
+                for name in call_names)
+        elif entry.id == "PROCESS-001":
+            launches = False
+            for name in call_names:
+                prefix, dot, suffix = name.partition(".")
+                resolved = (imported_aliases.get(name, "") if not dot else
+                            imported_aliases.get(prefix, "") + "." + suffix
+                            if prefix in imported_aliases else name)
+                if re.fullmatch(
+                        r"(?:subprocess\.(?:run|Popen|call|check_call|"
+                        r"check_output)|os\.(?:system|exec\w+|spawn\w*)|"
+                        r"multiprocessing\.(?:Process|Pool)|"
+                        r"asyncio\.create_subprocess_(?:exec|shell))", resolved):
+                    launches = True
+                    break
+            result = launches and _PROCESS_BOUNDARY_RE.search(code) is not None
+        elif entry.id == "FIX-001":
+            for name in call_names:
+                prefix, dot, suffix = name.rpartition(".")
+                base = prefix if dot and suffix in {
+                    "create", "build", "create_batch", "build_batch"} else name
+                if "factory" in _python_identifier_text(base).lower():
+                    result = True
+                    break
+        elif entry.id == "RESOURCE-001" and tree is not None:
+            resource_key = ("python-parent-relative-write", path, text)
+            parent_write = (signal_cache.get(resource_key)
+                            if signal_cache is not None else None)
+            if parent_write is None:
+                parent_write = _resource_parent_write(tree)
+                if signal_cache is not None:
+                    signal_cache[resource_key] = parent_write
+            result = parent_write
+    if signal_cache is not None:
+        signal_cache[key] = result
+    return result
+
+
+def _python_import_aliases(source, text, tree, signal_cache):
+    key = ("python-import-aliases", source, text)
+    if signal_cache is not None and key in signal_cache:
+        return signal_cache[key]
+    aliases = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+    if signal_cache is not None:
+        signal_cache[key] = aliases
+    return aliases
+
+
+def _resource_parent_write(node):
+    parent_relative: set[str] = set()
+    for value in ast.walk(node):
+        if not isinstance(value, (ast.Assign, ast.AnnAssign)):
+            continue
+        expression = value.value
+        if not isinstance(expression, ast.BinOp) or not isinstance(
+                expression.op, ast.Div):
+            continue
+        has_parent = any(
+            isinstance(part, ast.Attribute) and part.attr == "parent"
+            for part in ast.walk(expression.left))
+        literal_sibling = isinstance(expression.right, ast.Constant) \
+            and isinstance(expression.right.value, str)
+        if not (has_parent and literal_sibling):
+            continue
+        targets = value.targets if isinstance(value, ast.Assign) \
+            else (value.target,)
+        parent_relative.update(target.id for target in targets
+                               if isinstance(target, ast.Name))
+    if not parent_relative:
+        return False
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id in parent_relative
+        and call.func.attr in _WRITE_METHODS
+        for call in ast.walk(node))
+
+
+def _strong_owner_operation(source, entry, owner, imported_aliases):
+    """Evaluate one cached AST owner summary without reparsing its body."""
+    if entry is None:
+        return False
+    if entry.id in {"DB-001", "DB-002"}:
+        for name, direct_name in owner["calls"]:
+            normalized = _python_identifier_text(name).lower()
+            if (_DB_QUALIFIED_CALL_RE.search(name)
+                    or (direct_name is not None and re.search(
+                        r"\b(?:databases?|db)\b", normalized))):
+                return True
+    elif entry.id == "CACHE-001":
+        return any(direct_name is not None and re.search(
+            r"\bcache\b", _python_identifier_text(direct_name).lower())
+                   for _name, direct_name in owner["calls"])
+    elif entry.id == "PROCESS-001":
+        for name, direct_name in owner["calls"]:
+            resolved = name
+            if direct_name is not None:
+                resolved = imported_aliases.get(direct_name, "")
+            else:
+                prefix, dot, suffix = name.partition(".")
+                if dot and prefix in imported_aliases:
+                    resolved = imported_aliases[prefix] + "." + suffix
+            if re.fullmatch(
+                    r"(?:subprocess\.(?:run|Popen|call|check_call|"
+                    r"check_output)|os\.(?:system|exec\w+|spawn\w*)|"
+                    r"multiprocessing\.(?:Process|Pool)|"
+                    r"asyncio\.create_subprocess_(?:exec|shell))", resolved):
+                return _PROCESS_BOUNDARY_RE.search(owner["code"]) is not None
+    elif entry.id == "FIX-001":
+        for name, direct_name in owner["calls"]:
+            if direct_name is not None and "factory" in (
+                    _python_identifier_text(direct_name).lower()):
+                return True
+            prefix, dot, _suffix = name.partition(".")
+            if dot and "factory" in _python_identifier_text(
+                    prefix).lower():
+                return True
+    elif entry.id == "RESOURCE-001":
+        return owner["parent_write"]
+    return False
+
+
+def _python_owner_summary(source, node, parent, tree, lines, signal_cache):
+    start = min([node.lineno, *(item.lineno
+                                for item in node.decorator_list)])
+    end = node.end_lineno or node.lineno
+    source_text = "".join(lines)
+    key = ("python-owner-summary", source, source_text, start, end)
+    cached = signal_cache.get(key) if signal_cache is not None else None
+    if cached is not None:
+        return cached
+    body = _line_text(lines, start, end)
+    code = _executable_text(source, body)
+    searchable = code + "\n" + _python_identifier_text(code)
+    call_nodes = tuple(value for value in ast.walk(node)
+                       if isinstance(value, ast.Call))
+    calls = []
+    local_calls = set()
+    method_calls = set()
+    for call in call_nodes:
+        name = _call_name(call.func)
+        direct_name = call.func.id if isinstance(call.func, ast.Name) else None
+        calls.append((name, direct_name))
+        if direct_name is not None:
+            local_calls.add(direct_name)
+        elif (isinstance(parent, ast.ClassDef)
+              and isinstance(call.func, ast.Attribute)
+              and isinstance(call.func.value, ast.Name)
+              and call.func.value.id in {"self", "cls"}):
+            method_calls.add(call.func.attr)
+    summary = {
+        "start": start,
+        "end": end,
+        "body": body,
+        "code": code,
+        "searchable": searchable,
+        "call_names": tuple(name for name, _direct in calls),
+        "calls": tuple(calls),
+        "local_calls": frozenset(local_calls),
+        "method_calls": frozenset(method_calls),
+        "assertion": bool(re.search(r"(?m)^\s*assert\b", body)),
+        "parent_write": _resource_parent_write(node),
+        "tree": tree,
+        "source_text": source_text,
+    }
+    if signal_cache is not None:
+        signal_cache[key] = summary
+        signal_cache[("python-owner-summary-text", source, body)] = summary
+    return summary
+
+
+def _python_owner_index(source, text, tree, signal_cache):
+    """Cache item-independent top-level owner and parent indexes per source."""
+    key = ("python-owner-index", source, text)
+    cached = signal_cache.get(key) if signal_cache is not None else None
+    if cached is not None:
+        return cached
+    parents = {}
+    module_owners: dict[str, list[ast.AST]] = {}
+    class_owners: dict[ast.ClassDef, dict[str, list[ast.AST]]] = {}
+    tests = []
+    owners = []
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    for owner in tree.body:
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            module_owners.setdefault(owner.name, []).append(owner)
+            owners.append((owner, tree))
+        elif isinstance(owner, ast.ClassDef):
+            members: dict[str, list[ast.AST]] = {}
+            class_owners[owner] = members
+            for member in owner.body:
+                if isinstance(member, (ast.FunctionDef,
+                                       ast.AsyncFunctionDef)):
+                    members.setdefault(member.name, []).append(member)
+                    owners.append((member, owner))
+    for node, parent in owners:
+        if node.name.startswith("test_"):
+            tests.append((node, parent))
+    index = {
+        "parents": parents,
+        "module_owners": module_owners,
+        "class_owners": class_owners,
+        "owners": tuple(owners),
+        "tests": tuple(tests),
+    }
+    if signal_cache is not None:
+        signal_cache[key] = index
+    return index
+
+
 _ROOT_MANIFEST_NAMES = frozenset({
     "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
     "requirements.txt", "requirements-dev.txt", "requirements-test.txt",
@@ -480,10 +772,20 @@ def _item_rank(path: str, text: str, entry, context,
     context_score = _relation_score(path, context)
     role = _source_role(path, context)
     caller = role == "test" and _TEST_PATH_RE.search(path) is not None
+    injected_network = (entry is not None
+                        and entry.id == "NETWORK-001"
+                        and role == "test"
+                        and path.endswith((".ts", ".tsx", ".js", ".jsx",
+                                           ".mjs"))
+                        and _js_network_injected_request_owner(
+                            path, text, entry, role, signal_cache))
     direct = call_hit or body_hit or criterion_control or path_specific
+    strong = _strong_item_operation(path, text, entry, signal_cache)
     # Generic cleanup can only order already relevant candidates. A finally
     # block in an unrelated helper never makes it an item candidate.
     return (not _is_config_path(path, context),
+            not strong,
+            not injected_network,
             not criterion_control,
             not call_hit, not body_hit, not path_specific, not caller,
             -context_score if direct else 0,
@@ -496,16 +798,24 @@ def _has_item_anchor(path: str, text: str, entry, context,
     call_hit, body_hit, _control, criterion_control = _item_signal(
         path, text, entry, signal_cache)
     path_specific, _path_generic = _matches_path(path, entry)
-    return call_hit or body_hit or criterion_control or path_specific
+    return (call_hit or body_hit or criterion_control or path_specific
+            or (entry is not None and entry.id == "NETWORK-001"
+                and path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs"))
+                and _js_network_injected_request_owner(
+                    path, text, entry, _source_role(path, context),
+                    signal_cache))
+            or _strong_item_operation(path, text, entry, signal_cache))
 
 
-def _has_related_fixture_anchor(path: str, texts: dict, entry, context) -> bool:
+def _has_related_fixture_anchor(path: str, texts: dict, entry, context,
+                                signal_cache=None) -> bool:
     """An active test is relevant when it uses this item's fixture evidence."""
     for source, target, kind in context.relations:
         if source != path or kind != "fixture-use":
             continue
         text = texts.get(target)
-        if text is not None and _has_item_anchor(target, text, entry, context):
+        if text is not None and _has_item_anchor(
+                target, text, entry, context, signal_cache):
             return True
     return False
 
@@ -555,20 +865,22 @@ def _active_paths(paths, context) -> list[str]:
     return [path for path in paths if path not in excluded]
 
 
-def _unit_priority(unit: SourceUnit, item_id: str) -> tuple:
+def _unit_priority(unit: SourceUnit, item_id: str,
+                   signal_cache: dict | None = None) -> tuple:
     """Put complete mechanisms and callers ahead of import-only units."""
     text = unit.text
     if unit.role == "config":
         return (0, unit.start_line)
     entry = next((item for item in CATALOG if item.id == item_id), None)
     call_hit, body_hit, control, criterion_control = (
-        _item_signal(unit.path, text, entry)
+        _item_signal(unit.path, text, entry, signal_cache)
         if entry else (False, False, False, False))
+    strong = _strong_item_operation(unit.path, text, entry, signal_cache)
     assertion = bool(re.search(r"(?m)^\s*assert\b", text))
     function = bool(re.search(
         r"(?m)^\s*(?:async\s+)?def\s+|^\s*class\s+", text))
     imported = bool(re.match(r"\s*(?:from\s+\S+\s+import|import\s+)", text))
-    if criterion_control:
+    if strong or criterion_control:
         return (0, unit.start_line)
     if call_hit:
         return (1, unit.start_line)
@@ -651,91 +963,1130 @@ def rank_item_candidates(context, candidates, texts, item_id: str, *,
         path, texts[path], entry, context, signal_cache)))
 
 
-def _python_used_imports(source, text, entry, cache, RC, signal_cache):
+def _python_test_owners(source, text, entry, tree, signal_cache=None):
+    """Rank active test owners once for both units and import dependencies."""
+    cache_key = ("python-test-owners", source, id(entry), text)
+    if signal_cache is not None and cache_key in signal_cache:
+        return signal_cache[cache_key]
+    source_key = ("source-analysis", source, text)
+    if signal_cache is not None and source_key not in signal_cache:
+        code = _executable_text(source, text)
+        searchable = code + "\n" + _python_identifier_text(code)
+        calls = tuple(_call_name(node.func) for node in ast.walk(tree)
+                      if isinstance(node, ast.Call))
+        signal_cache[source_key] = (code, searchable, calls, tree)
+    lines = text.splitlines(keepends=True)
+    index = _python_owner_index(source, text, tree, signal_cache)
+    parents = index["parents"]
+    module_owners = index["module_owners"]
+    class_owners = index["class_owners"]
+    imported_aliases = _python_import_aliases(
+        source, text, tree, signal_cache)
+    patterns = _resource_patterns(entry)
+    values = []
+    for node, parent in index["tests"]:
+        if parent is not tree and not isinstance(parent, ast.ClassDef):
+            continue
+        summary = _python_owner_summary(
+            source, node, parent, tree, lines, signal_cache)
+        body = summary["body"]
+        executable = summary["code"]
+        searchable = summary["searchable"]
+        call_names = summary["call_names"]
+        body_hit = any(pattern.search(searchable) for pattern in patterns)
+        call_hit = any(pattern.search(name) or pattern.search(name + "(")
+                       for name in call_names for pattern in patterns)
+        criterion = (entry.id == "TIME-001"
+                     and (_TIME_SPECIFIC_RE.search(executable) is not None
+                          or any(_TIME_SPECIFIC_RE.search(name + "(")
+                                 for name in call_names)))
+        process_boundary = (entry.id == "PROCESS-001"
+                            and _PROCESS_BOUNDARY_RE.search(executable)
+                            is not None)
+        strong_operation = _strong_owner_operation(
+            source, entry, summary, imported_aliases)
+        local_calls = summary["local_calls"]
+        owner_class = parents.get(node)
+        helper_names = set(local_calls)
+        helper_names.update(summary["method_calls"])
+        for name in helper_names:
+            owners = (class_owners.get(owner_class, {}).get(name, ())
+                      if isinstance(owner_class, ast.ClassDef)
+                      else module_owners.get(name, ()))
+            if len(owners) != 1 or owners[0] is node:
+                continue
+            owner = owners[0]
+            owner_summary = _python_owner_summary(
+                source, owner, owner_class if isinstance(owner_class, ast.ClassDef)
+                else tree, tree, lines, signal_cache)
+            owner_code = owner_summary["code"]
+            owner_searchable = owner_summary["searchable"]
+            owner_calls = owner_summary["call_names"]
+            body_hit = body_hit or any(
+                pattern.search(owner_searchable) for pattern in patterns)
+            call_hit = call_hit or any(
+                pattern.search(call_name)
+                or pattern.search(call_name + "(")
+                for call_name in owner_calls for pattern in patterns)
+            criterion = criterion or (entry.id == "TIME-001"
+                and (_TIME_SPECIFIC_RE.search(owner_code) is not None
+                     or any(_TIME_SPECIFIC_RE.search(call_name + "(")
+                            for call_name in owner_calls)))
+            process_boundary = process_boundary or (
+                entry.id == "PROCESS-001"
+                and _PROCESS_BOUNDARY_RE.search(owner_code) is not None)
+            strong_operation = strong_operation or _strong_owner_operation(
+                source, entry, owner_summary, imported_aliases)
+        assertion = bool(re.search(r"(?m)^\s*assert\b", body))
+        values.append((not strong_operation,
+                       not criterion,
+                       not (entry.id == "PROCESS-001" and call_hit
+                            and process_boundary),
+                       not call_hit, not body_hit,
+                       not assertion, summary["start"], node,
+                       bool(call_hit or body_hit or criterion
+                            or (entry.id == "PROCESS-001"
+                                and process_boundary)
+                            or strong_operation)))
+    values.sort(key=lambda value: value[:6])
+    result = tuple(value[7] for value in values if value[8])
+    if signal_cache is not None:
+        signal_cache[cache_key] = result
+    return result
+
+
+def _python_used_imports(source, text, entry, cache, RC, signal_cache, *,
+                         owner_names=()):
     """Return imports used by one item-relevant caller body only.
 
     A module-level import can be used by an unrelated test or helper. Treating
     every load in the module as a dependency makes one caller inherit the
     entire file's import closure and routinely exceeds the packet budget.
     """
-    key = ("python-used-imports", source, entry.id)
+    owner_key = tuple(sorted(set(owner_names)))
+    key = ("python-used-imports", source, entry.id, owner_key)
     if cache is not None and key in cache:
         return cache[key]
     try:
-        analysis = (signal_cache or {}).get(("source-analysis", source))
+        analysis = (signal_cache or {}).get(
+            ("source-analysis", source, text))
         tree = analysis[3] if analysis is not None else ast.parse(text)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         tree = None
     if tree is None:
         result = ()
     else:
-        callers = [node for node in tree.body
-                   if isinstance(node, (ast.FunctionDef,
-                                        ast.AsyncFunctionDef))
-                   and node.name.startswith("test_")]
-        lines = text.splitlines(keepends=True)
-        ranked_callers = []
-        for node in callers:
-            start = min([node.lineno, *(item.lineno
-                                        for item in node.decorator_list)])
-            end = node.end_lineno or node.lineno
-            body = _line_text(lines, start, end)
-            code = _executable_text(source, body)
-            searchable = code + "\n" + _python_identifier_text(code)
-            patterns = _resource_patterns(entry)
-            body_hit = any(pattern.search(searchable)
-                           for pattern in patterns)
-            call_names = [_call_name(value.func) for value in ast.walk(node)
-                          if isinstance(value, ast.Call)]
-            call_hit = any(pattern.search(name) or pattern.search(name + "(")
-                           for name in call_names for pattern in patterns)
-            criterion = (entry.id == "TIME-001"
-                         and (_TIME_SPECIFIC_RE.search(code) is not None
-                              or any(_TIME_SPECIFIC_RE.search(name + "(")
-                                     for name in call_names)))
-            assertion = bool(re.search(r"(?m)^\s*assert\b", body))
-            ranked_callers.append((not criterion, not call_hit, not body_hit,
-                                   not assertion, start, node,
-                                   bool(call_hit or body_hit or criterion)))
-        ranked_callers.sort(key=lambda item: item[:5])
-        selected = next((item[5] for item in ranked_callers if item[6]), None)
-        if selected is None:
+        if owner_key:
+            selected = tuple(
+                node for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in owner_key)
+        else:
+            callers = _python_test_owners(source, text, entry, tree,
+                                          signal_cache)
+            selected = callers[:1]
+        if not selected:
             result = ()
         else:
-            loaded = {node.id for node in ast.walk(selected)
-                      if isinstance(node, ast.Name)
-                      and isinstance(node.ctx, ast.Load)}
-            module_specs, _fixture_params, _truncated = RC._python_links(text)
-            supported = set(module_specs)
+            owner_facts = []
+            for owner in selected:
+                loaded: set[str] = set()
+                bound: set[str] = set()
+                assigned: set[str] = set()
+                import_bindings: dict[str, int] = {}
+                direct_imports: list[ast.AST] = []
+
+                class ScopeNames(ast.NodeVisitor):
+                    """Collect bindings in this function, excluding nested scopes."""
+                    def visit_Name(self, node):
+                        if isinstance(node.ctx, ast.Load):
+                            loaded.add(node.id)
+                        elif isinstance(node.ctx, (ast.Store, ast.Del)):
+                            bound.add(node.id)
+                            assigned.add(node.id)
+
+                    def visit_arg(self, node):
+                        bound.add(node.arg)
+                        assigned.add(node.arg)
+
+                    def visit_Import(self, node):
+                        for alias in node.names:
+                            binding = alias.asname or alias.name.split(".", 1)[0]
+                            bound.add(binding)
+                            import_bindings[binding] = (
+                                import_bindings.get(binding, 0) + 1)
+
+                    def visit_ImportFrom(self, node):
+                        for alias in node.names:
+                            if alias.name != "*":
+                                binding = alias.asname or alias.name
+                                bound.add(binding)
+                                import_bindings[binding] = (
+                                    import_bindings.get(binding, 0) + 1)
+
+                    def visit_FunctionDef(self, node):
+                        if node is not owner:
+                            bound.add(node.name)
+                            assigned.add(node.name)
+                            return
+                        self.generic_visit(node)
+
+                    visit_AsyncFunctionDef = visit_FunctionDef
+
+                    def visit_Lambda(self, node):
+                        return
+
+                    def visit_ClassDef(self, node):
+                        bound.add(node.name)
+                        assigned.add(node.name)
+
+                ScopeNames().visit(owner)
+                # A direct local import is a valid source edge. Imports nested
+                # under control flow remain unresolved, though their binding
+                # still shadows a module-level import in this function.
+                direct_imports.extend(
+                    node for node in owner.body
+                    if isinstance(node, (ast.Import, ast.ImportFrom)))
+                # Function-local imports shadow an outer binding, while a
+                # separate selected owner may still use the module binding.
+                owner_facts.append((loaded, bound, assigned, import_bindings,
+                                    direct_imports))
             result_values = []
-            import_nodes = [node for node in tree.body
-                            if isinstance(node, (ast.Import,
-                                                 ast.ImportFrom))]
-            for node in import_nodes[:RC._CONTEXT_MAX_LINKS_PER_FILE]:
+            max_links = RC._CONTEXT_MAX_LINKS_PER_FILE
+
+            def append_import(row):
+                if row not in result_values and len(result_values) < max_links:
+                    result_values.append(row)
+
+            module_import_counts: dict[str, int] = {}
+            for node in tree.body:
+                if isinstance(node, ast.ImportFrom):
+                    bindings = (alias.asname or alias.name
+                                for alias in node.names
+                                if alias.name != "*")
+                elif isinstance(node, ast.Import):
+                    bindings = (alias.asname or alias.name.split(".", 1)[0]
+                                for alias in node.names)
+                else:
+                    continue
+                for binding in bindings:
+                    module_import_counts[binding] = (
+                        module_import_counts.get(binding, 0) + 1)
+
+            for node in tree.body:
+                if len(result_values) >= max_links:
+                    break
+                if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                    continue
                 if isinstance(node, ast.ImportFrom):
                     module, level = node.module or "", node.level
-                    used = tuple(dict.fromkeys(
-                        alias.name for alias in node.names
-                        if alias.name != "*"
-                        and (alias.asname or alias.name) in loaded))
-                    if (module, level) in supported and used:
-                        result_values.append((module, level, used))
+                    used_rows = []
+                    for alias in node.names:
+                        binding = alias.asname or alias.name
+                        if alias.name == "*":
+                            continue
+                        eligible = (module_import_counts.get(binding) == 1
+                                    and any(
+                                        binding in owner_loaded
+                                        and binding not in owner_bound
+                                        for (owner_loaded, owner_bound,
+                                             _assigned, _import_bindings,
+                                             _local_imports) in owner_facts))
+                        if not eligible:
+                            continue
+                        used_rows.append(alias.name)
+                    used = tuple(dict.fromkeys(used_rows))
+                    if used:
+                        append_import((module, level, used))
                 else:
                     for alias in node.names:
                         module = alias.name
                         binding = alias.asname or module.split(".", 1)[0]
-                        if (module, 0) in supported and binding in loaded:
-                            result_values.append((module, 0, ()))
+                        if (module_import_counts.get(binding) == 1
+                                and any(binding in owner_loaded
+                               and binding not in owner_bound
+                               for (owner_loaded, owner_bound, _assigned,
+                                    _import_bindings, _local_imports)
+                               in owner_facts)):
+                            append_import((module, 0, ()))
+            # A literal import directly in the selected function is an exact
+            # local dependency too. It can replace a shadowed module binding.
+            for (loaded, _bound, assigned, import_bindings, direct_imports) \
+                    in owner_facts:
+                if len(result_values) >= max_links:
+                    break
+                for node in direct_imports:
+                    if len(result_values) >= max_links:
+                        break
+                    if isinstance(node, ast.ImportFrom):
+                        module, level = node.module or "", node.level
+                        used = tuple(dict.fromkeys(
+                            alias.name for alias in node.names
+                            if alias.name != "*"
+                            and (alias.asname or alias.name) in loaded
+                            and import_bindings.get(
+                                alias.asname or alias.name) == 1
+                            and (alias.asname or alias.name) not in assigned))
+                        if used:
+                            append_import((module, level, used))
+                    else:
+                        for alias in node.names:
+                            if len(result_values) >= max_links:
+                                break
+                            module = alias.name
+                            binding = alias.asname or module.split(".", 1)[0]
+                            if (binding in loaded and binding not in assigned
+                                    and import_bindings.get(binding) == 1):
+                                append_import((module, 0, ()))
             result = tuple(dict.fromkeys(result_values))
     if cache is not None:
         cache[key] = result
     return result
 
 
+def _python_requested_fixture_members(source, text, entry, signal_cache):
+    """Return fixture arguments and their directly called members."""
+    analysis = (signal_cache or {}).get(("source-analysis", source, text))
+    try:
+        tree = analysis[3] if analysis is not None else ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}
+    callers = _python_test_owners(source, text, entry, tree, signal_cache)
+    if not callers:
+        return {}
+    owner = callers[0]
+    arguments = (*owner.args.posonlyargs, *owner.args.args,
+                 *owner.args.kwonlyargs)
+    fixture_names = {argument.arg for argument in arguments}
+    members = {name: set() for name in fixture_names}
+    for node in ast.walk(owner):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in fixture_names):
+            members[node.func.value.id].add(node.func.attr)
+    return members
+
+
+def _python_export_targets(init_path, symbol, texts, candidates, prefix,
+                           RC, support_cache):
+    """Resolve one named package export, scanning for matches not prefixes."""
+    key = ("python-export-targets", init_path, symbol)
+    if support_cache is not None and key in support_cache:
+        return support_cache[key]
+    init_text = texts.get(init_path)
+    if not isinstance(init_text, str):
+        return ()
+    tree_key = ("python-export-tree", init_path)
+    tree = (support_cache.get(tree_key)
+            if support_cache is not None else None)
+    if tree is None:
+        try:
+            tree = ast.parse(init_text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            tree = None
+        if support_cache is not None and tree is not None:
+            support_cache[tree_key] = tree
+    if tree is None:
+        return ()
+    child_init = (init_path[len(prefix):]
+                  if prefix and init_path.startswith(prefix) else init_path)
+    found = []
+    matched = 0
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                exported = alias.asname or alias.name
+                if exported != symbol:
+                    continue
+                if statement.module:
+                    specs = RC._python_spec_targets(
+                        statement.module, statement.level, child_init)
+                else:
+                    specs = RC._python_spec_targets(
+                        alias.name, statement.level, child_init)
+                imported = alias.name
+                for spec in specs:
+                    target = prefix + spec
+                    if target in candidates:
+                        found.append((target, imported))
+                        matched += 1
+                        if matched >= RC._CONTEXT_MAX_LINKS_PER_FILE:
+                            break
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                exported = alias.asname or alias.name.split(".", 1)[0]
+                if exported != symbol:
+                    continue
+                for spec in RC._python_spec_targets(
+                        alias.name, 0, child_init):
+                    target = prefix + spec
+                    if target in candidates:
+                        found.append((target, ""))
+                        matched += 1
+                        if matched >= RC._CONTEXT_MAX_LINKS_PER_FILE:
+                            break
+        if matched >= RC._CONTEXT_MAX_LINKS_PER_FILE:
+            break
+    package_dir = posixpath.dirname(init_path)
+    sibling = symbol.replace(".", "/")
+    for target in (f"{package_dir}/{sibling}.py",
+                   f"{package_dir}/{sibling}/__init__.py"):
+        if target in candidates:
+            found.append((target, symbol))
+    result = tuple(dict.fromkeys(found))[:RC._CONTEXT_MAX_LINKS_PER_FILE]
+    if support_cache is not None:
+        support_cache[key] = result
+    return result
+
+
+def _python_selected_base_targets(source, text, symbols, texts, candidates,
+                                  prefix, RC, support_cache):
+    """Follow only imported bases of the selected top-level class owners."""
+    symbol_key = tuple(sorted(symbols))
+    key = ("python-selected-base-targets", source, symbol_key)
+    if support_cache is not None and key in support_cache:
+        return support_cache[key]
+    if not symbol_key:
+        return ()
+    tree_key = ("python-source-tree", source)
+    tree = (support_cache.get(tree_key)
+            if support_cache is not None else None)
+    if tree is None:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            tree = None
+        if support_cache is not None and tree is not None:
+            support_cache[tree_key] = tree
+    if tree is None:
+        return ()
+    imports = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                imports[alias.asname or alias.name] = (
+                    statement.module or "", statement.level, alias.name)
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                imports[alias.asname or alias.name.split(".", 1)[0]] = (
+                    alias.name, 0, "")
+    child_source = (source[len(prefix):]
+                    if prefix and source.startswith(prefix) else source)
+    found = []
+    for owner in tree.body:
+        if not isinstance(owner, ast.ClassDef) or owner.name not in symbol_key:
+            continue
+        for base in owner.bases:
+            root = base
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if not isinstance(root, ast.Name):
+                continue
+            imported = imports.get(root.id)
+            if imported is None:
+                continue
+            module, level, original = imported
+            for spec in RC._python_spec_targets(module, level, child_source):
+                target = prefix + spec
+                if target not in candidates:
+                    continue
+                if target.endswith("/__init__.py") and original:
+                    found.extend(_python_export_targets(
+                        target, original, texts,
+                        candidates=candidates, prefix=prefix, RC=RC,
+                        support_cache=support_cache))
+                else:
+                    found.append((target, original))
+    result = tuple(dict.fromkeys(found))[:RC._CONTEXT_MAX_LINKS_PER_FILE]
+    if support_cache is not None:
+        support_cache[key] = result
+    return result
+
+
+def _js_object_properties(tokens, start, end):
+    """Read direct literal object properties, preserving ambiguous repeats."""
+    values = {}
+    index = start + 1
+    while index < end:
+        if tokens[index] == ("punct", ","):
+            index += 1
+            continue
+        key = tokens[index]
+        if (key[0] not in {"ident", "string"} or index + 1 >= end
+                or tokens[index + 1] != ("punct", ":")):
+            return None
+        value_start = index + 2
+        cursor = value_start
+        stack = []
+        pairs = {"{": "}", "[": "]", "(": ")"}
+        while cursor < end:
+            token = tokens[cursor]
+            if token[0] == "punct":
+                if token[1] in pairs:
+                    stack.append(pairs[token[1]])
+                elif stack and token[1] == stack[-1]:
+                    stack.pop()
+                elif token[1] == "," and not stack:
+                    break
+            cursor += 1
+        if stack or value_start == cursor:
+            return None
+        values.setdefault(key[1], []).append((value_start, cursor))
+        index = cursor
+    return values
+
+
+def _js_literal_alias_value(tokens, start, end):
+    value = tokens[start:end]
+    if len(value) == 1 and value[0][0] == "string":
+        return value[0][1]
+    expected = [
+        ("ident", "fileURLToPath"), ("punct", "("),
+        ("ident", "new"), ("ident", "URL"), ("punct", "("),
+    ]
+    if (len(value) == 14 and value[:5] == expected
+            and value[5][0] == "string"
+            and value[6:13] == [
+                ("punct", ","), ("ident", "import"), ("punct", "."),
+                ("ident", "meta"), ("punct", "."), ("ident", "url"),
+                ("punct", ")")]
+            and value[13] == ("punct", ")")):
+        return value[5][1]
+    return None
+
+
+def _js_shadowed_binding(tokens, binding):
+    """Conservatively reject a runtime import name redeclared in the file."""
+    declarations = {"const", "let", "var", "class", "function",
+                    "interface", "type", "enum"}
+    for index, token in enumerate(tokens[:-1]):
+        if token is None or token[0] != "ident":
+            continue
+        if token[1] in declarations:
+            following = tokens[index + 1]
+            if following == ("ident", binding):
+                return True
+        if token == ("ident", binding) and tokens[index + 1] == (
+                "punct", "="):
+            return True
+    return False
+
+
+def _configured_js_aliases(texts, context, RC, support_cache):
+    key = ("configured-js-aliases", tuple(context.config_paths),
+           getattr(context, "declaration", "."))
+    if support_cache is not None and key in support_cache:
+        return support_cache[key]
+    rows: dict[str, set[str]] = {}
+    for path in context.config_paths:
+        text = texts.get(path)
+        if not isinstance(text, str):
+            continue
+        tokens = RC._js_tokens(text)
+        root = RC._exported_root_object(tokens)
+        if root is None:
+            continue
+        root_start, root_end = root
+        root_props = _js_object_properties(tokens, root_start, root_end)
+        if root_props is None:
+            continue
+        resolve_values = root_props.get("resolve", ())
+        if len(resolve_values) != 1:
+            continue
+        resolve_start, resolve_end = resolve_values[0]
+        if (resolve_start >= len(tokens)
+                or tokens[resolve_start] != ("punct", "{")):
+            continue
+        resolve_close = RC._matching_token(tokens, resolve_start, "{", "}")
+        if resolve_close is None or resolve_end != resolve_close + 1:
+            continue
+        resolve_props = _js_object_properties(
+            tokens, resolve_start, resolve_close)
+        if resolve_props is None:
+            continue
+        alias_values = resolve_props.get("alias", ())
+        if len(alias_values) != 1:
+            continue
+        alias_start, alias_end = alias_values[0]
+        if alias_start >= len(tokens) or tokens[alias_start] != (
+                "punct", "{"):
+            continue
+        alias_close = RC._matching_token(tokens, alias_start, "{", "}")
+        if alias_close is None or alias_end != alias_close + 1:
+            continue
+        alias_props = _js_object_properties(tokens, alias_start, alias_close)
+        if alias_props is None:
+            continue
+        imports = _js_import_bindings(text, RC, support_cache, path)
+        trusted_constructors = {
+            binding for specifier, bindings in imports
+            if specifier in {"url", "node:url"}
+            for binding in bindings
+        }
+        if not {"fileURLToPath", "URL"}.issubset(trusted_constructors):
+            continue
+        runtime_tokens = list(tokens)
+        for index, token in enumerate(tokens[:-1]):
+            if token == ("ident", "import"):
+                end = index + 1
+                while end < len(tokens):
+                    if tokens[end] == ("ident", "from"):
+                        end = min(end + 2, len(tokens))
+                        if end < len(tokens) and tokens[end] == ("punct", ";"):
+                            end += 1
+                        break
+                    end += 1
+                runtime_tokens[index:end] = [None] * (end - index)
+        if any(_js_shadowed_binding(runtime_tokens, name)
+               for name in ("fileURLToPath", "URL")):
+            continue
+        for name, expressions in alias_props.items():
+            if len(expressions) != 1:
+                continue
+            start, end = expressions[0]
+            value = _js_literal_alias_value(tokens, start, end)
+            if (isinstance(value, str) and value.startswith(".")
+                    and not value.startswith("../")
+                    and "\\" not in value):
+                rows.setdefault(name, set()).add((path, value))
+    aliases = {}
+    for name, values in rows.items():
+        if len(values) == 1:
+            aliases[name] = next(iter(values))
+    if support_cache is not None:
+        support_cache[key] = aliases
+    return aliases
+
+
+def _js_import_bindings(text, RC, support_cache=None, source=None):
+    """Return bounded static runtime import bindings and their uses."""
+    token_key = ("js-source-tokens", source) if source is not None else None
+    tokens = (support_cache.get(token_key)
+              if support_cache is not None and token_key is not None else None)
+    if tokens is None:
+        tokens = RC._js_tokens(text)
+        if support_cache is not None and token_key is not None:
+            support_cache[token_key] = tokens
+    import_key = ("js-import-bindings", source) if source is not None else None
+    cached = (support_cache.get(import_key)
+              if support_cache is not None and import_key is not None else None)
+    if cached is not None:
+        return cached
+    pending = []
+    for index, token in enumerate(tokens[:-1]):
+        if token != ("ident", "import"):
+            continue
+        if tokens[index + 1] in (("punct", "("), ("punct", "."),
+                                  ("ident", "type")):
+            continue
+        end = index + 1
+        depth = {"{": 0, "[": 0, "(": 0}
+        pairs = {"}": "{", "]": "[", ")": "("}
+        from_at = None
+        spec_at = None
+        stop_at = min(len(tokens), index + 512)
+        while end < stop_at:
+            current = tokens[end]
+            if current == ("ident", "from") and not any(depth.values()):
+                if end + 1 < len(tokens) and tokens[end + 1][0] == "string":
+                    from_at, spec_at = end, end + 1
+                    end = spec_at + 1
+                break
+            if current[0] == "punct":
+                if current[1] == ";" and not any(depth.values()):
+                    break
+                if current[1] in depth:
+                    depth[current[1]] += 1
+                elif current[1] in pairs:
+                    depth[pairs[current[1]]] = max(
+                        0, depth[pairs[current[1]]] - 1)
+            end += 1
+        if from_at is None or spec_at is None:
+            continue
+        bindings = []
+        segment = tokens[index + 1:from_at]
+        brace = next((position for position, value in enumerate(segment)
+                      if value == ("punct", "{")), None)
+        star = next((position for position, value in enumerate(segment)
+                     if value == ("punct", "*")), None)
+        if star is not None and star + 2 < len(segment) and segment[star + 1] == (
+                "ident", "as"):
+            bindings.append(segment[star + 2][1])
+        if brace is not None:
+            close = next((position for position in range(brace + 1,
+                                                         len(segment))
+                          if segment[position] == ("punct", "}")), None)
+            if close is not None:
+                members = segment[brace + 1:close]
+                for group in _js_split_members(members):
+                    if not group or group[0] == ("ident", "type"):
+                        continue
+                    alias_at = next((i for i, value in enumerate(group)
+                                     if value == ("ident", "as")), None)
+                    if alias_at is not None and alias_at + 1 < len(group):
+                        bindings.append(group[alias_at + 1][1])
+                    elif group[0][0] == "ident":
+                        bindings.append(group[0][1])
+        prefix_end = brace if brace is not None else (
+            star if star is not None else len(segment))
+        for value in segment[:prefix_end]:
+            if value[0] == "ident" and value[1] not in {"type", "as"}:
+                bindings.append(value[1])
+                break
+        declaration_end = spec_at + 1
+        if declaration_end < len(tokens) and tokens[declaration_end] == (
+                "punct", ";"):
+            declaration_end += 1
+        if bindings:
+            pending.append((tokens[spec_at][1], tuple(dict.fromkeys(bindings)),
+                            index, declaration_end))
+    runtime = list(tokens)
+    for _specifier, _bindings, start, end in pending:
+        runtime[start:end] = [None] * (end - start)
+    binding_set = {binding for _specifier, bindings, _start, _end in pending
+                   for binding in bindings}
+    used_bindings = _js_runtime_bindings_used(runtime, binding_set)
+    shadowed_bindings = _js_shadowed_bindings(runtime, binding_set)
+    imports = [(specifier, tuple(binding for binding in bindings
+                                 if binding in used_bindings
+                                 and binding not in shadowed_bindings))
+               for specifier, bindings, _start, _end in pending]
+    imports = [(specifier, used) for specifier, used in imports if used]
+    result = tuple(imports)
+    if support_cache is not None and import_key is not None:
+        support_cache[import_key] = result
+    return result
+
+
+def _js_split_members(tokens):
+    groups = []
+    current = []
+    depth = 0
+    for token in tokens:
+        if token == ("punct", ",") and depth == 0:
+            groups.append(current)
+            current = []
+            continue
+        if token[0] == "punct" and token[1] in "{[(":
+            depth += 1
+        elif token[0] == "punct" and token[1] in "}])":
+            depth = max(0, depth - 1)
+        current.append(token)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _js_runtime_bindings_used(tokens, bindings):
+    """Scan runtime use sites once, even for modules with many imports."""
+    used = set()
+    for index, token in enumerate(tokens):
+        if token is None or token[0] != "ident" or token[1] not in bindings:
+            continue
+        previous = tokens[index - 1] if index else None
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if previous == ("ident", "new") or following == ("punct", "("):
+            used.add(token[1])
+            continue
+        if following == ("punct", "."):
+            member = index + 3
+            if (member < len(tokens) and tokens[index + 2] is not None
+                    and tokens[index + 2][0] == "ident"
+                    and tokens[member] == ("punct", "(")):
+                used.add(token[1])
+                continue
+        if previous == ("ident", "extends") or previous == ("punct", "<"):
+            used.add(token[1])
+            continue
+        if (previous == ("punct", "/") and index > 1
+                and tokens[index - 2] == ("punct", "<")):
+            used.add(token[1])
+    return used
+
+
+def _js_shadowed_bindings(tokens, bindings):
+    declarations = {"const", "let", "var", "class", "function",
+                    "interface", "type", "enum"}
+    shadowed = set()
+    for index, token in enumerate(tokens[:-1]):
+        if token is None or token[0] != "ident":
+            continue
+        following = tokens[index + 1]
+        if (token[1] in declarations and following is not None
+                and following[0] == "ident"
+                and following[1] in bindings):
+            shadowed.add(following[1])
+        if (token[1] in bindings and following == ("punct", "=")):
+            shadowed.add(token[1])
+    return shadowed
+
+
+def _js_matching_delimiter(tokens, start, opening="{", closing="}"):
+    if start >= len(tokens) or tokens[start] != ("punct", opening):
+        return None
+    depth = 0
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        if token == ("punct", opening):
+            depth += 1
+        elif token == ("punct", closing):
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _js_test_callback_ranges(tokens):
+    """Find bounded direct and literal-table JS test callbacks."""
+    ranges = []
+    for index, token in enumerate(tokens[:-1]):
+        if (token != ("ident", "it") and token != ("ident", "test")
+                and token != ("ident", "specify")):
+            continue
+        if tokens[index + 1] == ("punct", "("):
+            call_open = index + 1
+        elif (index + 3 < len(tokens)
+              and tokens[index + 1] == ("punct", ".")
+              and tokens[index + 2] == ("ident", "each")
+              and tokens[index + 3] == ("punct", "(")):
+            table_close = _js_matching_delimiter(tokens, index + 3, "(", ")")
+            if table_close is None or table_close + 1 >= len(tokens) \
+                    or tokens[table_close + 1] != ("punct", "("):
+                continue
+            table = tokens[index + 4:table_close]
+            if not table or table[0] != ("punct", "["):
+                continue
+            array_close = _js_matching_delimiter(
+                tokens, index + 4, "[", "]")
+            if array_close is None or array_close >= table_close:
+                continue
+            literal_table = tokens[index + 4:array_close + 1]
+            suffix = tokens[array_close + 1:table_close]
+            if any(value[0] not in {"string"}
+                   and value not in {("punct", ","), ("ident", "as"),
+                                     ("ident", "const")}
+                   for value in literal_table[1:-1] + suffix):
+                continue
+            call_open = table_close + 1
+        else:
+            continue
+        stop = min(len(tokens), call_open + 768)
+        arrow = next((position for position in range(call_open + 1, stop - 1)
+                      if tokens[position:position + 2]
+                      == [("punct", "="), ("punct", ">")]), None)
+        if arrow is None:
+            continue
+        body = next((position for position in range(arrow + 2, stop)
+                     if tokens[position] == ("punct", "{")), None)
+        if body is None:
+            continue
+        end = _js_matching_delimiter(tokens, body)
+        if end is not None:
+            params = set()
+            if arrow > call_open + 1 and tokens[arrow - 1] == ("punct", ")"):
+                depth = 0
+                opening = None
+                for position in range(arrow - 1, call_open, -1):
+                    if tokens[position] == ("punct", ")"):
+                        depth += 1
+                    elif tokens[position] == ("punct", "("):
+                        depth -= 1
+                        if depth == 0:
+                            opening = position
+                            break
+                if opening is not None:
+                    params.update(value[1] for value in tokens[opening + 1:arrow - 1]
+                                  if value is not None and value[0] == "ident"
+                                  and value[1] not in {"async", "const", "let"})
+            elif arrow > call_open + 1 and tokens[arrow - 1][0] == "ident":
+                params.add(tokens[arrow - 1][1])
+            ranges.append((body + 1, end, frozenset(params)))
+    return tuple(ranges)
+
+
+def _js_property_object(tokens, start, end, name):
+    for index in range(start, end - 2):
+        if (tokens[index] in (("ident", name), ("string", name))
+                and tokens[index + 1] == ("punct", ":")
+                and tokens[index + 2] == ("punct", "{")):
+            close = _js_matching_delimiter(tokens, index + 2)
+            if close is not None and close < end:
+                return index + 2, close
+    return None
+
+
+def _js_request_property_binding(tokens, start, end):
+    for index in range(start, end):
+        if tokens[index] not in (("ident", "request"),
+                                  ("string", "request")):
+            continue
+        if index + 1 < end and tokens[index + 1] == ("punct", ":"):
+            value = index + 2
+            if value < end and tokens[value][0] == "ident":
+                return tokens[value][1]
+        elif index + 1 >= end or tokens[index + 1] in (
+                ("punct", ","), ("punct", "}")):
+            return "request"
+    return None
+
+
+def _js_network_injected_request_owner(path, text, entry, role,
+                                      signal_cache=None):
+    """Recognize one test that exercises an injected runtime request path."""
+    if (entry is None or entry.id != "NETWORK-001" or role != "test"
+            or _TEST_PATH_RE.search(path) is None
+            or not path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs"))):
+        return False
+    key = ("js-network-injected-request", path, text)
+    if signal_cache is not None and key in signal_cache:
+        return signal_cache[key]
+    from . import review_context as RC
+
+    imports = _js_import_bindings(text, RC, signal_cache, path)
+    imported = {name for _specifier, names in imports for name in names}
+    tokens = (signal_cache.get(("js-source-tokens", path))
+              if signal_cache is not None else None)
+    if tokens is None:
+        tokens = RC._js_tokens(text)
+        if signal_cache is not None:
+            signal_cache[("js-source-tokens", path)] = tokens
+    def block_depth(start, position):
+        depth = 0
+        for token in tokens[start:position]:
+            if token == ("punct", "{"):
+                depth += 1
+            elif token == ("punct", "}"):
+                depth = max(0, depth - 1)
+        return depth
+
+    injected = False
+    for start, end, parameters in _js_test_callback_ranges(tokens):
+        for index in range(start, end - 4):
+            if (tokens[index] != ("ident", "new")
+                    or tokens[index + 1][0] != "ident"
+                    or tokens[index + 1][1] not in imported
+                    or tokens[index + 2] != ("punct", "(")
+                    or tokens[index + 3] != ("punct", "{")):
+                continue
+            client_name = tokens[index + 1][1]
+            if client_name in parameters:
+                continue
+            client_close = _js_matching_delimiter(tokens, index + 3)
+            if client_close is None or client_close >= end:
+                continue
+            transport = _js_property_object(
+                tokens, index + 3, client_close, "transport")
+            if transport is None:
+                continue
+            request_name = _js_request_property_binding(
+                tokens, *transport)
+            if request_name is None or request_name in parameters:
+                continue
+            request_factory = False
+            request_assignment = None
+            for position in range(start, index):
+                if (tokens[position] in {
+                        ("ident", "const"), ("ident", "let"),
+                        ("ident", "var")}
+                        and position + 5 < end
+                        and tokens[position + 1] == ("ident", request_name)
+                        and tokens[position + 2] == ("punct", "=")
+                        and tokens[position + 3:position + 6] == [
+                            ("ident", "vi"), ("punct", "."),
+                            ("ident", "fn")]
+                        and block_depth(start, position) == 0):
+                    request_factory = True
+                    request_assignment = position + 2
+                    break
+            if not request_factory:
+                continue
+            client_var = None
+            if (index >= start + 3 and tokens[index - 1] == ("punct", "=")
+                    and tokens[index - 2][0] == "ident"
+                    and tokens[index - 3] in {
+                        ("ident", "const"), ("ident", "let"),
+                        ("ident", "var")}):
+                client_var = tokens[index - 2][1]
+            if (client_var is None or block_depth(start, index - 3) != 0
+                    or client_name in _js_shadowed_bindings(
+                        tokens[start:end], {client_name})):
+                continue
+            if any(tokens[position] == ("punct", "=")
+                   and position > start
+                   and tokens[position - 1] == ("ident", request_name)
+                   and position != request_assignment
+                   and block_depth(start, position) == 0
+                   for position in range(start, end)):
+                continue
+            bound_expressions = []
+            for position in range(start, end - 6):
+                if (tokens[position] == ("ident", client_var)
+                        and tokens[position + 1] == ("punct", ".")
+                        and tokens[position + 2][0] == "ident"
+                        and tokens[position + 3] == ("punct", ".")
+                        and tokens[position + 4] == ("ident", "bind")
+                        and tokens[position + 5] == ("punct", "(")
+                        and position + 6 < end
+                        and tokens[position + 6] == ("ident", client_var)):
+                    close_bind = _js_matching_delimiter(
+                        tokens, position + 5, "(", ")")
+                    if close_bind is not None and close_bind < end:
+                        bound_expressions.append((position, close_bind))
+            if not bound_expressions:
+                continue
+            supplied = False
+            for position in range(start, end - 2):
+                if (tokens[position][0] != "ident"
+                        or tokens[position + 1] != ("punct", "(")
+                        or position > start and tokens[position - 1] == (
+                            "punct", ".")):
+                    continue
+                close_args = _js_matching_delimiter(
+                    tokens, position + 1, "(", ")")
+                if close_args is None or close_args >= end:
+                    continue
+                if any(expression_start > position + 1
+                       and expression_end < close_args
+                       for expression_start, expression_end
+                       in bound_expressions):
+                    supplied = True
+                    break
+            if not supplied:
+                continue
+            for position in range(start, end - 4):
+                if (tokens[position] != ("ident", "expect")
+                        or tokens[position + 1] != ("punct", "(")
+                        or tokens[position + 2] != ("ident", request_name)):
+                    continue
+                close_expect = _js_matching_delimiter(
+                    tokens, position + 1, "(", ")")
+                if close_expect is None or close_expect + 2 >= end:
+                    continue
+                matcher = close_expect + 1
+                if tokens[matcher] != ("punct", "."):
+                    continue
+                if tokens[matcher + 1] == ("ident", "not"):
+                    continue
+                if matcher + 2 >= end or tokens[matcher + 1][0] != "ident":
+                    continue
+                method = tokens[matcher + 1][1]
+                if method not in {"toHaveBeenCalledWith",
+                                  "toHaveBeenCalledExactlyOnceWith"} \
+                        or tokens[matcher + 2] != ("punct", "("):
+                    continue
+                close_call = _js_matching_delimiter(
+                    tokens, matcher + 2, "(", ")")
+                if close_call is None or close_call >= end:
+                    continue
+                matcher_tokens = tokens[matcher + 3:close_call]
+                has_method = any(
+                    matcher_tokens[cursor] in (("ident", "method"),
+                                               ("string", "method"))
+                    and matcher_tokens[cursor + 1] == ("punct", ":")
+                    and cursor + 2 < len(matcher_tokens)
+                    and matcher_tokens[cursor + 2][0] == "string"
+                    and matcher_tokens[cursor + 2][1].upper() in {
+                        "GET", "POST", "PUT", "PATCH", "DELETE"}
+                    for cursor in range(max(0, len(matcher_tokens) - 2)))
+                has_path = any(
+                    matcher_tokens[cursor] in (("ident", "path"),
+                                               ("string", "path"))
+                    and cursor + 1 < len(matcher_tokens)
+                    and matcher_tokens[cursor + 1] == ("punct", ":")
+                    for cursor in range(len(matcher_tokens)))
+                if has_method and has_path:
+                    injected = True
+                    break
+            if injected:
+                break
+        if injected:
+            break
+    if signal_cache is not None:
+        signal_cache[key] = injected
+    return injected
+
+
+def _js_runtime_targets(source, source_text, entry, texts, context,
+                        candidates, RC, support_cache, depth,
+                        signal_cache=None):
+    if not source.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+        return ()
+    key = ("js-runtime-targets", source, entry.id, depth)
+    if support_cache is not None and key in support_cache:
+        return support_cache[key]
+    aliases = _configured_js_aliases(texts, context, RC, support_cache)
+    prefix = ("" if getattr(context, "declaration", ".") == "."
+              else context.declaration.rstrip("/") + "/")
+    result = []
+    source_tokens = (support_cache.get(("js-source-tokens", source))
+                     if support_cache is not None else None)
+    if source_tokens is None:
+        source_tokens = RC._js_tokens(source_text)
+        if support_cache is not None:
+            support_cache[("js-source-tokens", source)] = source_tokens
+    for specifier, used in _js_import_bindings(
+            source_text, RC, support_cache, source):
+        if not used:
+            continue
+        specs = []
+        if specifier.startswith("."):
+            specs = RC._js_spec_targets(source, specifier) or []
+        else:
+            matches = [(alias, value) for alias, value in aliases.items()
+                       if specifier == alias or specifier.startswith(alias + "/")]
+            if matches:
+                alias, (config_path, replacement) = max(
+                    matches, key=lambda row: len(row[0]))
+                suffix = specifier[len(alias):].lstrip("/")
+                mapped = (replacement.rstrip("/")
+                          + ("/" + suffix if suffix else ""))
+                specs = RC._js_spec_targets(config_path, mapped) or []
+        target = next((path for path in specs
+                       if path in candidates and path.startswith(prefix)), None)
+        if target is None:
+            continue
+        component_use = any(_js_component_binding_used(source_tokens, name)
+                            for name in used)
+        target_text = texts.get(target)
+        has_text = isinstance(target_text, str)
+        item_operation = (has_text and _has_item_anchor(
+            target, target_text, entry, context, signal_cache))
+        if depth == 0:
+            if component_use and not item_operation:
+                # Keep a rendered component only when it participates in an
+                # executable imported service chain, not for presentation.
+                if (not has_text or not _js_has_runtime_call_import(
+                        target_text, RC, support_cache, target)):
+                    continue
+            result.append((target, not item_operation))
+        elif item_operation:
+            result.append((target, False))
+    result.sort(key=lambda row: (row[1], row[0]))
+    targets = tuple(dict.fromkeys(path for path, _weak in result))[
+        :RC._CONTEXT_MAX_LINKS_PER_FILE]
+    if support_cache is not None:
+        support_cache[key] = targets
+    return targets
+
+
+def _js_component_binding_used(tokens, binding):
+    return any(token == ("punct", "<")
+               and index + 1 < len(tokens)
+               and tokens[index + 1] == ("ident", binding)
+               for index, token in enumerate(tokens))
+
+
+def _js_has_runtime_call_import(text, RC, support_cache=None, source=None):
+    return any(used for _specifier, used in _js_import_bindings(
+        text, RC, support_cache, source))
+
+
 def selected_item_support(callers, entry, texts, context, *,
                           candidate_paths=None,
                           support_cache: dict | None = None,
-                          signal_cache: dict | None = None) -> tuple[str, ...]:
+                          signal_cache: dict | None = None,
+                          selected_owners: dict | None = None) -> tuple[str, ...]:
     """Resolve a small source chain from selected callers without execution."""
     from . import review_context as RC
 
@@ -748,11 +2099,11 @@ def selected_item_support(callers, entry, texts, context, *,
         relations.setdefault(source, []).append((target, kind))
     result: list[str] = []
     for caller in callers:
-        queue = [(caller, 0)]
+        queue = [(caller, 0, ())]
         visited: set[str] = set()
         link_count = 0
         while queue and link_count < RC._CONTEXT_MAX_LINKS_PER_FILE:
-            source, depth = queue.pop(0)
+            source, depth, owner_symbols = queue.pop(0)
             if source in visited or depth >= RC._CONTEXT_MAX_DEPTH:
                 continue
             visited.add(source)
@@ -760,115 +2111,140 @@ def selected_item_support(callers, entry, texts, context, *,
             if source_text is None:
                 continue
             edges: list[str] = []
+            edge_symbols: dict[str, set[str]] = {}
+            if (entry.id == "FIX-001" and depth == 0
+                    and source.endswith(".py")):
+                # Relations are deliberately capped and may omit a later
+                # active caller. Resolve only explicitly requested ordinary
+                # fixtures in its applicable ancestor conftests.
+                requested = _python_requested_fixture_members(
+                    source, source_text, entry, signal_cache)
+                unresolved = set(requested)
+                parent = source.rpartition("/")[0]
+                child_prefix = ("" if declaration == "."
+                                else declaration.rstrip("/"))
+                while unresolved:
+                    conftest = (f"{parent}/conftest.py"
+                                if parent else "conftest.py")
+                    fixture_text = texts.get(conftest)
+                    if (conftest in candidates and fixture_text is not None
+                            and roles.get(conftest) in {"fixture", "setup"}):
+                        matched = unresolved & RC._conftest_fixtures(
+                            fixture_text)
+                        if matched:
+                            edges.append(conftest)
+                            edge_symbols.setdefault(conftest, set()).update(
+                                matched)
+                            unresolved.difference_update(matched)
+                    if parent == child_prefix or not parent:
+                        break
+                    parent = parent.rpartition("/")[0]
             for target, kind in relations.get(source, ()):
                 if target not in candidates:
                     continue
                 target_text = texts.get(target)
                 if kind == "fixture-use":
                     edges.append(target)
+                    if (entry.id == "FIX-001" and depth == 0
+                            and target_text is not None
+                            and target.rsplit("/", 1)[-1] == "conftest.py"
+                            and roles.get(target) in {"fixture", "setup"}):
+                        requested = _python_requested_fixture_members(
+                            source, source_text, entry, signal_cache)
+                        fixture_names = (set(requested)
+                                         & RC._conftest_fixtures(target_text))
+                        edge_symbols.setdefault(target, set()).update(
+                            fixture_names)
                 elif (kind == "local-import" and target_text is not None
                       and (roles.get(target) in {"fixture", "setup"}
                            or _has_item_anchor(target, target_text, entry,
-                                               context))):
+                                               context, signal_cache))):
                     edges.append(target)
-            js_key = ("js-support-targets", source)
-            js_targets = (support_cache.get(js_key)
-                          if support_cache is not None else None)
-            if js_targets is None:
-                discovered = []
-                for specifier in RC._vitest_import_links(source_text):
-                    targets = RC._js_spec_targets(source, specifier)
-                    if targets is not None:
-                        target = next((value for value in targets
-                                       if value in candidates), None)
-                        if target is not None:
-                            discovered.append(target)
-                js_targets = tuple(dict.fromkeys(discovered))
-                if support_cache is not None:
-                    support_cache[js_key] = js_targets
-            edges.extend(js_targets)
-            # Resolve only bounded, literal local Python imports whose bound
-            # name is used by this caller. Import edges from the collector
-            # remain useful for fixtures/setup, but source-role metadata may
-            # be absent when the collection cap stopped before the target.
-            py_key = ("python-support-targets", source, entry.id)
+            edges.extend(_js_runtime_targets(
+                source, source_text, entry, texts, context, candidates,
+                RC, support_cache, depth, signal_cache))
+            if source.endswith(".py") and owner_symbols:
+                for target, original in _python_selected_base_targets(
+                        source, source_text, owner_symbols, texts, candidates,
+                        prefix, RC, support_cache):
+                    edges.append(target)
+                    if original:
+                        edge_symbols.setdefault(target, set()).add(original)
+            # Resolve only literal local imports used by the chosen Python
+            # owner. Package exports are searched by matching symbol, not by
+            # taking the first sixteen declarations in the initializer.
+            owner_key = tuple(sorted(set(owner_symbols)))
+            py_key = ("python-support-targets", source, entry.id,
+                      owner_key)
             py_targets = (support_cache.get(py_key)
                           if support_cache is not None else None)
-            # Python imports are rooted only at the selected caller body.
-            # Imported support modules can be complete bounded owners, but
-            # their unrelated imports are not recursively treated as needs.
-            if py_targets is None and depth == 0:
+            python_symbol_map = {}
+            fixture_owner = (entry.id == "FIX-001" and depth == 1
+                             and source.rsplit("/", 1)[-1] == "conftest.py"
+                             and bool(owner_key))
+            if py_targets is None and (depth == 0 or fixture_owner):
                 child_source = (source[len(prefix):]
                                 if prefix and source.startswith(prefix)
                                 else source)
-                found = []
+                found: list[tuple[str, str]] = []
                 for module, level, used_symbols in _python_used_imports(
                         source, source_text, entry, support_cache, RC,
-                        signal_cache):
+                        signal_cache,
+                        owner_names=(owner_key if fixture_owner else ())):
                     module_targets = [prefix + value for value in
                                       RC._python_spec_targets(
                                           module, level, child_source)
                                       if prefix + value in candidates]
                     if module_targets:
-                        found.append(module_targets[0])
-                    if not used_symbols:
-                        continue
-                    # ``from package import name`` may load a sibling
-                    # submodule or a literal top-level re-export in the
-                    # package initializer. Resolve only those two forms
-                    # from already-frozen candidate text.
-                    for init_path in module_targets:
-                        if not init_path.endswith("/__init__.py"):
-                            continue
-                        init_text = texts.get(init_path)
-                        if not isinstance(init_text, str):
-                            continue
-                        try:
-                            init_tree = ast.parse(init_text)
-                        except (SyntaxError, ValueError, RecursionError,
-                                MemoryError):
-                            continue
-                        child_init = (init_path[len(prefix):]
-                                      if prefix and init_path.startswith(prefix)
-                                      else init_path)
-                        for statement in init_tree.body[:RC._CONTEXT_MAX_LINKS_PER_FILE]:
-                            if isinstance(statement, ast.ImportFrom):
-                                for alias in statement.names:
-                                    exported = alias.asname or alias.name
-                                    if exported not in used_symbols:
-                                        continue
-                                    if statement.module:
-                                        specs = RC._python_spec_targets(
-                                            statement.module,
-                                            statement.level, child_init)
-                                    else:
-                                        specs = RC._python_spec_targets(
-                                            alias.name, statement.level,
-                                            child_init)
-                                    found.extend(prefix + value for value in specs
-                                                 if prefix + value in candidates)
-                            elif isinstance(statement, ast.Import):
-                                for alias in statement.names:
-                                    exported = alias.asname or alias.name.split(
-                                        ".", 1)[0]
-                                    if exported not in used_symbols:
-                                        continue
-                                    found.extend(prefix + value for value in
-                                                 RC._python_spec_targets(
-                                                     alias.name, 0, child_init)
-                                                 if prefix + value in candidates)
-                        package_dir = posixpath.dirname(init_path)
-                        for symbol in used_symbols:
-                            sibling = symbol.replace(".", "/")
-                            for target in (f"{package_dir}/{sibling}.py",
-                                           f"{package_dir}/{sibling}/__init__.py"):
-                                if target in candidates:
-                                    found.append(target)
-                py_targets = tuple(dict.fromkeys(found))
+                        if used_symbols:
+                            found.extend((module_targets[0], symbol)
+                                         for symbol in used_symbols)
+                        else:
+                            found.append((module_targets[0], ""))
+                        if used_symbols:
+                            for target in module_targets:
+                                if not target.endswith("/__init__.py"):
+                                    continue
+                                for symbol in used_symbols:
+                                    found.extend(_python_export_targets(
+                                        target, symbol, texts, candidates,
+                                        prefix, RC, support_cache))
+                            package_dirs = {posixpath.dirname(path)
+                                            for path in module_targets}
+                            for symbol in used_symbols:
+                                sibling = symbol.replace(".", "/")
+                                for package_dir in package_dirs:
+                                    for target in (
+                                            f"{package_dir}/{sibling}.py",
+                                            f"{package_dir}/{sibling}/__init__.py"):
+                                        if target in candidates:
+                                            found.append((target, symbol))
+                unique_found = tuple(dict.fromkeys(found))[
+                    :RC._CONTEXT_MAX_LINKS_PER_FILE]
+                py_targets = tuple(dict.fromkeys(
+                    target for target, _symbol in unique_found))
+                python_symbol_map = {}
+                for target, symbol in unique_found:
+                    if symbol:
+                        python_symbol_map.setdefault(target, set()).add(symbol)
                 if support_cache is not None:
                     support_cache[py_key] = py_targets
+                    support_cache[("python-symbol-targets", source,
+                                   entry.id, owner_key)] = {
+                                       target: tuple(sorted(values))
+                                       for target, values in
+                                       python_symbol_map.items()}
             if py_targets is not None:
                 edges.extend(py_targets)
+                if support_cache is not None:
+                    python_symbol_map = support_cache.get(
+                        ("python-symbol-targets", source, entry.id,
+                         owner_key), {})
+                for target, symbols in python_symbol_map.items():
+                    edge_symbols.setdefault(target, set()).update(symbols)
+                    if selected_owners is not None:
+                        selected_owners.setdefault(target, set()).update(
+                            symbols)
             invocation_key = ("invocation-support-targets", source)
             invocation_targets = (support_cache.get(invocation_key)
                                   if support_cache is not None else None)
@@ -883,7 +2259,10 @@ def selected_item_support(callers, entry, texts, context, *,
                     continue
                 result.append(target)
                 link_count += 1
-                queue.append((target, depth + 1))
+                symbols = tuple(sorted(edge_symbols.get(target, ())))
+                if selected_owners is not None and symbols:
+                    selected_owners.setdefault(target, set()).update(symbols)
+                queue.append((target, depth + 1, symbols))
                 if link_count >= RC._CONTEXT_MAX_LINKS_PER_FILE:
                     break
     return tuple(dict.fromkeys(result))
@@ -893,6 +2272,7 @@ def item_source_chains(item_id: str, texts, context, candidate_paths, *,
                        declaration: str = ".",
                        signal_cache: dict | None = None,
                        support_cache: dict | None = None,
+                       caller_paths=None,
                        max_chains: int = 24) -> tuple[tuple[str, ...], ...]:
     """Return ranked active caller chains with exact bounded local support.
 
@@ -909,7 +2289,8 @@ def item_source_chains(item_id: str, texts, context, candidate_paths, *,
     context = _with_declaration_prefix(context, declaration)
     role_by_path = dict(context.roles)
     callers = rank_item_candidates(
-        context, tuple(candidates), texts, item_id,
+        context, tuple(candidates if caller_paths is None
+                       else set(caller_paths) & candidates), texts, item_id,
         declaration=declaration, signal_cache=signal_cache)
     chains: list[tuple[str, ...]] = []
     child_prefix = "" if declaration == "." else declaration.rstrip("/")
@@ -923,7 +2304,7 @@ def item_source_chains(item_id: str, texts, context, candidate_paths, *,
                 or not (_has_item_anchor(caller, texts[caller], entry,
                                          context, signal_cache)
                         or _has_related_fixture_anchor(
-                            caller, texts, entry, context))):
+                            caller, texts, entry, context, signal_cache))):
             continue
         considered += 1
         if considered > 64:
@@ -996,11 +2377,14 @@ def _node_names(node: ast.AST) -> set[str]:
 def _python_source_units(excerpt, item_id: str, context, *,
                          whole_module: bool = False,
                          caller_core: bool = False,
-                         linked_fixture_names=frozenset()
+                         linked_fixture_names=frozenset(),
+                         selected_symbols=frozenset(),
+                         signal_cache: dict | None = None
                          ) -> tuple[SourceUnit, ...]:
     if not excerpt.complete:
         return ()
-    if whole_module:
+    selected_symbols = frozenset(selected_symbols)
+    if whole_module and not selected_symbols:
         if len(excerpt.text.encode("utf-8")) <= MAX_UNIT_BYTES:
             lines = excerpt.text.splitlines(keepends=True)
             if lines and len(lines) <= MAX_UNIT_LINES:
@@ -1008,10 +2392,14 @@ def _python_source_units(excerpt, item_id: str, context, *,
                                    excerpt.start_line + len(lines) - 1,
                                    excerpt.sha256, excerpt.text,
                                    _source_role(excerpt.path, context)),)
-    try:
-        tree = ast.parse(excerpt.text)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return ()
+    analysis = (signal_cache or {}).get((
+        "source-analysis", excerpt.path, excerpt.text))
+    tree = analysis[3] if analysis is not None else None
+    if tree is None:
+        try:
+            tree = ast.parse(excerpt.text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return ()
     lines = excerpt.text.splitlines(keepends=True)
     if not lines:
         return ()
@@ -1029,6 +2417,9 @@ def _python_source_units(excerpt, item_id: str, context, *,
     imports = []
     declarations = []
     functions = []
+    selected_test_owners = {id(node) for node in _python_test_owners(
+        excerpt.path, excerpt.text, entry, tree, signal_cache
+    )} if entry is not None else set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if node in tree.body:
@@ -1039,8 +2430,10 @@ def _python_source_units(excerpt, item_id: str, context, *,
             # Methods are emitted as separate non-overlapping owner units.
             # A class with no methods can still be useful when it directly
             # declares the item-specific mechanism.
-            if any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-                   for child in node.body):
+            has_methods = any(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for child in node.body)
+            if has_methods and node.name not in selected_symbols:
                 continue
             decorators = getattr(node, "decorator_list", ())
             start = min([node.lineno, *(item.lineno for item in decorators)])
@@ -1048,13 +2441,14 @@ def _python_source_units(excerpt, item_id: str, context, *,
             text = _line_text(lines, start, end)
             code = _executable_text(excerpt.path, text)
             call_hit, body_hit, control, criterion_control = _item_signal(
-                excerpt.path, text, entry) if entry is not None else (
+                excerpt.path, text, entry, signal_cache) if entry is not None else (
                     False, False, False, False)
             direct = (any(pattern.search(code) for pattern in patterns)
                       or call_hit or body_hit)
-            if direct:
+            if direct or node.name in selected_symbols:
                 candidates.append((node, text, start, end,
-                                   criterion_control))
+                                   criterion_control
+                                   or node.name in selected_symbols))
         elif node in tree.body:
             targets: set[str] = set()
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -1076,7 +2470,7 @@ def _python_source_units(excerpt, item_id: str, context, *,
         text = _line_text(lines, start, end)
         code = _executable_text(excerpt.path, text)
         call_hit, body_hit, _control, criterion_control = _item_signal(
-            excerpt.path, text, entry) if entry is not None else (
+            excerpt.path, text, entry, signal_cache) if entry is not None else (
                 False, False, False, False)
         direct = (any(pattern.search(code) for pattern in patterns)
                   or call_hit or body_hit)
@@ -1100,11 +2494,15 @@ def _python_source_units(excerpt, item_id: str, context, *,
                          and any(argument.arg in linked_fixture_names
                                  for argument in ast.walk(node.args)
                                  if isinstance(argument, ast.arg)))
-        if owner_level and (direct or autouse_fixture
+        propagated_test = (is_test and node.name.startswith("test_")
+                           and id(node) in selected_test_owners)
+        if owner_level and (direct or propagated_test or autouse_fixture
                            or (fixture_used and "fixture" in decorator_names)
-                           or linked_caller):
+                           or linked_caller
+                           or node.name in selected_symbols):
             candidates.append((node, text, start, end,
-                               criterion_control))
+                               criterion_control
+                               or node.name in selected_symbols))
 
     selected_nodes: list[tuple[ast.AST, str, int, int]] = []
     referenced: set[str] = set()
@@ -1112,7 +2510,7 @@ def _python_source_units(excerpt, item_id: str, context, *,
         node, text, start, _end, criterion_control = value
         code = _executable_text(excerpt.path, text)
         call_hit, body_hit, control, _specific = _item_signal(
-            excerpt.path, text, entry) if entry is not None else (
+            excerpt.path, text, entry, signal_cache) if entry is not None else (
                 False, False, False, False)
         direct = (any(pattern.search(code) for pattern in patterns)
                   or call_hit or body_hit)
@@ -1126,19 +2524,43 @@ def _python_source_units(excerpt, item_id: str, context, *,
     candidates.sort(key=candidate_priority)
     bounded_candidates = candidates[:MAX_UNITS_PER_ITEM]
     owner_nodes: dict[str, list[ast.AST]] = {}
+    class_members: dict[ast.ClassDef, dict[str, list[ast.AST]]] = {}
     for owner in tree.body:
         if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef,
                               ast.ClassDef)):
             owner_nodes.setdefault(owner.name, []).append(owner)
+        if isinstance(owner, ast.ClassDef):
+            members = {}
+            for member in owner.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    members.setdefault(member.name, []).append(member)
+            class_members[owner] = members
 
     def direct_owner_values(caller):
-        direct_calls = {
-            call.func.id for call in ast.walk(caller)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-        }
+        direct_calls = set()
+        method_calls = set()
+        parent = parents.get(caller)
+        if isinstance(parent, ast.ClassDef):
+            for call in ast.walk(caller):
+                if not isinstance(call, ast.Call):
+                    continue
+                if isinstance(call.func, ast.Name):
+                    direct_calls.add(call.func.id)
+                elif (isinstance(call.func, ast.Attribute)
+                      and isinstance(call.func.value, ast.Name)
+                      and call.func.value.id in {"self", "cls"}):
+                    method_calls.add(call.func.attr)
+        else:
+            direct_calls = {
+                call.func.id for call in ast.walk(caller)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            }
         values = []
-        for name in sorted(direct_calls):
-            matches = owner_nodes.get(name, ())
+        names = sorted(method_calls) + sorted(direct_calls - method_calls)
+        for name in names:
+            matches = (class_members.get(parent, {}).get(name, ())
+                       if name in method_calls
+                       else owner_nodes.get(name, ()))
             if len(matches) != 1 or matches[0] is caller:
                 continue
             owner = matches[0]
@@ -1155,15 +2577,27 @@ def _python_source_units(excerpt, item_id: str, context, *,
 
     selected_candidates = []
     if caller_core and is_test:
-        active_callers = [value for value in candidates
-                          if isinstance(value[0], (ast.FunctionDef,
+        preferred_owners = _python_test_owners(
+            excerpt.path, excerpt.text, entry, tree, signal_cache)
+        values_by_owner = {id(value[0]): value for value in candidates}
+        active_callers = [values_by_owner[id(node)]
+                          for node in preferred_owners
+                          if id(node) in values_by_owner]
+        direct_ids = {id(value[0]) for value in active_callers}
+        linked_callers = [value for value in candidates
+                          if id(value[0]) not in direct_ids
+                          and isinstance(value[0], (ast.FunctionDef,
                                                     ast.AsyncFunctionDef))
-                          and value[0].name.startswith("test_")]
-        if active_callers:
-            caller = active_callers[0]
+                          and value[0].name.startswith("test_")
+                          and any(argument.arg in linked_fixture_names
+                                  for argument in ast.walk(value[0].args)
+                                  if isinstance(argument, ast.arg))]
+        active_callers.extend(linked_callers)
+        for caller in active_callers:
             support = direct_owner_values(caller[0])
             if support is not None and 1 + len(support) <= MAX_UNITS_PER_ITEM:
                 selected_candidates = [caller, *support]
+                break
     else:
         # Optional test owners are selected as caller-plus-direct-helper
         # groups. A caller whose local owner cannot fit the existing cap is
@@ -1204,7 +2638,7 @@ def _python_source_units(excerpt, item_id: str, context, *,
         referenced.update(_node_names(node))
     units: list[SourceUnit] = []
     # Include only imports used by a selected evidence owner.
-    imported_names: set[str] = set()
+    imported_names: set[str] = set(selected_symbols)
     for node in selected_nodes:
         imported_names.update(_node_names(node[0]))
     for node in imports:
@@ -1246,14 +2680,17 @@ def _python_source_units(excerpt, item_id: str, context, *,
                                                  value.end_line)):
         unique.setdefault((unit.start_line, unit.end_line, unit.text), unit)
     return tuple(sorted(unique.values(),
-                        key=lambda unit: _unit_priority(unit, item_id))
+                        key=lambda unit: _unit_priority(
+                            unit, item_id, signal_cache))
                  [:MAX_UNITS_PER_ITEM])
 
 
 def source_units(excerpt, item_id: str, context, *,
                  whole_module: bool = False,
                  caller_core: bool = False,
-                 linked_fixture_names=frozenset()
+                 linked_fixture_names=frozenset(),
+                 selected_symbols=frozenset(),
+                 signal_cache: dict | None = None
                  ) -> tuple[SourceUnit, ...]:
     """Select complete contiguous units from one immutable admitted excerpt."""
     if not hasattr(excerpt, "path") or not hasattr(excerpt, "text"):
@@ -1266,12 +2703,14 @@ def source_units(excerpt, item_id: str, context, *,
     if path.endswith(".py"):
         return _python_source_units(
             excerpt, item_id, context,
-            whole_module=(whole_module
+            whole_module=(not selected_symbols and (whole_module
                           or (path.rsplit("/", 1)[-1] == "conftest.py"
                               and _source_role(path, context)
-                              in {"setup", "fixture"})),
+                              in {"setup", "fixture"}))),
             caller_core=caller_core,
-            linked_fixture_names=linked_fixture_names)
+            linked_fixture_names=linked_fixture_names,
+            selected_symbols=selected_symbols,
+            signal_cache=signal_cache)
     if not excerpt.complete:
         return ()
     role = _source_role(path, context)
@@ -1281,14 +2720,15 @@ def source_units(excerpt, item_id: str, context, *,
                          ".go", ".rs", ".java", ".kt", ".sql", ".sh",
                          ".c", ".h", ".cpp", ".cc", ".cs", ".rb", ".php")
     entry = next(item for item in CATALOG if item.id == item_id)
-    rank = _item_rank(path, excerpt.text, entry, context)
+    rank = _item_rank(path, excerpt.text, entry, context, signal_cache)
     caller = role == "test" and _TEST_PATH_RE.search(path) is not None
     fixture_used = role == "fixture" and any(
         target == path and kind == "fixture-use"
         for _source, target, kind in context.relations)
     relevant = (whole_module or fixture_used or not rank[0]
                 or (caller and _has_item_anchor(path, excerpt.text,
-                                                entry, context)))
+                                                entry, context,
+                                                signal_cache)))
     if not is_config and not (path.endswith(source_extensions) and relevant):
         return ()
     text = excerpt.text
@@ -1307,13 +2747,15 @@ def select_item_sources(packet, item_id: str):
         raise TypeError("item id must be nonempty str")
     context = _with_declaration_prefix(packet.context, packet.declaration)
     from . import review_context as RC
+    signal_cache: dict = {}
     texts = {excerpt.path: excerpt.text for excerpt in packet.excerpts}
     entry = next((item for item in CATALOG if item.id == item_id), None)
     if entry is None:
         raise ValueError("unknown checklist item")
     all_ranked_paths = tuple(sorted(
         _active_paths(texts, context),
-        key=lambda path: _item_rank(path, texts[path], entry, context)))
+        key=lambda path: _item_rank(
+            path, texts[path], entry, context, signal_cache)))
     by_path = {excerpt.path: excerpt for excerpt in packet.excerpts}
     role_by_path = dict(context.roles)
     config_paths = [path for path in all_ranked_paths
@@ -1334,11 +2776,21 @@ def select_item_sources(packet, item_id: str):
     caller_paths = [chain[0] for chain in chains]
     support_paths = list(dict.fromkeys(
         path for chain in chains for path in chain[1:]))
+    selected_support_symbols: dict[str, set[str]] = {}
+    support_cache: dict = {}
+    for chain in chains:
+        selected_item_support(
+            (chain[0],), entry, texts, context,
+            candidate_paths=set(chain), support_cache=support_cache,
+            signal_cache=signal_cache,
+            selected_owners=(selected_support_symbols
+                             if item_id == "FIX-001" else None))
     linked_fixture_names: dict[str, set[str]] = {}
     for source, target, kind in context.relations:
         if (kind == "fixture-use" and source in caller_paths
                 and target in texts
-                and _has_item_anchor(target, texts[target], entry, context)):
+                and _has_item_anchor(target, texts[target], entry, context,
+                                     signal_cache)):
             linked_fixture_names.setdefault(source, set()).update(
                 RC._conftest_fixtures(texts[target]))
     global_setups = [path for path in all_ranked_paths
@@ -1361,28 +2813,30 @@ def select_item_sources(packet, item_id: str):
     missing: list[tuple[str, str]] = []
     for path in ranked_paths:
         excerpt = by_path[path]
-        whole_module = (path in support_paths and path not in caller_paths
-                        or path in config_paths
-                        or role_by_path.get(path) == "setup")
+        selected_symbols = frozenset(selected_support_symbols.get(path, ()))
+        whole_module = (not selected_symbols and (
+            (path in support_paths and path not in caller_paths)
+            or path in config_paths
+            or role_by_path.get(path) == "setup"))
         units = source_units(excerpt, item_id, context,
                              whole_module=whole_module,
                              linked_fixture_names=frozenset(
-                                 linked_fixture_names.get(path, ())))
+                                 linked_fixture_names.get(path, ())),
+                             selected_symbols=selected_symbols,
+                             caller_core=path in caller_paths,
+                             signal_cache=signal_cache)
         if not units:
             if not excerpt.complete:
                 missing.append((path, "partial-source"))
             elif (_item_rank(path, excerpt.text, entry,
-                             context)[0] is False
+                             context, signal_cache)[0] is False
                   or _source_role(path, context) in {
                       "config", "setup", "fixture", "helper", "test"}):
                 missing.append((path, "incomplete-or-irrelevant-unit"))
             continue
         units_by_path[path] = units
         if path in caller_paths:
-            core_units_by_path[path] = source_units(
-                excerpt, item_id, context, caller_core=True,
-                linked_fixture_names=frozenset(
-                    linked_fixture_names.get(path, ())))
+            core_units_by_path[path] = units
     initial: list[SourceUnit] = []
     reserve: list[SourceUnit] = []
     initial_paths: set[str] = set()
@@ -1391,7 +2845,8 @@ def select_item_sources(packet, item_id: str):
     reserve_bytes = 0
     ranked_units = {
         path: tuple(sorted(units_by_path.get(path, ()),
-                           key=lambda unit: _unit_priority(unit, item_id)))
+                           key=lambda unit: _unit_priority(
+                               unit, item_id, signal_cache)))
         for path in ranked_paths
     }
     selected_units: set[SourceUnit] = set()
@@ -1450,16 +2905,6 @@ def select_item_sources(packet, item_id: str):
         if not add_group(chain, allow_reserve=True):
             missing.extend((path, "source-budget-exhausted")
                            for path in chain)
-    # Preserve additional concrete operations in the chosen test modules
-    # when space remains; the first caller plus its referenced declarations
-    # and complete support chain already fit atomically above.
-    for path in caller_paths:
-        core = set(core_units_by_path.get(path, ()))
-        for unit in ranked_units.get(path, ()):
-            if unit in core:
-                continue
-            if not add_units((unit,), allow_reserve=True):
-                missing.append((path, "source-budget-exhausted"))
     for path in ranked_paths:
         if path not in initial_paths and path not in reserve_paths \
                 and path in by_path:

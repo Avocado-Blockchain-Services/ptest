@@ -13,6 +13,8 @@ change the selected semantic chain; no curated production paths.
 """
 from __future__ import annotations
 
+import pytest
+
 
 def _excerpt(path="src/db.py", start=1, text="x = 1\n", sha=None):
     from ptest import agent_assessment as AA
@@ -622,13 +624,18 @@ def _packet_for_select(tmp_path):
     (tmp_path / "tests").mkdir(parents=True)
     (tmp_path / "tests" / "conftest.py").write_text(
         "import pytest\n"
+        "shared_values = []\n"
         "@pytest.fixture\n"
         "def conn():\n"
-        "    yield 'c'\n",
+        "    try:\n"
+        "        yield shared_values\n"
+        "    finally:\n"
+        "        shared_values.clear()\n",
         encoding="utf-8")
     (tmp_path / "tests" / "test_db.py").write_text(
         "def test_writes(conn):\n"
-        "    assert conn\n",
+        "    conn.append('c')\n"
+        "    assert conn == ['c']\n",
         encoding="utf-8")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "helper.py").write_text(
@@ -685,3 +692,398 @@ def test_select_item_sources_uses_packet(tmp_path):
 
 def excerpt_lines(owner):
     return owner.text.splitlines()
+
+
+def test_selected_python_owner_follows_only_literal_local_builder_import():
+    from ptest import review_evidence as RE
+
+    caller_path = "tests/test_record_factory.py"
+    builder_path = "testlib/builders.py"
+    unused_path = "testlib/unrelated.py"
+    builder = (
+        "class Builder:\n"
+        "    @classmethod\n"
+        "    def create(cls):\n"
+        "        return {'id': 'fresh'}\n")
+    unused = "class UnusedBuilder:\n    pass\n"
+    cases = (
+        ("def test_record_factory():\n"
+         "    from testlib.builders import Builder\n"
+         "    record = Builder.create()\n"
+         "    assert record['id']\n", True),
+        ("def test_record_factory():\n"
+         "    from testlib.builders import Builder\n"
+         "    Builder = LocalBuilder\n"
+         "    record = Builder.create()\n"
+         "    assert record\n", False),
+        ("def test_record_factory():\n"
+         "    if enabled:\n"
+         "        from testlib.builders import Builder\n"
+         "    record = Builder.create()\n"
+         "    assert record\n", False),
+        ("def test_record_factory():\n"
+         "    import importlib\n"
+         "    Builder = importlib.import_module(module_name).Builder\n"
+         "    record = Builder.create()\n"
+         "    assert record\n", False),
+    )
+    for caller, expected in cases:
+        texts = {caller_path: caller, builder_path: builder,
+                 unused_path: unused}
+        context = _context(roles=((caller_path, "test"),
+                                  (builder_path, "helper"),
+                                  (unused_path, "helper")))
+        chains = RE.item_source_chains(
+            "FIX-001", texts, context, set(texts), support_cache={})
+        selected = next((chain for chain in chains
+                         if chain[0] == caller_path), ())
+        assert (builder_path in selected) is expected
+        assert unused_path not in selected
+
+
+def test_selected_owner_import_resolution_respects_parameter_and_local_shadowing():
+    from ptest import review_evidence as RE
+    from ptest import review_context as RC
+
+    shadowed = "tests/test_shadowed_factory.py"
+    module_user = "tests/test_module_factory.py"
+    local_user = "tests/test_local_factory.py"
+    decoy = "testlib/builders.py"
+    real = "testlib/real_builders.py"
+    builder = (
+        "class Builder:\n"
+        "    @classmethod\n"
+        "    def create(cls):\n"
+        "        return {'id': 'fresh'}\n")
+    texts = {
+        shadowed: (
+            "from testlib.builders import Builder\n"
+            "def test_record_factory(Builder):\n"
+            "    record = Builder.create()\n"
+            "    assert record['id']\n"),
+        module_user: (
+            "from testlib.builders import Builder\n"
+            "def test_module_factory():\n"
+            "    record = Builder.create()\n"
+            "    assert record['id']\n"),
+        local_user: (
+            "from testlib.builders import Builder\n"
+            "def test_local_factory():\n"
+            "    from testlib.real_builders import Builder\n"
+            "    record = Builder.create()\n"
+            "    assert record['id']\n"),
+        decoy: builder,
+        real: builder,
+    }
+    context = _context(roles=tuple(
+        [(path, "test") for path in (shadowed, module_user, local_user)]
+        + [(decoy, "helper"), (real, "helper")]))
+    chains = RE.item_source_chains(
+        "FIX-001", texts, context, set(texts), support_cache={})
+    by_caller = {chain[0]: set(chain[1:]) for chain in chains}
+
+    assert shadowed in by_caller
+    assert decoy not in by_caller[shadowed]
+    assert decoy in by_caller[module_user]
+    assert real in by_caller[local_user]
+    assert decoy not in by_caller[local_user]
+
+    # A shadow in one selected owner must not suppress a genuine module
+    # binding used by another selected owner in the same file.
+    mixed_path = "tests/test_mixed_factory.py"
+    mixed_text = (
+        "from testlib.builders import Builder\n"
+        "def test_parameter_shadow(Builder):\n"
+        "    assert Builder.create()\n"
+        "def test_module_binding():\n"
+        "    assert Builder.create()\n")
+    imports = RE._python_used_imports(
+        mixed_path, mixed_text, next(item for item in RE.CATALOG
+                                     if item.id == "FIX-001"),
+        {}, RC, {}, owner_names=("test_parameter_shadow",
+                                 "test_module_binding"))
+    assert imports == (("testlib.builders", 0, ("Builder",)),)
+
+    # A direct function-local import replaces, rather than supplements, a
+    # same-named module import for that selected owner.
+    local_text = (
+        "from testlib.builders import Builder\n"
+        "def test_local_override():\n"
+        "    from testlib.real_builders import Builder\n"
+        "    assert Builder.create()\n")
+    imports = RE._python_used_imports(
+        "tests/test_local_override.py", local_text,
+        next(item for item in RE.CATALOG if item.id == "FIX-001"),
+        {}, RC, {}, owner_names=("test_local_override",))
+    assert imports == (("testlib.real_builders", 0, ("Builder",)),)
+
+    def selected_imports(path, text, owner):
+        return RE._python_used_imports(
+            path, text, next(item for item in RE.CATALOG
+                             if item.id == "FIX-001"),
+            {}, RC, {}, owner_names=(owner,))
+
+    # Multiple definitions of one binding are ambiguous, including module
+    # imports, multiple direct imports, and a direct import plus a conditional
+    # re-import. None may be represented as a complete local dependency.
+    assert selected_imports(
+        "tests/test_ambiguous_module.py",
+        "from testlib.builders import Builder\n"
+        "from testlib.real_builders import Builder\n"
+        "def test_ambiguous_module():\n"
+        "    assert Builder.create()\n",
+        "test_ambiguous_module") == ()
+    assert selected_imports(
+        "tests/test_ambiguous_local.py",
+        "def test_ambiguous_local():\n"
+        "    from testlib.builders import Builder\n"
+        "    from testlib.real_builders import Builder\n"
+        "    assert Builder.create()\n",
+        "test_ambiguous_local") == ()
+    assert selected_imports(
+        "tests/test_conditional_local.py",
+        "def test_conditional_local():\n"
+        "    from testlib.builders import Builder\n"
+        "    if use_alternate:\n"
+        "        from testlib.real_builders import Builder\n"
+        "    assert Builder.create()\n",
+        "test_conditional_local") == ()
+
+
+def test_fix001_follows_only_requested_ordinary_fixture_spans():
+    from ptest import agent_assessment as AA
+    from ptest import review_context as RC
+    from ptest import review_evidence as RE
+
+    caller = _excerpt(
+        "tests/test_record_factory.py", text=(
+            "def test_record_factory(case):\n"
+            "    assert case.id\n"))
+    conftest = _excerpt(
+        "tests/conftest.py", text=(
+            "import pytest\n"
+            "from src.builders import Builder\n"
+            "from src.unused import UnusedBuilder\n"
+            "@pytest.fixture\n"
+            "def case():\n"
+            "    return Builder.create()\n"
+            "@pytest.fixture\n"
+            "def unused_case():\n"
+            "    return UnusedBuilder.create()\n"))
+    factory = _excerpt(
+        "src/builders.py", text=(
+            "class Builder:\n"
+            "    @classmethod\n"
+            "    def create(cls):\n"
+            "        return {'id': 'fresh'}\n"))
+    unused = _excerpt(
+        "src/unused.py", text=(
+            "class UnusedBuilder:\n"
+            "    @classmethod\n"
+            "    def create(cls):\n"
+            "        return {'id': 'unrequested'}\n"))
+    context = RC.ReviewContext(
+        runner_kind="pytest",
+        roles=((caller.path, "test"), (conftest.path, "fixture"),
+               (factory.path, "helper"), (unused.path, "helper")),
+        relations=((caller.path, conftest.path, "fixture-use"),),
+        config_status="resolved")
+    excerpts = (caller, conftest, factory, unused)
+    packet = AA.EvidencePacket(
+        declaration=".", project_id="cd" * 16, scope=".",
+        packet_sha256="11" * 32, excerpts=excerpts, dependencies=(),
+        runner_kind="pytest", excluded_count=0, truncated_count=0,
+        file_count=len(excerpts), byte_count=sum(
+            len(item.text.encode("utf-8")) for item in excerpts),
+        context=context)
+
+    initial, reserve, _missing = RE.select_item_sources(packet, "FIX-001")
+    selected = (*initial, *reserve)
+    fixture_unit = next(unit for unit in selected
+                        if unit.path == conftest.path
+                        and "def case()" in unit.text)
+    factory_unit = next(unit for unit in selected
+                        if unit.path == factory.path
+                        and "class Builder" in unit.text)
+    assert "@pytest.fixture" in fixture_unit.text
+    assert "Builder.create()" in fixture_unit.text
+    assert "def create(cls)" in factory_unit.text
+    assert all(unit.path != unused.path for unit in selected)
+
+    other_initial, other_reserve, _ = RE.select_item_sources(
+        packet, "FIX-002")
+    other_units = (*other_initial, *other_reserve)
+    assert not any(unit.path == factory.path for unit in other_units)
+
+
+def test_network_prefers_runtime_request_caller_over_url_fixture_only():
+    from ptest import review_context as RC
+    from ptest import review_evidence as RE
+
+    url_fixture = "web/src/__tests__/00_endpoint_fixture.test.ts"
+    request_caller = "web/src/__tests__/99_upload_request.test.ts"
+    runtime_client = "web/src/network/service.ts"
+    texts = {
+        url_fixture: (
+            "const endpoint = 'https://api.example.invalid/upload';\n"
+            "it('documents endpoint', () => {\n"
+            "  expect(endpoint).toContain('https://');\n"
+            "});\n"),
+        request_caller: (
+            "import { Service } from '../network/service';\n"
+            "it.each(['pointer', 'keyboard'] as const)(\n"
+            "  'uses an injected request for %s', async (inputMode) => {\n"
+            "  const request = vi.fn().mockResolvedValue({ status: 201 });\n"
+            "  const service = new Service({ transport: { request } });\n"
+            "  if (inputMode === 'pointer') events.observe();\n"
+            "  const model = makeModel();\n"
+            "  const { store } = makeStore({\n"
+            "    createDraft: service.createDraft.bind(service),\n"
+            "  }, model);\n"
+            "  renderPanel(store);\n"
+            "  expect(request).not.toHaveBeenCalled();\n"
+            "  events.input(inputMode);\n"
+            "  await advanceAutosave(store);\n"
+            "  expect(request).toHaveBeenCalledExactlyOnceWith(\n"
+            "    expect.objectContaining({ method: 'POST', "
+            "path: `/api/drafts/${inputMode}` }));\n"
+            "});\n"),
+        runtime_client: (
+            "export class Service {\n"
+            "  constructor({ transport }) { this.transport = transport; }\n"
+            "  createDraft(body) {\n"
+            "    return this.transport.request({ method: 'POST', "
+            "path: '/api/drafts/current', body });\n"
+            "  }\n"
+            "}\n"),
+    }
+    context = RC.ReviewContext(
+        runner_kind="vitest",
+        roles=((url_fixture, "test"), (request_caller, "test"),
+               (runtime_client, "helper")),
+        config_status="resolved")
+
+    chains = RE.item_source_chains(
+        "NETWORK-001", texts, context, set(texts), support_cache={})
+
+    assert chains
+    assert chains[0][0] == request_caller
+    assert runtime_client in chains[0]
+    assert all(url_fixture not in chain for chain in chains[:1])
+
+
+@pytest.mark.parametrize("mutation", [
+    "type-only-client",
+    "unconsumed-client",
+    "separate-assertion",
+    "shadowed-client-parameter",
+    "shadowed-request-parameter",
+    "conditional-client",
+    "comment-and-template-only",
+    "negative-assertion",
+])
+def test_network_request_signal_rejects_disconnected_or_ambiguous_shapes(
+        mutation):
+    from ptest import review_evidence as RE
+    from ptest.checklist import CATALOG
+
+    source = (
+        "import { Service } from '../network/service';\n"
+        "it.each(['pointer', 'keyboard'] as const)(\n"
+        "  'uses an injected request', async (inputMode) => {\n"
+        "  const request = vi.fn().mockResolvedValue({ status: 201 });\n"
+        "  const service = new Service({ transport: { request } });\n"
+        "  if (inputMode === 'pointer') events.observe();\n"
+        "  const model = makeModel();\n"
+        "  const { store } = makeStore({\n"
+        "    createDraft: service.createDraft.bind(service),\n"
+        "  }, model);\n"
+        "  renderPanel(store);\n"
+        "  expect(request).not.toHaveBeenCalled();\n"
+        "  await advanceAutosave(store);\n"
+        "  expect(request).toHaveBeenCalledExactlyOnceWith(\n"
+        "    expect.objectContaining({ method: 'POST', "
+        "path: `/api/drafts/${id}` }));\n"
+        "});\n")
+    original_source = source
+    if mutation == "type-only-client":
+        source = source.replace(
+            "import { Service }", "import type { Service }")
+    elif mutation == "unconsumed-client":
+        source = source.replace(
+            "  const { store } = makeStore({\n"
+            "    createDraft: service.createDraft.bind(service),\n"
+            "  }, model);\n"
+            "  renderPanel(store);\n"
+            "  expect(request).not.toHaveBeenCalled();\n"
+            "  await advanceAutosave(store);\n", "")
+        assert source != original_source and "makeStore" not in source
+    elif mutation == "separate-assertion":
+        source = source.replace(
+            "  expect(request).toHaveBeenCalledExactlyOnceWith(\n"
+            "    expect.objectContaining({ method: 'POST', "
+            "path: `/api/drafts/${id}` }));\n", "")
+        source += (
+            "it('asserts a neighboring request', () => {\n"
+            "  expect(request).toHaveBeenCalledExactlyOnceWith(\n"
+            "    expect.objectContaining({ method: 'POST', path: '/draft' }));\n"
+            "});\n")
+    elif mutation == "shadowed-client-parameter":
+        source = source.replace(
+            "async (inputMode) => {", "async (Service, inputMode) => {")
+    elif mutation == "shadowed-request-parameter":
+        source = source.replace(
+            "async (inputMode) => {", "async (request, inputMode) => {")
+        source = source.replace(
+            "  const request = vi.fn().mockResolvedValue({ status: 201 });\n", "")
+    elif mutation == "conditional-client":
+        source = source.replace(
+            "  const request = vi.fn().mockResolvedValue({ status: 201 });\n"
+            "  const service = new Service({ transport: { request } });\n",
+            "  if (featureEnabled) {\n"
+            "    const request = vi.fn().mockResolvedValue({ status: 201 });\n"
+            "    const service = new Service({ transport: { request } });\n"
+            "  }\n")
+    elif mutation == "comment-and-template-only":
+        source = (
+            "import { Service } from '../network/service';\n"
+            "it('documents the request', () => {\n"
+            "  // new Service({ transport: { request } });\n"
+            "  const example = `makeStore({ createDraft: "
+            "service.createDraft.bind(service) }); ` + "
+            "`expect(request).toHaveBeenCalledExactlyOnceWith({ "
+            "method: 'POST', path: '/draft' })`;\n"
+            "  expect(example).toContain('POST');\n"
+            "});\n")
+    elif mutation == "negative-assertion":
+        source = source.replace(
+            "expect(request).toHaveBeenCalledExactlyOnceWith(",
+            "expect(request).not.toHaveBeenCalledExactlyOnceWith(")
+
+    entry = next(item for item in CATALOG if item.id == "NETWORK-001")
+    assert not RE._js_network_injected_request_owner(
+        "web/src/__tests__/request.test.ts", source, entry, "test", {})
+
+
+def test_network_request_signal_accepts_explicit_transport_request_alias():
+    from ptest import review_evidence as RE
+    from ptest.checklist import CATALOG
+
+    source = (
+        "import { Service } from '../network/service';\n"
+        "it.each(['pointer', 'keyboard'] as const)(\n"
+        "  'uses an aliased injected request', async (inputMode) => {\n"
+        "  const fakeRequest = vi.fn().mockResolvedValue({ status: 201 });\n"
+        "  const service = new Service({ transport: { request: fakeRequest } });\n"
+        "  const { store } = makeStore({\n"
+        "    createDraft: service.createDraft.bind(service),\n"
+        "  }, makeModel());\n"
+        "  renderPanel(store);\n"
+        "  await advanceAutosave(store);\n"
+        "  expect(fakeRequest).toHaveBeenCalledExactlyOnceWith(\n"
+        "    expect.objectContaining({ method: 'POST', "
+        "path: `/api/drafts/${id}` }));\n"
+        "});\n")
+    entry = next(item for item in CATALOG if item.id == "NETWORK-001")
+    assert RE._js_network_injected_request_owner(
+        "web/src/__tests__/request.test.ts", source, entry, "test", {})

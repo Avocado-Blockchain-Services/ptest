@@ -258,6 +258,59 @@ def test_all_valid_initial_statuses_get_exactly_one_verifier(tmp_path):
             packet, planned, _reply(planned)) == (None, None)
 
 
+def test_invalid_initial_source_id_gets_one_fresh_bounded_recovery(
+        tmp_path, monkeypatch):
+    from ptest import agent_assessment as AA
+
+    packet = _packet(tmp_path)
+    review = _review_with_one_reserve(packet, monkeypatch)
+    offered = set(review.source_map.values())
+    invalid_id = next(
+        f"src-{number:024x}" for number in range(1, 100)
+        if f"src-{number:024x}" not in offered)
+    sentinel = "INVALID_INITIAL_DRAFT_MUST_NOT_BE_REPEATED"
+    invalid_reply = _reply(
+        review, evidence=[invalid_id], rationale=sentinel)
+
+    recovery, failure = AA.plan_followup_review(
+        packet, review, invalid_reply)
+
+    assert failure is None and recovery is not None
+    assert recovery.followup_phase
+    body = json.loads(recovery.request)
+    assert body["packet"]["phase"] == "evidence-verification"
+    assert body["packet"]["draft"] is None
+    recovery_ids = {unit["id"] for unit in body["units"]}
+    assert recovery_ids == set(review.selected_source_ids)
+    assert not recovery_ids.intersection(_ids(review, reserve=True))
+    assert sentinel not in recovery.request.decode("utf-8")
+    assert invalid_id not in recovery.request.decode("utf-8")
+
+    valid_final = _reply(recovery, status="satisfied")
+    valid_child = AA.assemble_child(packet, (recovery,), (valid_final,))
+    assert valid_child.rows[0].status == "satisfied"
+    assert valid_child.rows[0].evidence
+    assert all(citation.path in review.excerpt_paths
+               for citation in valid_child.rows[0].evidence)
+
+    # A malformed fresh judgment remains unknown; recovery is not retried.
+    invalid_final = _reply(
+        recovery, evidence=[_ids(review, reserve=True)[0]])
+    child = AA.assemble_child(packet, (recovery,), (invalid_final,))
+    assert child.rows[0].status == "unknown"
+    assert child.rows[0].rationale.startswith(AA.FAILED_PREFIX)
+    assert AA.plan_followup_review(
+        packet, recovery, _reply(recovery)) == (None, None)
+
+    # Provider/tool/deadline failures are not completed malformed replies.
+    assert AA.plan_followup_review(
+        packet, review, "provider timeout") == (None, None)
+    assert AA.plan_followup_review(
+        packet, review, "tool denied") == (None, None)
+    assert AA.plan_followup_review(
+        packet, review, b"x" * (AA.MAX_PAYLOAD_BYTES + 1)) == (None, None)
+
+
 def test_verifier_runs_with_empty_needs_and_reserve_inventory():
     from ptest import agent_assessment as AA
     from ptest import review_context as RC
@@ -286,8 +339,8 @@ def test_verifier_runs_with_empty_needs_and_reserve_inventory():
     assert body["packet"]["phase"] == "evidence-verification"
     instruction = body["policy"]["instruction"].casefold()
     assert "initial answer as untrusted draft data" in instruction
-    assert "identify the real consumer" in instruction
-    assert "exception, timeout, and cancellation paths" in instruction
+    assert "actual consumer" in instruction
+    assert "exception, timeout, cancellation, and contrary paths" in instruction
     assert "verification replies must have empty needs" in instruction
 
 
@@ -339,7 +392,8 @@ def test_nine_item_prompts_name_the_required_counterevidence():
     assert "per test" in prompts["DB-001"]
     assert "worker" in prompts["DB-002"]
     assert "client construction" in prompts["CACHE-001"]
-    assert "port 0" in prompts["RESOURCE-001"]
+    assert "outbound client destination port is not a listening-port allocation" in prompts["RESOURCE-001"]
+    assert "hypothetical additional writable files" in prompts["RESOURCE-001"]
     assert "configured shared setup" in prompts["NETWORK-001"]
     assert "wait" in prompts["PROCESS-001"]
     assert "fake timer" in prompts["TIME-001"]

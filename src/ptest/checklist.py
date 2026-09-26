@@ -14,7 +14,7 @@ deterministic ``skip`` rule (``no-database`` | ``no-cache`` | None).
 from __future__ import annotations
 
 import importlib.resources
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 # NOTE: ptest.contracts derives its checklist constants from CATALOG below,
 # so this module must not import contracts at top level (import cycle).
@@ -36,20 +36,6 @@ TEST_FILE = r"(?i)(?:^|/)test_[^/]*\.py$|[^/]*_test\.py$|\.test\.|\.spec\."
 SRC_DIR = r"(?:^|/)src(?:/|$)"
 _CONFTEST = r"(?:^|/)conftest\.py$"
 
-# Evidence standard shared by every item prompt: judge a cited, representative
-# reachable mechanism within the supplied scope; never imply suite-wide proof.
-_PROMPT_STANDARD = (
-    " Return gap only with a cited concrete violation; return satisfied "
-    "only when cited evidence shows a mechanism sufficient for the "
-    "representative, reachable path in the assessed scope; otherwise return "
-                "unknown with one sentence naming the missing evidence, such as an "
-    "untraced caller, consumer, or cleanup path. Use 'not shown in the supplied units' for a gap in "
-    "evidence; do not say it cannot be verified. "
-    "Check admitted shared setup and counterevidence before a gap. Qualify "
-    "claims to the assessed evidence scope; missing or incomplete setup "
-    "cannot establish suite-wide satisfaction or non-applicability. "
-    "Absence of code is unknown, never a guess."
-)
 _MANIFEST = (r"(?i)(?:^|/)(?:pyproject\.toml|package\.json|requirements"
              r"(?:[^/]*)?\.txt|uv\.lock|poetry\.lock|pdm\.lock|Cargo\.toml"
              r"|go\.mod|setup\.py|setup\.cfg|pytest\.ini|tox\.ini)$")
@@ -88,6 +74,10 @@ CATALOG: tuple[ChecklistEntry, ...] = (
                 "caller and cite both the creation and caller assertions. "
                 "A factory name or definition alone proves nothing; check "
                 "whether callers reuse mutable records or weaken assertions. "
+                "Read-only shared identity is not a violation by itself; "
+                "require a demonstrated mutation leak, unreset mutable owner, "
+                "or weakened assertion. If no decisive consumer is shown, "
+                "name that missing fact instead of inferring one. "
                 "Use N/A only with affirmative evidence that record creation "
                 "cannot apply in the assessed scope."),
         path_patterns=(_CONFTEST,
@@ -228,14 +218,26 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         example="Reuse recipes/files-ports.md.",
         verification="Concurrent scoped runs use distinct paths/ports and preserve a neighbor sentinel.",
         recipe="files-ports",
-        prompt=("Are the representative writable files and listening ports "
-                "shown uniquely owned and released? Trace each shown writable "
-                "path or bind through allocation "
-                "and release. Fixture-provided temporary paths and OS port "
-                "0 are ownership mechanisms; fixed paths/ports need a proven "
-                "owner. Missing setup or cleanup evidence is unknown. Use "
-                "N/A only with affirmative evidence that writable files and "
-                "listening ports cannot apply in the assessed scope."),
+        prompt=("Assess actual writable-file and listening-port operations "
+                "shown on representative reachable paths. Trace allocation, "
+                "exclusive ownership or coordination, and release for those "
+                "operations. Fixture temporary roots, context managers, "
+                "finally blocks, and operating-system release of file handles "
+                "and locks are valid mechanisms. A fixed lock path is not "
+                "automatically a collision when the supplied mechanism "
+                "coordinates exclusive access. An outbound client destination "
+                "port is not a listening-port allocation. If the shown file "
+                "mechanism is sufficient, hypothetical additional writable "
+                "files or absent listening-port operations are not reasons "
+                "for unknown; qualify satisfied to the sampled file paths. "
+                "Database record or schema cleanup is assessed by the "
+                "database items, not by this file/port criterion. Return gap "
+                "for a concrete reachable violation in the shown code; return "
+                "unknown only when a decisive allocation, caller, ownership, "
+                "or release fact for a shown applicable resource is missing. "
+                "Use not-applicable only with affirmative evidence that "
+                "neither resource has a role in the assessed scope. Check "
+                "concrete counterevidence before deciding."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"\bopen\s*\(", r"Path\s*\(",
@@ -287,12 +289,25 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         example="Reuse recipes/processes.md.",
         verification="Cancellation leaves no owned descendant and does not affect a neighbor process.",
         recipe="processes",
-        prompt=("Do the representative test-created child processes stay owned, joined, "
-                "cancelled, and reaped? Trace an actual spawn to wait, cancel, "
-                "and reap paths. Runner/provider worker declarations alone "
-                "do not prove an orphan test process. Missing lifecycle "
-                "evidence is unknown. Use N/A only with affirmative evidence "
-                "that no test-created child process can exist in scope."),
+        prompt=("Do representative test-created child processes stay owned, "
+                "joined, cancelled, and reaped? Trace nested launches as a "
+                "process tree from the test-owned parent. A child's own "
+                "timeout cannot guarantee descendant cleanup after that child "
+                "is terminated by its parent. When complete reachable "
+                "spawn-owner code shows a timeout or exception boundary "
+                "without required cancel or join, that is a concrete gap; "
+                "unknown is for missing decisive owner or caller code. "
+                "Standard subprocess.run waits for and reaps its direct child; "
+                "its timeout kills and waits for that child only, not its "
+                "descendants. "
+                "Inspect all reachable branches independently before "
+                "comparing the untrusted draft. Distinguish a runner deadline "
+                "from cancellation of awaited work or entry into finally; "
+                "do not assume the latter follows from the former. "
+                "Runner or provider worker declarations alone do not prove "
+                "an orphan test process. Use not-applicable only with "
+                "affirmative evidence that no test-created child process can "
+                "exist in scope."),
         path_patterns=(_CONFTEST, TEST_DIR, TEST_FILE, SRC_DIR,
                        _PTEST_TOML),
         text_patterns=(r"subprocess|asyncio\.create_subprocess|Popen"
@@ -409,15 +424,6 @@ CATALOG: tuple[ChecklistEntry, ...] = (
         scanner_codes=(),
         skip=None,
     ),
-)
-
-# Every item prompt carries the same evidence standard. Applied here (not
-# repeated in each literal) so no item can miss it: gap needs a cited
-# concrete violation, satisfied needs a sufficient cited mechanism in scope,
-# and anything less is unknown naming the missing evidence.
-CATALOG = tuple(
-    replace(entry, prompt=entry.prompt + _PROMPT_STANDARD)
-    for entry in CATALOG
 )
 
 #: Parallel-safety items gating the PARALLEL-001 enabling suggestion: the
