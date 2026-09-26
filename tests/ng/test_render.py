@@ -185,7 +185,7 @@ def test_agent_assessment_golden_o4_shape_at_width_90():
         "Next: ptest doctor --fix\n"
         "\n"
         "Review scope: cited reachable mechanisms only; omitted decisive "
-        "callers remain unknown. Report: recommendations.md (created) — "
+        "callers remain unknown.\n  Report: recommendations.md (created) — "
         "citations, fixes and verification steps.\n"
     )
     assert "Answered by ptest" not in text
