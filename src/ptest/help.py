@@ -271,7 +271,7 @@ Syntax (ptest options precede scoped/native arguments):
   ptest [--workers 1..64] [-v | --verbose] [-q | --quiet] [<scoped paths>...]
   ptest --changed | --full [--workers 1..64] [-v] [-q]
   ptest [--queue-timeout 1..86400 (default 1800)] [--base X]
-        [--timeout 1..86400 (default: from history, else 600)]
+        [--timeout 1..86400 (default: history, else test-count estimate, else 600)]
         [--no-setup] [--shadow] [--result-json PATH] [-- SCOPES...]
   e.g. ptest --workers 2 tests/test_example.py  # only with verified isolation and adapter support
 

@@ -14,6 +14,7 @@ import contextvars
 import hashlib
 import json
 import os
+import re
 import select
 import secrets
 import signal
@@ -45,18 +46,95 @@ _POLL_S = 0.05
 # Direct or test callers that never resolve see today's 600 s default.
 _COMPOUND_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
     "ptest_compound_timeout_s", default=C.DEFAULT_COMPOUND_TIMEOUT_S)
+_COMPOUND_TIMEOUT_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ptest_compound_timeout_source", default="default")
+
+_ESTIMATE_MAX_FILES = 20000
+_ESTIMATE_MAX_FILE_BYTES = 1048576
+_VITEST_CASE_RE = re.compile(r"(?:^|[^\w$])(?:it|test)\s*\(")
+
+
+def estimate_test_count(config: C.Config, root: Path,
+                        *, native_count: int | None = None) -> int | None:
+    """Up-front test-count estimate for runs with no comparable history.
+
+    Prefers the owned native collection count (a baseline inventory the
+    bridge already authenticated, passed as ``native_count``).  The
+    bridge deliberately performs no collection before launch, so otherwise
+    make a cheap static count of test functions in the configured test
+    roots: ``def test_`` / ``async def test_`` lines for pytest, ``it(`` /
+    ``test(`` calls for vitest.  Returns None when the runner kind has no
+    countable test roots.
+    """
+    if native_count is not None:
+        return max(0, int(native_count))
+    kind = config.runner.kind
+    if kind is C.RunnerKind.PYTEST:
+        suffixes = (".py",)
+    elif kind is C.RunnerKind.VITEST:
+        suffixes = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+                    ".mts", ".cts")
+    else:
+        return None
+    roots = tuple(config.runner.test_roots or ())
+    if not roots:
+        return None
+    total = 0
+    scanned = False
+    seen = 0
+    for name in roots:
+        candidate = Path(name)
+        base = candidate if candidate.is_absolute() else root / candidate
+        try:
+            if not base.is_dir():
+                continue
+        except OSError:
+            continue
+        scanned = True
+        for current, dirs, files in os.walk(base, followlinks=False):
+            dirs[:] = [entry for entry in dirs if not entry.startswith(".")]
+            for filename in files:
+                if seen >= _ESTIMATE_MAX_FILES:
+                    break
+                if not filename.endswith(suffixes):
+                    continue
+                path = Path(current) / filename
+                try:
+                    if not path.is_file() or path.stat().st_size > _ESTIMATE_MAX_FILE_BYTES:
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                seen += 1
+                if kind is C.RunnerKind.PYTEST:
+                    for line in text.splitlines():
+                        stripped = line.lstrip()
+                        if (stripped.startswith("def test_")
+                                or stripped.startswith("async def test_")):
+                            total += 1
+                else:
+                    total += len(_VITEST_CASE_RE.findall(text))
+            if seen >= _ESTIMATE_MAX_FILES:
+                break
+        if seen >= _ESTIMATE_MAX_FILES:
+            break
+    return total if scanned else None
 
 
 def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
-                             evidence: tuple[float | None, int | None]
+                             evidence: tuple[float | None, int | None],
+                             estimate: int | None = None,
                              ) -> tuple[float, str]:
     """Resolve the compound execution deadline and name its source.
 
     Precedence: explicit CLI ``--timeout`` ("cli"), then ``full_timeout``
     for FULL-mode runs or ``timeout`` ("config"), then the dynamic deadline
-    from comparable history ("history"), else the 600 s default ("default").
-    The dynamic deadline is max(last duration x safety factor, test count x
-    per-test budget), clamped to [MIN, MAX_DYNAMIC].
+    from comparable history ("history"), then the up-front test-count
+    estimate for runs with no history ("estimate"), else the 600 s default
+    ("default").  The dynamic deadline is max(last duration x safety
+    factor, test count x per-test budget), clamped to [MIN, MAX_DYNAMIC];
+    the estimate is count x per-test budget with a 600 s floor, clamped to
+    MAX_DYNAMIC.
     """
     if request.timeout_s is not None:
         return (float(request.timeout_s), "cli")
@@ -70,12 +148,39 @@ def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
         signals.append(execution_s * C.COMPOUND_TIMEOUT_SAFETY_FACTOR)
     if total_tests is not None:
         signals.append(total_tests * C.COMPOUND_TIMEOUT_PER_TEST_S)
-    if not signals:
-        return (C.DEFAULT_COMPOUND_TIMEOUT_S, "default")
-    limited = max(signals)
-    limited = min(max(limited, C.MIN_COMPOUND_TIMEOUT_S),
-                  C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
-    return (limited, "history")
+    if signals:
+        limited = max(signals)
+        limited = min(max(limited, C.MIN_COMPOUND_TIMEOUT_S),
+                      C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
+        return (limited, "history")
+    if estimate is not None:
+        estimated = max(float(estimate) * C.COMPOUND_TIMEOUT_PER_TEST_S,
+                        C.DEFAULT_COMPOUND_TIMEOUT_S)
+        return (min(estimated, C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S), "estimate")
+    return (C.DEFAULT_COMPOUND_TIMEOUT_S, "default")
+
+
+def _no_history_estimate(config: C.Config, checkout: C.CheckoutIdentity,
+                         request: C.RunRequest, history_view: C.HistoryView,
+                         evidence: tuple[float | None, int | None]) -> int | None:
+    """Up-front test-count estimate, or None when it cannot apply.
+
+    Only computed when no comparable history exists and no explicit CLI or
+    config timeout short-circuits the resolve, so the static scan never
+    costs IO on a run that would ignore it.  The native count is the owned
+    baseline inventory when one exists.
+    """
+    if evidence != (None, None) or request.timeout_s is not None:
+        return None
+    runner = config.runner
+    if runner.timeout_s is not None:
+        return None
+    if request.mode is C.Mode.FULL and runner.full_timeout_s is not None:
+        return None
+    baseline = history_view.baseline
+    return estimate_test_count(
+        config, checkout.root,
+        native_count=None if baseline is None else len(baseline.inventory.tests))
 # The parent-to-guard boundary strips inherited PTEST_* control variables so
 # orchestrator state can never leak into the guard. Keep the configured state
 # directory so the guard validates the same domain, and the opt-in doctor
@@ -1124,6 +1229,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         setup_timeout_s=C.DEFAULT_SETUP_TIMEOUT_S,
         attempt_timeout_s=None,
         compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
+        compound_timeout_source=_COMPOUND_TIMEOUT_SOURCE.get(),
     )
     guard_peer, controller = socket.socketpair()
     manifest_read, manifest_write = os.pipe()
@@ -1611,10 +1717,18 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
         # The shadow compound always runs the full-gate attempt (a002) next
         # to the selected attempt (a001), so its deadline must come from
         # full-family evidence even though the request mode is AUTOMATIC.
-        limit, _ = resolve_compound_timeout(
-            config.runner, request,
-            history.comparable_run_evidence(domain, checkout, full=True))
+        shadow_evidence = history.comparable_run_evidence(
+            domain, checkout, full=True)
+        limit, source = resolve_compound_timeout(
+            config.runner, request, shadow_evidence,
+            _no_history_estimate(config, checkout, request,
+                                 history_view, shadow_evidence))
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v compound deadline: {limit:.0f}s ({source})",
+                quiet=request.quiet)
         token = _COMPOUND_TIMEOUT_S.set(limit)
+        source_token = _COMPOUND_TIMEOUT_SOURCE.set(source)
         try:
             raw_guard, frames, execution_s = _run_guard(
                 domain, grant, tuple(prepared_runs), signal_state,
@@ -1622,6 +1736,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             )
         finally:
             _COMPOUND_TIMEOUT_S.reset(token)
+            _COMPOUND_TIMEOUT_SOURCE.reset(source_token)
         observed = getattr(frames, "facts_by_attempt", {})
         raw_codes = {
             attempt_id: facts["raw_exit_code"]
@@ -2543,18 +2658,26 @@ def execute(domain: C.DomainPaths, config: C.Config,
             # single-file row must never set the deadline for that run.
             # FULL requests always plan execution "full", so the plan check
             # covers both cases.
-            limit, _ = resolve_compound_timeout(
-                effective.runner, request,
-                history.comparable_run_evidence(
-                    domain, checkout,
-                    full=(plan.execution == "full")))
+            run_evidence = history.comparable_run_evidence(
+                domain, checkout,
+                full=(plan.execution == "full"))
+            limit, source = resolve_compound_timeout(
+                effective.runner, request, run_evidence,
+                _no_history_estimate(effective, checkout, request,
+                                     history_view, run_evidence))
+            if request.verbose:
+                progress.emit(
+                    f"ptest: -v compound deadline: {limit:.0f}s ({source})",
+                    quiet=request.quiet)
             token = _COMPOUND_TIMEOUT_S.set(limit)
+            source_token = _COMPOUND_TIMEOUT_SOURCE.set(source)
             try:
                 raw_guard, frames, execution_s = _run_guard(
                     domain, grant, prepared, signals, decide_attempt,
                     setup_prepared)
             finally:
                 _COMPOUND_TIMEOUT_S.reset(token)
+                _COMPOUND_TIMEOUT_SOURCE.reset(source_token)
         except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
@@ -2701,6 +2824,29 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 except C.Problem:
                     result = _incomplete(result, _reason("ownership-uncertain", "pending grant remains unconfirmed"))
             return _finish(_export(domain, checkout, request, result))
+        if (not advanced and guard_problem is not None
+                and guard_problem.code == "execution-timeout"
+                and guard_problem.message.startswith(
+                    "compound execution deadline expired")):
+            # A compound-deadline kill on the basic path still leaves
+            # history evidence: the elapsed duration grows the next dynamic
+            # deadline instead of repeating the same bound.  A per-attempt
+            # kill is not compound evidence and is never recorded here.
+            # Best-effort: a failed evidence write never fails the run.
+            try:
+                timed = replace(
+                    result, sequence=history.next_sequence(domain, checkout),
+                    policy_digest=_policy_digest(config))
+                timed_publication = history.publish_outcome(
+                    domain, checkout, timed, None)
+                result = replace(
+                    result,
+                    baseline_published=timed_publication.baseline_published,
+                    reasons=_unique_reasons(
+                        result.reasons + timed_publication.reasons),
+                )
+            except (C.Problem, OSError):
+                pass
         # Only authenticated DRAINING plus guard reap permits this proof. Take
         # the post-run snapshot while the lease is held, before finalization.
         input_after = _capture_source(

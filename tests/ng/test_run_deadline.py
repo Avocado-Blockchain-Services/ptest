@@ -112,7 +112,7 @@ def test_deadline_constants():
     assert C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S == 21600.0
     assert C.MAX_COMPOUND_TIMEOUT_S == 86400.0
     assert C.COMPOUND_TIMEOUT_SAFETY_FACTOR == 3.0
-    assert C.COMPOUND_TIMEOUT_PER_TEST_S == 0.25
+    assert C.COMPOUND_TIMEOUT_PER_TEST_S == 0.50
 
 
 def test_runner_timeout_fields_default_none_and_accept_bounds():
@@ -185,15 +185,15 @@ def test_resolve_runner_timeout_beats_history():
 
 def test_resolve_history_combines_duration_and_count():
     runner = _minimal_runner()
-    # max(200*3, 100*0.25) = 600 -> history
+    # max(200*3, 100*0.50) = 600 -> history
     assert operations.resolve_compound_timeout(
         runner, _scoped_request(), (200.0, 100)) == (600.0, "history")
-    # count dominates: max(10*3, 4000*0.25) = 1000 -> history
+    # count dominates: max(10*3, 4000*0.50) = 2000 -> history
     assert operations.resolve_compound_timeout(
-        runner, _scoped_request(), (10.0, 4000)) == (1000.0, "history")
+        runner, _scoped_request(), (10.0, 4000)) == (2000.0, "history")
     # a 60k-test project escapes the old 600s cap
     assert operations.resolve_compound_timeout(
-        runner, _scoped_request(), (100.0, 60000)) == (15000.0, "history")
+        runner, _scoped_request(), (100.0, 60000)) == (21600.0, "history")
 
 
 def test_resolve_history_without_count_uses_duration_only():
@@ -214,6 +214,176 @@ def test_resolve_empty_history_falls_back_to_default():
     runner = _minimal_runner()
     assert operations.resolve_compound_timeout(
         runner, _scoped_request(), (None, None)) == (600.0, "default")
+
+
+def test_resolve_estimate_without_history():
+    runner = _minimal_runner()
+    # A no-history 60k-test first run: 60000*0.50 = 30000 -> clamped to MAX_DYNAMIC.
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 60000) == (21600.0, "estimate")
+    # A tiny first run keeps the 600 s floor.
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 100) == (600.0, "estimate")
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 0) == (600.0, "estimate")
+    # A mid-size estimate scales with the per-test budget.
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 4000) == (2000.0, "estimate")
+
+
+def test_resolve_history_beats_estimate():
+    runner = _minimal_runner()
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (200.0, 100), 60000) == (600.0, "history")
+
+
+def test_resolve_cli_and_config_beat_estimate():
+    runner = _minimal_runner(timeout_s=200, full_timeout_s=300)
+    request = C.RunRequest(mode=C.Mode.FULL, timeout_s=100)
+    assert operations.resolve_compound_timeout(
+        runner, request, (None, None), 60000) == (100.0, "cli")
+    assert operations.resolve_compound_timeout(
+        runner, C.RunRequest(mode=C.Mode.FULL), (None, None), 60000) == (300.0, "config")
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 60000) == (200.0, "config")
+
+
+def _pytest_config(root: Path) -> C.Config:
+    return C.Config(
+        runner=C.RunnerConfig(
+            kind=C.RunnerKind.PYTEST, launcher=("pytest",), args=(),
+            full_args=(), test_roots=("tests",), workers=1,
+            lifecycle="cooperative-process-group"),
+        setup=None,
+        resources=C.ResourceConfig(),
+        selection=C.SelectionPolicy(enabled=False, closed_inputs=False),
+        project_id="ab" * 16,
+    )
+
+
+def test_estimate_counts_pytest_functions(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_a.py").write_text(
+        "def test_one():\n    pass\n\nasync def test_two():\n    pass\n\n"
+        "def helper():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests / "test_b.py").write_text(
+        "class TestGroup:\n    def test_three(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    (tests / "conftest.py").write_text("import pytest\n", encoding="utf-8")
+    assert operations.estimate_test_count(_pytest_config(tmp_path), tmp_path) == 3
+
+
+def test_estimate_prefers_native_count(tmp_path):
+    assert operations.estimate_test_count(
+        _pytest_config(tmp_path), tmp_path, native_count=60000) == 60000
+
+
+def test_estimate_counts_vitest_cases(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "a.test.ts").write_text(
+        "import { it, test, describe } from 'vitest';\n"
+        "it('one', () => {});\n"
+        "test('two', () => {});\n"
+        "describe('group', () => { it('three', () => {}); });\n"
+        "const parts = value.split('y');\n",
+        encoding="utf-8",
+    )
+    config = _pytest_config(tmp_path)
+    config = replace(
+        config, runner=replace(config.runner, kind=C.RunnerKind.VITEST))
+    assert operations.estimate_test_count(config, tmp_path) == 3
+
+
+def test_estimate_returns_none_without_countable_roots(tmp_path):
+    assert operations.estimate_test_count(_minimal_config(), tmp_path) is None
+    # A pytest project whose configured roots are absent has nothing to scan.
+    assert operations.estimate_test_count(_pytest_config(tmp_path), tmp_path) is None
+
+
+def _killed_full_result(checkout, request):
+    plan = C.Plan(mode=C.Mode.FULL, execution="full")
+    command = C.CommandSummary(
+        kind=C.RunnerKind.COMMAND, mode=C.Mode.FULL, argument_count=1)
+    return operations._result(
+        run_id=os.urandom(16).hex(), checkout=checkout, request=request,
+        plan=plan, command=command, status=C.Status.INCOMPLETE,
+        phase="complete", started="2026-09-26T00:00:00+00:00",
+        runner_code=None, exit_code=70, origin="runner", signal_number=None,
+        reasons=(C.Reason(
+            code="execution-timeout",
+            message="compound execution deadline expired after 600s; raise it "
+            "with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml"),),
+        execution_s=600.0)
+
+
+def test_killed_run_evidence_grows_next_deadline(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    runner = _minimal_runner()
+    request = C.RunRequest(mode=C.Mode.FULL)
+    assert history_api.comparable_run_evidence(
+        domain, checkout, full=True) == (None, None)
+    assert operations.resolve_compound_timeout(
+        runner, request, (None, None)) == (600.0, "default")
+    killed = _killed_full_result(checkout, request)
+    killed = replace(
+        killed, sequence=history_api.next_sequence(domain, checkout),
+        policy_digest="ab" * 32)
+    publication = history_api.publish_outcome(domain, checkout, killed, None)
+    assert publication.committed
+    evidence = history_api.comparable_run_evidence(domain, checkout, full=True)
+    assert evidence == (600.0, None)
+    # The recorded 600 s duration triples the next dynamic deadline: never
+    # the same 600 s twice.
+    assert operations.resolve_compound_timeout(
+        runner, request, evidence) == (1800.0, "history")
+
+
+def test_comparable_evidence_ignores_attempt_timeout_kill(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    request = C.RunRequest(mode=C.Mode.FULL)
+    killed = _killed_full_result(checkout, request)
+    killed = replace(
+        killed,
+        reasons=(C.Reason(code="execution-timeout",
+                          message="attempt execution deadline expired"),),
+        timings=replace(killed.timings, execution_s=30.0),
+        sequence=history_api.next_sequence(domain, checkout),
+        policy_digest="ab" * 32)
+    assert history_api.publish_outcome(domain, checkout, killed, None).committed
+    # A per-attempt kill is not compound evidence: it must not shrink the
+    # next deadline below the default.
+    assert history_api.comparable_run_evidence(
+        domain, checkout, full=True) == (None, None)
+
+
+def test_compound_timeout_message_names_estimate_source(case):
+    manifest = _manifest_with_deadline(case, 0.5)
+    assert guard_api._compound_timeout_message(manifest) == EXPECTED_COMPOUND_MESSAGE
+    estimated = replace(_manifest_with_deadline(case, 21600.0),
+                        compound_timeout_source="estimate")
+    message = guard_api._compound_timeout_message(estimated)
+    assert "estimate" in message
+    assert message == (
+        "compound execution deadline expired after 21600s (estimate); raise it "
+        "with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml")
+
+
+def test_manifest_source_round_trip(case):
+    manifest = _manifest_with_deadline(case, 20)
+    assert C.decode_launch_manifest(
+        C.encode_launch_manifest(manifest)).compound_timeout_source is None
+    estimated = replace(manifest, compound_timeout_source="estimate")
+    assert C.decode_launch_manifest(
+        C.encode_launch_manifest(estimated)).compound_timeout_source == "estimate"
+    with pytest.raises(ValueError):
+        replace(manifest, compound_timeout_source="bogus")
 
 
 # --- history.comparable_run_evidence ------------------------------------------
@@ -677,8 +847,8 @@ def test_bare_automatic_full_gate_history_round_trips(case, monkeypatch):
     sources = []
     real_resolve = operations.resolve_compound_timeout
 
-    def spy_resolve(runner, request, evidence):
-        limit, source = real_resolve(runner, request, evidence)
+    def spy_resolve(runner, request, evidence, estimate=None):
+        limit, source = real_resolve(runner, request, evidence, estimate)
         sources.append(source)
         return (limit, source)
 
