@@ -27,10 +27,10 @@ _PROVIDER_SKILLS = {
 }
 SUPPORTED_AGENTS = tuple(_PROVIDER_SKILLS)
 _PROVIDER_DESCRIPTIONS = {
-    "claude": "Coordinate repository testing through ptest from the repository root.",
-    "codex": "Run repository tests through ptest; Codex discovers this skill automatically.",
-    "opencode": "Run repository tests through ptest from the repository root.",
-    "gemini": "Run repository tests through ptest from the repository root.",
+    "claude": "Run, add, change, or verify tests or code in this repo through ptest; pytest, vitest, and npm test intents go through ptest from the repository root.",
+    "codex": "Codex: run, add, change, or verify tests or code in this repo through ptest; pytest, vitest, and npm test intents go through ptest. Discovered automatically.",
+    "opencode": "Use ptest when you run, add, change, or verify tests or code in this repo; pytest, vitest, and npm test intents go through ptest from the repository root.",
+    "gemini": "Run repository tests through ptest whenever you run, add, change, or verify tests or code; pytest, vitest, and npm test intents go through ptest from the repository root.",
 }
 
 
@@ -85,6 +85,18 @@ def _legacy_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+# Descriptions shipped with every skill version before the agent-docs
+# rewrite. Recognition helpers below must keep returning the exact bytes
+# those versions wrote, so they use this pinned table instead of
+# _PROVIDER_DESCRIPTIONS.
+_OLD_PROVIDER_DESCRIPTIONS = {
+    "claude": "Coordinate repository testing through ptest from the repository root.",
+    "codex": "Run repository tests through ptest; Codex discovers this skill automatically.",
+    "opencode": "Run repository tests through ptest from the repository root.",
+    "gemini": "Run repository tests through ptest from the repository root.",
+}
+
+
 def _previous_provider_text(provider: str) -> bytes:
     """Exact base-commit skill bytes, recognized as previous managed content.
 
@@ -92,7 +104,7 @@ def _previous_provider_text(provider: str) -> bytes:
     that is not current still raises ``already-exists`` so user edits are
     never clobbered.
     """
-    description = _PROVIDER_DESCRIPTIONS[provider]
+    description = _OLD_PROVIDER_DESCRIPTIONS[provider]
     return (
         "---\n"
         "name: ptest\n"
@@ -127,7 +139,7 @@ def _pre_gate_provider_text(provider: str) -> bytes:
     template without the merge-gate/graph tail that ``0c2cb7a`` added.
     Recognized as previous managed content, like `_previous_provider_text`.
     """
-    description = _PROVIDER_DESCRIPTIONS[provider]
+    description = _OLD_PROVIDER_DESCRIPTIONS[provider]
     return (
         "---\n"
         "name: ptest\n"
@@ -159,7 +171,7 @@ def _pre_changed_provider_text(provider: str) -> bytes:
     change; recognized as previous managed content so it upgrades in
     place, like `_previous_provider_text`.
     """
-    description = _PROVIDER_DESCRIPTIONS[provider]
+    description = _OLD_PROVIDER_DESCRIPTIONS[provider]
     return (
         "---\n"
         "name: ptest\n"
@@ -174,12 +186,12 @@ def _pre_changed_provider_text(provider: str) -> bytes:
 
 
 def _provider_text(provider: str) -> bytes:
-    """Current generated skill: front matter plus a short guide pointer.
+    """Current generated skill: front matter plus the test loop.
 
-    Shared guidance (merge gate, graph refresh, scopes, the `--full`
-    gate) lives only in `docs/ptest-agent.md`; the skill just points
-    at it so the two can never duplicate or drift. The body stays
-    within four lines and names only the `--changed` default loop.
+    Shared guidance (output meanings, exit codes, scopes, quality
+    rules) lives only in `docs/ptest-agent.md`; the skill names just
+    the loop and the never-rules so the two can never duplicate or
+    drift. The body stays within fifteen lines.
     """
     description = _PROVIDER_DESCRIPTIONS[provider]
     return (
@@ -190,8 +202,9 @@ def _provider_text(provider: str) -> bytes:
         "\n"
         "# ptest skill\n"
         "\n"
-        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
-        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n"
+        "The loop: `ptest` after each edit runs the changed tests; `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate.\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
 
 
@@ -631,6 +644,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "a9d5171f5023ffe732474be096d85e33cf5873f5b99469b61320ea3180f807a3",
     # 42bf3be: guide before the --changed default loop.
     "0e30bbbc2462dbe178c50ab60c219e2bcb071400f80812fcf89cca99294ad0b2",
+    # c183837: guide with the --changed default loop (before the agent-docs rewrite).
+    "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa",
 })
 
 

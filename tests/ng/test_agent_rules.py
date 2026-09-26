@@ -74,8 +74,9 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "ptest --full" in guide
     assert "repository root" in guide
     assert "ptest api/" in guide
-    assert "-n 0" in guide
-    assert "vitest run" in guide
+    assert "--again" in guide
+    assert "joined the running full run" in guide
+    assert "## Exit codes" in guide
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
@@ -158,17 +159,17 @@ def test_repository_guide_states_assessment_only_authority():
 
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    flat = " ".join(guide.split())
     assert "assessment authority only" in guide
     assert "separate user instruction" in guide
     assert FAST_FORWARD_GATE_RULE not in guide
     assert "graphify" not in guide
-    assert "Run `ptest --full` once after the integrated change" in guide
-    assert "one cheap-model call per checklist item that needs one" in flat
-    assert "timing, selection and parallel execution" in flat
-    assert "items skip the model" in flat
-    assert "`ptest doctor --offline` is static" in guide
-    assert len(guide.splitlines()) <= 45
+    assert "ptest --full" in guide
+    assert "--again" in guide
+    for section in ("## The loop", "## Monorepo",
+                    "## Reading ptest output", "## Exit codes",
+                    "## Test-quality rules", "## Reporting"):
+        assert section in guide
+    assert len(guide.splitlines()) <= 100
 
 
 def test_local_repair_guide_has_no_repo_internal_workflow():
@@ -578,7 +579,8 @@ def test_rollback_leaves_same_byte_file_swapped_between_read_and_replace(
 
 
 
-def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path):
+def test_generated_skill_names_the_loop_without_duplicated_guidance(tmp_path):
+    """New skill contract: short, no duplicated tables, must contain the loop."""
     result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
 
     assert result.changed is True
@@ -591,13 +593,41 @@ def test_generated_skill_is_a_short_pointer_without_duplicated_guidance(tmp_path
         head = text.split("---", 2)[1]
         assert "description:" in head
         body = text.split("---", 2)[2].strip("\n").splitlines()
-        assert len(body) <= 4
+        assert len(body) <= 15
+        # The loop: bare ptest, one scoped path, the full gate.
+        assert "`ptest`" in text
+        assert "`ptest <path>`" in text
+        assert "ptest --full" in text
+        # The three never-rules.
+        assert "Never invoke pytest, vitest, or npm test directly" in text
+        assert "Never cd into a child" in text
+        assert "Never rerun `ptest --full` without a change" in text
+        # Shared tables live only in the guide: no markdown tables here.
+        assert not any(line.lstrip().startswith("|") for line in body)
         assert "docs/ptest-agent.md" in text
+        assert "output" in text.lower()
         assert "run tests only through `ptest` from the repository root" in text.lower()
         # Merge/graphify guidance lives only in the guide, never in skills.
         assert "graphify" not in text
         assert "fast-forward" not in text
-        assert "ptest --full" not in text
+
+
+def test_skill_description_fires_on_test_and_code_intents(tmp_path):
+    """Each provider frontmatter must trigger on test/code intents."""
+    result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
+
+    assert result.changed is True
+    for relative in (".claude/skills/ptest/SKILL.md",
+                     ".agents/skills/ptest/SKILL.md",
+                     ".opencode/skills/ptest/SKILL.md",
+                     ".gemini/skills/ptest/SKILL.md"):
+        text = (tmp_path / relative).read_text(encoding="utf-8")
+        head = text.split("---", 2)[1]
+        description = next(line for line in head.splitlines()
+                           if line.startswith("description:")).lower()
+        for token in ("run", "add", "change", "verif", "test",
+                      "code", "pytest", "vitest", "npm test"):
+            assert token in description, (relative, token)
 
 
 def test_previous_managed_skill_upgrades_in_place(tmp_path):
@@ -704,6 +734,7 @@ def test_previous_hashes_cover_main_pre_change_guide():
 
     assert "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6" in rules_module._PREVIOUS_GUIDE_SHA256S
     assert "72f2a5bbfcafc9b74cc2d1a7e621fe6784f67f701315d0503eef06e866989e68" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa" in rules_module._PREVIOUS_GUIDE_SHA256S
     current = rules_module._guide()
     assert hashlib.sha256(current).hexdigest() not in rules_module._PREVIOUS_GUIDE_SHA256S
     assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"

@@ -38,35 +38,42 @@ def test_agent_guide_describes_doctor_v2_first():
     assert "--offline" in first and "static" in first
 
 
-def test_repository_guide_is_short_accurate_and_owns_shared_guidance():
+def test_repository_guide_is_short_structured_and_links_internals_out():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
-    assert len(guide.splitlines()) <= 45
+    assert len(guide.splitlines()) <= 100
+    for section in ("## The loop", "## Monorepo",
+                    "## Reading ptest output", "## Exit codes",
+                    "## Test-quality rules", "## Reporting"):
+        assert section in guide
     assert "repository root" in guide
     assert "ptest api/" in guide
-    assert "Run `ptest --full` once after the integrated change" in guide
-    assert "-n 0" in guide
-    # Parallel-tier accuracy: qualified projects run workers in parallel;
-    # init writes `-n 0` only into new configs for static fallbacks, never
-    # rewrites an existing config, and `-n 0` is an opt-out, not the only
-    # allowed xdist control.
-    assert "run xdist in parallel under ptest" in guide
-    assert "run serially with ptest's" in guide
-    assert "writes `-n 0` into a new config only for static" in guide
-    assert "never rewrites an existing config" in guide
-    assert "only allowed xdist control" not in guide
-    assert "Keep `-n N`, `--dist`, `--tx` out" in guide
-    assert "opts out of the parallel tier" in guide
-    assert "which ptest adds when the project enables xdist" not in guide
-    assert "vitest run" in guide
-    assert ("one cheap-model call per checklist item that needs one"
-            in " ".join(guide.split()))
+    assert "ptest --full" in guide
+    assert "--again" in guide
+    assert "joined the running full run" in guide
+    # Output table: every documented line is present.
+    for row in ("changed: N of M test files", "changed → full suite:",
+                "web · no changes", "waiting for N slots",
+                "setup failed", "passed · N tests",
+                "baseline recorded", "no baseline recorded:",
+                "already verified", "incomplete (exit 70)",
+                "protocol-mismatch", "ownership-uncertain",
+                "execution-timeout", "queue-timeout",
+                "unsafe-path", "unknown command"):
+        assert row in guide, row
+    # Exit-code table: every documented code is present.
+    for code in ("| 0 |", "| 1 |", "| 2 |", "| 70 |", "| 75 |",
+                 "| 124 |", "| 130 |"):
+        assert code in guide, code
     assert "one database per worker per run" in guide
     assert "assessment authority only" in guide
     # ptest-repo-internal workflow (merge gate, graph refresh) must never
     # ship to other people's repositories.
     assert "graphify" not in guide
     assert "fast-forward" not in guide
+    # Runner and doctor internals live in README/help, not the agent guide.
+    assert "xdist" not in guide
+    assert "cheap-model" not in guide
     # Tightened test-design guidance: fixture scope, ownership, recipes.
     assert "factories/builders for test records" in guide
     assert "function by default" in guide
