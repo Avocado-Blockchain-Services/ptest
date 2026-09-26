@@ -15,7 +15,7 @@ Getting started:
 
 Running tests from the repository root:
   ptest tests/test_example.py     # scoped: smallest relevant scope
-  ptest --changed                 # default loop: only what the change touches
+  ptest                           # default loop: only what the change touches (= --changed)
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
