@@ -299,7 +299,7 @@ def test_review_disclosure_is_at_most_three_lines_before_prompt(
     lines = [line for line in head.splitlines() if line.strip()]
     assert len(lines) <= 3
     assert lines[0].startswith("Model review disclosure: claude ")
-    assert "9 initial item calls" in lines[0]
+    assert "9 initial + up to 9 verification calls (18 maximum)" in lines[0]
     assert "4 at a time" in lines[0]
     assert "model haiku" in lines[0]
     assert "--offline" in "\n".join(lines[1:])
@@ -320,7 +320,7 @@ def test_review_disclosure_unknown_model_and_missing_count_shapes(
         model=None) is True
     err = capsys.readouterr().err
     assert err.splitlines()[0].startswith("Model review disclosure: codex ")
-    assert "model chosen from the provider list after consent" in err
+    assert "requested model is unavailable" in err
     assert cli_module._render_review_disclosure(
         adapter, resolution, ask=False, calls=None) is True
     short = capsys.readouterr().err.splitlines()[0]
@@ -740,10 +740,10 @@ def test_doctor_persea_shaped_monorepo(tmp_path, monkeypatch, capsys,
     # provider.
     assert set(counts) <= catalog_ids - {
         "TIMING-001", "SELECT-001", "PARALLEL-001"}
-    # Both children review all nine non-deterministic items. At most one
-    # call per child; absence of a pure-library hit is no longer a skip.
-    assert sum(counts.values()) == 18
-    assert all(count <= 2 for count in counts.values())
+    # Both children review all nine non-deterministic items and receive one
+    # bounded verification for each valid initial reply.
+    assert sum(counts.values()) == 36
+    assert all(count <= 4 for count in counts.values())
 
     disclosure_head, _, _ = human.err.partition("Run this review once?")
     assert ("Model review disclosure: claude " in disclosure_head)

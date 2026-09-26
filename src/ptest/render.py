@@ -1134,6 +1134,7 @@ def render_agent_assessment(children, workspace, *, report_path: str,
                + f"Report: {terminal_text(report_path)} "
                f"({terminal_text(publication_status)}) {dash} citations, "
                f"fixes and verification steps.")
+    trailer = "\n".join(wrap_words(trailer, resolved, indent="", hang="  "))
 
     # Header, facts, next and trailer are mandatory; tables keep every
     # row but share the byte bound whole: the facts lines above already
