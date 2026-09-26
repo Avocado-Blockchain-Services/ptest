@@ -1080,6 +1080,7 @@ class RunRequest:
     display_argv: tuple[str, ...] | None = None
     setup_only: bool = False
     timeout_s: float | None = None
+    again: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1108,6 +1109,7 @@ class RunRequest:
         if self.timeout_s is not None:
             object.__setattr__(self, "timeout_s", _check_float(
                 "request.timeout_s", self.timeout_s, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
+        object.__setattr__(self, "again", _check_bool("request.again", self.again))
 
 
 @dataclass(frozen=True, kw_only=True)

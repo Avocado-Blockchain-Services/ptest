@@ -37,7 +37,7 @@ _INSPECTION = frozenset({
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
-_EXECUTION_BOOL = frozenset({"--changed", "--full", "--no-setup", "--shadow",
+_EXECUTION_BOOL = frozenset({"--changed", "--full", "--again", "--no-setup", "--shadow",
                              "-v", "--verbose", "-q", "--quiet"})
 _REVIEW_TOTAL_TIMEOUT_S = 1800
 _REVIEW_CONFIG_MAX_BYTES = 256 * 1024
@@ -66,6 +66,7 @@ class ParsedArgs:
     result_path: str | None = None
     changed: bool = False
     full: bool = False
+    again: bool = False
     json: bool = False
     reveal_command: bool = False
     dry_run: bool = False
@@ -184,6 +185,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
     mode = C.Mode.AUTOMATIC
     changed = command == "changed"
     full = False
+    again = False
     workers = None
     base = None
     queue_timeout = C.DEFAULT_QUEUE_TIMEOUT_S
@@ -212,6 +214,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
                 if changed or full:
                     raise _problem("invalid-config", "execution modes cannot be combined")
                 full = True
+            elif token == "--again":
+                if again:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                again = True
             elif token == "--no-setup":
                 no_setup = True
             elif token in ("-v", "--verbose"):
@@ -241,6 +247,8 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
             if result_path is not None:
                 raise _problem("invalid-config", "option cannot be repeated")
             result_path = value
+    if again and not full:
+        raise _problem("invalid-config", "--again requires --full")
     if full:
         if base is not None:
             raise _problem("invalid-config", "--base is unavailable with --full")
@@ -260,7 +268,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
         base=base, workers=workers, queue_timeout_s=queue_timeout,
         timeout_s=timeout,
         no_setup=no_setup, shadow=shadow, result_path=result_path,
-        changed=changed, full=full, verbose=verbose, quiet=quiet,
+        changed=changed, full=full, again=again, verbose=verbose, quiet=quiet,
     )
 
 
@@ -2863,7 +2871,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                      no_setup=parsed.no_setup,
                                      result_path=parsed.result_path,
                                      fixture_domain=parsed.fixture_domain,
-                                     verbose=parsed.verbose, quiet=parsed.quiet),
+                                     verbose=parsed.verbose, quiet=parsed.quiet,
+                                     again=parsed.again),
                     )
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
@@ -2875,7 +2884,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _emit_monorepo_total(child_outcomes, started, code,
                                      quiet=parsed.quiet)
                 return code
-            if parsed.changed:
+            # Bare `ptest` at a monorepo root is the cheap loop: no scope
+            # and no mode flag selects the same changed path as --changed.
+            # (Both arrive here as AUTOMATIC with no runner tail; scoped
+            # paths arrive as SCOPED and keep their route below.)
+            if parsed.changed or parsed.mode is C.Mode.AUTOMATIC:
                 changed_started = time.monotonic()
                 changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
                 first_failure = 0
@@ -2960,6 +2973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe=parsed.probe,
             verbose=parsed.verbose,
             quiet=parsed.quiet,
+            again=parsed.again,
         )
         result = operations.execute(domain, resolution.config, request)
         for reason in result.reasons:

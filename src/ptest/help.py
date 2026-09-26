@@ -269,7 +269,7 @@ _RUN = """Running tests: scoped iteration and the integrated full gate, from the
 
 Syntax (ptest options precede scoped/native arguments):
   ptest [--workers 1..64] [-v | --verbose] [-q | --quiet] [<scoped paths>...]
-  ptest --changed | --full [--workers 1..64] [-v] [-q]
+  ptest --changed | --full [--again] [--workers 1..64] [-v] [-q]
   ptest [--queue-timeout 1..86400 (default 1800)] [--base X]
         [--timeout 1..86400 (default: history, else test-count estimate, else 600)]
         [--no-setup] [--shadow] [--result-json PATH] [-- SCOPES...]

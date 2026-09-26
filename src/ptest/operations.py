@@ -2208,6 +2208,262 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         progress.emit(baseline_note, quiet=request.quiet)
 
 
+_FULL_SUMMARY_LIMIT = 50
+_FULL_JOIN_POLL_S = 0.1
+
+
+def _pid_alive(pid: int) -> bool:
+    """True when a process with this pid exists (any owner)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _latest_full_summary(domain: C.DomainPaths,
+                         checkout: C.CheckoutIdentity) -> dict | None:
+    """Newest summary of a run that actually executed the full gate.
+
+    The family is what ran (plan.execution), not the request label, mirroring
+    history's comparable-evidence classification. None when unreadable.
+    """
+    try:
+        summaries = history.read_history_summaries(
+            domain, checkout, _FULL_SUMMARY_LIMIT)
+    except BaseException:
+        return None
+    for summary in summaries:
+        try:
+            if not isinstance(summary, dict):
+                continue
+            plan = summary.get("plan")
+            execution = plan.get("execution") if isinstance(plan, dict) else None
+            is_full = ((execution == "full") if isinstance(execution, str)
+                       else summary.get("mode") == "full")
+            if is_full:
+                return summary
+        except Exception:
+            continue
+    return None
+
+
+def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
+                      checkout: C.CheckoutIdentity, request: C.RunRequest,
+                      baseline: C.Baseline) -> tuple[str, float] | None:
+    """(short sha, age_s) when the baseline already verifies current inputs.
+
+    All of: same commit, clean tree, same source digest and compatibility
+    (config, lock and trigger fingerprint plus runner identity), same
+    selection policy, and the latest full run passed by recording exactly
+    this baseline. None on any mismatch or unreadable evidence.
+    """
+    try:
+        snapshot = _capture_source(
+            domain, config, request, ensure_key=False,
+            execution_tier=C.ExecutionTier.ADVANCED,
+            runtime_identity=baseline.runtime_identity, baseline=baseline)
+    except BaseException:
+        # Pre-admission only: the admitted flow re-captures and re-raises
+        # aborts itself, so even KeyboardInterrupt runs normally here.
+        return None
+    if (snapshot.digest != baseline.input_digest
+            or snapshot.compatibility != baseline.compatibility
+            or snapshot.head != baseline.head
+            or not snapshot.clean
+            or snapshot.limitations):
+        return None
+    try:
+        if _policy_digest(config) != baseline.policy_digest:
+            return None
+    except BaseException:
+        return None
+    latest = _latest_full_summary(domain, checkout)
+    if latest is None:
+        return None
+    try:
+        if (latest.get("status") != "passed"
+                or latest.get("run_id") != baseline.run_id):
+            return None
+    except Exception:
+        return None
+    try:
+        created = datetime.fromisoformat(baseline.created_at)
+        age_s = max(0.0, time.time() - created.timestamp())
+    except (TypeError, ValueError):
+        age_s = 0.0
+    head = baseline.head or ""
+    return (head[:7], age_s)
+
+
+def _joined_counts(value: object) -> C.Counts | None:
+    """Best-effort counts from a joined run's summary; None when unusable."""
+    if not isinstance(value, dict):
+        return None
+    fields: dict[str, int] = {}
+    for key in ("collected", "executed", "passed", "failed", "skipped",
+                "unknown"):
+        item = value.get(key)
+        if item is None:
+            continue
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            return None
+        fields[key] = item
+    try:
+        return C.Counts(**fields)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gated_full_result(run_id: str, checkout: C.CheckoutIdentity,
+                       config: C.Config, request: C.RunRequest,
+                       status: C.Status, exit_code: int,
+                       counts: C.Counts | None,
+                       queue_s: float | None = None) -> C.RunResult | None:
+    """Synthetic completed result for a skipped or joined full run.
+
+    Never published: it reports another run's verdict, it is not new
+    evidence. None when the verdict cannot be represented.
+    """
+    try:
+        plan = _plan(request, config.runner.kind)
+        command = _summary(config, plan, request, 1)
+        result = _result(run_id=run_id, checkout=checkout, request=request,
+                         plan=plan, command=command, status=status,
+                         phase="complete", started=_iso_now(), runner_code=None,
+                         exit_code=exit_code, origin="runner", queue_s=queue_s)
+        return replace(result, counts=counts)
+    except (C.Problem, TypeError, ValueError):
+        return None
+
+
+def _wait_full_verdict(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                       request: C.RunRequest, lease: dict,
+                       signals: _Signals) -> dict | None:
+    """Published summary for the leased run, or None when it can't be read.
+
+    Returns None when the lease disappears without a matching summary, its
+    owner dies, we are signalled, or the queue timeout expires: every one of
+    those runs the suite normally (fail-closed).
+    """
+    deadline = time.monotonic() + request.queue_timeout_s
+    while True:
+        if signals.number is not None:
+            return None
+        try:
+            summaries = history.read_history_summaries(
+                domain, checkout, _FULL_SUMMARY_LIMIT)
+        except BaseException:
+            summaries = ()
+        for summary in summaries:
+            try:
+                if (isinstance(summary, dict)
+                        and summary.get("run_id") == lease["run_id"]):
+                    return summary
+            except Exception:
+                continue
+        live = history.read_full_lease(domain, checkout)
+        if (live is None or live.get("run_id") != lease["run_id"]
+                or not _pid_alive(live["pid"])):
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(min(_FULL_JOIN_POLL_S,
+                       max(0.0, deadline - time.monotonic())))
+
+
+def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
+                        checkout: C.CheckoutIdentity, request: C.RunRequest,
+                        run_id: str, signals: _Signals
+                        ) -> tuple[str, C.RunResult | None, bool]:
+    """Pre-admission full gate: skip, join, or run.
+
+    Returns (action, result, lease_claimed). "skip" and "join" carry a
+    completed, unpublished result (no start line ran, nothing is admitted);
+    "run" carries None and, when lease_claimed, owns the coalescing lease
+    until the outer finally releases it. Never raises: any uncertainty
+    means ("run", None, False).
+    """
+    color = sys.stderr.isatty()
+    baseline = None
+    if not request.again:
+        # Pre-admission only (see above): the admitted flow re-raises.
+        try:
+            baseline = history.read_history(domain, checkout).baseline
+        except BaseException:
+            baseline = None
+        if baseline is not None:
+            verdict = _full_skip_inputs(domain, config, checkout, request,
+                                        baseline)
+            if verdict is not None:
+                short_sha, age_s = verdict
+                skipped = _gated_full_result(
+                    run_id, checkout, config, request, C.Status.PASSED, 0,
+                    None)
+                if skipped is not None:
+                    progress.emit(progress.format_already_verified(
+                        short_sha, age_s, color=color), quiet=request.quiet)
+                    return ("skip", skipped, False)
+    try:
+        snapshot = _capture_source(
+            domain, config, request, ensure_key=False,
+            execution_tier=C.ExecutionTier.ADVANCED,
+            runtime_identity=(baseline.runtime_identity
+                              if baseline is not None else None),
+            baseline=baseline)
+    except BaseException:
+        # Pre-admission only (see above): the admitted flow re-raises.
+        return ("run", None, False)
+    digest = snapshot.digest
+    if not isinstance(digest, str) or not digest:
+        return ("run", None, False)
+    try:
+        sequence = history.next_sequence(domain, checkout)
+    except BaseException:
+        sequence = 0
+    lease = {"version": 1, "digest": digest, "run_id": run_id,
+             "pid": os.getpid(), "started_at": _iso_now(),
+             "sequence": sequence}
+    if history.claim_full_lease(domain, checkout, lease):
+        return ("run", None, True)
+    try:
+        live = history.read_full_lease(domain, checkout)
+    except BaseException:
+        live = None
+    if live is None or live.get("digest") != digest:
+        # Different inputs (or an unreadable lease): normal scheduler
+        # queueing, without holding a lease for another fingerprint.
+        return ("run", None, False)
+    if not _pid_alive(live["pid"]):
+        history.release_full_lease(domain, checkout, live["run_id"])
+        if history.claim_full_lease(domain, checkout, lease):
+            return ("run", None, True)
+        return ("run", None, False)
+    progress.emit(progress.format_joined_full_run(live["pid"], color=color),
+                  quiet=request.quiet)
+    waited_from = time.monotonic()
+    summary = _wait_full_verdict(domain, checkout, request, live, signals)
+    if summary is None:
+        return ("run", None, False)
+    try:
+        status = C.Status(summary["status"])
+        exit_code = summary["exit_code"]
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            return ("run", None, False)
+    except (KeyError, TypeError, ValueError):
+        return ("run", None, False)
+    joined = _gated_full_result(run_id, checkout, config, request, status,
+                                exit_code, _joined_counts(summary.get("counts")),
+                                queue_s=time.monotonic() - waited_from)
+    if joined is None:
+        return ("run", None, False)
+    return ("join", joined, False)
+
+
 def execute(domain: C.DomainPaths, config: C.Config,
             request: C.RunRequest) -> C.RunResult:
     """Run one admitted command and return its typed outcome."""
@@ -2429,7 +2685,20 @@ def execute(domain: C.DomainPaths, config: C.Config,
     ticket = None
     grant = None
     report_binding = None
+    full_lease_claimed = False
     try:
+        if request.mode is C.Mode.FULL:
+            # The pre-admission gate (skip verified work, coalesce
+            # duplicates) must never break a run: uncertainty runs normally.
+            try:
+                action, gated, full_lease_claimed = _full_pre_admission(
+                    domain, config, checkout, request, run_id, signals)
+            except Exception:
+                action, gated, full_lease_claimed = ("run", None, False)
+            if action == "skip":
+                return _export(domain, checkout, request, gated)
+            if action == "join":
+                return _finish(_export(domain, checkout, request, gated))
         owner = platform.process_identity(os.getpid())
         if owner is None:
             raise _problem("ownership-uncertain", "caller identity cannot be verified")
@@ -3130,6 +3399,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         )
         return _finish(result)
     finally:
+        if full_lease_claimed:
+            history.release_full_lease(domain, checkout, run_id)
         for signum, handler in previous.items():
             signal.signal(signum, handler)
 

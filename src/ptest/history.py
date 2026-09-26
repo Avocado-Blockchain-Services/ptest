@@ -340,6 +340,105 @@ def _write_disabled_marker(
         return
 
 
+_FULL_LEASE_NAME = "full-lease.json"
+_FULL_LEASE_MAX_BYTES = 1024
+
+
+def _valid_full_lease(value: object) -> dict | None:
+    """Validate one full-run coalescing lease payload, or None.
+
+    The lease names the admitted full run (its input digest, run id, owner
+    pid, claim time and publication sequence) so a duplicate ``--full``
+    with the same inputs can wait for it instead of running again.
+    """
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    digest = value.get("digest")
+    run_id = value.get("run_id")
+    pid = value.get("pid")
+    started_at = value.get("started_at")
+    sequence = value.get("sequence")
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        return None
+    if (not isinstance(run_id, str) or len(run_id) != 32
+            or any(char not in "0123456789abcdef" for char in run_id)):
+        return None
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    if not isinstance(started_at, str) or not started_at:
+        return None
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        return None
+    return {"version": 1, "digest": digest, "run_id": run_id, "pid": pid,
+            "started_at": started_at, "sequence": sequence}
+
+
+def read_full_lease(domain: C.DomainPaths,
+                    checkout: C.CheckoutIdentity) -> dict | None:
+    """Return the recorded full-run lease payload, or None.
+
+    None covers absent, oversized, corrupt and unreadable leases alike:
+    callers treat those as "no joinable run" and proceed normally
+    (fail-closed), never as a refusal.
+    """
+    try:
+        _validate_arguments(domain, checkout)
+        directory = _history_directory(domain, checkout, create=False)
+        if directory is None:
+            return None
+        raw = read_regular(directory, _FULL_LEASE_NAME,
+                           _FULL_LEASE_MAX_BYTES + 1)
+    except (C.Problem, OSError, ValueError):
+        return None
+    if len(raw) > _FULL_LEASE_MAX_BYTES:
+        return None
+    try:
+        return _valid_full_lease(json.loads(raw))
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def claim_full_lease(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                     payload: dict) -> bool:
+    """Atomically record this full run's lease; False when one is held.
+
+    Creation is exclusive, so exactly one duplicate wins. False also covers
+    invalid payloads and unavailable state: the caller runs normally.
+    """
+    lease = _valid_full_lease(payload)
+    if lease is None:
+        return False
+    try:
+        _validate_arguments(domain, checkout)
+        directory = _history_directory(domain, checkout, create=True)
+        if directory is None:
+            return False
+        create_exclusive(directory, _FULL_LEASE_NAME,
+                         _json_bytes(lease).encode("utf-8"))
+    except (C.Problem, OSError, ValueError):
+        return False
+    return True
+
+
+def release_full_lease(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                       run_id: str) -> None:
+    """Remove this run's lease when it still names this run; never raises."""
+    try:
+        _validate_arguments(domain, checkout)
+        if not isinstance(run_id, str) or not run_id:
+            return
+        directory = _history_directory(domain, checkout, create=False)
+        if directory is None:
+            return
+        current = read_full_lease(domain, checkout)
+        if current is None or current.get("run_id") != run_id:
+            return
+        _remove_marker(directory, _FULL_LEASE_NAME)
+    except (C.Problem, OSError, ValueError):
+        return
+
+
 @contextmanager
 def _writer_lock(domain: C.DomainPaths, checkout: C.CheckoutIdentity):
     """Serialize bounded recovery and capacity-marker changes across publishers.
