@@ -1078,6 +1078,36 @@ def _run_changed_baseline(parsed: ParsedArgs, root: Path,
               file=sys.stderr)
 
 
+def _existing_changed_targets(root: Path) -> tuple:
+    """``((declaration, config), ...)`` resolved read-only from disk.
+
+    Mirrors the real-run existing-config targets so a dry-run preview
+    describes exactly what the real run will do; nothing is written.
+    """
+    from . import monorepo
+    resolution = config_api.resolve_config(root)
+    manifest = getattr(resolution, "monorepo", None)
+    if manifest is None:
+        if resolution.config is None:
+            return ()
+        return ((".", resolution.config),)
+    targets = []
+    for child in tuple(getattr(manifest, "children", ()) or ()):
+        diagnosis = monorepo.diagnose_child(root, child)
+        config = diagnosis.config if diagnosis.kind == "ok" else None
+        if config is not None:
+            targets.append((child, config))
+    return tuple(targets)
+
+
+def _report_existing_changed(config, project: str) -> None:
+    """One existing-config line: needs-cov, `doctor --fix`, or silence."""
+    if not init_changed.has_frozen_pair(config):
+        print(init_changed.NEEDS_COV_LINE.format(project=project))
+    elif not init_changed.selection_enabled(config):
+        print(init_changed.EXISTING_LINE.format(project=project))
+
+
 def _run_changed_setup(parsed: ParsedArgs, cwd: Path, result,
                        smoke_plans: tuple = ()) -> None:
     """Post-smoke `--changed` setup: question, config draft, baseline run.
@@ -1085,12 +1115,26 @@ def _run_changed_setup(parsed: ParsedArgs, cwd: Path, result,
     One line per pytest project; vitest and other runners are never
     asked. `--json` never reaches here (rejected at parse); dry runs
     preview only; existing configs point at `doctor --fix` and are
-    never rewritten.
+    never rewritten. A `no` choice stays silent everywhere, and a
+    dry-run preview of existing configs reports those configs instead
+    of a fresh write.
     """
     if parsed.json:
         return
     if parsed.dry_run:
+        choice = parsed.changed_setup
+        if choice is None:
+            choice = init_changed.DEFAULT_CHOICE
+        if choice == "no":
+            return
         root = result.target.parent
+        if result.action is C.InitAction.EXISTING:
+            for declaration, config in _existing_changed_targets(root):
+                if config.runner.kind is not C.RunnerKind.PYTEST:
+                    continue
+                _report_existing_changed(
+                    config, render.terminal_text(declaration))
+            return
         for declaration, probe in _preview_targets(root, result, parsed):
             project = render.terminal_text(declaration)
             if init_changed.has_frozen_pair(probe):
@@ -1101,20 +1145,21 @@ def _run_changed_setup(parsed: ParsedArgs, cwd: Path, result,
     root = config_api.resolve_config(cwd).root
     targets = _plan_targets(smoke_plans)
     if result.action is C.InitAction.EXISTING:
+        if parsed.changed_setup == "no":
+            return
         for declaration, config in targets:
             if config.runner.kind is not C.RunnerKind.PYTEST:
                 continue
-            project = render.terminal_text(declaration)
-            if not init_changed.has_frozen_pair(config):
-                print(init_changed.NEEDS_COV_LINE.format(project=project))
-            elif not init_changed.selection_enabled(config):
-                print(init_changed.EXISTING_LINE.format(project=project))
+            _report_existing_changed(
+                config, render.terminal_text(declaration))
         return
     for declaration, config in targets:
         if config.runner.kind is not C.RunnerKind.PYTEST:
             continue
         project = render.terminal_text(declaration)
         if not init_changed.has_frozen_pair(config):
+            if parsed.changed_setup == "no":
+                continue
             print(init_changed.NEEDS_COV_LINE.format(project=project))
             continue
         choice = parsed.changed_setup
