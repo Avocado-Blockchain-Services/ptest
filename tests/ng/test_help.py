@@ -125,8 +125,8 @@ def test_doctor_help_names_all_deterministic_items_as_model_free(
 
     assert main(("help", "doctor")) == 0
     text = " ".join(capsys.readouterr().out.split()).lower()
-    assert ("timing, selection and parallel execution items are answered "
-            "from ptest's own facts" in text)
+    assert ("timing, selection and parallel execution items use ptest's "
+            "own facts with no model call" in text)
 
 
 def test_user_facing_text_has_no_banned_terms():
@@ -468,14 +468,14 @@ def test_help_documents_review_model_flags_per_item_review_and_canary(
     doctor_help = " ".join(capsys.readouterr().out.split())
     for marker in (
         "--review-model", "--review-concurrency",
-        "one model call per checklist item",
-        "cheapest adequate",
+        "one initial review call",
+        "one independent verification call",
+        "satisfied and not-applicable",
+        "gpt-6-sol", "opus",
         "PTEST_REVIEW_MODEL",
-        "haiku",
-        "one extra call that sends only the model list",
-        "cached per provider and CLI version",
-        "tool-denial qualification must be re-run when the chosen model changes",
-        "Citations are in recommendations.md",
+        "maximum initial-plus-verification call count",
+        "omitted from the units remains unknown",
+        "Citations appear in recommendations.md",
     ):
         assert marker.lower() in doctor_help.lower(), marker
 

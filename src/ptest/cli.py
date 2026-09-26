@@ -1236,19 +1236,9 @@ def _require_review_qualification(selected: str | None = None) -> None:
         )
 
 
-_REVIEW_MODEL_CACHE_DIR = "review-models"
-_REVIEW_MODEL_CACHE_MAX_BYTES = 4096
-_MODEL_PICK_TIMEOUT_S = 120
-_MODEL_PICK_SCHEMA = b'{"type":"string","description":"one listed model slug"}'
-
-
 def _declared_review_model(provider: str, override: str | None,
                            environ: Mapping[str, str]) -> str | None:
-    """Pre-consent, subprocess-free model choice: flag, env, claude alias.
-
-    Returns None when the model is decided after consent (codex discovery
-    plus one pick call in :func:`_resolve_review_model`).
-    """
+    """Resolve flag, environment override, then the product model policy."""
     if not isinstance(provider, str):
         raise TypeError("provider must be str")
     if override is not None and not isinstance(override, str):
@@ -1260,122 +1250,36 @@ def _declared_review_model(provider: str, override: str | None,
     env_value = environ.get("PTEST_REVIEW_MODEL")
     if isinstance(env_value, str) and env_value:
         return env_value
+    if provider == "codex":
+        return "gpt-6-sol"
     if provider == "claude":
-        return "haiku"
+        return "opus"
     return None
 
 
-def _read_cached_review_model(cache_root: Path, provider: str,
-                              cli_version: str | None) -> str | None:
-    """Cached pick result, honored only for the same CLI version."""
-    if cli_version is None:
-        return None
-    try:
-        raw = files.read_regular(Path(cache_root), f"{provider}.json",
-                                 _REVIEW_MODEL_CACHE_MAX_BYTES + 1)
-    except (OSError, C.Problem):
-        return None
-    if len(raw) > _REVIEW_MODEL_CACHE_MAX_BYTES:
-        return None
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if data.get("cli_version") != cli_version:
-        return None
-    model = data.get("model")
-    if not isinstance(model, str) or not model:
-        return None
-    if agent_providers.MODEL_RE.fullmatch(model) is None:
-        # Corrupted entry: fall back instead of failing every review with
-        # invalid-bound until the CLI version changes.
-        return None
-    return model
-
-
-def _write_cached_review_model(cache_root: Path, provider: str,
-                               cli_version: str | None, model: str) -> None:
-    """Persist a pick result; cache failures never fail the review."""
-    if cli_version is None:
-        return
-    try:
-        # The caller created cache_root with ensure_private_dir already.
-        files.publish_atomic(
-            Path(cache_root), f"{provider}.json",
-            json.dumps({"cli_version": cli_version, "model": model},
-                       sort_keys=True).encode("utf-8"))
-    except (OSError, C.Problem):
-        pass
-
-
-def _pick_review_model(adapter, entries: tuple[dict, ...]) -> str | None:
-    """One pick call carrying only the listed models; exact slug or None."""
-    slugs = [entry["slug"] for entry in entries]
-    payload = {
-        "instruction": (
-            "Reply with exactly one listed model slug: the single "
-            "cheapest adequate model for a bounded source-text checklist "
-            "review. Output only the slug, with no other text."),
-        "models": [{"slug": entry["slug"],
-                    "display_name": entry["display_name"],
-                    "description": entry["description"]}
-                   for entry in entries],
-    }
-    try:
-        request = json.dumps(payload, sort_keys=True,
-                             separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError):
-        return None
-    try:
-        result = agent_providers.launch_review(
-            adapter, request, _MODEL_PICK_SCHEMA, _MODEL_PICK_TIMEOUT_S,
-            lambda event: None)
-    except C.Problem:
-        return None
-    if not result.ok:
-        return None
-    try:
-        choice = result.assessment.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        return None
-    return choice if choice in slugs else None
-
-
-def _resolve_review_model(adapter, cache_root: Path,
-                          declared: str | None) -> tuple[str | None,
-                                                         str | None]:
-    """Post-consent model choice: declared, cache, cheap pick, default.
-
-    Returns ``(model, cli_version)``; ``model`` None means the provider
-    default (no model flag). Declared models win and are never cached.
-    """
+def _resolve_review_model(adapter, cache_root: Path | None,
+                          declared: str | None, *,
+                          require_listed_default: bool = False
+                          ) -> tuple[str | None, str | None]:
+    """Resolve the requested model after consent, with no picker/cache path."""
     if not isinstance(adapter, agent_providers.ReviewerAdapter):
         raise TypeError("adapter must be ReviewerAdapter")
     if declared is not None and not isinstance(declared, str):
         raise TypeError("declared must be str or None")
     version = agent_providers.cli_version(adapter)
     if declared:
+        if require_listed_default and adapter.name == "codex":
+            try:
+                listed = agent_providers.discover_models(adapter)
+            except OSError:
+                listed = ()
+            if declared not in listed:
+                raise _problem(
+                    "provider-unqualified",
+                    f"default Codex model {declared} is not listed by this CLI; "
+                    "choose an explicit --review-model override",
+                )
         return (declared, version)
-    if adapter.name == "claude":
-        return ("haiku", version)
-    if adapter.name == "codex":
-        cached = _read_cached_review_model(cache_root, adapter.name,
-                                           version)
-        if cached is not None:
-            return (cached, version)
-        try:
-            entries = agent_providers.discover_model_entries(adapter)
-        except OSError:
-            entries = ()
-        if entries:
-            picked = _pick_review_model(adapter, entries)
-            if picked is not None:
-                _write_cached_review_model(cache_root, adapter.name,
-                                           version, picked)
-                return (picked, version)
-        return (None, version)
     return (None, version)
 
 
@@ -1386,8 +1290,8 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
                               model: str | None = None) -> bool:
     """Short pre-consent disclosure: at most three lines, then the prompt.
 
-    Line 1 names the provider, the project, and the planned model calls;
-    lines 2-3 name the exclusions, the cost note, and the pointer to the
+    Line 1 names the provider, project, requested model, and call ceiling;
+    lines 2-3 name source exclusions, the cost note, and the pointer to the
     full legal text (``ptest doctor --help``) and the model-free static
     review (``ptest doctor --offline``).
     """
@@ -1409,22 +1313,23 @@ def _render_review_disclosure(adapter, resolution: C.ConfigResolution,
     else:
         chosen = (render.terminal_text(str(model)[:128])
                   if model else "")
-        tail = (f"model {chosen}."
+        tail = (f"requested model {chosen}."
                 if chosen else
-                "model chosen from the provider list after consent "
-                "(one extra call sends only that list).")
+                "requested model is unavailable.")
         planned_followups = calls if followups is None else followups
         if isinstance(planned_followups, bool) or not isinstance(
                 planned_followups, int) or planned_followups < 0:
             raise TypeError("followups must be a nonnegative int or None")
         first = (f"Model review disclosure: {provider} gets bounded source "
-                 f"excerpts from {project}: {calls} initial item calls, "
-                 f"up to {planned_followups} evidence follow-ups, "
+                 f"excerpts from {project}: {calls} initial + up to "
+                 f"{planned_followups} verification calls "
+                 f"({calls + planned_followups} maximum), "
                  f"{concurrency} at a time, {tail}")
     disclosure = "\n".join((
         first,
-        "Secrets, private files, agent instructions, dependency folders, "
-        "caches and build output are never sent. Provider costs may apply.",
+        "Excluded private files, instructions, dependencies, caches and "
+        "build output are omitted; source may contain undetected secrets. "
+        "Provider account costs may apply.",
         "Full disclosure: ptest doctor --help. Static review without a "
         "model: ptest doctor --offline.",
     ))
@@ -1669,11 +1574,20 @@ def _summarize_review_failures(reviewed_rows) -> str:
 
 
 def _review_profile(model: str | None) -> str:
-    """Provider profile naming the per-item review and its model."""
-    profile = f"ptest-item-review-v1 model={model or 'provider-default'}"
-    if len(profile.encode("utf-8")) > 128:
-        return "ptest-item-review-v1"
-    return profile
+    """Name the source-ID protocol and requested model within the public cap."""
+    if model is not None and not isinstance(model, str):
+        raise TypeError("model must be str or None")
+    requested = model or "provider-default"
+    printable = "".join(char if char.isprintable() else " "
+                         for char in requested)
+    requested = " ".join(printable.split()) or "provider-default"
+    prefix = "ptest-source-id-v3 requested-model="
+    profile = prefix + requested
+    if len(profile.encode("utf-8")) <= 128:
+        return profile
+    room = 128 - len(prefix.encode("utf-8")) - len("...".encode("utf-8"))
+    clipped = requested.encode("utf-8")[:room].decode("utf-8", "ignore")
+    return prefix + clipped + "..."
 
 
 def _run_review_entry(parsed: ParsedArgs, resolution: C.ConfigResolution,
@@ -1998,11 +1912,13 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                 return _declined_review_output(parsed, resolution, domain)
             ensure_deadline()
             scheduler.prepare_state_directory(domain)
-            cache_root = files.ensure_private_dir(
-                domain.root, _REVIEW_MODEL_CACHE_DIR)
             ensure_deadline()
+            explicit_model = (parsed.review_model is not None
+                              or bool(os.environ.get("PTEST_REVIEW_MODEL")))
             model, version = _resolve_review_model(
-                adapter, cache_root, declared)
+                adapter, None, declared,
+                require_listed_default=(adapter.name == "codex"
+                                        and not explicit_model))
             if model is not None:
                 effective = agent_providers.with_model(adapter, model)
         assessments = []
@@ -2074,7 +1990,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                                    "total review deadline expired")
                 followup_pending = [(review.request, review.schema)
                                     for _index, review in followup_jobs]
-                progress("requesting evidence", adapter.name, packet.scope,
+                progress("verifying evidence", adapter.name, packet.scope,
                          time.monotonic() - started)
                 try:
                     ensure_deadline()
@@ -2082,7 +1998,7 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
                         effective, followup_pending, timeout_s,
                         concurrency=parsed.review_concurrency,
                         on_done=lambda index, result, scope=packet.scope: progress(
-                            "requesting evidence", adapter.name, scope,
+                            "verifying evidence", adapter.name, scope,
                             time.monotonic() - started),
                         progress=lambda _event: heartbeat(),
                         deadline=deadline)

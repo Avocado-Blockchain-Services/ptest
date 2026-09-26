@@ -233,7 +233,8 @@ def test_context_traversal_depth_is_bounded(tmp_path):
     for depth in range(10):
         nxt = f"f{depth + 1}" if depth < 9 else None
         body = f"import './{nxt}';\n" if nxt else "export const x = 1;\n"
-        chain[f"f{depth}.ts"] = body
+        path = "f0.test.ts" if depth == 0 else f"f{depth}.ts"
+        chain[path] = body
 
     def reader(rel: str, limit: int):
         if rel in chain:
@@ -241,7 +242,7 @@ def test_context_traversal_depth_is_bounded(tmp_path):
         raise FileNotFoundError(rel)
 
     ctx = RC.collect_vitest_context(
-        tmp_path, "", (), reader, set(), seeds=("f0.ts",))
+        tmp_path, "", (), reader, set(), seeds=("f0.test.ts",))
     assert len(ctx.relations) <= RC.CONTEXT_MAX_FILES
     assert any(reason in ("depth-limit", "read-limit", "unresolved-import")
                for _, reason in ctx.missing)
@@ -433,7 +434,7 @@ def test_vitest_full_profile_unknown_keeps_outside_include_candidate(tmp_path):
                                   for excerpt in packet.excerpts}
 
 
-def test_pytest_mandatory_review_includes_fixture_closure_without_item_hits(
+def test_unrelated_fixture_closure_does_not_seed_every_item(
         tmp_path):
     import re
 
@@ -460,12 +461,9 @@ def test_pytest_mandatory_review_includes_fixture_closure_without_item_hits(
     assert not any(re.search(pattern, helper.text)
                    for pattern in network_item.text_patterns)
 
-    mandatory_paths = {excerpt.path
-                       for excerpt in AA._mandatory_context_excerpts(packet)}
-    assert "support/fixtures.py" in mandatory_paths
     network_review = next(review for review in AA.plan_item_reviews(packet)
                           if review.item_id == "NETWORK-001")
-    assert "support/fixtures.py" in network_review.excerpt_paths
+    assert "support/fixtures.py" not in network_review.excerpt_paths
 
 
 def test_secret_names_never_enter_context_inventory(tmp_path):
@@ -521,7 +519,7 @@ def test_runner_config_in_every_item_request(tmp_path):
         body = json.loads(review.request.decode("utf-8"))
         assert body["packet"]["runner_kind"] == "pytest"
         assert ".ptest.toml" in review.excerpt_paths
-        offered = [e["path"] for e in body["excerpts"]]
+        offered = [unit["path"] for unit in body["units"]]
         assert ".ptest.toml" in offered
         assert body["packet"]["config_status"] in (
             "resolved", "partial", "unavailable")
@@ -544,8 +542,9 @@ def test_every_offered_source_comes_from_the_frozen_packet(tmp_path):
         for path in review.excerpt_paths:
             assert path in known
         body = json.loads(review.request.decode("utf-8"))
-        for offered in body["excerpts"]:
+        for offered in body["units"]:
             assert offered["path"] in known
+            assert offered["id"] in review.source_map_by_id
 
 
 def test_absent_config_is_missing_reason_not_invented_source(tmp_path):
@@ -565,7 +564,7 @@ def test_absent_config_is_missing_reason_not_invented_source(tmp_path):
     for review in reviews:
         assert ".ptest.toml" not in review.excerpt_paths
         body = json.loads(review.request.decode("utf-8"))
-        offered = [e["path"] for e in body["excerpts"]]
+        offered = [unit["path"] for unit in body["units"]]
         assert ".ptest.toml" not in offered
         missing = body["packet"]["missing"]
         assert missing, review.item_id
@@ -585,19 +584,12 @@ def test_citation_to_unadmitted_config_is_rejected(tmp_path):
     })
     reviews = AA.plan_item_reviews(packet)
     target = next(r for r in reviews if r.request is not None)
-    offered = {e["path"]: e for e in
-               json.loads(target.request.decode("utf-8"))["excerpts"]}
-    if ".ptest.toml" in offered:  # pre-fix invented source: cite its sha
-        toml = offered[".ptest.toml"]
-        forged = {"path": ".ptest.toml", "start_line": 1,
-                  "end_line": toml["end_line"], "sha256": toml["sha256"]}
-    else:
-        forged = {"path": ".ptest.toml", "start_line": 1,
-                  "end_line": 5, "sha256": "0" * 64}
+    forged = "src-" + "f" * 24
     reply = json.dumps(
         {"status": "satisfied",
          "rationale": "Runner configuration proves reuse scope.",
-         "evidence": [forged], "finding": None}).encode("utf-8")
+         "evidence": [forged], "finding": None,
+         "needs": []}).encode("utf-8")
     child = AA.assemble_child(
         packet, reviews,
         tuple(reply if r.item_id == target.item_id else None
@@ -610,23 +602,15 @@ def test_citation_to_unadmitted_config_is_rejected(tmp_path):
 
 def _satisfied_reply(packet, review):
     import json
-
-    from ptest import agent_assessment as AA
-
-    assert review.excerpt_paths, review.item_id
-    try:
-        first = next(e for e in packet.excerpts
-                     if e.path == review.excerpt_paths[0])
-    except StopIteration:  # pre-fix invented source: cite real evidence
-        first = packet.excerpts[0]
+    evidence = ([review.selected_source_ids[0]]
+                if review.selected_source_ids else [])
+    status = "satisfied" if evidence else "unknown"
     return json.dumps(
-        {"status": "satisfied",
-         "rationale": f"Row {review.item_id} holds on the cited lines.",
-         "evidence": [{"path": first.path,
-                       "start_line": first.start_line,
-                       "end_line": first.end_line,
-                       "sha256": first.sha256}],
-         "finding": None}).encode("utf-8")
+        {"status": status,
+         "rationale": f"Row {review.item_id} holds on the selected source."
+         if evidence else f"Row {review.item_id} needs more source evidence.",
+         "evidence": evidence, "finding": None,
+         "needs": []}).encode("utf-8")
 
 
 def test_saturated_vitest_packet_seeds_real_config_and_setup(tmp_path):
@@ -656,13 +640,15 @@ def test_saturated_vitest_packet_seeds_real_config_and_setup(tmp_path):
     reviews = AA.plan_item_reviews(packet)
     assert all(r.request is not None for r in reviews)
     by_id = {r.item_id: r for r in reviews}
-    assert "vitest.config.ts" in by_id["DB-001"].excerpt_paths
+    assert "vitest.config.ts" in by_id["DB-001"].excerpt_paths, (
+        packet.context.config_paths, packet.context.roles,
+        by_id["DB-001"].excerpt_paths)
     assert "src/setup.ts" in by_id["DB-001"].excerpt_paths
     for review in reviews:
         assert "vitest.config.ts" in review.excerpt_paths, review.item_id
         assert "src/setup.ts" in review.excerpt_paths, review.item_id
         body = json.loads(review.request.decode("utf-8"))
-        offered = [e["path"] for e in body["excerpts"]]
+        offered = [unit["path"] for unit in body["units"]]
         assert not any("e2e" in path for path in offered), review.item_id
         assert len(review.excerpt_paths) <= AA.ITEM_MAX_FILES
 
@@ -676,7 +662,7 @@ def test_setup_closure_outranks_generic_samples(tmp_path):
     resolution = _resolution(root)
     workspace = doctor.inspect_workspace(
         _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
-    tiny = AA.EvidenceLimits(max_files_per_child=4)
+    tiny = AA.EvidenceLimits(max_files_per_child=6)
     packets = AA.build_packets(workspace, resolution, tiny)
     paths = [e.path for e in packets[0].excerpts]
     assert "tests/conftest.py" in paths
@@ -935,6 +921,7 @@ def test_pytest_conftest_import_and_plugin_closure_is_seeded_first(tmp_path):
         in context.relations
     assert reads.index("tests/conftest.py") < reads.index("tests/helper.py")
     assert reads.index("tests/helper.py") < reads.index("tests/test_case.py")
+    assert roles["tests/test_case.py"] == "test"
 
 
 def test_pytest_fixture_owners_are_nearest_applicable_ancestors(tmp_path):
@@ -1107,3 +1094,366 @@ def _build_vitest_packet(root):
     workspace = doctor.inspect_workspace(
         _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
     return AA.build_packets(workspace, resolution, AA.EvidenceLimits())[0]
+
+
+# --- Automatic suite selection (approved design section 1) --------------------
+
+
+def _pytest_tree(root: Path, sources: dict[str, str]) -> None:
+    for relative, text in sources.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+
+def test_pytest_scoped_and_full_profiles_share_effective_config(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "pytest.ini": "[pytest]\naddopts = --ignore=tests/e2e\n",
+        "tests/test_live.py": "def test_live():\n    assert True\n",
+        "tests/e2e/test_flow.py": "def test_flow():\n    assert True\n",
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"pytest.ini"},
+        ("tests/test_live.py", "tests/e2e/test_flow.py"), ("tests",),
+        argv=(), full_argv=("--ignore=tests/e2e",))
+    profiles = {profile.name: profile for profile in context.suite_profiles}
+    assert set(profiles) == {"scoped", "full"}
+    assert "tests/e2e" in profiles["full"].excludes
+    assert context.config_status in ("resolved", "partial")
+
+
+def test_pytest_testpaths_and_python_files_bound_collection(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "pytest.ini": ("[pytest]\ntestpaths = tests/unit\n"
+                       "python_files = check_*.py\n"
+                       "norecursedirs = .* build\n"),
+        "tests/unit/check_a.py": "def test_a():\n    assert True\n",
+        "tests/other/test_b.py": "def test_b():\n    assert True\n",
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"pytest.ini"},
+        ("tests/unit/check_a.py", "tests/other/test_b.py"), ("tests",))
+    assert context.config_status in ("resolved", "partial")
+    assert "tests/unit" in context.active_roots or any(
+        "tests/unit" in path for path, _role in context.roles)
+
+
+def test_pytest_coverage_flags_are_neutral_and_explicit_path_wins(
+        tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "pytest.ini": (
+            "[pytest]\n"
+            "testpaths = tests/unit\n"
+            "python_files = check_*.py\n"
+            "addopts = --cov=ptest --cov-report=term --cov-branch "
+            "--self-contained-html\n"),
+        "tests/unit/check_live.py": "def test_live():\n    assert True\n",
+        "tests/outside/selected.py": "def test_selected():\n    assert True\n",
+        "tests/outside/check_other.py": "def test_other():\n    assert True\n",
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"pytest.ini"},
+        ("tests/unit/check_live.py", "tests/outside/selected.py",
+         "tests/outside/check_other.py"), ("tests",),
+        argv=("--cov=ptest", "--cov-report=term", "--cov-branch",
+              "--self-contained-html"),
+        full_argv=("--cov=ptest", "tests/outside/selected.py"))
+    roles = dict(context.roles)
+    assert roles.get("tests/unit/check_live.py") == "test"
+    assert roles.get("tests/outside/selected.py") == "test"
+    assert "tests/outside/check_other.py" not in roles
+    assert not any(reason == "unsupported-argv"
+                   for _path, reason in context.missing)
+    assert context.config_status == "resolved"
+
+    ignores, dynamic, explicit, can_expand = RC._pytest_argv_ignores(
+        ("--cov", "--cov-branch", "tests/outside/selected.py"))
+    assert ignores == [] and not dynamic and not can_expand
+    assert explicit == ("tests/outside/selected.py",)
+
+
+def test_pytest_xdist_and_marker_selector_keep_safe_suite_exclusions(tmp_path):
+    from ptest import agent_assessment as AA
+    from ptest import review_context as RC
+
+    ignores, dynamic, explicit, can_expand = RC._pytest_argv_ignores(
+        ("-n", "4", "--dist=loadgroup"))
+    assert ignores == [] and not dynamic and not explicit and not can_expand
+
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "pytest.ini": ("[pytest]\n"
+                       "testpaths = tests/unit\n"
+                       "addopts = -n 4 --dist=loadgroup -m 'not slow'\n"),
+        "tests/unit/test_live.py": "def test_live():\n    assert True\n",
+        "tests/outside/test_danger.py": (
+            "import sqlite3\n"
+            "def test_danger():\n"
+            "    sqlite3.connect('shared.db')\n"),
+        "src/client.py": "def write(value):\n    return value\n",
+    }, config=_config(args=("-n", "4", "--dist=loadgroup")))
+
+    profile = packet.context.suite_profiles[0]
+    assert profile.status == "partial"  # -m membership remains unresolved
+    assert not profile.expansive  # xdist and -m cannot broaden path roots
+    assert "tests/unit/test_live.py" in {e.path for e in packet.excerpts}, (
+        packet.context.roles, packet.context.missing,
+        packet.context.suite_profiles,
+        [excerpt.path for excerpt in packet.excerpts])
+    assert "tests/outside/test_danger.py" not in {
+        e.path for e in packet.excerpts}
+    assert "src/client.py" not in dict(packet.context.roles)
+    assert any(reason == "unsupported-argv"
+               for _path, reason in packet.context.missing)
+
+
+def test_build_packet_preserves_pytest_exclusions_with_narrow_selector(
+        tmp_path):
+    from ptest import agent_assessment as AA
+
+    root = tmp_path / "child"
+    packet = _packet_for(root, {
+        "pytest.ini": "[pytest]\ntestpaths = tests/unit\n",
+        "tests/unit/test_live.py": "def test_live():\n    assert True\n",
+        "tests/outside/test_danger.py": (
+            "import sqlite3\n"
+            "def test_danger():\n"
+            "    sqlite3.connect('shared.db')\n"),
+    }, config=_config(args=("-m", "slow")))
+    profile = packet.context.suite_profiles[0]
+    assert profile.status == "partial" and not profile.expansive
+    assert any(reason == "unsupported-argv"
+               for _path, reason in packet.context.missing)
+    assert "tests/outside/test_danger.py" not in {
+        excerpt.path for excerpt in packet.excerpts}
+    assert packet.excluded_count >= 1
+
+
+def test_pytest_unsupported_collection_flags_stay_partial(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "pytest.ini": "[pytest]\naddopts = -k 'not slow'\n",
+        "tests/test_live.py": "def test_live():\n    assert True\n",
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"pytest.ini"},
+        ("tests/test_live.py",), ("tests",),
+        argv=("-k", "not slow"))
+    assert context.config_status == "partial"
+    assert ("config", "dynamic-config") in context.missing or any(
+        reason in ("dynamic-config", "unsupported-argv")
+        for _, reason in context.missing)
+
+
+def test_pytest_fixture_definition_params_are_traced(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "tests/conftest.py": (
+            "@pytest.fixture\n"
+            "def conn():\n"
+            "    return 'conn'\n"
+            "@pytest.fixture\n"
+            "def db(conn):\n"
+            "    return conn\n"),
+        "tests/test_case.py": (
+            "def test_db(db):\n    assert db\n"),
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"tests/conftest.py"},
+        ("tests/test_case.py",), ("tests",))
+    relations = set(context.relations)
+    assert ("tests/test_case.py", "tests/conftest.py", "fixture-use") \
+        in relations
+    assert ("tests/conftest.py", "tests/conftest.py", "fixture-use") \
+        in relations
+
+
+def test_pytest_imported_fixture_alias_resolves_to_defining_file(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "tests/helpers.py": (
+            "@pytest.fixture\n"
+            "def db():\n"
+            "    return 'db'\n"),
+        "tests/conftest.py": (
+            "from tests.helpers import db as database\n"),
+        "tests/test_case.py": (
+            "def test_db(database):\n    assert database\n"),
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"tests/conftest.py"},
+        ("tests/test_case.py",), ("tests",))
+    assert ("tests/test_case.py", "tests/helpers.py", "fixture-use") in set(
+        context.relations)
+
+
+def test_pytest_plugin_fixture_is_resolvable_from_test(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "tests/conftest.py": "pytest_plugins = ['tests.plugin']\n",
+        "tests/plugin.py": (
+            "@pytest.fixture\n"
+            "def shared():\n"
+            "    return 1\n"),
+        "tests/test_case.py": (
+            "def test_case(shared):\n    assert shared == 1\n"),
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"tests/conftest.py"},
+        ("tests/test_case.py",), ("tests",))
+    assert ("tests/test_case.py", "tests/plugin.py", "fixture-use") in set(
+        context.relations)
+
+
+def test_excluded_vitest_seed_does_not_seed_active_setup(tmp_path):
+    from ptest import review_context as RC
+
+    config = ("export default {\n"
+              "  test: {\n"
+              "    include: ['tests/unit/**/*.spec.ts'],\n"
+              "    exclude: ['tests/e2e/**'],\n"
+              "  },\n"
+              "};\n")
+    files = {
+        "vitest.config.ts": config,
+        "tests/unit/b.spec.ts": "import '../helpers/active';\n",
+        "tests/helpers/active.ts": "export const x = 1;\n",
+        "tests/e2e/a.spec.ts": "import '../helpers/only_e2e';\n",
+        "tests/helpers/only_e2e.ts": "export const y = 2;\n",
+    }
+
+    def reader(rel: str, limit: int):
+        if rel in files:
+            return files[rel].encode("utf-8")
+        raise FileNotFoundError(rel)
+
+    ctx = RC.collect_vitest_context(
+        tmp_path, "", (), reader, {"vitest.config.ts"},
+        seeds=("tests/unit/b.spec.ts", "tests/e2e/a.spec.ts"))
+    roles = dict(ctx.roles)
+    assert roles.get("tests/helpers/active.ts") == "helper"
+    assert "tests/helpers/only_e2e.ts" not in roles
+    assert any(
+        path == "tests/e2e/a.spec.ts" and reason == "excluded-suite"
+        for path, reason in ctx.missing)
+
+
+def test_vitest_seed_membership_uses_default_globs_or_literal_include(tmp_path):
+    from ptest import review_context as RC
+
+    files = {
+        "vitest.config.ts": (
+            "export default { test: { "
+            "include: ['tests/__tests__/fixture-bundle.ts'] } };\n"),
+        "tests/__tests__/document-attempt-fixtures.ts": (
+            "import './shared';\n"),
+        "tests/__tests__/fixture-bundle.ts": "import './shared';\n",
+        "tests/__tests__/shared.ts": "export const value = 2;\n",
+        "tests/unit/example.test.ts": "import './shared';\n",
+        "tests/unit/shared.ts": "export const value = 1;\n",
+    }
+
+    def reader(rel, limit):
+        if rel in files:
+            return files[rel].encode("utf-8")
+        raise FileNotFoundError(rel)
+
+    ctx = RC.collect_vitest_context(
+        tmp_path, "", ("--config=vitest.config.ts",), reader,
+        {"vitest.config.ts"},
+        seeds=("tests/__tests__/document-attempt-fixtures.ts",
+               "tests/__tests__/fixture-bundle.ts",
+               "tests/unit/example.test.ts"))
+    roles = dict(ctx.roles)
+    assert roles.get("tests/__tests__/document-attempt-fixtures.ts") != "test"
+    assert roles["tests/__tests__/fixture-bundle.ts"] == "test"
+    assert ("tests/__tests__/fixture-bundle.ts", "tests/__tests__/shared.ts",
+            "local-import") in ctx.relations
+
+    default_ctx = RC.collect_vitest_context(
+        tmp_path, "", (), reader, set(),
+        seeds=("tests/__tests__/document-attempt-fixtures.ts",
+               "tests/unit/example.test.ts"))
+    default_roles = dict(default_ctx.roles)
+    assert default_roles.get(
+        "tests/__tests__/document-attempt-fixtures.ts") != "test"
+    assert default_roles["tests/unit/example.test.ts"] == "test"
+    assert ("tests/unit/example.test.ts", "tests/unit/shared.ts",
+            "local-import") in default_ctx.relations
+
+
+def test_excluded_pytest_seed_does_not_seed_active_setup(tmp_path):
+    from ptest import review_context as RC
+    from ptest.files import read_regular
+
+    root = tmp_path / "child"
+    _pytest_tree(root, {
+        "pytest.ini": "[pytest]\naddopts = --ignore=tests/e2e\n",
+        "tests/e2e/test_flow.py": (
+            "from tests.e2e import e2e_only\n"
+            "def test_flow(e2e_only):\n    assert e2e_only\n"),
+        "tests/e2e/__init__.py": "",
+        "tests/e2e/e2e_only.py": "VALUE = 1\n",
+        "tests/test_live.py": "def test_live():\n    assert True\n",
+    })
+
+    def reader(relative, limit):
+        return read_regular(root, relative, limit)
+
+    context = RC.collect_pytest_context(
+        root, "", reader, {"pytest.ini"},
+        ("tests/test_live.py", "tests/e2e/test_flow.py"), ("tests",))
+    roles = dict(context.roles)
+    assert "tests/e2e/e2e_only.py" not in roles

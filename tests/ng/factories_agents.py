@@ -192,26 +192,20 @@ def doctor_one_row_assessment(request: bytes) -> bytes:
 
     body = _json.loads(request)
     item_id = body["policy"]["item"]["id"]
-    excerpts = body["excerpts"]
+    units = body["units"]
     cache_id = next(row_id for row_id in C.AGENT_ASSESSMENT_CHECKLIST_IDS
                     if row_id.startswith("CACHE-"))
-    if not excerpts:
+    if not units:
         return _json.dumps({
             "status": "unknown",
-            "rationale": ("The item subset admitted no excerpts for "
+            "rationale": ("The item subset admitted no source units for "
                           "this row."),
             "evidence": [],
             "finding": None,
-            "proof": [],
             "needs": [],
         }).encode("utf-8")
-    excerpt = excerpts[0]
-    citation = {
-        key: excerpt[key]
-        for key in ("path", "start_line", "end_line", "sha256")
-    }
+    unit = units[0]
     is_gap = item_id == cache_id
-    quote = excerpt["text"].splitlines()[0][:512]
     return _json.dumps({
         "status": "gap" if is_gap else "unknown",
         "rationale": (
@@ -220,11 +214,7 @@ def doctor_one_row_assessment(request: bytes) -> bytes:
             if is_gap else
             "The supplied bounded evidence does not establish this criterion."
         ),
-        "evidence": [citation] if is_gap else [],
-        "proof": ([{"role": "applicability", "citation_index": 0,
-                    "quote": quote},
-                   {"role": "violation", "citation_index": 0,
-                    "quote": quote}] if is_gap else []),
+        "evidence": [unit["id"]],
         "needs": [],
         "finding": ({
             "summary": "Cache cleanup has no neighbor ownership assertion.",
@@ -232,7 +222,7 @@ def doctor_one_row_assessment(request: bytes) -> bytes:
                 "Add an executable test that proves a neighbor cache key "
                 "survives cleanup."
             ),
-            "evidence": [citation],
+            "evidence": [unit["id"]],
         } if is_gap else None),
     }).encode("utf-8")
 

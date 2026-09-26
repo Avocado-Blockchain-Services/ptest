@@ -184,8 +184,9 @@ def test_agent_assessment_golden_o4_shape_at_width_90():
         "\n"
         "Next: ptest doctor --fix\n"
         "\n"
-        "Report: recommendations.md (created) — citations, fixes and "
-        "verification steps.\n"
+        "Review scope: cited reachable mechanisms only; omitted decisive "
+        "callers remain unknown. Report: recommendations.md (created) — "
+        "citations, fixes and verification steps.\n"
     )
     assert "Answered by ptest" not in text
 
@@ -811,9 +812,12 @@ def test_assessment_item_line_shows_dropped_citations_no_color(monkeypatch):
     assert "✓" not in text
 
 
-def test_na_verdict_renders_dim_cell_and_grouped_reason():
+def test_na_verdict_renders_dim_cell_and_grouped_reason(monkeypatch):
     """N/a reasons group into a dim section, wrapped whole, never cut."""
     from ptest.render import render_agent_assessment
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
     rationale = " ".join(f"token{i:03d}" for i in range(30))
     child = {
@@ -863,6 +867,9 @@ def test_unknown_reason_wraps_fully_without_ellipsis():
 
 def test_assessment_colors_icons_on_tty_only(monkeypatch):
     from ptest.render import render_agent_assessment
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
     child = {
         "scope": "api",

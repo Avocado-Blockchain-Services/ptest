@@ -1919,7 +1919,8 @@ def _aa_child(**overrides):
 def _aa_payload(children=None):
     return {"schema": "ptest.agent-assessment/v1",
             "provider": {"name": "claude", "cli_version": "1.2.3",
-                         "profile": "ptest-item-review-v1 model=haiku"},
+                         "profile": "ptest-source-id-v3 "
+                                    "requested-model=opus"},
             "children": [_aa_child()] if children is None else children,
             "limitations": [],
             "publication": {"status": "created",

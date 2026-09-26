@@ -132,6 +132,15 @@ def test_render_recomputes_score_and_ignores_model_score():
     assert '"percent": 0' not in out
 
 
+def test_report_limits_conclusions_to_cited_reachable_scope():
+    from ptest.recommendations import render_recommendations
+
+    out = render_recommendations(_run()).decode("utf-8")
+    assert "cited, reachable mechanisms" in out
+    assert "omitted decisive caller, consumer, or cleanup path remains unknown" in out
+    assert "not a suite-wide execution result" in out
+
+
 def test_render_foregrounds_deterministic_initialization_limitation_once():
     import ptest.recommendations as recommendations
 

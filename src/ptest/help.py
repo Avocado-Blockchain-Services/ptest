@@ -74,7 +74,7 @@ Notes:
   model-review consent. After successful initialization, --doctor requests
   the review offer and --no-doctor suppresses it. Review flags cannot be
   combined with --json or --dry-run. --review-model (or PTEST_REVIEW_MODEL)
-  overrides the cheap-model choice; --review-concurrency 1..8 (default 4)
+  overrides the requested default model; --review-concurrency 1..8 (default 4)
   bounds parallel model calls. After init, --smoke runs one small real
   test per project through the scoped runner, --no-smoke skips it, and a
   TTY asks once naming the files. --dry-run and --json never run smoke;
@@ -177,16 +177,18 @@ Notes:
   byte-identical, and are idempotent. Model-review findings about test
   code are never applied.
 
-  Each review makes one model call per checklist item that needs one
-  (4 at a time by default; --review-concurrency 1..8 bounds
-  parallelism), skipping items that do not apply without a call.
-  Timing, selection and parallel execution items are answered from
-  ptest's own facts with no model call. The model is the
-  cheapest adequate one: --review-model (or PTEST_REVIEW_MODEL) wins,
-  otherwise claude uses its haiku alias and codex picks from its model
-  list with one extra call that sends only the model list; the choice is
-  cached per provider and CLI version. The tool-denial qualification must
-  be re-run when the chosen model changes. Citations are in
+  Each model-assessed checklist item receives one initial review call.
+  Every valid model reply, including satisfied and not-applicable, receives
+  one independent verification call; no reply gets a second verification.
+  Timing, selection and parallel execution items use ptest's own facts with
+  no model call. Default requested models are Codex gpt-6-sol and Claude
+  opus. --review-model (or PTEST_REVIEW_MODEL) overrides the requested model;
+  normal provider qualification still applies. --review-concurrency 1..8
+  (default 4) bounds parallel calls. Consent discloses the requested model
+  and maximum initial-plus-verification call count. Reviews cite opaque IDs
+  for automatically selected source units and assess only representative,
+  reachable evidence in the supplied scope. A decisive caller or cleanup
+  path omitted from the units remains unknown. Citations appear in
   recommendations.md.
 
   Full model review disclosure: the selected provider may receive bounded
@@ -359,9 +361,11 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
 
 5. Guidance and isolation:
      ptest guide
-   Findings are hypotheses; verify callers before repairing. Use factories,
-   keep one owned database per worker per run, namespace caches by run and
-   worker, keep tests/coverage/assertions, and never global-flush,
+   Findings are hypotheses about cited, reachable callers; they do not
+   certify an entire suite. Verify callers before repairing. Use factories,
+   reuse expensive server/schema setup per run or worker, allow fresh owned
+   SQLite databases or mutable instances per test/use, namespace shared
+   services by overlapping owners, keep tests/coverage/assertions, and never global-flush,
    blanket-drop, or use fixed paths, fixed ports, detached processes, live
    network targets, or wall-clock sleeps."""
 

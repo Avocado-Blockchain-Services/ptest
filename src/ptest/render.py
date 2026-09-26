@@ -1127,7 +1127,11 @@ def render_agent_assessment(children, workspace, *, report_path: str,
                   for status in info["statuses"].values())
     next_command = "ptest doctor --fix" if any_gap else "ptest --full"
     next_line = "Next: " + paint(next_command, "bold", color=color)
-    trailer = (f"Report: {terminal_text(report_path)} "
+    review_scope = (
+        "Review scope: cited reachable mechanisms only; omitted decisive "
+        "callers remain unknown. " if provider is not None else "")
+    trailer = (review_scope
+               + f"Report: {terminal_text(report_path)} "
                f"({terminal_text(publication_status)}) {dash} citations, "
                f"fixes and verification steps.")
 

@@ -43,15 +43,14 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 from . import contracts as C
 from . import review_context as RC
 from . import review_protocol as RP
 from .checklist import CATALOG as _CHECKLIST_CATALOG
-from .deterministic_items import DeterministicAnswer
-from .checklist import SRC_DIR as _GENERIC_SRC_DIR_PATTERN
-from .checklist import TEST_DIR as _GENERIC_TEST_DIR_PATTERN
-from .checklist import TEST_FILE as _GENERIC_TEST_FILE_PATTERN
+from .deterministic_items import (
+    DETERMINISTIC_ITEM_IDS, DeterministicAnswer)
 from .files import read_regular
 
 _PHASE = "validation"
@@ -61,8 +60,8 @@ MAX_BYTES_PER_CHILD = 512 * 1024
 MAX_BYTES_PER_FILE = 64 * 1024
 # Candidate reads include files later rejected for encoding or binary content.
 # Keep their independent work budget finite even when no excerpt is admitted.
-MAX_CANDIDATE_FILES_PER_CHILD = 256
-MAX_CANDIDATE_BYTES_PER_CHILD = 2 * 1024 * 1024
+MAX_CANDIDATE_FILES_PER_CHILD = 1024
+MAX_CANDIDATE_BYTES_PER_CHILD = 16 * 1024 * 1024
 MAX_PROMPT_BYTES = 1024 * 1024
 # The collected packet leaves room for the fixed policy, response contract,
 # and ordinary provider schema before the shared 1 MiB stdin budget.
@@ -125,12 +124,8 @@ _TIER3_BASENAMES = frozenset({
 })
 
 _PY_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][\w.]*)")
-_PY_FROM_RE = re.compile(r"^[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import[ \t]+")
-_JS_REQUIRE_RE = re.compile(
-    r"(?:import\s+(?:[^'\"]*?\s+from\s+)?|require\s*\(\s*|import\s*\(\s*)"
-    r"['\"](\.[^'\"]*)['\"]")
-_JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
-
+_PY_FROM_RE = re.compile(
+    r"^[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import[ \t]+")
 
 def _admission_tier(path: str, tier4: frozenset = frozenset()) -> int:
     """Return the admission tier (0..5) for a child-relative path."""
@@ -172,26 +167,8 @@ def _python_import_targets(module: str) -> list[str]:
 
 def _js_import_targets(from_path: str, specifier: str) -> list[str]:
     """Resolve a relative JS/TS import to candidate rel paths."""
-    if "/" in from_path:
-        anchor = from_path.rsplit("/", 1)[0]
-    else:
-        anchor = ""
-    joined = f"{anchor}/{specifier}" if anchor else specifier
-    normalized: list[str] = []
-    for part in joined.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if normalized:
-                normalized.pop()
-            else:
-                return []
-        else:
-            normalized.append(part)
-    base = "/".join(normalized)
-    targets = [f"{base}{ext}" for ext in _JS_EXTENSIONS]
-    targets.extend(f"{base}/index{ext}" for ext in _JS_EXTENSIONS)
-    return targets
+    targets = RC._js_spec_targets(from_path, specifier)
+    return [] if targets is None else targets
 
 
 def _resolve_tier4(request_texts: dict[str, str],
@@ -206,10 +183,10 @@ def _resolve_tier4(request_texts: dict[str, str],
                     if target in candidates:
                         resolved.add(target)
                 continue
-            for specifier in _JS_REQUIRE_RE.findall(line):
-                for target in _js_import_targets(from_path, specifier):
-                    if target in candidates:
-                        resolved.add(target)
+        for specifier in RC._vitest_import_links(text):
+            for target in _js_import_targets(from_path, specifier):
+                if target in candidates:
+                    resolved.add(target)
     return frozenset(resolved)
 
 _VALID_STATUSES = frozenset({"satisfied", "gap", "unknown", "not-applicable"})
@@ -339,6 +316,8 @@ class EvidencePacket:
     file_count: int
     byte_count: int
     context: object = None
+    _item_chains: tuple = ()
+    _inventory_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "declaration",
@@ -385,6 +364,29 @@ class EvidencePacket:
         if not isinstance(context, RC.ReviewContext):
             raise TypeError("packet.context must be a ReviewContext")
         object.__setattr__(self, "context", context)
+        inventory_sha256 = self._inventory_sha256
+        if inventory_sha256 is not None:
+            object.__setattr__(
+                self, "_inventory_sha256",
+                _check_hex(inventory_sha256,
+                           "packet._inventory_sha256", 64))
+        chains = self._item_chains
+        if not isinstance(chains, (tuple, list)):
+            raise TypeError("packet._item_chains must be a tuple")
+        normalized_chains = []
+        for entry in chains:
+            if (not isinstance(entry, tuple) or len(entry) != 3
+                    or not isinstance(entry[0], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", entry[0])
+                    or not isinstance(entry[1], str) or not entry[1]
+                    or not isinstance(entry[2], (tuple, list))):
+                raise TypeError("packet._item_chains entries are invalid")
+            paths = tuple(tuple(chain) for chain in entry[2])
+            if any(not isinstance(path, str) or not path
+                   for chain in paths for path in chain):
+                raise TypeError("packet._item_chains paths must be strings")
+            normalized_chains.append((entry[0], entry[1], paths))
+        object.__setattr__(self, "_item_chains", tuple(normalized_chains))
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,14 +676,32 @@ def _packet_body(declaration: str, project_id: str, scope: str,
 
 
 def packet_hash(packet: EvidencePacket) -> str:
-    """Canonical SHA-256 identity of a packet, including its context."""
+    """Canonical packet identity, including private consulted inventory."""
     if not isinstance(packet, EvidencePacket):
         raise TypeError("packet must be EvidencePacket")
-    return _packet_identity(_packet_body(
+    body_hash = _packet_identity(_packet_body(
         packet.declaration, packet.project_id, packet.scope,
         list(packet.excerpts), packet.dependencies, packet.runner_kind,
         packet.excluded_count, packet.truncated_count, packet.byte_count,
         packet.context))
+    if packet._inventory_sha256 is None:
+        return body_hash
+    return hashlib.sha256(
+        b"ptest-packet-inventory-v1\0"
+        + bytes.fromhex(body_hash)
+        + bytes.fromhex(packet._inventory_sha256)).hexdigest()
+
+
+def _candidate_inventory_sha256(candidate_texts: dict[str, str]) -> str:
+    """Fingerprint complete, already-read candidates without exposing names."""
+    digest = hashlib.sha256(b"ptest-consulted-inventory-v1\0")
+    for path, text in sorted(candidate_texts.items()):
+        raw = text.encode("utf-8")
+        digest.update(len(path.encode("utf-8")).to_bytes(8, "big"))
+        digest.update(path.encode("utf-8"))
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(hashlib.sha256(raw).digest())
+    return digest.hexdigest()
 
 
 # Project-local environment inspection bounds. Metadata is read without
@@ -1385,25 +1405,41 @@ _RUNNER_CONFIG_BASENAMES = frozenset({
 _DECLARATION_BASENAMES = frozenset({
     "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
 })
+_ROOT_DECISION_BASENAMES = frozenset({
+    ".ptest.toml", *_RUNNER_CONFIG_BASENAMES, *_DECLARATION_BASENAMES,
+})
 _CONTEXT_PRIORITY_ROLES = frozenset({"config", "setup", "fixture", "helper"})
 
 
 def _context_priority(rel: str, role_of: dict,
-                      linked: set[str]) -> int:
-    """Admission priority: config first, then closure, tests, the rest."""
+                      linked: set[str], config_paths: set[str] = frozenset()
+                      ) -> int:
+    """Admission priority: deciding config, active callers, related support."""
     base = rel.rsplit("/", 1)[-1]
-    if "/" not in rel and (
-            rel == ".ptest.toml"
-            or base in _RUNNER_CONFIG_BASENAMES
-            or base in _DECLARATION_BASENAMES
-            or fnmatch.fnmatchcase(base, "requirements*.txt")):
+    if (role_of.get(rel) == "config" or rel in config_paths
+            or "/" not in rel and (
+                base in _ROOT_DECISION_BASENAMES
+                or fnmatch.fnmatchcase(base, "requirements*.txt"))):
         return 0
-    if (role_of.get(rel) in _CONTEXT_PRIORITY_ROLES
-            or base == "conftest.py" or rel in linked):
+    if role_of.get(rel) == "test":
         return 1
-    if _admission_tier(rel) == 2:
+    if (base == "conftest.py"
+            or role_of.get(rel) in {"setup", "fixture"}
+            or (role_of.get(rel) == "helper" and rel in linked)):
         return 2
-    return 3
+    if role_of.get(rel) == "helper":
+        return 3
+    if _admission_tier(rel) == 2:
+        return 4
+    return 5
+
+
+def _selected_item_support(callers, entry, texts, context,
+                           *, candidate_paths) -> tuple[str, ...]:
+    """Follow bounded exact setup/import/invocation edges from chosen callers."""
+    from . import review_evidence as RE
+    return RE.selected_item_support(
+        callers, entry, texts, context, candidate_paths=candidate_paths)
 
 
 def _regular_no_follow(root: Path, rel: str) -> bool:
@@ -1485,8 +1521,14 @@ def _collect_packet_context(*, child_root: Path, scan_start: str,
     # Seeds trace fixture/import links from a bounded sample of tests;
     # unbounded seeding would burn the shared candidate budget that
     # admission still needs.
-    seeds = tuple(sorted(rel for rel in rels
-                         if _admission_tier(rel) == 2)[:RC.CONTEXT_MAX_FILES])
+    if runner_kind == "pytest":
+        seeds = tuple(sorted(rel for rel in rels if rel.endswith(".py")))
+    elif runner_kind == "vitest":
+        seeds = tuple(sorted(
+            rel for rel in rels
+            if rel.endswith(RC._JS_EXTENSIONS)))
+    else:
+        seeds = ()
     if runner_kind == "vitest":
         configs = {rel for rel in rels
                    if "/" not in rel
@@ -1514,7 +1556,8 @@ def _collect_packet_context(*, child_root: Path, scan_start: str,
                    or rel.rsplit("/", 1)[-1] == "conftest.py"}
         context = RC.collect_pytest_context(
             child_root, scan_start, reader, configs, seeds,
-            tuple(test_roots))
+            tuple(test_roots), argv=tuple(runner_args),
+            full_argv=tuple(runner_full_args))
         if scan_start:
             # Ancestor setup is outside the selected scope: record its
             # presence (lstat only, never read) instead of collecting it.
@@ -1536,6 +1579,94 @@ def _collect_packet_context(*, child_root: Path, scan_start: str,
     else:
         context = RC.empty_context(runner_kind)
     return context
+
+
+_RANKABLE_SOURCE_EXTENSIONS = frozenset({
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go",
+    ".rs", ".java", ".kt", ".sql", ".sh", ".c", ".h", ".cpp",
+    ".cc", ".cs", ".rb", ".php",
+})
+_RANKABLE_CONFIG_NAMES = frozenset({
+    ".ptest.toml", "pyproject.toml", "pytest.ini", ".pytest.ini",
+    "pytest.toml", ".pytest.toml", "tox.ini", "setup.cfg",
+    "package.json", "vitest.config.ts", "vitest.config.js",
+    "vite.config.ts", "vite.config.js", "jest.config.ts",
+    "jest.config.js",
+})
+
+
+def _candidate_text_pool(*, child_root: Path, regular: list,
+                         state: _AdmissionState, limits: EvidenceLimits,
+                         max_candidate_read: int, cache: dict[str, bytes],
+                         deadline: float | None,
+                         progress: Callable[[], None] | None
+                         ) -> dict[str, str]:
+    """Read bounded complete source candidates once for semantic ranking.
+
+    This uses the same file/byte ledger and raw-byte cache as context and
+    final admission. Oversized, unreadable, partial, or exhausted candidates
+    never receive a rank from a prefix that could appear complete.
+    """
+    from . import review_evidence as RE
+
+    def scan_priority(entry) -> tuple:
+        rel, size = entry
+        base = rel.rsplit("/", 1)[-1].lower()
+        suffix = Path(base).suffix
+        if "/" not in rel and base in _RANKABLE_CONFIG_NAMES:
+            tier = 0
+        elif _admission_tier(rel) == 2:
+            tier = 1
+        elif suffix in _RANKABLE_SOURCE_EXTENSIONS:
+            tier = 2
+        else:
+            tier = 3
+        return (tier, size, rel)
+
+    candidates = [(rel, size) for rel, size in regular
+                  if (rel.rsplit("/", 1)[-1].lower()
+                      in _RANKABLE_CONFIG_NAMES
+                      or Path(rel).suffix.lower()
+                      in _RANKABLE_SOURCE_EXTENSIONS)]
+    candidates.sort(key=scan_priority)
+    texts: dict[str, str] = {}
+    for rel, size in candidates:
+        _review_checkpoint(deadline, progress)
+        if size > limits.max_bytes_per_file:
+            continue
+        raw = cache.get(rel)
+        if raw is None:
+            remaining = (limits.max_candidate_bytes_per_child
+                         - state.candidate_bytes_read)
+            if (state.candidate_files_read
+                    >= limits.max_candidate_files_per_child
+                    or remaining <= 0):
+                break
+            read_limit = min(max_candidate_read, remaining)
+            state.candidate_files_read += 1
+            state.candidate_bytes_read += read_limit
+            try:
+                raw = read_regular(child_root, rel, read_limit)
+            except C.Problem:
+                # A failed bounded read consumes its reservation so repeated
+                # bad paths cannot defeat the shared candidate budget.
+                continue
+            state.candidate_bytes_read -= read_limit - len(raw)
+            if len(raw) != size or len(raw) >= max_candidate_read:
+                # The scanner only ranks complete regular files. A later
+                # admission may still provide its normal partial-source note.
+                continue
+            cache[rel] = raw
+        elif len(raw) != size or len(raw) >= max_candidate_read:
+            continue
+        _review_checkpoint(deadline, progress)
+        if b"\x00" in raw:
+            continue
+        try:
+            texts[rel] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return texts
 
 
 def _profile_label(profile: tuple[str, ...]) -> str:
@@ -1605,6 +1736,37 @@ def _conclusive_suite_skips(*, runner_kind: str, context: RC.ReviewContext,
                                          tuple(runner_full_args)))):
                 skipped.add(rel)
         return skipped
+    if runner_kind == "pytest" and context.suite_profiles:
+        def excluded_in_profile(rel: str, profile) -> bool:
+            # A narrowing selector such as -m or -k makes exact membership
+            # partial, but it cannot add files outside literal testpaths,
+            # explicit paths, or literal ignores. Unknown expansive options
+            # and dynamic configuration disable these exclusions.
+            if profile.expansive or profile.config_path is None:
+                return False
+            if profile.includes and not any(
+                    rel == root or rel.startswith(root.rstrip("/") + "/")
+                    for root in profile.includes):
+                return True
+            for pattern in profile.excludes:
+                stripped = pattern.rstrip("/")
+                if (fnmatch.fnmatchcase(rel, pattern)
+                        or rel == stripped
+                        or rel.startswith(stripped + "/")):
+                    return True
+            return False
+
+        explicit = {path for path, reason in context.missing
+                    if reason == "excluded-suite"}
+        return {
+            rel for rel in rels
+            if _admission_tier(rel) == 2
+            and rel not in linked
+            and role_of.get(rel) not in _CONTEXT_PRIORITY_ROLES
+            and (rel in explicit or all(
+                excluded_in_profile(rel, profile)
+                for profile in context.suite_profiles))
+        }
     authoritative = set(context.config_paths) | {"config"}
     if any(path in authoritative and reason in (
             "dynamic-config", "ambiguous-config", "read-limit",
@@ -1753,45 +1915,154 @@ def _build_one_packet(root: Path, repo, resolution,
                if rel not in suite_skips]
     _review_checkpoint(deadline, progress)
 
-    # Admission order is (context priority, tier, path): the child
-    # ``.ptest.toml``, effective runner configuration, and small
-    # dependency declarations first so the file cap can never starve
-    # configured context; configured setup/conftest/plugin/helper closure
-    # before sampled tests; everything else trails. Imported source
-    # (tier 4) additionally resolves from the admitted test texts between
-    # the two phases.
-    ordered = sorted(
-        ((_context_priority(rel, role_of, linked),
-          _admission_tier(rel), rel) for rel, _size in regular)
-    )
-    early = [item for item in ordered if item[0] <= 2]
-    later_all = [item[2] for item in ordered if item[0] > 2]
+    candidate_texts = _candidate_text_pool(
+        child_root=child_root, regular=regular, state=state, limits=limits,
+        max_candidate_read=max_candidate_read, cache=cache,
+        deadline=deadline, progress=progress)
+    from . import review_evidence as RE
+    signal_cache: dict = {}
+    support_cache: dict = {}
+    ranked_candidates = RE.rank_candidates(
+        context, candidate_texts, candidate_texts, _CHECKLIST_CATALOG,
+        signal_cache=signal_cache)
+    candidate_rank = {path: index
+                      for index, path in enumerate(ranked_candidates)}
     _review_checkpoint(deadline, progress)
+
+    config_paths = set(context.config_paths)
+    model_items = tuple(
+        entry for entry in _CHECKLIST_CATALOG
+        if entry.id not in DETERMINISTIC_ITEM_IDS)
+    root_decisions = [
+        rel for rel, _size in regular
+        if _context_priority(rel, role_of, linked, config_paths) == 0]
+    configured_setups = [rel for rel, _size in regular
+                         if role_of.get(rel) == "setup"]
+    candidate_paths = {rel for rel, _size in regular}
+    chains_for_item = {
+        item.id: RE.item_source_chains(
+            item.id, candidate_texts, context, candidate_paths,
+            signal_cache=signal_cache, support_cache=support_cache)
+        for item in model_items
+    }
+    selected_chains: dict[str, list[tuple[str, ...]]] = {
+        item.id: [] for item in model_items}
+    core_paths = list(dict.fromkeys(root_decisions + configured_setups))
     early_halted = False
-    for position, (_priority, _tier, rel) in enumerate(early):
+    for position, rel in enumerate(core_paths):
         _review_checkpoint(deadline, progress)
         if not _admit_candidate(
                 state, child_root, rel, prefix, limits, max_candidate_read,
-                len(early) - 1 - position + len(later_all),
+                len(core_paths) - position - 1,
                 deadline=deadline, progress=progress, cache=cache):
             early_halted = True
-            later_all = []
             break
+
+    regular_sizes = dict(regular)
+
+    def chain_fits(chain):
+        admitted = {excerpt.path for excerpt in state.excerpts}
+        additions = [path for path in chain if prefix + path not in admitted]
+        if any(path not in regular_sizes
+               or regular_sizes[path] > limits.max_bytes_per_file
+               or regular_sizes[path] > max_candidate_read - 1
+               for path in additions):
+            return False
+        if len(state.excerpts) + len(additions) > limits.max_files_per_child:
+            return False
+        if state.byte_count + sum(regular_sizes[path]
+                                  for path in additions) \
+                > limits.max_bytes_per_child:
+            return False
+        unread = [path for path in additions if path not in cache]
+        if state.candidate_files_read + len(unread) \
+                > limits.max_candidate_files_per_child:
+            return False
+        if state.candidate_bytes_read + sum(
+                regular_sizes[path] for path in unread) \
+                > limits.max_candidate_bytes_per_child:
+            return False
+        return True
+
+    def admit_chain(item_id, chain):
+        if early_halted or not chain_fits(chain):
+            return False
+        old_excerpt_count = len(state.excerpts)
+        old_paths = dict(state.paths)
+        old_byte_count = state.byte_count
+        admitted = {excerpt.path for excerpt in state.excerpts}
+        additions = [path for path in chain if prefix + path not in admitted]
+        for position, rel in enumerate(additions):
+            _review_checkpoint(deadline, progress)
+            if not _admit_candidate(
+                    state, child_root, rel, prefix, limits,
+                    max_candidate_read, len(chain) - position - 1,
+                    deadline=deadline, progress=progress, cache=cache):
+                break
+        admitted = {excerpt.path for excerpt in state.excerpts}
+        if not all(prefix + path in admitted for path in chain):
+            del state.excerpts[old_excerpt_count:]
+            state.paths.clear()
+            state.paths.update(old_paths)
+            state.byte_count = old_byte_count
+            return False
+        selected_chains[item_id].append(tuple(chain))
+        return True
+
+    # Admit one complete, source-backed caller chain per item before any
+    # row receives its second sample. Each chain retains its exact local
+    # helper, invocation, and ancestor setup edges.
+    if not early_halted:
+        for desired_count in (1, 2):
+            for item in model_items:
+                accepted_callers = {
+                    chain[0] for chain in selected_chains[item.id]}
+                if len(accepted_callers) >= desired_count:
+                    continue
+                for chain in chains_for_item[item.id]:
+                    if chain[0] in accepted_callers:
+                        continue
+                    if admit_chain(item.id, chain):
+                        break
+
+    chosen_callers = list(dict.fromkeys(
+        chain[0] for chains in selected_chains.values() for chain in chains))
+    support_paths = list(dict.fromkeys(
+        path for chains in selected_chains.values() for chain in chains
+        for path in chain[1:]))
+    protected = set(core_paths + chosen_callers + support_paths)
+    unresolved_suite = any(
+        profile.status == "partial" for profile in context.suite_profiles)
+    late = sorted(
+        (rel for rel, _size in regular
+         if rel not in protected
+         and (role_of.get(rel) != "test" or unresolved_suite)),
+        key=lambda rel: (_context_priority(
+            rel, role_of, linked, config_paths),
+            candidate_rank.get(rel, 10**9),
+            _admission_tier(rel), rel))
+    later_all = list(late)
     _review_checkpoint(deadline, progress)
     if not early_halted:
+        linked_texts = {
+            rel: text for rel, text in candidate_texts.items()
+            if role_of.get(rel) in {"test", "setup", "fixture", "helper"}
+        }
         tier4 = frozenset(
-            _resolve_tier4(state.tier2_texts, set(later_all)))
-        late = sorted(
-            ((_context_priority(rel, role_of, linked),
+            _resolve_tier4(linked_texts, set(later_all)))
+        late_ranked = sorted(
+            ((_context_priority(rel, role_of, linked, config_paths),
               _admission_tier(rel, tier4), rel)
-             for rel in later_all))
+             for rel in later_all),
+            key=lambda item: (item[0], candidate_rank.get(item[2], 10**9),
+                              item[1], item[2]))
     else:
-        late = []
-    for position, (_priority, _tier, rel) in enumerate(late):
+        late_ranked = []
+    for position, (_priority, _tier, rel) in enumerate(late_ranked):
         _review_checkpoint(deadline, progress)
         if not _admit_candidate(
                 state, child_root, rel, prefix, limits, max_candidate_read,
-                len(late) - 1 - position,
+                len(late_ranked) - 1 - position,
                 deadline=deadline, progress=progress, cache=cache):
             break
     _review_checkpoint(deadline, progress)
@@ -1840,10 +2111,20 @@ def _build_one_packet(root: Path, repo, resolution,
         packet_sha256="0" * 64, excerpts=tuple(excerpts),
         dependencies=dependencies, runner_kind=runner_kind,
         excluded_count=skipped, truncated_count=truncated,
-        file_count=len(excerpts), byte_count=byte_count, context=context)
+        file_count=len(excerpts), byte_count=byte_count, context=context,
+        _inventory_sha256=_candidate_inventory_sha256(candidate_texts))
     digest = packet_hash(packet)
+    admitted_paths = {excerpt.path for excerpt in excerpts}
+    item_chains = []
+    for item in model_items:
+        complete = tuple(
+            tuple((prefix + path) for path in chain)
+            for chain in selected_chains[item.id]
+            if all(prefix + path in admitted_paths for path in chain))
+        item_chains.append((digest, item.id, complete))
     _review_checkpoint(deadline, progress)
-    return replace(packet, packet_sha256=digest)
+    return replace(packet, packet_sha256=digest,
+                   _item_chains=tuple(item_chains))
 
 
 def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
@@ -1868,8 +2149,6 @@ def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
 
 ITEM_MAX_FILES = 24
 ITEM_MAX_BYTES = 256 * 1024
-ITEM_INITIAL_MAX_FILES = 20
-ITEM_INITIAL_MAX_BYTES = 192 * 1024
 SKIP_PREFIX = "Skipped without a model call: "
 FAILED_PREFIX = "Review failed: "
 PTEST_ANSWER_PREFIX = "Answered by ptest: "
@@ -1879,35 +2158,6 @@ _ONE_ROW_EVIDENCE_MAX = 16
 _SKIP_RATIONALE_MIN_NONSPACE = 24
 
 _CATALOG_BY_ID = {entry.id: entry for entry in _CHECKLIST_CATALOG}
-
-# Conservative dependency signals. Any hit means the item is reviewed;
-# only total absence across manifests, evidence, and scanner hits skips.
-# The library lists deliberately cover Python, Node, Go, Rust, and JVM
-# drivers, ORMs, and caches by substring so new clients fail open to review.
-_DB_LIBRARY_RE = re.compile(
-    r"sqlalchemy|sqlmodel|django|alembic|psycopg|asyncpg|aiosqlite|"
-    r"\bsqlite3?\b|sqlite|duckdb|peewee|tortoise|prisma|sequelize|typeorm|"
-    r"knex|mongoose|mongo|pymongo|\bmotor\b|mongoengine|beanie|odmantic|"
-    r"piccolo|postgres|\bpg\b|pgx|lib/pq|mysql2?|mssql|pymssql|oracledb|"
-    r"cx_oracle|oracle|pyodbc|pymysql|asyncmy|drizzle|kysely|supabase|"
-    r"mikro-orm|gorm|sqlx|diesel|rusqlite|cassandra|dynamo|firestore|"
-    r"cockroach|jdbc|hibernate|\bjpa\b|jooq|mybatis",
-    re.IGNORECASE)
-_DB_USAGE_RE = re.compile(
-    r"connect\s*\(|create_all|drop_database|drop_all|truncate|DATABASE_URL|"
-    r"database_url|postgres(?:ql)?://|mysql://|mariadb://|mongodb://|"
-    r"mssql://|sqlite:/|Column\s*\(|"
-    r"create_engine|sessionmaker|\.query\s*\(|\.execute\s*\(|\.sql\s*\(",
-    re.IGNORECASE)
-_CACHE_LIBRARY_RE = re.compile(
-    r"redis|valkey|memcach|pylibmc|pymemcache|aiocache|cachetools|"
-    r"keyv|lru|node-cache|diskcache|go-cache|ehcache|caffeine|hazelcast|"
-    r"cacheops",
-    re.IGNORECASE)
-_CACHE_USAGE_RE = re.compile(
-    r"flushall|flushdb|clear_all|invalidate_all|invalidate\s*\(|CACHE_URL|"
-    r"cache_url|redis://|valkey://|memcached://|\.clear\s*\(|\.delete\s*\(",
-    re.IGNORECASE)
 
 _ONE_ROW_CITATION_SCHEMA = {
     "type": "object",
@@ -1946,40 +2196,82 @@ _ONE_ROW_SCHEMA_OBJECT = {
     "additionalProperties": False,
 }
 
+_AA_EXEC_WORDS_FOR_PROMPT = ", ".join(C.AA_EXEC_CLAIM_WORDS)
+_AA_EXEC_SUBJECTS_FOR_PROMPT = ", ".join(C.AA_EXEC_CLAIM_SUBJECTS)
+_AA_EXEC_VERBS_FOR_PROMPT = ", ".join(C.AA_EXEC_CLAIM_VERBS)
+
 _ITEM_INSTRUCTION = (
     "Answer exactly one checklist item with one JSON object matching "
     "response_schema; return JSON only, with no markdown fence or "
-    "surrounding prose. Judge the single item in this request against its "
-    "criterion using only the listed excerpts and metadata; cite excerpts "
-    "with their root-relative paths, line ranges, and content identities. "
-    "The private proof array has at most four entries; each entry names "
-    "applicability, mechanism, violation, or counterevidence, indexes one "
-    "evidence citation, and quotes an exact substring from its cited lines "
-    "of at most 512 UTF-8 bytes. Satisfied needs applicability and mechanism "
-    "proof; gap needs applicability and violation proof, and the violation "
-    "citation must also appear in finding evidence; not-applicable needs "
-    "affirmative applicability proof. Unknown may request at most four "
-    "opaque IDs from packet.omission_inventory in needs, and only when the "
-    "missing excerpt could resolve the named uncertainty. On an evidence-"
-    "followup request, needs must be empty. Do not invent IDs, paths, "
-    "quotes, or execution results. Check shared setup and counterevidence "
+    "surrounding prose. Judge the single item against its criterion using "
+    "only listed source units and metadata. Qualify conclusions to the "
+    "representative, statically reachable callers and mechanisms shown; "
+    "do not require proof about every suite path, universal absence, or "
+    "runtime execution. A fresh mutable instance per test or use can show "
+    "ownership; SQLite is a database; a per-instance map used for reuse "
+    "can be a cache; a managed temporary root or context manager can show "
+    "file ownership. An injected in-process fake transport can establish "
+    "isolation for the callers it intercepts, but a mock, string, or "
+    "deliberately bad example alone does not show live effects. "
+    "subprocess.run can establish joining/reaping its direct child when the "
+    "call waits for it; do not infer descendant cleanup without evidence "
+    "for the descendant or process-group path. State polling with a bound "
+    "is different from correctness that depends on a wall-clock sleep. "
+    "Concrete contrary evidence in a reachable caller takes precedence "
+    "over a helper that is not used by that caller. evidence "
+    "contains source IDs from this request, never paths, coordinates, hashes, "
+    "quotes, or IDs from another item. A gap finding cites IDs from evidence. "
+    "needs may contain up to four offered reserve IDs for any initial status, "
+    "but verification replies must have empty needs. Do not invent IDs or "
+    "execution results. Check actual callers, shared setup, normal cleanup, "
+    "exception/timeout/cancellation paths, and concrete counterevidence "
     "before claiming a gap; incomplete or missing setup cannot prove a "
-    "suite-wide result. Use "
-    "satisfied only with cited evidence that the criterion holds, gap only "
-    "with cited evidence plus a finding, not-applicable only with a "
+    "suite-wide result. Satisfied only when the cited evidence shows a "
+    "mechanism sufficient for the representative, reachable paths in the "
+    "assessed scope; "
+    "do not require "
+    "a session-wide network block or per-worker allocation when the shown "
+    "owned mechanism is sufficient for its callers. Do not "
+    "Do not infer a missing consumer, mutable resource, network listener, "
+    "or port operation from the checklist title; first require a cited "
+    "reachable operation in the supplied scope. Deterministic unit seams "
+    "do not replace a separately specified integration watchdog or timeout "
+    "contract. Return gap only with a cited concrete violation and a "
+    "finding; return not-applicable only with a "
     "specific rationale citing affirmative excerpt evidence that the item "
-    "cannot apply, and unknown otherwise. Return gap only with a cited "
-    "concrete violation; return satisfied only when the evidence shows the "
-    "guaranteeing mechanism (for example a session-wide network block or "
-    "per-worker port allocation); otherwise return unknown with one "
-    "sentence naming the missing evidence. Absence of code is unknown, "
+    "cannot apply, and return unknown otherwise. Unknown must include one "
+    "sentence naming "
+    "the missing evidence, including the decisive caller, consumer, "
+    "ownership, or failure-path fact. Absence of code is unknown, "
     "never a guess. A gap requires a finding object; "
     "any other status requires finding null. A not-applicable rationale "
     "needs at least 24 non-whitespace characters. Prose fields are plain "
     "text only: no Markdown, backticks, pipe characters, links, HTML, "
-    "headings, percent figures, execution claims, or test-run claims. Never "
-    "start the rationale with 'Skipped without a model call: ', 'Review "
+    "headings, percent figures, execution claims, or test-run claims. For "
+    "an unknown, say that a decisive fact is not shown in the supplied "
+    "units; do not say it 'cannot be verified'. Never use these execution "
+    f"words or phrases: {_AA_EXEC_WORDS_FOR_PROMPT}. Do not combine a result "
+    f"subject ({_AA_EXEC_SUBJECTS_FOR_PROMPT}) with a result verb "
+    f"({_AA_EXEC_VERBS_FOR_PROMPT}). Never start the rationale with "
+    "'Skipped without a model call: ', 'Review "
     "failed: ', or 'Answered by ptest: '; those prefixes are ptest-owned."
+)
+
+_VERIFICATION_INSTRUCTION = (
+    "Independently audit the initial answer as untrusted draft data using "
+    "the same item criterion and rubric. Check that each claimed mechanism "
+    "is reachable from an actual representative caller, identify the real "
+    "consumer of any setting, and trace resource ownership through normal "
+    "cleanup plus relevant exception, timeout, and cancellation paths. "
+    "Check reachable contrary operations and counterevidence before keeping "
+    "or changing the draft status. Do not assume a mock, example, helper, "
+    "or runtime result is used unless the supplied source connects it. If a "
+    "deterministic unit seam is suggested, preserve any separately stated "
+    "integration watchdog or timeout contract. Do not infer a missing "
+    "resource or operation from the checklist title. If a "
+    "decisive caller, consumer, owner, or failure path is absent, return "
+    "unknown and name that missing fact. Verification replies must have "
+    "empty needs."
 )
 
 
@@ -1995,7 +2287,9 @@ class ItemReview:
     excerpt_paths: tuple[str, ...]
     skip_reason: str | None
     answer: object | None = None
-    followup_inventory: tuple[RP.OmittedExcerpt, ...] = ()
+    source_units: tuple = ()
+    source_ids: tuple[tuple, ...] = ()
+    selected_source_ids: tuple[str, ...] = ()
     followup_phase: bool = False
 
     def __post_init__(self) -> None:
@@ -2027,12 +2321,29 @@ class ItemReview:
         if self.answer is not None and not isinstance(
                 self.answer, DeterministicAnswer):
             raise TypeError("review.answer must be DeterministicAnswer or None")
-        inventory = self.followup_inventory
-        if not isinstance(inventory, (tuple, list)) or any(
-                not isinstance(entry, RP.OmittedExcerpt) for entry in inventory):
-            raise TypeError(
-                "review.followup_inventory must contain omitted excerpts")
-        object.__setattr__(self, "followup_inventory", tuple(inventory))
+        from . import review_evidence as RE
+        units = self.source_units
+        if not isinstance(units, (tuple, list)) or any(
+                not isinstance(unit, RE.SourceUnit) for unit in units):
+            raise TypeError("review.source_units must contain SourceUnit")
+        object.__setattr__(self, "source_units", tuple(units))
+        source_ids = self.source_ids
+        if not isinstance(source_ids, (tuple, list)):
+            raise TypeError("review.source_ids must be a tuple")
+        pairs = tuple(source_ids)
+        if any(not isinstance(pair, tuple) or len(pair) != 2
+               or not isinstance(pair[0], RE.SourceUnit)
+               or not isinstance(pair[1], str) for pair in pairs):
+            raise TypeError("review.source_ids entries are invalid")
+        if len({unit for unit, _identifier in pairs}) != len(pairs) \
+                or len({identifier for _unit, identifier in pairs}) != len(pairs):
+            raise ValueError("review source IDs must be unique")
+        object.__setattr__(self, "source_ids", pairs)
+        selected_ids = self.selected_source_ids
+        if not isinstance(selected_ids, (tuple, list)) or any(
+                not isinstance(identifier, str) for identifier in selected_ids):
+            raise TypeError("review.selected_source_ids must be strings")
+        object.__setattr__(self, "selected_source_ids", tuple(selected_ids))
         if not isinstance(self.followup_phase, bool):
             raise TypeError("review.followup_phase must be bool")
         set_count = ((self.request is not None)
@@ -2041,6 +2352,23 @@ class ItemReview:
         if set_count != 1:
             raise ValueError(
                 "review must set exactly one of request, skip_reason, answer")
+
+    @property
+    def source_map(self):
+        """Immutable source-unit to ptest-issued source-ID mapping."""
+        return MappingProxyType(dict(self.source_ids))
+
+    @property
+    def source_map_by_id(self):
+        """Immutable reverse lookup used by the protocol validator."""
+        return MappingProxyType({identifier: unit
+                                 for unit, identifier in self.source_ids})
+
+    @property
+    def reserve_source_ids(self) -> tuple[str, ...]:
+        selected = set(self.selected_source_ids)
+        return tuple(identifier for _unit, identifier in self.source_ids
+                     if identifier not in selected)
 
 
 def one_row_schema() -> bytes:
@@ -2069,205 +2397,9 @@ def _manifest_excerpts(packet: EvidencePacket) -> list[SourceExcerpt]:
             and excerpt.path.rsplit("/", 1)[-1] != ".ptest.toml"]
 
 
-# Broad directory patterns that admit almost every test/src file. Ranked
-# last so an excerpt matching only these never pushes out key evidence.
-_GENERIC_PATH_PATTERN_STRINGS = frozenset({
-    _GENERIC_TEST_DIR_PATTERN, _GENERIC_TEST_FILE_PATTERN,
-    _GENERIC_SRC_DIR_PATTERN})
-
-
-_CONFTEST_PATH_RE = re.compile(r"(?:^|/)conftest\.py$")
-_TEST_DIR_RE = re.compile(_GENERIC_TEST_DIR_PATTERN)
-_TEST_FILE_RE = re.compile(_GENERIC_TEST_FILE_PATTERN)
-_FIXTURE_DEF_RE = re.compile(
-    r"@pytest\.fixture(?:\([^)]*\))?\s*\ndef[ \t]+([A-Za-z_]\w*)[ \t]*\(")
-_TEST_PARAMS_RE = re.compile(
-    r"^[ \t]*def[ \t]+test_\w*[ \t]*\(([^)]*)\)", re.MULTILINE)
-
-
-def _fixture_first_paths(routed: list[SourceExcerpt]) -> list[SourceExcerpt]:
-    """Rank conftest fixture definitions used by routed tests first.
-
-    A conftest excerpt that defines a fixture whose name appears as a
-    parameter in the item's routed test excerpts outranks every other
-    signal, so the guaranteeing mechanism (not just the use site) is
-    always in the review subset.
-    """
-    params: set[str] = set()
-    for excerpt in routed:
-        if not (_TEST_FILE_RE.search(excerpt.path)
-                or _TEST_DIR_RE.search(excerpt.path)):
-            continue
-        for match in _TEST_PARAMS_RE.finditer(excerpt.text):
-            for chunk in match.group(1).split(","):
-                name = chunk.strip().split(":")[0].split("=")[0].strip()
-                name = name.lstrip("*")
-                if name.isidentifier():
-                    params.add(name)
-    if not params:
-        return routed
-    first: list[SourceExcerpt] = []
-    rest: list[SourceExcerpt] = []
-    for excerpt in routed:
-        if (_CONFTEST_PATH_RE.search(excerpt.path)
-                and "@pytest.fixture" in excerpt.text
-                and any(name in params
-                        for name in _FIXTURE_DEF_RE.findall(excerpt.text))):
-            first.append(excerpt)
-        else:
-            rest.append(excerpt)
-    return first + rest
-
-
-def _mandatory_context_excerpts(
-        packet: EvidencePacket) -> list[SourceExcerpt]:
-    """Admitted runner config + setup/helper/fixture closure, in order.
-
-    Mandatory context is seeded before item-specific sampling so the
-    effective runner configuration and its configured setup/helper
-    closure reach every applicable item regardless of that item's regex
-    matches. Only actually admitted excerpts are seeded: the admitted
-    ``.ptest.toml``, admitted excerpts on the context's config paths
-    (the selected Vitest configuration), and admitted excerpts carrying
-    a setup/helper/fixture context role. Selected-scope reviews keep their
-    privacy boundary and seed nothing.
-    """
-    if packet.scope != packet.declaration:
-        return []
-    context = packet.context
-    if not isinstance(context, RC.ReviewContext):
-        return []
-    prefix = "" if packet.declaration == "." else packet.declaration + "/"
-    wanted = {f"{prefix}.ptest.toml"}
-    wanted.update(prefix + rel for rel in context.config_paths)
-    roles = dict(context.roles)
-    mandatory: list[SourceExcerpt] = []
-    for excerpt in packet.excerpts:
-        rel = (excerpt.path[len(prefix):]
-               if prefix and excerpt.path.startswith(prefix)
-               else excerpt.path)
-        if excerpt.path in wanted \
-                or roles.get(rel) in ("setup", "helper", "fixture"):
-            mandatory.append(excerpt)
-    return mandatory
-
-
-def _route_excerpts(packet: EvidencePacket, entry,
-                    code_index: dict[str, frozenset]
-                    ) -> tuple[list[SourceExcerpt], list[str]]:
-    """Route the item's evidence subset, ranked before capping.
-
-    Mandatory admitted runner context (the admitted ``.ptest.toml``,
-    the selected Vitest configuration, and the admitted setup/helper
-    closure) is seeded first so it reaches every applicable item even
-    when the item has no path/text hit on it. Item-specific sampling
-    then fills the remaining ITEM_MAX_FILES / ITEM_MAX_BYTES budget:
-    eligibility is a path-pattern, text-pattern, or scanner-code hit,
-    ranked with fixture-defining conftests first, then scanner-code
-    hits, then text-pattern hits, then item-specific path matches, then
-    generic test/src directory matches. Packet order is kept within
-    each rank. Returns ``(chosen, omitted)`` where ``omitted`` holds
-    the paths cut by the item caps so metadata stays honest.
-    """
-    mandatory = _mandatory_context_excerpts(packet)
-    mandatory_paths = {excerpt.path for excerpt in mandatory}
-    specific_res = [re.compile(pattern) for pattern in entry.path_patterns
-                    if pattern not in _GENERIC_PATH_PATTERN_STRINGS]
-    generic_res = [re.compile(pattern) for pattern in entry.path_patterns
-                   if pattern in _GENERIC_PATH_PATTERN_STRINGS]
-    text_res = [re.compile(pattern) for pattern in entry.text_patterns]
-    wanted = set(entry.scanner_codes)
-    ranked: list[tuple[tuple[bool, bool, bool], SourceExcerpt]] = []
-    for excerpt in packet.excerpts:
-        if excerpt.path in mandatory_paths:
-            continue
-        codes = set(code_index.get(excerpt.path, ()))
-        scanner_hit = bool(wanted & codes)
-        text_hit = any(pattern.search(excerpt.text) for pattern in text_res)
-        specific_hit = any(pattern.search(excerpt.path)
-                           for pattern in specific_res)
-        generic_hit = any(pattern.search(excerpt.path)
-                          for pattern in generic_res)
-        if not (scanner_hit or text_hit or specific_hit or generic_hit):
-            continue
-        ranked.append(((not scanner_hit, not text_hit, not specific_hit),
-                       excerpt))
-    # Stable sort: packet order is kept within each rank.
-    ranked.sort(key=lambda item: item[0])
-    ordered = list(mandatory)
-    ordered.extend(_closure_first_paths(
-        packet, _fixture_first_paths([excerpt for _, excerpt in ranked])))
-    routed: list[SourceExcerpt] = []
-    total = 0
-    for excerpt in ordered:
-        if len(routed) >= ITEM_INITIAL_MAX_FILES:
-            break
-        size = len(excerpt.text.encode("utf-8"))
-        if total + size > ITEM_INITIAL_MAX_BYTES:
-            continue
-        routed.append(excerpt)
-        total += size
-    chosen = {excerpt.path for excerpt in routed}
-    # The follow-up inventory may request any other already-admitted packet
-    # source, including one with no first-pass regex hit. Such omissions are
-    # explicit unknowns, never claims that a path is absent.
-    omitted = [excerpt.path for excerpt in packet.excerpts
-               if excerpt.path not in chosen]
-    return routed, omitted
-
-
-def _closure_first_paths(packet: EvidencePacket,
-                         ordered: list[SourceExcerpt]
-                         ) -> list[SourceExcerpt]:
-    """Rank configured setup/fixture/helper closure before sampled tests.
-
-    Mandatory runner context itself is seeded first by
-    :func:`_mandatory_context_excerpts`; here the admitted closure
-    (context roles plus conftest basenames, with fixture-defining
-    conftests already first) outranks generic matches in the sampled
-    tail. Stable: packet order is kept within each rank.
-    """
-    roles: dict = {}
-    context = packet.context
-    if isinstance(context, RC.ReviewContext):
-        roles = dict(context.roles)
-    prefix = "" if packet.declaration == "." else packet.declaration + "/"
-
-    def is_closure(excerpt: SourceExcerpt) -> bool:
-        path = excerpt.path
-        rel = (path[len(prefix):] if prefix and path.startswith(prefix)
-               else path)
-        return (roles.get(rel) in _CONTEXT_PRIORITY_ROLES
-                or rel.rsplit("/", 1)[-1] == "conftest.py")
-
-    return sorted(ordered, key=lambda excerpt: (not is_closure(excerpt),))
-
-
-def _omission_inventory(packet: EvidencePacket, item_id: str,
-                        omitted: list[str]) -> tuple[RP.OmittedExcerpt, ...]:
-    roles = dict(packet.context.roles) if isinstance(
-        packet.context, RC.ReviewContext) else {}
-    by_path = {excerpt.path: excerpt for excerpt in packet.excerpts}
-    inventory = []
-    for path in omitted:
-        excerpt = by_path.get(path)
-        if excerpt is None or RC.is_excluded_path(
-                _child_relative(path, packet.declaration)):
-            continue
-        relative = _child_relative(path, packet.declaration)
-        role = roles.get(relative)
-        if role not in RC._CONTEXT_ROLES:
-            role = "test" if _admission_tier(relative) == 2 else "source"
-        inventory.append(RP.OmittedExcerpt(
-            opaque_id=RP.opaque_id(packet.packet_sha256, item_id, path,
-                                   excerpt.sha256),
-            excerpt=excerpt, role=role))
-    return tuple(inventory)
-
-
 def _item_context_metadata(
         packet: EvidencePacket, omitted: list[str], item_id: str,
-        *, phase: str = "initial") -> dict:
+        *, phase: str = "initial", reserve=(), draft=None) -> dict:
     """Private request metadata: trusted runner facts and honest omissions.
 
     Carries the effective runner kind, config resolution status, bounded
@@ -2280,8 +2412,9 @@ def _item_context_metadata(
     context = packet.context
     if isinstance(context, RC.ReviewContext):
         config_status = context.config_status
-        missing = [[path, reason] for path, reason in context.missing]
-        known_excluded = list(context.known_excluded)
+        missing = [[path, reason] for path, reason in context.missing
+                   if reason != "excluded-suite"]
+        known_excluded = []
     else:
         config_status = "unavailable"
         missing = []
@@ -2307,7 +2440,11 @@ def _item_context_metadata(
                     entry[0] == path for entry in missing):
                 if len(missing) < RC._CONTEXT_MISSING_CAP:
                     missing.append([path, "not-collected"])
-    inventory = _omission_inventory(packet, item_id, omitted)
+    reserve_inventory = [
+        {"id": identifier, "path": unit.path, "role": unit.role,
+         "bytes": len(unit.text.encode("utf-8")),
+         "start_line": unit.start_line, "end_line": unit.end_line}
+        for unit, identifier in reserve]
     return {"protocol_version": RP.PROTOCOL_VERSION,
             "phase": phase,
             "packet_sha256": packet.packet_sha256,
@@ -2336,11 +2473,10 @@ def _item_context_metadata(
                                            if isinstance(context, RC.ReviewContext)
                                            else ())],
             "suite_profiles": [
-                {"name": profile.name,
+            {"name": profile.name,
                  "config_path": profile.config_path,
                  "status": profile.status,
-                 "includes": list(profile.includes),
-                 "excludes": list(profile.excludes)}
+                 "expansive": profile.expansive}
                 for profile in (context.suite_profiles
                                 if isinstance(context, RC.ReviewContext)
                                 else ())],
@@ -2351,29 +2487,31 @@ def _item_context_metadata(
             "excluded_count": packet.excluded_count,
             "truncated_count": packet.truncated_count,
             "omitted": list(omitted),
-            "omission_inventory": [entry.public_inventory()
-                                   for entry in inventory]}
+            "omission_inventory": reserve_inventory,
+            "draft": draft}
 
 
-def _encode_item_request(packet: EvidencePacket, entry, routed,
-                         schema_bytes: bytes,
+def _encode_item_request(packet: EvidencePacket, entry, initial_units,
+                         reserve_pairs, source_pairs, schema_bytes: bytes,
+                         *, phase: str = "initial", draft=None,
                          omitted: list[str] | None = None
-                         ) -> tuple[bytes, list, list[str]]:
-    """Encode one item request; shrink excerpts until it fits its bound.
-
-    Returns ``(request, chosen, omitted)``: further excerpts dropped to
-    fit the prompt cap are appended to the omission inventory before
-    hashing/dispatch so truncation stays explicit.
-    """
+                         ) -> tuple[bytes, tuple, tuple[str, ...]]:
+    """Encode bounded complete units and shrink only at unit boundaries."""
     from .agent_providers import PROMPT_INPUT_MAX_BYTES
 
     schema_object = json.loads(schema_bytes.decode("utf-8"))
-    chosen = list(routed)
+    chosen = list(initial_units)
+    if phase == "evidence-verification":
+        chosen.extend(unit for unit, _identifier in reserve_pairs)
     dropped = list(omitted or [])
+    source_ids = dict(source_pairs)
     while True:
         payload = {
             "policy": {
-                "instruction": _ITEM_INSTRUCTION,
+                "instruction": (_ITEM_INSTRUCTION
+                                + (" " + _VERIFICATION_INSTRUCTION
+                                   if phase == "evidence-verification"
+                                   else "")),
                 "item": {"id": entry.id, "label": entry.label,
                          "criterion": entry.criterion,
                          "evidence": entry.evidence,
@@ -2383,31 +2521,28 @@ def _encode_item_request(packet: EvidencePacket, entry, routed,
                 "statuses": sorted(_VALID_STATUSES),
             },
             "packet": _item_context_metadata(
-                packet, dropped, entry.id),
-            "excerpts": [{"path": excerpt.path,
-                          "start_line": excerpt.start_line,
-                          "end_line": excerpt.end_line,
-                          "sha256": excerpt.sha256,
-                          "role": dict(packet.context.roles).get(
-                              _child_relative(excerpt.path,
-                                              packet.declaration),
-                              "source"),
-                          "completeness": ("complete" if excerpt.complete
-                                           else "partial"),
-                          "text": excerpt.text} for excerpt in chosen],
+                packet, dropped, entry.id, phase=phase,
+                reserve=(reserve_pairs if phase == "initial" else ()),
+                draft=draft),
+            "units": [{"id": source_ids[unit], "path": unit.path,
+                       "start_line": unit.start_line,
+                       "end_line": unit.end_line,
+                       "sha256": unit.source_sha256, "role": unit.role,
+                       "text": unit.text} for unit in chosen],
         }
         request = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=True).encode("utf-8")
         if len(request) <= PROMPT_INPUT_MAX_BYTES - len(schema_bytes):
-            return request, chosen, dropped
+            selected_ids = tuple(source_ids[unit] for unit in chosen)
+            return request, tuple(chosen), selected_ids
         if not chosen:
-            return request, chosen, dropped
-        dropped.append(chosen.pop().path)
+            return request, (), ()
+        removed = chosen.pop()
+        if removed.path not in dropped:
+            dropped.append(removed.path)
 
 
-def _plan_one(packet: EvidencePacket, entry,
-              code_index: dict[str, frozenset],
-              schema_bytes: bytes,
+def _plan_one(packet: EvidencePacket, entry, schema_bytes: bytes,
               answers: Mapping[str, object] | None = None) -> ItemReview:
     if answers is not None:
         answer = answers.get(entry.id)
@@ -2426,16 +2561,28 @@ def _plan_one(packet: EvidencePacket, entry,
     # subset; absent, filtered, or over-budget config surfaces as a
     # missing-context reason in the request metadata, never as an
     # invented source.
-    routed, omitted = _route_excerpts(packet, entry, code_index)
-    request, chosen, omitted = _encode_item_request(
-        packet, entry, routed, schema_bytes, omitted)
+    from . import review_evidence as RE
+    initial, reserve, missing = RE.select_item_sources(packet, entry.id)
+    all_units = tuple(dict.fromkeys((*initial, *reserve)))
+    source_pairs = tuple((unit, RE.source_id(packet.packet_sha256,
+                                             entry.id, unit))
+                         for unit in all_units)
+    chosen_paths = {unit.path for unit in initial}
+    omitted = [excerpt.path for excerpt in packet.excerpts
+               if excerpt.path not in chosen_paths]
+    omitted.extend(path for path, _reason in missing)
+    reserve_pairs = tuple((unit, dict(source_pairs)[unit]) for unit in reserve)
+    request, chosen, selected_ids = _encode_item_request(
+        packet, entry, initial, reserve_pairs, source_pairs, schema_bytes,
+        omitted=omitted)
     return ItemReview(item_id=entry.id, label=entry.label,
                       scope=packet.scope, request=request,
                       schema=schema_bytes,
-                      excerpt_paths=tuple(e.path for e in chosen),
+                      excerpt_paths=tuple(dict.fromkeys(
+                          unit.path for unit in chosen)),
                       skip_reason=None,
-                      followup_inventory=_omission_inventory(
-                          packet, entry.id, omitted))
+                      source_units=all_units, source_ids=source_pairs,
+                      selected_source_ids=selected_ids)
 
 
 def plan_item_reviews(packet: EvidencePacket,
@@ -2452,24 +2599,15 @@ def plan_item_reviews(packet: EvidencePacket,
         raise TypeError("packet must be EvidencePacket")
     if answers is not None and not isinstance(answers, Mapping):
         raise TypeError("answers must be a mapping or None")
-    from . import doctor as doctor_api
-
-    code_index = {excerpt.path: doctor_api.match_rules(excerpt.text)
-                  for excerpt in packet.excerpts}
     schema_bytes = one_row_schema()
-    return tuple(_plan_one(packet, entry, code_index, schema_bytes, answers)
+    return tuple(_plan_one(packet, entry, schema_bytes, answers)
                  for entry in _CHECKLIST_CATALOG)
 
 
 _ONE_ROW_KEYS = frozenset({
-    "status", "rationale", "evidence", "finding", "proof", "needs"})
+    "status", "rationale", "evidence", "finding", "needs"})
 _ONE_ROW_FINDING_KEYS = frozenset(
     {"summary", "suggested_change", "evidence"})
-_ONE_ROW_CITATION_KEYS = frozenset({
-    "path", "start_line", "end_line", "sha256",
-})
-
-
 def _invalid_reply(message: str) -> C.Problem:
     return C.Problem(code="invalid-assessment", message=message,
                      phase=_PHASE, retryable=False)
@@ -2516,7 +2654,7 @@ def _short_reply_detail(message: str) -> str:
 
 
 def _normalize_one_row_prose(text: str) -> str:
-    """Strip inline-code backticks so cheap-model prose stays plain text.
+    """Strip inline-code backticks so reviewer prose stays plain text.
 
     Only the backtick characters go: links, autolinks, bare URLs, HTML,
     headings, pipes, percent figures, execution-claim words, and command
@@ -2543,55 +2681,55 @@ def _check_one_row_prose(text: object, ctx: str) -> str:
     return normalized
 
 
-def _bind_one_row_citations(items: object, subset: dict,
-                            ctx: str) -> tuple[tuple, int]:
-    """Bind citations, dropping invalid ones instead of failing the item.
+def _bind_source_ids(items: object, source_map: Mapping,
+                     subset: dict, ctx: str,
+                     available_ids: set[str] | frozenset[str]
+                     ) -> tuple[tuple[Citation, ...], tuple[str, ...]]:
+    """Bind IDs to exact source units and reconstruct public citations."""
+    from . import review_evidence as RE
 
-    Returns ``(valid_citations, dropped_count)``. A citation that is
-    malformed, cites evidence outside the item subset (including files
-    excluded at admission, such as empty files), carries a stale
-    identity, or escapes its excerpt is dropped and counted; the caller
-    fails the item only when its status demands citations and none
-    remain. A non-list or over-long evidence value still fails the row.
-    """
     if not isinstance(items, list) or len(items) > _ONE_ROW_EVIDENCE_MAX:
-        raise _invalid_reply(f"{ctx} must be a list of at most 16 citations")
+        raise _invalid_reply(f"{ctx} must be a list of at most 16 source IDs")
+    by_id = {identifier: unit for unit, identifier in source_map.items()}
+    identifiers: list[str] = []
     citations: list[Citation] = []
-    dropped = 0
-    for position, item in enumerate(items):
-        entry_ctx = f"{ctx}[{position}]"
-        try:
-            _require_exact_keys(item, _ONE_ROW_CITATION_KEYS, entry_ctx)
-            try:
-                citation = Citation(path=item["path"],
-                                    start_line=item["start_line"],
-                                    end_line=item["end_line"],
-                                    sha256=item["sha256"])
-            except (TypeError, ValueError):
-                raise _invalid_reply(
-                    f"{entry_ctx} is not a valid citation") from None
-            excerpt = subset.get(citation.path)
-            if excerpt is None:
-                raise _invalid_reply(
-                    f"{entry_ctx} cites evidence outside the item subset")
-            if citation.sha256 != excerpt.sha256:
-                raise _invalid_reply(
-                    f"{entry_ctx} citation identity is stale")
-            if not (excerpt.start_line <= citation.start_line
-                    <= citation.end_line <= excerpt.end_line):
-                raise _invalid_reply(
-                    f"{entry_ctx} citation escapes its excerpt")
-        except C.Problem:
-            dropped += 1
-            continue
-        citations.append(citation)
-    return tuple(citations), dropped
+    for position, identifier in enumerate(items):
+        if not isinstance(identifier, str) or not RP.SOURCE_ID_RE.fullmatch(
+                identifier):
+            raise _invalid_reply(f"{ctx}[{position}] is not a source ID")
+        if identifier in identifiers:
+            raise _invalid_reply(f"{ctx} contains duplicate source IDs")
+        if identifier not in by_id or identifier not in available_ids:
+            raise _invalid_reply(f"{ctx}[{position}] is an unknown or unoffered source ID")
+        unit = by_id[identifier]
+        if not isinstance(unit, RE.SourceUnit):
+            raise _invalid_reply(f"{ctx}[{position}] source mapping is invalid")
+        excerpt = subset.get(unit.path)
+        if excerpt is None:
+            raise _invalid_reply(f"{ctx}[{position}] source is outside this request")
+        if unit.source_sha256 != excerpt.sha256 or not excerpt.complete:
+            raise _invalid_reply(f"{ctx}[{position}] source identity is stale or partial")
+        if not (excerpt.start_line <= unit.start_line
+                <= unit.end_line <= excerpt.end_line):
+            raise _invalid_reply(f"{ctx}[{position}] source span escapes its excerpt")
+        lines = excerpt.text.splitlines(keepends=True)
+        lo = unit.start_line - excerpt.start_line
+        hi = unit.end_line - excerpt.start_line + 1
+        if "".join(lines[lo:hi]) != unit.text:
+            raise _invalid_reply(f"{ctx}[{position}] source text is not original")
+        identifiers.append(identifier)
+        citations.append(Citation(
+            path=unit.path, start_line=unit.start_line,
+            end_line=unit.end_line, sha256=excerpt.sha256))
+    return tuple(citations), tuple(identifiers)
 
 
 def _validate_one_row(reply: bytes, subset: dict, entry, *,
+                      source_map: Mapping | None = None,
                       offered_ids: set[str] | frozenset[str] = frozenset(),
+                      available_ids: set[str] | frozenset[str] | None = None,
                       followup: bool = False) -> tuple:
-    """Validate one one-row reply; return (AssessmentRow, Finding | None)."""
+    """Validate one reply; return its row, optional finding, and source needs."""
     if len(reply) > MAX_PAYLOAD_BYTES:
         raise _invalid_reply("reply exceeds its bound")
     try:
@@ -2612,10 +2750,15 @@ def _validate_one_row(reply: bytes, subset: dict, entry, *,
     if rationale.startswith((SKIP_PREFIX, FAILED_PREFIX,
                              PTEST_ANSWER_PREFIX)):
         raise _invalid_reply("reply carries a ptest-owned prefix")
-    evidence, dropped = _bind_one_row_citations(document["evidence"],
-                                                subset, "reply.evidence")
-    if status in ("satisfied", "gap", "not-applicable") and not evidence:
-        raise _invalid_reply("no valid citations")
+    if source_map is None:
+        source_map = MappingProxyType({})
+    all_source_ids = {identifier for identifier in source_map.values()
+                      if isinstance(identifier, str)}
+    if available_ids is None:
+        available_ids = all_source_ids
+    evidence, evidence_ids = _bind_source_ids(
+        document["evidence"], source_map, subset, "reply.evidence",
+        set(available_ids))
     if status == "not-applicable" and sum(
             1 for char in rationale if not char.isspace()) < (
                 _SKIP_RATIONALE_MIN_NONSPACE):
@@ -2632,47 +2775,34 @@ def _validate_one_row(reply: bytes, subset: dict, entry, *,
                                        "reply.finding.summary")
         change = _check_one_row_prose(raw_finding["suggested_change"],
                                       "reply.finding.suggested_change")
-        finding_evidence, finding_dropped = _bind_one_row_citations(
-            raw_finding["evidence"], subset, "reply.finding.evidence")
+        finding_evidence, finding_ids = _bind_source_ids(
+            raw_finding["evidence"], source_map, subset,
+            "reply.finding.evidence", set(available_ids))
         if not finding_evidence:
-            raise _invalid_reply("finding has no valid citations")
-        dropped += finding_dropped
+            raise _invalid_reply("finding has no valid source IDs")
         finding = Finding(id=entry.id, summary=summary,
                           suggested_change=change, recipe_id=entry.recipe,
                           evidence=finding_evidence)
     elif raw_finding is not None:
         raise _invalid_reply("non-gap reply must carry finding null")
-    def identities(citations):
-        return {(citation.path, citation.start_line, citation.end_line,
-                 citation.sha256) for citation in citations}
     try:
-        RP.validate_private_fields(document, subset, set(offered_ids),
-                                  followup=followup,
-                                  valid_evidence=identities(evidence),
-                                  valid_finding_evidence=(
-                                      identities(finding_evidence)
-                                      if status == "gap" else None))
+        needs = RP.validate_private_fields(
+            document, all_source_ids, set(offered_ids),
+            available_ids=set(available_ids), followup=followup)
     except (TypeError, ValueError) as exc:
-        raise _invalid_reply("private proof is invalid: " + str(exc)) from None
+        raise _invalid_reply("private source IDs are invalid: " + str(exc)) from None
     row = AssessmentRow(id=entry.id, status=status, rationale=rationale,
-                        evidence=evidence, label=entry.label,
-                        dropped_citations=dropped)
-    return row, finding
+                        evidence=evidence, label=entry.label)
+    return row, finding, needs
 
 
 def plan_followup_review(packet: EvidencePacket, review: ItemReview,
                          reply: bytes) -> tuple[ItemReview | None, str | None]:
-    """Plan the one allowed packet-only evidence follow-up, if requested.
-
-    Returns ``(review, None)`` for one eligible follow-up, ``(None, None)``
-    when the first valid row needs no more evidence, and ``(None, reason)``
-    when a valid request cannot fit the frozen-packet bounds.
-    """
+    """Plan exactly one verifier request for every valid initial judgment."""
     if not isinstance(packet, EvidencePacket) or not isinstance(review, ItemReview):
         raise TypeError("packet and review have invalid types")
-    if not isinstance(reply, (bytes, bytearray)):
-        return None, None
-    if review.followup_phase or not review.followup_inventory:
+    if review.followup_phase or review.request is None \
+            or not isinstance(reply, (bytes, bytearray)):
         return None, None
     known = {excerpt.path: excerpt for excerpt in packet.excerpts}
     subset = {path: known[path] for path in review.excerpt_paths}
@@ -2680,31 +2810,32 @@ def plan_followup_review(packet: EvidencePacket, review: ItemReview,
     if entry is None:
         return None, None
     try:
-        row, _finding = _validate_one_row(
+        _row, _finding, _needs = _validate_one_row(
             bytes(reply), subset, entry,
-            offered_ids={item.opaque_id for item in review.followup_inventory})
-        if row.status != "unknown":
-            return None, None
+            source_map=review.source_map,
+            offered_ids=set(review.reserve_source_ids),
+            available_ids=set(review.selected_source_ids))
         document = json.loads(_unwrap_single_fence(
             bytes(reply).decode("utf-8")))
-        needs = RP.validate_private_fields(
-            document, subset,
-            {item.opaque_id for item in review.followup_inventory})
     except (C.Problem, UnicodeDecodeError, ValueError, TypeError):
         return None, None
-    if not needs:
-        return None, None
-    from .agent_providers import PROMPT_INPUT_MAX_BYTES
-    try:
-        request, paths = RP.build_followup_request(
-            bytes(review.request), review.followup_inventory, needs,
-            max_request_bytes=PROMPT_INPUT_MAX_BYTES - len(review.schema))
-    except (TypeError, ValueError):
-        return None, "requested packet evidence could not fit the follow-up bounds"
+
+    initial_units = tuple(
+        unit for unit, identifier in review.source_ids
+        if identifier in review.selected_source_ids)
+    reserve_pairs = tuple(
+        (unit, identifier) for unit, identifier in review.source_ids
+        if identifier in review.reserve_source_ids)
+    draft = {key: document[key] for key in
+             ("status", "rationale", "evidence", "finding", "needs")}
+    request, selected_units, selected_ids = _encode_item_request(
+        packet, entry, initial_units, reserve_pairs, review.source_ids,
+        review.schema, phase="evidence-verification", draft=draft)
+    paths = tuple(unit.path for unit in selected_units)
     next_review = replace(
         review, request=request,
-        excerpt_paths=review.excerpt_paths + paths,
-        followup_inventory=(), followup_phase=True)
+        excerpt_paths=tuple(dict.fromkeys(review.excerpt_paths + paths)),
+        selected_source_ids=selected_ids, followup_phase=True)
     return next_review, None
 
 
@@ -2963,6 +3094,7 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
     # only actually collected and admitted excerpts may be offered or
     # cited, so citations to absent or unadmitted files fail validation.
     known = {excerpt.path: excerpt for excerpt in packet.excerpts}
+    from . import review_evidence as RE
     for review in reviews:
         if review.item_id not in _CATALOG_BY_ID:
             raise ValueError(f"review {review.item_id!r} is not a catalog item")
@@ -2971,19 +3103,32 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
             raise C.Problem(code="stale-evidence",
                             message="item reviews belong to another packet",
                             phase=_PHASE, retryable=False)
-        for offered in review.followup_inventory:
-            excerpt = known.get(offered.excerpt.path)
-            expected_id = RP.opaque_id(
-                packet.packet_sha256, review.item_id, offered.excerpt.path,
-                offered.excerpt.sha256)
-            if (excerpt is None or excerpt.sha256 != offered.excerpt.sha256
-                    or offered.opaque_id != expected_id
-                    or offered.excerpt.path in review.excerpt_paths
+        expected_ids: set[str] = set()
+        for unit, identifier in review.source_ids:
+            excerpt = known.get(unit.path)
+            expected_id = RE.source_id(packet.packet_sha256,
+                                       review.item_id, unit)
+            lines = excerpt.text.splitlines(keepends=True) if excerpt else []
+            lo = unit.start_line - excerpt.start_line if excerpt else 0
+            hi = unit.end_line - excerpt.start_line + 1 if excerpt else 0
+            valid_text = (excerpt is not None and excerpt.complete
+                          and excerpt.sha256 == unit.source_sha256
+                          and excerpt.start_line <= unit.start_line
+                          <= unit.end_line <= excerpt.end_line
+                          and "".join(lines[lo:hi]) == unit.text)
+            if (not valid_text or identifier != expected_id
+                    or identifier in expected_ids
                     or RC.is_excluded_path(_child_relative(
-                        offered.excerpt.path, packet.declaration))):
+                        unit.path, packet.declaration))):
                 raise C.Problem(code="stale-evidence",
-                                message="follow-up inventory is stale",
+                                message="item source-ID map is stale",
                                 phase=_PHASE, retryable=False)
+            expected_ids.add(identifier)
+        if any(identifier not in expected_ids
+               for identifier in review.selected_source_ids):
+            raise C.Problem(code="stale-evidence",
+                            message="selected source IDs are stale",
+                            phase=_PHASE, retryable=False)
     rows: list[AssessmentRow] = []
     findings: list[Finding] = []
     for review, reply in zip(reviews, replies):
@@ -3013,10 +3158,11 @@ def assemble_child(packet: EvidencePacket, reviews: tuple[ItemReview, ...],
             raise TypeError("replies must be bytes, str, or None")
         subset = {path: known[path] for path in review.excerpt_paths}
         try:
-            row, finding = _validate_one_row(
+            row, finding, _needs = _validate_one_row(
                 bytes(reply), subset, entry,
-                offered_ids={offered.opaque_id
-                             for offered in review.followup_inventory},
+                source_map=review.source_map,
+                offered_ids=set(review.reserve_source_ids),
+                available_ids=set(review.selected_source_ids),
                 followup=review.followup_phase)
         except C.Problem as exc:
             # Untrusted model shapes must never abort the child assembly:

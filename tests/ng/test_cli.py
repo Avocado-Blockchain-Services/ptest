@@ -1086,6 +1086,7 @@ def test_tty_human_init_colors_banner_only_without_no_color(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setenv("TERM", "xterm-256color")
     if no_color:
         monkeypatch.setenv("NO_COLOR", "")
     else:
@@ -1736,7 +1737,7 @@ def test_tty_doctor_discloses_sanitized_bounded_source_once_and_decline_is_offli
     assert "claude" in disclosure
     assert r"project\x1b[31m\nname" in disclosure
     assert "gets bounded source excerpts from" in disclosure
-    assert "Provider costs may apply" in disclosure
+    assert "Provider account costs may apply" in disclosure
     assert "cannot perfectly detect secrets" not in disclosure
     assert "Full disclosure: ptest doctor --help" in disclosure
     assert "--offline" in disclosure
@@ -1772,11 +1773,10 @@ def test_tty_review_disclosure_names_excluded_source_classes(
     assert main(("doctor",)) == 0
 
     disclosure = capsys.readouterr().err.lower()
-    assert "secrets, private files" in disclosure
-    assert "agent instructions" in disclosure
-    assert "dependency folders" in disclosure
-    assert "caches and build output are never sent" in disclosure
-    assert "provider costs may apply" in disclosure
+    assert ("excluded private files, instructions, dependencies, caches and "
+            "build output are omitted") in disclosure
+    assert "source may contain undetected secrets" in disclosure
+    assert "provider account costs may apply" in disclosure
 
 
 def test_review_disclosure_terminates_tty_spinner_line(
@@ -1854,6 +1854,10 @@ def _fake_qualified_profiles(monkeypatch, *, unqualified=()):
 
     statuses = []
 
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.discover_models",
+        lambda adapter: ("gpt-6-sol", "gpt-6-astra"))
+
     def status(name):
         statuses.append(name)
         return QualificationStatus(
@@ -1874,36 +1878,23 @@ def _fake_cli_executable(tmp_path, monkeypatch, name="claude"):
 
 
 def _one_row_reply(request, *, status="unknown", needs=()):
-    """One-row per-item reply citing the item request's own subset."""
+    """One-row private-v3 reply citing IDs offered in this item request."""
     body = json.loads(request)
-    excerpts = body["excerpts"]
+    units = body["units"]
     evidence = []
-    if status in ("satisfied", "gap", "not-applicable") and excerpts:
-        first = excerpts[0]
-        evidence = [{key: first[key] for key in (
-            "path", "start_line", "end_line", "sha256")}]
+    if status in ("satisfied", "gap", "not-applicable") and units:
+        evidence = [units[0]["id"]]
     if status in ("satisfied", "gap", "not-applicable") and not evidence:
         status = "unknown"
-    proof = []
-    if evidence:
-        quote = excerpts[0]["text"].splitlines()[0][:512]
-        roles = (("applicability", "mechanism") if status == "satisfied"
-                 else ("applicability", "violation")
-                 if status == "gap"
-                 else ("applicability",)
-                 if status == "not-applicable" else ())
-        proof = [{"role": role, "citation_index": 0, "quote": quote}
-                 for role in roles]
     finding = ({"summary": "A concrete violation is present.",
                 "suggested_change": "Keep cleanup within its owner.",
-                "evidence": evidence}
+                "evidence": evidence[:1]}
                if status == "gap" else None)
     return json.dumps({
         "status": status,
         "rationale": "The bounded source evidence does not establish this row.",
         "evidence": evidence,
         "finding": finding,
-        "proof": proof,
         "needs": list(needs),
     }).encode("utf-8")
 
@@ -1973,9 +1964,9 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
 
     assert main(("doctor", "--reviewer", "claude", "--allow-model-review")) == 0
 
-    # The parsed flags reach the provider: claude reviews on its haiku alias.
+    # The product default reaches the provider as Claude opus.
     assert argv_log
-    assert all(item[-2:] == ("--model", "haiku") for item in argv_log)
+    assert all(item[-2:] == ("--model", "opus") for item in argv_log)
 
     human = capsys.readouterr()
     squashed = " ".join(human.out.split())
@@ -2002,7 +1993,7 @@ def test_unconfigured_review_foregrounds_config_blocker_and_keeps_public_score(
     assert all(row["label"] for row in child["rows"])
     assert child["score"]["applicable"] == 12
     assert document.data["provider"]["profile"] == (
-        "ptest-item-review-v1 model=haiku")
+        "ptest-source-id-v3 requested-model=opus")
     blocker = next(item for item in document.data["limitations"]
                    if item["code"] == "capability-unsupported")
     assert "initialization-required" in blocker["message"]
@@ -2160,7 +2151,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
         assert body["packet"]["declaration"] in ("api", "web")
         requests.append(request)
         timeouts.append(timeout_s)
-        assert adapter.argv[-2:] == ("--model", "haiku")
+        assert adapter.argv[-2:] == ("--model", "opus")
 
     def launch_many(adapter, requests_arg, timeout_s, *, concurrency=4,
                     on_done=None,
@@ -2191,7 +2182,7 @@ def test_doctor_reviews_children_sequentially_and_publishes_one_document(
     assert [child["scope"] for child in document.data["children"]] == ["api", "web"]
     assert document.data["provider"]["name"] == "claude"
     assert document.data["provider"]["profile"] == (
-        "ptest-item-review-v1 model=haiku")
+        "ptest-source-id-v3 requested-model=opus")
     assert document.data["publication"]["status"] == "created"
     assert set(document.data) == {
         "schema", "provider", "children", "limitations", "publication",
@@ -2372,8 +2363,8 @@ def test_scoped_review_launches_rebased_evidence_and_rejects_in_scope_drift(
         assert packet["declaration"] == "api"
         assert packet["scope"] == "api/tests"
         assert body["policy"]["item"]["id"] in C.AGENT_ASSESSMENT_CHECKLIST_IDS
-        assert [excerpt["path"] for excerpt in body["excerpts"]] == [
-            "api/tests/test_scoped.py"] or body["excerpts"] == []
+        assert all(unit["path"] == "api/tests/test_scoped.py"
+                   for unit in body["units"])
         assert b"SCOPED_REVIEW_OUTSIDE_SENTINEL_251b" not in request
         if mutate_during_review[0] and not mutated:
             mutated.append(1)
@@ -2491,6 +2482,13 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
     from ptest.agent_providers import ProviderResult
 
     _, root = inspection_project
+    (root / "tests" / "test_factory.py").write_text(
+        "def make_record():\n    return {'records': []}\n\n"
+        "def test_factory_isolation():\n"
+        "    factory = make_record()\n"
+        "    factory['records'].append(1)\n"
+        "    assert factory['records'] == [1]\n",
+        encoding="utf-8")
     for index in range(25):
         (root / "tests" / f"test_extra_{index:02d}.py").write_text(
             f"def test_extra_{index}():\n    assert True\n",
@@ -2501,6 +2499,28 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
     monkeypatch.setenv("PTEST_RECOMMENDATIONS_LOCK_DIR", str(tmp_path / "locks"))
     _fake_cli_executable(tmp_path, monkeypatch)
     _fake_qualified_profiles(monkeypatch)
+    from ptest import review_evidence as RE
+
+    original_select = RE.select_item_sources
+
+    def select_with_reserve(packet, item_id):
+        if item_id != "FIX-001":
+            return original_select(packet, item_id)
+        excerpt = next(item for item in packet.excerpts
+                       if item.path == "tests/test_factory.py")
+        lines = excerpt.text.splitlines(keepends=True)
+        first_text, reserve_text = "".join(lines[:2]), "".join(lines[3:])
+        initial_unit = RE.SourceUnit(
+            path=excerpt.path, start_line=excerpt.start_line,
+            end_line=excerpt.start_line + 1,
+            source_sha256=excerpt.sha256, text=first_text, role="test")
+        reserve_unit = RE.SourceUnit(
+            path=excerpt.path, start_line=excerpt.start_line + 3,
+            end_line=excerpt.end_line,
+            source_sha256=excerpt.sha256, text=reserve_text, role="test")
+        return (initial_unit,), (reserve_unit,), ()
+
+    monkeypatch.setattr(RE, "select_item_sources", select_with_reserve)
     monkeypatch.setattr(cli, "_REVIEW_TOTAL_TIMEOUT_S", 30)
     clock = [100.0]
     # cli and assessment share Python's time module; patch its clock once so
@@ -2534,7 +2554,7 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
                 requested_ids.append(opaque_id)
                 reply = _one_row_reply(request, status="unknown",
                                        needs=(opaque_id,))
-            elif phase == "evidence-followup":
+            elif phase == "evidence-verification":
                 assert build_calls == [1], "follow-up must not recollect"
                 reply = _one_row_reply(request, status="satisfied")
             else:
@@ -2562,8 +2582,9 @@ def test_doctor_followup_reuses_adapter_deadline_and_concurrency_once(
     assert len(launch_calls) == 2
     initial, followup = launch_calls
     assert len(initial[3]) > 1
-    assert len(followup[3]) == 1
-    assert followup[3][0]["packet"]["phase"] == "evidence-followup"
+    assert len(followup[3]) == len(initial[3])
+    assert all(body["packet"]["phase"] == "evidence-verification"
+               for body in followup[3])
     assert requested_ids
     assert initial[0] is followup[0]
     assert initial[0].argv == followup[0].argv
@@ -2849,6 +2870,9 @@ def test_auto_with_codex_and_opencode_picks_codex(
                               encoding="utf-8")
         executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.discover_models",
+        lambda adapter: ("gpt-6-sol", "gpt-6-astra"))
     monkeypatch.setattr("builtins.input", lambda: "yes")
     launches = []
 
@@ -3083,7 +3107,7 @@ def _native_replay_executable(bindir, name):
         "assert item_id in " + repr(list(C.AGENT_ASSESSMENT_CHECKLIST_IDS)),
         "reply = {'status': 'unknown',",
         "        'rationale': 'The bounded source evidence does not establish this row.',",
-        "        'evidence': [], 'finding': None, 'proof': [], 'needs': []}",
+        "        'evidence': [], 'finding': None, 'needs': []}",
         "payload = json.dumps(reply)",
     ])
     if name == "claude":
@@ -3131,6 +3155,10 @@ def test_native_envelope_end_to_end_publishes_report(
     bindir.mkdir()
     _native_replay_executable(bindir, provider)
     monkeypatch.setenv("PATH", str(bindir))
+    if provider == "codex":
+        monkeypatch.setattr(
+            "ptest.cli.agent_providers.discover_models",
+            lambda adapter: ("gpt-6-sol", "gpt-6-astra"))
 
     assert main(("doctor", "--reviewer", provider,
                  "--allow-model-review")) == 0
@@ -3186,27 +3214,15 @@ def _recorded_replay_executable(bindir, name, reply):
         "recorded = json.load(open(fixture, encoding='utf-8'))",
         "child = recorded['data']['children'][0]",
         "row = next(r for r in child['rows'] if r['id'] == item_id)",
-        "by_path = {e['path']: e for e in request['excerpts']}",
-        "def rebind(items):",
-        "    for cit in items:",
-        "        excerpt = by_path.get(cit['path'])",
-        "        if excerpt is None:",
-        "            continue",
-        "        cit['sha256'] = excerpt['sha256']",
-        "        cit['start_line'] = max(excerpt['start_line'],",
-        "            min(cit['start_line'], excerpt['end_line']))",
-        "        cit['end_line'] = max(cit['start_line'],",
-        "            min(cit['end_line'], excerpt['end_line']))",
-        "rebind(row.get('evidence', []))",
         "finding = next((f for f in child.get('findings', [])",
         "                if f['id'] == item_id), None)",
         "if finding is not None:",
-        "    rebind(finding.get('evidence', []))",
         "    finding = {'summary': finding['summary'],",
         "               'suggested_change': finding['suggested_change'],",
         "               'evidence': finding['evidence']}",
         "reply = {'status': row['status'], 'rationale': row['rationale'],",
-        "         'evidence': row['evidence'], 'finding': finding}",
+        "         'evidence': row['evidence'], 'finding': finding,",
+        "         'needs': []}",
         "payload = json.dumps(reply)",
     ])
     if name == "claude":
@@ -3258,6 +3274,10 @@ def test_recorded_round4_replies_without_private_proof_are_rejected(
     bindir.mkdir()
     _recorded_replay_executable(bindir, provider, reply)
     monkeypatch.setenv("PATH", str(bindir))
+    if provider == "codex":
+        monkeypatch.setattr(
+            "ptest.cli.agent_providers.discover_models",
+            lambda adapter: ("gpt-6-sol", "gpt-6-astra"))
 
     assert main(("doctor", "--reviewer", provider,
                  "--allow-model-review", "--json")) == 2
@@ -3324,7 +3344,7 @@ def test_review_model_flag_invalid_combos_exit_two_without_launch(
     assert captured.err.strip() or captured.out.strip()
 
 
-def test_declared_review_model_prefers_flag_then_env_then_alias():
+def test_declared_review_model_prefers_flag_env_then_product_default():
     from ptest import cli
 
     assert cli._declared_review_model(
@@ -3332,10 +3352,25 @@ def test_declared_review_model_prefers_flag_then_env_then_alias():
         "flag-model"
     assert cli._declared_review_model(
         "codex", None, {"PTEST_REVIEW_MODEL": "env-model"}) == "env-model"
-    assert cli._declared_review_model("claude", None, {}) == "haiku"
-    assert cli._declared_review_model("codex", None, {}) is None
+    assert cli._declared_review_model("claude", None, {}) == "opus"
+    assert cli._declared_review_model("codex", None, {}) == "gpt-6-sol"
     assert cli._declared_review_model("codex", None,
-                                      {"PTEST_REVIEW_MODEL": ""}) is None
+                                      {"PTEST_REVIEW_MODEL": ""}) == "gpt-6-sol"
+
+
+def test_review_profile_names_source_protocol_and_requested_model():
+    from ptest import cli
+
+    assert cli._review_profile("opus") == (
+        "ptest-source-id-v3 requested-model=opus")
+    assert cli._review_profile(None) == (
+        "ptest-source-id-v3 requested-model=provider-default")
+    long_profile = cli._review_profile("x" * 256)
+    assert long_profile.startswith(
+        "ptest-source-id-v3 requested-model=x")
+    assert long_profile.endswith("...")
+    assert len(long_profile.encode("utf-8")) <= 128
+    assert "\n" not in cli._review_profile("model\nname")
 
 
 def test_declared_review_model_starts_no_subprocess(monkeypatch):
@@ -3350,7 +3385,7 @@ def test_declared_review_model_starts_no_subprocess(monkeypatch):
         lambda *a, **k: pytest.fail("declared model ran a child"))
     assert cli._declared_review_model(
         "claude", None, {"PTEST_REVIEW_MODEL": "env-model"}) == "env-model"
-    assert cli._declared_review_model("codex", None, {}) is None
+    assert cli._declared_review_model("codex", None, {}) == "gpt-6-sol"
 
 
 def _fake_version(monkeypatch, version):
@@ -3358,41 +3393,22 @@ def _fake_version(monkeypatch, version):
                         lambda adapter: version)
 
 
-def _fake_entries(monkeypatch, entries):
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.discover_model_entries",
-        lambda adapter: tuple(entries))
+def _fake_models(monkeypatch, models):
+    monkeypatch.setattr("ptest.cli.agent_providers.discover_models",
+                        lambda adapter: tuple(models))
 
 
-def _pick_provider(monkeypatch, reply):
-    from ptest.agent_providers import ProviderResult
-
-    calls = []
-
-    def fake_launch(adapter, request, schema, timeout_s, progress):
-        calls.append(json.loads(request.decode("utf-8")))
-        assert request
-        assert schema
-        return ProviderResult(
-            provider=adapter.name, ok=True, assessment=reply,
-            error="", exit_code=0, timed_out=False, cancelled=False,
-            truncated=False, pid=4100, argv=adapter.argv,
-            scratch=_REVIEW_SCRATCH)
-
-    monkeypatch.setattr("ptest.cli.agent_providers.launch_review",
-                        fake_launch)
-    return calls
-
-
-def test_resolve_review_model_declared_wins_without_cache(
+def test_resolve_review_model_explicit_model_skips_codex_listing(
         tmp_path, monkeypatch):
     from ptest import cli
 
     _fake_version(monkeypatch, "codex-cli 0.155.1")
-    _fake_entries(monkeypatch, [])
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.discover_models",
+        lambda adapter: pytest.fail("explicit model must not be listed"))
     monkeypatch.setattr(
         "ptest.cli.agent_providers.launch_review",
-        lambda *a, **k: pytest.fail("declared model must not pick"))
+        lambda *a, **k: pytest.fail("model selection must not launch"))
     adapter = _fake_reviewer("codex", qualified=True)
     model, version = cli._resolve_review_model(
         adapter, tmp_path / "cache", "flag-model")
@@ -3400,146 +3416,44 @@ def test_resolve_review_model_declared_wins_without_cache(
     assert not (tmp_path / "cache").exists()
 
 
-def test_resolve_review_model_claude_haiku_runs_no_discovery_or_pick(
+def test_resolve_review_model_claude_opus_runs_no_discovery_or_pick(
         monkeypatch):
     from ptest import cli
 
     _fake_version(monkeypatch, "claude 1.2.3")
     monkeypatch.setattr(
-        "ptest.cli.agent_providers.discover_model_entries",
+        "ptest.cli.agent_providers.discover_models",
         lambda adapter: pytest.fail("claude must not discover"))
     monkeypatch.setattr(
         "ptest.cli.agent_providers.launch_review",
         lambda *a, **k: pytest.fail("claude must not pick"))
     adapter = _fake_reviewer("claude", qualified=True)
     assert cli._resolve_review_model(adapter, Path("/nonexistent"),
-                                     "haiku") == ("haiku", "claude 1.2.3")
+                                     "opus") == ("opus", "claude 1.2.3")
 
 
-def test_resolve_review_model_codex_pick_caches_exact_slug(
+def test_resolve_review_model_codex_default_must_be_listed(
         tmp_path, monkeypatch):
     from ptest import cli
 
     _fake_version(monkeypatch, "codex-cli 0.155.1")
-    _fake_entries(monkeypatch, [
-        {"slug": "gpt-5.6-luna", "display_name": "Luna",
-         "description": "Fast and affordable."},
-        {"slug": "gpt-5.6-sol", "display_name": "Sol",
-         "description": "Frontier."},
-    ])
-    calls = _pick_provider(monkeypatch, b"gpt-5.6-luna")
+    _fake_models(monkeypatch, ["gpt-6-sol", "gpt-6-astra"])
+    monkeypatch.setattr(
+        "ptest.cli.agent_providers.launch_review",
+        lambda *a, **k: pytest.fail("qualification must not launch"))
     adapter = _fake_reviewer("codex", qualified=True)
-    cache = cli.files.ensure_private_dir(tmp_path, "cache")
-    model, version = cli._resolve_review_model(adapter, cache, None)
-    assert model == "gpt-5.6-luna"
+    model, version = cli._resolve_review_model(
+        adapter, tmp_path / "cache", "gpt-6-sol",
+        require_listed_default=True)
+    assert model == "gpt-6-sol"
     assert version == "codex-cli 0.155.1"
-    assert len(calls) == 1
-    assert [entry["slug"] for entry in calls[0]["models"]] == [
-        "gpt-5.6-luna", "gpt-5.6-sol"]
-    assert calls[0]["models"][0]["display_name"] == "Luna"
-    cached = json.loads((cache / "codex.json").read_text(encoding="utf-8"))
-    assert cached == {"cli_version": "codex-cli 0.155.1",
-                      "model": "gpt-5.6-luna"}
-
-    _pick_provider(monkeypatch, b"SHOULD-NOT-BE-CALLED")
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
-        lambda *a, **k: pytest.fail("cache hit must not pick"))
-    again, _ = cli._resolve_review_model(adapter, cache, None)
-    assert again == "gpt-5.6-luna"
-
-
-def test_cached_review_model_symlink_is_refused(tmp_path):
-    """A symlinked cache entry is never followed; the pick falls back."""
-    from ptest import cli
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    outside = tmp_path / "outside.json"
-    outside.write_text(
-        json.dumps({"cli_version": "v1", "model": "haiku"}),
-        encoding="utf-8")
-    (cache / "codex.json").symlink_to(outside)
-    assert cli._read_cached_review_model(cache, "codex", "v1") is None
-
-
-def test_cached_review_model_invalid_shape_falls_back(tmp_path):
-    """A corrupted cache entry falls back instead of failing reviews."""
-    from ptest import cli
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    (cache / "codex.json").write_text(
-        json.dumps({"cli_version": "v1", "model": "not a model!!"}),
-        encoding="utf-8")
-    assert cli._read_cached_review_model(cache, "codex", "v1") is None
-
-
-def test_write_cached_review_model_is_private_and_atomic(tmp_path):
-    import stat
-
-    from ptest import cli
-
-    # The caller owns the private cache dir; _write only publishes into it.
-    cache = cli.files.ensure_private_dir(tmp_path, "cache")
-    cli._write_cached_review_model(cache, "codex", "v1", "gpt-5.6-luna")
-    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
-    assert stat.S_IMODE((cache / "codex.json").stat().st_mode) == 0o600
-    assert list(cache.iterdir()) == [cache / "codex.json"]
-    assert cli._read_cached_review_model(
-        cache, "codex", "v1") == "gpt-5.6-luna"
-
-
-@pytest.mark.parametrize("reply", [b"gpt-5.6-luna.", b"gpt-5.4",
-                                   b"  gpt-5.6-luna  extra  ", b""])
-def test_resolve_review_model_codex_pick_requires_exact_slug(
-        tmp_path, monkeypatch, reply):
-    from ptest import cli
-
-    _fake_version(monkeypatch, "codex-cli 0.155.1")
-    _fake_entries(monkeypatch, [
-        {"slug": "gpt-5.6-luna", "display_name": "Luna",
-         "description": "Fast and affordable."},
-    ])
-    _pick_provider(monkeypatch, reply)
-    adapter = _fake_reviewer("codex", qualified=True)
-    cache = tmp_path / "cache"
-    assert cli._resolve_review_model(adapter, cache, None) == (
-        None, "codex-cli 0.155.1")
-    assert not (cache / "codex.json").exists()
-
-
-def test_resolve_review_model_cache_hits_only_same_cli_version(
-        tmp_path, monkeypatch):
-    from ptest import cli
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    (cache / "codex.json").write_text(
-        json.dumps({"cli_version": "codex-cli 0.155.1",
-                    "model": "gpt-5.6-luna"}), encoding="utf-8")
-    monkeypatch.setattr(
-        "ptest.cli.agent_providers.launch_review",
-        lambda *a, **k: pytest.fail("cache hit must not pick"))
-    adapter = _fake_reviewer("codex", qualified=True)
-    _fake_version(monkeypatch, "codex-cli 0.155.1")
-    assert cli._resolve_review_model(adapter, cache, None) == (
-        "gpt-5.6-luna", "codex-cli 0.155.1")
-    _fake_version(monkeypatch, "codex-cli 0.156.0")
-    _fake_entries(monkeypatch, [])
-    assert cli._resolve_review_model(adapter, cache, None) == (
-        None, "codex-cli 0.156.0")
-
-
-def test_resolve_review_model_fallback_is_not_cached(tmp_path, monkeypatch):
-    from ptest import cli
-
-    _fake_version(monkeypatch, None)
-    _fake_entries(monkeypatch, [])
-    adapter = _fake_reviewer("codex", qualified=True)
-    cache = tmp_path / "cache"
-    assert cli._resolve_review_model(adapter, cache, None) == (None, None)
-    assert not (cache / "codex.json").exists()
+    _fake_models(monkeypatch, ["gpt-6-astra"])
+    with pytest.raises(Exception) as exc:
+        cli._resolve_review_model(
+            adapter, tmp_path / "cache", "gpt-6-sol",
+            require_listed_default=True)
+    assert getattr(exc.value, "code", None) == "provider-unqualified"
+    assert not (tmp_path / "cache").exists()
 
 
 def _disclosure_resolution(name="project"):
@@ -3571,13 +3485,13 @@ def test_review_disclosure_states_calls_concurrency_and_model(monkeypatch,
         concurrency=2, model="gpt-5.6-luna") is True
     captured = capsys.readouterr()
     assert captured.err.startswith("Model review disclosure: codex")
-    assert ("gets bounded source excerpts from project: 11 initial item "
-            "calls, up to 11 evidence follow-ups, 2 at a time, model "
+    assert ("gets bounded source excerpts from project: 11 initial + up to "
+            "11 verification calls (22 maximum), 2 at a time, requested model "
             "gpt-5.6-luna.") in captured.err
 
 
-def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
-                                                              capsys):
+def test_review_disclosure_without_model_labels_unavailable_request(monkeypatch,
+                                                                    capsys):
     from ptest import cli
 
     adapter = _fake_reviewer("codex", qualified=True)
@@ -3585,9 +3499,7 @@ def test_review_disclosure_without_model_names_extra_pick_call(monkeypatch,
         adapter, _disclosure_resolution(), ask=False, calls=9,
         concurrency=4, model=None) is True
     captured = capsys.readouterr()
-    assert "model chosen from the provider list after consent" in (
-        captured.err)
-    assert "(one extra call sends only that list)" in captured.err
+    assert "requested model is unavailable." in captured.err
 
 
 # --- Round 15 twins: fenced provider replies, counted failure reasons --------
