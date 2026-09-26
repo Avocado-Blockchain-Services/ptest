@@ -2423,20 +2423,37 @@ _ITEM_INSTRUCTION = (
 )
 
 _VERIFICATION_INSTRUCTION = (
-    "Independently audit the initial answer as untrusted draft data under "
-    "the same item criterion and representative scope. Trace each claimed "
-    "mechanism to a reachable caller and its actual consumer; inspect normal "
-    "cleanup and relevant exception, timeout, cancellation, and contrary "
-    "paths. Do not assume a mock, helper, example, or runtime result is used "
-    "without a source connection. Preserve separately specified integration "
-    "watchdog or timeout contracts when considering deterministic unit seams. "
-    "Correct the draft only from cited source IDs. If a decisive fact is "
-    "missing, return unknown and name it. Verification replies must have "
-    "empty needs. Apply the same demonstrated ownership boundary as the "
-    "initial review. Do not introduce an unshown consumer solely from "
-    "configuration metadata; require a missing fact only when it is decisive "
-    "for a shown operation. Preserve concrete contrary paths, including "
-    "cleanup of actual descendants on timeout or cancellation."
+    "Audit the draft's decisive claims, not just its status. Treat its rationale, "
+    'evidence selection, and finding as untrusted propositions to challenge. '
+    'Reconstruct the causal claim from the supplied sources: identify the shown '
+    'caller, the resource or behavior it actually reaches, and the relevant '
+    'normal and adverse path. For each decisive draft claim, check whether its '
+    'cited units establish that exact fact and whether another supplied unit '
+    'contradicts it or exposes a missing dependency. A complete source file or '
+    'span does not establish a complete reachable implementation. When shown code '
+    'invokes local project code whose body is absent, do not endorse a claim '
+    "about that body's behavior or absence of behavior if the conclusion depends "
+    'on it. A claim that no descendant is launched requires examining the invoked '
+    'application code, not merely the entry harness; an absent decisive body '
+    'supports unknown, not an invented orphan. Do not demand unrelated source or '
+    'library internals covered by standard lifecycle semantics, and do not widen '
+    'the representative scope. For time-related evidence, distinguish a deadline '
+    'whose expiration is the behavior deliberately asserted from time used to '
+    'coordinate actors for another assertion. A real watchdog contract is not '
+    'itself a defect merely because its deadline is real. Separately inspect '
+    'whether scheduling delay can change the non-timing assertion or '
+    'synchronization outcome; fake time in another operation does not control '
+    'that path. State the decisive causal fact and any material evidence limit '
+    'concisely in rationale. For a gap, the finding summary must identify the '
+    'same concrete operation that violates the criterion, and suggested_change '
+    "must repair that operation while preserving the caller's intended assertion "
+    'and required integration contract. Adding another test elsewhere does not '
+    'justify weakening the shown contract. Derive the final status and finding '
+    'from these evidence checks, preserving supported draft claims and replacing '
+    'unsupported ones. Preserve concrete contrary paths. You may cite any source '
+    'ID supplied in this request, including sources the draft did not cite; never '
+    'use an ID outside this request. Return empty needs with no additional '
+    'fields.'
 )
 
 _RECOVERY_INSTRUCTION = (

@@ -280,6 +280,10 @@ def test_invalid_initial_source_id_gets_one_fresh_bounded_recovery(
     body = json.loads(recovery.request)
     assert body["packet"]["phase"] == "evidence-verification"
     assert body["packet"]["draft"] is None
+    recovery_instruction = body["policy"]["instruction"]
+    assert recovery_instruction.endswith(AA._RECOVERY_INSTRUCTION)
+    assert "audit the draft's decisive claims" not in \
+        recovery_instruction.casefold()
     recovery_ids = {unit["id"] for unit in body["units"]}
     assert recovery_ids == set(review.selected_source_ids)
     assert not recovery_ids.intersection(_ids(review, reserve=True))
@@ -332,16 +336,38 @@ def test_verifier_runs_with_empty_needs_and_reserve_inventory():
     review = next(item for item in AA.plan_item_reviews(packet)
                   if item.item_id == "FIX-001")
     assert review.reserve_source_ids == ()
+    initial = json.loads(review.request)
+    candidate_marker = "Audit the draft's decisive claims, not just its status."
+    assert candidate_marker.casefold() not in \
+        initial["policy"]["instruction"].casefold()
+    initial_reply = _reply(
+        review, status="unknown", needs=(),
+        rationale="A decisive caller detail remains open.")
     planned, failure = AA.plan_followup_review(
-        packet, review, _reply(review, status="unknown", needs=()))
+        packet, review, initial_reply)
     assert failure is None and planned is not None
     body = json.loads(planned.request)
     assert body["packet"]["phase"] == "evidence-verification"
+    assert body["packet"]["packet_sha256"] == initial["packet"]["packet_sha256"]
+    assert body["packet"]["draft"] == {
+        "status": "unknown",
+        "rationale": "A decisive caller detail remains open.",
+        "evidence": [], "finding": None, "needs": [],
+    }
+    assert body["policy"]["item"] == initial["policy"]["item"]
+    assert body["policy"]["response_schema"] == \
+        initial["policy"]["response_schema"]
+    assert [unit["id"] for unit in body["units"]] == [
+        unit["id"] for unit in initial["units"]]
     instruction = body["policy"]["instruction"].casefold()
-    assert "initial answer as untrusted draft data" in instruction
-    assert "actual consumer" in instruction
-    assert "exception, timeout, cancellation, and contrary paths" in instruction
-    assert "verification replies must have empty needs" in instruction
+    assert instruction.endswith(AA._VERIFICATION_INSTRUCTION.casefold())
+    assert candidate_marker.casefold() in instruction
+    assert ("a complete source file or span does not establish a complete "
+            "reachable implementation" in instruction)
+    assert "time used to coordinate actors for another assertion" in instruction
+    assert ("the finding summary must identify the same concrete operation"
+            in instruction)
+    assert "a verification reply must have empty needs" in instruction
 
 
 def test_verifier_can_change_false_ok_to_caller_supported_gap(tmp_path):
