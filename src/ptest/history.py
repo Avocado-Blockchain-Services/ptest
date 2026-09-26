@@ -2725,10 +2725,12 @@ def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
     """Split one summary into (execution_s, total_tests, is_full) or None.
 
     Comparable means the same mode family (full vs non-full), a terminal
-    passed|failed status, and a numeric execution duration. The family is
-    what actually ran (summary plan.execution), not the request label
-    (top-level mode). Unusable counts yield a None total instead of
-    disqualifying the row.
+    passed|failed status (or an incomplete run killed by the compound
+    deadline, which still proves the suite needs at least that long), and
+    a numeric execution duration. The family is what actually ran
+    (summary plan.execution), not the request label (top-level mode).
+    Unusable counts yield a None total instead of disqualifying the row.
+    A per-attempt kill is not compound evidence and never qualifies.
     """
     if not isinstance(summary, dict):
         return None
@@ -2745,7 +2747,11 @@ def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
     # hand-built) keep the old top-level mode reading.
     is_full = (plan_execution == "full") if isinstance(
         plan_execution, str) else (mode == "full")
-    if summary.get("status") not in ("passed", "failed"):
+    if summary.get("status") in ("passed", "failed"):
+        pass
+    elif summary.get("status") == "incomplete" and _compound_killed(summary):
+        pass
+    else:
         return None
     timings = summary.get("timings")
     execution = timings.get("execution", timings.get("execution_s")) if isinstance(
@@ -2765,14 +2771,32 @@ def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
     return (float(execution), total, is_full)
 
 
+def _compound_killed(summary: dict) -> bool:
+    """Whether a summary row records a compound-deadline kill.
+
+    Only the compound scope proves the suite outlasted the bound: a
+    per-attempt kill carries a shorter duration that must never shrink the
+    next dynamic deadline.
+    """
+    reasons = summary.get("reasons")
+    if not isinstance(reasons, list):
+        return False
+    return any(
+        isinstance(item, dict) and item.get("code") == "execution-timeout"
+        and isinstance(item.get("message"), str)
+        and item["message"].startswith("compound execution deadline expired")
+        for item in reasons)
+
+
 def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                             *, full: bool) -> tuple[float | None, int | None]:
     """(execution_s, total_tests) of the most recent comparable completed run.
 
     Comparable means the same mode family (full vs non-full), status
-    passed|failed, and a numeric timings execution duration. A non-full
-    request falls back to the latest qualifying full run. Reads at most 20
-    summaries and never raises: any store, shape, or decode problem yields
+    passed|failed (or incomplete when killed by the compound deadline),
+    and a numeric timings execution duration. A non-full request falls
+    back to the latest qualifying full run. Reads at most 20 summaries
+    and never raises: any store, shape, or decode problem yields
     (None, None).
     """
     try:

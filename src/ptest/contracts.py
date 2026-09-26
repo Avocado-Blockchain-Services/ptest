@@ -124,7 +124,7 @@ MIN_COMPOUND_TIMEOUT_S = 60.0
 MAX_DYNAMIC_COMPOUND_TIMEOUT_S = 21600.0
 MAX_COMPOUND_TIMEOUT_S = 86400.0
 COMPOUND_TIMEOUT_SAFETY_FACTOR = 3.0
-COMPOUND_TIMEOUT_PER_TEST_S = 0.25
+COMPOUND_TIMEOUT_PER_TEST_S = 0.50
 CANCEL_GRACE_S = 3.0
 SCHEDULER_POLL_S = 0.25
 CONTROL_FRAME_MAX_BYTES = 65536
@@ -2101,6 +2101,9 @@ def _require_frame_keys(kind: str, payload: dict) -> None:
             raise ValueError("attempt-decision stop reason is invalid")
 
 
+COMPOUND_TIMEOUT_SOURCES = frozenset({"cli", "config", "history", "estimate", "default"})
+
+
 @dataclass(frozen=True, kw_only=True)
 class LaunchManifest:
     protocol: int
@@ -2112,6 +2115,7 @@ class LaunchManifest:
     setup_timeout_s: float
     attempt_timeout_s: float | None = None
     compound_timeout_s: float | None = None
+    compound_timeout_source: str | None = None
 
     def __post_init__(self) -> None:
         if (not _is_int(self.protocol)
@@ -2145,6 +2149,9 @@ class LaunchManifest:
             value = getattr(self, field)
             if value is not None:
                 object.__setattr__(self, field, _check_float(f"manifest.{field}", value, lo=0.1))
+        if (self.compound_timeout_source is not None
+                and self.compound_timeout_source not in COMPOUND_TIMEOUT_SOURCES):
+            raise ValueError("manifest.compound_timeout_source must be a known deadline source")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -3846,6 +3853,7 @@ def _manifest_object(manifest: LaunchManifest) -> dict:
         "setup_timeout_s": manifest.setup_timeout_s,
         "attempt_timeout_s": manifest.attempt_timeout_s,
         "compound_timeout_s": manifest.compound_timeout_s,
+        "compound_timeout_source": manifest.compound_timeout_source,
     }
 
 
@@ -3994,7 +4002,7 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
     for key in obj:
         if key not in ("protocol", "domain", "grant", "setup", "attempts",
                        "attempt_ids", "setup_timeout_s", "attempt_timeout_s",
-                       "compound_timeout_s"):
+                       "compound_timeout_s", "compound_timeout_source"):
             raise _invalid("protocol-mismatch",
                            "manifest carries an unknown field")
     _check_nesting(obj, MANIFEST_MAX_NESTING)
@@ -4011,6 +4019,7 @@ def decode_launch_manifest(data: bytes | bytearray) -> LaunchManifest:
             setup_timeout_s=obj["setup_timeout_s"],
             attempt_timeout_s=obj.get("attempt_timeout_s"),
             compound_timeout_s=obj.get("compound_timeout_s"),
+            compound_timeout_source=obj.get("compound_timeout_source"),
         )
     except (KeyError, TypeError, ValueError):
         raise _invalid("protocol-mismatch",
