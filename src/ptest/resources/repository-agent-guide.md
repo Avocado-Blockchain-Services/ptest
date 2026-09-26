@@ -10,7 +10,9 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 |---|---|
 | After each edit | `ptest` (bare `ptest` runs the changed tests) |
 | One test file | `ptest <path>` |
+| All tests of one project | `ptest <child>`, e.g. `ptest web` |
 | Integrated change, before handoff | `ptest --full` once |
+| Integrated gate for one project | `ptest --full <child>` |
 | Force a full rerun over already-verified inputs | `ptest --full --again` |
 
 A scoped or changed green is iteration only; only `ptest --full` completes the
@@ -40,7 +42,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `setup: …` | declared setup (such as `npm ci`) is running | Wait. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
-| `failed · …` | tests failed | Fix the code, rerun `ptest`. |
+| `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | `baseline recorded` | the full run saved its baseline | Nothing. |
 | `no baseline recorded: <why>` | no baseline: failures, uncommitted changes, or files changed during the run | Fix failures; the baseline is recorded by a passing `--full` on a clean, committed tree — never commit just for this. |
 | `already verified … --again` | `--full` skipped already-verified inputs | Nothing; pass `--again` to force them. |
@@ -56,7 +58,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | Code | Meaning | Action |
 |---|---|---|
 | 0 | pass | Done; only `--full` completes the change. |
-| 1 | test failure | Fix the code, rerun `ptest`. |
+| 1 | test failure | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | 2 | usage or config error | Fix the command or config. |
 | 70 | incomplete: ptest could not prove the result | Rerun once alone; report it if it repeats. |
 | 75 | queue or coordinator unavailable | Wait, then rerun. |

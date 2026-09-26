@@ -253,8 +253,10 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
         if base is not None:
             raise _problem("invalid-config", "--base is unavailable with --full")
         mode = C.Mode.FULL
-        if tail:
-            raise _problem("invalid-config", "full execution cannot accept runner narrowing")
+        # A runner tail with --full is accepted here and routed at
+        # dispatch: at a monorepo root a whole-child scope runs that one
+        # child's full gate, anything else (and any standalone tail) is
+        # rejected in plain words there.
     elif changed:
         mode = C.Mode.AUTOMATIC
         if tail:
@@ -1486,9 +1488,10 @@ def _recommendation_verification_scopes(workspace, resolution
                                         ) -> tuple[str | None, ...]:
     """Return only test paths accepted by the ptest command router.
 
-    A whole child has no narrow root route, so its report must use
-    ``ptest --full``. Monorepo candidates are checked by the same
-    ``route_scopes`` function used for execution; standalone scopes were
+    A whole child verifies with ``ptest --full`` (a bare child name
+    would also route, but the report keeps the integrated gate).
+    Monorepo candidates are checked by the same ``route_scopes``
+    function used for execution; standalone scopes were
     already path-validated by ``doctor.inspect_workspace`` and are checked
     again against its path grammar here.
     """
@@ -2860,24 +2863,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 domain, _state_anchor(resolution.root))
             children = monorepo.preflight_children(resolution.root, resolution.monorepo)
             if parsed.full:
-                child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                def child_full_request() -> C.RunRequest:
+                    return C.RunRequest(
+                        mode=C.Mode.FULL, workers=parsed.workers,
+                        queue_timeout_s=parsed.queue_timeout_s,
+                        timeout_s=parsed.timeout_s,
+                        no_setup=parsed.no_setup,
+                        result_path=parsed.result_path,
+                        fixture_domain=parsed.fixture_domain,
+                        verbose=parsed.verbose, quiet=parsed.quiet,
+                        again=parsed.again)
 
                 def run_full(child):
                     result = operations.execute(
-                        domain, child.config,
-                        C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
-                                     queue_timeout_s=parsed.queue_timeout_s,
-                                     timeout_s=parsed.timeout_s,
-                                     no_setup=parsed.no_setup,
-                                     result_path=parsed.result_path,
-                                     fixture_domain=parsed.fixture_domain,
-                                     verbose=parsed.verbose, quiet=parsed.quiet,
-                                     again=parsed.again),
-                    )
+                        domain, child.config, child_full_request())
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     child_outcomes.append(
                         (result.exit_code, result.status, result.counts))
+                    return result.exit_code
+                child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                if parsed.runner_argv:
+                    # `ptest --full <child>` runs that one child's full
+                    # gate exactly as the per-child part of root --full
+                    # (already-verified, --again and join included); the
+                    # integrated total line stays with plain --full.
+                    target = monorepo.resolve_full_child(
+                        parsed.runner_argv, children)
+                    result = operations.execute(
+                        domain, target.config, child_full_request())
+                    for reason in result.reasons:
+                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     return result.exit_code
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
@@ -2958,6 +2974,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise resolution.problem or _problem(
                 "initialization-required", "project configuration is required",
             )
+        if parsed.full and parsed.runner_argv:
+            # A standalone full gate takes no scope; narrowing belongs
+            # to a scoped run. The monorepo branch above routes whole
+            # children before reaching here.
+            from . import monorepo
+            raise _problem("invalid-config", monorepo.FULL_SCOPE_MESSAGE)
         domain = platform.domain_paths(parsed.fixture_domain)
         request = C.RunRequest(
             mode=parsed.mode,

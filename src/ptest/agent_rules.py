@@ -646,6 +646,9 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "0e30bbbc2462dbe178c50ab60c219e2bcb071400f80812fcf89cca99294ad0b2",
     # c183837: guide with the --changed default loop (before the agent-docs rewrite).
     "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa",
+    # b29b691: rewritten agent guide (before bare-child routing and the
+    # never-weaken failure wording).
+    "3e01c053ffb8f817967d2950d95dc7d39076e31541e591770844291989a66e9b",
 })
 
 

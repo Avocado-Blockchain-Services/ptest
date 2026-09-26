@@ -86,6 +86,13 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     flat = " ".join(guide.split())
     assert ("See `ptest guide` recipes: factories, databases, cache, "
             "files-ports, processes, time-network." in flat)
+    # Failure rows must never read as permission to weaken tests.
+    assert ("never weaken, skip or delete tests or assertions to get green."
+            in flat)
+    assert "All tests of one project" in guide
+    assert "`ptest <child>`, e.g. `ptest web`" in guide
+    assert "Integrated gate for one project" in guide
+    assert "`ptest --full <child>`" in guide
 
 
 def test_shipped_guides_never_mention_repo_internal_workflow():

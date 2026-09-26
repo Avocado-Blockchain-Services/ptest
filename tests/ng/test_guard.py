@@ -1183,3 +1183,74 @@ def test_fanout_children_leave_no_survivors_on_cancel(harness):
     assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
     assert h.frames[-1].kind == "draining"
     _assert_fanout_group_gone(info)
+
+
+# --- Group-quiescence scan under parallel load --------------------------------
+#
+# The quiescence scan reads the machine-global process table on a bounded
+# budget. Under a parallel suite a transient scheduling stall can exhaust
+# that budget while the group is already quiescent; the scan must retry a
+# bounded number of times before failing closed, or verdict lines flip
+# intermittently (e.g. a second "ptest: failed" line reads "incomplete").
+
+def _quiescent_identity():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(pid=os.getpid(), pgid=-1)
+
+
+def test_transient_scan_stall_retries_before_reporting_cleanup(monkeypatch):
+    import ptest.guard as guard_module
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise psutil.Error("transient observation stall")
+        return iter(())
+
+    monkeypatch.setattr(guard_module.psutil, "process_iter", flaky)
+
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is False
+    assert len(calls) == 2
+
+
+def test_persistent_scan_outage_still_fails_closed(monkeypatch):
+    import ptest.guard as guard_module
+
+    calls = []
+
+    def blind():
+        calls.append(1)
+        raise psutil.Error("process table unavailable")
+
+    monkeypatch.setattr(guard_module.psutil, "process_iter", blind)
+
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is True
+    assert len(calls) > 1
+
+
+def test_observed_group_member_fails_fast_without_retry(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        calls = []
+
+        def counting():
+            calls.append(1)
+            # One real same-group member, first in iteration order, so
+            # the verdict cannot depend on table size or scan budget.
+            return iter([psutil.Process(proc.pid)])
+
+        monkeypatch.setattr(guard_module.psutil, "process_iter", counting)
+        identity = SimpleNamespace(pid=os.getpid(), pgid=os.getpgrp())
+
+        assert guard_module._group_needs_cleanup(identity) is True
+        assert len(calls) == 1
+    finally:
+        proc.kill()
+        proc.wait()

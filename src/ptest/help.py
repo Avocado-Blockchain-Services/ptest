@@ -284,8 +284,11 @@ Notes:
   ptest tests/a.py -v leaves -v as runner data (pytest verbose only).
   From a monorepo root, scoped paths must be child-prefixed
   paths selecting exactly one child (e.g. api/tests/test_example.py);
-  arbitrary runner flags are rejected by root scope validation. --changed
-  and --full are mutually exclusive; both reject runner narrowing. --base
+  a bare child name runs that child's tests (e.g. ptest web).
+  Arbitrary runner flags are rejected by root scope validation. --changed
+  and --full are mutually exclusive; --changed rejects runner arguments
+  while root --full accepts only a whole child (e.g. --full web) and
+  otherwise names the scoped form. --base
   is unavailable with --full. --shadow requires automatic mode. Root
   --full preflights all children, then runs them sequentially with output
   preserved, returning the first nonzero exit after all children finish.
