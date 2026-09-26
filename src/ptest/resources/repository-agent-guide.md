@@ -44,7 +44,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | `baseline recorded` | the full run saved its baseline | Nothing. |
-| `no baseline recorded: <why>` | no baseline: failures, uncommitted changes, or files changed during the run | Fix failures; the baseline is recorded by a passing `--full` on a clean, committed tree — never commit just for this. |
+| `no baseline recorded: <why>` | the run was fine but could not save a baseline (failures, uncommitted changes, or files changed during the run) | Failures: fix the code and rerun. Otherwise do nothing and just report it; the user's next commit plus `ptest --full` records it. Do not commit yourself for this. |
 | `already verified … --again` | `--full` skipped already-verified inputs | Nothing; pass `--again` to force them. |
 | `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |

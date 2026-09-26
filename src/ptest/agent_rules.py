@@ -649,6 +649,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     # b29b691: rewritten agent guide (before bare-child routing and the
     # never-weaken failure wording).
     "3e01c053ffb8f817967d2950d95dc7d39076e31541e591770844291989a66e9b",
+    # e9749ca: never-weaken wording, bare-child and --full <child> rows.
+    "63f5e055284cdb6379e9237cc88f0825e8d65e8bf02fd3a4e427298d40d64f42",
 })
 
 
