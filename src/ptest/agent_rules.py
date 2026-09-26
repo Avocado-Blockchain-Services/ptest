@@ -185,6 +185,27 @@ def _pre_changed_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_rewrite_provider_text(provider: str) -> bytes:
+    """Exact skill bytes before the agent-docs rewrite.
+
+    ``c183837:src/ptest/agent_rules.py`` `_provider_text`: the short
+    pointer naming the `--changed` default loop. Recognized as previous
+    managed content, like `_previous_provider_text`.
+    """
+    description = _OLD_PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
+        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus the test loop.
 
@@ -251,7 +272,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
         return relative, target, current, "legacy"
     if current in (_previous_provider_text(provider),
                    _pre_gate_provider_text(provider),
-                   _pre_changed_provider_text(provider)):
+                   _pre_changed_provider_text(provider),
+                   _pre_rewrite_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 

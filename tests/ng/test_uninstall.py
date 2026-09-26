@@ -331,6 +331,34 @@ def test_pre_gate_skill_managed_bytes_are_removed(
     assert not skill.exists()
 
 
+def test_changed_loop_skill_managed_bytes_are_removed(
+        case, tmp_path, monkeypatch, capsys):
+    """Twin: the short `--changed`-loop skill (c183837) uninstalls as managed."""
+    domain = case.domain()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root)
+    _v1(root)
+    skill = root / ".claude" / "skills" / "ptest" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
+        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n".encode("utf-8"))
+    monkeypatch.chdir(root)
+
+    assert _uninstall(domain, "--yes") == 0
+    out = capsys.readouterr().out
+    assert "edited" not in out
+    assert not skill.exists()
+
+
 def test_released_template_skill_is_removed_as_managed(
         case, tmp_path, monkeypatch, capsys):
     """Twin: the pre-8cd2b54 short template uninstalls as managed."""

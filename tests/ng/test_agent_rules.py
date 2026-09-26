@@ -695,6 +695,114 @@ def test_pre_gate_managed_skill_upgrades_in_place(tmp_path):
     assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
 
 
+def test_changed_loop_managed_skill_upgrades_in_place(tmp_path):
+    """The short `--changed`-loop skill shipped at c183837 upgrades too.
+
+    Exact bytes of ``c183837:src/ptest/agent_rules.py`` `_provider_text`
+    ("claude"): the short pointer naming the `--changed` default loop,
+    before the agent-docs rewrite. Real-world twin: repos initialised by
+    ptest between c183837 and the rewrite hold exactly these bytes and
+    `ptest init` must upgrade them in place, not raise already-exists.
+    """
+    from ptest.agent_rules import _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    changed_loop = (
+        "---\n"
+        "name: ptest\n"
+        "description: Coordinate repository testing through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "Before running or changing tests, read `docs/ptest-agent.md` (relative to the repository root).\n"
+        "Run tests only through `ptest` from the repository root; after each edit run `ptest --changed`.\n"
+    ).encode("utf-8")
+    (target / "SKILL.md").write_bytes(changed_loop)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
+def test_every_shipped_skill_version_recognised_as_managed():
+    """Every skill template ever shipped must upgrade, not conflict.
+
+    Renders `_provider_text` of every commit that changed
+    ``src/ptest/agent_rules.py`` (via `git show` + exec of the template
+    functions in isolation) and requires each version, for every
+    provider, to be byte-identical to one of the currently recognised
+    managed templates (current, legacy, or a previous helper).
+    Skips with a clear reason when git history is unavailable.
+    """
+    import ast
+    import subprocess
+
+    import ptest.agent_rules as rules_module
+
+    anchor = Path(__file__).resolve().parent
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=anchor, capture_output=True, text=True,
+            check=True).stdout.strip()
+        commits = subprocess.run(
+            ["git", "log", "--format=%H", "--",
+             "src/ptest/agent_rules.py"],
+            cwd=toplevel, capture_output=True, text=True,
+            check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip("git history for agent_rules is unavailable")
+    if not commits:
+        pytest.skip("git history for agent_rules is unavailable")
+    helpers = [
+        obj for name, obj in vars(rules_module).items()
+        if name.endswith("_provider_text")
+        and name != "_provider_target" and callable(obj)
+    ]
+    assert helpers, "no recognised skill templates found"
+    providers = ("claude", "codex", "opencode", "gemini")
+    known = {provider: {fn(provider) for fn in helpers}
+             for provider in providers}
+    missing = []
+    for commit in commits:
+        try:
+            raw = subprocess.run(
+                ["git", "show",
+                 f"{commit}:src/ptest/agent_rules.py"],
+                cwd=toplevel, capture_output=True, check=True).stdout.decode("utf-8")
+        except subprocess.CalledProcessError:
+            pytest.skip(f"git history for agent_rules is unreadable at {commit}")
+        tree = ast.parse(raw)
+        stmts = [
+            node for node in tree.body
+            if (isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in (
+                    "_PROVIDER_DESCRIPTIONS", "_OLD_PROVIDER_DESCRIPTIONS")
+                for target in node.targets))
+            or (isinstance(node, ast.FunctionDef)
+                and "provider_text" in node.name
+                and node.name != "_provider_target")
+        ]
+        namespace: dict = {}
+        exec(compile(ast.Module(body=stmts, type_ignores=[]),
+                     f"{commit}:src/ptest/agent_rules.py", "exec"),
+             namespace)
+        if "_provider_text" not in namespace:
+            continue
+        for provider in providers:
+            if namespace["_provider_text"](provider) not in known[provider]:
+                missing.append(f"{commit[:7]} {provider}")
+    assert not missing, (
+        "shipped skill versions missing from the recognised managed set: "
+        + ", ".join(missing))
+
+
 def test_previous_managed_guide_upgrades_in_place(tmp_path, monkeypatch):
     import hashlib
 
