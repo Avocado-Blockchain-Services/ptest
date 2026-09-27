@@ -157,7 +157,8 @@ def test_plan_docs_only_is_none_with_changed(tmp_path):
     impact = _plan_at(tmp_path, ["README.md"])
 
     assert impact.kind == "none"
-    assert impact.changed == ("README.md",)
+    assert impact.changed == ()
+    assert impact.ignored == 1
 
 
 def test_plan_hidden_only_is_none(tmp_path):
@@ -493,11 +494,136 @@ def test_plan_graph_bound_runs_full(tmp_path, monkeypatch):
 
 def test_plan_changed_orders_relevant_before_ignored(tmp_path):
     _repo(tmp_path, _graph_files())
+    write_file(tmp_path / "README.md", "hi\n")
+    write_file(tmp_path / "docs" / "note.rst", "x\n")
 
     impact = _plan_at(tmp_path, ["README.md", "pkg/b.py", "docs/note.rst"])
 
     assert impact.kind == "selected"
-    assert impact.changed == ("pkg/b.py", "README.md", "docs/note.rst")
+    assert impact.changed == ("pkg/b.py",)
+    assert impact.ignored == 2
+
+
+# --- 0.3.3: build output / non-code outside packages are not inputs ---
+
+def test_plan_build_lib_copy_is_dropped(tmp_path):
+    """Report twin: untracked build/lib copy, no code change -> no changes."""
+    _repo(tmp_path, {"tests/test_a.py": "def test_x():\n assert True\n"})
+    write_file(tmp_path / "build" / "lib" / "ptest" / "runtime"
+               / "protocol-v1.json", "{}\n")
+
+    impact = _plan_at(tmp_path, ["build/lib/ptest/runtime/protocol-v1.json"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.ignored == 1
+
+
+def test_plan_report_scenario_is_no_changes(tmp_path):
+    """Exact report shape: build output + skills + AGENTS.md -> no changes."""
+    _repo(tmp_path, {"tests/test_a.py": "def test_x():\n assert True\n"})
+    changed = [
+        "build/lib/ptest/runtime/protocol-v1.json",
+        "build/lib/ptest/worker.py",
+        "AGENTS.md",
+        "docs/ptest-agent.md",
+        ".agents/skills/a/SKILL.md",
+        ".claude/skills/b/SKILL.md",
+        ".gemini/c.md",
+        ".opencode/d.md",
+    ]
+    for rel in changed:
+        write_file(tmp_path / rel, "x\n")
+
+    impact = _plan_at(tmp_path, changed)
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.ignored == len(changed)
+
+
+@pytest.mark.parametrize("path", [
+    "build/lib/pkg/b.py",
+    "dist/pkg/b.py",
+    "pkg.egg-info/SOURCES.txt",
+    "node_modules/dep/index.js",
+    ".venv/lib/x.py",
+    "venv/lib/x.py",
+    "pkg/__pycache__/b.pyc",
+    ".pytest_cache/CACHEDIR.TAG",
+    ".mypy_cache/x.data",
+    ".ruff_cache/x",
+    ".tox/py311/x.py",
+    "htmlcov/index.html",
+    ".coverage",
+    ".coverage.localhost.1234",
+    "api/build/lib/x.py",
+])
+def test_plan_tool_output_segments_are_dropped(tmp_path, path):
+    _repo(tmp_path, {"tests/test_a.py": "def test_x():\n assert True\n"})
+
+    impact = _plan_at(tmp_path, [path])
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.ignored == 1
+
+
+def test_plan_docs_change_is_no_changes(tmp_path):
+    _repo(tmp_path, _graph_files())
+    write_file(tmp_path / "docs" / "guide.md", "x\n")
+
+    impact = _plan_at(tmp_path, ["docs/guide.md"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.ignored == 1
+
+
+def test_plan_json_under_tests_is_full(tmp_path):
+    _repo(tmp_path, dict(_graph_files(), **{"tests/data.json": "{}\n"}))
+
+    impact = _plan_at(tmp_path, ["tests/data.json"])
+
+    assert impact.kind == "full"
+    assert impact.reason == "tests/data.json is outside the import graph"
+
+
+def test_plan_md_inside_package_keeps_old_note(tmp_path):
+    """Inside non-code keeps today's ignore-note (fail safe, unchanged)."""
+    _repo(tmp_path, dict(_graph_files(), **{"pkg/notes.md": "x\n"}))
+
+    impact = _plan_at(tmp_path, ["pkg/notes.md"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ("pkg/notes.md",)
+    assert impact.ignored == 0
+
+
+def test_plan_build_under_monorepo_child_is_dropped(tmp_path):
+    """Twin: build/ under a monorepo child is ignored for that child."""
+    _repo(tmp_path, {"api/pkg/b.py": "X = 1\n",
+                     "api/tests/test_b.py": "def test_b():\n assert True\n"})
+    write_file(tmp_path / "api" / "build" / "lib" / "x.json", "{}\n")
+
+    impact = I.plan(tmp_path, tmp_path / "api", _config(),
+                    ("api/build/lib/x.json",))
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.ignored == 1
+
+
+def test_plan_py_under_build_is_not_a_seed(tmp_path):
+    """A build copy of imported source must not select its importers."""
+    _repo(tmp_path, _graph_files())
+    write_file(tmp_path / "build" / "lib" / "pkg" / "b.py", "VALUE = 1\n")
+
+    impact = _plan_at(tmp_path, ["build/lib/pkg/b.py"])
+
+    assert impact.kind == "none"
+    assert impact.changed == ()
+    assert impact.files == ()
 
 
 def test_plan_no_tests_prefix_is_ignored(tmp_path):

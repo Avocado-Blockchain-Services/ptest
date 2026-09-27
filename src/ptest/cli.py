@@ -2926,6 +2926,17 @@ def _impact_base_and_changed(parsed: ParsedArgs, root: Path):
     return impact_api, top, base, impact_api.changed_files(top, base)
 
 
+def _emit_ignored_count(parsed: ParsedArgs, impact) -> None:
+    """Verbose-only note for changed files excluded as build output or as
+    non-code outside the project's source and test areas. Never printed
+    on the normal line: without ``-v`` the excluded files stay silent."""
+    count = getattr(impact, "ignored", 0) or 0
+    if parsed.verbose and not parsed.quiet and count > 0:
+        word = "file" if count == 1 else "files"
+        progress.emit(f"ptest: -v ignored {count} non-code/output {word}",
+                      quiet=False)
+
+
 def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
                            domain: C.DomainPaths) -> int:
     """Route bare `ptest` / `ptest --changed` through the import graph."""
@@ -2936,6 +2947,7 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
         parsed, domain, top, "", base, repo_changed)
     impact = impact_api.plan(top, resolution.root, resolution.config,
                              repo_changed)
+    _emit_ignored_count(parsed, impact)
     request = _impact_run_request(parsed, impact, base, next_hint=True,
                                   reference=reference)
     if request is None:
@@ -3014,6 +3026,8 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                in consulted]
     if all(impact.kind == "none" and not impact.changed
            for _, _, impact, _ in planned):
+        for _, _, impact, _ in planned:
+            _emit_ignored_count(parsed, impact)
         greens = [green for _, _, _, _, green in consulted]
         if all(greens):
             progress.emit(progress.format_no_green_changes(
@@ -3034,6 +3048,7 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     first_failure = 0
     narrowed = False
     for child, child_base, impact, reference in planned:
+        _emit_ignored_count(parsed, impact)
         request = _impact_run_request(parsed, impact, child_base,
                                       next_hint=False, reference=reference)
         if request is None:

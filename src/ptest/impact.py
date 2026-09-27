@@ -37,6 +37,7 @@ class Impact:
     via: int = 0
     total: int = 0
     reason: str = ""
+    ignored: int = 0
 
 
 def _problem(message: str) -> C.Problem:
@@ -139,7 +140,72 @@ _IGNORED_SUFFIXES = (".md", ".rst", ".txt")
 
 _IGNORED_BASENAMES = frozenset({"LICENSE", "CODEOWNERS"})
 
-_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages"})
+_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages",
+                          "build", "dist", "venv", ".tox", "htmlcov"})
+
+_OUTPUT_DIRS = frozenset({
+    "build", "dist", "node_modules", ".venv", "venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "htmlcov",
+})
+
+_VITEST_CODE_EXTS = frozenset({
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts",
+})
+
+
+def _is_output(path: str) -> bool:
+    """Tool/build output is never a changed input, even when untracked."""
+    parts = path.split("/")
+    if any(part in _OUTPUT_DIRS or part.endswith(".egg-info")
+           for part in parts):
+        return True
+    basename = parts[-1]
+    return basename == ".coverage" or basename.startswith(".coverage.")
+
+
+def _is_code_file(path: str, kind_value: str) -> bool:
+    lowered = path.lower()
+    if kind_value == C.RunnerKind.VITEST.value:
+        return any(lowered.endswith(ext) for ext in _VITEST_CODE_EXTS)
+    return lowered.endswith(".py")
+
+
+def _dir_has_py_source(directory: Path) -> bool:
+    """Whether a directory on disk looks like importable source (fail safe)."""
+    try:
+        for entry in directory.iterdir():
+            try:
+                if entry.is_file() and entry.name.endswith(".py"):
+                    return True
+            except OSError:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _inside_code_area(project_root: Path, path: str,
+                      test_roots: tuple) -> bool:
+    """Whether a non-code file lies where a test could reach it.
+
+    Inside a test root or a directory holding ``.py`` source (a package
+    or a plain source dir) the file keeps today's fail-safe behaviour.
+    A missing ancestor directory cannot be proven inside, so it counts
+    as outside; code files never consult this helper.
+    """
+    if test_roots and any(_under_root(path, root) for root in test_roots):
+        return True
+    parts = path.split("/")[:-1]
+    for index in range(1, len(parts) + 1):
+        ancestor = project_root.joinpath(*parts[:index])
+        try:
+            if not ancestor.is_dir():
+                return False
+        except OSError:
+            return True
+        if _dir_has_py_source(ancestor):
+            return True
+    return False
 
 
 def _is_trigger_basename(basename: str) -> bool:
@@ -207,7 +273,8 @@ def _iter_py_files(project_root: Path):
             if entry.is_symlink():
                 continue
             if entry.is_dir():
-                if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
+                if entry.name.startswith(".") or entry.name in _SKIP_DIRS \
+                        or entry.name.endswith(".egg-info"):
                     continue
                 stack.append(entry)
             elif entry.is_file() and entry.name.endswith(".py"):
@@ -353,55 +420,72 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
         return Impact(kind="none")
 
     selection = config.selection
+    kind_value = config.runner.kind.value
+    test_roots = tuple(config.runner.test_roots)
+    dropped = 0
+    scoped: list[str] = []
     for path in sorted(under):
+        if _is_output(path):
+            dropped += 1
+        else:
+            scoped.append(path)
+    for path in scoped:
         if _is_trigger_basename(path.rsplit("/", 1)[-1]) \
                 or _matches(path, selection.full_triggers):
             return Impact(kind="full",
                           reason=f"{path} is a full trigger")
     relevant: list[str] = []
-    ignored: list[str] = []
-    for path in under:
-        (relevant if not _is_ignored(path, selection) else ignored).append(path)
-    changed = tuple(sorted(relevant) + sorted(ignored))
+    noted: list[str] = []
+    graph_kinds = (C.RunnerKind.PYTEST.value, C.RunnerKind.VITEST.value)
+    for path in scoped:
+        if _is_code_file(path, kind_value):
+            (relevant if not _is_ignored(path, selection)
+             else noted).append(path)
+        elif kind_value in graph_kinds and not _inside_code_area(
+                project_root, path, test_roots):
+            dropped += 1
+        elif _is_ignored(path, selection):
+            noted.append(path)
+        else:
+            relevant.append(path)
+    changed = tuple(sorted(relevant) + sorted(noted))
     if not relevant:
-        return Impact(kind="none", changed=changed)
+        return Impact(kind="none", changed=changed, ignored=dropped)
 
-    kind_value = config.runner.kind.value
     if kind_value == C.RunnerKind.VITEST.value:
-        return Impact(kind="vitest", changed=changed)
+        return Impact(kind="vitest", changed=changed, ignored=dropped)
     if kind_value != C.RunnerKind.PYTEST.value:
-        return Impact(kind="full", changed=changed,
+        return Impact(kind="full", changed=changed, ignored=dropped,
                       reason=f"{kind_value} has no import graph")
     if not selection.enabled:
         return Impact(
-            kind="full", changed=changed,
+            kind="full", changed=changed, ignored=dropped,
             reason="selection is off in .ptest.toml — "
                    "set [selection] enabled = true")
 
-    test_roots = tuple(config.runner.test_roots)
     direct: set[str] = set()
     seeds: list[str] = []
     for path in sorted(relevant):
         if not path.endswith(".py"):
-            return Impact(kind="full", changed=changed,
+            return Impact(kind="full", changed=changed, ignored=dropped,
                           reason=f"{path} is outside the import graph")
         if _is_test_file(path, test_roots):
             if (project_root / path).is_file():
                 direct.add(path)
             continue
         if _is_test_support(path, test_roots):
-            return Impact(kind="full", changed=changed,
+            return Impact(kind="full", changed=changed, ignored=dropped,
                           reason=f"{path} is test support")
         candidate = project_root / path
         if candidate.is_file():
             text = _read_text(candidate)
             if text is None:
-                return Impact(kind="full", changed=changed,
+                return Impact(kind="full", changed=changed, ignored=dropped,
                               reason=f"{path} could not be parsed")
             try:
                 ast.parse(text)
             except (SyntaxError, ValueError):
-                return Impact(kind="full", changed=changed,
+                return Impact(kind="full", changed=changed, ignored=dropped,
                               reason=f"{path} could not be parsed")
         seeds.append(path)
 
@@ -416,7 +500,7 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
         for rel in _iter_py_files(project_root):
             py_files.append(rel)
             if len(py_files) > MAX_SCAN_FILES:
-                return Impact(kind="full", changed=changed,
+                return Impact(kind="full", changed=changed, ignored=dropped,
                               reason="import graph too large")
         names_of: dict[str, tuple[str, ...]] = {}
         for rel in py_files:
@@ -449,16 +533,17 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
 
     files = tuple(sorted(direct | via))
     if not files:
-        return Impact(kind="none", changed=changed)
+        return Impact(kind="none", changed=changed, ignored=dropped)
     if total > 0 and len(files) >= selection.full_ratio * total:
         return Impact(
-            kind="full", changed=changed,
+            kind="full", changed=changed, ignored=dropped,
             reason=(f"{len(files)} of {total} test files reaches "
                     f"full_ratio {selection.full_ratio:g}"))
     if len(files) > MAX_SELECTED:
         return Impact(
-            kind="full", changed=changed,
+            kind="full", changed=changed, ignored=dropped,
             reason=f"{len(files)} test files exceed the 200-file "
                    "scoped limit")
     return Impact(kind="selected", changed=changed, files=files,
-                  direct=len(direct), via=len(via), total=total)
+                  direct=len(direct), via=len(via), total=total,
+                  ignored=dropped)

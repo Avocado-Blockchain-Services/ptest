@@ -44,6 +44,7 @@ def _install_impact(monkeypatch, *, sha="abc123", label="origin/dev",
         via: int = 0
         total: int = 0
         reason: str = ""
+        ignored: int = 0
 
     seen: dict = {}
     base = Base(sha, label)
@@ -235,6 +236,38 @@ def test_bare_nothing_changed_prints_nothing_line(tmp_path, monkeypatch, capsys)
     err = capsys.readouterr().err
     assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
             "ptest --full runs everything") in err
+
+
+def test_bare_verbose_reports_ignored_count(tmp_path, monkeypatch, capsys):
+    _standalone(tmp_path, monkeypatch)
+    _route_standalone(
+        monkeypatch, tmp_path.name,
+        lambda mod: mod.Impact(kind="none", changed=(), ignored=61),
+        repo_changed=())
+    calls = _capture(monkeypatch)
+
+    assert main(("-v",)) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "ptest: -v ignored 61 non-code/output files" in err
+    assert "no changes" in err
+
+
+def test_bare_without_verbose_hides_ignored_count(tmp_path, monkeypatch, capsys):
+    _standalone(tmp_path, monkeypatch)
+    _route_standalone(
+        monkeypatch, tmp_path.name,
+        lambda mod: mod.Impact(kind="none", changed=(), ignored=61),
+        repo_changed=())
+    calls = _capture(monkeypatch)
+
+    assert main(()) == 0
+
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "ignored" not in err
+    assert "no changes" in err
 
 
 def test_base_ref_is_forwarded_to_resolve(tmp_path, monkeypatch):

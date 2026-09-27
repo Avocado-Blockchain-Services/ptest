@@ -16,6 +16,8 @@ config.toml
 
 __pycache__/
 *.pyc
+build/
+dist/
 
 # Task0 local-only artifacts (never committed: env, caches, raw logs)
 .venv/
