@@ -185,16 +185,90 @@ def _raw_changes(raw: bytes) -> tuple[C.Change, ...]:
     return tuple(result)
 
 
-def _committed_changes(root: Path, scan: _Scan, older: str, newer: str) -> tuple[C.Change, ...]:
+def _committed_changes(root: Path, scan: _Scan, older: str, newer: str,
+                       pathspec: tuple = ()) -> tuple[C.Change, ...]:
     raw = _git(root, scan, "diff", "--raw", "-z", "--find-renames", "--no-ext-diff",
-               "--no-textconv", older, newer, "--")
+               "--no-textconv", older, newer, "--", *pathspec)
     return _raw_changes(raw)
 
 
-def _staged_changes(root: Path, scan: _Scan, head: str) -> tuple[C.Change, ...]:
+def _staged_changes(root: Path, scan: _Scan, head: str,
+                    pathspec: tuple = ()) -> tuple[C.Change, ...]:
     raw = _git(root, scan, "diff", "--cached", "--raw", "-z", "--find-renames",
-               "--no-ext-diff", "--no-textconv", head, "--")
+               "--no-ext-diff", "--no-textconv", head, "--", *pathspec)
     return _raw_changes(raw)
+
+
+def _child_scope(root: Path, top: bytes,
+                 selection: C.SelectionPolicy) -> tuple[Path, str, tuple, tuple] | None:
+    """Resolve a checkout below its Git root to a scoped evidence plan.
+
+    Returns ``(git_root, prefix, pathspec, triggers)`` where ``git_root`` is
+    the enclosing repository, ``prefix`` the child directory relative to it,
+    ``pathspec`` the literal Git pathspecs limiting every listing to the
+    child plus declared root-level inputs, and ``triggers`` the root-relative
+    prefixes those extra pathspecs may yield. Returns None when the checkout
+    is unrelated to the Git root.
+    """
+    git_root = Path(os.fsdecode(top))
+    try:
+        rel = Path(os.path.realpath(root)).relative_to(os.path.realpath(git_root))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not rel.parts:
+        return None
+    prefix = rel.as_posix()
+    triggers = tuple(dict.fromkeys((*selection.full_triggers, ".ptest.toml")))
+    # Plain pathspecs: _git locks GIT_LITERAL_PATHSPECS=1, so wildcards in
+    # child or trigger names never expand (and the :(literal) magic would
+    # itself be read as a literal path). Directory-prefix matching still
+    # applies, and _scope_path fails closed on anything unexpected.
+    pathspec = (prefix, *triggers)
+    return git_root, prefix, pathspec, triggers
+
+
+def _scope_path(prefix: str | None, triggers: tuple, git_path: str) -> str | None:
+    """Express one Git-root-relative path in checkout scope, or None.
+
+    Single-repo scope (``prefix`` None) is the identity. A child maps its
+    own directory to child-relative paths and declared root-level inputs to
+    ``../`` aliases that can never collide with child-relative paths;
+    anything else is unclassifiable.
+    """
+    if prefix is None:
+        return git_path
+    if git_path != prefix and git_path.startswith(prefix + "/"):
+        return git_path[len(prefix) + 1:]
+    if _matches(git_path, triggers):
+        return "../" + git_path
+    return None
+
+
+def _scope_git_path(prefix: str | None, path: str) -> str:
+    """Invert _scope_path for fingerprint reads (aliases back to Git paths)."""
+    if prefix is None or not path.startswith("../"):
+        return path if prefix is None else f"{prefix}/{path}"
+    return path[3:]
+
+
+def _scoped_conversion(git_root: Path, scan: _Scan, prefix: str | None,
+                       triggers: tuple, raw_changed: set[str]) -> set[str]:
+    """Attribute-conversion evidence expressed in checkout scope.
+
+    Single-repo scope delegates directly; a child maps its changed aliases
+    back to Git paths, resolves attributes from the Git root, and maps back,
+    failing closed on anything outside the scope.
+    """
+    if prefix is None:
+        return _conversion_paths(git_root, scan, raw_changed)
+    converted = set()
+    git_changed = {_scope_git_path(prefix, path) for path in raw_changed}
+    for git_path in _conversion_paths(git_root, scan, git_changed):
+        mapped = _scope_path(prefix, triggers, git_path)
+        if mapped is None or mapped not in raw_changed:
+            raise _Unavailable("Git evidence outside the checkout scope cannot be classified")
+        converted.add(mapped)
+    return converted
 
 
 def _revision(root: Path, scan: _Scan, value: str) -> str:
@@ -389,6 +463,19 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
     ``runtime_identity`` is a 64-hex digest of *verified* native facts, not a
     caller's guessed runner version. T11 must refresh those facts after setup
     and queue waits. No native probing/import is performed by this function.
+
+    Child scope (monorepo): when the checkout is a subdirectory of its Git
+    root, Git evidence runs from the Git root with pathspecs limited to the
+    child directory plus root-level inputs the child declares (its
+    ``full_triggers`` and the root ``.ptest.toml`` manifest, which declares
+    the child's membership; a trigger that also matches another child
+    couples that sibling's files into this digest, so triggers should name
+    files outside every child). Paths are expressed relative to the child;
+    declared root inputs use ``../`` aliases that can never collide with
+    child-relative paths. Sibling directories never enter the digest,
+    changes, or clean flag, so a dirty sibling does not make the child's
+    tree dirty. Commit identity stays the repo HEAD. Anything outside that
+    scope that cannot be classified fails closed as unknown-input.
     """
     if pytest_full_outputs and (
             config.runner.kind is not C.RunnerKind.PYTEST
@@ -412,43 +499,75 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         if _invalid_policy(config.selection, config.runner.test_roots):
             raise _Unavailable("invalid selection exclusions", "policy-invalid")
         top = _git(root, scan, "rev-parse", "--show-toplevel").rstrip(b"\n")
+        git_root, prefix, pathspec, triggers = root, None, (), ()
         if os.fsdecode(top) != os.fspath(root):
-            raise _Unavailable("Git root does not match checkout")
-        filter_config = _git(root, scan, "config", "--includes", "--get-regexp",
+            scoped = _child_scope(root, top, config.selection)
+            if scoped is None:
+                raise _Unavailable("Git root does not match checkout")
+            git_root, prefix, pathspec, triggers = scoped
+
+        def _scoped_path(git_path: str) -> str:
+            mapped = _scope_path(prefix, triggers, git_path)
+            if mapped is None:
+                raise _Unavailable("Git evidence outside the checkout scope cannot be classified")
+            return mapped
+
+        def _scoped_changes(records: tuple[C.Change, ...]) -> tuple[C.Change, ...]:
+            if prefix is None:
+                return records
+            result = []
+            for change in records:
+                old = change.old if change.old is None else _scope_path(prefix, triggers, change.old)
+                new = change.new if change.new is None else _scope_path(prefix, triggers, change.new)
+                if ((change.old is not None and old is None)
+                        or (change.new is not None and new is None)):
+                    raise _Unavailable("Git evidence outside the checkout scope cannot be classified")
+                result.append(C.Change(old=old, new=new, kind=change.kind))
+            return tuple(result)
+
+        filter_config = _git(git_root, scan, "config", "--includes", "--get-regexp",
                              r"^filter\.", absent_ok=True)
         if filter_config:
             raise _Unavailable("Git filter configuration prevents static source inspection")
         # Avoid any operation that could fetch missing promisor objects.
-        if _git(root, scan, "config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.promisor)$", absent_ok=True):
+        if _git(git_root, scan, "config", "--get-regexp", r"^(extensions\.partialclone|remote\..*\.promisor)$", absent_ok=True):
             raise _Unavailable("partial clone requires unavailable local evidence")
-        autocrlf_raw = _git(root, scan, "config", "--get", "core.autocrlf", absent_ok=True)
+        autocrlf_raw = _git(git_root, scan, "config", "--get", "core.autocrlf", absent_ok=True)
         autocrlf = autocrlf_raw.strip().lower() if autocrlf_raw is not None else b"false"
         if autocrlf not in {b"false", b"true", b"input"}:
             raise _Unavailable("unsupported Git line-ending configuration")
-        git_dir = Path(os.fsdecode(_git(root, scan, "rev-parse", "--absolute-git-dir").rstrip(b"\n")))
+        git_dir = Path(os.fsdecode(_git(git_root, scan, "rev-parse", "--absolute-git-dir").rstrip(b"\n")))
         if any(os.path.lexists(git_dir / marker) for marker in _OPERATIONS):
             raise _Unavailable("in-progress Git operation prevents selection")
-        head = _revision(root, scan, "HEAD")
+        head = _revision(git_root, scan, "HEAD")
         for revision in dict.fromkeys(value for value in (baseline_head, base) if value is not None):
-            older = _revision(root, scan, revision)
+            older = _revision(git_root, scan, revision)
             if revision == baseline_head and revision != older:
                 raise _Unavailable("baseline is not an immutable commit identity", "incompatible-baseline")
-            if _git(root, scan, "merge-base", "--is-ancestor", older, head, absent_ok=True) is None:
+            if _git(git_root, scan, "merge-base", "--is-ancestor", older, head, absent_ok=True) is None:
                 raise _Unavailable("baseline or base is not an available ancestor", "incompatible-baseline")
-            changes += _committed_changes(root, scan, older, head)
+            changes += _scoped_changes(_committed_changes(git_root, scan, older, head, pathspec))
         index_args = ("ls-files", "--stage", "-v", "-z")
-        indexed = _git(root, scan, *index_args)
-        tracked = _index(indexed)
-        object_format = _git(root, scan, "rev-parse", "--show-object-format").strip().decode("ascii")
-        staged = _staged_changes(root, scan, head)
-        untracked_raw = _git(root, scan, "ls-files", "--others", "--exclude-standard", "-z")
-        untracked = {_path(path) for path in _records(untracked_raw)}
+        if pathspec:
+            index_args += ("--", *pathspec)
+        indexed = _git(git_root, scan, *index_args)
+        tracked = {_scoped_path(path): value for path, value in _index(indexed).items()}
+        object_format = _git(git_root, scan, "rev-parse", "--show-object-format").strip().decode("ascii")
+        staged = _scoped_changes(_staged_changes(git_root, scan, head, pathspec))
+        untracked_args = ("ls-files", "--others", "--exclude-standard", "-z")
+        if pathspec:
+            untracked_args += ("--", *pathspec)
+        untracked_raw = _git(git_root, scan, *untracked_args)
+        untracked = {_scoped_path(_path(path)) for path in _records(untracked_raw)}
         untracked = {path for path in untracked
                      if not _matches(path, config.selection.non_input_outputs)}
-        ignored_raw = _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        ignored_args = ("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        if pathspec:
+            ignored_args += ("--", *pathspec)
+        ignored_raw = _git(git_root, scan, *ignored_args)
         ignored_all = set()
         for raw_path in _records(ignored_raw):
-            path = _path(raw_path)
+            path = _scoped_path(_path(raw_path))
             if not _matches(path, config.selection.non_input_outputs):
                 ignored_all.add(path)
         declared_ignored = {path for path in ignored_all
@@ -456,7 +575,17 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         undeclared_ignored = {path for path in ignored_all
                             if path not in declared_ignored
                               and not _matches(path, config.selection.non_input_outputs)}
-        present, deleted = _present_tracked(root, set(tracked), scan)
+        if prefix is None:
+            present, deleted = _present_tracked(root, set(tracked), scan)
+        else:
+            # Declared root-level inputs live at the Git root, not under the
+            # child directory; presence is checked from their own base.
+            own = {path for path in tracked if not path.startswith("../")}
+            outer = {path[3:] for path in tracked if path.startswith("../")}
+            own_present, own_deleted = _present_tracked(root, own, scan)
+            outer_present, outer_deleted = _present_tracked(git_root, outer, scan)
+            present = own_present | {"../" + path for path in outer_present}
+            deleted = own_deleted | {"../" + path for path in outer_deleted}
         candidate_paths = present | untracked | declared_ignored | undeclared_ignored
         generated = set()
         # Tool byproducts are never source inputs, for scoped runs as well
@@ -466,6 +595,11 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         # protocol below is unchanged; only this classification is shared.
         if config.runner.kind is C.RunnerKind.PYTEST:
             for path in untracked | undeclared_ignored:
+                if prefix is not None and path.startswith("../"):
+                    # Root-level outputs are outside the child content scope;
+                    # only declared root inputs are fingerprinted, never
+                    # filtered as tool byproducts.
+                    continue
                 relation = _pytest_tool_generated(path, candidate_paths)
                 if relation is None:
                     continue
@@ -481,9 +615,26 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         untracked -= generated
         undeclared_ignored -= generated
         paths = present | untracked | declared_ignored | undeclared_ignored
-        files, object_ids = _fingerprints(key, root, paths, scan, object_format)
+        if prefix is None:
+            files, object_ids = _fingerprints(key, root, paths, scan, object_format)
+        else:
+            own_paths = {path for path in paths if not path.startswith("../")}
+            outer_paths = {path[3:] for path in paths if path.startswith("../")}
+            fingerprints: list[C.FileFingerprint] = []
+            object_ids = {}
+            for base, names in ((root, own_paths), (git_root, outer_paths)):
+                if not names:
+                    continue
+                scoped_files, scoped_ids = _fingerprints(key, base, names, scan, object_format)
+                for item in scoped_files:
+                    alias = item.path if base is root else "../" + item.path
+                    fingerprints.append(C.FileFingerprint(path=alias, digest=item.digest,
+                                                          mode=item.mode, size=item.size))
+                    object_ids[alias] = scoped_ids[item.path]
+            fingerprints.sort(key=lambda item: item.path)
+            files = tuple(fingerprints)
         raw_changed = {path for path in present if object_ids[path] != tracked[path][1]}
-        attribute_converted = _conversion_paths(root, scan, raw_changed)
+        attribute_converted = _scoped_conversion(git_root, scan, prefix, triggers, raw_changed)
         converted = set(attribute_converted)
         if autocrlf != b"false":
             converted.update(raw_changed)
@@ -501,13 +652,14 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         changes = tuple(dict.fromkeys((*changes, *working)))
         if mode_changed:
             raise _Unavailable("file mode differs from Git index")
-        if (_revision(root, scan, "HEAD") != head or _git(root, scan, *index_args) != indexed
-                or _git(root, scan, "ls-files", "--others", "--exclude-standard", "-z") != untracked_raw
-                or _git(root, scan, "ls-files", "--others", "--ignored", "--exclude-standard", "-z") != ignored_raw
-                or _git(root, scan, "config", "--includes", "--get-regexp",
+        reverified_converted = _scoped_conversion(git_root, scan, prefix, triggers, raw_changed)
+        if (_revision(git_root, scan, "HEAD") != head or _git(git_root, scan, *index_args) != indexed
+                or _git(git_root, scan, *untracked_args) != untracked_raw
+                or _git(git_root, scan, *ignored_args) != ignored_raw
+                or _git(git_root, scan, "config", "--includes", "--get-regexp",
                         r"^filter\.", absent_ok=True) != filter_config
-                or _git(root, scan, "config", "--get", "core.autocrlf", absent_ok=True) != autocrlf_raw
-                or _conversion_paths(root, scan, raw_changed) != attribute_converted):
+                or _git(git_root, scan, "config", "--get", "core.autocrlf", absent_ok=True) != autocrlf_raw
+                or reverified_converted != attribute_converted):
             raise _Unavailable("Git evidence changed during snapshot")
         environment = [(name, name in os.environ, os.environ.get(name)) for name in sorted(config.selection.environment)]
         external = _mac(key, [environment, [(f.path, f.digest, f.mode, f.size)
