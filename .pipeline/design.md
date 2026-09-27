@@ -41,10 +41,15 @@ another task writes; there is no shared-file edit.
 |---|---|
 | **T1** impact + wiring | NEW `src/ptest/impact.py`, NEW `tests/ng/test_impact.py`, NEW `tests/ng/test_changed_default.py`; edits `src/ptest/cli.py`, `src/ptest/operations.py`, `src/ptest/progress.py`, `src/ptest/contracts.py`, `src/ptest/monorepo.py`, and the legacy tests the routing change breaks: `tests/ng/test_monorepo_changed.py`, `tests/ng/test_changed_explain.py`, `tests/ng/test_natural_loop.py`, `tests/ng/test_run_output.py`, `tests/ng/test_operations.py`, `tests/ng/test_pytest_adapter.py`, `tests/ng/test_pytest_scoped_subprocess.py`, `tests/ng/test_monorepo_snapshot.py`, `tests/ng/test_shadow.py`, `tests/ng/test_files.py`, `tests/ng/test_parallel_output_cli.py`, `tests/ng/test_cli.py` (only if a routing assertion breaks) |
 | **T2** help + README | `src/ptest/help.py`, `README.md`, `tests/ng/test_help.py` |
-| **T3** guide + skill + own config | `src/ptest/resources/repository-agent-guide.md`, `src/ptest/agent_rules.py`, `.ptest.toml`, `tests/ng/test_agent_rules.py`, `tests/ng/test_resources.py` |
+| **T3** guide + skill + own config | `src/ptest/resources/repository-agent-guide.md`, `src/ptest/agent_rules.py`, `src/ptest/uninstall.py` (the `_decide_skill` tuple only), `.ptest.toml`, `tests/ng/test_agent_rules.py`, `tests/ng/test_resources.py`, `tests/ng/test_init_changed.py`, `tests/ng/test_uninstall.py` (one new test only), plus the files listed in the Controller amendment |
 
-Nobody touches `src/ptest/config.py`, `init_changed.py`, `tests/ng/test_config.py`,
-`tests/ng/test_init.py`, `tests/ng/test_init_changed.py` (D6, D11).
+`tests/ng/test_init_changed.py` belongs to T3 alone. Its help/README assertions
+(`test_getting_started_shows_changed`) pin T2's wording, which T3's worktree never sees, so the
+assertions are split: T3 deletes that one test from `test_init_changed.py`, and T2 re-adds the
+same checks with the new wording (frozen in §4.7) as a new test in `tests/ng/test_help.py`. Each
+task's scoped-green command then runs every assertion that pins the wording that task changes.
+Nobody else touches `src/ptest/config.py`, `init_changed.py`, `doctor_fix.py`, `uninstall.py` or
+their tests.
 
 ## 4. FROZEN INTERFACES
 
@@ -217,6 +222,20 @@ operations (T1): `_emit_start` — when `request.changed_note is not None` emit
 `progress.format_impact(project, request.changed_note)` (+ the existing `-v plan` line) and return.
 `_emit_end` — `next = progress.next_step(result.status, request.mode is C.Mode.SCOPED) if request.next_hint else None`; claim the `-v` hint only when `next` is None.
 
+### 4.7 Frozen doc wording (the exact substrings the tests assert)
+
+T2 (asserted by T2's new test in `tests/ng/test_help.py`):
+- `help.overview()` contains `default loop: tests your change reaches (= --changed)` (overview line 18,
+  keep the `#` column alignment).
+- `help.topic("agents")` contains `bare ptest runs the tests your change reaches`.
+- `README.md`, whitespace-normalised (`" ".join(text.split())`, so line wrapping does not matter),
+  contains `` `ptest` runs the tests your change reaches ``.
+
+T3 (asserted by T3 in `tests/ng/test_init_changed.py`):
+- Guide row, exact line: ``| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |``
+- Guide keeps ``| Integrated change, before handoff | `ptest --full` once |``, keeps `baseline recorded`, stays ≤ 100 lines, and no longer contains `the first run records a baseline`.
+- `_provider_text("claude")` contains `` `ptest` after each edit runs the tests your change reaches `` and `` `ptest --full` once before handoff `` and `docs/ptest-agent.md`.
+
 ## 5. Acceptance criteria
 
 ### T1 — impact + wiring
@@ -231,13 +250,16 @@ operations (T1): `_emit_start` — when `request.changed_note is not None` emit
 ### T2 — help + README
 - [ ] `help.py`: overview line 18 and the execution section say bare `ptest` = `--changed` = tests reached by the change vs the branch base (merge-base with origin/HEAD, else main/master/dev; on the default branch only uncommitted work), no baseline or coverage needed; `--base REF` compares against the merge-base with REF; the loop section drops "The first loop run may run everything to record a baseline" and says `ptest --full` once before handoff. `init --changed-setup` text untouched.
 - [ ] `README.md` loop wording matches (no claim that `--changed` needs a baseline or coverage).
-- [ ] `tests/ng/test_help.py` updated/extended for the new sentences; `.venv/bin/ptest --workers 2 tests/ng/test_help.py` green.
+- [ ] Wording matches §4.7 (T2) exactly.
+- [ ] `tests/ng/test_help.py` updated/extended for the new sentences, including a new `test_getting_started_shows_graph_default` that asserts the three §4.7 T2 substrings (it replaces `test_init_changed.py::test_getting_started_shows_changed`, which T3 deletes; T2 does not edit `test_init_changed.py`). `.venv/bin/ptest --workers 2 tests/ng/test_help.py` green.
 
 ### T3 — guide + skill + own config
 - [ ] `repository-agent-guide.md`: loop table row "After each edit" says bare `ptest` runs the tests the change reaches (git diff vs branch base; no baseline or coverage needed); "Reading ptest output" rows replaced/added for every line in 4.5 and the reasons in 4.2 (what to do: nothing for selected/full/none; `ptest --full` once before handoff after `next:`; fix code after failure); baseline rows stay (they describe `--full`). Exit-code table unchanged.
 - [ ] `agent_rules.py`: sha256 of the base-commit guide bytes (`2c9ec366c57d69f24053268632132915938098f1ff540dade0963b8206667fe7`, last changed in `5467c52`) added to `_PREVIOUS_GUIDE_SHA256S` with a comment; the current `_provider_text` bytes frozen into a new `_pre_graph_provider_text(provider)` (same pattern as `_pre_rewrite_provider_text`) and added to the recognised tuple; new `_provider_text` loop line: "`ptest` after each edit runs the tests your change reaches (git diff vs the branch base; no baseline or coverage needed); `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate." Body stays within fifteen lines.
+- [ ] `uninstall._decide_skill`: `agent_rules._pre_graph_provider_text(provider)` added to its managed tuple (it keeps its own list, separate from `agent_rules._provider_target`). New test in `tests/ng/test_uninstall.py`: a repo whose `.claude/skills/ptest/SKILL.md` holds `_pre_graph_provider_text("claude")` bytes → `ptest uninstall` plans that file as REMOVE "managed skill" (not KEPT "edited"), and it is gone after `--yes`.
+- [ ] `tests/ng/test_init_changed.py`: `test_repository_guide_default_loop_is_changed` and `test_skill_template_defaults_to_changed` assert the §4.7 T3 wording (the `the first run records a baseline` assertion is dropped because that row is replaced); `test_getting_started_shows_changed` is deleted (T2 re-adds it in `test_help.py`); every other assertion is kept, apart from the Controller-amendment default-flip updates.
 - [ ] `.ptest.toml` (ptest's own): `[selection] enabled = true`; nothing else.
-- [ ] `.venv/bin/ptest --workers 2 tests/ng/test_agent_rules.py tests/ng/test_resources.py` green (including `test_every_shipped_guide_version_hashes_into_previous_set`).
+- [ ] `.venv/bin/ptest --workers 2 tests/ng/test_agent_rules.py tests/ng/test_resources.py tests/ng/test_init_changed.py tests/ng/test_uninstall.py tests/ng/test_config.py tests/ng/test_init.py tests/ng/test_doctor_fix.py` green (including `test_every_shipped_guide_version_hashes_into_previous_set`).
 
 ## 6. Test approach
 - Every task: `uv sync --locked --extra test` in its own worktree first; run only through that worktree's `.venv/bin/ptest`, always `--workers 2` (the machine was saturated: an 8-minute slot wait was observed while designing). Never `--full` inside a task.
@@ -260,3 +282,21 @@ operations (T1): `_emit_start` — when `request.changed_note is not None` emit
 2. Generator default not flipped (D6).
 3. `RunRequest` gains two fields (`changed_note`, `next_hint`), not one — children must not print the hint.
 4. Explicit `--base` also uses the merge-base (D2); hidden-path and docs ignore list added (step 5); none-with-changes line added.
+
+## Controller amendment (binding, supersedes D6 and the Open question)
+The user's requirement is "changed must be the default, even with no parameters". D6 is reversed:
+- `config._fresh_config` (the generator) writes `[selection] enabled = true` for every new config, and `init --changed-setup`
+  no longer controls whether graph selection is on (graph selection needs no coverage and no baseline). Keep `--changed-setup`
+  working for the optional coverage/--shadow engine only, with wording that no longer implies it is needed for `ptest`.
+- An EXISTING config with `enabled = false` still means full-suite (respect explicit user choice), and its reason line says the
+  one-line fix. `ptest doctor --fix` proposes flipping a generator-default `enabled = false` to `true`.
+- Ownership: T3 additionally owns `src/ptest/config.py` (generator only), `src/ptest/init_changed.py` (wording/gating only),
+  `src/ptest/doctor_fix.py` (the enabled flip proposal only), `tests/ng/test_config.py`, `tests/ng/test_init.py`,
+  `tests/ng/test_init_changed.py`, `tests/ng/test_doctor_fix.py`. Update the ~5 measured assertions to the new default.
+
+## Revision 1 (review findings)
+- `tests/ng/test_init_changed.py` is owned by T3 alone (§3). Its help/README test moves to T2's `test_help.py`
+  (§5 T2), and every doc substring the tests assert is frozen in §4.7, so each task's scoped green covers
+  the wording that task changes.
+- T3 also owns `src/ptest/uninstall.py` (`_decide_skill` tuple) and one new test in `tests/ng/test_uninstall.py`,
+  so a 0.2.5 `SKILL.md` (`_pre_graph_provider_text`) is still removed by `ptest uninstall`.
