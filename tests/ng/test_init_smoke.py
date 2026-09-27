@@ -504,9 +504,12 @@ def test_real_failing_smoke_keeps_config_and_exit_zero(
 # --- setup gating (controller decision b): TTY offers setup, else skip -----
 
 
-def test_tty_setup_yes_runs_setup_through_ptest_then_passes(
+def test_tty_smoke_yes_runs_owed_setup_without_asking_then_passes(
         tmp_path, monkeypatch, capsys, case):
-    """Uv-locked pytest with [setup]: TTY yes runs setup, then smoke passes."""
+    """Uv-locked pytest with [setup]: one TTY yes runs setup, then smoke passes.
+
+    There is no second (setup) question: any further prompt fails the test.
+    """
     import sys as _sys
 
     from ptest import cli
@@ -529,13 +532,13 @@ def test_tty_setup_yes_runs_setup_through_ptest_then_passes(
     monkeypatch.chdir(root)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-    answers = iter(["y", "y"])
+    answers = iter(["y"])
 
     def fake_input(*args, **kwargs):
         try:
             return next(answers)
         except StopIteration:
-            return pytest.fail("unexpected third init prompt")
+            return pytest.fail("unexpected second init prompt")
 
     monkeypatch.setattr("builtins.input", fake_input)
 
@@ -551,9 +554,9 @@ def test_consented_setup_runs_smoke_exactly_once_per_init(
         tmp_path, monkeypatch, capsys, case):
     """Consented setup runs the smoke candidate exactly once per init.
 
-    The candidate appends to a counter file; after "y, y" the counter
+    The candidate appends to a counter file; after one "y" the counter
     holds one line (setup alone must not execute tests). A second init
-    asks no setup question and appends exactly one more line.
+    appends exactly one more line. No setup question is ever asked.
     """
     import sys as _sys
 
@@ -596,7 +599,7 @@ def test_consented_setup_runs_smoke_exactly_once_per_init(
 
         return fake_input
 
-    monkeypatch.setattr("builtins.input", _answers(["y", "y"]))
+    monkeypatch.setattr("builtins.input", _answers(["y"]))
     assert cli.main((
         "--fixture-domain", str(domain.root),
         "init", "--agents", "none", "--no-doctor")) == 0
@@ -626,73 +629,6 @@ def _npm_locked_vitest_repo(root):
         project_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         setup={"argv": ("npm", "ci"), "required_paths": ("node_modules",),
                "network": True, "lifecycle_scripts": True})
-
-
-def test_tty_setup_no_skips_without_running(
-        tmp_path, monkeypatch, capsys, case):
-    """Npm-locked vitest: TTY smoke-yes plus setup-no skips, runs nothing."""
-    from ptest import cli, operations
-
-    _npm_locked_vitest_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    answers = iter(["y", "n"])
-
-    def fake_input(*args, **kwargs):
-        try:
-            return next(answers)
-        except StopIteration:
-            return pytest.fail("unexpected third init prompt")
-
-    monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr(
-        operations, "execute",
-        lambda *a, **k: pytest.fail("declined setup executed"))
-    domain = case.domain()
-
-    assert cli.main((
-        "--fixture-domain", str(domain.root),
-        "init", "--agents", "none", "--no-doctor")) == 0
-    out = capsys.readouterr().out
-    assert "  smoke      " in out
-    assert "–" in out
-    assert "setup baseline not recorded" in out
-    assert "runs npm ci first" in out
-
-
-def test_tty_setup_ctrl_c_skips_without_running(
-        tmp_path, monkeypatch, capsys, case):
-    """Ctrl-C at the setup prompt is a decline: skip, exit 0, no run."""
-    from ptest import cli, operations
-
-    _npm_locked_vitest_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    answers = iter(["y", KeyboardInterrupt()])
-
-    def fake_input(*args, **kwargs):
-        try:
-            answer = next(answers)
-        except StopIteration:
-            return pytest.fail("unexpected third init prompt")
-        if isinstance(answer, BaseException):
-            raise answer
-        return answer
-
-    monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr(
-        operations, "execute",
-        lambda *a, **k: pytest.fail("ctrl-c setup executed"))
-    domain = case.domain()
-
-    assert cli.main((
-        "--fixture-domain", str(domain.root),
-        "init", "--agents", "none", "--no-doctor")) == 0
-    out = capsys.readouterr().out
-    assert "–" in out
-    assert "setup baseline not recorded" in out
 
 
 def test_non_tty_setup_missing_skips_with_working_advice(

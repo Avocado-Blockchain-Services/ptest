@@ -33,8 +33,6 @@ STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 
 SMOKE_QUESTION = "Run a quick smoke test to confirm ptest works? [Y/n]"
-SETUP_QUESTION = ("ptest needs to run setup ({argv}) once before the smoke "
-                  "test; run it? [Y/n]")
 
 # Smoke never waits on a busy admission queue: a queue timeout is a skip.
 SMOKE_QUEUE_TIMEOUT_S = 60

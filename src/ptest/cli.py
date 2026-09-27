@@ -917,17 +917,6 @@ def _ask_init_smoke(runnable: Sequence[init_smoke.SmokePlan]) -> bool:
     return init_smoke.parse_consent(answer)
 
 
-def _ask_init_setup(plan: init_smoke.SmokePlan) -> bool:
-    """TTY consent to run owed setup through ptest before the smoke."""
-    argv = render.terminal_text(" ".join(plan.setup_argv or ()))
-    print(init_smoke.SETUP_QUESTION.format(argv=argv), file=sys.stderr)
-    try:
-        answer = input()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return init_smoke.parse_consent(answer)
-
-
 def _init_facts(cwd: Path) -> tuple:
     """Best-effort FACT_KEYS dicts per project for the init renderers."""
     try:
@@ -992,10 +981,9 @@ def _init_smoke_results(parsed: ParsedArgs, cwd: Path, plans: tuple,
     for plan in plans:
         if plan.skip_reason is not None:
             results.append(init_smoke.skip_result(plan, plan.skip_reason))
-        elif plan.setup_argv is not None and not _ask_init_setup(plan):
-            results.append(
-                init_smoke.skip_result(plan, init_smoke.setup_advice(plan)))
         else:
+            # Consent to the smoke covers its owed setup: run it without
+            # a second question (the setup line names the command).
             if plan.setup_argv is not None:
                 reason = init_smoke.run_setup(
                     domain, plan, fixture_domain=parsed.fixture_domain)
