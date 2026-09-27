@@ -5,7 +5,8 @@ from ``executability.parallel_request`` (the predicate init consults) and
 the setup baseline from ``config._fresh_config``. Applied changes are
 limited to what the deterministic doctor items know exactly: a stale
 ``-n 0`` serial fallback, a ``[setup]`` argv missing its test-dependency
-group/extra, and a ``[selection]`` draft when coverage is configured.
+group/extra, a ``[selection]`` draft when coverage is configured, and the
+missing ``node_modules`` exemption on a vitest ``[selection]`` policy.
 Model-review findings about test code are never applied.
 
 File edits are line surgery on the existing bytes: only managed
@@ -437,6 +438,22 @@ def plan_project(root: Path, declaration: str,
                 changes.append(FieldChange("setup", "argv", fixed_argv))
 
     selection = parsed.get("selection", {})
+    if kind is C.RunnerKind.VITEST:
+        # Vite writes its cache under node_modules (e.g. .vite-temp), so
+        # an existing vitest config without that exemption can never
+        # record a baseline.  Append only the missing exemption, keeping
+        # any hand-tuned entries; dependency changes stay governed by the
+        # lockfile/setup fingerprint.
+        have_outputs: tuple = ()
+        if isinstance(selection, dict) and isinstance(
+                selection.get("non_input_outputs"), list):
+            have_outputs = tuple(
+                item for item in selection["non_input_outputs"]
+                if isinstance(item, str))
+        if "node_modules" not in have_outputs:
+            changes.append(FieldChange(
+                "selection", "non_input_outputs",
+                have_outputs + ("node_modules",)))
     if (kind is C.RunnerKind.PYTEST
             and (not isinstance(selection, dict)
                  or selection.get("enabled") is not True)
