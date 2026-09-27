@@ -2693,24 +2693,6 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 _reason("coordinator-unavailable",
                         "advanced no-tests-needed history could not be committed"),
             ))
-    if native_pytest and config.setup is not None and not request.no_setup:
-        # The parallel tier is decided from the project environment, which
-        # on a fresh checkout only exists after setup installs it. Run a
-        # due setup now, before the tier probe below re-reads the
-        # environment, so the first run is already parallel when setup
-        # provides the plugins. The in-guard setup then finds a current
-        # fingerprint and skips, so setup still runs exactly once. A
-        # failing setup returns its own result: setup is what ran. This
-        # sits after the no-tests-needed return above, so a run with
-        # nothing to execute never runs setup for its side effects.
-        if _required_setup_state(config, checkout, domain) is not None:
-            setup_result = run_setup_only(
-                domain, config, queue_timeout_s=request.queue_timeout_s,
-                fixture_domain=request.fixture_domain,
-                verbose=request.verbose, quiet=request.quiet)
-            if (setup_result is not None
-                    and setup_result.status is not C.Status.PASSED):
-                return _export(domain, checkout, request, setup_result)
     # The command summary is redacted and never includes token values.
     # A qualified xdist pytest project (basic profile) requests its own
     # worker count: an explicit -n N requests N, -n auto requests the
@@ -3515,9 +3497,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
 
 def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
                    queue_timeout_s: float,
-                   fixture_domain: Path | None = None,
-                   verbose: bool = False,
-                   quiet: bool = False) -> C.RunResult | None:
+                   fixture_domain: Path | None = None) -> C.RunResult | None:
     """Run the declared setup once, without running any tests.
 
     The setup executes as a literal exclusive command through
@@ -3548,8 +3528,7 @@ def run_setup_only(domain: C.DomainPaths, config: C.Config, *,
         domain, setup_config,
         C.RunRequest(mode=C.Mode.SCOPED, argv=(),
                      queue_timeout_s=queue_timeout_s,
-                     fixture_domain=fixture_domain, setup_only=True,
-                     verbose=verbose, quiet=quiet))
+                     fixture_domain=fixture_domain, setup_only=True))
     if result.status is C.Status.PASSED:
         setup_reason = _finish_setup(domain, config, checkout, before)
         if setup_reason is not None:
