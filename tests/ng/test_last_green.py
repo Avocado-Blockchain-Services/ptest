@@ -204,6 +204,27 @@ def test_monorepo_children_tracked_independently(
     assert "api · no changes" in err
 
 
+def test_monorepo_mixed_green_nothing_changed_makes_no_reference_claim(
+        tmp_path, monkeypatch, capsys, monorepo):
+    """api has a green record, web does not: the nothing-changed line must not
+    claim 'no green run yet' (real persea smoke finding)."""
+    monorepo({"api": {"kind": "command", "launcher": ("true",)},
+              "web": {"kind": "command", "launcher": ("true",)}},
+             parent=tmp_path, name=None)
+    init_git_repo(tmp_path, message="base")
+    monkeypatch.chdir(tmp_path)
+    calls = _capture(monkeypatch, [])
+
+    (tmp_path / "api" / "service.py").write_text("A = 1\n", encoding="utf-8")
+    assert main(()) == 0          # api runs green, web untouched
+    capsys.readouterr()
+    assert main(()) == 0          # nothing changed anywhere now
+    err = capsys.readouterr().err
+    assert len(calls) == 1
+    assert "no changes — nothing to test" in err
+    assert "no green run yet" not in err
+
+
 # --- cache unit contracts -----------------------------------------------------
 
 def test_unreadable_record_falls_back(tmp_path):

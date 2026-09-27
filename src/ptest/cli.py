@@ -3014,8 +3014,14 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
                in consulted]
     if all(impact.kind == "none" and not impact.changed
            for _, _, impact, _ in planned):
-        if all(green for _, _, _, _, green in consulted):
+        greens = [green for _, _, _, _, green in consulted]
+        if all(greens):
             progress.emit(progress.format_no_green_changes(
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        elif any(greens):
+            # Children compare against different references (some have a
+            # green run, some not): make no claim about a single reference.
+            progress.emit(progress.format_no_changes_anywhere(
                 color=sys.stderr.isatty()), quiet=parsed.quiet)
         else:
             progress.emit(progress.format_nothing_changed(

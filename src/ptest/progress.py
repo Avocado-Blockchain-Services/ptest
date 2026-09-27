@@ -181,6 +181,12 @@ def format_nothing_changed(label: str, *, color: bool = False,
             "· ptest --full runs everything")
 
 
+def format_no_changes_anywhere(*, color: bool = False) -> str:
+    """Nothing changed in any project, whatever each project compares against."""
+    return (f"{_prefix(color=color)} no changes — nothing to test"
+            " · ptest --full runs everything")
+
+
 def format_no_green_changes(*, color: bool = False) -> str:
     """Line for a run where nothing changed since the last green run."""
     return (f"{_prefix(color=color)} no changes since last green run"
