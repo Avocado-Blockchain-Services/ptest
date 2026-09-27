@@ -21,6 +21,26 @@ def _compatible_history(case, config, files=("tests/test_a.py",), input_digest=N
     ))
 
 
+def test_enabled_but_not_closed_reports_not_closed(case):
+    from ptest.selection import choose_plan
+
+    config = case.config(selection_enabled=True, closed_inputs=False)
+    plan = choose_plan(config, _snapshot(case),
+                       _compatible_history(case, config), case.request())
+    assert plan.execution == "full"
+    assert plan.reasons[0].code == "selection-not-closed"
+
+
+def test_disabled_reports_selection_disabled(case):
+    from ptest.selection import choose_plan
+
+    config = case.config(selection_enabled=False, closed_inputs=False)
+    plan = choose_plan(config, _snapshot(case),
+                       _compatible_history(case, config), case.request())
+    assert plan.execution == "full"
+    assert plan.reasons[0].code == "selection-disabled"
+
+
 def test_unmapped_runtime_change_forces_full(case):
     from ptest.selection import choose_plan
 

@@ -59,9 +59,14 @@ def _cfg(declaration: str) -> str:
 def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        inner = ", ".join(
+            f"{key} = {_toml_value(item)}" for key, item in value.items())
+        return "{ " + inner + " }" if inner else "{}"
     if isinstance(value, (tuple, list)):
-        return "[" + ", ".join(json.dumps(str(item), ensure_ascii=False)
-                               for item in value) + "]"
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     raise TypeError("unsupported fix value")
 
 
@@ -383,18 +388,160 @@ def _is_real_file(project_dir: Path, name: str) -> bool:
     return stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode)
 
 
-def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict]:
-    """Draft ``[selection]`` values from the source layout."""
-    roots = set(test_roots)
+def _src_package_entries(project_dir: Path) -> tuple:
+    """Top-level ``src/`` ``(name, rel)`` entries from the real layout.
+
+    Skips generated trees (``*.egg-info``), hidden entries, symlinks,
+    and names that could never validate as policy paths, so the draft
+    can never contradict a hand-tuned exclusion beneath ``src/``.
+    """
+    src = project_dir / "src"
     try:
-        if (project_dir / "src").is_dir() and not os.path.islink(
-                project_dir / "src"):
-            roots.add("src")
+        if os.path.islink(src) or not src.is_dir():
+            return ()
     except OSError:
-        pass
+        return ()
+    try:
+        entries = sorted(src.iterdir())
+    except OSError:
+        return ()
+    found: list[tuple] = []
+    for entry in entries:
+        name = entry.name
+        if (not name or name.startswith(".") or name.endswith(".egg-info")
+                or "\\" in name or len(name) > 64):
+            continue
+        try:
+            stamp = os.lstat(entry)
+        except OSError:
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            continue
+        if stat.S_ISDIR(stamp.st_mode):
+            found.append((name, f"src/{name}"))
+        elif (stat.S_ISREG(stamp.st_mode) and name.endswith(".py")
+                and name[:-3].replace("_", "").isalnum()):
+            found.append((name[:-3], f"src/{name}"))
+    return tuple(found)
+
+
+def _test_dir_entries(project_dir: Path, test_root: str) -> tuple:
+    """Real (non-symlink) file/dir names directly under one test root."""
+    base = project_dir if test_root == "." else project_dir / test_root
+    try:
+        if os.path.islink(base) or not base.is_dir():
+            return ()
+    except OSError:
+        return ()
+    try:
+        items = sorted(base.iterdir())
+    except OSError:
+        return ()
+    names: list[str] = []
+    for item in items:
+        if not item.name or item.name.startswith("."):
+            continue
+        try:
+            stamp = os.lstat(item)
+        except OSError:
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            continue
+        if stat.S_ISDIR(stamp.st_mode) or stat.S_ISREG(stamp.st_mode):
+            names.append(item.name)
+    return tuple(names)
+
+
+def _package_test_match(entry: str, package: str) -> bool:
+    """True when a test-root entry plausibly tests one src package."""
+    stem = entry[:-3] if entry.endswith(".py") else entry
+
+    def _norm(text: str) -> str:
+        return text.replace("-", "_")
+
+    want = _norm(package)
+    got = _norm(stem)
+    return (got == want
+            or got == f"test_{want}"
+            or got == f"{want}_test"
+            or want.endswith(f"_{got}"))
+
+
+def _selection_group_draft(project_dir: Path, test_roots: tuple) -> tuple:
+    """Draft ``groups`` mapping src packages to their test dirs.
+
+    A package with no recognisable test dir falls back to the declared
+    test roots; without any ``src/`` layout each test root maps to
+    itself. Entries are literal path prefixes, so every drafted path
+    names a real directory (or the declared root) from this layout.
+    """
+    groups: list[dict] = []
+    packages = _src_package_entries(project_dir)
+    if not packages:
+        for root in test_roots:
+            name = root if root != "." else "root"
+            groups.append({"name": name, "sources": [root],
+                           "tests": [root]})
+        return tuple(groups[:256])
+    fallback = tuple(test_roots) or ("tests",)
+    for package, rel in packages:
+        matched: list[str] = []
+        for root in test_roots:
+            for entry in _test_dir_entries(project_dir, root):
+                if _package_test_match(entry, package):
+                    matched.append(
+                        entry if root == "." else f"{root}/{entry}")
+        tests = tuple(sorted(set(matched))) or fallback
+        groups.append({"name": package, "sources": [rel],
+                       "tests": list(tests)})
+    return tuple(groups[:256])
+
+
+def _selection_key_is_default(have: dict, key: str) -> bool:
+    """True when a draftable selection key is absent or still at default.
+
+    ``closed_inputs`` defaults to false and the list keys default to
+    empty; only non-default values count as hand-tuned and are kept.
+    """
+    if key == "closed_inputs":
+        return have.get("closed_inputs") is not True
+    value = have.get(key)
+    return not isinstance(value, list) or len(value) == 0
+
+
+def _selection_needs_close(selection: object) -> bool:
+    """True when enablement or any draftable key still needs its draft."""
+    if not isinstance(selection, dict):
+        return True
+    if selection.get("enabled") is not True:
+        return True
+    return any(_selection_key_is_default(selection, key)
+               for key in ("closed_inputs", "input_roots",
+                           "full_triggers", "groups"))
+
+
+def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, dict]:
+    """Draft ``[selection]`` values from the source layout.
+
+    Source roots are the real top-level ``src/`` packages, never the
+    bare ``src/`` itself: generated trees beneath it (for example a
+    hand-tuned ``*.egg-info`` exclusion) must not overlap the drafted
+    inputs, or the policy would fail ptest's own validation.
+    """
+    packages = _src_package_entries(project_dir)
+    roots = set(test_roots) | {rel for _, rel in packages}
+    if not packages:
+        try:
+            if (project_dir / "src").is_dir() and not os.path.islink(
+                    project_dir / "src"):
+                roots.add("src")
+        except OSError:
+            pass
     triggers = [name for name in _TRIGGER_CANDIDATES
                 if _is_real_file(project_dir, name)]
-    return {"input_roots": sorted(roots)}, {"full_triggers": triggers}
+    groups = _selection_group_draft(project_dir, tuple(test_roots))
+    return ({"input_roots": sorted(roots)}, {"full_triggers": triggers},
+            {"groups": groups})
 
 
 def plan_project(root: Path, declaration: str,
@@ -438,25 +585,27 @@ def plan_project(root: Path, declaration: str,
 
     selection = parsed.get("selection", {})
     if (kind is C.RunnerKind.PYTEST
+            and _has_cov(current_args)
             and (not isinstance(selection, dict)
-                 or selection.get("enabled") is not True)
-            and _has_cov(current_args)):
+                 or _selection_needs_close(selection))):
         # The enablement itself flips false (or missing) to true; every
-        # other key is only filled when absent, so hand-tuned values stay
-        # untouched and appear as kept context in the diff.
-        if not isinstance(selection, dict) or "enabled" not in selection:
+        # other key is drafted when absent OR still at its default, so
+        # init-fresh defaults (false/empty) are completed while hand-tuned
+        # non-default values stay untouched and appear as kept context.
+        have = selection if isinstance(selection, dict) else {}
+        if "enabled" not in have:
             changes.append(FieldChange(
                 "selection", "enabled", True, draft=True))
-        elif selection.get("enabled") is not True:
+        elif have.get("enabled") is not True:
             changes.append(FieldChange("selection", "enabled", True))
-        roots, triggers = _selection_draft(
+        roots, triggers, groups = _selection_draft(
             project_dir, tuple(config.runner.test_roots))
         draft = (("closed_inputs", True),
                  ("input_roots", tuple(roots["input_roots"])),
-                 ("full_triggers", tuple(triggers["full_triggers"])))
-        have = selection if isinstance(selection, dict) else {}
+                 ("full_triggers", tuple(triggers["full_triggers"])),
+                 ("groups", tuple(groups["groups"])))
         for key, value in draft:
-            if key not in have:
+            if _selection_key_is_default(have, key):
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
 

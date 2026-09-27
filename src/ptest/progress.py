@@ -174,6 +174,9 @@ def explain_changed_full_reason(reason: C.Reason | None, *,
         return "no baseline yet (this run records one if it passes on a clean tree)"
     if code == "selection-disabled":
         return f"selection is off in {config_name or 'the config'} (ptest doctor --fix)"
+    if code == "selection-not-closed":
+        return (f"selection is on but not closed in {config_name or 'the config'}"
+                " — run ptest doctor --fix")
     if code == "policy-changed":
         if changed_path is not None:
             return f"{changed_path} is a full trigger"
