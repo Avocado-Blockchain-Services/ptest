@@ -973,6 +973,132 @@ def test_symlinked_parent_directory_fails_closed(case):
     assert result.digest is None and result.limitations
 
 
+def _coverage_config(case, domain):
+    from ptest import contracts as _C
+
+    checkout = case.checkout(domain)
+    object.__setattr__(checkout, "root", domain.root / "repo")
+    return case.config(checkout=checkout, runner=_C.RunnerConfig(
+        kind=_C.RunnerKind.PYTEST,
+        launcher=("python",),
+        args=("--cov=src", "--cov-report=term"),
+        full_args=(),
+        test_roots=("tests",),
+        workers=1,
+        lifecycle="cooperative-process-group",
+    ))
+
+
+def test_pytest_scoped_snapshot_tolerates_coverage_data_when_config_enables_coverage(case):
+    """A --cov run's `.coverage` is an expected tool byproduct, like `.pytest_cache`.
+
+    On a clean tree the snapshot before the run must match the snapshot
+    after pytest-cov wrote its data file, so no `changed-during-run`
+    fires for it.
+    """
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    (root / ".gitignore").write_text(".coverage\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    before = snapshot(domain, config, None, None)
+    assert before.digest is not None
+    assert before.clean
+    (root / ".coverage").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None)
+    assert after.digest is not None
+    assert after.digest == before.digest
+    assert after.clean
+    assert ".coverage" not in {item.path for item in after.files}
+
+
+def test_pytest_full_snapshot_tolerates_coverage_data_when_config_enables_coverage(case):
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    (root / ".gitignore").write_text(".coverage\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    before = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert before.digest is not None
+    (root / ".coverage").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None, pytest_full_outputs=True)
+    assert after.digest is not None
+    assert after.digest == before.digest
+    assert ".coverage" not in {item.path for item in after.files}
+
+
+def test_pytest_scoped_snapshot_tolerates_parallel_coverage_data_when_enabled(case):
+    """Parallel pytest-cov suffix files (`.coverage.<host>.<pid>.<rand>`) match too."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    (root / ".gitignore").write_text(".coverage*\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    before = snapshot(domain, config, None, None)
+    assert before.clean
+    (root / ".coverage.localhost.12345.678901").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None)
+    assert after.digest == before.digest
+    assert after.clean
+
+
+def test_pytest_scoped_snapshot_tolerates_configured_coverage_data_file(case):
+    """A custom coverage `data_file` is tolerated exactly as configured."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    (root / ".gitignore").write_text(".custom-coverage\n")
+    (root / ".coveragerc").write_text("[run]\ndata_file = .custom-coverage\n")
+    git(root, "add", ".gitignore", ".coveragerc"); git(root, "commit", "-m", "custom coverage file")
+    before = snapshot(domain, config, None, None)
+    assert before.clean
+    (root / ".custom-coverage").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None)
+    assert after.digest == before.digest
+    assert after.clean
+    assert ".custom-coverage" not in {item.path for item in after.files}
+
+
+def test_pytest_scoped_snapshot_keeps_coverage_data_without_config_coverage(case):
+    """Without `--cov` in the ptest config, `.coverage` stays a real input (fail-closed)."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / ".gitignore").write_text(".coverage\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    before = snapshot(domain, config, None, None)
+    assert before.clean
+    (root / ".coverage").write_bytes(b"coverage-data")
+    after = snapshot(domain, config, None, None)
+    assert not after.clean
+    assert ".coverage" in {change.new for change in after.changes if change.kind == "ignored"}
+
+
+def test_pytest_scoped_snapshot_keeps_nested_coverage_data(case):
+    """Coverage tolerance is root-only: `sub/.coverage` is never a byproduct."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _coverage_config(case, domain)
+    (root / ".gitignore").write_text(".coverage\nsub/.coverage\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore coverage data")
+    (root / "sub").mkdir()
+    (root / "sub" / ".coverage").write_bytes(b"coverage-data")
+    result = snapshot(domain, config, None, None)
+    assert "sub/.coverage" in {item.path for item in result.files}
+
+
 @pytest.mark.parametrize("kind", ["fifo", "invalid-utf8"])
 def test_unsafe_input_types_and_encodings_fail_closed(case, kind):
     from ptest.source import ensure_fingerprint_key

@@ -128,6 +128,36 @@ def _fail(message: str, code: str = "native-config-invalid") -> None:
     raise BridgeRefusal(message, code)
 
 
+def _normalize_test_id(test_id: str, max_test_id_bytes: int) -> str:
+    """Deterministically bound an over-long native test identity.
+
+    Byte-identical to ``ptest.contracts.normalize_test_id`` (duplicated
+    because this bridge intentionally has no ptest imports; the unit
+    suite pins the two together on the frozen bound).  Ids within the
+    bound pass through unchanged; longer ids keep the longest readable
+    UTF-8 prefix that fits alongside a ``…[sha256:<hex>]`` suffix over
+    the full id.  The bound always comes from the frozen descriptor via
+    :func:`_report_limits`, never a literal.
+    """
+    if not isinstance(test_id, str):
+        raise BridgeRefusal("native test identity is not a string")
+    raw = test_id.encode("utf-8")
+    if len(raw) <= max_test_id_bytes:
+        return test_id
+    suffix = "…[sha256:" + hashlib.sha256(raw).hexdigest() + "]"
+    budget = max_test_id_bytes - len(suffix.encode("utf-8"))
+    prefix = raw[:max(budget, 0)]
+    while prefix:
+        try:
+            head = prefix.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            prefix = prefix[:-1]
+    else:
+        head = ""
+    return head + suffix
+
+
 def _refusal_marker(code: str, message: str) -> None:
     # No argv, paths or project data: distinguish owned refusals from native exit 4.
     print("ptest-bridge-refusal: " + json.dumps({"code": code, "message": message}), file=sys.stderr)
@@ -1249,6 +1279,28 @@ class OwnedPlugin:
         # closed, never passes.
         self._worker_outcomes: dict[str, str] = {}
         self._worker_outcome_bound: int | None = None
+        # Descriptor-read test-identity bound, fetched lazily so every
+        # normalisation below enforces the same frozen limit the report
+        # writer enforces (never a literal, never a second bound).
+        self._test_id_bound: int | None = None
+
+    def _test_identity(self, nodeid: str) -> str:
+        """Normalise one native node id to its bounded test identity.
+
+        Pure function of the id text, so serial and parallel halves and
+        repeated runs produce the identical bounded form and
+        collected-vs-run reconciliation still matches exactly.
+        """
+        if self._test_id_bound is None:
+            try:
+                self._test_id_bound = _report_limits()[3]
+            except BridgeRefusal:
+                self._refuse("native report descriptor limits are unavailable")
+        assert self._test_id_bound is not None
+        try:
+            return _normalize_test_id(nodeid, self._test_id_bound)
+        except BridgeRefusal as exc:
+            self._refuse(exc.message)
 
     def _refuse(self, message: str) -> None:
         from pytest import UsageError
@@ -1953,9 +2005,12 @@ class OwnedPlugin:
             collected: list[str] = []
             for item in getattr(session, "items", ()):
                 nodeid = str(getattr(item, "nodeid", ""))
-                if nodeid and nodeid not in seen:
-                    seen.add(nodeid)
-                    collected.append(nodeid)
+                if not nodeid:
+                    continue
+                identity = self._test_identity(nodeid)
+                if identity not in seen:
+                    seen.add(identity)
+                    collected.append(identity)
             self._collected = tuple(collected)
             # Worker-half drop detection runs on identities, never nodeid
             # text (see the attribute comment in __init__).
@@ -1999,7 +2054,7 @@ class OwnedPlugin:
         except (TypeError, ValueError):
             nodeid = ""
         if nodeid:
-            self._reported_nodeids.add(nodeid)
+            self._reported_nodeids.add(self._test_identity(nodeid))
 
     def pytest_collectreport(self, report: Any) -> None:
         """Observe native collection errors; they fail the run like test failures."""
@@ -2020,6 +2075,7 @@ class OwnedPlugin:
             if not nodeid:
                 self._refuse("a parallel worker report has no test identity")
                 return
+            nodeid = self._test_identity(nodeid)
             outcome: str | None = None
             if phase == "call":
                 outcome = {
@@ -2082,7 +2138,7 @@ class OwnedPlugin:
         if self.execution == "full":
             nodeid = str(getattr(item, "nodeid", ""))
             if nodeid:
-                self._protocol_seen.add(nodeid)
+                self._protocol_seen.add(self._test_identity(nodeid))
             self._worker_protocol_ids.add(id(item))
         self._validate(item.config, generated=True)
         return (yield)
@@ -2137,7 +2193,11 @@ class OwnedPlugin:
             collected = tuple(str(item) for item in ids)
         except TypeError:
             self._refuse("native parallel worker identity is malformed")
-        self._node_collections[worker] = collected
+        # Controller-side collections are stored normalised, so the
+        # inventory, the merge and the reconciliation below all compare
+        # the same bounded identities the report writer emits.
+        self._node_collections[worker] = tuple(
+            self._test_identity(nodeid) for nodeid in collected)
 
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
         """Record a worker going down, with its bridge record when sent.
@@ -2382,9 +2442,16 @@ class AdvancedPlugin(OwnedPlugin):
         seen: set[str] = set()
         for item in getattr(session, "items", ()):
             nodeid = str(getattr(item, "nodeid", ""))
-            if not nodeid or nodeid in seen:
+            if not nodeid:
                 self._refuse("duplicate or missing native test identity")
-            seen.add(nodeid)
+            # The inventory is keyed and recorded normalised: an over-long
+            # parametrised id keeps its readable prefix plus the sha256 of
+            # the full id, bounded so the terminal report never refuses.
+            # A normalised collision refuses exactly like a raw duplicate.
+            identity = self._test_identity(nodeid)
+            if identity in seen:
+                self._refuse("duplicate or missing native test identity")
+            seen.add(identity)
             path = str(getattr(item, "fspath", ""))
             try:
                 checkout_root = os.path.realpath(self.checkout_root or os.getcwd())
@@ -2396,8 +2463,8 @@ class AdvancedPlugin(OwnedPlugin):
                 self._refuse("native test identity is outside the checkout")
             if path == ".." or path.startswith("../") or path.startswith("/"):
                 self._refuse("native test identity is outside the checkout")
-            self.inventory[nodeid] = {
-                "id": nodeid, "file": path, "outcome": "unknown",
+            self.inventory[identity] = {
+                "id": identity, "file": path, "outcome": "unknown",
                 "setup_s": None, "call_s": None, "teardown_s": None,
             }
         self.collection_complete = True
@@ -2416,6 +2483,7 @@ class AdvancedPlugin(OwnedPlugin):
         self._note_native_report(report)
         nodeid = str(getattr(report, "nodeid", ""))
         if nodeid:
+            nodeid = self._test_identity(nodeid)
             self._reported_nodeids.add(nodeid)
         item = self.inventory.get(nodeid)
         if item is None:
@@ -2601,9 +2669,14 @@ def _valid_worker_record(record: Any, worker: str) -> bool:
         if (not isinstance(value, list)
                 or any(not isinstance(item, str) for item in value)):
             return False
+    try:
+        max_test_id_bytes = _report_limits()[3]
+    except BridgeRefusal:
+        return False
     outcomes = record.get("outcomes")
     if (not isinstance(outcomes, dict)
             or any(not isinstance(nodeid, str) or not nodeid
+                   or len(nodeid.encode("utf-8")) > max_test_id_bytes
                    or item not in _WORKER_OUTCOMES
                    for nodeid, item in outcomes.items())):
         return False

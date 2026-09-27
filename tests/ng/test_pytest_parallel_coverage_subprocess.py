@@ -472,3 +472,116 @@ def test_parallel_coverage_mutating_testnodedown_cannot_forge(tmp_path, fake_pyt
         or twin.report.get("native_exit_code") not in (None, 0))
     assert twin.report is None or twin.report["coverage"] == {
         "complete": False}
+
+
+def _long_param_tests(url_size: int, feed_size: int | None = None) -> str:
+    """Persea-shaped over-long parametrised ids (8 KB and 300 KB)."""
+    url = "https://cdn.example/" + "a" * url_size
+    body = (
+        "import pytest\n"
+        "\n\n"
+        "@pytest.mark.parametrize(\"media_url\", [\n"
+        f"    {url!r},\n"
+        "])\n"
+        "def test_invalid_media_url_makes_whole_projection_unavailable(media_url):\n"
+        "    assert media_url.startswith(\"https://cdn.example/\")\n"
+    )
+    if feed_size is not None:
+        feed = "<rss>" + "x" * feed_size + "</rss>"
+        body += (
+            "\n\n"
+            "@pytest.mark.parametrize(\"feed\", [\n"
+            f"    {feed!r},\n"
+            "])\n"
+            "def test_malformed_entity_and_oversized_feeds_fail_closed(feed):\n"
+            "    assert feed.startswith(\"<rss>\")\n"
+        )
+    return body
+
+
+def _assert_long_ids_reconciled_and_recorded(twin, *, expected: int) -> None:
+    import hashlib as _hashlib
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.refusals == []
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+    assert twin.report["inventory"]["complete"] is True
+    items = twin.report["inventory"]["tests"]
+    assert len(items) == expected
+    assert {item["outcome"] for item in items} == {"passed"}
+    for item in items:
+        raw_size = len(item["id"].encode("utf-8"))
+        assert raw_size <= 4096, item["id"][:120]
+    counts = twin.report.get("test_counts")
+    if counts is not None:
+        assert counts["collected"] == expected
+        assert counts["executed"] == expected
+        assert counts["passed"] == expected
+    # The recorded inventory authenticates exactly: recompute the digest
+    # over the reported (normalised) tests.
+    encoded = json.dumps(
+        twin.report["inventory"]["tests"], sort_keys=True,
+        separators=(",", ":")).encode()
+    assert _hashlib.sha256(encoded).hexdigest() == twin.report["inventory"]["digest"]
+
+
+def test_advanced_long_parametrized_id_passes_serial(tmp_path, fake_pytest_project):
+    """Twin (long-serial): an 8 KB parametrised id passes serial, reconciled, recorded."""
+    root = fake_pytest_project(
+        tests={"tests/test_long.py": _long_param_tests(8000)}, git=False)
+
+    twin = _run_advanced_bridge(
+        root, ["-q", "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests"],
+        execution="full", workers=1, timeout=60)
+
+    _assert_long_ids_reconciled_and_recorded(twin, expected=1)
+    [item] = twin.report["inventory"]["tests"]
+    assert item["id"].startswith(
+        "tests/test_long.py::test_invalid_media_url_makes_whole_projection_unavailable[https://cdn.example/")
+    assert "…[sha256:" in item["id"]
+
+
+def test_advanced_long_parametrized_id_passes_parallel(tmp_path, fake_pytest_project):
+    """Twin (long-xdist): a 300 KB parametrised id passes on 4 workers, reconciled, recorded."""
+    root = fake_pytest_project(
+        tests={"tests/test_long.py": _long_param_tests(100, 300000)}, git=False)
+
+    twin = _run_advanced_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests"],
+        execution="full", timeout=60)
+
+    _assert_long_ids_reconciled_and_recorded(twin, expected=2)
+    long_items = [item for item in twin.report["inventory"]["tests"]
+                  if "test_malformed_entity" in item["id"]]
+    assert len(long_items) == 1
+    assert "…[sha256:" in long_items[0]["id"]
+
+
+def test_advanced_shared_prefix_long_ids_never_collide(tmp_path, fake_pytest_project):
+    """Two distinct long ids with a shared 8 KB prefix stay distinct end to end."""
+    stem = "https://cdn.example/" + "a" * 8000
+    body = (
+        "import pytest\n"
+        "\n\n"
+        "@pytest.mark.parametrize(\"media_url\", [\n"
+        f"    {stem + 'A'!r},\n"
+        f"    {stem + 'B'!r},\n"
+        "])\n"
+        "def test_invalid_media_url_makes_whole_projection_unavailable(media_url):\n"
+        "    assert media_url.startswith(\"https://cdn.example/\")\n"
+    )
+    root = fake_pytest_project(tests={"tests/test_long.py": body}, git=False)
+
+    twin = _run_advanced_bridge(
+        root, ["-q", "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests"],
+        execution="full", workers=1, timeout=60)
+
+    _assert_long_ids_reconciled_and_recorded(twin, expected=2)
+    ids = [item["id"] for item in twin.report["inventory"]["tests"]]
+    assert len(set(ids)) == 2

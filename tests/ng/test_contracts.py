@@ -1993,3 +1993,46 @@ def test_agent_assessment_schema_files_cover_new_fields():
     assert execution["properties"]["status"]["enum"] == [
         "executable", "caveat", "not-executable"]
     assert "execution" not in child["required"]
+
+
+def _long_id(prefix: str, size: int) -> str:
+    body = prefix
+    body += "x" * (size - len(body.encode("utf-8")))
+    assert len(body.encode("utf-8")) == size
+    return body
+
+
+def test_normalize_test_id_short_ids_pass_through_unchanged():
+    short = "tests/test_a.py::test_a[param]"
+    assert C.normalize_test_id(short) == short
+    boundary = "t" * C.TEST_ID_MAX_BYTES
+    assert C.normalize_test_id(boundary) == boundary
+
+
+def test_normalize_test_id_long_ids_keep_prefix_plus_sha256_suffix():
+    import hashlib as _hashlib
+
+    for size in (8315, 262259):
+        raw = _long_id("tests/test_channel_previews.py::test_case[https://cdn.example/", size)
+        normalised = C.normalize_test_id(raw)
+        assert len(normalised.encode("utf-8")) <= C.TEST_ID_MAX_BYTES
+        expected_suffix = "…[sha256:" + _hashlib.sha256(raw.encode("utf-8")).hexdigest() + "]"
+        assert normalised.endswith(expected_suffix)
+        assert raw.startswith(normalised[: -len(expected_suffix)])
+        # Deterministic across runs/workers: same input, same output.
+        assert C.normalize_test_id(raw) == normalised
+
+
+def test_normalize_test_id_shared_prefix_long_ids_never_collide():
+    stem = "tests/test_rss_news.py::test_case[<rss>" + "y" * 8000
+    first = _long_id(stem + "A", 9000)
+    second = _long_id(stem + "B", 9000)
+    assert first != second
+    assert C.normalize_test_id(first) != C.normalize_test_id(second)
+
+
+def test_normalize_test_id_rejects_non_strings():
+    import pytest as _pytest
+
+    with _pytest.raises(TypeError):
+        C.normalize_test_id(None)  # type: ignore[arg-type]

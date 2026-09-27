@@ -123,3 +123,42 @@ def test_observation_only_read_only_collection_observer_passes(tmp_path):
 def test_observation_only_missing_source_is_refused():
     """A hook with no retrievable source fails closed."""
     assert pytest_bridge._is_observation_only(len, ("node",)) is False
+
+
+def _long_id(prefix: str, size: int) -> str:
+    body = prefix + "x" * (size - len(prefix.encode("utf-8")))
+    assert len(body.encode("utf-8")) == size
+    return body
+
+
+def test_bridge_normalize_test_id_matches_contracts_on_real_shapes():
+    """The dependency-light bridge must normalise exactly like contracts.
+
+    The bridge cannot import ptest, so the algorithm is duplicated; this
+    pins the two implementations together on the real persea shapes
+    (8,315 and 262,259 bytes) plus the byte boundary.
+    """
+    from ptest import contracts as C
+
+    samples = [
+        "tests/test_a.py::test_a[param]",
+        "t" * C.TEST_ID_MAX_BYTES,
+        _long_id("tests/test_channel_previews.py::test_case[https://cdn.example/", 8315),
+        _long_id("tests/test_rss_news.py::test_case[<rss>", 262259),
+    ]
+    for raw in samples:
+        assert (pytest_bridge._normalize_test_id(raw, C.TEST_ID_MAX_BYTES)
+                == C.normalize_test_id(raw))
+
+
+def test_bridge_worker_record_rejects_unbounded_outcome_ids():
+    """Worker outcome keys longer than the bound stay refused, fail-closed."""
+    from ptest import contracts as C
+
+    record = {
+        "worker_id": "gw0", "refused": False,
+        "protocol_seen": 1, "failures": 0, "collection_errors": 0,
+        "dropped": False, "conftest_hooks": [], "notes": [],
+        "outcomes": {"t" * (C.TEST_ID_MAX_BYTES + 1): "passed"},
+    }
+    assert pytest_bridge._valid_worker_record(record, "gw0") is False

@@ -513,15 +513,22 @@ def _inventory(value: object, binding: NativeReportBinding) -> C.Inventory:
         if not isinstance(item, dict) or set(item) != {
                 "id", "file", "outcome", "setup_s", "call_s", "teardown_s"}:
             _reject()
-        if (not isinstance(item["id"], str)
-                or len(item["id"].encode("utf-8")) > max_id_bytes
-                or item["id"] in seen):
+        if not isinstance(item["id"], str):
+            _reject()
+        # Over-long native identities never refuse the run: they are
+        # stored normalised (readable prefix plus the sha256 of the full
+        # id).  The digest below still covers the received bytes exactly,
+        # so only the authenticated sender's inventory is admitted.
+        # The str check above makes this total: no TypeError can escape.
+        normalised = C.normalize_test_id(item["id"])
+        if (len(normalised.encode("utf-8")) > max_id_bytes
+                or normalised in seen):
             _reject()
         if not isinstance(item["outcome"], str) or item["outcome"] not in _OUTCOMES:
             _reject()
         try:
             record = C.TestRecord(
-                id=item["id"], file=item["file"],
+                id=normalised, file=item["file"],
                 outcome=C.Outcome(item["outcome"]),
                 setup_s=item["setup_s"], call_s=item["call_s"],
                 teardown_s=item["teardown_s"],
