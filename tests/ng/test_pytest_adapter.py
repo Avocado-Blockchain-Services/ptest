@@ -1641,3 +1641,23 @@ def test_prepare_advanced_selected_cov_run_leads_gate_before_files(tmp_path):
 
     assert "--cov-fail-under=0" in prepared.argv
     assert prepared.argv[-1:] == ("tests/alpha.py",)
+
+
+def test_runtime_identity_ignores_only_cov_fail_under(monkeypatch):
+    """The fail-under gate must not change the runtime identity; other options still do."""
+    monkeypatch.setenv("PTEST_PYTEST_COMMAND_VARIANTS", json.dumps([["python"], ["python"]]))
+
+    def facts(**options):
+        plugin = pytest_bridge.AdvancedPlugin(workers=1)
+        config = SimpleNamespace(option=SimpleNamespace(**options), pluginmanager=None)
+        plugin._refresh_runtime_facts(config)
+        return plugin.runtime_facts("9.1.1")
+
+    base = facts(cov_fail_under=None, verbose=0)
+    assert "cov_fail_under" not in base["effective_options"]
+    gated = facts(cov_fail_under=0, verbose=0)
+    assert (pytest_bridge.AdvancedPlugin._facts_identity(base)
+            == pytest_bridge.AdvancedPlugin._facts_identity(gated))
+    other = facts(cov_fail_under=None, verbose=1)
+    assert (pytest_bridge.AdvancedPlugin._facts_identity(base)
+            != pytest_bridge.AdvancedPlugin._facts_identity(other))
