@@ -249,6 +249,23 @@ def _pre_green_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_loop_hint_provider_text(provider: str) -> bytes:
+    """0.3.1 skill (before the bare-ptest/project-name clarification)."""
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "`ptest` after each edit runs the tests your change reaches (changed since the last green run; no baseline or coverage needed); `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate.\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
     """Current generated skill: front matter plus the test loop.
 
@@ -266,7 +283,7 @@ def _provider_text(provider: str) -> bytes:
         "\n"
         "# ptest skill\n"
         "\n"
-        "`ptest` after each edit runs the tests your change reaches (changed since the last green run; no baseline or coverage needed); `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate.\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches, changed since the last green run, no baseline or coverage needed. `ptest api` runs ALL of api, `ptest <path>` one file; `ptest --full` once when you are done, before handoff.\n"
         "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
         "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
@@ -318,7 +335,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_changed_provider_text(provider),
                    _pre_rewrite_provider_text(provider),
                    _pre_graph_provider_text(provider),
-                   _pre_green_provider_text(provider)):
+                   _pre_green_provider_text(provider),
+                   _pre_loop_hint_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -728,6 +746,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     # 1e1d270: guide before the last-green-run reference (branch-base diff
     # wording for what "changed" means).
     "f079e0d36f0526ab07b405c59b3204788f40c35bc1965e0985a7868cda7460d6",
+    # e70de73 (0.3.1): guide before the bare-ptest/project-name clarification.
+    "fb72facbfe7e1104f7f59158d4fe5c01d1a133d5a0ca85feefb868c944f8f0dc",
 })
 
 

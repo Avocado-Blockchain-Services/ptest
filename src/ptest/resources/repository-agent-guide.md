@@ -8,9 +8,9 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 
 | Situation | Command |
 |---|---|
-| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |
+| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches (changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |
 | One test file | `ptest <path>` |
-| All tests of one project | `ptest <child>`, e.g. `ptest web` |
+| All tests of one project (not the edit loop: it ignores what changed) | `ptest <child>`, e.g. `ptest web` |
 | Integrated change, before handoff | `ptest --full` once |
 | Integrated gate for one project | `ptest --full <child>` |
 | Force a full rerun over already-verified inputs | `ptest --full --again` |
@@ -36,11 +36,11 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 |---|---|---|
 | `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
 | `changed: <path> (+N files) → N of M test files (D direct · V via importers)` | changed mode selected the tests your change reaches | Nothing; this is the normal loop. |
-| `changed → full suite: <reason>` | changed mode ran everything: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing; no baseline or coverage step is needed. |
+| `changed → full suite: <reason>` | this run IS the full suite: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing extra; do not start `ptest --full` because of this line. |
 | `changed: <path> → vitest --changed <label>` | that child delegated its changed set to vitest | Nothing. |
 | `changed: <path> → no tests affected` / `no changes vs <label> — nothing to test` | the change reaches no tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
 | `web · no changes` | that child is untouched (one line per untouched child) | Nothing. |
-| `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Run `ptest --full` once before handoff. |
+| `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Keep iterating with `ptest`; run `ptest --full` once only when you are done. |
 | `waiting for N slots … in use by …` | queued behind other runs | Wait; do not start another run. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
