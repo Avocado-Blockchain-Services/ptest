@@ -1,13 +1,11 @@
-"""`ptest init` follow-up: offer the optional coverage engine per project.
+"""`ptest init` follow-up: offer `ptest --changed` setup per pytest project.
 
 After the smoke step, init asks once per pytest project whose environment
-holds the frozen pytest-cov/coverage pair whether to set up the coverage
-engine (``ptest --shadow``). Bare ``ptest`` already runs the tests the
-change reaches without it. The ``[selection]`` draft itself comes from
-``doctor_fix``'s planner (no duplicate logic here); this module only
-ensures the coverage argv the planner keys on, asks the question, and
-reports. Existing configs are never rewritten here: they point at
-``ptest doctor --fix``.
+holds the frozen pytest-cov/coverage pair whether to enable test
+selection. The ``[selection]`` draft itself comes from ``doctor_fix``'s
+planner (no duplicate logic here); this module only ensures the coverage
+argv the planner keys on, asks the question, and reports. Existing
+configs are never rewritten here: they point at ``ptest doctor --fix``.
 """
 from __future__ import annotations
 
@@ -28,35 +26,30 @@ DEFAULT_CHOICE = "later"
 COV_ARGV = ("--cov", "--cov-report", "term")
 
 QUESTION = (
-    "Set up the optional coverage engine (ptest --shadow) for {project}? "
-    "Bare ptest already runs the tests your change reaches without it. "
-    "Adds coverage to test runs; needs one full run as a baseline. "
-    "[now/later/no] (default: later)"
+    "Set up ptest --changed for {project}? Adds coverage to test runs; "
+    "needs one full run as a baseline. [now/later/no] (default: later)"
 )
 
 NEEDS_COV_LINE = (
-    "{project}: the optional coverage engine (ptest --shadow) needs "
-    "pytest-cov; bare ptest does not"
+    "{project}: ptest --changed needs pytest-cov (add it to the test deps)"
 )
 
 LATER_LINE = (
-    "{project}: coverage engine drafted; its baseline is recorded on the "
-    "first passing --full on a clean tree"
+    "{project}: selection drafted; the baseline is recorded on the first "
+    "passing --full/--changed on a clean tree"
 )
 
-NOW_LINE = (
-    "{project}: coverage engine drafted; running ptest --full for the baseline"
-)
+NOW_LINE = "{project}: selection drafted; running ptest --full for the baseline"
 
 EXISTING_LINE = (
-    "{project}: selection is off in this config — set [selection] "
-    "enabled = true, or run ptest doctor --fix"
+    "{project}: config already exists; run `ptest doctor --fix` "
+    "to set up ptest --changed"
 )
 
 DRY_RUN_LINE = (
-    "would set up the coverage engine for {project}: write "
-    "--cov/--cov-report plus the [selection] draft; the baseline is "
-    "recorded on the first passing --full on a clean tree"
+    "would set up ptest --changed for {project}: write --cov/--cov-report "
+    "plus the [selection] draft; the baseline is recorded on the first "
+    "passing --full/--changed on a clean tree"
 )
 
 

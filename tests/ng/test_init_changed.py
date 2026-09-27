@@ -105,7 +105,7 @@ def test_changed_setup_now_writes_and_runs_full_baseline(tmp_path, monkeypatch, 
     assert calls[0].mode is C.Mode.FULL
 
 
-def test_changed_setup_no_writes_no_coverage(tmp_path, monkeypatch, capsys, venv_stub):
+def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
     _pytest_repo(tmp_path, venv_stub)
@@ -116,7 +116,7 @@ def test_changed_setup_no_writes_no_coverage(tmp_path, monkeypatch, capsys, venv
     assert main(_init_argv("--changed-setup", "no")) == 0
 
     assert "--cov" not in _runner_args(tmp_path)
-    assert _selection(tmp_path).get("enabled") is True
+    assert _selection(tmp_path).get("enabled") is not True
     assert calls == []
 
 
@@ -137,7 +137,7 @@ def test_changed_setup_enter_defaults_to_later(tmp_path, monkeypatch, capsys, ve
     assert _selection(tmp_path).get("enabled") is True
     assert calls == []
     err = capsys.readouterr().err
-    assert "Set up the optional coverage engine (ptest --shadow) for" in err
+    assert "Set up ptest --changed for" in err
     assert "[now/later/no] (default: later)" in err
 
 
@@ -167,7 +167,7 @@ def test_ask_choice_reasks_on_unrecognised_answer(monkeypatch, capsys):
 
     assert init_changed.ask_choice("api") == "now"
     err = capsys.readouterr().err
-    assert err.count("Set up the optional coverage engine (ptest --shadow) for") == 2
+    assert err.count("Set up ptest --changed for") == 2
     assert "nao" in err
 
 
@@ -223,8 +223,7 @@ def test_changed_setup_without_pytest_cov_prints_needs_line(tmp_path, monkeypatc
 
     assert "--cov" not in _runner_args(tmp_path)
     out = capsys.readouterr().out
-    assert (".: the optional coverage engine (ptest --shadow) needs pytest-cov; "
-            "bare ptest does not") in out
+    assert "ptest --changed needs pytest-cov (add it to the test deps)" in out
 
 
 def test_changed_setup_skips_vitest_without_a_question(tmp_path, monkeypatch, capsys):
@@ -249,7 +248,7 @@ def test_changed_setup_skips_vitest_without_a_question(tmp_path, monkeypatch, ca
 
     captured = capsys.readouterr()
     assert "--changed" not in captured.out
-    assert "Set up the optional coverage engine" not in captured.err
+    assert "Set up ptest --changed" not in captured.err
 
 
 def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, capsys, venv_stub):
@@ -268,8 +267,8 @@ def test_changed_setup_dry_run_shows_and_writes_nothing(tmp_path, monkeypatch, c
     assert "--cov" in out or "would" in out
 
 
-_CHANGED_MARKERS = ("coverage engine", "selection is off in this config",
-                     "would set up", "baseline")
+_CHANGED_MARKERS = ("--changed", "config already exists", "would set up",
+                     "baseline", "selection drafted")
 
 
 def _changed_lines(out: str) -> list[str]:
@@ -292,14 +291,7 @@ def test_changed_setup_preview_matches_real_run(
 
     if existing:
         assert main(_init_argv("--changed-setup", "no")) == 0
-        # Fresh configs enable graph selection; rewrite to a 0.2.x config
-        # so the existing-config path still applies.
-        config_path = tmp_path / ".ptest.toml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                "enabled = true", "enabled = false", 1),
-            encoding="utf-8")
-        before = config_path.read_bytes()
+        before = (tmp_path / ".ptest.toml").read_bytes()
         capsys.readouterr()
         calls.clear()
     else:
@@ -388,14 +380,7 @@ def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatc
     _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     assert main(_init_argv("--changed-setup", "no")) == 0
-    # Fresh configs enable graph selection; rewrite to a 0.2.x config
-    # so the existing-config path still applies.
-    config_path = tmp_path / ".ptest.toml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "enabled = true", "enabled = false", 1),
-        encoding="utf-8")
-    before = config_path.read_bytes()
+    before = (tmp_path / ".ptest.toml").read_bytes()
     capsys.readouterr()
 
     assert main(_init_argv("--changed-setup", "later")) == 0
@@ -454,11 +439,9 @@ def test_repository_guide_default_loop_is_changed():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
     assert len(guide.splitlines()) <= 100
-    assert ("| After each edit | `ptest` (bare `ptest` runs the tests your change "
-            "reaches: git diff vs the branch base, no baseline or coverage needed) |"
-            ) in guide
+    assert "| After each edit | `ptest` (bare `ptest` runs the changed tests) |" in guide
     assert "| Integrated change, before handoff | `ptest --full` once |" in guide
-    assert "the first run records a baseline" not in guide
+    assert "the first run records a baseline" in guide
     assert "baseline recorded" in guide
 
 
@@ -466,18 +449,9 @@ def test_skill_template_defaults_to_changed():
     import ptest.agent_rules as rules_module
 
     text = rules_module._provider_text("claude").decode("utf-8")
-    assert "`ptest` after each edit runs the tests your change reaches" in text
+    assert "`ptest` after each edit runs the changed tests" in text
     assert "`ptest --full` once before handoff" in text
     assert "docs/ptest-agent.md" in text
-
-
-def test_changed_setup_strings_never_name_changed_flag():
-    from ptest import init_changed
-
-    for constant in (init_changed.QUESTION, init_changed.NEEDS_COV_LINE,
-                     init_changed.LATER_LINE, init_changed.NOW_LINE,
-                     init_changed.EXISTING_LINE, init_changed.DRY_RUN_LINE):
-        assert "ptest --changed" not in constant
 
 
 def test_init_then_uninstall_recognises_new_guide_and_skill(tmp_path, monkeypatch, venv_stub):
@@ -515,3 +489,15 @@ def test_init_upgrades_previous_skill_in_place(tmp_path, monkeypatch, venv_stub)
                  "--no-doctor", "--no-smoke", "--changed-setup", "no")) == 0
 
     assert (target / "SKILL.md").read_bytes() == rules_module._provider_text("claude")
+
+
+def test_getting_started_shows_changed():
+    from ptest import help as help_api
+    from pathlib import Path as _Path
+
+    assert "default loop: only what the change touches (= --changed)" in help_api.overview()
+    agents = help_api.topic("agents")
+    assert agents is not None and "bare ptest runs the changed tests" in agents
+    readme = (_Path(__file__).resolve().parent.parent.parent
+              / "README.md").read_text(encoding="utf-8")
+    assert "`ptest` runs the changed tests" in readme
