@@ -1057,3 +1057,213 @@ def test_package_import_leaves_environ_unchanged(monkeypatch):
             sys.modules[name] = saved
     assert module.__file__ == str(BRIDGE), module.__file__
     assert dict(os.environ) == before
+
+
+_PERSEA_OBSERVATION_CONFTEST = (
+    "import pytest\n"
+    "\n"
+    "_RUN_ID_KEY = 'persea_run_id'\n"
+    "_active_xdist_workers = set()\n"
+    "\n"
+    "def _get_run_id(config=None):\n"
+    "    return 'run123'\n"
+    "\n"
+    "\n"
+    "def pytest_configure_node(node):\n"
+    '    """Give every xdist worker the controller\'s one run namespace."""\n'
+    "    node.workerinput[_RUN_ID_KEY] = _get_run_id(node.config)\n"
+    "    worker_id = getattr(getattr(node, 'gateway', None), 'id', None)\n"
+    "    if worker_id is None:\n"
+    "        worker_id = node.workerinput.get('workerid')\n"
+    "    if worker_id is not None:\n"
+    "        _active_xdist_workers.add(worker_id)\n"
+    "\n"
+    "\n"
+    "def _print_db_cleanup_profile(profile):\n"
+    "    print('cleanup-profile:', profile)\n"
+    "\n"
+    "\n"
+    "@pytest.hookimpl(optionalhook=True)\n"
+    "def pytest_testnodedown(node, error):\n"
+    '    """Record completed workers and relay opt-in cleanup profiles."""\n'
+    "    worker_id = getattr(getattr(node, 'gateway', None), 'id', None)\n"
+    "    if worker_id is not None:\n"
+    "        _active_xdist_workers.discard(worker_id)\n"
+    "    workeroutput = getattr(node, 'workeroutput', None) or {}\n"
+    "    profile = workeroutput.get('real_commit_cleanup_profile')\n"
+    "    if profile is not None:\n"
+    "        _print_db_cleanup_profile(profile)\n"
+)
+
+
+def test_parallel_persea_observation_hooks_pass(tmp_path, fake_pytest_project):
+    """Twin (t): a persea-shaped observation conftest passes parallel full.
+
+    ``pytest_configure_node`` (workerinput configuration) plus a plain
+    observation-only ``pytest_testnodedown`` (reads worker output,
+    prints opt-in profiles) cannot change reports, outcomes, or the exit
+    status, so the parallel grant admits them: exit 0, no refusals.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": _PERSEA_OBSERVATION_CONFTEST,
+            "tests/test_ok.py": _identity_tests(8),
+        },
+        git=False,
+    )
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q",
+               "-p", "no:cacheprovider", "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+    assert twin.refusals == []
+
+    lines = _worker_lines(root)
+    assert len(lines) == 8
+    assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
+
+
+def test_parallel_mutating_testnodedown_is_refused(tmp_path, fake_pytest_project):
+    """Twin (u): a testnodedown that rewrites worker output is refused.
+
+    A plain (non-reordering) ``pytest_testnodedown`` that assigns into
+    ``node.workeroutput`` could forge the worker record the
+    reconciliation trusts, so the observation-only scan refuses it: never
+    a pass, and the message names the hook.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": (
+                "def pytest_testnodedown(node, error):\n"
+                "    node.workeroutput['ptest_bridge'] = {\n"
+                "        'worker_id': 'gw0',\n"
+                "        'protocol_seen': 0,\n"
+                "        'failures': 0,\n"
+                "        'collection_errors': 0,\n"
+                "        'dropped': False,\n"
+                "        'conftest_hooks': [],\n"
+                "        'notes': [],\n"
+                "        'refused': False,\n"
+                "        'outcomes': {},\n"
+                "    }\n"
+            ),
+            "tests/test_ok.py": _identity_tests(4),
+        },
+        git=False,
+    )
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q",
+               "-p", "no:cacheprovider", "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest_testnodedown" in refusal.get("message", "")
+               for refusal in twin.refusals)
+
+
+def test_parallel_wrapper_testnodedown_is_refused(tmp_path, fake_pytest_project):
+    """Twin (v): a wrapping testnodedown is refused even when read-only.
+
+    A wrapper runs around the bridge's own tryfirst snapshot, so even a
+    body that only reads could reorder around the evidence read. The
+    grant refuses wrappers regardless of what the body does.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": (
+                "import pytest\n"
+                "@pytest.hookimpl(wrapper=True)\n"
+                "def pytest_testnodedown(node, error):\n"
+                "    workeroutput = getattr(node, 'workeroutput', None) or {}\n"
+                "    print('saw', sorted(workeroutput))\n"
+                "    return (yield)\n"
+            ),
+            "tests/test_ok.py": _identity_tests(4),
+        },
+        git=False,
+    )
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q",
+               "-p", "no:cacheprovider", "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest_testnodedown" in refusal.get("message", "")
+               for refusal in twin.refusals)
+
+
+def test_parallel_plain_collection_mutation_is_refused(tmp_path, fake_pytest_project):
+    """Twin (w): a plain collection-finished pop is refused.
+
+    Twin (n3) pins the tryfirst variant; this pins the same mutation
+    without reordering flags. The observation-only scan sees the
+    ``ids.pop()`` write and refuses: the shortened collection can never
+    pass as complete.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": (
+                "def pytest_xdist_node_collection_finished(node, ids):\n"
+                "    if len(ids) > 1:\n"
+                "        ids.pop()\n"
+            ),
+            "tests/test_mixed.py": _forgery_tests(),
+        },
+        git=False,
+    )
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 4
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is False
+    assert twin.report["problem"] == "bridge-refused"
+    assert any("pytest_xdist_node_collection_finished" in refusal.get(
+        "message", "") for refusal in twin.refusals)
+
+
+def test_parallel_observation_collection_finished_passes(tmp_path, fake_pytest_project):
+    """Twin (x): a read-only collection-finished observer passes.
+
+    The same hook position as twin (w) with a body that only reads
+    ``ids`` is observation-only and is admitted: exit 0, no refusals.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": (
+                "def pytest_xdist_node_collection_finished(node, ids):\n"
+                "    print('node collected', len(ids))\n"
+            ),
+            "tests/test_ok.py": _identity_tests(8),
+        },
+        git=False,
+    )
+
+    twin = _run_bridge(
+        root, ["-n", "4", "--dist", "load", "-q", "-p", "no:cacheprovider",
+               "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+    assert twin.refusals == []

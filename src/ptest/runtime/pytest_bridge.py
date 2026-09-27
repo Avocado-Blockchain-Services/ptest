@@ -6,14 +6,17 @@ the target interpreter need only provide pytest itself.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import hashlib
 import importlib.metadata
+import inspect
 import os
 import re
 import shlex
 import sys
+import textwrap
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -916,7 +919,10 @@ _FULL_SESSIONFINISH_HOOKS = frozenset({
 # collections, dropped node-down events), so all stay refused on both
 # sides -- except a checkout conftest's ``pytest_configure_node``, which is
 # project-owned worker configuration and is recorded like the collection
-# hooks. A wrapper/hookwrapper ``pytest_configure_node`` stays refused: it
+# hooks, and the observation-only lifecycle hooks admitted by
+# ``_PARALLEL_OBSERVATION_HOOKS`` (plain, non-reordering, statically
+# read-only conftest implementations, recorded the same way). A
+# wrapper/hookwrapper ``pytest_configure_node`` stays refused: it
 # could rewrite the per-worker identity after the bridge publishes it.
 _PARALLEL_TRANSPORT_HOOKS = (
     "pytest_report_to_serializable",
@@ -926,6 +932,195 @@ _PARALLEL_TRANSPORT_HOOKS = (
     "pytest_testnodeready",
     "pytest_configure_node",
 )
+
+# Node-lifecycle hooks a checkout conftest may implement as pure observers
+# under the parallel grant. ``pytest_configure_node`` is project-owned
+# worker configuration (admitted separately, plain implementations only).
+# ``pytest_testnodedown`` and ``pytest_xdist_node_collection_finished``
+# observe worker teardown/collections the bridge already snapshot: the
+# bridge's own implementations are ``tryfirst`` and deep-copy the worker
+# record (``ptest_bridge`` evidence and ``cov_worker_node_id``) before any
+# plain project implementation runs, so an admitted observer cannot forge
+# that evidence. Anything that could reorder around the bridge snapshot
+# (wrappers, ``tryfirst``/``trylast``) or rewrite it stays refused.
+_PARALLEL_OBSERVATION_HOOKS = frozenset({
+    "pytest_testnodedown",
+    "pytest_xdist_node_collection_finished",
+})
+
+# Mutating methods refused on hook-parameter-derived values by the
+# observation-only scan below. Read-only accessors (``get``, ``items``,
+# ``keys``, ``values``, ``getattr``) are absent on purpose.
+_OBSERVATION_MUTATING_METHODS = frozenset({
+    "__setitem__", "__delitem__", "__setattr__", "__delattr__",
+    "add", "append", "clear", "difference_update", "discard",
+    "extend", "insert", "intersection_update", "pop", "popitem",
+    "remove", "reverse", "setdefault", "sort",
+    "symmetric_difference_update", "update",
+})
+
+# Calls refused anywhere inside an observation-only hook body. ``setattr``
+# / ``delattr`` / ``vars`` / ``globals`` / ``locals`` can alias parameter
+# state around the receiver check; ``exec`` / ``eval`` / ``compile`` /
+# ``__import__`` hide behavior from the static scan.
+_OBSERVATION_REFUSED_CALLS = frozenset({
+    "setattr", "delattr", "vars", "globals", "locals",
+    "exec", "eval", "compile", "__import__",
+})
+
+
+def _dotted_name(node: Any) -> str:
+    """Dotted path behind a decorator expression, or ``""`` when opaque."""
+    parts: list[str] = []
+    current = node
+    if isinstance(current, ast.Call):
+        current = current.func
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        parts.reverse()
+        return ".".join(parts)
+    return ""
+
+
+def _names_in(node: Any) -> set[str]:
+    """Every ``Name`` id loaded or stored anywhere under ``node``."""
+    return {child.id for child in ast.walk(node)
+            if isinstance(child, ast.Name)}
+
+
+def _tainted_root(node: Any, tainted: set[str]) -> bool:
+    """True when ``node`` aliases hook-parameter-derived state.
+
+    A bare tainted name, an attribute/subscript chain rooted at one, or a
+    ``getattr`` over one (which returns the parameter state itself).
+    Anything else (plain calls, literals, unrelated names) is untainted.
+    """
+    current = node
+    while isinstance(current, (ast.Attribute, ast.Subscript)):
+        current = current.value
+    if isinstance(current, ast.Name):
+        return current.id in tainted
+    if (isinstance(current, ast.Call) and isinstance(current.func, ast.Name)
+            and current.func.id == "getattr" and current.args
+            and _tainted_root(current.args[0], tainted)):
+        return True
+    return False
+
+
+def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
+    """True when a hook function provably only observes its parameters.
+
+    Fail-closed: source that cannot be read or parsed, unexpected
+    decorators, nested definitions/lambdas, and any direct write to a
+    parameter-derived value (item/attribute store or delete, augmented
+    assignment, mutating method call) all return False. Reads, plain
+    calls, prints, and mutation of the project's own globals stay allowed.
+
+    Ordering is the primary forgery defense (the bridge snapshots before
+    any admitted plain implementation runs, and wrappers/reordering
+    implementations are refused by the caller); this scan refuses direct
+    mutations fail-closed on top of it.
+    """
+    try:
+        source = inspect.getsource(function)
+    except (OSError, TypeError):
+        return False
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except (SyntaxError, ValueError, MemoryError):
+        return False
+    target: Any | None = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            target = node
+            break
+    if target is None:
+        return False
+    for decorator in target.decorator_list:
+        if _dotted_name(decorator).split(".")[-1:] != ["hookimpl"]:
+            return False
+    tainted = set(params)
+    # Fixpoint taint: any binding whose value mentions a tainted name
+    # aliases parameter-derived state (``workeroutput = getattr(node,
+    # ...)``). Reads of plain names stay untainted.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(target):
+            value: Any | None = None
+            bound: list[str] = []
+            if isinstance(node, ast.Assign):
+                value = node.value
+                for target_node in node.targets:
+                    bound.extend(_names_in(target_node)
+                                 if not isinstance(target_node, ast.Name)
+                                 else [target_node.id])
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                value = node.value
+                bound.extend(_names_in(node.target)
+                             if not isinstance(node.target, ast.Name)
+                             else [node.target.id])
+            elif isinstance(node, ast.For):
+                value = node.iter
+                bound.extend(name for name in _names_in(node.target))
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if item.optional_vars is not None and _names_in(
+                            item.context_expr) & tainted:
+                        for name in _names_in(item.optional_vars):
+                            if name not in tainted:
+                                tainted.add(name)
+                                changed = True
+                continue
+            elif isinstance(node, ast.ExceptHandler):
+                if node.name and node.type is not None \
+                        and _names_in(node.type) & tainted:
+                    if node.name not in tainted:
+                        tainted.add(node.name)
+                        changed = True
+                continue
+            elif isinstance(node, ast.NamedExpr):
+                value = node.value
+                bound = [node.target.id] if isinstance(
+                    node.target, ast.Name) else list(_names_in(node.target))
+            else:
+                continue
+            if value is not None and _names_in(value) & tainted:
+                for name in bound:
+                    if name not in tainted:
+                        tainted.add(name)
+                        changed = True
+    for node in ast.walk(target):
+        # Closures and deferred bodies hide behavior from this scan.
+        if isinstance(node, (ast.Lambda, ast.ClassDef)):
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node is not target:
+            return False
+        if isinstance(node, ast.Subscript) \
+                and not isinstance(node.ctx, ast.Load):
+            if _tainted_root(node.value, tainted):
+                return False
+        elif isinstance(node, ast.Attribute) \
+                and not isinstance(node.ctx, ast.Load):
+            if _tainted_root(node.value, tainted):
+                return False
+        elif isinstance(node, ast.AugAssign):
+            if _tainted_root(node.target, tainted):
+                return False
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id in _OBSERVATION_REFUSED_CALLS:
+                    return False
+            elif isinstance(func, ast.Attribute):
+                if func.attr in _OBSERVATION_MUTATING_METHODS \
+                        and _tainted_root(func.value, tainted):
+                    return False
+    return True
 
 
 # Hook-only modules that neither distribute, reorder, nor re-run tests stay
@@ -1180,9 +1375,13 @@ class OwnedPlugin:
         Runs on the controller and on every worker: ``pytest_configure_node``
         from a checkout conftest is project-owned worker configuration
         (plain implementations only, recorded like the collection hooks);
-        every other non-xdist/``_pytest``/bridge implementation of the
-        transport hooks forges the records the reconciliation trusts and is
-        refused, conftests included.
+        ``pytest_testnodedown`` and
+        ``pytest_xdist_node_collection_finished`` from a checkout conftest
+        are admitted when observation-only (plain, non-reordering,
+        statically read-only; recorded like the collection hooks). Every
+        other non-xdist/``_pytest``/bridge implementation of the transport
+        hooks forges the records the reconciliation trusts and is refused,
+        conftests included.
         """
         for name in _PARALLEL_TRANSPORT_HOOKS:
             hook = getattr(manager.hook, name, None)
@@ -1212,9 +1411,42 @@ class OwnedPlugin:
                             f" ({name} from {module})")
                     accepted_hooks.append(owned)
                     continue
+                if name in _PARALLEL_OBSERVATION_HOOKS and self._allow_observation_hook(
+                        name, implementation, accepted_hooks):
+                    continue
                 self._refuse(
                     "unqualified pytest report-transport hook is not owned by the parallel grant"
                     f" ({name} from {module})")
+
+    def _allow_observation_hook(self, name: str, implementation: Any,
+                                accepted_hooks: list[str]) -> bool:
+        """Admit an observation-only lifecycle hook, else refuse it here.
+
+        Returns True when ``implementation`` of ``pytest_testnodedown`` or
+        ``pytest_xdist_node_collection_finished`` is a plain checkout
+        conftest function that provably only observes its parameters (the
+        owner path is recorded like the collection hooks). Wrappers,
+        reordering (``tryfirst``/``trylast``) implementations, hooks
+        defined outside a checkout conftest, and implementations whose
+        source is unavailable or writes to parameter-derived state return
+        False so the caller refuses them with the transport message.
+        """
+        if (getattr(implementation, "wrapper", False)
+                or getattr(implementation, "hookwrapper", False)
+                or getattr(implementation, "tryfirst", False)
+                or getattr(implementation, "trylast", False)):
+            return False
+        owned = self._conftest_owner_path(implementation)
+        if owned is None:
+            return False
+        params = tuple(getattr(implementation, "argnames", None) or ())
+        if not params:
+            return False
+        if not _is_observation_only(
+                getattr(implementation, "function", None), params):
+            return False
+        accepted_hooks.append(owned)
+        return True
 
     @staticmethod
     def _is_bridge_worker_impl(implementation: Any) -> bool:
