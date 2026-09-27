@@ -750,7 +750,7 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         # conservative full decision.  Dependency changes stay governed by
         # the lockfile/setup fingerprint.
         selection=C.SelectionPolicy(
-            enabled=False, closed_inputs=False,
+            enabled=kind is C.RunnerKind.PYTEST, closed_inputs=False,
             non_input_outputs=(".venv",) if kind is C.RunnerKind.PYTEST
             and _native_present(root, "uv.lock") else
             ("node_modules",) if kind is C.RunnerKind.VITEST else (),

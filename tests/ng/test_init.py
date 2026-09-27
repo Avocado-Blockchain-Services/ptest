@@ -70,8 +70,18 @@ def test_init_creates_one_fresh_config_exclusively(tmp_path):
     resolution = resolve_config(tmp_path)
     assert resolution.config is not None
     assert resolution.config.runner.workers == 1
-    assert resolution.config.selection.enabled is False
+    assert resolution.config.selection.enabled is True
     assert len(resolution.config.project_id) == 32
+
+
+def test_init_fresh_vitest_config_leaves_selection_off(tmp_path):
+    result = init_project(tmp_path, _options(runner=RunnerKind.VITEST))
+
+    assert result.action is InitAction.CREATED
+    resolution = resolve_config(tmp_path)
+    assert resolution.config is not None
+    assert resolution.config.runner.kind is RunnerKind.VITEST
+    assert resolution.config.selection.enabled is False
 
 
 def test_pytest_native_preview_is_static_and_does_not_copy_addopts(tmp_path, monkeypatch):

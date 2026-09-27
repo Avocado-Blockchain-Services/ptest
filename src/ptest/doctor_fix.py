@@ -837,6 +837,37 @@ def _selection_key_is_default(have: dict, key: str) -> bool:
     return not isinstance(value, list) or len(value) == 0
 
 
+def _generator_default_off(selection: object) -> bool:
+    """True for an untouched 0.2.x generator `[selection]` table.
+
+    The generator wrote all ten keys with `enabled = false`; such a table
+    cannot be told apart from a user who deliberately typed `enabled =
+    false` into an otherwise untouched generated table, so `ptest doctor`
+    reports "config is out of date" and `doctor --fix` flips it for such
+    a table. Changing or deleting any other `[selection]` line makes the
+    choice durable: anything else counts as an explicit user choice and
+    doctor proposes nothing for it.
+    """
+    if not isinstance(selection, dict):
+        return False
+    if set(selection) != {"enabled", "closed_inputs", "input_roots",
+                           "ignored_inputs", "environment", "full_triggers",
+                           "always", "no_tests", "non_input_outputs",
+                           "full_ratio"}:
+        return False
+    if selection.get("enabled") is not False:
+        return False
+    if selection.get("closed_inputs") is not False:
+        return False
+    for key in ("input_roots", "ignored_inputs", "environment",
+                "full_triggers", "always", "no_tests"):
+        if selection.get(key) != []:
+            return False
+    if selection.get("non_input_outputs") not in ([], [".venv"]):
+        return False
+    return selection.get("full_ratio") == 0.7
+
+
 def _selection_needs_close(selection: object) -> bool:
     """True when enablement or any draftable key still needs its draft."""
     if not isinstance(selection, dict):
@@ -977,6 +1008,14 @@ def plan_project(root: Path, declaration: str,
             if _selection_key_is_default(have, key):
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
+    if (kind is C.RunnerKind.PYTEST
+            and not any(change.table == "selection"
+                        and change.key == "enabled"
+                        for change in changes)
+            and _generator_default_off(selection)):
+        # Untouched 0.2.x generator table without --cov: flip enablement
+        # only, with no draft. Hand-tuned tables are the user's choice.
+        changes.append(FieldChange("selection", "enabled", True))
 
     if not changes:
         return None
