@@ -3395,3 +3395,37 @@ def test_corrupt_store_next_sequence_raises_clean_problem(case, capsys):
         H.read_history_summaries(domain, checkout)
     assert not (store.parent / (store.name + ".reinitialised")).exists()
     assert "re-initialised" not in capsys.readouterr().err
+
+
+# ---- Dirty-tree baseline note names the actual run kind ---------------------
+
+def _dirty_reasons(case, *, mode, execution):
+    snapshot = _snapshot(case, clean=False)
+    result = _result(case, 1, before=snapshot, after=snapshot, mode=mode)
+    if result.plan.execution != execution:
+        result = replace(result, plan=replace(result.plan, execution=execution))
+    return H._baseline_reasons(result, None)
+
+
+def test_dirty_selected_run_names_selected_kind(case):
+    """A dirty selected run must not claim the full gate ran."""
+    reasons = _dirty_reasons(case, mode=C.Mode.AUTOMATIC, execution="selected")
+
+    assert [(reason.code, reason.message) for reason in reasons] == [
+        ("unknown-input", "the selected run ran on a dirty source tree")]
+
+
+def test_dirty_scoped_run_names_scoped_kind(case):
+    """A dirty scoped run must not claim the full gate ran."""
+    reasons = _dirty_reasons(case, mode=C.Mode.SCOPED, execution="scoped")
+
+    assert [(reason.code, reason.message) for reason in reasons] == [
+        ("unknown-input", "the scoped run ran on a dirty source tree")]
+
+
+def test_dirty_full_gate_keeps_gate_wording(case):
+    """The full gate keeps its established wording."""
+    reasons = _dirty_reasons(case, mode=C.Mode.FULL, execution="full")
+
+    assert [(reason.code, reason.message) for reason in reasons] == [
+        ("unknown-input", "the full gate ran on a dirty source tree")]

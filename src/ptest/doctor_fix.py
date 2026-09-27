@@ -1116,6 +1116,66 @@ def render_diff(plan: FixPlan) -> str:
     return "\n".join(parts) + "\n" if parts else ""
 
 
+#: Summary preview shows this many groups/triggers before the ellipsis.
+_SUMMARY_PREVIEW_LIMIT = 4
+
+
+def _summarise_groups(value: object) -> str:
+    """``N (name M test files, …)`` for a drafted ``groups`` value."""
+    groups = list(value) if isinstance(value, (list, tuple)) else []
+    parts: list[str] = []
+    for group in groups[:_SUMMARY_PREVIEW_LIMIT]:
+        if isinstance(group, dict):
+            tests = group.get("tests", ())
+            count = len(tests) if isinstance(tests, (list, tuple)) else 0
+            noun = "test file" if count == 1 else "test files"
+            parts.append(f"{group.get('name', '?')} {count} {noun}")
+        else:
+            parts.append(str(group))
+    if len(groups) > _SUMMARY_PREVIEW_LIMIT:
+        parts.append("…")
+    shown = ", ".join(parts)
+    return f"{len(groups)} ({shown})" if shown else f"{len(groups)} ()"
+
+
+def _summarise_triggers(value: object) -> str:
+    """``N (first, …)`` for a drafted ``full_triggers`` value."""
+    items = [str(item) for item in value] if isinstance(
+        value, (list, tuple)) else []
+    shown = items[:_SUMMARY_PREVIEW_LIMIT]
+    if len(items) > _SUMMARY_PREVIEW_LIMIT:
+        shown = [*shown, "…"]
+    joined = ", ".join(shown)
+    return f"{len(items)} ({joined})" if joined else f"{len(items)} ()"
+
+
+def _summarise_change(change: FieldChange) -> str:
+    """One short ``table.key`` line for a planned change."""
+    if change.table == "selection" and change.key == "groups":
+        return f"selection.groups: {_summarise_groups(change.value)}"
+    if change.table == "selection" and change.key == "full_triggers":
+        return f"selection.full_triggers: {_summarise_triggers(change.value)}"
+    return f"{change.table}.{change.key} = {_toml_value(change.value)}"
+
+
+def render_summary(plan: FixPlan) -> str:
+    """Short per-key preview; display only, never written.
+
+    One line per changed key (``<rel>: <table>.<key> = <value>``), with
+    the ``[selection]`` mapping drafts compressed to a group count with
+    per-group test-file counts and a trigger count with the first few
+    entries. The file on disk still receives the full content; draft
+    notes are kept.
+    """
+    lines: list[str] = []
+    for item in plan.files:
+        for change in item.changes:
+            lines.append(f"{item.rel}: {_summarise_change(change)}")
+        if item.drafts:
+            lines.append(_SELECTION_DRAFT_NOTE)
+    return "\n".join(lines) + "\n" if lines else ""
+
+
 def _atomic_write_text(root: Path, rel: str, data: bytes, *,
                        expect: bytes, identity: tuple | None) -> None:
     """Replace one config file atomically, keeping its mode.

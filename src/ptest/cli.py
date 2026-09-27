@@ -502,6 +502,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         offline_seen = False
         fix = fix_dry = False
         fix_seen = dry_seen = False
+        verbose = False
+        verbose_seen = False
         review_timeout_s = 300
         review_model = None
         review_concurrency = 4
@@ -579,6 +581,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "option cannot be repeated")
                 dry_seen = True
                 fix_dry = True
+            elif token in ("-v", "--verbose"):
+                if verbose_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                verbose_seen = True
+                verbose = True
             elif token == "--probe":
                 if probe:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -616,7 +623,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 raise _problem("invalid-config", "doctor probe requires --scope")
             if fix or fix_dry:
                 raise _problem("invalid-config", "doctor probe cannot combine with --fix")
-            if json_output:
+            if json_output or verbose_seen:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
             if (reviewer_seen or allow_seen or timeout_seen
                     or model_seen or concurrency_seen or offline):
@@ -642,8 +649,9 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     or concurrency_seen):
                 raise _problem("invalid-config", "--fix never runs a model review")
             return ParsedArgs(command=command, fix=fix,
-                              dry_run=fix_dry, offline=offline)
-        if fix_dry:
+                              dry_run=fix_dry, offline=offline,
+                              verbose=verbose)
+        if fix_dry or verbose_seen:
             raise _problem("invalid-config", "fix options require --fix")
         return ParsedArgs(command=command, json=json_output,
                           scope=scope, reviewer=reviewer,
@@ -2236,9 +2244,12 @@ def _fix_mention(resolution: C.ConfigResolution) -> str | None:
 
 
 def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
-    """Show the config diff and apply it. Never reviews, never asks.
+    """Show the config preview and apply it. Never reviews, never asks.
 
     The ``--fix`` flag itself is the consent; ``--dry-run`` previews only.
+    The preview is a short per-key summary (the ``[selection]`` mapping
+    drafts compress to counts); ``-v`` shows the full unified diff. The
+    file on disk always receives the full content.
     """
     plan = doctor_fix.plan_all(resolution.root, resolution)
     if plan.refusals:
@@ -2247,7 +2258,10 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
     if not plan.files:
         print("config is up to date")
         return 0
-    sys.stdout.write(doctor_fix.render_diff(plan))
+    if parsed.verbose:
+        sys.stdout.write(doctor_fix.render_diff(plan))
+    else:
+        sys.stdout.write(doctor_fix.render_summary(plan))
     if parsed.dry_run:
         return 0
     updated = doctor_fix.apply_plan(resolution.root, plan)
