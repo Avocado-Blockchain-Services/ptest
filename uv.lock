@@ -544,7 +544,7 @@ wheels = [
 
 [[package]]
 name = "ptest-ng"
-version = "0.3.2"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "psutil" },
