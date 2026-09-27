@@ -172,10 +172,19 @@ def format_impact(project: str, note: str, *, color: bool = False) -> str:
     return f"{_prefix(color=color)} {_project(project, color=color)} · {note}"
 
 
-def format_nothing_changed(label: str, *, color: bool = False) -> str:
+def format_nothing_changed(label: str, *, color: bool = False,
+                           no_green_run: bool = False) -> str:
     """Line for a changed-mode run where nothing changed anywhere."""
-    return (f"{_prefix(color=color)} no changes vs {label} — nothing to test "
+    suffix = " (no green run yet)" if no_green_run else ""
+    return (f"{_prefix(color=color)} no changes vs {label}{suffix}"
+            " — nothing to test "
             "· ptest --full runs everything")
+
+
+def format_no_green_changes(*, color: bool = False) -> str:
+    """Line for a run where nothing changed since the last green run."""
+    return (f"{_prefix(color=color)} no changes since last green run"
+            " — nothing to test · ptest --full runs everything")
 
 
 def format_already_verified(short_sha: str, age_s: float,
@@ -387,7 +396,7 @@ __all__ = [
     "format_start", "format_waiting",
     "format_changed_selected", "format_changed_start", "format_no_changes",
     "NEXT_FULL", "NEXT_FIX", "next_step", "format_impact",
-    "format_nothing_changed",
+    "format_nothing_changed", "format_no_green_changes",
     "format_already_verified", "format_joined_full_run",
     "explain_changed_full_reason",
     "format_baseline_note",

@@ -445,7 +445,7 @@ def test_repository_guide_default_loop_is_changed():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
     assert len(guide.splitlines()) <= 100
-    assert "| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |" in guide
+    assert "| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |" in guide
     assert "| Integrated change, before handoff | `ptest --full` once |" in guide
     assert "no baseline or coverage needed" in guide
     assert "baseline recorded" in guide
@@ -455,7 +455,7 @@ def test_skill_template_defaults_to_changed():
     import ptest.agent_rules as rules_module
 
     text = rules_module._provider_text("claude").decode("utf-8")
-    assert "`ptest` after each edit runs the tests your change reaches (git diff vs the branch base; no baseline or coverage needed)" in text
+    assert "`ptest` after each edit runs the tests your change reaches (changed since the last green run; no baseline or coverage needed)" in text
     assert "`ptest --full` once before handoff" in text
     assert "docs/ptest-agent.md" in text
 
@@ -502,14 +502,14 @@ def test_getting_started_shows_changed():
     from pathlib import Path as _Path
 
     assert "default loop: tests your change reaches" in help_api.overview()
-    assert "diff vs the branch base" in help_api.overview()
+    assert "changes since the last green run" in help_api.overview()
     run = help_api.topic("run")
     assert run is not None and "merge-base" in run
     agents = help_api.topic("agents")
-    assert agents is not None and "runs the tests the change reaches: git diff vs the branch base" in agents
+    assert agents is not None and "runs the tests the change reaches: changes since the last green run" in agents
     assert "no baseline or coverage step is needed" in agents
     readme = (_Path(__file__).resolve().parent.parent.parent
               / "README.md").read_text(encoding="utf-8")
     assert "`ptest` runs the tests your change reaches" in readme
-    assert "git diff vs the branch base" in readme
+    assert "changes since the last green run" in readme
     assert "`ptest --full` once before handoff" in readme

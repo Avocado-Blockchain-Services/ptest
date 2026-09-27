@@ -129,7 +129,7 @@ def test_bare_selected_routes_scoped_with_note(tmp_path, monkeypatch):
     assert request.argv == ("tests/test_a.py", "tests/test_b.py")
     assert request.base is None
     assert request.changed_note == (
-        "changed: services/credits.py (+2 files) → "
+        "changed vs origin/dev (no green run yet): services/credits.py (+2 files) → "
         "2 of 10 test files (1 direct · 1 via importers)")
     assert request.next_hint is True
 
@@ -149,7 +149,7 @@ def test_changed_flag_matches_bare_request(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0].mode is C.Mode.SCOPED
     assert calls[0].changed_note == (
-        "changed: only.py → 1 of 4 test files (1 direct · 0 via importers)")
+        "changed vs origin/dev (no green run yet): only.py → 1 of 4 test files (1 direct · 0 via importers)")
 
 
 def test_bare_full_routes_full_with_reason(tmp_path, monkeypatch):
@@ -168,7 +168,7 @@ def test_bare_full_routes_full_with_reason(tmp_path, monkeypatch):
     assert request.mode is C.Mode.FULL
     assert request.argv == ()
     assert request.base is None
-    assert request.changed_note == "changed → full suite: uv.lock is a full trigger"
+    assert request.changed_note == "changed vs origin/dev (no green run yet) → full suite: uv.lock is a full trigger"
     assert request.next_hint is True
 
 
@@ -188,7 +188,7 @@ def test_bare_vitest_delegates_changed_argv(tmp_path, monkeypatch):
     assert request.argv == ("--changed", "abc123")
     assert request.base is None
     assert request.changed_note == (
-        "changed: src/a.ts (+1 file) → vitest --changed origin/dev")
+        "changed vs origin/dev (no green run yet): src/a.ts (+1 file) → vitest --changed origin/dev")
     assert request.next_hint is True
 
 
@@ -203,7 +203,7 @@ def test_bare_vitest_without_sha_falls_back_to_head(tmp_path, monkeypatch):
     assert main(()) == 0
 
     assert calls[0].argv == ("--changed", "HEAD")
-    assert calls[0].changed_note == "changed: src/a.ts → vitest --changed HEAD"
+    assert calls[0].changed_note == "changed vs HEAD (no green run yet): src/a.ts → vitest --changed HEAD"
 
 
 def test_bare_none_with_changes_prints_no_tests_line(tmp_path, monkeypatch, capsys):
@@ -218,7 +218,7 @@ def test_bare_none_with_changes_prints_no_tests_line(tmp_path, monkeypatch, caps
 
     assert calls == []
     err = capsys.readouterr().err
-    assert (f"ptest: {tmp_path.name} · changed: README.md → "
+    assert (f"ptest: {tmp_path.name} · changed vs origin/dev (no green run yet): README.md → "
             "no tests affected · ptest --full runs everything") in err
 
 
@@ -233,7 +233,7 @@ def test_bare_nothing_changed_prints_nothing_line(tmp_path, monkeypatch, capsys)
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev — nothing to test · "
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
             "ptest --full runs everything") in err
 
 
@@ -325,7 +325,7 @@ def test_monorepo_selected_child_runs_scoped_without_hint(
     assert request.mode is C.Mode.SCOPED
     assert request.argv == ("tests/test_a.py", "tests/test_b.py")
     assert request.next_hint is False
-    assert request.changed_note.startswith("changed: services/credits.py")
+    assert request.changed_note.startswith("changed vs origin/dev (no green run yet): services/credits.py")
     err = capsys.readouterr().err
     assert "ptest: web · no changes" in err
     assert "ptest: total" in err
@@ -345,7 +345,7 @@ def test_monorepo_full_child_runs_full_gate(tmp_path, monkeypatch, monorepo):
 
     assert len(calls) == 1
     assert calls[0].mode is C.Mode.FULL
-    assert calls[0].changed_note == "changed → full suite: uv.lock is a full trigger"
+    assert calls[0].changed_note == "changed vs origin/dev (no green run yet) → full suite: uv.lock is a full trigger"
     assert calls[0].next_hint is False
 
 
@@ -380,7 +380,7 @@ def test_monorepo_nothing_changed_has_no_total(
 
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev — nothing to test · "
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
             "ptest --full runs everything") in err
     assert "ptest: total" not in err
     assert "ptest: api ·" not in err
@@ -424,6 +424,13 @@ def test_format_impact_and_nothing_changed():
         "ptest: api · changed: a.py → 1 of 2 test files")
     assert progress.format_nothing_changed("origin/dev") == (
         "ptest: no changes vs origin/dev — nothing to test · "
+        "ptest --full runs everything")
+    assert progress.format_nothing_changed(
+        "origin/dev", no_green_run=True) == (
+        "ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
+        "ptest --full runs everything")
+    assert progress.format_no_green_changes() == (
+        "ptest: no changes since last green run — nothing to test · "
         "ptest --full runs everything")
 
 
@@ -473,7 +480,7 @@ def test_emit_end_changed_failure_carries_fix_hint(case, capsys):
 
 def test_emit_end_changed_full_pass_has_no_hint(case, capsys):
     request = C.RunRequest(mode=C.Mode.FULL,
-                           changed_note="changed → full suite: uv.lock is a full trigger",
+                           changed_note="changed vs origin/dev (no green run yet) → full suite: uv.lock is a full trigger",
                            next_hint=True)
     result = case.result(status=C.Status.PASSED, exit_code=0,
                          counts=C.Counts(passed=12))
