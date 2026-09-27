@@ -3,8 +3,9 @@
 Bare `ptest` and `ptest --changed` (no --shadow, no --probe) route through
 ``ptest.impact`` (``resolve_base`` + ``changed_files`` + ``plan``) instead of
 the history/baseline engine, for single projects and monorepo children.
-``ptest.impact`` is stubbed here via ``sys.modules`` so these tests pin the
-ROUTING (request mapping, start lines, end-line hint) rather than the graph.
+``ptest.impact`` is stubbed here through the ``cli._impact_api`` seam (plus a
+``sys.modules`` entry) so these tests pin the ROUTING (request mapping,
+start lines, end-line hint) rather than the graph.
 """
 from __future__ import annotations
 
@@ -66,6 +67,13 @@ def _install_impact(monkeypatch, *, sha="abc123", label="origin/dev",
     mod.changed_files = changed_files
     mod.plan = plan
     monkeypatch.setitem(sys.modules, "ptest.impact", mod)
+    # `cli._impact_api()` does `from . import impact`, which reads the
+    # attribute on the `ptest` package before consulting `sys.modules`, so
+    # the sys.modules entry alone is ignored once the real module is
+    # imported (e.g. T1's test_impact.py does `from ptest import impact`).
+    # This setattr is the binding that matters; the sys.modules entry is
+    # kept for any direct sys.modules lookup.
+    monkeypatch.setattr("ptest.cli._impact_api", lambda: mod)
     return mod, seen
 
 

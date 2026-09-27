@@ -100,8 +100,9 @@ def _no_admission(monkeypatch):
 # --- 1. bare ptest is --changed -----------------------------------------------
 #
 # Bare `ptest` and `ptest --changed` route through the import graph
-# (``ptest.impact``, stubbed here); the mapping itself is pinned in
-# test_changed_default.py, these twins pin loop parity and skip lines.
+# (``ptest.impact``, stubbed here through the ``cli._impact_api`` seam);
+# the mapping itself is pinned in test_changed_default.py, these twins pin
+# loop parity and skip lines.
 
 def _stub_impact(monkeypatch, plans, *, sha="abc123", label="origin/dev",
                  repo_changed=()):
@@ -135,6 +136,10 @@ def _stub_impact(monkeypatch, plans, *, sha="abc123", label="origin/dev",
     mod.plan = lambda top, project_root, config, changed: plans(mod)[
         Path(project_root).name]
     monkeypatch.setitem(sys.modules, "ptest.impact", mod)
+    # Stub through the `cli._impact_api` seam: `from . import impact` reads
+    # the attribute on the `ptest` package before `sys.modules`, so the
+    # sys.modules entry alone is ignored once the real module is imported.
+    monkeypatch.setattr("ptest.cli._impact_api", lambda: mod)
     return mod
 
 

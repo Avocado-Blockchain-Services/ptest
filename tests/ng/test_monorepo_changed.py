@@ -11,8 +11,9 @@ A.4 a root lockfile full trigger runs only the triggered child.
 A clean tree with nothing changed anywhere prints the nothing-changed
 line with no per-child lines and no total.
 
-The graph itself (``ptest.impact``) is stubbed here via ``sys.modules``;
-these tests pin the CLI mapping, not the selection.
+The graph itself (``ptest.impact``) is stubbed here through the
+``cli._impact_api`` seam (plus a ``sys.modules`` entry); these tests pin
+the CLI mapping, not the selection.
 """
 from __future__ import annotations
 
@@ -74,6 +75,10 @@ def _install_impact(monkeypatch, plans, *, sha="abc123", label="origin/dev",
     mod.plan = lambda top_arg, project_root, config, changed: (
         plans(mod)[Path(project_root).name])
     monkeypatch.setitem(sys.modules, "ptest.impact", mod)
+    # Stub through the `cli._impact_api` seam: `from . import impact` reads
+    # the attribute on the `ptest` package before `sys.modules`, so the
+    # sys.modules entry alone is ignored once the real module is imported.
+    monkeypatch.setattr("ptest.cli._impact_api", lambda: mod)
     return mod
 
 
