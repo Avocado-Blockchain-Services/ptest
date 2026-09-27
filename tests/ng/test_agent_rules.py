@@ -737,6 +737,43 @@ def test_changed_loop_managed_skill_upgrades_in_place(tmp_path):
     assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
 
 
+def test_pre_graph_managed_skill_upgrades_in_place(tmp_path):
+    """The changed-tests-loop skill shipped at 5467c52 upgrades too.
+
+    Exact bytes of ``5467c52:src/ptest/agent_rules.py`` `_provider_text`
+    ("claude"): the loop line naming the changed-tests default, before the
+    graph-selection default loop. Repos initialised between 5467c52 and the
+    flip hold exactly these bytes and `ptest init` must upgrade them in
+    place, not raise already-exists.
+    """
+    from ptest.agent_rules import _pre_graph_provider_text, _provider_text
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    pre_graph = (
+        "---\n"
+        "name: ptest\n"
+        "description: Run, add, change, or verify tests or code in this repo through ptest; pytest, vitest, and npm test intents go through ptest from the repository root.\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "The loop: `ptest` after each edit runs the changed tests; `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate.\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+    assert _pre_graph_provider_text("claude") == pre_graph
+    (target / "SKILL.md").write_bytes(pre_graph)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
 def test_every_shipped_skill_version_recognised_as_managed():
     """Every skill template ever shipped must upgrade, not conflict.
 
@@ -852,6 +889,7 @@ def test_previous_hashes_cover_main_pre_change_guide():
     assert "a8f6346d401010b75cc1e402069eb8e6beb41f0edda58972c02b6ff38f9a8caa" in rules_module._PREVIOUS_GUIDE_SHA256S
     assert "f151ca5d379597b20a4dbe97e064139660d973e4169869ff23a245e564253af0" in rules_module._PREVIOUS_GUIDE_SHA256S
     assert "09e59492e026c83bc8e51268bfd18e64b978736531e3a27b80a0a580ee1127ec" in rules_module._PREVIOUS_GUIDE_SHA256S
+    assert "2c9ec366c57d69f24053268632132915938098f1ff540dade0963b8206667fe7" in rules_module._PREVIOUS_GUIDE_SHA256S
     current = rules_module._guide()
     assert hashlib.sha256(current).hexdigest() not in rules_module._PREVIOUS_GUIDE_SHA256S
     assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"

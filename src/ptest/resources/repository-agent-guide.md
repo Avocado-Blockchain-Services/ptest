@@ -8,7 +8,7 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 
 | Situation | Command |
 |---|---|
-| After each edit | `ptest` (bare `ptest` runs the changed tests) |
+| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |
 | One test file | `ptest <path>` |
 | All tests of one project | `ptest <child>`, e.g. `ptest web` |
 | Integrated change, before handoff | `ptest --full` once |
@@ -35,11 +35,13 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | Line | Meaning | What to do |
 |---|---|---|
 | `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
-| `changed: N of M test files` | changed mode selected N tests | Nothing; this is the normal loop. |
-| `changed → full suite: <reason>` | changed mode ran everything: no baseline yet, selection off, a full trigger changed, or inputs outside the selection map | Nothing; the first run records a baseline if it passes on a clean tree. |
+| `changed: <path> (+N files) → N of M test files (D direct · V via importers)` | changed mode selected the tests your change reaches | Nothing; this is the normal loop. |
+| `changed → full suite: <reason>` | changed mode ran everything: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing; no baseline or coverage step is needed. |
+| `changed: <path> → vitest --changed <label>` | that child delegated its changed set to vitest | Nothing. |
+| `changed: <path> → no tests affected` / `no changes vs <label> — nothing to test` | the change reaches no tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
 | `web · no changes` | that child is untouched (one line per untouched child) | Nothing. |
+| `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Run `ptest --full` once before handoff. |
 | `waiting for N slots … in use by …` | queued behind other runs | Wait; do not start another run. |
-| `setup: …` | declared setup (such as `npm ci`) is running | Wait. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
@@ -48,10 +50,8 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `already verified … --again` | `--full` skipped already-verified inputs | Nothing; pass `--again` to force them. |
 | `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
-| `execution-timeout …` | the run exceeded its budget | Raise with `--timeout`, rerun. |
-| `queue-timeout` | admission never completed | Rerun; report it if it repeats. |
-| `unsafe-path` | a path is unsafe | Fix the path, rerun. |
-| `unknown command …` | bad command | Fix the command (exit 2). |
+| `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
+| `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
 
 ## Exit codes
 

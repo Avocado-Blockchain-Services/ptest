@@ -22,7 +22,7 @@ memory_mb_per_worker = 0
 probe_isolation = "undeclared"
 
 [selection]
-enabled = false
+enabled = true
 closed_inputs = false
 input_roots = []
 ignored_inputs = []

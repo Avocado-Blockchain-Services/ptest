@@ -105,7 +105,7 @@ def test_changed_setup_now_writes_and_runs_full_baseline(tmp_path, monkeypatch, 
     assert calls[0].mode is C.Mode.FULL
 
 
-def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys, venv_stub):
+def test_changed_setup_no_keeps_fresh_selection_on(tmp_path, monkeypatch, capsys, venv_stub):
     from ptest.cli import main
 
     _pytest_repo(tmp_path, venv_stub)
@@ -115,8 +115,10 @@ def test_changed_setup_no_leaves_selection_off(tmp_path, monkeypatch, capsys, ve
 
     assert main(_init_argv("--changed-setup", "no")) == 0
 
+    # `no` writes no coverage argv and runs no baseline, but a fresh
+    # pytest config already enables selection: bare ptest needs no setup.
     assert "--cov" not in _runner_args(tmp_path)
-    assert _selection(tmp_path).get("enabled") is not True
+    assert _selection(tmp_path).get("enabled") is True
     assert calls == []
 
 
@@ -308,13 +310,11 @@ def test_changed_setup_preview_matches_real_run(
     assert main(_init_argv("--changed-setup", choice)) == 0
     real_lines = _changed_lines(capsys.readouterr().out)
 
-    if choice == "no":
+    if choice == "no" or existing:
+        # `no` writes nothing; and a config from a fresh `no` init already
+        # enables selection, so re-init stays silent in preview and reality.
         assert preview_lines == []
         assert real_lines == []
-    elif existing:
-        expected = [init_changed.EXISTING_LINE.format(project=".")]
-        assert preview_lines == expected
-        assert real_lines == expected
     else:
         assert preview_lines == [init_changed.DRY_RUN_LINE.format(project=".")]
         if choice == "later":
@@ -380,6 +380,12 @@ def test_changed_setup_existing_config_points_to_doctor_fix(tmp_path, monkeypatc
     _pytest_repo(tmp_path, venv_stub)
     monkeypatch.chdir(tmp_path)
     assert main(_init_argv("--changed-setup", "no")) == 0
+    # A fresh config already enables selection, so simulate a 0.2.x-era
+    # config with selection off: that is the case needing `doctor --fix`.
+    raw = (tmp_path / ".ptest.toml").read_text(encoding="utf-8")
+    assert raw.count("enabled = true") == 1
+    (tmp_path / ".ptest.toml").write_text(
+        raw.replace("enabled = true", "enabled = false"), encoding="utf-8")
     before = (tmp_path / ".ptest.toml").read_bytes()
     capsys.readouterr()
 
@@ -439,9 +445,9 @@ def test_repository_guide_default_loop_is_changed():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
     assert len(guide.splitlines()) <= 100
-    assert "| After each edit | `ptest` (bare `ptest` runs the changed tests) |" in guide
+    assert "| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |" in guide
     assert "| Integrated change, before handoff | `ptest --full` once |" in guide
-    assert "the first run records a baseline" in guide
+    assert "no baseline or coverage needed" in guide
     assert "baseline recorded" in guide
 
 
@@ -449,7 +455,7 @@ def test_skill_template_defaults_to_changed():
     import ptest.agent_rules as rules_module
 
     text = rules_module._provider_text("claude").decode("utf-8")
-    assert "`ptest` after each edit runs the changed tests" in text
+    assert "`ptest` after each edit runs the tests your change reaches (git diff vs the branch base; no baseline or coverage needed)" in text
     assert "`ptest --full` once before handoff" in text
     assert "docs/ptest-agent.md" in text
 
@@ -495,9 +501,15 @@ def test_getting_started_shows_changed():
     from ptest import help as help_api
     from pathlib import Path as _Path
 
-    assert "default loop: only what the change touches (= --changed)" in help_api.overview()
+    assert "default loop: tests your change reaches" in help_api.overview()
+    assert "diff vs the branch base" in help_api.overview()
+    run = help_api.topic("run")
+    assert run is not None and "merge-base" in run
     agents = help_api.topic("agents")
-    assert agents is not None and "bare ptest runs the changed tests" in agents
+    assert agents is not None and "runs the tests the change reaches: git diff vs the branch base" in agents
+    assert "no baseline or coverage step is needed" in agents
     readme = (_Path(__file__).resolve().parent.parent.parent
               / "README.md").read_text(encoding="utf-8")
-    assert "`ptest` runs the changed tests" in readme
+    assert "`ptest` runs the tests your change reaches" in readme
+    assert "git diff vs the branch base" in readme
+    assert "`ptest --full` once before handoff" in readme

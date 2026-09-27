@@ -53,7 +53,10 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     assert "--again" in guide
     assert "joined the running full run" in guide
     # Output table: every documented line is present.
-    for row in ("changed: N of M test files", "changed → full suite:",
+    for row in ("→ N of M test files", "via importers",
+                "changed → full suite:", "vitest --changed",
+                "no tests affected", "nothing to test",
+                "next: ptest --full before handoff",
                 "web · no changes", "waiting for N slots",
                 "setup failed", "passed · N tests",
                 "baseline recorded", "no baseline recorded:",
