@@ -299,18 +299,26 @@ def _signal_group(identity, signum: int) -> None:
     os.killpg(identity.pgid, signum)
 
 
+class _ScanTruncated(Exception):
+    """The process table exceeded the per-pass observation count bound."""
+
+
 def _scan_group_once(identity) -> bool | None:
     """One bounded process-table pass: True/False, or None when incomplete.
 
     True is positive evidence (a live same-group member was observed) and
     False requires a complete scan with no live member. None proves
-    nothing: the scan hit its count/deadline bound or the table was
-    momentarily unobservable.
+    nothing: the scan exhausted its time budget or the table was
+    momentarily unobservable (both worth retrying). A table that exceeds
+    the count bound raises _ScanTruncated instead: truncation is
+    deterministic, so retrying the same bound cannot complete it.
     """
     deadline = time.monotonic() + _POLL_S
     try:
         for count, proc in enumerate(psutil.process_iter()):
-            if count >= _MAX_GROUP_SCAN or time.monotonic() >= deadline:
+            if count >= _MAX_GROUP_SCAN:
+                raise _ScanTruncated
+            if time.monotonic() >= deadline:
                 return None
             if proc.pid == identity.pid:
                 continue
@@ -327,27 +335,56 @@ def _scan_group_once(identity) -> bool | None:
 
 
 # An incomplete scan proves nothing, but a transient scheduling stall under
-# a parallel suite can exhaust the per-scan budget while the group is
-# already quiescent. Retry a bounded number of times before failing
-# closed, so load spikes cannot flip run verdicts. Fail-closed is
-# preserved: False still requires one complete scan with no live member,
-# and an observed member still reports True on the first pass.
-_CLEANUP_SCAN_ATTEMPTS = 3
+# a parallel suite can exhaust the per-pass time budget while the group is
+# already quiescent. Retry time/blind incompleteness until one complete
+# pass decides, or a generous deadline expires, so load spikes cannot flip
+# run verdicts. Count truncation fails closed immediately: the bound is
+# identical on every pass, so retrying cannot complete it. Fail-closed is
+# preserved throughout: False still requires one complete scan with no
+# live member, an observed member still reports True on the first pass,
+# and a retryable-incomplete streak still reports True at the deadline.
+_GROUP_SCAN_DEADLINE_S = 10.0
+_GROUP_SCAN_RETRY_S = 0.005
+# The reap path is already bounded by the cancel grace deadline and
+# post-reap ESRCH probes, and cancel latency is itself budgeted by callers:
+# scans there stay fast. Patience lives only at the spawn gate, where a
+# slow verdict merely delays the next spawn.
+_REAP_SCAN_DEADLINE_S = 0.5
 
 
-def _group_needs_cleanup(identity) -> bool:
+def _sleep(delay: float) -> None:
+    """Wait without the time module.
+
+    The test driver replaces guard.time with a monotonic-only fake clock to
+    simulate slow phases; only time.monotonic may be used here. select is
+    never patched and waits identically.
+    """
+    select.select([], [], [], delay)
+
+
+def _group_needs_cleanup(identity, deadline_s: float | None = None) -> bool:
     """Bounded observation for cancellation effort, NEVER an absence proof.
 
     Only a caller's post-reap ESRCH probe can prove group absence. A racing fork
     or inaccessible snapshot retains that obligation even after this says no.
+    A None budget resolves the module deadline at call time (never as a
+    default argument) so tests can pin it without touching callers.
     """
-    for _ in range(_CLEANUP_SCAN_ATTEMPTS):
-        verdict = _scan_group_once(identity)
+    if deadline_s is None:
+        deadline_s = _GROUP_SCAN_DEADLINE_S
+    deadline = time.monotonic() + deadline_s
+    while True:
+        try:
+            verdict = _scan_group_once(identity)
+        except _ScanTruncated:
+            return True
         if verdict is False:
             return False
         if verdict is True:
             return True
-    return True
+        if time.monotonic() >= deadline:
+            return True
+        _sleep(_GROUP_SCAN_RETRY_S)
 
 
 def _cancel_and_reap(state: _State, control: _Control, identity) -> None:
@@ -356,7 +393,8 @@ def _cancel_and_reap(state: _State, control: _Control, identity) -> None:
         _signal_group(identity, state.cancel_signal or signal.SIGTERM)
     while True:
         child_done = state.child is None or state.child.poll() is not None
-        if child_done and not _group_needs_cleanup(identity):
+        if child_done and not _group_needs_cleanup(
+                identity, deadline_s=_REAP_SCAN_DEADLINE_S):
             return
         remaining = state.grace_deadline - time.monotonic()
         if remaining <= 0:
@@ -385,19 +423,87 @@ def _runner_facts(control: _Control, prepared, attempt_id: str, phase: str,
     })
 
 
+# A contended read-only reconcile (parent write transactions hold the
+# coordinator lock) is transient pressure, not ancestry evidence. Retry it
+# with backoff; scheduler.reconcile already retries internally, so this
+# outer budget only covers sustained lockouts. Any non-transient verdict
+# still propagates on the first pass.
+_RECONCILE_RETRY_DEADLINE_S = 30.0
+_RECONCILE_RETRY_BASE_S = 0.005
+_RECONCILE_RETRY_MAX_S = 0.5
+
+
+def _reconcile_for_spawn(domain, deadline=None):
+    # Retry budgets compose, never stack: a caller with its own (shorter)
+    # deadline passes it in, so one spawn decision cannot burn the scan
+    # budget, then the reconcile budget, then the view budget end to end.
+    # A single scheduler.reconcile call may still overrun via its own inner
+    # transient retry, which returns readable data rather than spinning.
+    own = time.monotonic() + _RECONCILE_RETRY_DEADLINE_S
+    deadline = own if deadline is None else min(deadline, own)
+    delay = _RECONCILE_RETRY_BASE_S
+    while True:
+        try:
+            return scheduler.reconcile(domain)
+        except Problem as exc:
+            if not scheduler.is_transient_contention(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            _sleep(delay)
+            delay = min(_RECONCILE_RETRY_MAX_S, delay * 2)
+
+
+# A non-RUNNING lease view while this guard is alive is almost always a
+# transient observation (an exiting descendant caught mid-reap reads as
+# escaped-or-indeterminate for one pass). Genuine escapes and detachments
+# persist across passes because the guard never leaves its group, so
+# re-viewing for a bounded time cannot launder a real violation: it still
+# fails closed once the budget expires.
+_LEASE_VIEW_RETRY_DEADLINE_S = 10.0
+_LEASE_VIEW_RETRY_S = 0.2
+
+
+def _running_lease(domain, run_id, deadline_s: float | None = None):
+    """Return the live RUNNING view, tolerating transient observations.
+
+    Views are recomputed from current kernel state on every pass
+    (reconcile persists nothing), so only a stable non-RUNNING verdict
+    survives to the deadline. A None budget resolves the module deadline
+    at call time (never as a default argument) so tests can pin it.
+    """
+    if deadline_s is None:
+        deadline_s = _LEASE_VIEW_RETRY_DEADLINE_S
+    deadline = time.monotonic() + deadline_s
+    while True:
+        leases = _reconcile_for_spawn(domain, deadline)
+        lease = next(
+            (item for item in leases if item.run_id == run_id),
+            None,
+        )
+        if lease is not None and lease.state is scheduler.LeaseState.RUNNING:
+            return lease
+        if time.monotonic() >= deadline:
+            return lease
+        _sleep(_LEASE_VIEW_RETRY_S)
+
+
 def _predecessor_quiescent(
         manifest: LaunchManifest, identity, state: _State) -> bool:
     """Require bounded process and scheduler evidence before another spawn."""
-    if _group_needs_cleanup(identity):
+    # A pending cancel owns the timeline now: stay fast so the kill path
+    # keeps its own budget. Otherwise be patient: a slow verdict here only
+    # delays the next spawn, while a hasty one fails a healthy run.
+    cancelling = state.cancel_signal is not None
+    scan_budget = _REAP_SCAN_DEADLINE_S if cancelling else _GROUP_SCAN_DEADLINE_S
+    view_budget = _REAP_SCAN_DEADLINE_S if cancelling else _LEASE_VIEW_RETRY_DEADLINE_S
+    if _group_needs_cleanup(identity, deadline_s=scan_budget):
         state.fail(_problem(
             "ownership-uncertain",
             "a prior phase still has live or unobservable descendants"))
         return False
-    lease = next(
-        (item for item in scheduler.reconcile(manifest.domain)
-         if item.run_id == manifest.grant.run_id),
-        None,
-    )
+    lease = _running_lease(manifest.domain, manifest.grant.run_id,
+                           deadline_s=view_budget)
     if lease is None or lease.state is not scheduler.LeaseState.RUNNING:
         state.fail(_problem(
             "ownership-uncertain",

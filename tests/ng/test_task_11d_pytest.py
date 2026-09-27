@@ -861,7 +861,13 @@ def test_bridge_writes_private_terminal_report_after_native_exit(tmp_path, monke
 
     monkeypatch.setitem(__import__("sys").modules, "pytest", FakePytest)
 
+    before = sys.path[:]
     assert pytest_bridge.run(["tests/test_a.py"]) == 23
+    # run() swaps sys.path[0] for `python -m pytest` cwd parity. The swap
+    # must not outlive the call: this worker keeps its prepended tests
+    # directory, so later sibling imports (e.g. test helpers imported
+    # inside other test functions on this same worker) keep resolving.
+    assert sys.path == before
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload == {
         "protocol": 1,

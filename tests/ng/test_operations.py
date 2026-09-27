@@ -224,7 +224,9 @@ def _follower(case, domain):
 def test_command_native_failure_codes(case, code):
     domain = case.domain()
     root = _command_project(case, domain, args=("exit", str(code)))
-    completed = case.invoke(domain, root, timeout=5)
+    # Trivial native command, but the budget covers child interpreter
+    # startup plus admission under machine load, not the instant command.
+    completed = case.invoke(domain, root, timeout=30)
     assert completed.code == code
     assert _run_data(completed)["runner_exit_code"] == code
 
@@ -617,7 +619,9 @@ def test_command_from_subdirectory_uses_project_root(case):
     root = _command_project(case, domain, args=("cwd",))
     child = root / "nested"
     child.mkdir()
-    completed = case.invoke(domain, child, timeout=5)
+    # Trivial native command; the budget covers child startup plus
+    # admission under machine load, not the instant command itself.
+    completed = case.invoke(domain, child, timeout=30)
     assert completed.code == 0
     assert completed.stdout.decode().strip() == str(root)
     exports = list(root.glob("ptest-result-*.json"))
@@ -631,7 +635,9 @@ def test_export_collision_preserves_native_exit_and_existing_file(case, code):
     root = _command_project(case, domain, args=("exit", str(code)))
     target = root / "result.json"
     target.write_bytes(b"user-owned sentinel")
-    completed = case.invoke(domain, root, "--result-json", "result.json", timeout=5)
+    # Trivial native command; the budget covers child startup plus
+    # admission under machine load, not the instant command itself.
+    completed = case.invoke(domain, root, "--result-json", "result.json", timeout=30)
     assert completed.code == (70 if code == 0 else code)
     assert target.read_bytes() == b"user-owned sentinel"
 

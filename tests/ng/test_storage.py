@@ -133,6 +133,42 @@ needs_proc_fd = pytest.mark.skipif(
 )
 
 
+def test_open_database_reports_lock_contention_as_unavailable(tmp_path):
+    """A write-locked DB is contention (retryable), never corruption evidence."""
+    root = _private_root(tmp_path)
+    seed = open_database(root, "hot.sqlite3", max_bytes=16 << 20)
+    try:
+        seed.execute("CREATE TABLE t(x TEXT)")
+        seed.execute("INSERT INTO t VALUES ('seed')")
+        seed.commit()
+    finally:
+        seed.close()
+    holder = sqlite3.connect(str(root / "hot.sqlite3"), isolation_level=None)
+    try:
+        # EXCLUSIVE (a committing writer): even the opener's header/pragma
+        # reads cannot proceed, so the busy wait expires inside the open.
+        holder.execute("BEGIN EXCLUSIVE")
+        holder.execute("INSERT INTO t VALUES ('held')")
+        # A second connection opens while the write lock is held past the
+        # busy timeout: the opener must report contention, not corruption.
+        with pytest.raises(Problem) as caught:
+            open_database(root, "hot.sqlite3", max_bytes=16 << 20)
+        assert caught.value.code == "coordinator-unavailable"
+        assert caught.value.retryable is True
+    finally:
+        try:
+            holder.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        holder.close()
+    # After the lock releases the same open succeeds: nothing was corrupt.
+    reopened = open_database(root, "hot.sqlite3", max_bytes=16 << 20)
+    try:
+        assert reopened.execute("SELECT count(*) FROM t").fetchone()[0] == 1
+    finally:
+        reopened.close()
+
+
 @needs_proc_fd
 def test_open_database_closes_connection_on_pragma_rejection(tmp_path):
     root = _private_root(tmp_path)

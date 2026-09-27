@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import functools
 import json
 import os
 import pwd
@@ -54,6 +55,19 @@ _DB_MAX_BYTES = 16 * 1024 * 1024
 _MARKER_MAX_BYTES = 65536
 _MACHINE_MAX_BYTES = 65536
 _MAX_OBSERVATIONS = 256
+# Transient lock contention waits with bounded exponential backoff instead of
+# surfacing as coordinator-unavailable. Budgets use the real clock (never the
+# faked _now) so frozen-time tests cannot spin. Genuine errors (corruption,
+# ownership violations, capacity) are not transient and return immediately.
+_BEGIN_RETRY_DEADLINE_S = 30.0
+_BEGIN_RETRY_BASE_S = 0.005
+_BEGIN_RETRY_MAX_S = 0.2
+_TRANSACTION_RETRY_DEADLINE_S = 30.0
+_TRANSACTION_RETRY_BASE_S = 0.005
+_TRANSACTION_RETRY_MAX_S = 0.5
+_ANCESTRY_RETRY_DEADLINE_S = 2.0
+_ANCESTRY_RETRY_BASE_S = 0.005
+_ANCESTRY_RETRY_MAX_S = 0.1
 _ACTIVE = frozenset({
     "GRANTED", "RUNNING", "DRAINING", "FINALIZING", "CANCELLING", "UNCERTAIN",
 })
@@ -63,6 +77,50 @@ _SCHEMA_TABLES = frozenset({"domain", "jobs", "job_resources", "observations"})
 
 def _fail(code: str, message: str, *, retryable: bool = False) -> None:
     raise Problem(code=code, message=message, phase=_PHASE, retryable=retryable)
+
+
+def is_transient_contention(exc: BaseException) -> bool:
+    """True only for cause-verified lock contention (never a verdict).
+
+    A plain ``coordinator-unavailable`` Problem is NOT enough: storage and
+    transaction layers reuse that code for genuine failures (disk errors,
+    failed commits) that must surface immediately. Only TransientContention
+    — raised after is_transient_sqlite passed on the live exception —
+    authorizes an automatic retry.
+    """
+    return isinstance(exc, storage.TransientContention)
+
+
+def _transient_retry(fn):
+    """Re-run one coordinator call while it reports transient contention.
+
+    Each attempt holds no lock when it fails (the connection is closed on
+    every error path), so retries cannot deadlock with the lock holder.
+    Attempts are NOT re-runs of committed work: a sqlite-level failure
+    always rolls back first, and CAS updates only commit once. Genuine
+    failures keep their exact code and surface on the first attempt.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        deadline = time.monotonic() + _TRANSACTION_RETRY_DEADLINE_S
+        delay = _TRANSACTION_RETRY_BASE_S
+        while True:
+            try:
+                return fn(*args, **kwargs)
+            except storage.TransientContention:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(_TRANSACTION_RETRY_MAX_S, delay * 2)
+    return wrapper
+
+
+def _unavailable_from_sqlite(exc: sqlite3.Error, message: str) -> None:
+    """Map a transaction failure by cause: contention retries, damage stands."""
+    if storage.is_transient_sqlite(exc):
+        raise storage.TransientContention(message="coordinator is busy",
+                                          phase=_PHASE)
+    _fail("coordinator-unavailable", message, retryable=True)
 
 
 def _now() -> float:
@@ -490,14 +548,22 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )""")
 
 
+def _unavailable_or_corrupt(exc: sqlite3.Error, corrupt_message: str) -> None:
+    """Lock contention is retryable; every other storage error is corruption."""
+    if storage.is_transient_sqlite(exc):
+        raise storage.TransientContention(message="coordinator is busy",
+                                          phase=_PHASE)
+    _fail("coordinator-corrupt", corrupt_message)
+
+
 def _validate_schema(conn: sqlite3.Connection) -> None:
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
-    except sqlite3.Error:
-        _fail("coordinator-corrupt", "coordinator schema cannot be read")
+    except sqlite3.Error as exc:
+        _unavailable_or_corrupt(exc, "coordinator schema cannot be read")
     if version != SCHEMA_VERSION or {row[0] for row in rows} != _SCHEMA_TABLES:
         _fail("protocol-mismatch", "coordinator schema is unsupported")
     expected_columns = {
@@ -520,8 +586,8 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
             if columns != expected_columns[table]:
                 _fail("protocol-mismatch", "coordinator table schema is unsupported")
             conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()  # nosec B608 - table is closed constant
-        except sqlite3.Error:
-            _fail("coordinator-corrupt", "coordinator schema is incomplete")
+        except sqlite3.Error as exc:
+            _unavailable_or_corrupt(exc, "coordinator schema is incomplete")
 
 
 def _initial_state(domain: DomainPaths) -> None:
@@ -544,8 +610,8 @@ def _initial_state(domain: DomainPaths) -> None:
                  limits[0], limits[1], limits[2], 0),
             )
         _publish_marker(domain, conn)
-    except sqlite3.Error:
-        _fail("coordinator-corrupt", "coordinator initialization failed")
+    except sqlite3.Error as exc:
+        _unavailable_or_corrupt(exc, "coordinator initialization failed")
     finally:
         conn.close()
 
@@ -648,9 +714,9 @@ def _open_state(domain: DomainPaths, *, create: bool,
                 elif identity != (info["marker_device"], info["marker_inode"]):
                     _fail("unsafe-path", "coordinator marker identity changed")
             return conn, _domain_info(conn)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             conn.close()
-            _fail("coordinator-corrupt", "coordinator database is corrupt")
+            _unavailable_or_corrupt(exc, "coordinator database is corrupt")
         except BaseException:
             conn.close()
             raise
@@ -685,19 +751,35 @@ def _recover_boot_locked(conn: sqlite3.Connection, now: float) -> dict:
 
 
 def _begin(conn: sqlite3.Connection) -> None:
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator transaction is unavailable", retryable=True)
+    """Take the write lock, waiting out transient holders with backoff.
+
+    A busy lock is never an ownership verdict: the holder always commits or
+    rolls back, so waiting is safe. Only the budget is bounded; genuine
+    errors fail immediately.
+    """
+    deadline = time.monotonic() + _BEGIN_RETRY_DEADLINE_S
+    delay = _BEGIN_RETRY_BASE_S
+    while True:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.Error as exc:
+            if not storage.is_transient_sqlite(exc):
+                _fail("coordinator-unavailable", "coordinator transaction is unavailable", retryable=True)
+            if time.monotonic() >= deadline:
+                raise storage.TransientContention(
+                    message="coordinator transaction is unavailable", phase=_PHASE)
+            time.sleep(delay)
+            delay = min(_BEGIN_RETRY_MAX_S, delay * 2)
 
 
 def _finish_transaction(conn: sqlite3.Connection, success: bool) -> None:
     try:
         try:
             conn.commit() if success else conn.rollback()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             if success:
-                _fail("coordinator-unavailable", "coordinator commit failed", retryable=True)
+                _unavailable_from_sqlite(exc, "coordinator commit failed")
     finally:
         # Even a failed commit must close/roll back and release the SQLite lock.
         conn.close()
@@ -838,13 +920,20 @@ def _same_identity(observed: ProcessIdentity | None, row: sqlite3.Row | dict,
             and observed.pgid == row[f"{prefix}_pgid"])
 
 
-def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
+def _descendant_observations(row: dict, recorded: list[dict]) -> tuple[list[dict], bool]:
     """Track bounded observed identities, including children before they escape.
 
     Inaccessible/capped scans persist an uncertainty sentinel. This is a
     cooperative lifecycle check, not proof against unobserved daemonization.
+
+    Returns the observations plus whether THIS pass found fresh uncertainty.
+    Recorded sentinels are carried forward (a dead guard can never be
+    re-observed, so its doubt must stick), but the flag tells the caller
+    whether the current pass added anything new: only a clean pass under a
+    live guard may clear stale doubt.
     """
     observations = {}
+    fresh_uncertain = False
     for item in recorded:
         item = dict(item)
         if item["uncertain"]:
@@ -856,6 +945,8 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
         observations[item["pid"]] = item
 
     def uncertain():
+        nonlocal fresh_uncertain
+        fresh_uncertain = True
         observations[0] = dict(run_id=row["run_id"], pid=0, birth=None,
                                uid=None, pgid=None, uncertain=1)
 
@@ -886,6 +977,20 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
                 if gone or guard_reused or descendant_reused:
                     observations.pop(pid, None)
                     continue
+                if identity is not None and (
+                        (expected is not None
+                         and identity.birth == expected["birth"]
+                         and identity.uid == expected["uid"]
+                         and identity.pgid == expected["pgid"])
+                        or (pid == guard.pid and expected is None
+                            and _same_identity(identity, row, "guard"))):
+                    # Alive with an unchanged identity but an unlistable
+                    # subtree (an unreaped zombie, a racing exec): it cannot
+                    # act or escape, and there is nothing new beneath it this
+                    # pass. Keep the record and re-walk it next pass instead
+                    # of poisoning the whole observation. Anything changed
+                    # (or unreadable) below still fails closed.
+                    continue
                 uncertain()
                 break
             except (psutil.Error, OSError):
@@ -913,7 +1018,7 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> list[dict]:
         current, gone = _observe_process(guard.pid)
         if not gone and not _same_identity(current, row, "guard"):
             uncertain()
-    return list(observations.values())
+    return list(observations.values()), fresh_uncertain
 
 
 def _escaped_or_unknown(row: dict, observations: list[dict], *, require_absent: bool = False) -> bool:
@@ -923,15 +1028,76 @@ def _escaped_or_unknown(row: dict, observations: list[dict], *, require_absent: 
         identity, absent = _observe_process(item["pid"])
         if absent or (identity is not None and identity.birth != item["birth"]):
             continue
-        if (require_absent or identity is None or identity.uid != item["uid"]
-                or identity.pgid != row["guard_pgid"]):
+        if identity is None:
             return True
+        if identity.uid != item["uid"] or identity.pgid != row["guard_pgid"]:
+            return True
+        if require_absent and not _unreaped_zombie(item["pid"]):
+            return True
+    return False
+
+
+def _observation_cause(row: dict, observations: list[dict]) -> str | None:
+    """Why the descendant check fails: 'escape', 'transient', or None (clean).
+
+    Positive evidence (a live identity outside the guard group) is an escape
+    verdict and must stick. A momentarily unreadable table or process is
+    transient pressure: it reports UNCERTAIN for this pass but may heal when
+    the next pass observes cleanly. Escape dominates: a live escapee beside
+    a stale ghost still reports escape. Doubt recorded against a dead or
+    changed guard can never be re-observed, so it stays a verdict — only a
+    clean pass under a live, unchanged guard may clear stale doubt.
+    """
+    found_transient = False
+    for item in observations:
+        if item["uncertain"]:
+            guard, gone = _observe_process(row["guard_pid"])
+            if gone or guard is None or not _same_identity(guard, row, "guard"):
+                return "escape"
+            found_transient = True
+            continue
+        identity, absent = _observe_process(item["pid"])
+        if absent or (identity is not None and identity.birth != item["birth"]):
+            continue
+        if identity is None:
+            found_transient = True
+            continue
+        if identity.uid != item["uid"] or identity.pgid != row["guard_pgid"]:
+            return "escape"
+    return "transient" if found_transient else None
+
+
+def _unreaped_zombie(pid: int) -> bool:
+    """True when a recorded pid is an unreaped zombie, not a live survivor.
+
+    A zombie keeps its identity (birth/uid/pgid still match the record) but
+    its subtree is unlistable, holds no resources, and cannot escape — the
+    same signal the descendant walk tolerates. Anything listable, changed,
+    or unreadable stays unknown so the release still fails closed.
+    """
+    try:
+        psutil.Process(pid).children()
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        # Inaccessible live trees remain unknown, never zombies.
+        return False
     return False
 
 
 def _observations(conn: sqlite3.Connection, row: dict, *, persist: bool) -> list[dict]:
     recorded = [dict(item) for item in conn.execute("SELECT * FROM observations WHERE run_id=?", (row["run_id"],))]
-    observed = _descendant_observations(row, recorded)
+    observed, fresh_uncertain = _descendant_observations(row, recorded)
+    if not fresh_uncertain and row["guard_pid"] is not None:
+        # A clean pass under a live, unchanged guard proves the stale doubt
+        # wrong: a raced walk or indeterminate read from an earlier pass must
+        # not poison every later verdict. Clearing needs a positively live
+        # guard — after death nothing can be re-observed, so doubt sticks
+        # (fail closed). Positive escape evidence is never a sentinel, so a
+        # live escapee still re-fires below on this same pass.
+        guard, gone = _observe_process(row["guard_pid"])
+        if not gone and guard is not None and _same_identity(guard, row, "guard"):
+            observed = [item for item in observed if not item["uncertain"]]
     if persist:
         observed_pids = {item["pid"] for item in observed}
         conn.executemany(
@@ -947,6 +1113,17 @@ def _observations(conn: sqlite3.Connection, row: dict, *, persist: bool) -> list
 def _uncertain(row: dict, message: str, code: str = "ownership-uncertain") -> dict:
     row.update(state="UNCERTAIN", reason_code=code, reason_message=message)
     return row
+
+
+# UNCERTAIN verdicts that a later clean pass may heal back to RUNNING: a
+# raced walk, a stale group probe, a momentarily indeterminate owner read.
+# Everything else — escape verdicts, proof contradictions, queue/deadline
+# outcomes — keeps its history and never enters this set.
+_HEALABLE_UNCERTAIN_REASONS = frozenset({
+    "descendant observation was incomplete",
+    "process-group ownership could not be proven",
+    "owner identity is indeterminate",
+})
 
 
 def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: bool) -> dict:
@@ -966,9 +1143,13 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
             _uncertain(row, "grant owner identity is indeterminate")
         return row
     observations = _observations(conn, row, persist=persist)
-    if _escaped_or_unknown(row, observations):
+    cause = _observation_cause(row, observations)
+    if cause == "escape":
         return _uncertain(row, "observed descendants are escaped or indeterminate",
                           "unsupported-detached-descendant")
+    if cause == "transient":
+        return _uncertain(row, "descendant observation was incomplete",
+                          "ownership-uncertain")
     checked_at = _now()
     group = platform.probe_group(row["guard_pgid"])
     if group.exists is None or not group.permission or group.checked_at < checked_at:
@@ -976,6 +1157,25 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
     if group.exists:
         if not absent and not _same_identity(owner, row):
             return _uncertain(row, "owner identity is indeterminate")
+        if (row["state"] == "UNCERTAIN" and row["phase"] == "setup"
+                and not absent and (
+                    (row["reason_code"] == "ownership-uncertain"
+                     and row["reason_message"] in _HEALABLE_UNCERTAIN_REASONS)
+                    or row["reason_code"] == "unsupported-detached-descendant")):
+            # Live guard, live group, live owner verified, descendants clean:
+            # whatever the recorded doubt was (a raced walk, a stale probe,
+            # or an escape verdict whose evidence has since vanished — the
+            # subjects reaped, the pids recycled), nothing alive remains to
+            # leak, so restore RUNNING and let bounded retries proceed. A
+            # proof contradiction ("finalization lacked...") never heals:
+            # it names a caller that lied, not an observation that lapsed.
+            # Anything still wrong re-fires on every pass before this point
+            # is reached: a live escapee, a reused guard, and a still-blind
+            # tree all recreate their verdicts here. Handoff phases never
+            # heal: their pre-doubt state is not RUNNING and must not be
+            # rewritten. An absent owner never heals either: an orphaned run
+            # must not spawn.
+            row.update(state="RUNNING", reason_code=None, reason_message=None)
         return row
     if _escaped_or_unknown(row, observations, require_absent=True):
         return _uncertain(row, "observed descendants remain after group absence",
@@ -1004,11 +1204,21 @@ def _reconcile_locked(conn: sqlite3.Connection, now: float) -> None:
                       row["run_id"], row["nonce"], row["generation"]))
 
 
-def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
+class _TransientAncestry(Exception):
+    """A momentarily unobservable process table; safe to look again."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def _check_nested_once(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
     guards = conn.execute("SELECT * FROM jobs WHERE guard_pid IS NOT NULL AND state NOT IN ('RELEASED','CANCELLED')").fetchall()
     if not guards:
         return
     identity, _ = _observe_process(owner.pid)
+    if identity is None:
+        raise _TransientAncestry("admission owner identity cannot be verified")
     if identity != owner:
         _fail("ownership-uncertain", "admission owner identity cannot be verified")
     visited = set()
@@ -1020,7 +1230,7 @@ def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
             visited.add(pid)
             identity = platform.process_identity(pid)
             if identity is None:
-                _fail("ownership-uncertain", "ancestry identity is unavailable")
+                raise _TransientAncestry("ancestry identity is unavailable")
             for row in guards:
                 if identity.pid == row["guard_pid"] or identity.pgid == row["guard_pgid"]:
                     current = platform.process_identity(row["guard_pid"])
@@ -1031,8 +1241,30 @@ def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
             if platform.process_identity(pid) != identity:
                 _fail("ownership-uncertain", "ancestry changed during observation")
             pid = parent
-    except (psutil.Error, OSError):
-        _fail("ownership-uncertain", "ancestry is inaccessible")
+    except _TransientAncestry:
+        raise
+    except (psutil.Error, OSError) as exc:
+        raise _TransientAncestry("ancestry is inaccessible") from exc
+
+
+def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
+    """Walk the owner ancestry, looking past momentary observation stalls.
+
+    Only an unobservable table is retried. A present-but-different identity,
+    a detected nesting, a bound cycle, or a changed mid-walk identity still
+    fails closed on the first pass.
+    """
+    deadline = time.monotonic() + _ANCESTRY_RETRY_DEADLINE_S
+    delay = _ANCESTRY_RETRY_BASE_S
+    while True:
+        try:
+            _check_nested_once(conn, owner)
+            return
+        except _TransientAncestry as exc:
+            if time.monotonic() >= deadline:
+                _fail("ownership-uncertain", exc.message)
+            time.sleep(delay)
+            delay = min(_ANCESTRY_RETRY_MAX_S, delay * 2)
 
 
 def _deadline_for(request: AdmissionRequest, now: float) -> float:
@@ -1053,6 +1285,7 @@ def _prune_terminal(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM jobs WHERE run_id=?", (row[0],))
 
 
+@_transient_retry
 def enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket:
     """Atomically append one local admission request to the domain FIFO."""
     if not isinstance(request, AdmissionRequest):
@@ -1094,8 +1327,8 @@ def enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket:
             conn.execute("INSERT INTO job_resources VALUES (?,?)", (request.run_id, resource))
         _prune_terminal(conn)
         ok = True
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
     return Ticket(run_id=request.run_id, sequence=sequence)
@@ -1145,6 +1378,7 @@ def _problem_from_row(row: sqlite3.Row | dict) -> Problem | None:
                        phase=_PHASE, retryable=False)
 
 
+@_transient_retry
 def poll(domain: DomainPaths, ticket: Ticket) -> AdmissionState:
     """Reconcile, then attempt FIFO admission; polling never bypasses the head."""
     if not isinstance(ticket, Ticket):
@@ -1171,12 +1405,13 @@ def poll(domain: DomainPaths, ticket: Ticket) -> AdmissionState:
                 "SELECT sequence FROM jobs WHERE state='QUEUED' AND sequence<=?", (row["sequence"],))) - 1
                       if row["state"] == "QUEUED" else None),
         )
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
 
 
+@_transient_retry
 def register_guard(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) -> bool:
     """CAS-register one guard identity before repository work can begin."""
     if not isinstance(grant, Grant):
@@ -1206,12 +1441,13 @@ def register_guard(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) ->
             result = False
         ok = True
         return bool(result)
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
 
 
+@_transient_retry
 def mark_draining(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) -> bool:
     """CAS the authenticated live guard from RUNNING/CANCELLING to DRAINING."""
     if not isinstance(grant, Grant):
@@ -1249,8 +1485,8 @@ def mark_draining(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) -> 
                 result = cursor.rowcount == 1
         ok = True
         return result
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
 
@@ -1277,6 +1513,7 @@ def _lease_view(row: sqlite3.Row | dict, now: float) -> LeaseView:
     )
 
 
+@_transient_retry
 def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
     """Observe the same recovery decisions as admission without writing state."""
     try:
@@ -1294,8 +1531,8 @@ def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
         return tuple(_lease_view(_boot_transition(dict(row), now) if boot_changed else
                                  _recovery_view(conn, dict(row), now, persist=False), now)
                      for row in rows)
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator read failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator read failed")
     finally:
         conn.close()
 
@@ -1308,6 +1545,7 @@ class QueueHolder(NamedTuple):
     checkout_id: str
 
 
+@_transient_retry
 def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, ...]:
     """Best-effort read-only snapshot of live slot holders, oldest first.
 
@@ -1344,6 +1582,7 @@ def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, 
         conn.close()
 
 
+@_transient_retry
 def forget_checkouts(domain: DomainPaths, ids) -> int:
     """Delete only terminal scheduler rows for ``ids``, under one lock.
 
@@ -1382,18 +1621,20 @@ def forget_checkouts(domain: DomainPaths, ids) -> int:
             wanted)
         ok = True
         return cursor.rowcount
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
 
 
+@_transient_retry
 def initialize(domain: DomainPaths) -> None:
     """Create and validate the account coordinator before read-only checks."""
     conn, _ = _open_state(domain, create=True)
     conn.close()
 
 
+@_transient_retry
 def effective_limits(domain: DomainPaths) -> EffectiveLimits:
     """Read-only T11 presentation using the shared frozen limits record.
 
@@ -1418,8 +1659,8 @@ def effective_limits(domain: DomainPaths) -> EffectiveLimits:
             _boot_identity()
             requested = _load_config_limits(domain, create_missing=False)
             limits = _selected_limits(conn, requested, (info["config_slots"], info["config_jobs"], info["config_memory"]))
-        except sqlite3.Error:
-            _fail("coordinator-unavailable", "coordinator read failed", retryable=True)
+        except sqlite3.Error as exc:
+            _unavailable_from_sqlite(exc, "coordinator read failed")
         finally:
             conn.close()
     return EffectiveLimits(max_slots=limits[0], max_jobs=limits[1], memory_mb=limits[2])
@@ -1441,6 +1682,7 @@ def _matches_owner(row: sqlite3.Row | dict, owner: ProcessIdentity) -> bool:
             and platform.process_identity(owner.pid) == owner)
 
 
+@_transient_retry
 def cancel_pending(domain: DomainPaths, ticket: Ticket, owner: ProcessIdentity) -> bool:
     """Cancel only an exact owner's queued or never-registered grant.
 
@@ -1479,8 +1721,8 @@ def cancel_pending(domain: DomainPaths, ticket: Ticket, owner: ProcessIdentity) 
         )
         ok = True
         return cursor.rowcount == 1
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
 
@@ -1495,6 +1737,7 @@ def _finalization_failure(conn: sqlite3.Connection, run_id: str, *, escaped: boo
     )
 
 
+@_transient_retry
 def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
     """Prove quiescence and enter ``FINALIZING`` while retaining every claim."""
     if not isinstance(grant, Grant):
@@ -1554,12 +1797,13 @@ def begin_finalization(domain: DomainPaths, grant: Grant) -> QuiescenceProof:
             _fail("ownership-uncertain", "finalization lease changed during proof")
         ok = True
         return proof
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok or commit_on_error)
 
 
+@_transient_retry
 def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
            final: Finalization) -> None:
     """Commit finalization only after a typed, conservative quiescence proof."""
@@ -1613,8 +1857,8 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
         )
         _prune_terminal(conn)
         ok = True
-    except sqlite3.Error:
-        _fail("coordinator-unavailable", "coordinator write failed", retryable=True)
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok or commit_on_error)
 
