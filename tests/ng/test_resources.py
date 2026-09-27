@@ -48,19 +48,20 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
                     "## Test-quality rules", "## Reporting"):
         assert section in guide
     assert "repository root" in guide
-    assert "ptest api/" in guide
+    assert "ptest <project>/" in guide
+    assert "api/" not in guide
     assert "ptest --full" in guide
     assert "--again" in guide
     assert "joined the running full run" in guide
     # Output table: every documented line is present.
     for row in ("→ N of M test files", "via importers",
-                "changed → full suite:", "vitest --changed",
+                "changed → full suite:", "vitest changed delegation",
                 "no tests affected", "nothing to test",
+                "no changes under <folder>",
                 "next: ptest --full before handoff",
-                "web · no changes", "waiting for N slots",
+                "<project> · no changes", "waiting for N slots",
                 "setup failed", "passed · N tests",
-                "baseline recorded", "no baseline recorded:",
-                "already verified", "incomplete (exit 70)",
+                "incomplete (exit 70)",
                 "protocol-mismatch", "ownership-uncertain",
                 "execution-timeout", "queue-timeout",
                 "unsafe-path", "unknown command"):
@@ -103,10 +104,11 @@ def test_repository_guide_is_short_structured_and_links_internals_out():
     # Failure rows must never read as permission to weaken tests.
     assert ("never weaken, skip or delete tests or assertions to get green."
             in flat)
-    assert "All tests of one project" in guide
-    assert "`ptest <child>`, e.g. `ptest web`" in guide
-    assert "Integrated gate for one project" in guide
-    assert "`ptest --full <child>`" in guide
+    assert "Changed tests under one folder" in guide
+    assert "`ptest <folder>`, e.g. `ptest <project>/tests`" in guide
+    assert "One test file (always runs it)" in guide
+    assert "All tests under one folder" in guide
+    assert "`ptest --full <folder>`" in guide
 
 
 def test_shipped_guides_never_mention_repo_internal_workflow():

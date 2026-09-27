@@ -187,6 +187,14 @@ def format_no_changes_anywhere(*, color: bool = False) -> str:
             " · ptest --full runs everything")
 
 
+def format_no_changes_under(declaration: str, scope: str, *,
+                            color: bool = False) -> str:
+    """Line for a folder run whose change reaches no tests under it."""
+    return (f"{_prefix(color=color)} {_project(declaration, color=color)} "
+            f"· no changes under {scope} — nothing to test · "
+            f"ptest --full {scope} runs all of them")
+
+
 def format_no_green_changes(*, color: bool = False) -> str:
     """Line for a run where nothing changed since the last green run."""
     return (f"{_prefix(color=color)} no changes since last green run"

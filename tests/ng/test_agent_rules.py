@@ -73,7 +73,8 @@ def test_apply_preserves_existing_agent_files_and_is_idempotent(tmp_path):
     assert "never globally flush caches" in guide
     assert "ptest --full" in guide
     assert "repository root" in guide
-    assert "ptest api/" in guide
+    assert "ptest <project>/" in guide
+    assert "api/" not in guide
     assert "--again" in guide
     assert "joined the running full run" in guide
     assert "## Exit codes" in guide
@@ -587,7 +588,7 @@ def test_rollback_leaves_same_byte_file_swapped_between_read_and_replace(
 
 
 def test_generated_skill_names_the_loop_without_duplicated_guidance(tmp_path):
-    """New skill contract: short, no duplicated tables, must contain the loop."""
+    """New skill contract: short loop plus the five-command table only."""
     result = apply(tmp_path, agents=("claude", "codex", "opencode", "gemini"))
 
     assert result.changed is True
@@ -601,16 +602,23 @@ def test_generated_skill_names_the_loop_without_duplicated_guidance(tmp_path):
         assert "description:" in head
         body = text.split("---", 2)[2].strip("\n").splitlines()
         assert len(body) <= 15
-        # The loop: bare ptest, one scoped path, the full gate.
+        # The loop: bare ptest after each edit, then the five commands.
+        assert "After each edit run bare `ptest` (no project name)" in text
         assert "`ptest`" in text
-        assert "`ptest <path>`" in text
+        assert "`ptest <folder>`" in text
+        assert "`ptest <file>`" in text
+        assert "`ptest --full <folder>`" in text
         assert "ptest --full" in text
+        # Old command-model wording is gone from the shipped skill.
+        assert "no baseline or coverage needed" not in text
+        assert "`ptest api` runs ALL of api" not in text
+        assert "--changed" not in text
+        assert "baseline" not in text.lower()
+        assert "coverage" not in text.lower()
         # The three never-rules.
         assert "Never invoke pytest, vitest, or npm test directly" in text
         assert "Never cd into a child" in text
         assert "Never rerun `ptest --full` without a change" in text
-        # Shared tables live only in the guide: no markdown tables here.
-        assert not any(line.lstrip().startswith("|") for line in body)
         assert "docs/ptest-agent.md" in text
         assert "output" in text.lower()
         assert "run tests only through `ptest` from the repository root" in text.lower()
@@ -808,6 +816,42 @@ def test_pre_green_managed_skill_upgrades_in_place(tmp_path):
 
     assert result.changed is True
     assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
+def test_five_command_managed_skill_upgrades_in_place(tmp_path):
+    """The 0.3.2 loop-hint skill upgrades to the five-command table.
+
+    Twin: repos initialised by ptest 0.3.2 hold exactly these bytes and
+    `ptest init` must upgrade them in place, not raise already-exists.
+    The user-edited half is ``test_edited_skill_conflicts_before_any_rules_write``.
+    """
+    from ptest.agent_rules import (_pre_five_command_provider_text,
+                                   _provider_text)
+
+    target = tmp_path / ".claude" / "skills" / "ptest"
+    target.mkdir(parents=True)
+    old = _pre_five_command_provider_text("claude")
+    assert b"`ptest api` runs ALL of api" in old
+    (target / "SKILL.md").write_bytes(old)
+
+    plan = preview(tmp_path, agents=("claude",))
+    assert "update .claude/skills/ptest/SKILL.md" in plan.actions
+
+    result = apply(tmp_path, agents=("claude",))
+
+    assert result.changed is True
+    assert (target / "SKILL.md").read_bytes() == _provider_text("claude")
+
+
+def test_previous_hashes_cover_five_command_guide():
+    """The 0.3.2 guide upgrades instead of conflicting.
+
+    ``5fd9544b...`` is the sha256 of the guide as shipped at 0.3.2
+    (last-green-run reference, baseline/coverage wording).
+    """
+    import ptest.agent_rules as rules_module
+
+    assert "5fd9544b2fbbb648cd32e51a820c57231dd2ff7e840314923e359724ca304aa5" in rules_module._PREVIOUS_GUIDE_SHA256S
 
 
 def test_every_shipped_skill_version_recognised_as_managed():

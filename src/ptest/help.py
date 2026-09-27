@@ -280,6 +280,15 @@ Syntax (ptest options precede scoped/native arguments):
   e.g. ptest --workers 2 tests/test_example.py  # only with verified isolation and adapter support
 
 Notes:
+  Mode is changed by default; --full switches to all; a path only
+  narrows where. `ptest <folder>` runs the changed tests under that
+  folder, printing `no changes under <folder>` when the change reaches
+  nothing there; `ptest <file>` or `ptest <file>::<test>` always runs
+  it. `ptest --full <folder>` runs every test under that folder (not
+  the integrated gate: no already-verified skip, no join); bare `ptest
+  --full` runs the integrated gate. Any path resolves to the nearest
+  `.ptest.toml` at or above it, so no root manifest is needed to route
+  a path (bare `ptest` still uses it to discover projects).
   Standalone v1 only: the scoped form passes runner arguments literally;
   everything from the first native token (or --) reaches the runner
   untouched, e.g. ptest -- -k slow. An explicit -- still preserves
@@ -287,12 +296,11 @@ Notes:
   the scope: ptest -v tests/a.py is ptest-verbose, while
   ptest tests/a.py -v leaves -v as runner data (pytest verbose only).
   From a monorepo root, scoped paths must be child-prefixed
-  paths selecting exactly one child (e.g. api/tests/test_example.py);
-  a bare child name runs that child's tests (e.g. ptest web).
+  paths selecting exactly one child
+  (e.g. <project>/tests/test_example.py).
   Arbitrary runner flags are rejected by root scope validation. --changed
   and --full are mutually exclusive; --changed rejects runner arguments
-  while root --full accepts only a whole child (e.g. --full web) and
-  otherwise names the scoped form. A bare ptest is the default loop:
+  while --full takes only folders. A bare ptest is the default loop:
   it runs the tests the change reaches (changes since the last green
   run: the verified commit plus the worktree state of the last passing
   run, no baseline or coverage needed). With no green run recorded it
@@ -335,14 +343,16 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    the directory holding the root .ptest.toml). Prefix scopes with the
    owning child; never copy or merge child configs.
    Standalone: ptest tests/test_example.py
-   Monorepo:   ptest api/tests/test_example.py
+   Monorepo:   ptest <project>/tests/test_example.py
    From a monorepo root, scoped paths must be child-prefixed scopes for
    exactly one child; arbitrary runner flags are rejected by root scope
    validation.
 
 3. Loop changed, then gate full:
      ptest                           # default loop after each edit (runs the tests the change reaches: changes since the last green run, no baseline or coverage needed)
-     ptest api/tests/test_example.py  # monorepo; standalone example in step 2
+     ptest <folder>                  # changed tests under that folder (monorepo: ptest <project>/tests)
+     ptest <file>                    # one file always runs (ptest <project>/tests/test_example.py)
+     ptest --full <folder>           # all tests under that folder (not the integrated gate)
      ptest --full                  # once, after the change is integrated
      ptest --full --again          # force already-verified inputs
    A scoped or changed green is iteration only; only --full completes the

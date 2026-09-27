@@ -266,8 +266,30 @@ def _pre_loop_hint_provider_text(provider: str) -> bytes:
     ).encode("utf-8")
 
 
+def _pre_five_command_provider_text(provider: str) -> bytes:
+    """Exact skill bytes before the five-command table.
+
+    The 0.3.2 loop hint named the last-green-run reference and claimed
+    ``ptest api`` runs all of a child. Recognized as previous managed
+    content, like `_previous_provider_text`, so it upgrades in place.
+    """
+    description = _PROVIDER_DESCRIPTIONS[provider]
+    return (
+        "---\n"
+        "name: ptest\n"
+        f"description: {description}\n"
+        "---\n"
+        "\n"
+        "# ptest skill\n"
+        "\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches, changed since the last green run, no baseline or coverage needed. `ptest api` runs ALL of api, `ptest <path>` one file; `ptest --full` once when you are done, before handoff.\n"
+        "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
+        "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
+    ).encode("utf-8")
+
+
 def _provider_text(provider: str) -> bytes:
-    """Current generated skill: front matter plus the test loop.
+    """Current generated skill: front matter plus the five-command table.
 
     Shared guidance (output meanings, exit codes, scopes, quality
     rules) lives only in `docs/ptest-agent.md`; the skill names just
@@ -283,7 +305,14 @@ def _provider_text(provider: str) -> bytes:
         "\n"
         "# ptest skill\n"
         "\n"
-        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches, changed since the last green run, no baseline or coverage needed. `ptest api` runs ALL of api, `ptest <path>` one file; `ptest --full` once when you are done, before handoff.\n"
+        "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches.\n"
+        "| Command | Runs |\n"
+        "|---|---|\n"
+        "| `ptest` | changed tests, whole repo |\n"
+        "| `ptest <folder>` | changed tests under that folder |\n"
+        "| `ptest <file>` | that file, always |\n"
+        "| `ptest --full <folder>` | all tests under that folder |\n"
+        "| `ptest --full` | integrated gate, once before handoff |\n"
         "Run tests only through `ptest` from the repository root. Never invoke pytest, vitest, or npm test directly. Never cd into a child directory. Never rerun `ptest --full` without a change.\n"
         "Read `docs/ptest-agent.md` (relative to the repository root) for what each ptest output means.\n"
     ).encode("utf-8")
@@ -336,7 +365,8 @@ def _provider_target(root: Path, provider: str) -> tuple[str, Path, bytes | None
                    _pre_rewrite_provider_text(provider),
                    _pre_graph_provider_text(provider),
                    _pre_green_provider_text(provider),
-                   _pre_loop_hint_provider_text(provider)):
+                   _pre_loop_hint_provider_text(provider),
+                   _pre_five_command_provider_text(provider)):
         return relative, target, current, "previous"
     raise _problem("already-exists", f"agent provider target {relative} already exists")
 
@@ -748,6 +778,9 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "f079e0d36f0526ab07b405c59b3204788f40c35bc1965e0985a7868cda7460d6",
     # e70de73 (0.3.1): guide before the bare-ptest/project-name clarification.
     "fb72facbfe7e1104f7f59158d4fe5c01d1a133d5a0ca85feefb868c944f8f0dc",
+    # 4e26676 (0.3.2): guide before the five-command table (last-green-run
+    # reference, per-child rows, baseline/coverage wording).
+    "5fd9544b2fbbb648cd32e51a820c57231dd2ff7e840314923e359724ca304aa5",
 })
 
 
@@ -761,6 +794,54 @@ def _guide_kind(existing: str | None, guide: bytes) -> str:
     if hashlib.sha256(raw).hexdigest() in _PREVIOUS_GUIDE_SHA256S:
         return "previous"
     raise _problem("already-exists", "docs/ptest-agent.md already exists and is not ptest-managed")
+
+
+def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
+    """Recognised older skill bytes for one provider (never the current)."""
+    return (
+        _legacy_provider_text(provider),
+        _previous_provider_text(provider),
+        _pre_gate_provider_text(provider),
+        _pre_changed_provider_text(provider),
+        _pre_rewrite_provider_text(provider),
+        _pre_graph_provider_text(provider),
+        _pre_green_provider_text(provider),
+        _pre_loop_hint_provider_text(provider),
+        _pre_five_command_provider_text(provider),
+    )
+
+
+def guidance_outdated(root: Path) -> bool:
+    """True when installed managed guidance is a recognised older version.
+
+    Read-only and fail-closed: missing files, current bytes, user edits,
+    and any I/O problem all report False (no warning). Old version bytes
+    are only recognised here, never written.
+    """
+    try:
+        root = Path(root)
+        try:
+            raw = files.read_regular(root, _GUIDE_PATH,
+                                     _MAX_FILE_BYTES + 1)
+        except (C.Problem, OSError, ValueError):
+            raw = None
+        if raw is not None and raw != _guide():
+            if hashlib.sha256(bytes(raw)).hexdigest() in \
+                    _PREVIOUS_GUIDE_SHA256S:
+                return True
+        for provider, relative in _PROVIDER_SKILLS.items():
+            try:
+                existing = files.read_regular(root, relative,
+                                              _MAX_FILE_BYTES + 1)
+            except (C.Problem, OSError, ValueError):
+                continue
+            if existing == _provider_text(provider):
+                continue
+            if bytes(existing) in _previous_skill_bytes(provider):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes, str]:

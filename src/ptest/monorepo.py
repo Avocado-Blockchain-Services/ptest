@@ -33,6 +33,30 @@ class RoutedChildRequest:
     scopes: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class FileScope:
+    """An explicitly named test file (or ``::`` node id): always runs."""
+
+    typed: str
+    local: str
+
+
+@dataclass(frozen=True, slots=True)
+class FolderScope:
+    """A directory scope: changed tests under it run (``local`` empty
+    means the whole child)."""
+
+    typed: str
+    local: str
+
+
+@dataclass(frozen=True, slots=True)
+class SplitScopes:
+    target: ChildTarget
+    files: tuple[FileScope, ...]
+    folders: tuple[FolderScope, ...]
+
+
 def _problem(message: str, code: str = "invalid-config") -> C.Problem:
     return C.Problem(code=code, message=message, phase="config", retryable=False)
 
@@ -278,8 +302,9 @@ def route_scopes(scopes: tuple[str, ...], children: tuple[ChildTarget, ...]) -> 
         try:
             parts = _safe_segments(scope)
         except C.Problem:
+            first = next(iter(by_name))
             raise _problem("test paths must be relative to the repository root, "
-                           'without ".." (for example "api/tests")') from None
+                           f'without ".." (for example "{first}/tests")') from None
         child_name = parts[0]
         if child_name not in by_name:
             raise _problem(f"name a test path inside a project: {where}, "
@@ -300,47 +325,56 @@ def route_scopes(scopes: tuple[str, ...], children: tuple[ChildTarget, ...]) -> 
     return RoutedChildRequest(target=by_name[selected], scopes=tuple(rebased))
 
 
-#: Rejection when --full names anything but one whole child project.
-FULL_SCOPE_MESSAGE = ("--full runs a whole project; to run part of it use "
-                      "`ptest <path>` (e.g. ptest api/tests/test_x.py)")
+def full_folder_example(children: tuple[ChildTarget, ...]) -> str:
+    """Example folder scope using the first declared child (never hard-coded)."""
+    first = children[0].declaration if children else "project"
+    return f"{first}/tests"
 
 
-def resolve_full_child(scopes: tuple[str, ...],
-                       children: tuple[ChildTarget, ...]) -> ChildTarget:
-    """Map ``ptest --full <scope>...`` to the one child whose full gate runs.
+def full_scope_message(children: tuple[ChildTarget, ...],
+                       *, typed: str | None = None) -> str:
+    """Plain-words rejection for a ``--full`` scope that is not a folder.
 
-    A scope selects a whole child when it is the bare declared name (with
-    or without a trailing ``/``) or exactly that child's configured test
-    root (``api/tests`` when ``api`` roots at ``tests``). Anything else --
-    a file, a subdirectory, an unknown name, a runner flag -- is rejected
-    in plain words, as are whole scopes from more than one child.
+    A named file (or node id) echoes the user's own scope so the line
+    names the real project; anything else shows the first declared child.
+    """
+    if typed is not None:
+        return ("--full takes a folder, not a file; "
+                f"`ptest {typed}` runs it")
+    return ("--full runs all tests under one folder "
+            f"(e.g. `ptest --full {full_folder_example(children)}`); "
+            "bare `ptest --full` runs the integrated gate")
+
+
+def split_scopes(scopes: tuple[str, ...],
+                 children: tuple[ChildTarget, ...]) -> SplitScopes:
+    """Route scopes to one child, then split files from folders.
+
+    Routing (unknown children, cross-child scopes, unsafe paths) raises
+    the same problems as :func:`route_scopes`. A bare child name is a
+    folder covering the whole child; a ``::`` node id is always a file;
+    otherwise an existing directory under the child is a folder and
+    anything else is a file the user named explicitly.
     """
     if not scopes:
         raise _problem("a monorepo scope is required")
-    by_name = {child.declaration: child for child in children}
-    # Declarations are validated manifest names, safe to show.
-    where = " or ".join(f'"{name}/..."' for name in by_name)
-    selected: str | None = None
+    routed = route_scopes(scopes, children)
+    target = routed.target
+    files: list[FileScope] = []
+    folders: list[FolderScope] = []
     for scope in scopes:
-        scope = _normalize_scope(scope)
-        try:
-            parts = _safe_segments(scope)
-        except C.Problem:
-            raise _problem(FULL_SCOPE_MESSAGE) from None
-        child_name = parts[0]
-        child = by_name.get(child_name)
-        if child is None:
-            raise _problem(FULL_SCOPE_MESSAGE)
-        if len(parts) > 1:
-            roots = _child_test_roots(child)
-            if len(roots) != 1 or "/".join(parts[1:]) != roots[0]:
-                raise _problem(FULL_SCOPE_MESSAGE)
-        if selected is not None and selected != child_name:
-            raise _problem("run one project at a time: all paths must be "
-                           f"inside the same project ({where})")
-        selected = child_name
-    assert selected is not None
-    return by_name[selected]
+        typed = _normalize_scope(scope)
+        parts = _safe_segments(typed)
+        if len(parts) == 1:
+            folders.append(FolderScope(typed=typed, local=""))
+            continue
+        local = "/".join(parts[1:])
+        if "::" in local or not (target.directory / local).is_dir():
+            files.append(FileScope(typed=typed, local=local))
+        else:
+            folders.append(FolderScope(typed=typed, local=local))
+    return SplitScopes(target=target, files=tuple(files),
+                       folders=tuple(folders))
 
 
 def execute_full(children: tuple[ChildTarget, ...], execute_child: Callable[[ChildTarget], int]) -> int:

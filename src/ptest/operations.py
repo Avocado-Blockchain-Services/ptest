@@ -2263,6 +2263,9 @@ def _baseline_note(*, plan: C.Plan, advanced: bool,
     """
     if not advanced or plan.execution != "full":
         return None
+    if getattr(result, "signal", None) == signal.SIGINT:
+        # A Ctrl-C run prints only its cancelled end line.
+        return None
     return progress.format_baseline_note(result, color=color)
 
 
@@ -2279,15 +2282,20 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         progress.emit(progress.format_setup_run_done(
             elapsed_s, color=sys.stderr.isatty()), quiet=request.quiet)
         return
+    # A Ctrl-C run reads as cancelled whatever the guard recorded: the
+    # user stopped it, so the verdict, hint, and exit line match.
+    status = (C.Status.CANCELLED
+              if getattr(result, "signal", None) == signal.SIGINT
+              else result.status)
     next_hint = (progress.next_step(
-        result.status, request.mode is C.Mode.SCOPED)
+        status, request.mode is C.Mode.SCOPED)
         if request.next_hint else None)
     hint = (next_hint is None
-            and result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
-                                  C.Status.NOT_RUN)
+            and status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                           C.Status.NOT_RUN)
             and progress.claim_hint())
     progress.emit(progress.format_end(
-        result.status, counts=result.counts,
+        status, counts=result.counts,
         duration_s=elapsed_s, exit_code=result.exit_code,
         hint=hint, color=sys.stderr.isatty(),
         next_step=next_hint), quiet=request.quiet)

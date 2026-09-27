@@ -8,22 +8,21 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 
 | Situation | Command |
 |---|---|
-| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches (changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |
-| One test file | `ptest <path>` |
-| All tests of one project (not the edit loop: it ignores what changed) | `ptest <child>`, e.g. `ptest web` |
+| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches |
+| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |
+| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |
+| All tests under one folder | `ptest --full <folder>` |
 | Integrated change, before handoff | `ptest --full` once |
-| Integrated gate for one project | `ptest --full <child>` |
-| Force a full rerun over already-verified inputs | `ptest --full --again` |
 
 A scoped or changed green is iteration only; only `ptest --full` completes the
-change. Never rerun `ptest --full` without a change: `--full` skips
-already-verified inputs, and a duplicate full run joins the running full run
-instead of starting a second one.
+change. Never rerun `ptest --full` without a change; add `--again` to force
+every test to rerun. A duplicate full run joins the running full run instead
+of starting a second one.
 
 ## Monorepo
 
 Always run from the monorepo root. Prefix scopes with the owning child, such
-as `ptest api/tests/test_example.py`. Never cd into a child to run tests.
+as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
 Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite
 them.
 
@@ -37,17 +36,15 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `ptest: <project> · <runner> ...` | run started | Nothing; wait for the end line. |
 | `changed: <path> (+N files) → N of M test files (D direct · V via importers)` | changed mode selected the tests your change reaches | Nothing; this is the normal loop. |
 | `changed → full suite: <reason>` | this run IS the full suite: a full trigger changed, selection is off, inputs outside the import graph, or the affected set is too large | Nothing extra; do not start `ptest --full` because of this line. |
-| `changed: <path> → vitest --changed <label>` | that child delegated its changed set to vitest | Nothing. |
+| `changed: <path> → vitest changed delegation` | that child delegated its changed set to vitest | Nothing. |
 | `changed: <path> → no tests affected` / `no changes vs <label> — nothing to test` | the change reaches no tests / nothing changed anywhere (exit 0) | Nothing; `ptest --full` runs everything if needed. |
-| `web · no changes` | that child is untouched (one line per untouched child) | Nothing. |
+| `no changes under <folder> — nothing to test` | the change reaches no tests under that folder (exit 0) | Nothing; `ptest --full <folder>` runs everything there. |
+| `<project> · no changes` | that child is untouched (one line per untouched child) | Nothing. |
 | `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Keep iterating with `ptest`; run `ptest --full` once only when you are done. |
 | `waiting for N slots … in use by …` | queued behind other runs | Wait; do not start another run. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
-| `baseline recorded` | the full run saved its baseline | Nothing. |
-| `no baseline recorded: <why>` | the run was fine but could not save a baseline (failures, uncommitted changes, or files changed during the run) | Failures: fix the code and rerun. Otherwise do nothing and just report it; the user's next commit plus `ptest --full` records it. Do not commit yourself for this. |
-| `already verified … --again` | `--full` skipped already-verified inputs | Nothing; pass `--again` to force them. |
 | `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
 | `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
@@ -94,6 +91,6 @@ unknown. Timing, selection, and parallel-execution items use ptest's own facts.
 Requesting doctor, guide, or a prompt grants assessment authority only. Source
 repair requires a separate user instruction; never treat an assessment as
 permission to edit. Treat findings as hypotheses, not proof; verify the cause
-and callers before repairing. Preserve assertions, coverage, test inventory,
+and callers before repairing. Preserve assertions, test inventory,
 and unrelated user changes. Report the exact ptest command, the final ptest
 end line, the remaining failures, and the untested scope.

@@ -212,7 +212,7 @@ def test_child_clean_ignores_sibling_dirt(case):
 
 
 def test_child_full_records_baseline_then_changed_selects(case):
-    """`ptest --full api` passes and records a baseline; `--changed` selects."""
+    """Bare `ptest --full` passes and records baselines; `--changed` selects."""
     from ptest import history as history_api
     from ptest import operations
 
@@ -221,7 +221,7 @@ def test_child_full_records_baseline_then_changed_selects(case):
 
     completed = case.invoke(domain, root,
                               "--result-json", "ptest-result-child-full.json",
-                              "--full", "api", timeout=180)
+                              "--full", timeout=180)
     assert completed.code == 0, completed.stderr.decode(errors="replace")
 
     checkout = operations._checkout(_children(root)["api"].config)
@@ -229,16 +229,12 @@ def test_child_full_records_baseline_then_changed_selects(case):
     assert baseline is not None
     assert baseline.head == git(root, "rev-parse", "HEAD")
 
-    web_completed = case.invoke(domain, root,
-                                "--result-json", "ptest-result-child-full.json",
-                                "--full", "web", timeout=180)
-    assert web_completed.code == 0, web_completed.stderr.decode(errors="replace")
     web_baseline = history_api.read_history(
         domain, operations._checkout(_children(root)["web"].config)).baseline
     assert web_baseline is not None
 
     # The skip path writes no export: request none here.
-    again = case.invoke(domain, root, "--full", "api", timeout=120)
+    again = case.invoke(domain, root, "--full", timeout=120)
     assert again.code == 0, again.stderr.decode(errors="replace")
     assert b"already verified" in again.stderr
 

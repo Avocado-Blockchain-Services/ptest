@@ -445,19 +445,31 @@ def test_repository_guide_default_loop_is_changed():
     guide = files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
     assert len(guide.splitlines()) <= 100
-    assert "| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches (changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |" in guide
+    assert "| After each edit | bare `ptest` with NO project name: it runs only the tests your change reaches |" in guide
+    assert "| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |" in guide
+    assert "| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |" in guide
+    assert "| All tests under one folder | `ptest --full <folder>` |" in guide
     assert "| Integrated change, before handoff | `ptest --full` once |" in guide
-    assert "no baseline or coverage needed" in guide
-    assert "baseline recorded" in guide
+    lowered = guide.lower()
+    assert "no baseline or coverage needed" not in lowered
+    assert "baseline" not in lowered
+    assert "coverage" not in lowered
+    assert "--changed" not in guide
+    assert "--changed-setup" not in guide
+    assert "automatic" not in lowered
+    assert "api/" not in guide
 
 
 def test_skill_template_defaults_to_changed():
     import ptest.agent_rules as rules_module
 
     text = rules_module._provider_text("claude").decode("utf-8")
-    assert "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches, changed since the last green run, no baseline or coverage needed." in text
-    assert "`ptest api` runs ALL of api" in text
-    assert "`ptest --full` once when you are done, before handoff" in text
+    assert "After each edit run bare `ptest` (no project name): it runs only the tests your change reaches." in text
+    assert "| `ptest` | changed tests, whole repo |" in text
+    assert "| `ptest <folder>` | changed tests under that folder |" in text
+    assert "| `ptest <file>` | that file, always |" in text
+    assert "| `ptest --full <folder>` | all tests under that folder |" in text
+    assert "| `ptest --full` | integrated gate, once before handoff |" in text
     assert "docs/ptest-agent.md" in text
 
 

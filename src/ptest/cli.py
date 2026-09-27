@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import sys
 import time
@@ -2704,9 +2705,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                         timeout_s=parsed.timeout_s,
                     ),
                 )
-                for reason in result.reasons:
-                    print(render.terminal_text(f"{reason.code}: {reason.message}"),
-                          file=sys.stderr)
+                _emit_reasons(result)
                 return result.exit_code
             if parsed.offline:
                 _doctor_static_output(parsed, resolution, domain)
@@ -2887,6 +2886,109 @@ def _is_test_file_token(token: str) -> bool:
             or base.endswith("_test.py"))
 
 
+def _emit_reasons(result) -> None:
+    """Print one result's reason lines, unless SIGINT cancelled the run.
+
+    A Ctrl-C run prints only its ``ptest: cancelled ...`` end line; the
+    protocol-mismatch / state-unavailable follow-ons are consequences of
+    the cancellation. Genuine failures keep their lines.
+    """
+    if getattr(result, "signal", None) == signal.SIGINT:
+        return
+    for reason in result.reasons:
+        print(render.terminal_text(f"{reason.code}: {reason.message}"),
+              file=sys.stderr)
+
+
+def _warn_stale_guidance(root: Path) -> None:
+    """Nudge once per run when managed guidance is a recognised older version.
+
+    Read-only: never writes, and stays silent on current, user-edited, or
+    missing guidance. Failures never affect the run.
+    """
+    try:
+        from . import agent_rules
+        stale = agent_rules.guidance_outdated(root)
+    except Exception:
+        return
+    if stale:
+        progress.emit("ptest: agent guidance is outdated — run ptest init "
+                      "to update", quiet=False)
+
+
+def _normalize_scope_text(scope: str) -> str:
+    """Strip ``./`` prefixes and a trailing ``/`` (shell completion)."""
+    while scope.startswith("./"):
+        scope = scope[2:]
+    return scope.rstrip("/")
+
+
+def _scope_parts(scope: str) -> tuple[str, ...] | None:
+    """Safe relative segments for a path scope; None when not a path.
+
+    Runner flags (a leading ``-``) are never paths: they keep the legacy
+    literal handling instead of nearest-config routing.
+    """
+    from . import monorepo
+
+    typed = _normalize_scope_text(scope)
+    if not typed or typed.startswith("-"):
+        return None
+    try:
+        return monorepo._safe_segments(typed)
+    except C.Problem:
+        return None
+
+
+def _split_standalone_scopes(scopes: tuple[str, ...], root: Path):
+    """Split standalone scopes into always-run files and changed folders.
+
+    A ``::`` node id is always a file; otherwise an existing directory is
+    a folder and anything else is a file the user named explicitly.
+    Returns ``(files, folders)`` of ``(typed, local)`` pairs.
+    """
+    from . import monorepo
+
+    files: list[tuple[str, str]] = []
+    folders: list[tuple[str, str]] = []
+    for scope in scopes:
+        typed = _normalize_scope_text(scope)
+        try:
+            parts = monorepo._safe_segments(typed)
+        except C.Problem:
+            raise _problem(
+                "invalid-config",
+                "test paths must be relative to the repository root, "
+                'without ".." (for example "tests/test_x.py")') from None
+        local = "/".join(parts)
+        if "::" in local or not (Path(root) / local).is_dir():
+            files.append((typed, local))
+        else:
+            folders.append((typed, local))
+    return files, folders
+
+
+def _folder_note(typeds: tuple[str, ...], selected: int, total: int) -> str:
+    """Start-line note for a folder-changed run: scope plus file counts."""
+    return f"{' '.join(typeds)} → {selected} of {total} test files"
+
+
+def _run_scoped_request(parsed: ParsedArgs, argv: tuple[str, ...], *,
+                        note: str | None = None,
+                        display: tuple[str, ...] | None = None,
+                        next_hint: bool = False) -> C.RunRequest:
+    """Build one literal scoped request (an explicitly narrowed run)."""
+    return C.RunRequest(
+        mode=C.Mode.SCOPED, argv=argv,
+        workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
+        timeout_s=parsed.timeout_s,
+        no_setup=parsed.no_setup,
+        result_path=parsed.result_path,
+        fixture_domain=parsed.fixture_domain,
+        verbose=parsed.verbose, quiet=parsed.quiet,
+        changed_note=note, display_argv=display, next_hint=next_hint)
+
+
 def _note_run(domain: C.DomainPaths, root: Path, project: str,
               request: C.RunRequest, result) -> None:
     """Record the green point on pass, failed test files on failure.
@@ -2968,10 +3070,258 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
         return 0
     result = operations.execute(domain, resolution.config, request)
     _note_run(domain, resolution.root, "", request, result)
-    for reason in result.reasons:
-        print(render.terminal_text(f"{reason.code}: {reason.message}"),
-              file=sys.stderr)
+    _emit_reasons(result)
     return result.exit_code
+
+
+#: Rejection when --again names a scope: it reruns the whole gate only.
+_AGAIN_WITH_SCOPE = ("--again reruns the whole gate, so it takes no path "
+                     "(use bare `ptest --full --again`)")
+
+
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether a child-relative file sits under any folder scope."""
+    return any(path == folder or folder == ""
+               or path.startswith(folder + "/") for folder in folders)
+
+
+def _all_under_note(typeds: tuple[str, ...]) -> str:
+    """Start-line note for a --full folder run: every test under it."""
+    shown = " ".join(render.terminal_text(item) for item in typeds)
+    return f"all tests under {shown}"
+
+
+def _run_folder_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                         domain: C.DomainPaths, split) -> int:
+    """Changed-mode run for folder scopes (plus always-run files)."""
+    from . import monorepo
+
+    target = split.target
+    impact_api, top, base, repo_changed = _impact_base_and_changed(
+        parsed, resolution.root)
+    child_base, child_changed, reference, _green = _consult_reference(
+        parsed, domain, top, target.declaration, base, repo_changed)
+    impact = impact_api.plan(top, target.directory, target.config,
+                             child_changed)
+    _emit_ignored_count(parsed, impact)
+    always = [item.local for item in split.files]
+    folders = tuple(item.local for item in split.folders)
+    typeds = tuple(item.typed for item in split.folders)
+    if impact.kind == "vitest":
+        argv = (("--changed", child_base.sha or "HEAD")
+                + tuple(local for local in folders if local)
+                + tuple(always))
+        note = (f"{' '.join(render.terminal_text(item) for item in typeds)}"
+                f" → vitest --changed "
+                f"{render.terminal_text(child_base.label)}")
+        request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
+        result = operations.execute(domain, target.config, request)
+        _note_run(domain, resolution.root, target.declaration, request,
+                  result)
+        _emit_reasons(result)
+        return result.exit_code
+    if impact.kind == "full":
+        argv = []
+        for local in folders:
+            if local:
+                argv.append(local)
+            else:
+                argv.extend(monorepo._child_test_roots(target))
+        argv.extend(item for item in always if item not in argv)
+        if argv:
+            request = _run_scoped_request(
+                parsed, tuple(argv), note=_all_under_note(typeds),
+                next_hint=True)
+        else:
+            request = _impact_run_request(parsed, impact, child_base,
+                                          next_hint=True, reference=reference)
+        result = operations.execute(domain, target.config, request)
+        _note_run(domain, resolution.root, target.declaration, request,
+                  result)
+        _emit_reasons(result)
+        return result.exit_code
+    if impact.kind == "selected":
+        under = [path for path in impact.files
+                 if _under_any(path, folders)]
+        selected = list(under) + [item for item in always
+                                  if item not in under]
+    else:
+        selected = list(always)
+    if not selected:
+        project = render.terminal_text(target.declaration)
+        for item in split.folders:
+            progress.emit(progress.format_no_changes_under(
+                project, render.terminal_text(item.typed),
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        return 0
+    request = _run_scoped_request(
+        parsed, tuple(selected),
+        note=_folder_note(typeds, len(selected), impact.total),
+        next_hint=True)
+    result = operations.execute(domain, target.config, request)
+    _note_run(domain, resolution.root, target.declaration, request, result)
+    _emit_reasons(result)
+    return result.exit_code
+
+
+def _run_full_folder_monorepo(parsed: ParsedArgs,
+                              resolution: C.ConfigResolution,
+                              domain: C.DomainPaths, split) -> int:
+    """``ptest --full <folder>``: every test under the folders, no gate."""
+    from . import monorepo
+
+    argv: list[str] = []
+    for item in split.folders:
+        if item.local:
+            argv.append(item.local)
+        else:
+            argv.extend(monorepo._child_test_roots(split.target))
+    request = _run_scoped_request(
+        parsed, tuple(argv),
+        note=_all_under_note(tuple(item.typed for item in split.folders)),
+        next_hint=True)
+    result = operations.execute(domain, split.target.config, request)
+    _note_run(domain, resolution.root, split.target.declaration, request,
+              result)
+    _emit_reasons(result)
+    return result.exit_code
+
+
+def _run_folder_standalone(parsed: ParsedArgs,
+                           resolution: C.ConfigResolution,
+                           domain: C.DomainPaths, files, folders) -> int:
+    """Changed-mode run for standalone folder scopes (plus files)."""
+    assert resolution.config is not None
+    impact_api, top, base, repo_changed = _impact_base_and_changed(
+        parsed, resolution.root)
+    base, repo_changed, reference, _green = _consult_reference(
+        parsed, domain, top, "", base, repo_changed)
+    impact = impact_api.plan(top, resolution.root, resolution.config,
+                             repo_changed)
+    _emit_ignored_count(parsed, impact)
+    always = [local for _, local in files]
+    under_roots = tuple(local for _, local in folders)
+    typeds = tuple(typed for typed, _ in folders)
+    if impact.kind == "vitest":
+        argv = (("--changed", base.sha or "HEAD")
+                + under_roots + tuple(always))
+        note = (f"{' '.join(render.terminal_text(item) for item in typeds)}"
+                f" → vitest --changed {render.terminal_text(base.label)}")
+        request = _run_scoped_request(parsed, argv, note=note, next_hint=True)
+        result = operations.execute(domain, resolution.config, request)
+        _note_run(domain, resolution.root, "", request, result)
+        _emit_reasons(result)
+        return result.exit_code
+    if impact.kind == "full":
+        argv = list(under_roots)
+        argv.extend(item for item in always if item not in argv)
+        if argv:
+            request = _run_scoped_request(
+                parsed, tuple(argv), note=_all_under_note(typeds),
+                next_hint=True)
+        else:
+            request = _impact_run_request(parsed, impact, base,
+                                          next_hint=True, reference=reference)
+        result = operations.execute(domain, resolution.config, request)
+        _note_run(domain, resolution.root, "", request, result)
+        _emit_reasons(result)
+        return result.exit_code
+    if impact.kind == "selected":
+        under = [path for path in impact.files
+                 if _under_any(path, under_roots)]
+        selected = list(under) + [item for item in always
+                                  if item not in under]
+    else:
+        selected = list(always)
+    if not selected:
+        project = render.terminal_text(resolution.root.name)
+        for typed, _ in folders:
+            progress.emit(progress.format_no_changes_under(
+                project, render.terminal_text(typed),
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        return 0
+    request = _run_scoped_request(
+        parsed, tuple(selected),
+        note=_folder_note(typeds, len(selected), impact.total),
+        next_hint=True)
+    result = operations.execute(domain, resolution.config, request)
+    _note_run(domain, resolution.root, "", request, result)
+    _emit_reasons(result)
+    return result.exit_code
+
+
+def _run_full_folder_standalone(parsed: ParsedArgs,
+                                resolution: C.ConfigResolution,
+                                domain: C.DomainPaths, folders) -> int:
+    """``ptest --full <folder>`` outside a monorepo: everything there."""
+    assert resolution.config is not None
+    argv = tuple(local for _, local in folders)
+    typeds = tuple(typed for typed, _ in folders)
+    request = _run_scoped_request(parsed, argv,
+                                  note=_all_under_note(typeds),
+                                  next_hint=True)
+    result = operations.execute(domain, resolution.config, request)
+    _note_run(domain, resolution.root, "", request, result)
+    _emit_reasons(result)
+    return result.exit_code
+
+
+def _nearest_config_dir(parts: tuple[str, ...], cwd: Path) -> Path | None:
+    """Nearest directory at or above a scope holding a regular .ptest.toml."""
+    start = Path(cwd, *parts)
+    cursor = start if start.is_dir() else start.parent
+    top = Path(cwd)
+    while True:
+        candidate = cursor / ".ptest.toml"
+        try:
+            stamp = os.lstat(candidate)
+        except FileNotFoundError:
+            stamp = None
+        except OSError:
+            stamp = None
+        if stamp is not None and stat.S_ISREG(stamp.st_mode) \
+                and not stat.S_ISLNK(stamp.st_mode):
+            return cursor
+        if cursor == top:
+            return None
+        cursor = cursor.parent
+
+
+def _reroute_nearest(parsed: ParsedArgs, cwd: Path):
+    """Route path scopes through the nearest config when cwd has none.
+
+    Returns None when a scope is not a path (the caller keeps its legacy
+    handling), ``("missing", typed)`` when no config sits above a path,
+    else ``(resolution, rebased scopes)`` rooted at the nearest config.
+    """
+    from . import config as config_api
+
+    narrowed: list[tuple[str, tuple[str, ...]]] = []
+    for scope in parsed.runner_argv:
+        parts = _scope_parts(scope)
+        if parts is None:
+            return None
+        narrowed.append((_normalize_scope_text(scope), parts))
+    hits: list[tuple[str, tuple[str, ...], Path]] = []
+    for typed, parts in narrowed:
+        root = _nearest_config_dir(parts, cwd)
+        if root is None:
+            return ("missing", typed)
+        hits.append((typed, parts, root))
+    roots = {os.fspath(found) for _, _, found in hits}
+    if len(roots) != 1:
+        raise _problem("invalid-config", "run one project at a time: all "
+                                        "paths must be inside the same project")
+    root = hits[0][2]
+    resolution = config_api.resolve_config(root)
+    if resolution.config is None and resolution.monorepo is None:
+        raise resolution.problem or _problem(
+            "initialization-required", "project configuration is required")
+    rebased: list[str] = []
+    for typed, parts, found in hits:
+        text = Path(cwd, *parts).relative_to(found).as_posix()
+        rebased.append("" if text == "." else text)
+    return resolution, tuple(rebased)
 
 
 def _run_monorepo_automatic(parsed: ParsedArgs, children,
@@ -2984,6 +3334,7 @@ def _run_monorepo_automatic(parsed: ParsedArgs, children,
     started = time.monotonic()
     outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
     first_failure = 0
+    cancelled = False
     for child in children:
         result = operations.execute(
             domain, child.config,
@@ -2998,14 +3349,15 @@ def _run_monorepo_automatic(parsed: ParsedArgs, children,
                 probe=parsed.probe,
                 verbose=parsed.verbose, quiet=parsed.quiet),
         )
-        for reason in result.reasons:
-            print(render.terminal_text(f"{reason.code}: {reason.message}"),
-                  file=sys.stderr)
+        _emit_reasons(result)
+        if getattr(result, "signal", None) == signal.SIGINT:
+            cancelled = True
         outcomes.append((result.exit_code, result.status, result.counts))
         if result.exit_code and not first_failure:
             first_failure = result.exit_code
-    _emit_monorepo_total(outcomes, started, first_failure,
-                         quiet=parsed.quiet)
+    if not cancelled:
+        _emit_monorepo_total(outcomes, started, first_failure,
+                             quiet=parsed.quiet)
     return first_failure
 
 
@@ -3047,6 +3399,7 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
     first_failure = 0
     narrowed = False
+    cancelled = False
     for child, child_base, impact, reference in planned:
         _emit_ignored_count(parsed, impact)
         request = _impact_run_request(parsed, impact, child_base,
@@ -3065,16 +3418,17 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         result = operations.execute(domain, child.config, request)
         _note_run(domain, resolution.root, child.declaration, request,
                   result)
-        for reason in result.reasons:
-            print(render.terminal_text(f"{reason.code}: {reason.message}"),
-                  file=sys.stderr)
+        _emit_reasons(result)
+        if getattr(result, "signal", None) == signal.SIGINT:
+            cancelled = True
         outcomes.append((result.exit_code, result.status, result.counts))
         if result.exit_code and not first_failure:
             first_failure = result.exit_code
     worst = _worst_status([status for _, status, _ in outcomes])
-    _emit_monorepo_total(outcomes, started, first_failure,
-                         quiet=parsed.quiet,
-                         next_step=progress.next_step(worst, narrowed))
+    if not cancelled:
+        _emit_monorepo_total(outcomes, started, first_failure,
+                             quiet=parsed.quiet,
+                             next_step=progress.next_step(worst, narrowed))
     return first_failure
 
 
@@ -3100,7 +3454,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
         resolution = config_api.resolve_config(Path.cwd())
+        if (resolution.monorepo is None and resolution.config is None
+                and parsed.runner_argv and resolution.problem is not None
+                and resolution.problem.code == "initialization-required"):
+            # No root manifest is required to route a path: it resolves
+            # to the nearest config at or above it. Bare `ptest` still
+            # needs the root manifest to discover projects.
+            rerouted = _reroute_nearest(parsed, Path.cwd())
+            if isinstance(rerouted, tuple) and rerouted[0] == "missing":
+                print(render.terminal_text(
+                    f"ptest: no ptest project for {rerouted[1]}"
+                    " — run ptest init there"), file=sys.stderr)
+                return 2
+            if rerouted is not None:
+                resolution, rebased = rerouted
+                kept = tuple(scope for scope in rebased if scope != "")
+                parsed = replace(parsed, runner_argv=kept)
+                if not kept and not parsed.full:
+                    parsed = replace(parsed, mode=C.Mode.AUTOMATIC)
         progress.reset()
+        _warn_stale_guidance(resolution.root)
         if resolution.monorepo is not None:
             from . import monorepo
             domain = platform.domain_paths(parsed.fixture_domain)
@@ -3119,50 +3492,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                         verbose=parsed.verbose, quiet=parsed.quiet,
                         again=parsed.again)
 
+                cancelled: list[bool] = []
+
                 def run_full(child):
                     request = child_full_request()
                     result = operations.execute(
                         domain, child.config, request)
                     _note_run(domain, resolution.root, child.declaration,
                               request, result)
-                    for reason in result.reasons:
-                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+                    _emit_reasons(result)
+                    if getattr(result, "signal", None) == signal.SIGINT:
+                        cancelled.append(True)
                     child_outcomes.append(
                         (result.exit_code, result.status, result.counts))
                     return result.exit_code
                 child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
                 if parsed.runner_argv:
-                    # `ptest --full <child>` runs that one child's full
-                    # gate exactly as the per-child part of root --full
-                    # (already-verified, --again and join included); the
-                    # integrated total line stays with plain --full.
-                    target = monorepo.resolve_full_child(
+                    # `ptest --full <folder>` runs every test under those
+                    # folders: not the integrated gate (no
+                    # already-verified skip, no join).
+                    if parsed.again:
+                        raise _problem("invalid-config", _AGAIN_WITH_SCOPE)
+                    split = monorepo.split_scopes(
                         parsed.runner_argv, children)
-                    single_request = child_full_request()
-                    result = operations.execute(
-                        domain, target.config, single_request)
-                    _note_run(domain, resolution.root, target.declaration,
-                              single_request, result)
-                    for reason in result.reasons:
-                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
-                    return result.exit_code
+                    if split.files:
+                        raise _problem(
+                            "invalid-config",
+                            monorepo.full_scope_message(
+                                children, typed=split.files[0].typed))
+                    return _run_full_folder_monorepo(
+                        parsed, resolution, domain, split)
                 started = time.monotonic()
                 code = monorepo.execute_full(children, run_full)
-                _emit_monorepo_total(child_outcomes, started, code,
-                                     quiet=parsed.quiet)
+                if not cancelled:
+                    _emit_monorepo_total(child_outcomes, started, code,
+                                         quiet=parsed.quiet)
                 return code
             # Bare `ptest` at a monorepo root is the cheap loop: no scope
             # and no mode flag selects the same changed path as --changed.
-            # (Both arrive here as AUTOMATIC with no runner tail; scoped
-            # paths arrive as SCOPED and keep their route below.)
+            # (Both arrive here as AUTOMATIC with no runner tail.)
             if parsed.changed or parsed.mode is C.Mode.AUTOMATIC:
                 if parsed.shadow or parsed.probe is not None:
                     return _run_monorepo_automatic(parsed, children, domain)
                 return _run_impact_monorepo(parsed, resolution, children,
                                             domain)
-            routed = monorepo.route_scopes(parsed.runner_argv, children)
+            # A path only narrows WHERE: files (and node ids) always run,
+            # folders run the changed tests under them.
+            split = monorepo.split_scopes(parsed.runner_argv, children)
+            if split.folders:
+                return _run_folder_monorepo(parsed, resolution, domain,
+                                            split)
             scoped_request = C.RunRequest(
-                mode=C.Mode.SCOPED, argv=routed.scopes,
+                mode=C.Mode.SCOPED,
+                argv=tuple(item.local for item in split.files),
                 workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
                 timeout_s=parsed.timeout_s,
                 no_setup=parsed.no_setup,
@@ -3171,11 +3553,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verbose=parsed.verbose, quiet=parsed.quiet,
                 display_argv=parsed.runner_argv)
             result = operations.execute(
-                domain, routed.target.config, scoped_request)
-            _note_run(domain, resolution.root, routed.target.declaration,
+                domain, split.target.config, scoped_request)
+            _note_run(domain, resolution.root, split.target.declaration,
                       scoped_request, result)
-            for reason in result.reasons:
-                print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+            _emit_reasons(result)
             return result.exit_code
         if resolution.config is None:
             # An explicit runner suffix has already crossed ptest's closed
@@ -3193,15 +3574,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "initialization-required", "project configuration is required",
             )
         if parsed.full and parsed.runner_argv:
-            # A standalone full gate takes no scope; narrowing belongs
-            # to a scoped run. The monorepo branch above routes whole
-            # children before reaching here.
+            # `ptest --full <folder>` runs every test under those
+            # folders: not the integrated gate (no already-verified
+            # skip, no join). A named file is rejected in plain words.
+            if parsed.again:
+                raise _problem("invalid-config", _AGAIN_WITH_SCOPE)
             from . import monorepo
-            raise _problem("invalid-config", monorepo.FULL_SCOPE_MESSAGE)
+            scoped_files, scoped_folders = _split_standalone_scopes(
+                parsed.runner_argv, resolution.root)
+            if scoped_files:
+                raise _problem(
+                    "invalid-config",
+                    monorepo.full_scope_message(
+                        (), typed=scoped_files[0][0]))
+            standalone_domain = platform.domain_paths(parsed.fixture_domain)
+            return _run_full_folder_standalone(
+                parsed, resolution, standalone_domain, scoped_folders)
         domain = platform.domain_paths(parsed.fixture_domain)
         if (parsed.mode is C.Mode.AUTOMATIC and not parsed.shadow
                 and parsed.probe is None):
             return _run_impact_standalone(parsed, resolution, domain)
+        if parsed.mode is C.Mode.SCOPED:
+            scoped_files, scoped_folders = _split_standalone_scopes(
+                parsed.runner_argv, resolution.root)
+            if scoped_folders:
+                return _run_folder_standalone(
+                    parsed, resolution, domain, scoped_files, scoped_folders)
         request = C.RunRequest(
             mode=parsed.mode,
             argv=parsed.runner_argv,
@@ -3220,8 +3618,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         result = operations.execute(domain, resolution.config, request)
         _note_run(domain, resolution.root, "", request, result)
-        for reason in result.reasons:
-            print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
+        _emit_reasons(result)
         return result.exit_code
     except _UnknownCommand as problem:
         print(render.terminal_text(f"ptest: {problem.message}"), file=sys.stderr)

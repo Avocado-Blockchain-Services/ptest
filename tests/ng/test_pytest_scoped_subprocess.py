@@ -1301,7 +1301,10 @@ def test_real_source_change_retains_reason_without_source_valid_claim(case):
     (root / "tracked-input.txt").write_text("original")
     (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n")
     support.init_git_repo(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
+    # A named file always runs, even with nothing changed: the folder
+    # spelling would (correctly) report no changes under tests here.
+    result = case.invoke(domain, root, "--", "tests/test_native.py",
+                         timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == 0
     assert any(reason["code"] == "changed-during-run" for reason in data["reasons"])

@@ -38,7 +38,7 @@ def test_root_scope_routes_to_one_child_and_rebases_before_execution(tmp_path, m
     assert calls[0][2].argv == ("tests/unit",)
 
 
-def test_bare_child_name_dispatches_scoped_run_over_child_test_roots(
+def test_bare_child_name_runs_changed_tests_for_that_child(
         tmp_path, monkeypatch, monorepo):
     monorepo(
         {"web": {"kind": "pytest", "launcher": ("python",),
@@ -52,11 +52,13 @@ def test_bare_child_name_dispatches_scoped_run_over_child_test_roots(
     assert len(calls) == 1
     request = calls[0][2]
     assert request.mode is C.Mode.SCOPED
+    # No git history here, so the change is unselectable: the whole
+    # child runs, scoped as a folder rather than the integrated gate.
     assert request.argv == ("tests",)
-    assert request.display_argv == ("web",)
+    assert request.changed_note == "all tests under web"
 
 
-def test_bare_child_name_with_trailing_slash_dispatches_scoped_run(
+def test_bare_child_name_with_trailing_slash_runs_changed_for_child(
         tmp_path, monkeypatch, monorepo):
     monorepo(
         {"web": {"kind": "pytest", "launcher": ("python",),
@@ -71,6 +73,7 @@ def test_bare_child_name_with_trailing_slash_dispatches_scoped_run(
     request = calls[0][2]
     assert request.mode is C.Mode.SCOPED
     assert request.argv == ("tests",)
+    assert request.changed_note == "all tests under web"
 
 
 def _full_monorepo(tmp_path, monorepo):
@@ -88,7 +91,7 @@ def _mock_execute(monkeypatch):
     return calls
 
 
-def test_full_bare_child_runs_only_that_childs_gate(
+def test_full_bare_child_runs_all_tests_under_it_without_gate(
         tmp_path, monkeypatch, capsys, monorepo):
     _full_monorepo(tmp_path, monorepo)
     monkeypatch.chdir(tmp_path)
@@ -97,12 +100,14 @@ def test_full_bare_child_runs_only_that_childs_gate(
     assert main(("--full", "web")) == 0
     assert len(calls) == 1
     request = calls[0][2]
-    assert request.mode is C.Mode.FULL
+    assert request.mode is C.Mode.SCOPED
+    # The command-kind child declares no test roots: the folder itself runs.
     assert request.argv == ()
+    assert request.changed_note == "all tests under web"
     assert "ptest: total" not in capsys.readouterr().err
 
 
-def test_full_child_with_trailing_slash_runs_gate(
+def test_full_child_with_trailing_slash_runs_all_there(
         tmp_path, monkeypatch, monorepo):
     _full_monorepo(tmp_path, monorepo)
     monkeypatch.chdir(tmp_path)
@@ -110,50 +115,74 @@ def test_full_child_with_trailing_slash_runs_gate(
 
     assert main(("--full", "web/")) == 0
     assert len(calls) == 1
-    assert calls[0][2].mode is C.Mode.FULL
+    assert calls[0][2].mode is C.Mode.SCOPED
+    assert calls[0][2].changed_note == "all tests under web"
 
 
-def test_full_exact_test_root_runs_that_childs_gate(
+def test_full_exact_test_root_runs_all_tests_there(
         tmp_path, monkeypatch, monorepo):
     _full_monorepo(tmp_path, monorepo)
+    (tmp_path / "api" / "tests").mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(tmp_path)
     calls = _mock_execute(monkeypatch)
 
     assert main(("--full", "api/tests")) == 0
     assert len(calls) == 1
     request = calls[0][2]
-    assert request.mode is C.Mode.FULL
-    assert request.argv == ()
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests",)
+    assert request.changed_note == "all tests under api/tests"
 
 
-def test_full_child_again_reaches_only_that_gate(
+def test_full_subfolder_runs_all_tests_there_without_gate(
         tmp_path, monkeypatch, monorepo):
     _full_monorepo(tmp_path, monorepo)
+    (tmp_path / "api" / "tests" / "unit").mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(tmp_path)
     calls = _mock_execute(monkeypatch)
 
-    assert main(("--full", "--again", "web")) == 0
+    assert main(("--full", "api/tests/unit")) == 0
     assert len(calls) == 1
-    assert calls[0][2].mode is C.Mode.FULL
-    assert calls[0][2].again is True
+    request = calls[0][2]
+    assert request.mode is C.Mode.SCOPED
+    assert request.argv == ("tests/unit",)
+    assert request.again is False
+    assert request.changed_note == "all tests under api/tests/unit"
 
 
-@pytest.mark.parametrize("argv", [
-    ("--full", "api/tests/test_x.py"),
-    ("--full", "api/tests/unit"),
-    ("--full", "-k", "slow"),
-])
-def test_full_partial_scope_is_rejected_with_next_step(
-        tmp_path, monkeypatch, capsys, monorepo, argv):
+def test_full_with_scope_and_again_is_rejected(
+        tmp_path, monkeypatch, capsys, monorepo):
     _full_monorepo(tmp_path, monorepo)
     monkeypatch.chdir(tmp_path)
     calls = _mock_execute(monkeypatch)
 
-    assert main(argv) == 2
+    assert main(("--full", "--again", "web")) == 2
+    assert calls == []
+    assert "--again" in capsys.readouterr().err
+
+
+def test_full_file_scope_is_rejected_with_next_step(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "api/tests/test_x.py")) == 2
     assert calls == []
     err = capsys.readouterr().err
-    assert "--full runs a whole project" in err
+    assert "--full" in err
     assert "ptest api/tests/test_x.py" in err
+
+
+def test_full_unknown_flag_scope_is_rejected(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _full_monorepo(tmp_path, monorepo)
+    monkeypatch.chdir(tmp_path)
+    calls = _mock_execute(monkeypatch)
+
+    assert main(("--full", "-k", "slow")) == 2
+    assert calls == []
+    assert "ptest --full" in capsys.readouterr().err
 
 
 def test_full_two_children_are_rejected_as_one_project(
@@ -167,7 +196,7 @@ def test_full_two_children_are_rejected_as_one_project(
     assert "one project at a time" in capsys.readouterr().err
 
 
-def test_full_with_scope_outside_a_monorepo_is_rejected_with_next_step(
+def test_full_with_file_scope_outside_a_monorepo_is_rejected(
         tmp_path, monkeypatch, capsys):
     write_ptest_toml(tmp_path, kind="command", launcher=("true",), args=(),
                      full_args=(), project_id="ab" * 16)
@@ -175,7 +204,8 @@ def test_full_with_scope_outside_a_monorepo_is_rejected_with_next_step(
 
     assert main(("--full", "tests/test_x.py")) == 2
     err = capsys.readouterr().err
-    assert "--full runs a whole project" in err
+    assert "--full takes a folder, not a file" in err
+    assert "ptest tests/test_x.py" in err
 
 
 def test_report_verification_scopes_follow_dispatcher_route_validation(
@@ -849,6 +879,8 @@ def test_json_inside_literal_execution_tail_stays_runner_data(
         argv, tmp_path, monkeypatch, capsys):
     # Keep this parser negative test outside the repository's native config:
     # it must reject before scheduler admission, independently of setup.
+    # Mixed path/flag tails are not pure path scopes, so they keep the
+    # legacy literal rejection (pure paths report the missing project).
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "ptest.operations.scheduler.enqueue",
