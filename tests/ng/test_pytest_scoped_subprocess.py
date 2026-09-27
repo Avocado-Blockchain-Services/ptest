@@ -327,6 +327,41 @@ def test_q_py_select_real_coverage_baseline_then_exact_selected_file(case):
     assert fallback_data["baseline_published"] is False
 
 
+def test_q_py_cov_run_leaves_coverage_data_and_records_baseline(case):
+    """Twin (cov-byproduct): a --cov full run tolerates `.coverage` like `.pytest_cache`.
+
+    The ptest config itself enables coverage, so the pytest-cov data file
+    left at the checkout root is an expected tool byproduct: no
+    `changed-during-run` fires and a clean tree still records a baseline.
+    `.coverage` is deliberately NOT declared in non_input_outputs here.
+    """
+    domain = case.domain(slots=1, jobs=1)
+    root = _project(case, domain, launcher=_coverage_launcher())
+    config = root / ".ptest.toml"
+    project_id = tomllib.loads(config.read_text())["project_id"]
+    config.write_text(
+        f'version = 1\nproject_id = "{project_id}"\n[runner]\nkind = "pytest"\n'
+        f'launcher = {json.dumps(list(_coverage_launcher()))}\n'
+        'args = ["-s", "-p", "no:xdist", "--cov=project_module", "--cov-report=term"]\n'
+        'full_args = []\ntest_roots = ["tests"]\nworkers = 8\n'
+        'lifecycle = "cooperative-process-group"\n'
+        '[selection]\nnon_input_outputs = ["tests-ran", "ptest-result-q-py-cov-byproduct.json"]\n'
+    )
+    # Ignored class, exactly like the real-world blocker: the data file
+    # must be tolerated as a tool byproduct, not flagged as an input.
+    (root / ".gitignore").write_text(".coverage\n")
+    support.init_git_repo(root)
+    result_path = "ptest-result-q-py-cov-byproduct.json"
+    completed = case.invoke(domain, root, "--result-json", result_path, "--full", timeout=60)
+    data = _data(completed)
+    assert completed.code == 0, completed.stderr.decode()
+    assert (root / ".coverage").exists()
+    assert data["status"] == "passed"
+    assert data["baseline_published"] is True
+    assert data["full_gate_eligible"] is True
+    assert b"changed-during-run" not in completed.stderr
+
+
 def test_q_py_select_parallel_coverage_baseline_then_parallel_selected(case):
     """A parallel coverage baseline qualifies selection that selects in parallel.
 

@@ -12,6 +12,7 @@ into :class:`Problem` with stable machine codes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -797,6 +798,36 @@ class InputSnapshot:
             object.__setattr__(self, field, items)
 
 
+def normalize_test_id(test_id: str) -> str:
+    """Deterministically bound an over-long native test identity.
+
+    Real parametrized node ids (multi-KB URLs, embedded feeds) exceed
+    ``TEST_ID_MAX_BYTES``; refusing the run for them loses whole suites.
+    Ids within the bound pass through byte-identical.  Longer ids keep
+    the longest readable UTF-8 prefix that fits alongside a
+    ``…[sha256:<hex>]`` suffix over the full id, so the result stays
+    within the bound, stays human-readable, is identical across
+    workers/runs, and never collides for distinct full ids.
+    """
+    if not isinstance(test_id, str):
+        raise TypeError(f"test.id must be str, got {type(test_id).__name__}")
+    raw = test_id.encode("utf-8")
+    if len(raw) <= TEST_ID_MAX_BYTES:
+        return test_id
+    suffix = "…[sha256:" + hashlib.sha256(raw).hexdigest() + "]"
+    budget = TEST_ID_MAX_BYTES - len(suffix.encode("utf-8"))
+    prefix = raw[:max(budget, 0)]
+    while prefix:
+        try:
+            head = prefix.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            prefix = prefix[:-1]
+    else:
+        head = ""
+    return head + suffix
+
+
 @dataclass(frozen=True, kw_only=True)
 class TestRecord:
     id: str
@@ -807,6 +838,7 @@ class TestRecord:
     teardown_s: float | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "id", normalize_test_id(self.id))
         _check_str("test.id", self.id, max_len=4096)
         _check_str("test.file", self.file)
         object.__setattr__(self, "outcome", _check_enum("test.outcome", self.outcome, Outcome))
@@ -873,6 +905,7 @@ class Obligation:
         if self.file is not None:
             _check_str("obligation.file", self.file)
         if self.test_id is not None:
+            object.__setattr__(self, "test_id", normalize_test_id(self.test_id))
             _check_str("obligation.test_id", self.test_id)
         _check_int("obligation.sequence", self.sequence, lo=0)
         if self.source_digest is not None:

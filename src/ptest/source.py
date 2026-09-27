@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+import configparser
 import hashlib
 import hmac
 import json
@@ -20,6 +21,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from . import contracts as C
@@ -565,15 +567,104 @@ def _mac(key: bytes, value: object) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _pytest_tool_generated(path: str, included: set[str]) -> str | None:
+def _pytest_coverage_enabled(config: C.Config) -> bool:
+    """True when the ptest config itself enables pytest-cov (``--cov``).
+
+    Only a config-declared coverage run makes coverage data files
+    expected tool byproducts; any other run keeps them as real inputs,
+    fail-closed.
+    """
+    if config.runner.kind is not C.RunnerKind.PYTEST:
+        return False
+    controls = tuple(config.runner.args) + tuple(config.runner.full_args)
+    return any(token == "--cov" or token.startswith("--cov=")
+               for token in controls)
+
+
+_COVERAGE_SUFFIX_RE = re.compile(r"(?=[A-Za-z0-9_.-]*[A-Za-z0-9])[A-Za-z0-9_.-]+")
+_COVERAGE_CONFIG_FILES = (".coveragerc", "setup.cfg", "tox.ini", "pyproject.toml")
+_COVERAGE_CONFIG_MAX_BYTES = 65536
+
+
+def _coverage_configured_data_file(root: str, name: str) -> str | None:
+    """Read one coverage ``data_file`` setting from the checkout, or None.
+
+    Only a safe checkout-relative path is ever returned (no absolute
+    paths, no ``..`` segments, no empty segments); anything missing,
+    oversized, undecodable, unparsable, or unsafe fails closed to None
+    so only the default data file stays tolerated.
+    """
+    candidate = os.path.join(root, name)
+    try:
+        with open(candidate, "rb") as handle:
+            raw = handle.read(_COVERAGE_CONFIG_MAX_BYTES + 1)
+        if len(raw) > _COVERAGE_CONFIG_MAX_BYTES:
+            return None
+        text = raw.decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        if name == "pyproject.toml":
+            data = tomllib.loads(text)
+            if not isinstance(data, dict):
+                return None
+            tool = data.get("tool")
+            if not isinstance(tool, dict):
+                return None
+            coverage = tool.get("coverage")
+            if not isinstance(coverage, dict):
+                return None
+            run = coverage.get("run")
+            if not isinstance(run, dict):
+                return None
+            value = run.get("data_file")
+        else:
+            parser = configparser.RawConfigParser()
+            parser.read_string(text)
+            section = "run" if name == ".coveragerc" else "coverage:run"
+            if not parser.has_section(section):
+                return None
+            value = parser.get(section, "data_file", fallback=None)
+    except Exception:
+        return None
+    if (not isinstance(value, str) or not value or "\x00" in value
+            or os.path.isabs(value)):
+        return None
+    segments = value.replace("\\", "/").split("/")
+    if any(part in ("", ".", "..") for part in segments):
+        return None
+    return value.replace("\\", "/")
+
+
+def _coverage_data_bases(root: str) -> tuple[str, ...]:
+    """Coverage data-file basenames tolerated as tool byproducts.
+
+    Always the default ``.coverage`` plus the configured ``data_file``
+    when one is safely declared.  Parallel-mode ``<base>.<suffix>``
+    files match in :func:`_pytest_tool_generated`.
+    """
+    bases = [".coverage"]
+    for name in _COVERAGE_CONFIG_FILES:
+        configured = _coverage_configured_data_file(root, name)
+        if configured is not None and configured not in bases:
+            bases.append(configured)
+    return tuple(bases)
+
+
+def _pytest_tool_generated(path: str, included: set[str],
+                           *, coverage_bases: tuple[str, ...] = ()) -> str | None:
     """Return the source relation for one exact Pytest tool byproduct.
 
     The native runner (cacheprovider) and the interpreter (bytecode,
     assertion-rewrite cache) write these while a run executes, so they can
     appear or change between the pre-launch and post-run snapshots of any
-    Pytest run, scoped or full.  Anything outside this exact allowlist —
-    unknown cache names, bytecode without its source in the snapshot —
-    returns None and stays a fingerprinted input (fail-closed).
+    Pytest run, scoped or full.  When the ptest config itself enables
+    coverage, pytest-cov data files (``.coverage``, parallel-mode
+    ``.coverage.<suffix>`` at the checkout root, or the configured
+    coverage ``data_file``) are expected byproducts too.  Anything outside
+    this exact allowlist — unknown cache names, bytecode without its
+    source in the snapshot — returns None and stays a fingerprinted
+    input (fail-closed).
     """
     if path in {
         ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
@@ -581,6 +672,12 @@ def _pytest_tool_generated(path: str, included: set[str]) -> str | None:
         ".pytest_cache/v/cache/stepwise",
     }:
         return ""
+    for base in coverage_bases:
+        if path == base:
+            return ""
+        if (path.startswith(base + ".")
+                and _COVERAGE_SUFFIX_RE.fullmatch(path[len(base) + 1:])):
+            return ""
     match = re.fullmatch(
         r"(?P<parent>(?:[^/]+/)*)__pycache__/(?P<module>[^/]+)\.cpython-(?P<version>[0-9]+)(?:\.opt-[0-9]+|-pytest-(?:8\.4\.2|9\.0\.3|9\.1\.0|9\.1\.1))?\.pyc",
         path,
@@ -745,13 +842,21 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         # bytecode, assertion-rewrite cache) write them mid-run.  The digest
         # protocol below is unchanged; only this classification is shared.
         if config.runner.kind is C.RunnerKind.PYTEST:
+            # Coverage data files are expected byproducts only when the
+            # ptest config itself enables coverage; any other run keeps
+            # them as fingerprinted inputs (fail-closed).
+            coverage_bases = (
+                _coverage_data_bases(os.fspath(root))
+                if _pytest_coverage_enabled(config) else ()
+            )
             for path in untracked | undeclared_ignored:
                 if prefix is not None and path.startswith("../"):
                     # Root-level outputs are outside the child content scope;
                     # only declared root inputs are fingerprinted, never
                     # filtered as tool byproducts.
                     continue
-                relation = _pytest_tool_generated(path, candidate_paths)
+                relation = _pytest_tool_generated(
+                    path, candidate_paths, coverage_bases=coverage_bases)
                 if relation is None:
                     continue
                 # Filtering is allowed only after the same no-follow regular

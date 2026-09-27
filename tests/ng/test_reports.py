@@ -459,3 +459,46 @@ def test_consume_attempt_report_refuses_incomplete_or_ambiguous_evidence(case, m
     with pytest.raises(C.Problem, match="report-invalid"):
         consume_attempt_report(binding)
     cleanup_report(binding)
+
+
+def _long_inventory_item(raw_id: str):
+    return {"id": raw_id, "file": "tests/test_long.py",
+            "outcome": "passed", "setup_s": 0.01, "call_s": 0.02,
+            "teardown_s": 0.01}
+
+
+def test_consume_attempt_report_normalises_overlong_test_identity(case):
+    """An 8 KB parametrised id never refuses the run: it is normalised.
+
+    The stored record keeps a readable prefix plus the sha256 of the full
+    id, bounded by TEST_ID_MAX_BYTES, and the inventory digest still
+    authenticates exactly.
+    """
+    _, _, binding = _allocate(case)
+    prefix = f"pt_{binding.report_directory.parent.name[:8]}_{RUN_ID}_a001_w000"
+    raw = ("tests/test_long.py::test_invalid_media_url[https://cdn.example/"
+           + "a" * 8315)
+    normalised = C.normalize_test_id(raw)
+    assert len(raw.encode("utf-8")) > C.TEST_ID_MAX_BYTES
+    assert len(normalised.encode("utf-8")) <= C.TEST_ID_MAX_BYTES
+    # The wire sender is unnormalised here; the digest still covers the
+    # received bytes exactly, while the stored record is normalised.
+    item = _long_inventory_item(raw)
+    value = _advanced_payload(
+        workers=[{"worker_id": "w000", "resource_prefix": prefix}],
+        inventory={
+            "adapter": "pytest", "version": "9.1.1", "complete": True,
+            "tests": [item],
+            "digest": hashlib.sha256(json.dumps(
+                [item], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        })
+    _write(binding, value)
+    evidence = consume_attempt_report(binding)
+    assert evidence is not None
+    assert evidence.inventory is not None
+    records = evidence.inventory.tests
+    assert len(records) == 1
+    assert records[0].id == normalised
+    assert records[0].id.endswith("…[sha256:" + hashlib.sha256(
+        raw.encode("utf-8")).hexdigest() + "]")
+    cleanup_report(binding)

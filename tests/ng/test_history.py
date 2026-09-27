@@ -1062,6 +1062,41 @@ def test_unrelated_pass_does_not_clear_failure(case):
     assert obligation.test_id == "tests/test_a.py::test_x"
 
 
+def test_overlong_test_identity_is_stored_normalised_and_reconciles(case):
+    """An 8 KB parametrised id is stored normalised and still reconciles.
+
+    The failure obligation carries the readable-prefix + sha256 form
+    (bounded by TEST_ID_MAX_BYTES), and a later passing run with the same
+    full id clears it — reconciliation matches exactly.
+    """
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    raw = ("tests/test_long.py::test_malformed_entity[<rss>"
+           + "x" * 8315 + "]")
+    assert len(raw.encode("utf-8")) > C.TEST_ID_MAX_BYTES
+    normalised = C.normalize_test_id(raw)
+    _publish_failure(case, domain, checkout, file="tests/test_long.py",
+                     test_id=raw)
+    obligation = H.read_history(domain, checkout).obligations[0]
+    assert obligation.test_id == normalised
+    assert len(obligation.test_id.encode("utf-8")) <= C.TEST_ID_MAX_BYTES
+    cleared = C.Inventory(
+        adapter="pytest", version="9.1.1", complete=True,
+        tests=(C.TestRecord(
+            id=raw, file="tests/test_long.py", outcome=C.Outcome.PASSED,
+            setup_s=None, call_s=0.01, teardown_s=None,
+        ),),
+        digest="44" * 32,
+    )
+    snapshot = _snapshot(case)
+    H.publish_outcome(
+        domain, checkout,
+        _result(case, 2, before=snapshot, after=snapshot, checkout=checkout),
+        cleared,
+    )
+    assert H.read_history(domain, checkout).obligations == ()
+
+
 def test_late_older_pass_cannot_clear_newer_failure(case):
     domain = case.domain()
     checkout = case.checkout(domain)
