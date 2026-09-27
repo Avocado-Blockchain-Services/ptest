@@ -297,8 +297,33 @@ def test_child_root_manifest_change_enters_digest(case):
     assert any(change.new == "../.ptest.toml" for change in result.changes)
 
 
-def test_child_undeclared_root_file_and_symlink_trigger_fail_closed(case):
-    """Undeclared root files stay out; an unreadable trigger fails closed."""
+def test_child_tracked_symlink_has_stable_digest(case):
+    """Twin of the real-world blocker: a tracked symlink inside a child
+    fingerprints by its target text and stays stable; retargeting it
+    changes the digest. The link is never followed."""
+    domain = case.domain()
+    root = _monorepo(case, domain)
+    link = root / "api" / "AGENTS.md"
+    link.symlink_to("api_module.py")
+    git(root, "add", "api/AGENTS.md")
+    git(root, "commit", "-m", "tracked child link")
+    first = _api_snapshot(case, domain, root)
+    assert first.digest is not None, first.limitations
+    assert first.clean
+    entry = [item for item in first.files if item.path == "AGENTS.md"]
+    assert len(entry) == 1 and entry[0].mode == 0o120000
+    assert _api_snapshot(case, domain, root).digest == first.digest
+    link.unlink()
+    link.symlink_to("tests/test_api.py")
+    second = _api_snapshot(case, domain, root)
+    assert second.digest is not None and second.digest != first.digest
+    assert any(change.new == "AGENTS.md" for change in second.changes)
+
+
+def test_child_undeclared_root_file_stays_out_and_trigger_swap_is_a_change(case):
+    """Undeclared root files stay out; a declared trigger swapped for a
+    symlink is a content change, not a failure (links are fingerprinted,
+    never followed)."""
     from ptest.source import ensure_fingerprint_key
 
     domain = case.domain()
@@ -320,8 +345,9 @@ def test_child_undeclared_root_file_and_symlink_trigger_fail_closed(case):
     (root / "uv.lock").unlink()
     (root / "uv.lock").symlink_to("notes.txt")
     result = _snapshot(domain, _children(root)["api"].config)
-    assert result.digest is None
-    assert any(reason.code == "unknown-input" for reason in result.limitations)
+    assert result.digest is not None
+    assert result.digest != before.digest
+    assert any(change.new == "../uv.lock" for change in result.changes)
 
 
 def test_child_glob_shaped_sibling_stays_outside_scope(case):

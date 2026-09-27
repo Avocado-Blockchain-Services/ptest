@@ -136,14 +136,34 @@ def test_fingerprint_scan_envelopes_fail_closed(case, monkeypatch):
     assert snapshot(domain, config, None, None).digest is None
 
 
-def test_mode_change_and_gitlink_fail_closed(case):
+def test_mode_change_still_fails_closed(case):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
     (root / "src" / "a.py").chmod(0o755)
     assert any(change.new == "src/a.py" for change in snapshot(domain, config, None, None).changes)
+
+
+def test_gitlink_is_pinned_to_commit_identity(case):
+    """A gitlink contributes its pinned commit id, never worktree content.
+
+    Re-pins the old ``symlink or submodule input is unsupported`` refusal:
+    submodules are inputs whose identity is the index commit, so adding
+    one keeps a digest and re-pinning the commit changes it.
+    """
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
+    (root / "submodule").mkdir()
     git(root, "update-index", "--add", "--cacheinfo", "160000," + "a" * 40 + ",submodule")
-    assert snapshot(domain, config, None, None).digest is None
+    first = snapshot(domain, config, None, None)
+    assert first.digest is not None, first.limitations
+    pinned = [item for item in first.files if item.path == "submodule"]
+    assert len(pinned) == 1 and pinned[0].mode == 0o160000
+    assert snapshot(domain, config, None, None).digest == first.digest
+    git(root, "update-index", "--add", "--cacheinfo", "160000," + "b" * 40 + ",submodule")
+    second = snapshot(domain, config, None, None)
+    assert second.digest is not None and second.digest != first.digest
 
 
 def test_unmerged_conflict_and_shallow_baseline_fail_closed(case):
@@ -887,14 +907,78 @@ def test_actual_sixteen_mib_file_limit_without_allocating_payload(case):
     assert result.digest is None and result.limitations[0].code == "scan-limit"
 
 
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "invalid-utf8"])
+def test_tracked_symlink_is_stable_and_retarget_changes_digest(case):
+    """Twin: a tracked symlink fingerprints by target text, never followed."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / "src/link").symlink_to("a.py")
+    git(root, "add", "src/link"); git(root, "commit", "-m", "tracked link")
+    config = _config(case, domain)
+    first = snapshot(domain, config, None, None)
+    assert first.digest is not None, first.limitations
+    assert first.clean
+    link = [item for item in first.files if item.path == "src/link"]
+    assert len(link) == 1 and link[0].mode == 0o120000
+    assert snapshot(domain, config, None, None).digest == first.digest
+    (root / "src/link").unlink()
+    (root / "src/link").symlink_to("other-target")
+    second = snapshot(domain, config, None, None)
+    assert second.digest is not None and second.digest != first.digest
+    assert not second.clean
+    assert any(change.new == "src/link" for change in second.changes)
+
+
+def test_regular_symlink_swap_is_a_change_not_an_error(case):
+    """A worktree swap between regular file and symlink changes the digest."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
+    before = snapshot(domain, config, None, None)
+    (root / "src/a.py").unlink()
+    (root / "src/a.py").symlink_to("link-target")
+    after = snapshot(domain, config, None, None)
+    assert after.digest is not None and after.digest != before.digest
+    assert any(change.new == "src/a.py" for change in after.changes)
+
+
+def test_untracked_symlink_target_is_never_followed(case):
+    """Absolute, escaping, and dangling targets fingerprint by text alone."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain); config = _config(case, domain)
+    (root / "src/escape-link").symlink_to("/etc/hostname")
+    (root / "src/dangling-link").symlink_to("no-such-target")
+    first = snapshot(domain, config, None, None)
+    assert first.digest is not None, first.limitations
+    assert {"src/escape-link", "src/dangling-link"} <= {item.path for item in first.files}
+    assert not first.clean
+    (root / "src/dangling-link").unlink()
+    (root / "src/dangling-link").symlink_to("other-target")
+    second = snapshot(domain, config, None, None)
+    assert second.digest is not None and second.digest != first.digest
+
+
+def test_symlinked_parent_directory_fails_closed(case):
+    """Link tolerance stops at the final component: a symlinked parent
+    directory must never be traversed, even inside the checkout."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / "real").mkdir(); (root / "real/a.py").write_text("x\n", encoding="utf-8")
+    git(root, "add", "real/a.py"); git(root, "commit", "-m", "real dir")
+    (root / "real").rename(root / "real-dir")
+    (root / "real").symlink_to("real-dir")
+    result = snapshot(domain, _config(case, domain), None, None)
+    assert result.digest is None and result.limitations
+
+
+@pytest.mark.parametrize("kind", ["fifo", "invalid-utf8"])
 def test_unsafe_input_types_and_encodings_fail_closed(case, kind):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case); ensure_fingerprint_key(domain)
-    if kind == "symlink":
-        (root / "src/unsafe").symlink_to(root / "src/a.py")
-    elif kind == "fifo":
+    if kind == "fifo":
         # Git has no untracked FIFO inventory; exercise a known input replaced
         # by a FIFO, which must never block the bounded reader.
         (root / "src/a.py").unlink()

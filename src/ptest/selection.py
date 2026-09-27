@@ -29,7 +29,11 @@ def _invalid_policy(policy: C.SelectionPolicy, test_roots: tuple = ()) -> bool:
                  + policy.ignored_inputs + test_roots + (".ptest.toml",))
     grouped = tuple(path for group in policy.groups for path in group.sources + group.tests)
     entries = protected + grouped + policy.no_tests + policy.non_input_outputs
-    if any(not path or path.startswith("/") or any(part in ("", ".", "..") for part in path.split("/"))
+    # A bare "." names the checkout root itself (for example a vitest
+    # child running everything below it). It is unambiguous — it can
+    # never be an escape — so only longer dotted segments stay invalid.
+    if any(not path or path.startswith("/") or (path != "."
+            and any(part in ("", ".", "..") for part in path.split("/")))
            for path in entries):
         return True
     for prefix in policy.no_tests:
