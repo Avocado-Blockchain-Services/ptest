@@ -427,7 +427,7 @@ def worktree_changed_files(root: Path, base: str | None) -> tuple[str, ...] | No
     if base is not None:
         committed = _git_blob(root, "diff", "--name-only", "-z",
                               "--no-ext-diff", "--no-textconv",
-                              "--find-renames", base, "HEAD", "--")
+                              "--no-renames", base, "HEAD", "--")
         if committed is None:
             return None
         paths = _nul_paths(committed)
@@ -435,7 +435,7 @@ def worktree_changed_files(root: Path, base: str | None) -> tuple[str, ...] | No
             return None
         changed.extend(paths)
     worktree = _git_blob(root, "diff", "--name-only", "-z", "--no-ext-diff",
-                         "--no-textconv", "--find-renames", "HEAD", "--")
+                         "--no-textconv", "--no-renames", "HEAD", "--")
     if worktree is None:
         return None
     paths = _nul_paths(worktree)

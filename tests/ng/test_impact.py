@@ -509,3 +509,48 @@ def test_plan_no_tests_prefix_is_ignored(tmp_path):
     impact = _plan_at(tmp_path, ["docs/gen.py"], config)
 
     assert impact.kind == "none"
+
+
+def _rename_fixture_files():
+    return {
+        "app/__init__.py": "",
+        "app/b.py": "X = 1\n",
+        "tests/test_b.py": "from app.b import X\n\ndef test_b():\n    assert X == 1\n",
+        "tests/test_c.py": "def test_c():\n    assert True\n",
+        "tests/test_d.py": "def test_d():\n    assert True\n",
+        "tests/test_e.py": "def test_e():\n    assert True\n",
+    }
+
+
+def test_changed_files_committed_rename_keeps_old_path(tmp_path):
+    _repo(tmp_path, _rename_fixture_files())
+    git(tmp_path, "checkout", "-qb", "feat")
+    git(tmp_path, "mv", "app/b.py", "app/c.py")
+    git(tmp_path, "commit", "-qm", "rename b to c")
+
+    base = I.resolve_base(tmp_path, None)
+    assert base.label == "main"
+
+    changed = I.changed_files(tmp_path, base)
+    assert "app/b.py" in changed
+    assert "app/c.py" in changed
+
+    impact = I.plan(tmp_path, tmp_path, _config(), changed)
+    assert impact.kind == "selected"
+    assert impact.files == ("tests/test_b.py",)
+
+
+def test_changed_files_staged_rename_keeps_old_path(tmp_path):
+    _repo(tmp_path, _rename_fixture_files())
+    git(tmp_path, "mv", "app/b.py", "app/c.py")
+
+    base = I.resolve_base(tmp_path, None)
+    assert base == I.Base(sha=None, label="HEAD")
+
+    changed = I.changed_files(tmp_path, base)
+    assert "app/b.py" in changed
+    assert "app/c.py" in changed
+
+    impact = I.plan(tmp_path, tmp_path, _config(), changed)
+    assert impact.kind == "selected"
+    assert impact.files == ("tests/test_b.py",)
