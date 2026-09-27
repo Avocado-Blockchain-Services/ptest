@@ -161,7 +161,9 @@ def test_native_profiles_are_rejected_before_admission(case):
         encoding="utf-8",
     )
 
-    completed = case.invoke(domain, root, timeout=20)
+    # Bare `ptest` now routes through the impact graph; the AUTOMATIC
+    # (native-profile) engine stays reachable via --shadow.
+    completed = case.invoke(domain, root, "--shadow", timeout=20)
 
     assert completed.code == 2
     assert b"unsupported-capability" in completed.stderr

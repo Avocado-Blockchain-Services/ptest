@@ -319,7 +319,9 @@ def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):
     assert "enabled = true" in raw
     assert "closed_inputs = true" in raw
     out = capsys.readouterr().out
-    assert "run a parallel full baseline once to record a baseline" in out
+    assert ("selection enabled: bare ptest now runs the tests your change "
+            "reaches (no baseline needed); run ptest --full once before handoff") in out
+    assert "record a baseline" not in out
 
 
 def test_fix_appends_missing_selection_table_at_eof(

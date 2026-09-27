@@ -242,6 +242,9 @@ def test_child_full_records_baseline_then_changed_selects(case):
     assert again.code == 0, again.stderr.decode(errors="replace")
     assert b"already verified" in again.stderr
 
+    # On the default branch only uncommitted work counts as changed, so
+    # commit the api touch on a feature branch to exercise per-child lines.
+    git(root, "checkout", "-b", "api-change")
     (root / "api" / "tests" / "test_api.py").write_text(
         "import api_module\n\n\ndef test_api():\n"
         "    assert api_module.VALUE == 7\n# committed change\n",

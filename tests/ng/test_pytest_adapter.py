@@ -1220,7 +1220,10 @@ def test_native_cli_deferred_modes_and_setup_refuse_before_dependencies(case, ve
     # before admission; explicit modes preserve the scheduler's own
     # invalid-config refusal and must never provision dependencies.
     domain, root = _native_project(case, version)
-    result = case.invoke(domain, root, *mode, timeout=10)
+    # Bare `ptest` now routes through the impact graph; drive the
+    # AUTOMATIC engine the supported way (--shadow) for the bare case.
+    argv = ("--shadow",) if not mode else mode
+    result = case.invoke(domain, root, *argv, timeout=10)
     assert result.code == 2, result.stderr
     expected = b"unsupported-capability" if not mode else b"invalid-config"
     assert expected in result.stderr

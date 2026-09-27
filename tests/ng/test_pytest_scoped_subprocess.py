@@ -142,6 +142,18 @@ def _data(result):
     return result.result["data"]
 
 
+def _automatic(domain, root, *, result_path):
+    """Drive the coverage-baseline AUTOMATIC engine in-process.
+
+    Bare `--changed` now routes through the impact graph, so tests that
+    pin the AUTOMATIC selected/full contract call operations directly.
+    """
+    config = config_api.resolve_config(root).config
+    return operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.AUTOMATIC, result_path=result_path))
+
+
 def _no_claims(data):
     assert data["source_valid"] is False
     assert data["full_gate_eligible"] is False
@@ -308,23 +320,20 @@ def test_q_py_select_real_coverage_baseline_then_exact_selected_file(case):
     assert baseline_data["baseline_published"] is True
     assert baseline_data["full_gate_eligible"] is True
     (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
-    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-selected.json", "--changed", timeout=30)
-    selected_data = _data(selected)
-    assert selected.code == 0, selected.stderr.decode()
-    assert selected_data["status"] == "passed"
-    assert selected_data["plan"]["execution"] == "selected"
-    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
-    assert selected_data["counts"]["collected"] == 2
-    assert selected_data["source_valid"] is True
+    selected = _automatic(domain, root, result_path="ptest-result-q-py-select-selected.json")
+    assert selected.exit_code == 0
+    assert selected.status is C.Status.PASSED
+    assert selected.plan.execution == "selected"
+    assert list(selected.plan.files) == ["tests/test_native.py"]
+    assert selected.counts is not None
+    assert selected.counts.collected == 2
+    assert selected.source_valid is True
     profile = next((domain.root / "checkouts").glob("*/qualified-native-profile.json"))
     profile.unlink()
-    fallback = case.invoke(
-        domain, root, "--result-json", "ptest-result-q-py-select-no-profile.json", "--changed",
-        timeout=30)
-    fallback_data = _data(fallback)
-    assert fallback.code == 4, fallback.stderr.decode()
-    assert fallback_data["plan"]["execution"] == "full"
-    assert fallback_data["baseline_published"] is False
+    fallback = _automatic(domain, root, result_path="ptest-result-q-py-select-no-profile.json")
+    assert fallback.exit_code == 4
+    assert fallback.plan.execution == "full"
+    assert fallback.baseline_published is False
 
 
 def test_q_py_cov_run_leaves_coverage_data_and_records_baseline(case):
@@ -400,14 +409,13 @@ def test_q_py_select_parallel_coverage_baseline_then_parallel_selected(case):
     assert baseline_data["full_gate_eligible"] is True
     assert baseline_data["granted_workers"] == 4
     (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
-    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-parallel-selected.json", "--changed", timeout=60)
-    selected_data = _data(selected)
-    assert selected.code == 0, selected.stderr.decode()
-    assert selected_data["status"] == "passed"
-    assert selected_data["plan"]["execution"] == "selected"
-    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
-    assert selected_data["granted_workers"] == 4
-    assert selected_data["source_valid"] is True
+    selected = _automatic(domain, root, result_path="ptest-result-q-py-select-parallel-selected.json")
+    assert selected.exit_code == 0
+    assert selected.status is C.Status.PASSED
+    assert selected.plan.execution == "selected"
+    assert list(selected.plan.files) == ["tests/test_native.py"]
+    assert selected.granted_workers == 4
+    assert selected.source_valid is True
 
 
 def test_q_py_select_without_parallel_profile_runs_serial_with_baseline_reason(case):
@@ -445,19 +453,17 @@ def test_q_py_select_without_parallel_profile_runs_serial_with_baseline_reason(c
     assert baseline_data["granted_workers"] == 1
     assert baseline_data["baseline_published"] is True
     (root / "project_module.py").write_text("VALUE = 7\n# changed source digest\n")
-    selected = case.invoke(domain, root, "--result-json", "ptest-result-q-py-select-serial-selected.json",
-                           "--changed", timeout=60)
-    selected_data = _data(selected)
-    assert selected.code == 0, selected.stderr.decode()
-    assert selected_data["plan"]["execution"] == "selected"
-    assert selected_data["plan"]["files"] == ["tests/test_native.py"]
-    assert selected_data["granted_workers"] == 1
-    assert selected_data["command"]["workers"] == 1
+    selected = _automatic(domain, root, result_path="ptest-result-q-py-select-serial-selected.json")
+    assert selected.exit_code == 0
+    assert selected.plan.execution == "selected"
+    assert list(selected.plan.files) == ["tests/test_native.py"]
+    assert selected.granted_workers == 1
+    assert selected.command.workers == 1
     assert ["parallel-workers",
             "serial: parallel selection needs a parallel coverage baseline "
             "— run ptest --full once"] in [
-                [reason["code"], reason["message"]]
-                for reason in selected_data["reasons"]]
+                [reason.code, reason.message]
+                for reason in selected.reasons]
 
 
 def test_q_py_scoped_coverage_uses_parallel_workers_without_baseline(case):
@@ -571,16 +577,13 @@ def test_q_py_selected_runtime_drift_refuses_then_full_rebaselines(case):
     (root / "project_module.py").write_text("VALUE = 7\n# selected runtime drift\n")
     (root / "conftest.py").write_text("pytest_plugins = ['drift_plugin']\n")
     (root / "drift_plugin.py").write_text("RUNTIME_DRIFT = True\n")
-    selected = case.invoke(
-        domain, root, "--result-json", "ptest-result-q-py-drift-selected.json",
-        "--changed", timeout=30)
-    selected_data = _data(selected)
-    assert selected.code != 0, (selected_data, selected.stderr.decode())
-    assert selected_data["status"] == "incomplete"
-    assert selected_data["baseline_published"] is False
+    selected = _automatic(domain, root, result_path="ptest-result-q-py-drift-selected.json")
+    assert selected.exit_code != 0, selected.reasons
+    assert selected.status is C.Status.INCOMPLETE
+    assert selected.baseline_published is False
     assert not (root / "tests-ran").exists()
-    assert any(reason["code"] in {"report-invalid", "unsupported-capability"}
-               for reason in selected_data["reasons"])
+    assert any(reason.code in {"report-invalid", "unsupported-capability"}
+               for reason in selected.reasons)
 
     support.init_git_repo(root)
     full = case.invoke(
