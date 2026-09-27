@@ -30,6 +30,32 @@ from ptest import config as config_api, contracts as C, operations, reports, sch
 VERSIONS = ("8.4.2", "9.0.3", "9.1.0", "9.1.1")
 FIXTURES = Path(__file__).parent / "fixtures" / "pytest"
 
+# Spawning a fresh interpreter while the machine is loaded can exceed a
+# small fixed budget although the interpreter is healthy. Version probes
+# retry a bounded number of times with a modest per-attempt budget; a
+# genuinely broken interpreter still fails (or skips) on every attempt.
+_PROBE_TIMEOUT_S = 10
+_PROBE_ATTEMPTS = 3
+
+# Whole child runs (interpreter startup, admission, guard, native pytest,
+# finalization) under machine load: the budget must cover loaded execution,
+# not just the native suite. It stays finite so a hung child still fails.
+_CHILD_TIMEOUT_S = 30
+
+
+def _probe_version(argv, *, check):
+    """Run one interpreter version probe with bounded load-tolerant retries."""
+    last = None
+    for _ in range(_PROBE_ATTEMPTS):
+        try:
+            return subprocess.run(
+                argv, capture_output=True, text=True,
+                timeout=_PROBE_TIMEOUT_S, check=check,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last = exc
+    raise last
+
 
 def _interpreter(version="9.1.1"):
     supplied = os.environ.get("PTEST_TEST_PYTHON_" + version.replace(".", "_"))
@@ -37,9 +63,9 @@ def _interpreter(version="9.1.1"):
         if pytest.__version__ != version:
             pytest.skip(f"unqualified: no preprovisioned pytest {version} interpreter")
         supplied = sys.executable
-    observed = subprocess.run(
+    observed = _probe_version(
         [supplied, "-c", "import pytest; print(pytest.__version__)"],
-        capture_output=True, text=True, check=True, timeout=5,
+        check=True,
     )
     assert observed.stdout.strip() == version
     return supplied
@@ -57,11 +83,11 @@ def _coverage_launcher():
         candidates = [sys.executable]
     for candidate in candidates:
         try:
-            checked = subprocess.run(
+            checked = _probe_version(
                 [candidate, "-c", (
                     "import pytest, pytest_cov, coverage; "
                     "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
-                )], capture_output=True, text=True, timeout=5, check=False,
+                )], check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             pytest.skip(f"unqualified: frozen pytest-cov fixture unavailable ({exc})")
@@ -77,10 +103,10 @@ def _parallel_coverage_launcher():
     """A frozen-tuple interpreter that also carries qualified xdist."""
     launcher = _coverage_launcher()
     try:
-        checked = subprocess.run(
+        checked = _probe_version(
             [launcher[0], "-c", (
                 "import xdist; print(xdist.__version__)"
-            )], capture_output=True, text=True, timeout=5, check=False,
+            )], check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         pytest.skip(f"unqualified: pytest-xdist fixture unavailable ({exc})")
@@ -136,7 +162,7 @@ def test_real_scoped_native_tuple_preserves_stream_exit_and_consumes_report(case
     domain = case.domain(slots=2, jobs=2)
     root = _project(case, domain, version=version)
     result = case.invoke(domain, root, "--workers", "8", "--", "tests",
-                         env={"FIXTURE_FAILURE": str(int(failure))}, timeout=10)
+                         env={"FIXTURE_FAILURE": str(int(failure))}, timeout=_CHILD_TIMEOUT_S)
     assert result.code == int(failure), result.stderr.decode()
     assert b"native-output:quoted [x];$HOME" in result.stdout
     assert (root / "tests-ran").read_text() == "yes"
@@ -160,7 +186,7 @@ def test_real_scoped_literal_suffix_is_not_reparsed_or_shell_expanded(case):
         "    Path('literal.json').write_text(json.dumps(config.getoption('--literal')))\n"
     ))
     value = "--workers 64; $(touch injected) '界' $HOME"
-    result = case.invoke(domain, root, "--", "--literal", value, "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "--literal", value, "tests", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 0, result.stderr.decode()
     assert json.loads((root / "literal.json").read_text()) == value
     assert not (root / "injected").exists()
@@ -170,7 +196,7 @@ def test_real_scoped_literal_suffix_is_not_reparsed_or_shell_expanded(case):
 def test_real_blocked_xdist_is_not_an_active_plugin(case):
     domain = case.domain()
     root = _project(case, domain)
-    result = case.invoke(domain, root, "--", "-p", "no:xdist", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "-p", "no:xdist", "tests", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 0, result.stderr.decode()
     assert (root / "tests-ran").exists()
 
@@ -192,11 +218,11 @@ def _nocov_launcher():
     if not supplied:
         pytest.skip("unqualified: set PTEST_TEST_PYTHON_9_1_1_NOCOV to a pytest 9.1.1 interpreter without pytest-cov")
     try:
-        checked = subprocess.run(
+        checked = _probe_version(
             [supplied, "-c", (
                 "import pytest; print(pytest.__version__); "
                 "import pytest_cov"
-            )], capture_output=True, text=True, timeout=5, check=False,
+            )], check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         pytest.skip(f"unqualified: no-cov fixture unavailable ({exc})")
@@ -214,7 +240,7 @@ def test_cataloged_advanced_tuple_reaches_bridge_but_missing_cov_fails_closed(ca
                     args=("--cov=project_module", "--cov-report=term"))
     (root / ".ptest.toml").write_text(
         (root / ".ptest.toml").read_text().replace("workers = 8", "workers = 1"))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == 4
     assert data["status"] == "incomplete"
@@ -227,12 +253,11 @@ def test_real_off_table_coverage_tuple_refuses_before_tests(case):
     interpreter = os.environ.get("PTEST_TEST_PYTHON_OFFTABLE_COV")
     if interpreter is None:
         pytest.skip("unqualified: no preprovisioned off-table coverage interpreter supplied")
-    probe = subprocess.run(
+    probe = _probe_version(
         [interpreter, "-c", (
             "import pytest, pytest_cov, coverage; "
             "print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"
-        )], check=True, capture_output=True, text=True, timeout=5,
-    )
+        )], check=True)
     assert probe.stdout.strip() == "9.1.1 7.0.0 7.16.1"
     domain = case.domain()
     root = _project(
@@ -241,7 +266,7 @@ def test_real_off_table_coverage_tuple_refuses_before_tests(case):
     )
     (root / ".ptest.toml").write_text(
         (root / ".ptest.toml").read_text().replace("workers = 8", "workers = 1"))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == 4
     assert data["status"] == "incomplete"
@@ -576,7 +601,7 @@ def test_real_unowned_execution_hook_is_refused_before_collection(case, hook):
         f"def {hook}():\n    Path('unowned-hook-ran').write_text('yes')\n    return True\n"
     ))
     (root / "tests/test_native.py").write_text("from pathlib import Path\nPath('collected').touch()\ndef test_one(): pass\n")
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert data["status"] == "incomplete"
     assert data["exit_origin"] == "ptest"
@@ -598,7 +623,7 @@ def test_real_pytest_cov_lookalike_hook_is_not_approved(case):
         "    Path('lookalike-hook-ran').touch()\n"
     )
     (root / "conftest.py").write_text("pytest_plugins = ['pytest_cov_shim']\n")
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == data["runner_exit_code"] == 4
     assert data["status"] == "incomplete"
@@ -623,7 +648,7 @@ def test_real_nested_execution_hook_is_refused_before_tests(case, hook):
         "def test_nested():\n    Path('nested-test-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert data["status"] == "incomplete"
@@ -662,7 +687,7 @@ def test_real_collection_finish_cannot_install_the_test_loop(case):
         "def test_nested():\n    Path('collection-finish-test-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert (
@@ -704,7 +729,7 @@ def test_real_outer_collection_finish_wrapper_cannot_install_the_test_loop(case)
         "def test_nested():\n    Path('outer-collection-finish-test-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert data["status"] == "incomplete"
@@ -742,7 +767,7 @@ def test_real_yield_fixture_teardown_cannot_install_protocol_suppression(case):
         "def test_later():\n    Path('teardown-later-test-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert data["status"] == "incomplete"
@@ -785,7 +810,7 @@ def test_real_setup_skip_registration_cannot_install_protocol_suppression(case):
         "def test_later():\n    Path('skip-later-body-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert data["status"] == "incomplete"
@@ -828,7 +853,7 @@ def test_real_last_item_teardown_registration_cannot_certify_completion(case, fa
         "    assert os.environ.get('FIXTURE_FAILURE') != '1'\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10,
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                          env={"FIXTURE_FAILURE": str(int(failure))})
 
     data = _data(result)
@@ -887,7 +912,7 @@ def test_real_per_item_setup_cannot_replace_the_test_body(case, registration, re
         "def test_second():\n    Path('per-item-second-test-ran').touch()\n"
     )
 
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
 
     data = _data(result)
     assert (
@@ -910,7 +935,7 @@ def test_real_per_item_setup_cannot_replace_the_test_body(case, registration, re
 def test_real_native_usage_error_is_not_a_bridge_refusal(case):
     domain = case.domain()
     root = _project(case, domain)
-    result = case.invoke(domain, root, "--", "--unknown-native-option", timeout=10)
+    result = case.invoke(domain, root, "--", "--unknown-native-option", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == data["runner_exit_code"] == 4
     assert data["status"] == "failed"
@@ -951,7 +976,7 @@ atexit.register(alter_report)
 def test_real_missing_forged_mismatched_report_never_passes(case, fault, failure):
     domain = case.domain()
     root = _project(case, domain, conftest=_TAMPER)
-    result = case.invoke(domain, root, "--", "tests", timeout=10,
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                          env={"REPORT_FAULT": fault, "FIXTURE_FAILURE": str(int(failure))})
     data = _data(result)
     assert result.code == (1 if failure else 70)
@@ -966,9 +991,9 @@ def test_real_missing_forged_mismatched_report_never_passes(case, fault, failure
 def test_real_report_from_previous_grant_cannot_be_replayed(case):
     domain = case.domain()
     root = _project(case, domain, conftest=_TAMPER)
-    first = case.invoke(domain, root, "--", "tests", timeout=10, env={"REPORT_FAULT": "save"})
+    first = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S, env={"REPORT_FAULT": "save"})
     assert first.code == 0
-    second = case.invoke(domain, root, "--", "tests", timeout=10, env={"REPORT_FAULT": "replay"})
+    second = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S, env={"REPORT_FAULT": "replay"})
     assert second.code == 70
     assert _data(second)["status"] == "incomplete"
     assert any(r["code"] == "report-invalid" for r in _data(second)["reasons"])
@@ -978,7 +1003,7 @@ def test_real_report_from_previous_grant_cannot_be_replayed(case):
 def test_real_disagreeing_refusal_report_keeps_observed_native_exit_origin(case):
     domain = case.domain()
     root = _project(case, domain, conftest=_TAMPER)
-    result = case.invoke(domain, root, "--", "tests", timeout=10,
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                          env={"REPORT_FAULT": "refused", "FIXTURE_FAILURE": "1"})
     data = _data(result)
     assert result.code == data["runner_exit_code"] == 1
@@ -988,7 +1013,11 @@ def test_real_disagreeing_refusal_report_keeps_observed_native_exit_origin(case)
     _released(domain)
 
 
-def _wait_for(predicate, timeout=5):
+def _wait_for(predicate, timeout=30):
+    # The condition synchronizes with a freshly spawned child interpreter
+    # (startup plus admission) while the machine may be heavily loaded. A
+    # small fixed budget flakes by milliseconds; the bound stays finite so
+    # a genuinely stuck fixture still fails instead of hanging the suite.
     deadline = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < deadline, "fixture condition did not arrive"
@@ -1001,7 +1030,10 @@ from pathlib import Path
 def test_block():
     label = os.environ.get('BLOCK_LABEL', 'first')
     Path(label + '-started').touch()
-    deadline = time.monotonic() + 5
+    # The driver releases after sibling startup plus admission, which is
+    # slow under machine load. The bound stays finite so a lost release
+    # still fails the native run instead of hanging the suite.
+    deadline = time.monotonic() + 30
     while not Path(label + '-release').exists():
         assert time.monotonic() < deadline, 'fixture release timed out'
         time.sleep(0.01)
@@ -1014,9 +1046,9 @@ def test_real_queued_config_change_cancels_without_launch(case, change):
     root = _project(case, domain)
     (root / "tests/test_native.py").write_text(_BLOCK)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(case.invoke, domain, root, "--", "tests", timeout=12)
+        first = pool.submit(case.invoke, domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
         _wait_for(lambda: (root / "first-started").exists())
-        second = pool.submit(case.invoke, domain, root, "--", "tests", timeout=12,
+        second = pool.submit(case.invoke, domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                              env={"BLOCK_LABEL": "second"})
         _wait_for(lambda: any(l.state is C.LeaseState.QUEUED for l in scheduler.reconcile(domain)))
         path = root / ".ptest.toml"
@@ -1046,9 +1078,9 @@ def test_real_checkout_admission_serializes_or_overlaps(case, same_checkout):
     for root in {first_root, second_root}:
         (root / "tests/test_native.py").write_text(_BLOCK)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(case.invoke, domain, first_root, "--", "tests", timeout=12)
+        first = pool.submit(case.invoke, domain, first_root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
         _wait_for(lambda: (first_root / "first-started").exists())
-        second = pool.submit(case.invoke, domain, second_root, "--", "tests", timeout=12,
+        second = pool.submit(case.invoke, domain, second_root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                              env={"BLOCK_LABEL": "second"})
         if same_checkout:
             _wait_for(lambda: any(l.state is C.LeaseState.QUEUED for l in scheduler.reconcile(domain)))
@@ -1081,7 +1113,7 @@ def test_real_cancellation_reaps_guard_and_releases_checkout(case):
     _no_claims(data)
     _released(domain)
     (root / "first-release").touch()
-    assert case.invoke(domain, root, "--", "tests", timeout=10).code == 0
+    assert case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S).code == 0
 
 
 def test_real_report_is_consumed_after_quiescence_and_only_once(case, monkeypatch):
@@ -1152,7 +1184,7 @@ def test_real_late_execution_plugin_is_refused_before_collection(case):
         "def pytest_configure(config):\n    config.pluginmanager.register(Executor(), 'late-executor')\n"
     ))
     (root / "tests/test_native.py").write_text("from pathlib import Path\nPath('collected').touch()\ndef test_one(): pass\n")
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert _data(result)["status"] == "incomplete"
     assert not (root / "collected").exists()
     assert not (root / "executor-ran").exists()
@@ -1167,7 +1199,7 @@ def test_real_repeat_plugin_cannot_bypass_gate_without_execution_hooks(case):
         "    def pytest_generate_tests(self, metafunc):\n        Path('repeat-ran').touch()\n"
         "def pytest_configure(config):\n    config.pluginmanager.register(Repeat(), 'repeat')\n"
     ))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert _data(result)["status"] == "incomplete"
     assert not (root / "repeat-ran").exists()
     assert not (root / "tests-ran").exists()
@@ -1181,7 +1213,7 @@ def test_real_execution_hook_alias_cannot_bypass_plugin_qualification(case):
         "@pytest.hookimpl(specname='pytest_runtestloop')\n"
         "def pytest_aliased_executor():\n    Path('alias-ran').touch()\n    return True\n"
     ))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert _data(result)["status"] == "incomplete"
     assert not (root / "alias-ran").exists()
     assert not (root / "tests-ran").exists()
@@ -1195,7 +1227,7 @@ def test_real_custom_reporter_and_cleanup_hooks_are_preserved(case):
         "def pytest_terminal_summary(terminalreporter):\n    terminalreporter.write_line('custom-report-preserved')\n"
         "def pytest_unconfigure(config):\n    Path('cleanup-ran').touch()\n"
     ))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 0, result.stderr.decode()
     assert b"custom-report-preserved" in result.stdout
     assert (root / "cleanup-ran").exists()
@@ -1211,7 +1243,7 @@ def test_real_report_write_collision_is_incomplete_without_overwrite(case, failu
         "path = Path(os.environ['PTEST_PYTEST_REPORT_PATH'])\n"
         "path.write_text('existing report sentinel')\npath.chmod(0o600)\n"
     ))
-    result = case.invoke(domain, root, "--", "tests", timeout=10,
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
                          env={"FIXTURE_FAILURE": str(int(failure))})
     assert result.code == (1 if failure else 70)
     assert _data(result)["status"] == "incomplete"
@@ -1231,7 +1263,7 @@ def test_real_source_change_retains_reason_without_source_valid_claim(case):
     (root / "tracked-input.txt").write_text("original")
     (root / ".gitignore").write_text("__pycache__/\n.pytest_cache/\ntests-ran\nptest-result-*\n")
     support.init_git_repo(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert result.code == 0
     assert any(reason["code"] == "changed-during-run" for reason in data["reasons"])
@@ -1244,14 +1276,15 @@ def test_real_xdist_plugin_is_refused_when_preprovisioned(case):
     interpreter = os.environ.get("PTEST_TEST_XDIST_PYTHON")
     if interpreter is None:
         pytest.skip("unqualified: no preprovisioned xdist interpreter supplied")
-    probe = subprocess.run([interpreter, "-c", "import pytest, xdist; print(pytest.__version__)"],
-                           check=True, capture_output=True, text=True, timeout=5)
+    probe = _probe_version(
+        [interpreter, "-c", "import pytest, xdist; print(pytest.__version__)"],
+        check=True)
     assert probe.stdout.strip() in VERSIONS
     domain = case.domain()
     root = _project(case, domain, allow_xdist=True)
     path = root / ".ptest.toml"
     path.write_text(path.read_text().replace(json.dumps([_interpreter()]), json.dumps([interpreter])))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert _data(result)["status"] == "incomplete"
     assert _data(result)["exit_origin"] == "ptest"
     assert b"xdist is not owned" in result.stderr
@@ -1264,10 +1297,9 @@ def test_real_renamed_xdist_controller_is_refused(case):
     interpreter = os.environ.get("PTEST_TEST_XDIST_PYTHON")
     if interpreter is None:
         pytest.skip("unqualified: no preprovisioned xdist interpreter supplied")
-    probe = subprocess.run(
+    probe = _probe_version(
         [interpreter, "-c", "import pytest, xdist; print(pytest.__version__)"],
-        check=True, capture_output=True, text=True, timeout=5,
-    )
+        check=True)
     assert probe.stdout.strip() in VERSIONS
     domain = case.domain()
     root = _project(case, domain, allow_xdist=True, conftest=(
@@ -1279,7 +1311,7 @@ def test_real_renamed_xdist_controller_is_refused(case):
     path.write_text(path.read_text().replace(
         json.dumps([_interpreter()]), json.dumps([interpreter])))
     result = case.invoke(
-        domain, root, "--", "tests", timeout=10,
+        domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S,
         env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
     )
     assert _data(result)["status"] == "incomplete"
@@ -1300,7 +1332,7 @@ def test_foreign_object_under_blocked_looponfail_name_is_refused(case):
         "    config.pluginmanager.unregister(name='xdist.looponfail')\n"
         "    config.pluginmanager.register(ForeignController(), 'xdist.looponfail')\n"
     ))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert data["status"] == "incomplete"
     assert data["exit_origin"] == "ptest"
@@ -1313,14 +1345,15 @@ def test_real_unsupported_runtime_is_refused_when_preprovisioned(case):
     interpreter = os.environ.get("PTEST_TEST_UNSUPPORTED_PYTEST_PYTHON")
     if interpreter is None:
         pytest.skip("unqualified: no preprovisioned unsupported pytest interpreter supplied")
-    probe = subprocess.run([interpreter, "-c", "import pytest; print(pytest.__version__)"],
-                           check=True, capture_output=True, text=True, timeout=5)
+    probe = _probe_version(
+        [interpreter, "-c", "import pytest; print(pytest.__version__)"],
+        check=True)
     assert probe.stdout.strip() not in VERSIONS
     domain = case.domain()
     root = _project(case, domain)
     path = root / ".ptest.toml"
     path.write_text(path.read_text().replace(json.dumps([_interpreter()]), json.dumps([interpreter])))
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     data = _data(result)
     assert data["status"] == "incomplete"
     assert data["exit_origin"] == "ptest"
@@ -1391,7 +1424,7 @@ def test_real_scoped_sessionfinish_exit_call_forces_zero_is_refused(case):
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    pytest.exit('forced', returncode=0)\n"))
     _round16_scoped_failing(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     _round16_scoped_refused(result, root)
 
 
@@ -1406,7 +1439,7 @@ def test_real_scoped_sessionfinish_wrapper_rewrite_is_refused(case):
         "    session.exitstatus = 0\n"
         "    return result\n"))
     _round16_scoped_failing(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     _round16_scoped_refused(result, root)
 
 
@@ -1420,7 +1453,7 @@ def test_real_scoped_sessionfinish_old_wrapper_rewrite_is_refused(case):
         "    outcome = yield\n"
         "    session.exitstatus = 0\n"))
     _round16_scoped_failing(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     _round16_scoped_refused(result, root)
 
 
@@ -1434,7 +1467,7 @@ def test_real_scoped_unconfigure_exitstatus_reset_is_refused(case):
         "def pytest_unconfigure(config):\n"
         "    SEEN['session'].exitstatus = 0\n"))
     _round16_scoped_failing(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     _round16_scoped_refused(result, root)
 
 
@@ -1445,7 +1478,7 @@ def test_real_scoped_add_cleanup_exitstatus_reset_is_refused(case):
         "def pytest_sessionstart(session):\n"
         "    session.config.add_cleanup(lambda: setattr(session, 'exitstatus', 0))\n"))
     _round16_scoped_failing(root)
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     _round16_scoped_refused(result, root)
 
 
@@ -1460,7 +1493,7 @@ def test_real_scoped_xfail_and_skip_stay_passing(case):
         "@pytest.mark.skip(reason='skipped')\n"
         "def test_skipped():\n    assert False\n"
         "def test_ok():\n    assert True\n")
-    result = case.invoke(domain, root, "--", "tests", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 0, result.stderr.decode()
     assert b"ptest-bridge-refusal" not in result.stderr
     data = _data(result)
@@ -1478,7 +1511,7 @@ def test_real_scoped_deselect_all_exit_five_passes_through(case):
     (root / "tests" / "test_native.py").write_text(
         "def test_only():\n    assert True\n")
     result = case.invoke(domain, root, "--", "tests",
-                         "--deselect", "tests/test_native.py::test_only", timeout=10)
+                         "--deselect", "tests/test_native.py::test_only", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 5, result.stderr.decode()
     assert b"ptest-bridge-refusal" not in result.stderr
     data = _data(result)
@@ -1495,7 +1528,7 @@ def test_real_scoped_maxfail_stop_after_failure_stays_failure(case):
         "from pathlib import Path\n"
         "def test_a():\n    assert False\n"
         "def test_b():\n    Path('b.marker').write_text('ran')\n")
-    result = case.invoke(domain, root, "--", "tests", "-x", timeout=10)
+    result = case.invoke(domain, root, "--", "tests", "-x", timeout=_CHILD_TIMEOUT_S)
     assert result.code == 1, result.stderr.decode()
     assert b"ptest-bridge-refusal" not in result.stderr
     data = _data(result)

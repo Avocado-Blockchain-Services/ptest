@@ -1538,6 +1538,75 @@ def _execute_probe(domain: C.DomainPaths, config: C.Config,
     raise _problem("unsupported-capability", "native probe execution is unavailable")
 
 
+_FINALIZATION_RETRY_DEADLINE_S = 60.0
+_FINALIZATION_RETRY_MAX_S = 0.5
+
+
+def _is_transient_coordinator(exc: BaseException) -> bool:
+    # Cause-verified contention only: a plain coordinator-unavailable Problem
+    # carries genuine failures too (disk errors, failed commits) that must
+    # surface immediately rather than burn the queue/finalization budget.
+    return scheduler.is_transient_contention(exc)
+
+
+def _enqueue_with_retry(domain: C.DomainPaths, admission: C.AdmissionRequest):
+    """Admission enqueue waits out transient contention until the deadline.
+
+    The queue deadline is the only budget: a run that would have waited in
+    line must not die because the ledger was momentarily locked. Genuine
+    verdicts (capacity, nesting, ownership) propagate on the first pass.
+    """
+    while True:
+        try:
+            return scheduler.enqueue(domain, admission)
+        except C.Problem as exc:
+            if not _is_transient_coordinator(exc):
+                raise
+            if time.monotonic() >= admission.deadline:
+                raise _problem("queue-timeout", "admission did not complete",
+                               retryable=True)
+            time.sleep(min(C.SCHEDULER_POLL_S,
+                           max(0.0, admission.deadline - time.monotonic())))
+
+
+def _poll_with_retry(domain: C.DomainPaths, ticket: C.Ticket,
+                     admission: C.AdmissionRequest):
+    """Admission poll treats a locked ledger like a long queue: keep waiting."""
+    while True:
+        try:
+            return scheduler.poll(domain, ticket)
+        except C.Problem as exc:
+            if not _is_transient_coordinator(exc):
+                raise
+            if time.monotonic() >= admission.deadline:
+                raise _problem("queue-timeout", "admission did not complete",
+                               retryable=True)
+            time.sleep(min(C.SCHEDULER_POLL_S,
+                           max(0.0, admission.deadline - time.monotonic())))
+
+
+def _finalize_with_retry(action):
+    """Finalization waits out transient contention on a bounded budget.
+
+    Retrying begin_finalization re-proves quiescence from scratch; retrying
+    finish reuses the same proof, whose checked_at window only widens. Only
+    cause-verified contention is retried: ownership verdicts stay
+    fail-closed on the first pass.
+    """
+    deadline = time.monotonic() + _FINALIZATION_RETRY_DEADLINE_S
+    delay = C.SCHEDULER_POLL_S
+    while True:
+        try:
+            return action()
+        except C.Problem as exc:
+            if not _is_transient_coordinator(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(_FINALIZATION_RETRY_MAX_S, delay * 2)
+
+
 def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                     request: C.RunRequest) -> C.RunResult:
     """Run one authenticated selected/full comparison under one guard."""
@@ -1589,7 +1658,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
         deadline=time.monotonic() + request.queue_timeout_s,
         fixture=domain.fixture,
     )
-    ticket = scheduler.enqueue(domain, admission)
+    ticket = _enqueue_with_retry(domain, admission)
     queue_started = time.monotonic()
     signal_state = _Signals()
     previous = {signum: signal.signal(signum, signal_state.handler)
@@ -1599,7 +1668,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
     frames: _CompoundFrames | None = None
     try:
         while True:
-            state = scheduler.poll(domain, ticket)
+            state = _poll_with_retry(domain, ticket, admission)
             if signal_state.number is not None and state.state in {
                     C.LeaseState.QUEUED, C.LeaseState.GRANTED}:
                 if scheduler.cancel_pending(domain, ticket, owner):
@@ -1977,12 +2046,14 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 "coordinator-unavailable", "shadow history could not be committed"))
         def finalize_shadow(final_result: C.RunResult) -> None:
             if frames.registered:
-                proof = scheduler.begin_finalization(domain, grant)
-                scheduler.finish(domain, grant, proof, C.Finalization(
-                    outcome_id=None, status=final_result.status,
-                    exit_code=final_result.exit_code,
-                    source_valid=final_result.source_valid, committed=True,
-                ))
+                proof = _finalize_with_retry(
+                                        lambda: scheduler.begin_finalization(domain, grant))
+                _finalize_with_retry(
+                                        lambda: scheduler.finish(domain, grant, proof, C.Finalization(
+                        outcome_id=None, status=final_result.status,
+                        exit_code=final_result.exit_code,
+                        source_valid=final_result.source_valid, committed=True,
+                    )))
                 return
             if not scheduler.cancel_pending(domain, ticket, owner):
                 raise _problem(
@@ -2000,11 +2071,13 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
         if grant is not None:
             try:
                 if frames is not None and frames.registered:
-                    proof = scheduler.begin_finalization(domain, grant)
-                    scheduler.finish(domain, grant, proof, C.Finalization(
-                        outcome_id=None, status=C.Status.INCOMPLETE,
-                        exit_code=70, source_valid=False, committed=False,
-                    ))
+                    proof = _finalize_with_retry(
+                                                lambda: scheduler.begin_finalization(domain, grant))
+                    _finalize_with_retry(
+                                                lambda: scheduler.finish(domain, grant, proof, C.Finalization(
+                            outcome_id=None, status=C.Status.INCOMPLETE,
+                            exit_code=70, source_valid=False, committed=False,
+                        )))
                 else:
                     scheduler.cancel_pending(domain, ticket, owner)
             except (C.Problem, OSError):
@@ -2710,7 +2783,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             deadline=time.monotonic() + request.queue_timeout_s,
             fixture=domain.fixture,
         )
-        ticket = scheduler.enqueue(domain, admission)
+        ticket = _enqueue_with_retry(domain, admission)
         if request.verbose:
             progress.emit(
                 f"ptest: -v admission: requested {requested_slots} "
@@ -2720,7 +2793,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         waited = False
         wait_last = 0.0
         while True:
-            state = scheduler.poll(domain, ticket)
+            state = _poll_with_retry(domain, ticket, admission)
             if signals.number is not None and state.state in {
                     C.LeaseState.QUEUED, C.LeaseState.GRANTED}:
                 if scheduler.cancel_pending(domain, ticket, owner):
@@ -3148,7 +3221,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 result = replace(result, reasons=result.reasons + (invalidation,))
         finalization_started = time.monotonic()
         try:
-            proof = scheduler.begin_finalization(domain, grant)
+            proof = _finalize_with_retry(
+                                lambda: scheduler.begin_finalization(domain, grant))
         except (C.Problem, OSError):
             return _export(domain, checkout, request, _incomplete(
                 result, _reason("ownership-uncertain", "guard quiescence could not be confirmed")))
@@ -3384,10 +3458,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 )
 
         def finalize(exported: C.RunResult) -> None:
-            scheduler.finish(domain, grant, proof, C.Finalization(
-                outcome_id=None, status=exported.status, exit_code=exported.exit_code,
-                source_valid=exported.source_valid, committed=True,
-            ))
+            _finalize_with_retry(
+                                lambda: scheduler.finish(domain, grant, proof, C.Finalization(
+                    outcome_id=None, status=exported.status,
+                    exit_code=exported.exit_code,
+                    source_valid=exported.source_valid, committed=True,
+                )))
             if consumed_report:
                 reports.cleanup_report(report_binding)
 

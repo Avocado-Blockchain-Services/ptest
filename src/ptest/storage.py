@@ -19,9 +19,50 @@ from .files import validate_private_dir, validate_single_name
 _PHASE = "storage"
 _BUSY_TIMEOUT_MS = 2000
 
+# SQLITE_BUSY / SQLITE_LOCKED (primary codes; masked to ignore extended bits).
+_TRANSIENT_SQLITE_CODES = frozenset({5, 6})
+_TRANSIENT_SQLITE_PHRASES = (
+    "database is locked",
+    "database table is locked",
+    "database schema is locked",
+)
+
 
 def _fail(code: str, message: str) -> None:
     raise Problem(code=code, message=message, phase=_PHASE, retryable=False)
+
+
+class TransientContention(Problem):
+    """Cause-verified lock contention: safe to auto-retry with backoff.
+
+    Behavior-identical to a retryable ``coordinator-unavailable`` Problem
+    (same code, phase carried by the raiser); the type additionally tells
+    retry loops that the cause was a busy/locked database rather than a
+    verdict that must stand. Raised ONLY after is_transient_sqlite passed.
+    """
+
+    def __init__(self, *, message: str, phase: str):
+        super().__init__(code="coordinator-unavailable", message=message,
+                         phase=phase, retryable=True)
+
+
+def _sqlite_error_code(exc: sqlite3.Error) -> int | None:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def is_transient_sqlite(exc: sqlite3.Error) -> bool:
+    """True when a SQLite error reports lock contention rather than damage.
+
+    A busy/locked database is transient pressure from a concurrent writer:
+    callers must wait with bounded retries, never treat it as corruption.
+    Anything else (not-a-database, io errors, full) keeps its verdict.
+    """
+    code = _sqlite_error_code(exc)
+    if code is not None and code & 0xFF in _TRANSIENT_SQLITE_CODES:
+        return True
+    text = str(exc).lower()
+    return any(phrase in text for phrase in _TRANSIENT_SQLITE_PHRASES)
 
 
 def _identity(path: Path) -> tuple:
@@ -113,11 +154,14 @@ def open_database(root: Path, name: str, *, max_bytes: int,
         except sqlite3.Error:
             pass
         raise
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         try:
             conn.close()
         except sqlite3.Error:
             pass
+        if is_transient_sqlite(exc):
+            raise TransientContention(message=f"database {name!r} is busy",
+                                      phase=_PHASE)
         _fail("coordinator-corrupt", f"database {name!r} is corrupt")
         raise AssertionError("unreachable")
     try:

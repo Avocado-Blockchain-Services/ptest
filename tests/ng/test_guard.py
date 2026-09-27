@@ -1219,6 +1219,9 @@ def test_transient_scan_stall_retries_before_reporting_cleanup(monkeypatch):
 def test_persistent_scan_outage_still_fails_closed(monkeypatch):
     import ptest.guard as guard_module
 
+    # The retry budget is a deadline, not a pass count: pin the verdict with
+    # a small deadline so a permanently blind table still fails closed fast.
+    monkeypatch.setattr(guard_module, "_GROUP_SCAN_DEADLINE_S", 0.4)
     calls = []
 
     def blind():
@@ -1227,7 +1230,9 @@ def test_persistent_scan_outage_still_fails_closed(monkeypatch):
 
     monkeypatch.setattr(guard_module.psutil, "process_iter", blind)
 
+    started = time.monotonic()
     assert guard_module._group_needs_cleanup(_quiescent_identity()) is True
+    assert time.monotonic() - started < 10
     assert len(calls) > 1
 
 
@@ -1254,3 +1259,291 @@ def test_observed_group_member_fails_fast_without_retry(monkeypatch):
     finally:
         proc.kill()
         proc.wait()
+
+
+# --- Slow-scan and contended-reconcile twins ----------------------------------
+#
+# Under load the per-pass scan budget is exhausted on every pass while the
+# group is already quiescent, and the guard's read-only reconcile collides
+# with the parent's write transactions. Both are transient: the guard must
+# wait for a complete clean pass / a readable snapshot instead of reporting
+# "a prior phase still has live descendants" or a failed handoff.
+
+def test_slow_but_complete_scan_waits_for_a_clean_pass(monkeypatch):
+    import ptest.guard as guard_module
+
+    calls = []
+
+    def sluggish():
+        calls.append(1)
+        if len(calls) <= 3:
+            # Each of the first passes exceeds the per-pass budget
+            # mid-iteration (a foreign pid is yielded only after the stall),
+            # so every one of those passes is incomplete, not clean.
+            time.sleep(0.3)
+        return iter([psutil.Process(1)])
+
+    monkeypatch.setattr(guard_module.psutil, "process_iter", sluggish)
+
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is False
+    assert len(calls) == 4
+
+
+def _monotonic_only_clock(monkeypatch):
+    """Mirror the guard driver's fake clock: monotonic exists, sleep does not."""
+    import time as realtime
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        guard_module, "time", SimpleNamespace(monotonic=realtime.monotonic))
+    return guard_module
+
+
+def test_scan_retry_survives_monotonic_only_clock(monkeypatch):
+    import psutil as psutil_module
+
+    guard_module = _monotonic_only_clock(monkeypatch)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise psutil_module.Error("transient observation stall")
+        return iter(())
+
+    monkeypatch.setattr(guard_module.psutil, "process_iter", flaky)
+
+    # The retry pacing must not use time.sleep: under the driver's fake
+    # clock that attribute does not exist and the guard would exit 70 with
+    # no facts instead of waiting out the stall.
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is False
+    assert len(calls) == 2
+
+
+def test_reconcile_retry_survives_monotonic_only_clock(monkeypatch):
+    from ptest.storage import TransientContention
+
+    guard_module = _monotonic_only_clock(monkeypatch)
+    reads = []
+
+    def flaky(domain):
+        reads.append(1)
+        if len(reads) == 1:
+            raise TransientContention(message="coordinator is busy",
+                                      phase="scheduler")
+        return ()
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", flaky)
+
+    assert guard_module._reconcile_for_spawn(object()) == ()
+    assert len(reads) == 2
+
+
+def test_lease_view_shares_its_deadline_with_reconcile_retries(monkeypatch):
+    import ptest.guard as guard_module
+    from ptest.storage import TransientContention
+
+    # Retry budgets compose, never stack: even with a generous reconcile
+    # budget, the shorter lease-view deadline owns the wait. Without
+    # sharing, one spawn decision burns scan + reconcile + view end to end
+    # (~50s) and outlives the harness watchdog although nothing is wrong.
+    monkeypatch.setattr(guard_module, "_LEASE_VIEW_RETRY_DEADLINE_S", 0.5)
+    monkeypatch.setattr(guard_module, "_RECONCILE_RETRY_DEADLINE_S", 30.0)
+
+    def busy(domain):
+        raise TransientContention(message="coordinator is busy",
+                                  phase="scheduler")
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", busy)
+    started = time.monotonic()
+    with pytest.raises(TransientContention):
+        guard_module._running_lease(object(), "r1")
+    assert time.monotonic() - started < 10
+
+
+def test_truncated_scan_fails_closed_without_waiting(monkeypatch):
+    import ptest.guard as guard_module
+
+    calls = []
+
+    def truncated():
+        calls.append(1)
+        return iter([psutil.Process(1), psutil.Process(1)])
+
+    monkeypatch.setattr(guard_module, "_MAX_GROUP_SCAN", 1)
+    monkeypatch.setattr(guard_module.psutil, "process_iter", truncated)
+
+    # The count bound is identical on every pass: retrying cannot complete
+    # it, so the verdict must come from the first pass, not the deadline.
+    started = time.monotonic()
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is True
+    assert time.monotonic() - started < 5
+    assert len(calls) == 1
+
+
+def test_chronically_slow_scan_still_fails_closed(monkeypatch):
+    import ptest.guard as guard_module
+
+    monkeypatch.setattr(guard_module, "_GROUP_SCAN_DEADLINE_S", 0.4)
+    calls = []
+
+    def sluggish():
+        calls.append(1)
+        time.sleep(0.3)
+        return iter([psutil.Process(1)])
+
+    monkeypatch.setattr(guard_module.psutil, "process_iter", sluggish)
+
+    started = time.monotonic()
+    assert guard_module._group_needs_cleanup(_quiescent_identity()) is True
+    assert time.monotonic() - started < 10
+    assert len(calls) > 1
+
+
+def _quiescent_manifest(run_id="r1"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        domain=SimpleNamespace(root="/nonexistent"),
+        grant=SimpleNamespace(run_id=run_id))
+
+
+def test_predecessor_quiescent_retries_transient_reconcile(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    from ptest.storage import TransientContention
+
+    scans, reads = [], []
+
+    def clean(identity):
+        scans.append(1)
+        return False
+
+    lease = SimpleNamespace(
+        run_id="r1", state=C.LeaseState.RUNNING)
+
+    def flaky(domain):
+        reads.append(1)
+        if len(reads) <= 2:
+            raise TransientContention(message="coordinator read failed",
+                                      phase="scheduler")
+        return (lease,)
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda identity, deadline_s=None: clean(identity))
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", flaky)
+
+    state = guard_module._State()
+    assert guard_module._predecessor_quiescent(
+        _quiescent_manifest(), _quiescent_identity(), state) is True
+    assert state.problem is None
+    assert len(reads) == 3
+
+
+def test_predecessor_quiescent_tolerates_transient_uncertain_view(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda identity, deadline_s=None: False)
+    running = SimpleNamespace(run_id="r1", state=C.LeaseState.RUNNING)
+    uncertain = SimpleNamespace(run_id="r1", state=C.LeaseState.UNCERTAIN)
+    reads = []
+
+    def flickering(domain):
+        reads.append(1)
+        # An exiting descendant caught mid-reap reads as escaped for one
+        # pass; the next pass sees the reaped truth. Only a stable verdict
+        # may refuse the spawn.
+        return (uncertain,) if len(reads) == 1 else (running,)
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", flickering)
+
+    state = guard_module._State()
+    assert guard_module._predecessor_quiescent(
+        _quiescent_manifest(), _quiescent_identity(), state) is True
+    assert state.problem is None
+    assert len(reads) == 2
+
+
+def test_predecessor_quiescent_fails_closed_on_stable_uncertain_view(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda identity, deadline_s=None: False)
+    monkeypatch.setattr(guard_module, "_LEASE_VIEW_RETRY_DEADLINE_S", 0.3)
+    uncertain = SimpleNamespace(run_id="r1", state=C.LeaseState.UNCERTAIN)
+    reads = []
+
+    def stuck(domain):
+        reads.append(1)
+        return (uncertain,)
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", stuck)
+
+    state = guard_module._State()
+    assert guard_module._predecessor_quiescent(
+        _quiescent_manifest(), _quiescent_identity(), state) is False
+    assert state.problem is not None
+    assert state.problem.code == "ownership-uncertain"
+    assert len(reads) > 1
+
+
+def test_predecessor_quiescent_stays_fast_while_cancelling(monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    uncertain = SimpleNamespace(run_id="r1", state=C.LeaseState.UNCERTAIN)
+    reads = []
+
+    def stuck(domain):
+        reads.append(1)
+        return (uncertain,)
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", stuck)
+
+    state = guard_module._State()
+    state.cancel(signal.SIGTERM)
+    started = time.monotonic()
+    assert guard_module._predecessor_quiescent(
+        _quiescent_manifest(), _quiescent_identity(), state) is False
+    # A pending cancel owns the timeline: the kill path keeps its budget
+    # instead of burning the patient spawn-gate budgets.
+    assert time.monotonic() - started < 5
+    assert state.problem is not None
+    assert len(reads) >= 1
+
+
+@pytest.mark.parametrize("code", ["ownership-uncertain", "coordinator-unavailable"])
+def test_predecessor_quiescent_does_not_retry_genuine_failure(
+        monkeypatch, code):
+    import ptest.guard as guard_module
+
+    def clean(identity):
+        return False
+
+    reads = []
+
+    def failing(domain):
+        reads.append(1)
+        # A plain coordinator-unavailable Problem carries genuine failures
+        # too (disk errors, failed commits): only cause-verified contention
+        # authorizes a retry, so both cases must propagate on the first pass.
+        raise C.Problem(code=code,
+                        message="process-group ownership could not be proven",
+                        phase="scheduler", retryable=(code != "ownership-uncertain"))
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda identity, deadline_s=None: clean(identity))
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", failing)
+
+    state = guard_module._State()
+    with pytest.raises(C.Problem) as caught:
+        guard_module._predecessor_quiescent(
+            _quiescent_manifest(), _quiescent_identity(), state)
+    assert caught.value.code == code
+    assert len(reads) == 1
+

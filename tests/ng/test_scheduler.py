@@ -39,7 +39,8 @@ def world(monkeypatch):
                             identities={owner.pid: owner, guard.pid: guard},
                             absent=set(), groups={guard.pgid: True},
                             children={}, parents={}, inaccessible=set(),
-                            vanish_on_children=set(), reuse_on_children={})
+                            vanish_on_children=set(), reuse_on_children={},
+                            blind_on_children=set())
 
     def process(pid):
         if pid in state.inaccessible:
@@ -56,6 +57,10 @@ def world(monkeypatch):
                 state.vanish_on_children.remove(pid)
                 state.identities.pop(pid, None)
                 state.absent.add(pid)
+                raise psutil.NoSuchProcess(pid)
+            if pid in state.blind_on_children:
+                # Alive with a matching identity (an unreaped zombie) whose
+                # subtree cannot be listed this pass.
                 raise psutil.NoSuchProcess(pid)
             return [SimpleNamespace(pid=child_pid)
                     for child_pid in state.children.get(pid, ())]
@@ -357,6 +362,152 @@ def test_listed_then_reaped_descendant_does_not_leak_lease(case, world):
     _gone(world, world.guard)
     finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
     assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_unlistable_live_descendant_does_not_poison_lease(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    world.blind_on_children.add(child.pid)
+
+    # The child is alive with an unchanged identity (an unreaped zombie):
+    # its subtree holds nothing new, so the lease stays RUNNING instead
+    # of flipping to unsupported-detached-descendant.
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+    assert _sql(domain, "SELECT pid FROM observations WHERE pid=0") == []
+
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_unlistable_escaped_descendant_still_fails_closed(case, world):
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+    # The subtree goes unlistable in the same pass the child escapes its
+    # group: tolerating the blind listing must not launder the escape. The
+    # walk refreshes the record with the escaped pgid, so the post-walk
+    # escape check still fires on this same pass.
+    world.identities[child.pid] = replace(child, pgid=child.pid)
+    world.blind_on_children.add(child.pid)
+
+    result = poll(domain, ticket)
+    assert result.state is C.LeaseState.UNCERTAIN
+    assert result.problem is not None
+    assert result.problem.code == "unsupported-detached-descendant"
+
+
+def test_transient_walk_ghost_heals_on_next_clean_pass(case, world):
+    # One raced pass (a subtree unreadable for a moment, as under fork-heavy
+    # load) must not brick the lease: the next clean pass under the live
+    # guard clears the stale sentinel and restores RUNNING with no reason.
+    # Without healing, a single mid-run race pins the row UNCERTAIN forever
+    # and the post-execution spawn gate fails a healthy run.
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+    world.inaccessible.add(child.pid)
+    ghost = poll(domain, ticket)
+    assert ghost.state is C.LeaseState.UNCERTAIN
+    assert ghost.problem is not None
+    assert ghost.problem.code == "ownership-uncertain"
+    assert _sql(domain, "SELECT uncertain FROM observations WHERE pid=0") == [(1,)]
+
+    world.inaccessible.clear()
+    healed = poll(domain, ticket)
+    assert healed.state is C.LeaseState.RUNNING
+    assert healed.problem is None
+    assert _sql(domain, "SELECT state, reason_code FROM jobs") == [("RUNNING", None)]
+    assert _sql(domain, "SELECT pid FROM observations WHERE pid=0") == []
+
+
+def test_healed_lease_releases_cleanly_after_guard_exits(case, world):
+    # End to end of the load flake: ghost, heal, clean exit, release.
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    world.inaccessible.add(child.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    world.inaccessible.clear()
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+    world.identities.pop(child.pid)
+    world.absent.add(child.pid)
+    world.children.clear()
+    _gone(world, world.guard)
+    finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
+    assert poll(domain, ticket).state is C.LeaseState.RELEASED
+
+
+def test_vanished_escape_heals_while_guard_lives(case, world):
+    # An escape verdict whose subjects are gone is history, not evidence:
+    # with the guard live, the group live, and the tree clean, the lease
+    # heals so a reaped straggler cannot brick the run. A live escapee
+    # still re-fires on every pass (pinned by the twins above); only the
+    # vanishing — death or pid recycle, both unobservable-after-the-fact —
+    # lets the lease recover.
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    assert poll(domain, ticket).state is C.LeaseState.RUNNING
+
+    world.identities[child.pid] = replace(child, pgid=child.pid)
+    escaped = poll(domain, ticket)
+    assert escaped.state is C.LeaseState.UNCERTAIN
+    assert escaped.problem is not None
+    assert escaped.problem.code == "unsupported-detached-descendant"
+
+    world.identities.pop(child.pid)
+    world.absent.add(child.pid)
+    world.children.clear()
+    healed = poll(domain, ticket)
+    assert healed.state is C.LeaseState.RUNNING
+    assert healed.problem is None
+    assert _sql(domain, "SELECT state, reason_code FROM jobs") == [("RUNNING", None)]
+    assert _sql(domain, "SELECT pid FROM observations WHERE pid=0") == []
+
+
+def test_stable_blindness_never_heals(case, world):
+    # Healing needs a clean pass: a permanently unreadable subtree re-fires
+    # every pass, so the lease stays UNCERTAIN with its reason intact.
+    domain = case.domain()
+    ticket, _ = _running(case, domain, world)
+    child = C.ProcessIdentity(pid=900002, birth=2.0, uid=os.getuid(),
+                              pgid=world.guard.pgid)
+    world.identities[child.pid] = child
+    world.children[world.guard.pid] = [child.pid]
+    world.inaccessible.add(child.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    again = poll(domain, ticket)
+    assert again.state is C.LeaseState.UNCERTAIN
+    assert again.problem is not None
+    # A ghost is transient-class, never an escape verdict: it reports
+    # ownership-uncertain so a later clean pass may heal it, while a live
+    # escapee keeps unsupported-detached-descendant and never heals.
+    assert again.problem.code == "ownership-uncertain"
+    assert _sql(domain, "SELECT state, reason_code FROM jobs"
+                ) == [("UNCERTAIN", "ownership-uncertain")]
+    assert _sql(domain, "SELECT uncertain FROM observations WHERE pid=0") == [(1,)]
 
 
 def test_guard_reused_during_children_walk_is_typed_uncertain_and_retains_charge(case, world):

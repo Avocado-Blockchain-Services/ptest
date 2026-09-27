@@ -2494,6 +2494,13 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
     if not isinstance(argv, (list, tuple)) or not all(isinstance(item, str) for item in argv):
         _fail("pytest argv must be a string array")
     # Executing this file must have the same cwd imports as `python -m pytest`.
+    # The swap is process-global: restore it on the way out so in-process
+    # callers keep their import path. (This repo's own suite calls run()
+    # in-process; without restoring, the worker's sys.path[0] — the tests
+    # directory pytest prepended — stays evicted and every later sibling
+    # import in that worker fails.) The child always exits right after
+    # run() returns, so restoring is a no-op there.
+    _saved_sys_path = sys.path[:]
     sys.path[:1] = [os.getcwd()]
     try:
         _protocol()
@@ -2640,6 +2647,7 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         problem = "bridge-refused"
         raise
     finally:
+        sys.path[:] = _saved_sys_path
         if binding is not None and (complete or problem == "bridge-refused"):
             try:
                 if binding[1].get("effective_profile") == "advanced":

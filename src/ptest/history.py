@@ -769,12 +769,16 @@ def _open_store(
         except C.Problem as exc:
             # A concurrent first writer can expose the SQLite header before it
             # has committed the schema.  Re-open a bounded number of times;
-            # persistent corruption still fails closed below.
-            if attempt < 2 and exc.code in {"already-exists", "coordinator-corrupt"}:
+            # persistent corruption still fails closed below. A busy store
+            # arrives typed as retryable coordinator-unavailable (never as
+            # corruption) and gets the same bounded re-open.
+            if attempt < 2 and (exc.code in {"already-exists", "coordinator-corrupt"}
+                                or (exc.code == "coordinator-unavailable" and exc.retryable)):
                 continue
             if exc.code == "coordinator-corrupt":
-                # T0's opener maps pragma lock errors to this same code. Only
-                # our own schema/content validation is positive corruption.
+                # The opener types lock contention as retryable
+                # coordinator-unavailable, never as corruption. Only our own
+                # schema/content validation is positive corruption.
                 raise _HistoryStateError("coordinator-unavailable") from None
             raise
         except sqlite3.Error:
