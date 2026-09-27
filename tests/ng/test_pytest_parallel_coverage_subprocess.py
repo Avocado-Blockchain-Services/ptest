@@ -352,3 +352,123 @@ def test_parallel_persea_shaped_coverage_runs_four_workers_labelled(
     lines = _worker_lines(root)
     assert len(lines) == 5
     assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
+
+
+_PERSEA_OBSERVATION_CONFTEST = (
+    "import pytest\n"
+    "\n"
+    "_RUN_ID_KEY = 'persea_run_id'\n"
+    "_active_xdist_workers = set()\n"
+    "\n"
+    "def _get_run_id(config=None):\n"
+    "    return 'run123'\n"
+    "\n"
+    "\n"
+    "def pytest_configure_node(node):\n"
+    '    """Give every xdist worker the controller\'s one run namespace."""\n'
+    "    node.workerinput[_RUN_ID_KEY] = _get_run_id(node.config)\n"
+    "    worker_id = getattr(getattr(node, 'gateway', None), 'id', None)\n"
+    "    if worker_id is None:\n"
+    "        worker_id = node.workerinput.get('workerid')\n"
+    "    if worker_id is not None:\n"
+    "        _active_xdist_workers.add(worker_id)\n"
+    "\n"
+    "\n"
+    "def _print_db_cleanup_profile(profile):\n"
+    "    print('cleanup-profile:', profile)\n"
+    "\n"
+    "\n"
+    "@pytest.hookimpl(optionalhook=True)\n"
+    "def pytest_testnodedown(node, error):\n"
+    '    """Record completed workers and relay opt-in cleanup profiles."""\n'
+    "    worker_id = getattr(getattr(node, 'gateway', None), 'id', None)\n"
+    "    if worker_id is not None:\n"
+    "        _active_xdist_workers.discard(worker_id)\n"
+    "    workeroutput = getattr(node, 'workeroutput', None) or {}\n"
+    "    profile = workeroutput.get('real_commit_cleanup_profile')\n"
+    "    if profile is not None:\n"
+    "        _print_db_cleanup_profile(profile)\n"
+)
+
+
+def test_parallel_coverage_persea_observation_hooks_complete(tmp_path, fake_pytest_project):
+    """Persea-shaped observation hooks plus --cov: pass, 4 workers, coverage complete."""
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": _PERSEA_OBSERVATION_CONFTEST,
+            "tests/test_ok.py": _identity_tests(8),
+        },
+        git=False,
+    )
+
+    twin = _run_advanced_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q",
+               "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests"],
+        execution="full", timeout=60)
+
+    assert twin.code == 0, twin.stderr.decode()
+    assert twin.report is not None
+    assert twin.report["terminal_complete"] is True
+    assert twin.report["native_exit_code"] == 0
+    assert twin.report["problem"] is None
+    assert twin.report["coverage"] == {"complete": True}
+    workers = twin.report["workers"]
+    assert len(workers) == 4
+    assert {item["worker_id"] for item in workers} == {
+        "w000", "w001", "w002", "w003"}
+    for item in workers:
+        assert item["resource_prefix"].endswith(item["worker_id"])
+
+    lines = _worker_lines(root)
+    assert len(lines) == 8
+    assert {line[0] for line in lines} == {"gw0", "gw1", "gw2", "gw3"}
+
+
+def test_parallel_coverage_mutating_testnodedown_cannot_forge(tmp_path, fake_pytest_project):
+    """A testnodedown rewriting worker output cannot forge worker/coverage evidence.
+
+    The hook overwrites both the bridge record and the coverage
+    contributor key after the run. The observation-only scan refuses it
+    up front: the run is bridge-refused, never complete, and coverage is
+    never reported complete.
+    """
+    root = fake_pytest_project(
+        tests={
+            "tests/conftest.py": (
+                "def pytest_testnodedown(node, error):\n"
+                "    node.workeroutput['ptest_bridge'] = {\n"
+                "        'worker_id': 'gw0',\n"
+                "        'protocol_seen': 99,\n"
+                "        'failures': 0,\n"
+                "        'collection_errors': 0,\n"
+                "        'dropped': False,\n"
+                "        'conftest_hooks': [],\n"
+                "        'notes': [],\n"
+                "        'refused': False,\n"
+                "        'outcomes': {},\n"
+                "    }\n"
+                "    node.workeroutput['cov_worker_node_id'] = 'gw0'\n"
+            ),
+            "tests/test_ok.py": _identity_tests(8),
+        },
+        git=False,
+    )
+
+    twin = _run_advanced_bridge(
+        root, ["-n", "4", "--dist", "loadgroup", "-q",
+               "-p", "no:cacheprovider",
+               "--cov=tests", "--cov-report=", "tests"],
+        execution="full", timeout=60)
+
+    # Fail-closed, never a forged pass: an early-refused advanced
+    # parallel run exits nonzero with the hook named in the refusals and
+    # no complete report carrying worker or coverage evidence.
+    assert twin.code != 0
+    assert any("pytest_testnodedown" in refusal.get("message", "")
+               for refusal in twin.refusals)
+    assert twin.report is None or (
+        twin.report["terminal_complete"] is False
+        or twin.report.get("native_exit_code") not in (None, 0))
+    assert twin.report is None or twin.report["coverage"] == {
+        "complete": False}
