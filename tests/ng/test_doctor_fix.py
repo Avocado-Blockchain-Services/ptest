@@ -201,9 +201,15 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert main(("doctor", "--fix", "--dry-run")) == 0
     out = capsys.readouterr().out
     assert "DRAFT" in out
-    assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' in out
-    assert '+args = ["--cov", "pkg", "--cov-report", "term"]' in out
+    assert ('.ptest.toml: runner.args = '
+            '["--cov", "pkg", "--cov-report", "term"]') in out
+    assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' not in out
     assert "serial" not in out.lower()
+
+    assert main(("doctor", "--fix", "--dry-run", "-v")) == 0
+    verbose_out = capsys.readouterr().out
+    assert '-args = ["-n", "0", "--cov", "pkg", "--cov-report", "term"]' in verbose_out
+    assert '+args = ["--cov", "pkg", "--cov-report", "term"]' in verbose_out
 
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
@@ -360,9 +366,15 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
     # Default-valued keys count as unset: the draft closes and fills them.
     assert "closed_inputs = true" in out
     assert "full_triggers" in out
-    # Non-default hand-tuned values stay untouched (visible as context).
-    assert '"libs/mylib"' in out
-    assert '"src/core"' in out
+    # Non-default hand-tuned values stay untouched: summary shows changed
+    # keys only, so kept values appear as diff context under -v.
+    assert '"libs/mylib"' not in out
+    assert '"src/core"' not in out
+
+    assert main(("doctor", "--fix", "--dry-run", "-v")) == 0
+    verbose_out = capsys.readouterr().out
+    assert '"libs/mylib"' in verbose_out
+    assert '"src/core"' in verbose_out
 
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
@@ -935,3 +947,63 @@ def test_fix_adds_node_modules_to_vitest_config_and_is_idempotent(
     assert main(("doctor", "--fix")) == 0
     assert "config is up to date" in capsys.readouterr().out
     assert (root / ".ptest.toml").read_text(encoding="utf-8") == raw
+
+
+def test_fix_dry_run_prints_selection_summary_not_the_full_mapping(
+        tmp_path, monkeypatch, capsys):
+    """A ~110 KB [selection] draft previews as a summary, not the mapping.
+
+    Twin of a real-repo `--fix`/`--dry-run` that dumped every test file of
+    every group: per changed key a short line, groups as a count with per
+    group test-file counts, triggers as a count plus the first few. The
+    file on disk is untouched by the dry run.
+    """
+    root = _write_import_twin(tmp_path / "summary")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "selection.enabled = true" in out
+    assert "selection.closed_inputs = true" in out
+    assert "selection.groups: 2 (pkg_a 2 test files, pkg_b 2 test files)" in out
+    assert ("selection.full_triggers: 7 (.ptest.toml, pyproject.toml, "
+            "tests/__init__.py, tests/conftest.py, …)") in out
+    assert "DRAFT" in out
+    # The full mapping stays off the terminal: no per-file diff lines.
+    assert "+groups = [" not in out
+    assert "+full_triggers = [" not in out
+    assert "tests/unit/test_both.py" not in out
+    # Dry run writes nothing.
+    assert "[selection]" not in (root / ".ptest.toml").read_text(encoding="utf-8")
+
+
+def test_fix_verbose_dry_run_shows_the_full_diff(tmp_path, monkeypatch, capsys):
+    """`-v` restores the full unified diff behind the summary."""
+    root = _write_import_twin(tmp_path / "verbose")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run", "-v")) == 0
+    out = capsys.readouterr().out
+    assert "+groups = [" in out
+    assert "+full_triggers = [" in out
+    assert "tests/unit/test_both.py" in out
+    assert "[selection]" not in (root / ".ptest.toml").read_text(encoding="utf-8")
+
+
+def test_fix_applies_the_full_selection_content(tmp_path, monkeypatch, capsys):
+    """The summary preview still writes the complete mapping to disk."""
+    root = _write_import_twin(tmp_path / "apply")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    out = capsys.readouterr().out
+    assert "updated .ptest.toml" in out
+    assert "selection.groups: 2 (" in out
+    assert "+groups = [" not in out
+    selection = _twin_selection(root)
+    assert [group["name"] for group in selection["groups"]] == ["pkg_a", "pkg_b"]
+    assert "tests/unit/test_both.py" in selection["groups"][1]["tests"]
+    assert len(selection["full_triggers"]) == 7

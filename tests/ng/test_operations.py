@@ -1349,3 +1349,118 @@ def test_parallel_worker_reason_messages():
         None, 1, 1, needs_parallel_baseline=True) is None
     assert operations._parallel_worker_reason(
         qualified, 1, 1, needs_parallel_baseline=False) is None
+
+
+# --- Setup-before-tier: first run goes parallel when setup installs plugins --
+
+def _installing_setup_project(root, *, installs=True, exit_code=0):
+    """Attach a fake setup that (optionally) installs stub pytest-xdist.
+
+    Twin of a fresh checkout where ``uv sync`` provides the parallel-tier
+    plugins: the probe venv starts without pytest-xdist and the declared
+    setup script creates its dist-info, so the post-setup tier re-probe
+    must admit the parallel tier on the very first run. A nonzero
+    ``exit_code`` makes the fake setup fail without touching anything.
+    """
+    venv_root = root / "probe-venv"
+    packages = venv_root / "lib" / "python3.12" / "site-packages"
+    packages.mkdir(parents=True)
+    script = root / "fake-setup.py"
+    body = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "packages, marker = Path(sys.argv[1]), Path(sys.argv[2])\n")
+    if exit_code != 0:
+        body += f"raise SystemExit({exit_code})\n"
+    else:
+        if installs:
+            body += (
+                "dist = packages / 'pytest_xdist-3.8.0.dist-info'\n"
+                "dist.mkdir(parents=True, exist_ok=True)\n"
+                "(dist / 'METADATA').write_text(\n"
+                "    'Metadata-Version: 2.1\\nName: pytest-xdist\\nVersion: 3.8.0\\n',\n"
+                "    encoding='utf-8')\n")
+        body += "marker.write_text('setup ran\\n', encoding='utf-8')\n"
+    script.write_text(body, encoding="utf-8")
+    marker = "setup-done.txt"
+    with (root / ".ptest.toml").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n[setup]\n"
+            f"argv = {json.dumps([sys.executable, str(script), str(packages), str(root / marker)])}\n"
+            f"required_paths = {json.dumps([marker])}\n"
+            "network = false\n"
+            "lifecycle_scripts = false\n")
+    resolved = config_api.resolve_config(root).config
+    assert resolved is not None and resolved.setup is not None
+    config = resolved
+    venv = (venv_root, None)
+
+    def _probe(config, dist):
+        return venv
+
+    return config, packages, marker, _probe
+
+
+def test_first_run_goes_parallel_when_setup_installs_xdist(case, monkeypatch):
+    """Fresh checkout: setup runs before the tier probe, so run one is parallel."""
+    from ptest import executability as E
+
+    domain = case.domain(slots=4, jobs=4)
+    config = _xdist_project(case, domain, addopts="-n 4")
+    root = Path(config.config_path).parent
+    config, packages, marker, probe = _installing_setup_project(root)
+    monkeypatch.setattr(E, "_project_venv", probe)
+    assert E.parallel_request(config).reason is not None
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert (root / marker).read_text(encoding="utf-8") == "setup ran\n"
+    assert (packages / "pytest_xdist-3.8.0.dist-info").is_dir()
+    assert result.status == C.Status.PASSED
+    assert result.granted_workers == 4
+    assert result.command.workers == 4
+    assert [code for code, _ in _reason_messages(result)
+            if code == "parallel-workers"] == []
+
+
+def test_run_stays_serial_when_setup_does_not_install_xdist(case, monkeypatch):
+    """The post-setup re-probe still fails closed when setup adds no plugin."""
+    from ptest import executability as E
+
+    domain = case.domain()
+    config = _xdist_project(case, domain, addopts="-n 4")
+    root = Path(config.config_path).parent
+    config, _, _, probe = _installing_setup_project(
+        root, installs=False)
+    monkeypatch.setattr(E, "_project_venv", probe)
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.status == C.Status.PASSED
+    assert result.granted_workers == 1
+    assert result.command.workers == 1
+    assert ("parallel-workers",
+            "serial: pytest-xdist is not installed in the project "
+            "environment yet; ptest runs serially until setup installs it") in (
+        _reason_messages(result))
+
+
+def test_failing_setup_returns_the_setup_result(case, monkeypatch):
+    """A setup that fails before the tier probe fails the run as setup.
+
+    No test phase is attempted: the returned result is the setup
+    sub-run's own failure, carrying its exit code.
+    """
+    from ptest import executability as E
+
+    domain = case.domain()
+    config = _xdist_project(case, domain, addopts="-n 4")
+    root = Path(config.config_path).parent
+    config, _, marker, probe = _installing_setup_project(root, exit_code=3)
+    monkeypatch.setattr(E, "_project_venv", probe)
+
+    result = operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED))
+
+    assert result.status is C.Status.FAILED
+    assert result.exit_code == 3
+    assert not (root / marker).exists()

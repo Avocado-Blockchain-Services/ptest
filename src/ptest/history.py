@@ -1821,6 +1821,18 @@ def _baseline_reasons(
     if result.input_before.digest != result.input_after.digest:
         return (_reason("changed-during-run", "source identity changed during the run"),)
     if not result.input_before.clean or not result.input_after.clean:
+        # Name the actual run kind: a selected/scoped run is not the full
+        # gate, so the dirty-tree note must not claim it ran.
+        execution = (result.plan.execution
+                     if result.plan is not None else "full")
+        if execution == "selected":
+            return (_reason(
+                "unknown-input",
+                "the selected run ran on a dirty source tree"),)
+        if execution == "scoped":
+            return (_reason(
+                "unknown-input",
+                "the scoped run ran on a dirty source tree"),)
         return (_reason("unknown-input", "the full gate ran on a dirty source tree"),)
     if inventory is None or not inventory.complete or any(
         item.outcome is C.Outcome.UNKNOWN for item in (inventory.tests if inventory else ())
