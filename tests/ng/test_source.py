@@ -1114,3 +1114,88 @@ def test_unsafe_input_types_and_encodings_fail_closed(case, kind):
         os.close(fd)
     result = snapshot(domain, _config(case, domain), None, None)
     assert result.digest is None and result.limitations
+
+
+def _vitest_config(case, domain):
+    checkout = case.checkout(domain)
+    object.__setattr__(checkout, "root", domain.root / "repo")
+    policy = replace(case.config().selection, non_input_outputs=("node_modules",))
+    return case.config(checkout=checkout, selection=policy, runner_kind="vitest")
+
+
+_NESTED_VITE_OUTPUT = ("scripts/__tests__/fixtures/sharded-coverage/node_modules"
+                       "/.vite/vitest/abc123/results.json")
+
+
+def test_vitest_snapshot_ignores_nested_node_modules_tool_output(case):
+    """Nested fixture node_modules/.vite output must not break the vitest identity.
+
+    Twin of the real ``ptest --full web`` changed-during-run: Vite wrote a
+    results file under a nested ``node_modules`` mid-run while only the
+    literal top-level ``node_modules`` prefix was exempt.  Any untracked
+    path with a ``node_modules`` segment is the same non-input tool output
+    for vitest projects.
+    """
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _vitest_config(case, domain)
+    target = root / _NESTED_VITE_OUTPUT
+    target.parent.mkdir(parents=True)
+    before = snapshot(domain, config, None, None)
+    assert before.digest is not None
+    assert before.clean
+    target.write_text('{"ok":true}\n')
+    after = snapshot(domain, config, None, None)
+    assert after.digest is not None
+    assert after.digest == before.digest
+    assert after.clean
+    assert _NESTED_VITE_OUTPUT not in {item.path for item in after.files}
+    assert _NESTED_VITE_OUTPUT not in {change.new for change in after.changes if change.new}
+
+
+def test_vitest_snapshot_ignores_ignored_nested_node_modules_tool_output(case):
+    """The nested node_modules exemption also covers git-ignored Vite output."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    (root / ".gitignore").write_text("node_modules/\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore environments")
+    config = _vitest_config(case, domain)
+    before = snapshot(domain, config, None, None)
+    assert before.digest is not None
+    assert before.clean
+    target = root / _NESTED_VITE_OUTPUT
+    target.parent.mkdir(parents=True)
+    target.write_text('{"ok":true}\n')
+    after = snapshot(domain, config, None, None)
+    assert after.digest is not None
+    assert after.digest == before.digest
+    assert after.clean
+    assert _NESTED_VITE_OUTPUT not in {item.path for item in after.files}
+    assert _NESTED_VITE_OUTPUT not in {change.new for change in after.changes if change.new}
+
+
+def test_nested_node_modules_stays_input_for_tracked_and_pytest(case):
+    """Decide and pin: tracked nested node_modules files stay inputs; pytest unaffected."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    tracked = root / "fixtures" / "node_modules" / "pinned.js"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("pinned\n")
+    git(root, "add", "."); git(root, "commit", "-m", "track nested module file")
+    result = snapshot(domain, _vitest_config(case, domain), None, None)
+    assert result.digest is not None
+    assert "fixtures/node_modules/pinned.js" in {item.path for item in result.files}
+    before = snapshot(domain, _config(case, domain), None, None)
+    target = root / _NESTED_VITE_OUTPUT
+    target.parent.mkdir(parents=True)
+    target.write_text('{"ok":true}\n')
+    after = snapshot(domain, _config(case, domain), None, None)
+    assert after.digest is not None
+    assert after.digest != before.digest
+    assert _NESTED_VITE_OUTPUT in {item.path for item in after.files}

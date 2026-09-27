@@ -59,6 +59,26 @@ def _reason(code: str, message: str, paths: tuple = ()) -> C.Reason:
     return C.Reason(code=code, message=message, paths=paths)
 
 
+def _is_non_input_output(config: C.Config, path: str) -> bool:
+    """Declared non-input outputs, plus nested node_modules for vitest.
+
+    ``non_input_outputs`` entries are literal path prefixes, so the
+    generated ``node_modules`` exemption only covers the checkout-root
+    environment.  Vite also writes caches under nested ``node_modules``
+    segments (for example fixture-local installs), so for vitest
+    projects any untracked/ignored path with a ``node_modules``
+    directory segment is the same non-input tool output.  Tracked
+    files are never filtered here (they stay inputs), pytest projects
+    are unaffected, and child-scope ``../`` aliases for declared root
+    inputs are matched only against the declared prefixes.
+    """
+    if _matches(path, config.selection.non_input_outputs):
+        return True
+    return (config.runner.kind is C.RunnerKind.VITEST
+            and not path.startswith("../")
+            and "node_modules" in path.split("/"))
+
+
 class _Unavailable(Exception):
     def __init__(self, message: str, code: str = "unknown-input"):
         self.reason = _reason(code, message)
@@ -806,7 +826,7 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         untracked_raw = _git(git_root, scan, *untracked_args)
         untracked = {_scoped_path(_path(path)) for path in _records(untracked_raw)}
         untracked = {path for path in untracked
-                     if not _matches(path, config.selection.non_input_outputs)}
+                     if not _is_non_input_output(config, path)}
         ignored_args = ("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
         if pathspec:
             ignored_args += ("--", *pathspec)
@@ -814,13 +834,13 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
         ignored_all = set()
         for raw_path in _records(ignored_raw):
             path = _scoped_path(_path(raw_path))
-            if not _matches(path, config.selection.non_input_outputs):
+            if not _is_non_input_output(config, path):
                 ignored_all.add(path)
         declared_ignored = {path for path in ignored_all
                             if _matches(path, config.selection.ignored_inputs)}
         undeclared_ignored = {path for path in ignored_all
                             if path not in declared_ignored
-                              and not _matches(path, config.selection.non_input_outputs)}
+                              and not _is_non_input_output(config, path)}
         if prefix is None:
             present, deleted = _present_tracked(root, tracked, scan)
         else:
