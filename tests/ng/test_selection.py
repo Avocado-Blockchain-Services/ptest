@@ -353,3 +353,145 @@ def test_mandatory_failure_is_not_hidden_by_docs_change(case):
     snap = _snapshot(case, changes=(C.Change(old=None, new="docs/readme.md", kind="untracked"),))
     plan = choose_plan(config, snap, history, case.request())
     assert plan.execution == "selected" and plan.files == ("tests/failed.py",)
+
+
+def _write_selection_twin(root):
+    """Persea-like twin on disk: pkg_b imports pkg_a; unit tests; factories."""
+    from pathlib import Path
+
+    root = Path(root)
+    files = {
+        "src/pkg_a/__init__.py": "VALUE = 1\n",
+        "src/pkg_a/core.py": (
+            "from pkg_a import VALUE\n\n"
+            "def double():\n    return VALUE * 2\n"),
+        "src/pkg_b/__init__.py": "",
+        "src/pkg_b/svc.py": (
+            "from pkg_a.core import double\n\n"
+            "def quad():\n    return double() * 2\n"),
+        "tests/__init__.py": "",
+        "tests/conftest.py": "",
+        "tests/unit/__init__.py": "",
+        "tests/unit/conftest.py": "",
+        "tests/unit/test_a.py": (
+            "from pkg_a.core import double\n\n"
+            "def test_double():\n    assert double() == 2\n"),
+        "tests/unit/test_both.py": (
+            "from pkg_a.core import double\n"
+            "from pkg_b.svc import quad\n\n"
+            "def test_quad():\n    assert quad() == 4\n"),
+        "tests/test_b.py": (
+            "from pkg_b.svc import quad\n\n"
+            "def test_quad_b():\n    assert quad() == 4\n"),
+        "tests/test_plain.py": "def test_plain():\n    assert True\n",
+        "tests/test_factory_user.py": (
+            "from tests.factories.f import make\n\n"
+            "def test_make():\n    assert make() == 1\n"),
+        "tests/factories/__init__.py": "",
+        "tests/factories/conftest.py": "",
+        "tests/factories/f.py": "def make():\n    return 1\n",
+    }
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
+_TWIN_INVENTORY = (
+    "tests/unit/test_a.py",
+    "tests/unit/test_both.py",
+    "tests/test_b.py",
+    "tests/test_plain.py",
+    "tests/test_factory_user.py",
+)
+
+
+def _twin_config(case, root):
+    from ptest import doctor_fix
+
+    roots, triggers, groups = doctor_fix._selection_draft(root, ("tests",))
+    policy = C.SelectionPolicy(
+        enabled=True, closed_inputs=True,
+        input_roots=tuple(roots["input_roots"]),
+        full_triggers=tuple(triggers["full_triggers"]),
+        groups=tuple(
+            C.Group(name=item["name"], sources=tuple(item["sources"]),
+                    tests=tuple(item["tests"]))
+            for item in groups["groups"]),
+    )
+    return case.config(selection=policy)
+
+
+def _twin_plan(case, config, new):
+    from ptest.selection import choose_plan
+
+    snap = _snapshot(case, changes=(
+        C.Change(old=new, new=new, kind="modified"),))
+    return choose_plan(
+        config, snap,
+        _compatible_history(case, config, _TWIN_INVENTORY), case.request())
+
+
+def test_drafted_src_change_selects_unit_tests_and_transitive_dependents(
+        case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "src/pkg_a/core.py")
+    assert plan.execution == "selected"
+    # The unit tests importing pkg_a, plus the test that only imports pkg_b
+    # (pkg_b transitively imports pkg_a).
+    assert plan.files == (
+        "tests/test_b.py", "tests/unit/test_a.py", "tests/unit/test_both.py")
+
+
+def test_drafted_leaf_src_change_selects_only_its_dependents(
+        case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin-leaf")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "src/pkg_b/svc.py")
+    assert plan.execution == "selected"
+    assert plan.files == ("tests/test_b.py", "tests/unit/test_both.py")
+
+
+def test_drafted_conftest_change_goes_full(case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin-conftest")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "tests/unit/conftest.py")
+    assert plan.execution == "full"
+    assert plan.reasons[0].code == "policy-changed"
+
+
+def test_drafted_factory_change_goes_full(case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin-factory")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "tests/factories/f.py")
+    assert plan.execution == "full"
+    assert plan.reasons[0].code == "policy-changed"
+
+
+def test_drafted_unclassified_test_change_goes_full(case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin-plain")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "tests/test_plain.py")
+    assert plan.execution == "full"
+    assert plan.reasons[0].code == "unknown-input"
+
+
+def test_drafted_unit_test_change_selects_its_group_not_full(case, tmp_path):
+    root = _write_selection_twin(tmp_path / "twin-unitchange")
+    (root / "tests" / "unit" / "helpers.py").write_text(
+        "def h():\n    return 1\n", encoding="utf-8")
+    (root / "tests" / "unit" / "test_a.py").write_text(
+        "from pkg_a.core import double\n"
+        "from tests.unit import helpers\n\n"
+        "def test_double():\n    assert double() == 2\n"
+        "    assert helpers.h() == 1\n",
+        encoding="utf-8")
+    config = _twin_config(case, root)
+    plan = _twin_plan(case, config, "tests/unit/test_a.py")
+    # The helper trigger files must not compress to tests/unit: that
+    # directory trigger would shadow the group and force full here.
+    assert plan.execution == "selected"
+    assert plan.files == (
+        "tests/test_b.py", "tests/unit/test_a.py", "tests/unit/test_both.py")

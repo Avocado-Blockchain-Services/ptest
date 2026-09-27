@@ -1587,3 +1587,57 @@ def test_inspect_capability_mentions_parallel_tier():
 
     assert capability.execution is C.ExecutionTier.BASIC_SERIAL
     assert any("parallel tier" in item.message for item in capability.limitations)
+
+
+def test_scoped_cov_run_neutralises_project_fail_under():
+    prepared = prepare(
+        _config(args=("--cov", "pkg", "--cov-report", "term")),
+        _plan(execution="scoped", files=("tests/test_a.py",)),
+        _grant(1), _attempt(1))
+
+    assert "--cov-fail-under=0" in prepared.argv
+    assert prepared.argv[-1] == "tests/test_a.py"
+    assert "coverage.fail-under=0" in prepared.summary.generated_options
+
+
+def test_full_cov_run_keeps_project_fail_under():
+    prepared = prepare(
+        _config(args=("--cov", "pkg", "--cov-report", "term")),
+        _plan(execution="full"), _grant(1), _attempt(1))
+
+    assert not [token for token in prepared.argv if "fail-under" in token]
+    assert "coverage.fail-under=0" not in prepared.summary.generated_options
+
+
+def test_scoped_run_without_cov_adds_no_gate():
+    prepared = prepare(
+        _config(args=()),
+        _plan(execution="scoped", files=("tests/test_a.py",)),
+        _grant(1), _attempt(1))
+
+    assert not [token for token in prepared.argv if "fail-under" in token]
+
+
+def test_scoped_cov_run_keeps_explicit_fail_under():
+    prepared = prepare(
+        _config(args=("--cov", "pkg", "--cov-fail-under=85")),
+        _plan(execution="scoped", files=("tests/test_a.py",)),
+        _grant(1), _attempt(1))
+
+    assert "--cov-fail-under=85" in prepared.argv
+    assert "--cov-fail-under=0" not in prepared.argv
+
+
+def test_prepare_advanced_selected_cov_run_leads_gate_before_files(tmp_path):
+    """Selected argv still ends with the bound files for the tail check."""
+    from ptest.adapters.pytest import prepare_advanced
+
+    config = _parallel_project(tmp_path, args=("--cov", "pkg"), full_args=())
+    config = replace(config, runner=replace(
+        config.runner, launcher=("python",)))
+    plan = C.Plan(mode=C.Mode.AUTOMATIC, execution="selected",
+                  files=("tests/alpha.py",))
+    prepared = prepare_advanced(config, plan, _grant(1), _attempt(1))
+
+    assert "--cov-fail-under=0" in prepared.argv
+    assert prepared.argv[-1:] == ("tests/alpha.py",)
