@@ -36,8 +36,6 @@ _PHASE = "doctor-fix"
 _CONFIG_LIMIT = 256 * 1024
 _CONFIG_NAME = ".ptest.toml"
 
-_PYTEST_DEP_RE = re.compile(r"^pytest(?![A-Za-z0-9_-])")
-
 #: Files probed (in order) for the selection ``full_triggers`` draft.
 _TRIGGER_CANDIDATES = (
     "uv.lock", "conftest.py", "pyproject.toml", "pytest.ini", "tox.ini",
@@ -212,8 +210,8 @@ def _project_dir(root: Path, config: C.Config, declaration: str) -> Path:
     return Path(root) / declaration
 
 
-def _pyproject_groups(project_dir: Path) -> tuple[dict, dict] | None:
-    """Return ``(extras, groups)`` from pyproject, or None when unusable."""
+def _pyproject_test_deps(project_dir: Path) -> tuple | None:
+    """Return ``(main, extras, groups, default_groups)`` or None when unusable."""
     try:
         raw = files.read_regular(project_dir, "pyproject.toml",
                                  _CONFIG_LIMIT + 1)
@@ -228,14 +226,25 @@ def _pyproject_groups(project_dir: Path) -> tuple[dict, dict] | None:
     if not isinstance(parsed, dict):
         return None
     project = parsed.get("project", {})
-    extras = project.get("optional-dependencies", {}) \
-        if isinstance(project, dict) else {}
+    if not isinstance(project, dict):
+        project = {}
+    main = project.get("dependencies", [])
+    extras = project.get("optional-dependencies", {})
     groups = parsed.get("dependency-groups", {})
+    if not isinstance(main, list):
+        main = []
     if not isinstance(extras, dict):
         extras = {}
     if not isinstance(groups, dict):
         groups = {}
-    return extras, groups
+    tool = parsed.get("tool", {})
+    uv = tool.get("uv", {}) if isinstance(tool, dict) else {}
+    default_groups = uv.get("default-groups", ["dev"]) \
+        if isinstance(uv, dict) else ["dev"]
+    if (not isinstance(default_groups, list)
+            or not all(isinstance(name, str) for name in default_groups)):
+        default_groups = ["dev"]
+    return main, extras, groups, tuple(default_groups)
 
 
 def _dep_names(value: object) -> list[str]:
@@ -246,13 +255,62 @@ def _dep_names(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
-def _setup_extras_fix(project_dir: Path, kind: C.RunnerKind,
-                      current: tuple) -> tuple | None:
-    """Append the test-dependency ``--group``/``--extra``, else None.
+def _normalised_dep_name(item: str) -> str | None:
+    """PEP 503-normalised leading distribution name, or None when absent."""
+    match = re.match(r"[A-Za-z0-9_.-]+", item.strip())
+    if match is None:
+        return None
+    return re.sub(r"[-_.]+", "-", match.group(0)).lower()
 
-    Applies only to an unmodified-shape ``uv sync`` argv that names no
-    group/extra, when exactly one optional extra or dependency group
-    carries the pytest dependency the main dependencies omit.
+
+def _provides(deps: object, target: str) -> bool:
+    return any(_normalised_dep_name(item) == target
+               for item in _dep_names(deps))
+
+
+def _runner_uses_n(args: tuple) -> bool:
+    """True when runner args request xdist workers (a non-zero ``-n``)."""
+    items = tuple(args)
+    index = 0
+    while index < len(items):
+        token = items[index]
+        if token in ("-n", "--numprocesses"):
+            nxt = items[index + 1] if index + 1 < len(items) else None
+            if nxt != "0":
+                return True
+            index += 2
+            continue
+        if token.startswith("-n") and len(token) > 2:
+            rest = token[2:]
+            if rest == "0":
+                index += 1
+                continue
+            if rest == "auto" or rest.isdigit():
+                return True
+            index += 1
+            continue
+        if token.startswith("--numprocesses="):
+            if token.split("=", 1)[1] != "0":
+                return True
+            index += 1
+            continue
+        index += 1
+    return False
+
+
+def _setup_extras_fix(project_dir: Path, kind: C.RunnerKind,
+                      current: tuple, runner_args: tuple = ()) -> tuple | None:
+    """Append the test-plugin ``--group``/``--extra`` flags, else None.
+
+    Plain ``uv sync`` already installs main dependencies and the default
+    groups, so only plugins living in an existing extra or a non-default
+    group need a flag: pytest itself (always), pytest-cov/coverage (when
+    ``--cov`` is in the runner args), pytest-xdist (when ``-n`` is used in
+    the runner args or pytest addopts). Applies only to an
+    unmodified-shape ``uv sync`` argv that names no group/extra. A
+    group/extra that does not exist in this pyproject is never named,
+    ``--group`` is never emitted for a default group, and ``--all-extras``
+    is never used.
     """
     if kind is not C.RunnerKind.PYTEST:
         return None
@@ -269,36 +327,45 @@ def _setup_extras_fix(project_dir: Path, kind: C.RunnerKind,
         return None
     if stat.S_ISLNK(locked.st_mode) or not stat.S_ISREG(locked.st_mode):
         return None
-    found = _pyproject_groups(project_dir)
+    found = _pyproject_test_deps(project_dir)
     if found is None:
         return None
-    extras, groups = found
-    try:
-        raw = files.read_regular(project_dir, "pyproject.toml",
-                                 _CONFIG_LIMIT + 1)
-        main_names = _dep_names(
-            tomllib.loads(raw.decode("utf-8")).get("project", {}))
-    except (C.Problem, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return None
-    if any(_PYTEST_DEP_RE.match(name.strip()) for name in main_names):
-        return None
-    candidates = []
-    for name, deps in extras.items():
-        if not isinstance(name, str):
+    main, extras, groups, default_groups = found
+    needs_cov = _has_cov(tuple(runner_args))
+    needs_xdist = (_runner_uses_n(tuple(runner_args))
+                   or executability_api.pytest_xdist_active(project_dir))
+    wanted = (("pytest", True), ("pytest-cov", needs_cov),
+              ("coverage", needs_cov), ("pytest-xdist", needs_xdist))
+    default_deps = [main] + [groups[name] for name in default_groups
+                             if isinstance(groups.get(name), list)]
+    flags: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _take(flag: str, name: str) -> None:
+        if (flag, name) not in seen:
+            seen.add((flag, name))
+            flags.extend((flag, name))
+
+    for target, needed in wanted:
+        if not needed:
             continue
-        if any(_PYTEST_DEP_RE.match(item.strip())
-               for item in _dep_names(deps)):
-            candidates.append(("--extra", name))
-    for name, deps in groups.items():
-        if not isinstance(name, str):
+        if any(_provides(deps, target) for deps in default_deps):
             continue
-        if any(_PYTEST_DEP_RE.match(item.strip())
-               for item in _dep_names(deps)):
-            candidates.append(("--group", name))
-    if len(candidates) != 1:
+        for name, deps in extras.items():
+            if isinstance(name, str) and _provides(deps, target):
+                _take("--extra", name)
+                break
+        else:
+            for name, deps in groups.items():
+                if (isinstance(name, str) and name not in default_groups
+                        and _provides(deps, target)):
+                    _take("--group", name)
+                    break
+            # A plugin that lives nowhere in this pyproject contributes no
+            # flag: a missing group/extra is never referenced.
+    if not flags:
         return None
-    flag, name = candidates[0]
-    return tuple(current) + (flag, name)
+    return tuple(current) + tuple(flags)
 
 
 def _has_cov(args: tuple) -> bool:
@@ -364,7 +431,8 @@ def plan_project(root: Path, declaration: str,
         except C.Problem:
             fresh = None
         if fresh is not None and fresh.setup is not None:
-            fixed_argv = _setup_extras_fix(project_dir, kind, current_argv)
+            fixed_argv = _setup_extras_fix(
+                project_dir, kind, current_argv, tuple(current_args))
             if fixed_argv is not None:
                 changes.append(FieldChange("setup", "argv", fixed_argv))
 

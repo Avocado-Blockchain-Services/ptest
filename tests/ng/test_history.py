@@ -3297,3 +3297,66 @@ def test_concurrent_first_initializers_publish_complete_schema(case, monkeypatch
     view = H.read_history(domain, checkout)
     assert view.selection_disabled is False
     assert not (domain.root / "checkouts" / checkout.checkout_id / "history-disabled.json").exists()
+
+
+def test_reinitialised_project_sets_store_aside_and_continues(case, capsys):
+    """A project_id mismatch means re-init: set aside, fresh store, run continues."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 0, before=snapshot, after=snapshot, checkout=checkout),
+        case.inventory(("tests/test_a.py",), outcome="passed"),
+    ).committed
+    store = _store_path(domain, checkout)
+    assert store.is_file()
+    reinit = replace(checkout, project_id="cd" * 16)
+    view = H.read_history(domain, reinit)
+    assert view.baseline is None
+    assert view.selection_disabled is False
+    assert H.next_sequence(domain, reinit) == 0
+    # Exactly one line across the read and the sequence call: the second
+    # entry point finds no store left to move and stays silent.
+    assert capsys.readouterr().err.count(
+        "ptest: project was re-initialised; previous run history set aside") == 1
+    aside = store.parent / (store.name + ".reinitialised")
+    assert aside.is_file()
+    assert not store.exists()
+    # The run continues: the next passing full run records a fresh baseline.
+    assert H.publish_outcome(
+        domain, reinit,
+        _result(case, 0, before=snapshot, after=snapshot, checkout=reinit),
+        case.inventory(("tests/test_a.py",), outcome="passed"),
+    ).baseline_published
+    assert H.read_history(domain, reinit).baseline is not None
+    assert H.next_sequence(domain, reinit) == 1
+    # Bounded to one kept copy: a second re-init replaces, never accumulates.
+    reinit2 = replace(checkout, project_id="ef" * 16)
+    assert H.next_sequence(domain, reinit2) == 0
+    kept = [path for path in store.parent.iterdir()
+            if path.name.startswith(store.name + ".")]
+    assert [path.name for path in kept] == [aside.name]
+
+
+def test_corrupt_store_next_sequence_raises_clean_problem(case, capsys):
+    """Non-reinit corruption stays fail-closed as a clean Problem, never a traceback."""
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    snapshot = _snapshot(case)
+    assert H.publish_outcome(
+        domain, checkout,
+        _result(case, 0, before=snapshot, after=snapshot, checkout=checkout),
+        case.inventory(("tests/test_a.py",), outcome="passed"),
+    ).committed
+    store = _store_path(domain, checkout)
+    store.write_bytes(b"not-a-sqlite-database")
+    with pytest.raises(C.Problem) as excinfo:
+        H.next_sequence(domain, checkout)
+    assert type(excinfo.value) is C.Problem
+    assert excinfo.value.code == "coordinator-corrupt"
+    assert excinfo.value.message
+    with pytest.raises(C.Problem, match="coordinator-corrupt"):
+        H.read_history_summaries(domain, checkout)
+    assert not (store.parent / (store.name + ".reinitialised")).exists()
+    assert "re-initialised" not in capsys.readouterr().err

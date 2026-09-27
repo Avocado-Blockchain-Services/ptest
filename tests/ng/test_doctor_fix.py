@@ -79,6 +79,52 @@ def _write_config(root: Path, *, args=(), setup: bool = False,
     )
 
 
+def _write_uv_pyproject(root: Path, *, dependencies=(), extras=None,
+                        groups=None, addopts="") -> None:
+    """Write a uv-style pyproject with main deps, extras, groups, addopts."""
+    lines = ["[project]", 'name = "fixture"', "dependencies = ["]
+    lines.extend(f'    "{dep}",' for dep in dependencies)
+    lines.append("]")
+    if extras:
+        lines.append("")
+        lines.append("[project.optional-dependencies]")
+        for name, deps in extras.items():
+            lines.append(f"{name} = [")
+            lines.extend(f'    "{dep}",' for dep in deps)
+            lines.append("]")
+    if groups:
+        lines.append("")
+        lines.append("[dependency-groups]")
+        for name, deps in groups.items():
+            lines.append(f"{name} = [")
+            lines.extend(f'    "{dep}",' for dep in deps)
+            lines.append("]")
+    if addopts is not None:
+        lines.append("")
+        lines.append("[tool.pytest.ini_options]")
+        lines.append(f"addopts = '{addopts}'")
+    (root / "pyproject.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_uv_project(root: Path, *, dependencies=(), extras=None,
+                      groups=None, addopts="", args=()) -> Path:
+    """One uv pytest fixture: tests, lock, pyproject, venv stubs, config."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert True\n", encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n    return None\n",
+        encoding="utf-8")
+    (root / "uv.lock").write_text("", encoding="utf-8")
+    _write_uv_pyproject(root, dependencies=dependencies, extras=extras,
+                        groups=groups, addopts=addopts)
+    _stub_xdist_venv(root)
+    _write_config(root, args=args, setup=True)
+    return root
+
+
 def _write_pytest_project(root: Path, *, addopts="-n 4", groups=None,
                           lock=True) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -166,17 +212,90 @@ def test_fix_drops_stale_n0_with_cov_when_tier_qualifies(
     assert '"--cov"' in raw
 
 
-def test_fix_adds_missing_group_to_setup_argv(tmp_path, monkeypatch, capsys):
-    root = _write_pytest_project(
-        tmp_path / "extras", addopts="", groups={"dev": ["pytest>=8"]})
-    _write_config(root, setup=True)
+def test_fix_leaves_default_dev_group_out_of_setup_argv(
+        tmp_path, monkeypatch, capsys):
+    """pytest in the default `dev` group needs no flag: plain sync covers it."""
+    root = _write_uv_project(tmp_path / "dev", groups={"dev": ["pytest>=8"]})
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
 
     assert main(("doctor", "--fix")) == 0
-    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
-    assert 'argv = ["uv", "sync", "--locked", "--group", "dev"]' in raw
     capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'argv = ["uv", "sync", "--locked"]' in raw
+    assert "--group" not in raw
+    assert "--extra" not in raw
+
+
+def test_fix_adds_extra_for_ptest_shaped_pyproject(tmp_path, monkeypatch, capsys):
+    """Shaped like ptest itself: pytest in dev, cov/xdist in the test extra."""
+    root = _write_uv_project(
+        tmp_path / "shaped",
+        groups={"dev": ["pytest==9.1.1", "bandit==1.9.4"]},
+        extras={"test": ["coverage==7.15.0", "pytest-cov==7.1.0",
+                         "pytest-xdist==3.8.0"]},
+        addopts="-n auto --dist loadgroup",
+        args=("--cov", "pkg", "--cov-report", "term"),
+    )
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
+    assert "--group" not in raw
+
+
+def test_fix_adds_group_for_plugin_in_non_default_group(
+        tmp_path, monkeypatch, capsys):
+    """pytest-cov in a non-default group is named with --group."""
+    root = _write_uv_project(
+        tmp_path / "nongroup",
+        dependencies=["pytest>=8"],
+        groups={"testdeps": ["pytest-cov==7.1.0"]},
+        args=("--cov",),
+    )
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'argv = ["uv", "sync", "--locked", "--group", "testdeps"]' in raw
+
+
+def test_fix_never_invents_a_missing_extra(tmp_path, monkeypatch, capsys):
+    """--cov in args but no cov plugin anywhere: no flag is invented."""
+    root = _write_uv_project(
+        tmp_path / "missing", dependencies=["pytest>=8"], args=("--cov",),
+    )
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'argv = ["uv", "sync", "--locked"]' in raw
+    assert "--group" not in raw
+    assert "--extra" not in raw
+
+
+def test_fix_adds_extra_for_xdist_when_n_is_used(tmp_path, monkeypatch, capsys):
+    """-n in runner args needs pytest-xdist from its extra."""
+    root = _write_uv_project(
+        tmp_path / "xdist",
+        dependencies=["pytest>=8"],
+        extras={"test": ["pytest-xdist==3.8.0"]},
+        args=("-n", "auto"),
+    )
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
 
 
 def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):

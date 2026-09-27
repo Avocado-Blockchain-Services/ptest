@@ -42,6 +42,14 @@ HISTORY_RETAIN_DAYS = C.HISTORY_RETAIN_DAYS
 
 _PHASE = "history"
 _STORE_NAME = "history.sqlite3"
+# A project_id mismatch means the project was re-initialised (never a
+# foreign store: the directory is already keyed by checkout). The old
+# store is moved aside under this suffix; the fixed name bounds the
+# quarantine to one kept copy.
+_SET_ASIDE_SUFFIX = ".reinitialised"
+_REINITIALISED_CODE = "project-reinitialised"
+_REINITIALISED_LINE = ("ptest: project was re-initialised; "
+                       "previous run history set aside")
 _DISABLED_MARKER_NAME = "history-disabled.json"
 _CAPACITY_MARKER_NAME = "history-capacity.json"
 _CAPACITY_RESERVE_NAME = "history-capacity-reserve.json"
@@ -693,6 +701,46 @@ def _selection_marker(domain: C.DomainPaths, checkout: C.CheckoutIdentity) -> st
     return "selection-disabled"
 
 
+def _set_aside_reinitialised_store(
+    domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+) -> bool:
+    """Move a re-initialised project's old store aside; True when moved.
+
+    The fixed suffix bounds the quarantine to one kept copy: a second
+    re-initialisation replaces the first. The store uses DELETE journal
+    mode, so only the main file (plus a stale journal, if any) moves.
+    Emits one line on stderr when a store actually moves. Never raises.
+    """
+    try:
+        directory = _history_directory(domain, checkout, create=False)
+        if directory is None:
+            return False
+        validate_private_dir(directory)
+        source = directory / _STORE_NAME
+        try:
+            os.lstat(source)
+        except FileNotFoundError:
+            return False
+        validate_private_file(source)
+        os.replace(
+            source, directory / (_STORE_NAME + _SET_ASIDE_SUFFIX))
+        journal = directory / (_STORE_NAME + "-journal")
+        try:
+            os.replace(
+                journal,
+                directory / (_STORE_NAME + "-journal" + _SET_ASIDE_SUFFIX))
+        except FileNotFoundError:
+            pass
+    except (C.Problem, OSError):
+        return False
+    try:
+        from . import progress as _progress
+        _progress.emit(_REINITIALISED_LINE)
+    except Exception:
+        pass
+    return True
+
+
 def _open_store(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity, *, create: bool,
 ) -> sqlite3.Connection | None:
@@ -878,8 +926,14 @@ def _validate_schema(
         raise _HistoryStateError("coordinator-corrupt")
     if disabled is None or disabled[0] not in {"0", "1"}:
         raise _HistoryStateError("coordinator-corrupt")
+    if stored_project is not None and stored_project[0] != project_id:
+        # The directory is keyed by checkout, so a project_id mismatch for
+        # this checkout means the project was re-initialised with a new
+        # identity: the old store is set aside by the public entry points,
+        # never treated as corruption.
+        raise _HistoryStateError(_REINITIALISED_CODE)
     if (
-        stored_project is None or stored_project[0] != project_id
+        stored_project is None
         or stored_checkout is None or stored_checkout[0] != checkout_id
     ):
         raise _HistoryStateError("coordinator-corrupt")
@@ -1360,6 +1414,15 @@ def read_history(
             selection_quarantine=quarantine,
         )
     except _HistoryStateError as exc:
+        if exc.code == _REINITIALISED_CODE:
+            # Re-initialisation is not corruption: set the old store aside
+            # and continue with no baseline until the next passing full run.
+            _set_aside_reinitialised_store(domain, checkout)
+            return C.HistoryView(
+                baseline=None, obligations=(), selection_disabled=False,
+                limitations=(_reason(
+                    "no-baseline", "no history has been recorded"),),
+            )
         if _can_persist_disabled_marker(exc.code):
             _write_disabled_marker(domain, checkout, exc.code)
         return _disabled_view(_problem(exc.code, "history state is unavailable"))
@@ -1506,6 +1569,14 @@ def next_sequence(
             "SELECT MAX(sequence) FROM runs"
         ).fetchone()
         return 0 if row is None or row[0] is None else int(row[0]) + 1
+    except _HistoryStateError as exc:
+        if exc.code == _REINITIALISED_CODE:
+            # The project was re-initialised: set the old store aside and
+            # start the fresh sequence. Every other store failure stays
+            # fail-closed as a clean Problem, never a traceback.
+            _set_aside_reinitialised_store(domain, checkout)
+            return 0
+        raise _problem(exc.code, "history sequence is unavailable") from None
     except (OSError, sqlite3.Error, TypeError, ValueError):
         raise _problem("coordinator-unavailable", "history sequence is unavailable") from None
     finally:
@@ -2526,20 +2597,30 @@ def publish_outcome(
         raise TypeError("history result must be RunResult")
     if inventory is not None and not isinstance(inventory, C.Inventory):
         raise TypeError("history inventory must be Inventory or None")
-    try:
-        marker_code = _disabled_marker(domain, checkout)
-        if marker_code is not None:
-            return C.PublishResult(
-                committed=False, baseline_published=False, selection_disabled=True,
-                reasons=(_reason(marker_code, "history selection is disabled"),),
-            )
-        return _publish_locked(domain, checkout, result, inventory)
-    except (_HistoryStateError, C.Problem) as exc:
-        code = exc.code
-    except OSError:
-        code = "coordinator-unavailable"
-    except sqlite3.Error as exc:
-        code = _state_error_for_sqlite(exc).code
+    for attempt in range(2):
+        try:
+            marker_code = _disabled_marker(domain, checkout)
+            if marker_code is not None:
+                return C.PublishResult(
+                    committed=False, baseline_published=False, selection_disabled=True,
+                    reasons=(_reason(marker_code, "history selection is disabled"),),
+                )
+            return _publish_locked(domain, checkout, result, inventory)
+        except (_HistoryStateError, C.Problem) as exc:
+            code = exc.code
+        except OSError:
+            code = "coordinator-unavailable"
+        except sqlite3.Error as exc:
+            code = _state_error_for_sqlite(exc).code
+        if code != _REINITIALISED_CODE or attempt:
+            break
+        # The project was re-initialised: set the old store aside and
+        # publish onto a fresh store, so the passing run in hand can
+        # become the next baseline.
+        _set_aside_reinitialised_store(domain, checkout)
+    if code == _REINITIALISED_CODE:
+        # The retry above failed for another reason; stay in-vocabulary.
+        code = "coordinator-corrupt"
     if _can_persist_disabled_marker(code):
         _write_disabled_marker(domain, checkout, code)
     return C.PublishResult(
@@ -2798,6 +2879,9 @@ def _history_payload(
         raw = C.encode_public_document("history", data)
         return C.decode_public_document(raw).data
     except _HistoryStateError as exc:
+        if exc.code == _REINITIALISED_CODE:
+            _set_aside_reinitialised_store(domain, checkout)
+            return {"summaries": [], "obligations": []}
         if _can_persist_disabled_marker(exc.code):
             _write_disabled_marker(domain, checkout, exc.code)
         raise _problem(exc.code, "history state is unavailable") from None
