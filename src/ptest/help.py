@@ -15,7 +15,7 @@ Getting started:
 
 Running tests from the repository root:
   ptest tests/test_example.py     # scoped: smallest relevant scope
-  ptest                           # default loop: tests your change reaches (diff vs the branch base; no baseline needed)
+  ptest                           # default loop: tests your change reaches (changes since the last green run; no baseline needed)
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
@@ -292,11 +292,13 @@ Notes:
   and --full are mutually exclusive; --changed rejects runner arguments
   while root --full accepts only a whole child (e.g. --full web) and
   otherwise names the scoped form. A bare ptest is the default loop:
-  it runs the tests the change reaches (git diff vs the branch base,
-  no baseline or coverage needed). The base defaults to the merge-base
-  of HEAD with the default branch (origin/HEAD, else main/master/dev;
-  the worktree diff on that branch itself); --base X compares against
-  the merge-base of HEAD and X instead. --base
+  it runs the tests the change reaches (changes since the last green
+  run: the verified commit plus the worktree state of the last passing
+  run, no baseline or coverage needed). With no green run recorded it
+  falls back to git diff vs the branch base: the merge-base of HEAD
+  with the default branch (origin/HEAD, else main/master/dev; the
+  worktree diff on that branch itself); --base X compares against
+  the merge-base of HEAD and X instead, ignoring the green record. --base
   is unavailable with --full. --shadow requires automatic mode. Root
   --full preflights all children, then runs them sequentially with output
   preserved, returning the first nonzero exit after all children finish.
@@ -338,7 +340,7 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    validation.
 
 3. Loop changed, then gate full:
-     ptest                           # default loop after each edit (runs the tests the change reaches: git diff vs the branch base, no baseline or coverage needed)
+     ptest                           # default loop after each edit (runs the tests the change reaches: changes since the last green run, no baseline or coverage needed)
      ptest api/tests/test_example.py  # monorepo; standalone example in step 2
      ptest --full                  # once, after the change is integrated
      ptest --full --again          # force already-verified inputs

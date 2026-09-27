@@ -21,7 +21,7 @@ from typing import Sequence
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, doctor_fix, executability, files, help as help_api, history
-from . import init_changed, init_render, init_smoke
+from . import init_changed, init_render, init_smoke, lastgreen
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
 from . import render
@@ -2792,18 +2792,23 @@ def _impact_api():
     return impact
 
 
-def _impact_note(impact, label: str) -> str:
-    """Start-line note for one impact verdict (paths/label escaped)."""
+def _impact_note(impact, label: str, *, reference: str) -> str:
+    """Start-line note for one impact verdict (paths/label escaped).
+
+    ``reference`` names the reference the changed set was diffed against:
+    the last green run or the branch base.
+    """
     if impact.kind == "full":
-        return f"changed → full suite: {render.terminal_text(impact.reason)}"
+        return (f"{reference} → full suite: "
+                f"{render.terminal_text(impact.reason)}")
     changed = tuple(impact.changed)
     if changed:
         first = render.terminal_text(changed[0])
         extra = len(changed) - 1
         count = "" if extra == 0 else f" (+{extra} file{'s' if extra > 1 else ''})"
-        head = f"changed: {first}{count}"
+        head = f"{reference}: {first}{count}"
     else:
-        head = "changed"
+        head = reference
     if impact.kind == "selected":
         return (f"{head} → {len(impact.files)} of {impact.total} test files "
                 f"({impact.direct} direct · {impact.via} via importers)")
@@ -2813,7 +2818,8 @@ def _impact_note(impact, label: str) -> str:
 
 
 def _impact_run_request(parsed: ParsedArgs, impact, base,
-                        *, next_hint: bool) -> C.RunRequest | None:
+                        *, next_hint: bool,
+                        reference: str) -> C.RunRequest | None:
     """Map one impact verdict to its run request; None means skip the run."""
     if impact.kind == "none":
         return None
@@ -2830,8 +2836,72 @@ def _impact_run_request(parsed: ParsedArgs, impact, base,
         result_path=parsed.result_path,
         fixture_domain=parsed.fixture_domain,
         verbose=parsed.verbose, quiet=parsed.quiet,
-        changed_note=_impact_note(impact, base.label),
+        changed_note=_impact_note(impact, base.label, reference=reference),
         next_hint=next_hint)
+
+
+def _consult_reference(parsed: ParsedArgs, domain: C.DomainPaths, top,
+                       project: str, base,
+                       repo_changed: tuple[str, ...] | None):
+    """Diff one project since its last green run, else the branch base.
+
+    Returns ``(base, changed, reference, green)`` where ``base`` carries
+    the reference commit (a green point or the branch base).  An explicit
+    ``--base`` skips the cache entirely.  Cache I/O never raises and never
+    changes the fallback verdict, only the changed set and the reference.
+    """
+    explicit = parsed.base is not None
+    fallback = lastgreen.fallback_reference(base.label,
+                                            explicit_base=explicit)
+    if top is None:
+        return base, repo_changed, fallback, False
+    try:
+        consultation = lastgreen.consult(
+            domain.root, top, project,
+            fallback_sha=base.sha, fallback_label=base.label,
+            fallback_changed=repo_changed, explicit_base=explicit)
+    except Exception:
+        return base, repo_changed, fallback, False
+    return consultation, consultation.changed, consultation.reference, \
+        consultation.green
+
+
+def _is_test_file_token(token: str) -> bool:
+    """Whether a run argv entry names a pytest test file (or node)."""
+    base = token.split("::", 1)[0].rsplit("/", 1)[-1]
+    return ((base.startswith("test_") and base.endswith(".py"))
+            or base.endswith("_test.py"))
+
+
+def _note_run(domain: C.DomainPaths, root: Path, project: str,
+              request: C.RunRequest, result) -> None:
+    """Record the green point on pass, failed test files on failure.
+
+    Cache only: a bare/--changed/scoped/full pass moves the project's
+    verified point, a failure merges its test files into the last-failed
+    set.  Never raises and never affects the run outcome.
+    """
+    try:
+        if request.shadow or request.probe is not None:
+            return
+        if request.mode is not C.Mode.SCOPED \
+                and request.mode is not C.Mode.FULL:
+            return
+        top = _impact_api().git_top(Path(root))
+        if top is None:
+            return
+        status = getattr(result, "status", None)
+        if status is C.Status.PASSED:
+            lastgreen.record_pass(domain.root, os.fspath(top), project, top)
+        elif status is C.Status.FAILED:
+            argv = getattr(request, "argv", ()) or ()
+            files = tuple(token.split("::", 1)[0] for token in argv
+                          if isinstance(token, str)
+                          and _is_test_file_token(token))
+            lastgreen.record_failure(domain.root, os.fspath(top), project,
+                                     files)
+    except Exception:
+        return
 
 
 def _impact_base_and_changed(parsed: ParsedArgs, root: Path):
@@ -2848,21 +2918,30 @@ def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
     assert resolution.config is not None
     impact_api, top, base, repo_changed = _impact_base_and_changed(
         parsed, resolution.root)
+    base, repo_changed, reference, green = _consult_reference(
+        parsed, domain, top, "", base, repo_changed)
     impact = impact_api.plan(top, resolution.root, resolution.config,
                              repo_changed)
-    request = _impact_run_request(parsed, impact, base, next_hint=True)
+    request = _impact_run_request(parsed, impact, base, next_hint=True,
+                                  reference=reference)
     if request is None:
         project = render.terminal_text(resolution.root.name)
         if impact.changed:
             progress.emit(progress.format_impact(
-                project, _impact_note(impact, base.label),
+                project, _impact_note(impact, base.label,
+                                      reference=reference),
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        elif green:
+            progress.emit(progress.format_no_green_changes(
                 color=sys.stderr.isatty()), quiet=parsed.quiet)
         else:
             progress.emit(progress.format_nothing_changed(
                 render.terminal_text(base.label),
-                color=sys.stderr.isatty()), quiet=parsed.quiet)
+                color=sys.stderr.isatty(),
+                no_green_run=parsed.base is None), quiet=parsed.quiet)
         return 0
     result = operations.execute(domain, resolution.config, request)
+    _note_run(domain, resolution.root, "", request, result)
     for reason in result.reasons:
         print(render.terminal_text(f"{reason.code}: {reason.message}"),
               file=sys.stderr)
@@ -2909,21 +2988,34 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
     """Route a monorepo root bare/`--changed` run child by child."""
     impact_api, top, base, repo_changed = _impact_base_and_changed(
         parsed, resolution.root)
-    planned = [(child, impact_api.plan(top, child.directory, child.config,
-                                       repo_changed))
-               for child in children]
+    consulted = []
+    for child in children:
+        child_base, child_changed, reference, green = _consult_reference(
+            parsed, domain, top, child.declaration, base, repo_changed)
+        consulted.append((child, child_base, child_changed, reference, green))
+    planned = [(child, child_base, impact_api.plan(top, child.directory,
+                                                   child.config,
+                                                   child_changed), reference)
+               for child, child_base, child_changed, reference, green
+               in consulted]
     if all(impact.kind == "none" and not impact.changed
-           for _, impact in planned):
-        progress.emit(progress.format_nothing_changed(
-            render.terminal_text(base.label),
-            color=sys.stderr.isatty()), quiet=parsed.quiet)
+           for _, _, impact, _ in planned):
+        if all(green for _, _, _, _, green in consulted):
+            progress.emit(progress.format_no_green_changes(
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        else:
+            progress.emit(progress.format_nothing_changed(
+                render.terminal_text(base.label),
+                color=sys.stderr.isatty(),
+                no_green_run=parsed.base is None), quiet=parsed.quiet)
         return 0
     started = time.monotonic()
     outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
     first_failure = 0
     narrowed = False
-    for child, impact in planned:
-        request = _impact_run_request(parsed, impact, base, next_hint=False)
+    for child, child_base, impact, reference in planned:
+        request = _impact_run_request(parsed, impact, child_base,
+                                      next_hint=False, reference=reference)
         if request is None:
             if impact.changed:
                 narrowed = True
@@ -2936,6 +3028,8 @@ def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
         if request.mode is C.Mode.SCOPED:
             narrowed = True
         result = operations.execute(domain, child.config, request)
+        _note_run(domain, resolution.root, child.declaration, request,
+                  result)
         for reason in result.reasons:
             print(render.terminal_text(f"{reason.code}: {reason.message}"),
                   file=sys.stderr)
@@ -2991,8 +3085,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         again=parsed.again)
 
                 def run_full(child):
+                    request = child_full_request()
                     result = operations.execute(
-                        domain, child.config, child_full_request())
+                        domain, child.config, request)
+                    _note_run(domain, resolution.root, child.declaration,
+                              request, result)
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     child_outcomes.append(
@@ -3006,8 +3103,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # integrated total line stays with plain --full.
                     target = monorepo.resolve_full_child(
                         parsed.runner_argv, children)
+                    single_request = child_full_request()
                     result = operations.execute(
-                        domain, target.config, child_full_request())
+                        domain, target.config, single_request)
+                    _note_run(domain, resolution.root, target.declaration,
+                              single_request, result)
                     for reason in result.reasons:
                         print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
                     return result.exit_code
@@ -3026,17 +3126,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _run_impact_monorepo(parsed, resolution, children,
                                             domain)
             routed = monorepo.route_scopes(parsed.runner_argv, children)
+            scoped_request = C.RunRequest(
+                mode=C.Mode.SCOPED, argv=routed.scopes,
+                workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
+                timeout_s=parsed.timeout_s,
+                no_setup=parsed.no_setup,
+                shadow=parsed.shadow, result_path=parsed.result_path,
+                fixture_domain=parsed.fixture_domain,
+                verbose=parsed.verbose, quiet=parsed.quiet,
+                display_argv=parsed.runner_argv)
             result = operations.execute(
-                domain, routed.target.config,
-                C.RunRequest(mode=C.Mode.SCOPED, argv=routed.scopes,
-                             workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
-                             timeout_s=parsed.timeout_s,
-                             no_setup=parsed.no_setup,
-                             shadow=parsed.shadow, result_path=parsed.result_path,
-                             fixture_domain=parsed.fixture_domain,
-                             verbose=parsed.verbose, quiet=parsed.quiet,
-                             display_argv=parsed.runner_argv),
-            )
+                domain, routed.target.config, scoped_request)
+            _note_run(domain, resolution.root, routed.target.declaration,
+                      scoped_request, result)
             for reason in result.reasons:
                 print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
             return result.exit_code
@@ -3082,6 +3184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             again=parsed.again,
         )
         result = operations.execute(domain, resolution.config, request)
+        _note_run(domain, resolution.root, "", request, result)
         for reason in result.reasons:
             print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
         return result.exit_code

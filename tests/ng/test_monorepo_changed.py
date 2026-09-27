@@ -165,7 +165,7 @@ def test_root_changed_clean_tree_prints_nothing_changed(
     assert main(("--changed",)) == 0
     assert calls == []
     err = capsys.readouterr().err
-    assert ("ptest: no changes vs origin/dev — nothing to test · "
+    assert ("ptest: no changes vs origin/dev (no green run yet) — nothing to test · "
             "ptest --full runs everything") in err
     assert "ptest: total" not in err
 
@@ -182,7 +182,8 @@ def test_root_changed_outside_git_runs_full_gate_per_child(
     assert main(("--changed",)) == 0
     assert [call[1].mode for call in calls] == [C.Mode.FULL] * 2
     assert all(call[1].changed_note
-               == "changed → full suite: git changes are unavailable"
+               == "changed vs origin/dev (no green run yet) → full suite: "
+                  "git changes are unavailable"
                for call in calls)
 
 
@@ -241,7 +242,8 @@ def test_root_lockfile_full_trigger_runs_only_the_triggered_child(
     assert len(calls) == 1
     assert calls[0][1].mode is C.Mode.FULL
     assert (calls[0][1].changed_note
-            == "changed → full suite: uv.lock is a full trigger")
+            == "changed vs origin/dev (no green run yet) → full suite: "
+               "uv.lock is a full trigger")
 
 
 # --- A.2: vitest delegation ---------------------------------------------------

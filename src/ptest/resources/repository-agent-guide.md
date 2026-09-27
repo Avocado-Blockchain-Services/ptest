@@ -8,7 +8,7 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 
 | Situation | Command |
 |---|---|
-| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |
+| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: changes since the last green run, branch-base diff until the first green run; no baseline or coverage needed) |
 | One test file | `ptest <path>` |
 | All tests of one project | `ptest <child>`, e.g. `ptest web` |
 | Integrated change, before handoff | `ptest --full` once |
