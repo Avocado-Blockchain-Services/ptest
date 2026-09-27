@@ -3,8 +3,9 @@
 ptest is a local-first test coordinator. Normal test execution is local and
 model-independent; no cloud account, model API, or remote service is required
 to run tests. Run `ptest init`, then loop bare `ptest` after each edit (bare
-`ptest` runs the changed tests), target one test with `ptest <scoped paths>`,
-and finish with `ptest --full`. `--full` skips already-verified inputs
+`ptest` runs the tests your change reaches: git diff vs the branch base, no
+baseline or coverage needed), target one test with `ptest <scoped paths>`,
+and finish with `ptest --full` once before handoff. `--full` skips already-verified inputs
 (`--again` forces them), and a duplicate full run joins the running full run
 instead of starting a second one.
 

@@ -15,7 +15,7 @@ Getting started:
 
 Running tests from the repository root:
   ptest tests/test_example.py     # scoped: smallest relevant scope
-  ptest                           # default loop: only what the change touches (= --changed)
+  ptest                           # default loop: tests your change reaches (diff vs the branch base; no baseline needed)
   ptest --full                    # integrated gate once the change lands
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
@@ -85,7 +85,8 @@ Notes:
   pytest project whose environment holds the frozen pytest-cov/coverage
   pair: now writes --cov/--cov-report plus the [selection] draft and
   runs ptest --full for the baseline, later writes the same draft for
-  a later baseline, no leaves selection off. --changed-setup
+  a later baseline, no writes nothing (a fresh pytest config already
+  enables selection, so bare ptest needs no setup). --changed-setup
   now|later|no answers non-interactively (default: later); existing
   configs are never rewritten (see ptest doctor --fix)."""
 
@@ -290,7 +291,12 @@ Notes:
   Arbitrary runner flags are rejected by root scope validation. --changed
   and --full are mutually exclusive; --changed rejects runner arguments
   while root --full accepts only a whole child (e.g. --full web) and
-  otherwise names the scoped form. --base
+  otherwise names the scoped form. A bare ptest is the default loop:
+  it runs the tests the change reaches (git diff vs the branch base,
+  no baseline or coverage needed). The base defaults to the merge-base
+  of HEAD with the default branch (origin/HEAD, else main/master/dev;
+  the worktree diff on that branch itself); --base X compares against
+  the merge-base of HEAD and X instead. --base
   is unavailable with --full. --shadow requires automatic mode. Root
   --full preflights all children, then runs them sequentially with output
   preserved, returning the first nonzero exit after all children finish.
@@ -332,12 +338,14 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    validation.
 
 3. Loop changed, then gate full:
-     ptest                           # default loop after each edit (bare ptest runs the changed tests)
+     ptest                           # default loop after each edit (runs the tests the change reaches: git diff vs the branch base, no baseline or coverage needed)
      ptest api/tests/test_example.py  # monorepo; standalone example in step 2
      ptest --full                  # once, after the change is integrated
      ptest --full --again          # force already-verified inputs
    A scoped or changed green is iteration only; only --full completes the
-   change. The first loop run may run everything to record a baseline.
+   change. A changed run may still run everything when the change is
+   unselectable (a full trigger changed, inputs outside the import graph,
+   or the affected set is too large); no baseline or coverage step is needed.
    --full skips already-verified inputs (--again forces them); a duplicate
    full run joins the running full run instead of starting a second one.
    Never rerun --full without a change. Never invoke pytest, vitest, or
