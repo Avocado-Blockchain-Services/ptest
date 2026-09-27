@@ -395,7 +395,7 @@ def test_plan_selection_disabled_is_full(tmp_path):
 
     assert impact.kind == "full"
     assert impact.reason == ("selection is off in .ptest.toml — "
-                             "set [selection] enabled = true")
+                             "ptest doctor --fix turns it on")
 
 
 def test_plan_vitest_delegates(tmp_path):

@@ -304,6 +304,33 @@ def test_fix_adds_extra_for_xdist_when_n_is_used(tmp_path, monkeypatch, capsys):
     assert 'argv = ["uv", "sync", "--locked", "--extra", "test"]' in raw
 
 
+def test_fix_turns_on_graph_selection_without_cov(tmp_path, monkeypatch, capsys):
+    """A pre-0.3 config (enabled = false, everything else default, no --cov)
+    gets only `enabled = true`: graph selection needs no coverage draft."""
+    root = _write_pytest_project(tmp_path / "old", addopts="")
+    _write_config(root, selection=True)
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert "enabled = true" in raw
+    assert "closed_inputs = true" not in raw   # no coverage-era draft
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+
+
+def test_fix_keeps_explicit_off_when_selection_was_hand_tuned(tmp_path, monkeypatch, capsys):
+    """enabled = false next to non-default selection keys is a deliberate choice."""
+    root = _write_pytest_project(tmp_path / "tuned", addopts="")
+    _write_config(root, extra_lines=("[selection]", "enabled = false",
+                                     'always = ["tests/test_example.py"]'))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    assert "selection.enabled" not in capsys.readouterr().out
+
+
 def test_fix_proposes_selection_draft_with_cov(tmp_path, monkeypatch, capsys):
     root = _write_pytest_project(tmp_path / "cov", addopts="")
     _write_config(root, args=("--cov",), selection=True)

@@ -461,7 +461,7 @@ def plan(top: Path | None, project_root: Path, config: C.Config,
         return Impact(
             kind="full", changed=changed, ignored=dropped,
             reason="selection is off in .ptest.toml — "
-                   "set [selection] enabled = true")
+                   "ptest doctor --fix turns it on")
 
     direct: set[str] = set()
     seeds: list[str] = []

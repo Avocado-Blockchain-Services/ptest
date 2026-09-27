@@ -954,6 +954,20 @@ def plan_project(root: Path, declaration: str,
                 "selection", "non_input_outputs",
                 have_outputs + ("node_modules",)))
     if (kind is C.RunnerKind.PYTEST
+            and not _has_cov(current_args)
+            and isinstance(selection, dict)
+            and selection.get("enabled") is False
+            and all(_selection_key_is_default(selection, key)
+                    for key in ("closed_inputs", "input_roots",
+                                "full_triggers", "groups", "always",
+                                "no_tests", "ignored_inputs",
+                                "environment"))
+            and selection.get("full_ratio", 0.7) == 0.7):
+        # Pre-0.3 generator default: graph selection needs no coverage
+        # draft, only the switch. Hand-tuned selection keys mean the
+        # user chose `false` deliberately, so it stays.
+        changes.append(FieldChange("selection", "enabled", True))
+    if (kind is C.RunnerKind.PYTEST
             and _has_cov(current_args)
             and (not isinstance(selection, dict)
                  or _selection_needs_close(selection))):
