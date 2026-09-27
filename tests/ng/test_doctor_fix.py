@@ -644,3 +644,31 @@ def test_fix_combines_with_offline_and_never_reviews(
     assert main(("doctor", "--fix", "--offline")) == 0
     assert "\nargs = []\n" in (root / ".ptest.toml").read_text(encoding="utf-8")
     capsys.readouterr()
+
+
+def _write_vitest_project(root: Path) -> Path:
+    """One vitest fixture without a [selection] exemption for node_modules."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "package-lock.json").write_text('{"lockfileVersion": 3}\n',
+                                            encoding="utf-8")
+    write_ptest_toml(root, kind="vitest", launcher=("node",),
+                     project_id=PROJECT_ID)
+    return root
+
+
+def test_fix_adds_node_modules_to_vitest_config_and_is_idempotent(
+        tmp_path, monkeypatch, capsys):
+    """Vite's cache lives under node_modules: fix exempts it, once."""
+    root = _write_vitest_project(tmp_path / "vitefix")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'non_input_outputs = ["node_modules"]' in raw
+
+    assert main(("doctor", "--fix")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+    assert (root / ".ptest.toml").read_text(encoding="utf-8") == raw

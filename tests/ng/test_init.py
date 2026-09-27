@@ -966,3 +966,20 @@ def test_explicit_init_doctor_failure_preserves_initialized_files(
     assert not (tmp_path / "recommendations.md").exists()
     assert statuses == ["claude", "claude"]
     assert launched and all(name == "claude" for name in launched)
+
+
+def test_vitest_init_marks_node_modules_as_non_input(tmp_path):
+    """Vite writes its cache under node_modules: exempt it like .venv."""
+    (tmp_path / "package.json").write_text(json.dumps({
+        "devDependencies": {"vitest": "3.2.7"},
+    }))
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
+
+    result = init_project(tmp_path, _options())
+
+    assert result.action is InitAction.CREATED
+    resolved = resolve_config(tmp_path)
+    assert resolved.config is not None
+    assert resolved.config.selection.non_input_outputs == ("node_modules",)
+    text = result.target.read_text(encoding="utf-8")
+    assert 'non_input_outputs = ["node_modules"]' in text
