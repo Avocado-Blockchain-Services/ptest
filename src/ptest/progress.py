@@ -152,6 +152,32 @@ def format_no_changes(declaration: str, *, color: bool = False) -> str:
             "· no changes")
 
 
+#: End-line hint after a narrowed pass: the graph is a subset, not the gate.
+NEXT_FULL = "next: ptest --full before handoff"
+#: End-line hint after any changed-mode failure.
+NEXT_FIX = "fix the code under test, then rerun ptest"
+
+
+def next_step(status: C.Status, narrowed: bool) -> str | None:
+    """One next-step hint for a changed-mode end line, or None."""
+    if status is C.Status.FAILED:
+        return NEXT_FIX
+    if narrowed and status in (C.Status.PASSED, C.Status.NO_TESTS_NEEDED):
+        return NEXT_FULL
+    return None
+
+
+def format_impact(project: str, note: str, *, color: bool = False) -> str:
+    """Changed-mode start line: project plus the prebuilt blast-radius note."""
+    return f"{_prefix(color=color)} {_project(project, color=color)} · {note}"
+
+
+def format_nothing_changed(label: str, *, color: bool = False) -> str:
+    """Line for a changed-mode run where nothing changed anywhere."""
+    return (f"{_prefix(color=color)} no changes vs {label} — nothing to test "
+            "· ptest --full runs everything")
+
+
 def format_already_verified(short_sha: str, age_s: float,
                             *, color: bool = False) -> str:
     """Skip line for a full run whose baseline already covers the inputs."""
@@ -297,7 +323,7 @@ _VERDICT_STYLES = {
 def format_end(status: C.Status, *, counts: C.Counts | None,
                duration_s: float | None, exit_code: int,
                hint: bool = False, lead: str | None = None,
-               color: bool = False) -> str:
+               color: bool = False, next_step: str | None = None) -> str:
     verdict = render.paint(_VERDICTS[status], _VERDICT_STYLES.get(status, ""),
                            color=color)
     duration = render.paint(format_duration(duration_s), "dim", color=color)
@@ -310,7 +336,9 @@ def format_end(status: C.Status, *, counts: C.Counts | None,
     line = " · ".join(parts)
     if exit_code != 0:
         line += f" (exit {exit_code})"
-    if hint:
+    if next_step is not None:
+        line += f" · {next_step}"
+    elif hint:
         line += f" · {HINT}"
     return line
 
@@ -358,6 +386,8 @@ __all__ = [
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",
     "format_changed_selected", "format_changed_start", "format_no_changes",
+    "NEXT_FULL", "NEXT_FIX", "next_step", "format_impact",
+    "format_nothing_changed",
     "format_already_verified", "format_joined_full_run",
     "explain_changed_full_reason",
     "format_baseline_note",

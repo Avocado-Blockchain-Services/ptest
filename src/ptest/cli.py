@@ -2254,7 +2254,8 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
     for rel in updated:
         print(f"updated {rel}")
     if doctor_fix.selection_enabled_by(plan):
-        print("run a parallel full baseline once to record a baseline")
+        print("selection enabled: bare ptest now runs the tests your change "
+              "reaches (no baseline needed); run ptest --full once before handoff")
     return 0
 
 
@@ -2767,19 +2768,185 @@ def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
 
 
 def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | None]],
-                          started: float, code: int, *, quiet: bool) -> None:
+                          started: float, code: int, *, quiet: bool,
+                          next_step: str | None = None) -> None:
     """Emit the existing total line over per-child outcomes."""
     total_counts = _summed_counts(
         [counts for _, _, counts in child_outcomes])
     status = _worst_status(
         [outcome for _, outcome, _ in child_outcomes])
-    hint = (status in (C.Status.FAILED, C.Status.INCOMPLETE,
-                       C.Status.NOT_RUN)
+    hint = (next_step is None
+            and status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                           C.Status.NOT_RUN)
             and progress.claim_hint())
     progress.emit(progress.format_end(
         status, counts=total_counts,
         duration_s=time.monotonic() - started, exit_code=code,
-        hint=hint, lead="total", color=sys.stderr.isatty()), quiet=quiet)
+        hint=hint, lead="total", color=sys.stderr.isatty(),
+        next_step=next_step), quiet=quiet)
+
+
+def _impact_api():
+    """Graph-selection module, imported lazily at the routing boundary."""
+    from . import impact
+    return impact
+
+
+def _impact_note(impact, label: str) -> str:
+    """Start-line note for one impact verdict (paths/label escaped)."""
+    if impact.kind == "full":
+        return f"changed → full suite: {render.terminal_text(impact.reason)}"
+    changed = tuple(impact.changed)
+    if changed:
+        first = render.terminal_text(changed[0])
+        extra = len(changed) - 1
+        count = "" if extra == 0 else f" (+{extra} file{'s' if extra > 1 else ''})"
+        head = f"changed: {first}{count}"
+    else:
+        head = "changed"
+    if impact.kind == "selected":
+        return (f"{head} → {len(impact.files)} of {impact.total} test files "
+                f"({impact.direct} direct · {impact.via} via importers)")
+    if impact.kind == "vitest":
+        return f"{head} → vitest --changed {render.terminal_text(label)}"
+    return f"{head} → no tests affected · ptest --full runs everything"
+
+
+def _impact_run_request(parsed: ParsedArgs, impact, base,
+                        *, next_hint: bool) -> C.RunRequest | None:
+    """Map one impact verdict to its run request; None means skip the run."""
+    if impact.kind == "none":
+        return None
+    if impact.kind == "selected":
+        mode, argv = C.Mode.SCOPED, tuple(impact.files)
+    elif impact.kind == "vitest":
+        mode, argv = C.Mode.SCOPED, ("--changed", base.sha or "HEAD")
+    else:
+        mode, argv = C.Mode.FULL, ()
+    return C.RunRequest(
+        mode=mode, argv=argv, base=None,
+        workers=parsed.workers, queue_timeout_s=parsed.queue_timeout_s,
+        timeout_s=parsed.timeout_s, no_setup=parsed.no_setup,
+        result_path=parsed.result_path,
+        fixture_domain=parsed.fixture_domain,
+        verbose=parsed.verbose, quiet=parsed.quiet,
+        changed_note=_impact_note(impact, base.label),
+        next_hint=next_hint)
+
+
+def _impact_base_and_changed(parsed: ParsedArgs, root: Path):
+    """Resolve the branch base and repo-level changed set once per run."""
+    impact_api = _impact_api()
+    top = impact_api.git_top(root)
+    base = impact_api.resolve_base(top, parsed.base)
+    return impact_api, top, base, impact_api.changed_files(top, base)
+
+
+def _run_impact_standalone(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                           domain: C.DomainPaths) -> int:
+    """Route bare `ptest` / `ptest --changed` through the import graph."""
+    assert resolution.config is not None
+    impact_api, top, base, repo_changed = _impact_base_and_changed(
+        parsed, resolution.root)
+    impact = impact_api.plan(top, resolution.root, resolution.config,
+                             repo_changed)
+    request = _impact_run_request(parsed, impact, base, next_hint=True)
+    if request is None:
+        project = render.terminal_text(resolution.root.name)
+        if impact.changed:
+            progress.emit(progress.format_impact(
+                project, _impact_note(impact, base.label),
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        else:
+            progress.emit(progress.format_nothing_changed(
+                render.terminal_text(base.label),
+                color=sys.stderr.isatty()), quiet=parsed.quiet)
+        return 0
+    result = operations.execute(domain, resolution.config, request)
+    for reason in result.reasons:
+        print(render.terminal_text(f"{reason.code}: {reason.message}"),
+              file=sys.stderr)
+    return result.exit_code
+
+
+def _run_monorepo_automatic(parsed: ParsedArgs, children,
+                            domain: C.DomainPaths) -> int:
+    """Legacy per-child AUTOMATIC loop for shadow/probe at a monorepo root.
+
+    The graph engine owns bare/`--changed`; shadowing and probing keep the
+    history/baseline engine one child at a time, flags carried through.
+    """
+    started = time.monotonic()
+    outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+    first_failure = 0
+    for child in children:
+        result = operations.execute(
+            domain, child.config,
+            C.RunRequest(
+                mode=C.Mode.AUTOMATIC, base=parsed.base,
+                workers=parsed.workers,
+                queue_timeout_s=parsed.queue_timeout_s,
+                timeout_s=parsed.timeout_s,
+                no_setup=parsed.no_setup, shadow=parsed.shadow,
+                result_path=parsed.result_path,
+                fixture_domain=parsed.fixture_domain,
+                probe=parsed.probe,
+                verbose=parsed.verbose, quiet=parsed.quiet),
+        )
+        for reason in result.reasons:
+            print(render.terminal_text(f"{reason.code}: {reason.message}"),
+                  file=sys.stderr)
+        outcomes.append((result.exit_code, result.status, result.counts))
+        if result.exit_code and not first_failure:
+            first_failure = result.exit_code
+    _emit_monorepo_total(outcomes, started, first_failure,
+                         quiet=parsed.quiet)
+    return first_failure
+
+
+def _run_impact_monorepo(parsed: ParsedArgs, resolution: C.ConfigResolution,
+                         children, domain: C.DomainPaths) -> int:
+    """Route a monorepo root bare/`--changed` run child by child."""
+    impact_api, top, base, repo_changed = _impact_base_and_changed(
+        parsed, resolution.root)
+    planned = [(child, impact_api.plan(top, child.directory, child.config,
+                                       repo_changed))
+               for child in children]
+    if all(impact.kind == "none" and not impact.changed
+           for _, impact in planned):
+        progress.emit(progress.format_nothing_changed(
+            render.terminal_text(base.label),
+            color=sys.stderr.isatty()), quiet=parsed.quiet)
+        return 0
+    started = time.monotonic()
+    outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+    first_failure = 0
+    narrowed = False
+    for child, impact in planned:
+        request = _impact_run_request(parsed, impact, base, next_hint=False)
+        if request is None:
+            if impact.changed:
+                narrowed = True
+            if not parsed.quiet:
+                print(progress.format_no_changes(
+                    render.terminal_text(child.declaration),
+                    color=sys.stderr.isatty()), file=sys.stderr)
+            outcomes.append((0, C.Status.NO_TESTS_NEEDED, None))
+            continue
+        if request.mode is C.Mode.SCOPED:
+            narrowed = True
+        result = operations.execute(domain, child.config, request)
+        for reason in result.reasons:
+            print(render.terminal_text(f"{reason.code}: {reason.message}"),
+                  file=sys.stderr)
+        outcomes.append((result.exit_code, result.status, result.counts))
+        if result.exit_code and not first_failure:
+            first_failure = result.exit_code
+    worst = _worst_status([status for _, status, _ in outcomes])
+    _emit_monorepo_total(outcomes, started, first_failure,
+                         quiet=parsed.quiet,
+                         next_step=progress.next_step(worst, narrowed))
+    return first_failure
 
 
 def _lease(item: C.LeaseView) -> dict:
@@ -2854,45 +3021,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # (Both arrive here as AUTOMATIC with no runner tail; scoped
             # paths arrive as SCOPED and keep their route below.)
             if parsed.changed or parsed.mode is C.Mode.AUTOMATIC:
-                changed_started = time.monotonic()
-                changed_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
-                first_failure = 0
-                heads = (monorepo.child_baseline_heads(domain, children)
-                         if parsed.base is None else None)
-                for item in monorepo.select_changed_children(
-                        resolution.root, children, parsed.base, heads):
-                    if not item.run:
-                        if not parsed.quiet:
-                            print(progress.format_no_changes(
-                                render.terminal_text(item.target.declaration),
-                                color=sys.stderr.isatty()), file=sys.stderr)
-                        changed_outcomes.append(
-                            (0, C.Status.NO_TESTS_NEEDED, None))
-                        continue
-                    result = operations.execute(
-                        domain, item.target.config,
-                        # monorepo.py is owned outside this change, so the CLI
-                        # timeout travels via replace() instead of a new
-                        # child_changed_request parameter.
-                        replace(monorepo.child_changed_request(
-                            item.target, base=parsed.base,
-                            workers=parsed.workers,
-                            queue_timeout_s=parsed.queue_timeout_s,
-                            no_setup=parsed.no_setup,
-                            result_path=parsed.result_path,
-                            fixture_domain=parsed.fixture_domain,
-                            verbose=parsed.verbose, quiet=parsed.quiet),
-                            timeout_s=parsed.timeout_s),
-                    )
-                    for reason in result.reasons:
-                        print(render.terminal_text(f"{reason.code}: {reason.message}"), file=sys.stderr)
-                    changed_outcomes.append(
-                        (result.exit_code, result.status, result.counts))
-                    if result.exit_code and not first_failure:
-                        first_failure = result.exit_code
-                _emit_monorepo_total(changed_outcomes, changed_started,
-                                     first_failure, quiet=parsed.quiet)
-                return first_failure
+                if parsed.shadow or parsed.probe is not None:
+                    return _run_monorepo_automatic(parsed, children, domain)
+                return _run_impact_monorepo(parsed, resolution, children,
+                                            domain)
             routed = monorepo.route_scopes(parsed.runner_argv, children)
             result = operations.execute(
                 domain, routed.target.config,
@@ -2930,6 +3062,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             from . import monorepo
             raise _problem("invalid-config", monorepo.FULL_SCOPE_MESSAGE)
         domain = platform.domain_paths(parsed.fixture_domain)
+        if (parsed.mode is C.Mode.AUTOMATIC and not parsed.shadow
+                and parsed.probe is None):
+            return _run_impact_standalone(parsed, resolution, domain)
         request = C.RunRequest(
             mode=parsed.mode,
             argv=parsed.runner_argv,
