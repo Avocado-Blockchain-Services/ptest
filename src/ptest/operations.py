@@ -2166,6 +2166,15 @@ def _emit_start(*, checkout: C.CheckoutIdentity, config: C.Config,
             project, tuple(config.runner.launcher),
             color=sys.stderr.isatty()), quiet=request.quiet)
         return
+    if request.changed_note is not None:
+        progress.emit(progress.format_impact(
+            project, request.changed_note,
+            color=sys.stderr.isatty()), quiet=request.quiet)
+        if request.verbose:
+            progress.emit(
+                f"ptest: -v plan: {plan.execution} · mode {plan.mode.value}",
+                quiet=request.quiet)
+        return
     runner = config.runner.kind.value
     if (request.mode is C.Mode.AUTOMATIC and plan.static_preview
             and snapshot is not None and plan.execution in ("selected", "full")):
@@ -2270,13 +2279,18 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
         progress.emit(progress.format_setup_run_done(
             elapsed_s, color=sys.stderr.isatty()), quiet=request.quiet)
         return
-    hint = (result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
-                              C.Status.NOT_RUN)
+    next_hint = (progress.next_step(
+        result.status, request.mode is C.Mode.SCOPED)
+        if request.next_hint else None)
+    hint = (next_hint is None
+            and result.status in (C.Status.FAILED, C.Status.INCOMPLETE,
+                                  C.Status.NOT_RUN)
             and progress.claim_hint())
     progress.emit(progress.format_end(
         result.status, counts=result.counts,
         duration_s=elapsed_s, exit_code=result.exit_code,
-        hint=hint, color=sys.stderr.isatty()), quiet=request.quiet)
+        hint=hint, color=sys.stderr.isatty(),
+        next_step=next_hint), quiet=request.quiet)
     if baseline_note is not None:
         progress.emit(baseline_note, quiet=request.quiet)
 

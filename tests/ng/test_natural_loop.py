@@ -33,9 +33,8 @@ _RUN_ID = "ef" * 16
 
 
 def _repo(domain) -> Path:
-    # History requires a fixture checkout inside its domain (see
-    # test_monorepo_changed._storerepo); execution is exempt from the
-    # state-outside-checkout rule for fixture domains.
+    # History requires a fixture checkout inside its domain; execution is
+    # exempt from the state-outside-checkout rule for fixture domains.
     root = domain.root / "repo"
     root.mkdir(parents=True, exist_ok=True)
     write_ptest_toml(root, kind="command", launcher=("true",), args=(),
@@ -99,11 +98,56 @@ def _no_admission(monkeypatch):
 
 
 # --- 1. bare ptest is --changed -----------------------------------------------
+#
+# Bare `ptest` and `ptest --changed` route through the import graph
+# (``ptest.impact``, stubbed here); the mapping itself is pinned in
+# test_changed_default.py, these twins pin loop parity and skip lines.
+
+def _stub_impact(monkeypatch, plans, *, sha="abc123", label="origin/dev",
+                 repo_changed=()):
+    """Stub ``ptest.impact``; plans maps project dir name -> Impact."""
+    import sys
+    import types
+    from dataclasses import dataclass
+
+    mod = types.ModuleType("ptest.impact")
+
+    @dataclass(frozen=True, slots=True)
+    class Base:
+        sha: str | None
+        label: str
+
+    @dataclass(frozen=True, slots=True)
+    class Impact:
+        kind: str
+        changed: tuple = ()
+        files: tuple = ()
+        direct: int = 0
+        via: int = 0
+        total: int = 0
+        reason: str = ""
+
+    mod.Base = Base
+    mod.Impact = Impact
+    mod.git_top = lambda start: Path(start)
+    mod.resolve_base = lambda top, explicit: Base(sha, label)
+    mod.changed_files = lambda top, resolved: repo_changed
+    mod.plan = lambda top, project_root, config, changed: plans(mod)[
+        Path(project_root).name]
+    monkeypatch.setitem(sys.modules, "ptest.impact", mod)
+    return mod
+
 
 def test_bare_standalone_matches_changed_request(tmp_path, monkeypatch):
     write_ptest_toml(tmp_path, kind="command", launcher=("true",), args=(),
                      full_args=(), project_id="ab" * 16)
     monkeypatch.chdir(tmp_path)
+    _stub_impact(
+        monkeypatch,
+        lambda mod: {tmp_path.name: mod.Impact(
+            kind="selected", changed=("a.py",), files=("tests/test_a.py",),
+            direct=0, via=1, total=5)},
+        repo_changed=("a.py",))
     calls = []
     monkeypatch.setattr(
         "ptest.operations.execute",
@@ -113,20 +157,21 @@ def test_bare_standalone_matches_changed_request(tmp_path, monkeypatch):
 
     assert main(()) == 0
     assert main(("--changed",)) == 0
-    assert [request.mode for request in calls] == [C.Mode.AUTOMATIC] * 2
+    assert [request.mode for request in calls] == [C.Mode.SCOPED] * 2
+    assert calls[0].argv == calls[1].argv == ("tests/test_a.py",)
+    assert calls[0].changed_note == calls[1].changed_note
+    assert all(request.next_hint for request in calls)
 
 
 def test_monorepo_root_bare_runs_changed_loop(tmp_path, monkeypatch, capsys, monorepo):
-    from ptest import monorepo as monorepo_api
-
     monorepo({"api": {"kind": "command", "launcher": ("true",)},
               "web": {"kind": "command", "launcher": ("true",)}},
              parent=tmp_path, name=None)
     init_git_repo(tmp_path, message="base")
-    head = git(tmp_path, "rev-parse", "HEAD")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": head, "web": head})
+    _stub_impact(monkeypatch,
+                 lambda mod: {"api": mod.Impact(kind="none"),
+                              "web": mod.Impact(kind="none")})
     calls = []
     monkeypatch.setattr(
         "ptest.operations.execute",
@@ -138,24 +183,26 @@ def test_monorepo_root_bare_runs_changed_loop(tmp_path, monkeypatch, capsys, mon
     assert main(()) == 0
     assert calls == []
     err = capsys.readouterr().err
-    assert "ptest: api · no changes" in err
-    assert "ptest: web · no changes" in err
-    assert "ptest: total" in err
+    assert ("ptest: no changes vs origin/dev — nothing to test · "
+            "ptest --full runs everything") in err
+    assert "ptest: total" not in err
 
 
 def test_monorepo_root_bare_runs_only_the_touched_child(
         tmp_path, monkeypatch, capsys, monorepo):
-    from ptest import monorepo as monorepo_api
-
     monorepo({"api": {"kind": "command", "launcher": ("true",)},
               "web": {"kind": "command", "launcher": ("true",)}},
              parent=tmp_path, name=None)
     init_git_repo(tmp_path, message="base")
     (tmp_path / "api" / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    head = git(tmp_path, "rev-parse", "HEAD")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": head, "web": head})
+    _stub_impact(
+        monkeypatch,
+        lambda mod: {"api": mod.Impact(
+            kind="selected", changed=("api/extra.py",),
+            files=("tests/test_a.py",), direct=1, via=0, total=4),
+            "web": mod.Impact(kind="none")},
+        repo_changed=("api/extra.py",))
     calls = []
     monkeypatch.setattr(
         "ptest.operations.execute",
@@ -165,7 +212,7 @@ def test_monorepo_root_bare_runs_only_the_touched_child(
     )
 
     assert main(()) == 0
-    assert [call[1].mode for call in calls] == [C.Mode.AUTOMATIC]
+    assert [call[1].mode for call in calls] == [C.Mode.SCOPED]
     assert calls[0][0].config_path.parent.name == "api"
     err = capsys.readouterr().err
     assert "ptest: web · no changes" in err

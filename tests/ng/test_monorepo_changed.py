@@ -1,15 +1,23 @@
-"""Section A twins: monorepo root `ptest --changed`.
+"""Section A twins: monorepo root `ptest --changed` via impact routing.
 
 Covers spec section A (cli.py monorepo branch, monorepo.py):
-A.1 root --changed runs touched children in CHANGED mode, skips clean ones
-    with `ptest: <child> · no changes`, --base passes through;
-A.2 vitest child with changes uses vitest's own `--changed <base>` when a
-    base names the comparison, else its full suite;
+A.1 root --changed runs impacted children with the mapped request
+    (SCOPED files / FULL / vitest `--changed <sha>`), skips clean ones
+    with `ptest: <child> · no changes`, --base reaches resolve_base;
+A.2 vitest child delegates to vitest's own `--changed <base>`,
+    falling back to HEAD when the base has no sha;
 A.3 one end line per child plus the total line, exit = first nonzero;
-A.4 root files outside every child that are full triggers run that child.
+A.4 a root lockfile full trigger runs only the triggered child.
+A clean tree with nothing changed anywhere prints the nothing-changed
+line with no per-child lines and no total.
+
+The graph itself (``ptest.impact``) is stubbed here via ``sys.modules``;
+these tests pin the CLI mapping, not the selection.
 """
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 from ptest import contracts as C
@@ -33,7 +41,71 @@ def _result(exit_code: int = 0):
                           "status": C.Status.PASSED, "counts": None})()
 
 
-# --- A.1: unit twins for change classification ---
+def _install_impact(monkeypatch, plans, *, sha="abc123", label="origin/dev",
+                    explicit_seen=None, top=None, repo_changed=()):
+    """Stub ``ptest.impact``; plans maps child declaration -> Impact."""
+    from dataclasses import dataclass
+
+    mod = types.ModuleType("ptest.impact")
+
+    @dataclass(frozen=True, slots=True)
+    class Base:
+        sha: str | None
+        label: str
+
+    @dataclass(frozen=True, slots=True)
+    class Impact:
+        kind: str
+        changed: tuple = ()
+        files: tuple = ()
+        direct: int = 0
+        via: int = 0
+        total: int = 0
+        reason: str = ""
+
+    base = Base(sha, label)
+    mod.Base = Base
+    mod.Impact = Impact
+    mod.git_top = lambda start: top
+    mod.resolve_base = lambda top_arg, explicit: (
+        explicit_seen.__setitem__("explicit", explicit) or base
+        if explicit_seen is not None else base)
+    mod.changed_files = lambda top_arg, resolved: repo_changed
+    mod.plan = lambda top_arg, project_root, config, changed: (
+        plans(mod)[Path(project_root).name])
+    monkeypatch.setitem(sys.modules, "ptest.impact", mod)
+    return mod
+
+
+def _selected(mod, changed=("api/a.py",),
+              files=("tests/test_a.py",), direct=1, via=0, total=4):
+    return mod.Impact(kind="selected", changed=tuple(changed),
+                      files=tuple(files), direct=direct, via=via, total=total)
+
+
+def _none(mod, changed=()):
+    return mod.Impact(kind="none", changed=tuple(changed))
+
+
+def _capture(monkeypatch, result=None):
+    calls = []
+    outcome = result if result is not None else _result()
+
+    def fake_execute(domain, config, request):
+        calls.append((config, request))
+        return outcome
+
+    monkeypatch.setattr("ptest.operations.execute", fake_execute)
+    return calls
+
+
+def _root(tmp_path, monkeypatch, monorepo, web_kind="command"):
+    monorepo(_child_specs(web_kind), parent=tmp_path, name=None)
+    init_git_repo(tmp_path, message="base")
+    monkeypatch.chdir(tmp_path)
+
+
+# --- worktree_changed_files (kept helper) ------------------------------------
 
 def test_changed_files_sees_uncommitted_and_untracked(tmp_path):
     init_git_repo(tmp_path, files={"api/a.py": "1\n"}, message="base")
@@ -55,164 +127,162 @@ def test_changed_files_limits_committed_range_to_base(tmp_path):
     assert monorepo_api.worktree_changed_files(tmp_path, base) == ("api/a.py",)
 
 
-def _preflight(tmp_path):
-    return monorepo_api.preflight_children(
-        tmp_path, monorepo_api.parse_monorepo_manifest(
-            b'version = 2\n[monorepo]\nchildren = ["api", "web"]\n',
-            tmp_path / ".ptest.toml"))
+# --- A.1: routing ------------------------------------------------------------
 
-
-def test_select_changed_runs_only_the_touched_child(tmp_path, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, files={"api/a.py": "1\n", "web/w.js": "1\n"}, message="base")
-    (tmp_path / "api" / "a.py").write_text("2\n", encoding="utf-8")
-    children = _preflight(tmp_path)
-    heads = _covering_heads(tmp_path)
-
-    selected = monorepo_api.select_changed_children(
-        tmp_path, children, None, heads)
-
-    assert {item.target.declaration: item.run for item in selected} == {
-        "api": True, "web": False}
-
-
-def test_select_changed_clean_tree_skips_only_baseline_covered_children(tmp_path, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, files={"api/a.py": "1\n", "web/w.js": "1\n"}, message="base")
-    children = _preflight(tmp_path)
-    heads = _covering_heads(tmp_path)
-
-    selected = monorepo_api.select_changed_children(
-        tmp_path, children, None, heads)
-
-    assert [item.run for item in selected] == [False, False]
-
-
-def test_select_changed_clean_tree_without_baselines_runs_every_child(tmp_path, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, files={"api/a.py": "1\n", "web/w.js": "1\n"}, message="base")
-    children = _preflight(tmp_path)
-
-    selected = monorepo_api.select_changed_children(
-        tmp_path, children, None, {"api": None, "web": None})
-
-    assert [item.run for item in selected] == [True, True]
-
-
-def _covering_heads(root: Path) -> dict[str, str]:
-    head = git(root, "rev-parse", "HEAD")
-    return {"api": head, "web": head}
-
-
-def _publish_baseline(case, domain, checkout, head: str) -> None:
-    from ptest import history as history_api
-
-    digest = "11" * 32
-    snapshot = case.snapshot(head=head, digest=digest,
-                             compatibility="compat-v1")
-    plan = C.Plan(mode=C.Mode.FULL, execution="full",
-                  input_digest=digest, compatibility="compat-v1")
-    result = case.result(sequence=1, plan=plan,
-                         project_id=checkout.project_id,
-                         checkout_id=checkout.checkout_id,
-                         input_before=snapshot, input_after=snapshot,
-                         policy_digest="33" * 32)
-    inventory = case.inventory(("tests/test_a.py",))
-    published = history_api.publish_outcome(domain, checkout, result, inventory)
-    assert published.baseline_published is True
-
-
-def _checkouts(children):
-    from ptest import operations
-
-    return {child.declaration: operations._checkout(child.config)
-            for child in children}
-
-
-def _storerepo(case, monorepo):
-    """Git monorepo inside the fixture domain (history requires it)."""
-    domain = case.domain()
-    repo = monorepo(_child_specs(), parent=domain.root, name="repo")
-    init_git_repo(repo, files={"api/a.py": "1\n", "web/w.js": "1\n"}, message="base")
-    return domain, repo
-
-
-def test_child_baseline_heads_reads_recorded_baselines(case, monorepo):
-    from ptest import history as history_api
-
-    domain, repo = _storerepo(case, monorepo)
-    children = _preflight(repo)
-    head = git(repo, "rev-parse", "HEAD")
-    checkouts = _checkouts(children)
-    _publish_baseline(case, domain, checkouts["api"], head)
-
-    heads = monorepo_api.child_baseline_heads(domain, children)
-
-    assert heads == {"api": head, "web": None}
-    reread = history_api.read_history(domain, checkouts["api"])
-    assert reread.baseline is not None and reread.baseline.head == head
-
-
-def test_no_base_runs_child_with_committed_change_since_baseline(case, monorepo):
-    domain, repo = _storerepo(case, monorepo)
-    children = _preflight(repo)
-    checkouts = _checkouts(children)
-    base = git(repo, "rev-parse", "HEAD")
-    _publish_baseline(case, domain, checkouts["api"], base)
-    _publish_baseline(case, domain, checkouts["web"], base)
-    (repo / "api" / "a.py").write_text("2\n", encoding="utf-8")
-    git(repo, "commit", "-am", "touch api")
-
-    heads = monorepo_api.child_baseline_heads(domain, children)
-    assert heads == {"api": base, "web": base}
-    selected = monorepo_api.select_changed_children(repo, children, None, heads)
-
-    assert {item.target.declaration: item.run for item in selected} == {
-        "api": True, "web": False}
-
-
-def test_no_base_uncommitted_change_runs_despite_covering_baseline(case, monorepo):
-    domain, repo = _storerepo(case, monorepo)
-    children = _preflight(repo)
-    checkouts = _checkouts(children)
-    head = git(repo, "rev-parse", "HEAD")
-    _publish_baseline(case, domain, checkouts["api"], head)
-    _publish_baseline(case, domain, checkouts["web"], head)
-    (repo / "api" / "a.py").write_text("2\n", encoding="utf-8")
-
-    heads = monorepo_api.child_baseline_heads(domain, children)
-    selected = monorepo_api.select_changed_children(repo, children, None, heads)
-
-    assert {item.target.declaration: item.run for item in selected} == {
-        "api": True, "web": False}
-
-
-def test_root_changed_uses_baselines_when_base_is_absent(
+def test_root_changed_runs_touched_child_and_skips_clean_one(
         tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    base = git(tmp_path, "rev-parse", "HEAD")
+    _root(tmp_path, monkeypatch, monorepo)
     (tmp_path / "api" / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    git(tmp_path, "add", "-A")
-    git(tmp_path, "commit", "-m", "touch api")
-    head = git(tmp_path, "rev-parse", "HEAD")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": base, "web": head})
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _selected(mod), "web": _none(mod)}, top=tmp_path,
+        repo_changed=("api/extra.py",))
+    calls = _capture(monkeypatch)
 
     assert main(("--changed",)) == 0
-    assert [call[0].config_path.parent.name for call in calls] == ["api"]
-    assert calls[0][1].mode is C.Mode.AUTOMATIC
+    assert len(calls) == 1
+    assert calls[0][1].mode is C.Mode.SCOPED
+    assert calls[0][1].argv == ("tests/test_a.py",)
+    assert calls[0][1].base is None
+    assert calls[0][1].next_hint is False
+    assert calls[0][0].config_path.parent.name == "api"
     err = capsys.readouterr().err
     assert "ptest: web · no changes" in err
     assert "ptest: total" in err
 
+
+def test_root_changed_clean_tree_prints_nothing_changed(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo)
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _none(mod), "web": _none(mod)}, top=tmp_path, repo_changed=())
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed",)) == 0
+    assert calls == []
+    err = capsys.readouterr().err
+    assert ("ptest: no changes vs origin/dev — nothing to test · "
+            "ptest --full runs everything") in err
+    assert "ptest: total" not in err
+
+
+def test_root_changed_outside_git_runs_full_gate_per_child(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo)
+    _install_impact(monkeypatch, lambda mod: {
+        "api": mod.Impact(kind="full", reason="git changes are unavailable"),
+        "web": mod.Impact(kind="full", reason="git changes are unavailable")},
+        top=None, repo_changed=None)
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed",)) == 0
+    assert [call[1].mode for call in calls] == [C.Mode.FULL] * 2
+    assert all(call[1].changed_note
+               == "changed → full suite: git changes are unavailable"
+               for call in calls)
+
+
+def test_root_changed_base_ref_reaches_resolve(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo)
+    base = git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "api" / "extra.py").write_text("x = 1\n", encoding="utf-8")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-m", "touch api")
+    seen: dict = {}
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _selected(mod), "web": _none(mod)}, top=tmp_path,
+        repo_changed=("api/extra.py",), explicit_seen=seen)
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed", "--base", base)) == 0
+    assert seen["explicit"] == base
+    assert len(calls) == 1
+    assert calls[0][1].base is None
+    assert "ptest: web · no changes" in capsys.readouterr().err
+
+
+def test_root_changed_returns_first_failure_after_all_children_finish(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo)
+    (tmp_path / "api" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "web" / "w.js").write_text("y = 1\n", encoding="utf-8")
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _selected(mod, changed=("api/a.py",)),
+        "web": _selected(mod, changed=("web/w.js",))}, top=tmp_path,
+        repo_changed=("api/a.py", "web/w.js"))
+    codes = iter((9, 3))
+    monkeypatch.setattr(
+        "ptest.operations.execute",
+        lambda domain, config, request: _result(next(codes)),
+    )
+
+    assert main(("--changed",)) == 9
+    assert "ptest: total" in capsys.readouterr().err
+
+
+# --- A.4: root files that are full triggers -----------------------------------
+
+def test_root_lockfile_full_trigger_runs_only_the_triggered_child(
+        tmp_path, monkeypatch, monorepo):
+    _root(tmp_path, monkeypatch, monorepo)
+    (tmp_path / "uv.lock").write_text("v2\n", encoding="utf-8")
+    _install_impact(monkeypatch, lambda mod: {
+        "api": mod.Impact(kind="full", changed=("uv.lock",),
+                          reason="uv.lock is a full trigger"),
+        "web": _none(mod)}, top=tmp_path, repo_changed=("uv.lock",))
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed",)) == 0
+    assert len(calls) == 1
+    assert calls[0][1].mode is C.Mode.FULL
+    assert (calls[0][1].changed_note
+            == "changed → full suite: uv.lock is a full trigger")
+
+
+# --- A.2: vitest delegation ---------------------------------------------------
+
+def test_root_changed_vitest_child_gets_changed_argv(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo, web_kind="vitest")
+    base = git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "web" / "src" / "app.test.ts").parent.mkdir(
+        parents=True, exist_ok=True)
+    (tmp_path / "web" / "src" / "app.test.ts").write_text(
+        "test\n", encoding="utf-8")
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _none(mod),
+        "web": mod.Impact(kind="vitest", changed=("web/src/app.ts",))},
+        top=tmp_path, repo_changed=("web/src/app.ts",))
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed", "--base", base)) == 0
+    assert len(calls) == 1
+    assert calls[0][1].argv == ("--changed", "abc123")
+    assert calls[0][1].base is None
+    assert "ptest: api · no changes" in capsys.readouterr().err
+
+
+def test_root_changed_vitest_child_without_sha_uses_head(
+        tmp_path, monkeypatch, capsys, monorepo):
+    _root(tmp_path, monkeypatch, monorepo, web_kind="vitest")
+    (tmp_path / "web" / "src" / "app.test.ts").parent.mkdir(
+        parents=True, exist_ok=True)
+    (tmp_path / "web" / "src" / "app.test.ts").write_text(
+        "test\n", encoding="utf-8")
+    _install_impact(monkeypatch, lambda mod: {
+        "api": _none(mod),
+        "web": mod.Impact(kind="vitest", changed=("web/src/app.ts",))},
+        top=tmp_path, sha=None, label="HEAD",
+        repo_changed=("web/src/app.ts",))
+    calls = _capture(monkeypatch)
+
+    assert main(("--changed",)) == 0
+    assert len(calls) == 1
+    assert calls[0][1].mode is C.Mode.SCOPED
+    assert calls[0][1].argv == ("--changed", "HEAD")
+
+
+# --- skip-line styling (kept helper) ------------------------------------------
 
 def test_no_changes_line_styles_prefix_and_project_on_tty():
     from ptest import progress
@@ -229,240 +299,3 @@ def test_no_changes_line_plain_without_tty(monkeypatch):
     assert progress.format_no_changes("web") == "ptest: web · no changes"
     monkeypatch.setenv("NO_COLOR", "1")
     assert "\x1b" not in progress.format_no_changes("web", color=True)
-
-
-def test_select_changed_outside_git_runs_every_child(tmp_path):
-    children = tuple(monorepo_api.ChildTarget(
-        declaration=name, directory=tmp_path / name, config=None)
-        for name in ("api", "web"))
-
-    selected = monorepo_api.select_changed_children(tmp_path, children, None)
-
-    assert [item.run for item in selected] == [True, True]
-
-
-# --- A.4: root files that are full triggers ---
-
-def test_select_changed_root_lockfile_runs_only_the_triggered_child(case):
-    web_config = case.config(runner_kind="command")
-    api_selection = case.config(runner_kind="command").selection
-    from dataclasses import replace
-    api_config = replace(case.config(runner_kind="command"),
-                         selection=replace(api_selection, full_triggers=("uv.lock",)))
-    children = (
-        monorepo_api.ChildTarget(declaration="api", directory=case.base / "api",
-                             config=api_config),
-        monorepo_api.ChildTarget(declaration="web", directory=case.base / "web",
-                             config=web_config),
-    )
-    init_git_repo(case.base, files={"api/a.py": "1\n", "web/w.js": "1\n", "uv.lock": "v1\n"}, message="base")
-    (case.base / "uv.lock").write_text("v2\n", encoding="utf-8")
-
-    selected = monorepo_api.select_changed_children(
-        case.base, children, None, _covering_heads(case.base))
-
-    assert {item.target.declaration: item.run for item in selected} == {
-        "api": True, "web": False}
-
-
-def test_select_changed_root_manifest_runs_every_child(case):
-    children = tuple(monorepo_api.ChildTarget(
-        declaration=name, directory=case.base / name,
-        config=case.config(runner_kind="command")) for name in ("api", "web"))
-    init_git_repo(case.base, files={"api/a.py": "1\n", ".ptest.toml": "root\n"}, message="base")
-    (case.base / ".ptest.toml").write_text("root-changed\n", encoding="utf-8")
-
-    selected = monorepo_api.select_changed_children(
-        case.base, children, None, _covering_heads(case.base))
-
-    assert [item.run for item in selected] == [True, True]
-
-
-# --- A.2: vitest request shape ---
-
-def test_vitest_child_with_base_uses_vitest_changed_argv(case):
-    child = monorepo_api.ChildTarget(
-        declaration="web", directory=case.base / "web",
-        config=case.config(runner_kind="vitest"))
-
-    request = monorepo_api.child_changed_request(child, base="abc123")
-
-    assert request.mode is C.Mode.SCOPED
-    assert request.argv == ("--changed", "abc123")
-
-
-def test_vitest_child_without_base_falls_back_to_changed_mode(case):
-    child = monorepo_api.ChildTarget(
-        declaration="web", directory=case.base / "web",
-        config=case.config(runner_kind="vitest"))
-
-    request = monorepo_api.child_changed_request(child, base=None)
-
-    assert request.mode is C.Mode.AUTOMATIC
-    assert request.argv == ()
-
-
-def test_command_child_uses_changed_mode_with_base_passthrough(case):
-    child = monorepo_api.ChildTarget(
-        declaration="api", directory=case.base / "api",
-        config=case.config(runner_kind="command"))
-
-    request = monorepo_api.child_changed_request(child, base="abc123")
-
-    assert request.mode is C.Mode.AUTOMATIC
-    assert request.base == "abc123"
-
-
-# --- cli.py monorepo branch twins ---
-
-def test_root_changed_runs_touched_child_and_skips_clean_one(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    (tmp_path / "api" / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    head = git(tmp_path, "rev-parse", "HEAD")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": head, "web": head})
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed",)) == 0
-    assert [call[1].mode for call in calls] == [C.Mode.AUTOMATIC]
-    assert calls[0][0].config_path.parent.name == "api"
-    err = capsys.readouterr().err
-    assert "ptest: web · no changes" in err
-    assert "ptest: total" in err
-
-
-def test_root_changed_clean_tree_skips_baseline_covered_children(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    head = git(tmp_path, "rev-parse", "HEAD")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": head, "web": head})
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed",)) == 0
-    assert calls == []
-    err = capsys.readouterr().err
-    assert "ptest: api · no changes" in err
-    assert "ptest: web · no changes" in err
-    assert "ptest: total" in err
-
-
-def test_root_changed_passes_base_through_to_children(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    base = git(tmp_path, "rev-parse", "HEAD")
-    (tmp_path / "api" / "extra.py").write_text("x = 1\n", encoding="utf-8")
-    git(tmp_path, "add", "-A")
-    git(tmp_path, "commit", "-m", "touch api")
-    monkeypatch.chdir(tmp_path)
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed", "--base", base)) == 0
-    assert len(calls) == 1
-    assert calls[0][1].base == base
-    assert "ptest: web · no changes" in capsys.readouterr().err
-
-
-def test_root_changed_returns_first_failure_after_all_children_finish(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    (tmp_path / "api" / "a.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "web" / "w.js").write_text("y = 1\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    codes = iter((9, 3))
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: _result(next(codes)),
-    )
-
-    assert main(("--changed",)) == 9
-    assert "ptest: total" in capsys.readouterr().err
-
-
-def test_root_changed_vitest_child_gets_changed_argv(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs("vitest"), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    base = git(tmp_path, "rev-parse", "HEAD")
-    (tmp_path / "web" / "src" / "app.test.ts").parent.mkdir(
-        parents=True, exist_ok=True)
-    (tmp_path / "web" / "src" / "app.test.ts").write_text(
-        "test\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed", "--base", base)) == 0
-    assert len(calls) == 1
-    assert calls[0][1].argv == ("--changed", base)
-    assert "ptest: api · no changes" in capsys.readouterr().err
-
-
-def test_root_changed_vitest_child_without_base_runs_full_gate(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs("vitest"), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    (tmp_path / "web" / "src" / "app.test.ts").parent.mkdir(
-        parents=True, exist_ok=True)
-    (tmp_path / "web" / "src" / "app.test.ts").write_text(
-        "test\n", encoding="utf-8")
-    head = git(tmp_path, "rev-parse", "HEAD")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": head, "web": head})
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed",)) == 0
-    assert len(calls) == 1
-    assert calls[0][1].mode is C.Mode.AUTOMATIC
-    assert calls[0][1].argv == ()
-
-
-def test_root_changed_clean_tree_without_baselines_runs_every_child(
-        tmp_path, monkeypatch, capsys, monorepo):
-    monorepo(_child_specs(), parent=tmp_path, name=None)
-    init_git_repo(tmp_path, message="base")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(monorepo_api, "child_baseline_heads",
-                        lambda domain, children: {"api": None, "web": None})
-    calls = []
-    monkeypatch.setattr(
-        "ptest.operations.execute",
-        lambda domain, config, request: calls.append((config, request))
-        or _result(),
-    )
-
-    assert main(("--changed",)) == 0
-    assert [call[0].config_path.parent.name for call in calls] == ["api", "web"]
-    assert "ptest: total" in capsys.readouterr().err

@@ -92,7 +92,7 @@ def test_failing_run_end_line_carries_hint(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("exit", "3"))
 
-    completed = case.invoke(domain, root, timeout=20)
+    completed = case.invoke(domain, root, "--full", timeout=20)
 
     assert completed.code == 3
     lines = _ptest_lines(completed)
@@ -106,7 +106,7 @@ def test_clean_pass_end_line_has_no_hint(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("literal",))
 
-    completed = case.invoke(domain, root, timeout=20)
+    completed = case.invoke(domain, root, "--full", timeout=20)
 
     assert completed.code == 0
     assert all("ptest -v" not in line for line in _ptest_lines(completed))
@@ -169,7 +169,7 @@ def test_queued_run_prints_waiting_line_then_repeats_with_elapsed(case):
     timer = threading.Timer(25.0, release)
     timer.start()
     try:
-        completed = case.invoke(domain, root, timeout=60)
+        completed = case.invoke(domain, root, "--full", timeout=60)
     finally:
         timer.cancel()
         try:
@@ -225,7 +225,7 @@ def test_setup_first_run_prints_start_and_done_lines(case):
     argv = [sys.executable, "command.py", "marker", marker]
     _write_setup_config(root, argv, [marker])
 
-    completed = case.invoke(domain, root, timeout=30)
+    completed = case.invoke(domain, root, "--full", timeout=30)
 
     assert completed.code == 0
     assert (root / marker).is_file()
@@ -243,10 +243,10 @@ def test_setup_current_second_run_prints_no_setup_lines(case):
     marker = "setup-out.txt"
     argv = [sys.executable, "command.py", "marker", marker]
     _write_setup_config(root, argv, [marker])
-    first = case.invoke(domain, root, timeout=30)
+    first = case.invoke(domain, root, "--full", timeout=30)
     assert first.code == 0
 
-    second = case.invoke(domain, root, timeout=30)
+    second = case.invoke(domain, root, "--full", timeout=30)
 
     assert second.code == 0
     assert not [line for line in _ptest_lines(second) if line.startswith("ptest: setup")]
@@ -258,10 +258,10 @@ def test_setup_inputs_changed_prints_changed_reason(case):
     marker = "setup-out.txt"
     argv = [sys.executable, "command.py", "marker", marker]
     _write_setup_config(root, argv, [marker])
-    assert case.invoke(domain, root, timeout=30).code == 0
+    assert case.invoke(domain, root, "--full", timeout=30).code == 0
     (root / "uv.lock").write_text("inputs changed\n", encoding="utf-8")
 
-    completed = case.invoke(domain, root, timeout=30)
+    completed = case.invoke(domain, root, "--full", timeout=30)
 
     assert completed.code == 0
     lines = _ptest_lines(completed)
@@ -314,14 +314,24 @@ def test_tail_verbose_after_scope_stays_runner_data():
     assert parsed.runner_argv == ("-k", "-v")
 
 
-def test_verbose_run_prints_detail_lines(case):
+def test_verbose_run_prints_detail_lines(case, capsys):
+    # The automatic engine's -v lines are pinned in-process: bare `ptest`
+    # now routes through the import graph, so the CLI no longer drives
+    # AUTOMATIC for it (see test_changed_default.py for the new route).
+    from ptest import config as config_api
+    from ptest import operations
+
     domain = case.domain()
     root = _command_project(case, domain, args=("literal",))
+    config = config_api.resolve_config(root).config
+    assert config is not None
 
-    completed = case.invoke(domain, root, "-v", timeout=20)
+    result = operations.execute(
+        domain, config,
+        C.RunRequest(mode=C.Mode.AUTOMATIC, verbose=True))
 
-    assert completed.code == 0
-    lines = _ptest_lines(completed)
+    assert result.exit_code == 0
+    lines = capsys.readouterr().err.splitlines()
     assert any(line.startswith("ptest: -v plan: full · mode automatic") for line in lines), lines
     assert any(line.startswith("ptest: -v admission: requested 1 slot") for line in lines), lines
     assert any(line.startswith("ptest: -v grant: 1 slot after ") for line in lines), lines
@@ -337,7 +347,7 @@ def test_command_runner_never_gets_forwarded_verbose(case):
     launcher = ("/usr/bin/python3", "command.py")
     root = _command_project(case, domain, args=("literal",), launcher=launcher)
 
-    completed = case.invoke(domain, root, "-v", env={"COLUMNS": "200"}, timeout=20)
+    completed = case.invoke(domain, root, "-v", "--full", env={"COLUMNS": "200"}, timeout=20)
 
     assert completed.code == 0
     runner_lines = [line for line in _ptest_lines(completed)
@@ -363,7 +373,7 @@ def test_quiet_suppresses_status_lines_but_keeps_runner_output(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("literal",))
 
-    completed = case.invoke(domain, root, "-q", timeout=20)
+    completed = case.invoke(domain, root, "-q", "--full", timeout=20)
 
     assert completed.code == 0
     assert json.loads(completed.stdout) == []
@@ -374,7 +384,7 @@ def test_quiet_combined_with_verbose_forwards_but_stays_quiet(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("literal",))
 
-    completed = case.invoke(domain, root, "-v", "-q", timeout=20)
+    completed = case.invoke(domain, root, "-v", "-q", "--full", timeout=20)
 
     assert completed.code == 0
     assert _ptest_lines(completed) == []
@@ -388,11 +398,14 @@ def test_quiet_refusal_still_prints_with_hint(case):
         + 'test_roots = ["tests"]\n',
         encoding="utf-8")
 
-    completed = case.invoke(domain, root, "-q", timeout=20)
+    completed = case.invoke(domain, root, "-q", "--full", timeout=20)
 
     assert completed.code == 2
     err = completed.stderr.decode("utf-8", "replace")
-    assert "unsupported-capability" in err
+    # A full gate reaches bridge validation (bare `ptest` plans this
+    # fixture to full first: selection is off with no [selection] table),
+    # so the refusal names the bridge, not the old automatic capability.
+    assert "native-config-invalid" in err
     assert "run with ptest -v for scheduling and setup details" in err
     assert [line for line in err.splitlines() if line.startswith("ptest: -v")] == []
 
@@ -595,7 +608,7 @@ def test_result_json_mode_leaves_stdout_to_the_runner(case):
     domain = case.domain()
     root = _command_project(case, domain, args=("literal",))
 
-    completed = case.invoke(domain, root, "--result-json", "mine.json", timeout=20)
+    completed = case.invoke(domain, root, "--full", "--result-json", "mine.json", timeout=20)
 
     assert completed.code == 0
     assert completed.stdout == b"[]\n"
@@ -622,7 +635,7 @@ def test_hostile_project_name_is_escaped(case):
         'lifecycle = "cooperative-process-group"\n',
         encoding="utf-8")
 
-    completed = case.invoke(domain, root, timeout=20)
+    completed = case.invoke(domain, root, "--full", timeout=20)
 
     assert completed.code == 0
     raw = completed.stderr.decode("utf-8", "replace")
@@ -636,7 +649,7 @@ def test_setup_failure_prints_failed_line_with_exit(case):
     argv = [sys.executable, "command.py", "exit", "3"]
     _write_setup_config(root, argv, ["never-created.txt"])
 
-    completed = case.invoke(domain, root, timeout=30)
+    completed = case.invoke(domain, root, "--full", timeout=30)
 
     assert completed.code != 0
     lines = _ptest_lines(completed)
@@ -680,7 +693,7 @@ def test_queue_timeout_refusal_keeps_code_message_and_hint_once(case):
     root = _command_project(case, domain, args=("literal",))
     release = _hold_slot(domain, root)
     try:
-        completed = case.invoke(domain, root, "--queue-timeout", "3", timeout=30)
+        completed = case.invoke(domain, root, "--full", "--queue-timeout", "3", timeout=30)
     finally:
         try:
             release()

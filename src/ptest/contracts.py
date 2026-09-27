@@ -1114,6 +1114,8 @@ class RunRequest:
     setup_only: bool = False
     timeout_s: float | None = None
     again: bool = False
+    changed_note: str | None = None
+    next_hint: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _check_enum("request.mode", self.mode, Mode))
@@ -1143,6 +1145,10 @@ class RunRequest:
             object.__setattr__(self, "timeout_s", _check_float(
                 "request.timeout_s", self.timeout_s, lo=1, hi=MAX_COMPOUND_TIMEOUT_S))
         object.__setattr__(self, "again", _check_bool("request.again", self.again))
+        if self.changed_note is not None:
+            _check_str("request.changed_note", self.changed_note)
+        object.__setattr__(self, "next_hint",
+                           _check_bool("request.next_hint", self.next_hint))
 
 
 @dataclass(frozen=True, kw_only=True)
