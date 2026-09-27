@@ -201,6 +201,18 @@ def test_no_tests_cannot_contain_an_input_contract(case, excluded):
     assert plan.reasons[0].code == "policy-invalid"
 
 
+def test_bare_dot_test_root_names_the_checkout_root(case):
+    """A vitest child with ``test_roots = ["."]`` is valid policy: the bare
+    dot is the checkout root itself, never an escape. Longer dotted
+    segments stay invalid."""
+    from ptest.selection import _invalid_policy
+
+    policy = C.SelectionPolicy(enabled=False, closed_inputs=False)
+    assert _invalid_policy(policy, (".",)) is False
+    assert _invalid_policy(policy, ("./x",)) is True
+    assert _invalid_policy(policy, ("..",)) is True
+
+
 @pytest.mark.parametrize("pattern,path", [("*", "src/x.py"), ("src/?ore", "src/core"), ("src/[c]ore", "src/core")])
 def test_no_tests_metacharacters_are_literal_prefixes(case, pattern, path):
     from ptest.selection import choose_plan
