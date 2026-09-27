@@ -1572,3 +1572,55 @@ def test_real_scoped_maxfail_stop_after_failure_stays_failure(case):
     assert data["exit_origin"] == "runner"
     assert not (root / "b.marker").exists()
     _released(domain)
+
+
+def test_real_scoped_cov_run_ignores_project_fail_under(case):
+    """A partial --cov run never reaches the whole-suite fail-under gate."""
+    domain = case.domain()
+    root = _project(case, domain, launcher=_coverage_launcher(),
+                    args=("--cov=project_module", "--cov-report=term"))
+    (root / "project_module.py").write_text(
+        "VALUE = 7\n"
+        "def used():\n    return VALUE\n"
+        "def unused_a():\n    return 1\n"
+        "def unused_b():\n    return 2\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from project_module import used\n"
+        "def test_used():\n    assert used() == 7\n")
+    (root / "pyproject.toml").write_text(
+        "[tool.coverage.report]\nfail_under = 85\n")
+    support.init_git_repo(root)
+    result = case.invoke(domain, root, "--", "tests/test_native.py",
+                         timeout=_CHILD_TIMEOUT_S)
+    assert result.code == 0, result.stderr.decode()
+    data = _data(result)
+    assert data["status"] == "passed"
+    assert data["runner_exit_code"] == 0
+    _released(domain)
+
+
+def test_real_full_cov_run_keeps_project_fail_under(case):
+    """The full gate still enforces the project's own fail-under."""
+    domain = case.domain()
+    root = _project(case, domain, launcher=_coverage_launcher(),
+                    args=("--cov=project_module", "--cov-report=term"))
+    (root / "project_module.py").write_text(
+        "VALUE = 7\n"
+        "def used():\n    return VALUE\n"
+        "def unused_a():\n    return 1\n"
+        "def unused_b():\n    return 2\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from project_module import used\n"
+        "def test_used():\n    assert used() == 7\n")
+    (root / "pyproject.toml").write_text(
+        "[tool.coverage.report]\nfail_under = 85\n")
+    support.init_git_repo(root)
+    completed = case.invoke(domain, root, "--full", timeout=_CHILD_TIMEOUT_S)
+    assert completed.code == 1, completed.stderr.decode()
+    data = _data(completed)
+    # Enforcement, not vocabulary: the gate fired (native exit 1) and the
+    # run did not pass. Advanced full runs report a gate-fired outcome
+    # with tests passing as incomplete per _outcome's precedence rule.
+    assert data["runner_exit_code"] == 1
+    assert data["status"] != "passed"
+    _released(domain)

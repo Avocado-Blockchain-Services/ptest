@@ -153,6 +153,19 @@ def test_explain_selection_disabled_names_config():
     ) == "selection is off in .ptest.toml (ptest doctor --fix)"
 
 
+def test_explain_selection_on_but_not_closed_names_config():
+    assert progress.explain_changed_full_reason(
+        _reason("selection-not-closed", "selection is not explicitly closed"),
+        config_name=".ptest.toml",
+    ) == "selection is on but not closed in .ptest.toml — run ptest doctor --fix"
+
+
+def test_explain_selection_off_default_config_name():
+    assert progress.explain_changed_full_reason(
+        _reason("selection-disabled", "selection is not enabled"),
+    ) == "selection is off in the config (ptest doctor --fix)"
+
+
 def test_explain_full_trigger_names_file():
     assert progress.explain_changed_full_reason(
         _reason("policy-changed", "full-trigger input changed"),

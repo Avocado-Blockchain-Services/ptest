@@ -17,6 +17,7 @@ between planning and writing.
 """
 from __future__ import annotations
 
+import ast
 import difflib
 import errno
 import json
@@ -38,10 +39,25 @@ _CONFIG_LIMIT = 256 * 1024
 _CONFIG_NAME = ".ptest.toml"
 
 #: Files probed (in order) for the selection ``full_triggers`` draft.
+#: Every ``conftest.py`` under the child and the test helper modules found
+#: by the static import scan join these; the bare ``conftest.py`` entry is
+#: covered by that walk.
 _TRIGGER_CANDIDATES = (
-    "uv.lock", "conftest.py", "pyproject.toml", "pytest.ini", "tox.ini",
-    "setup.cfg", ".ptest.toml",
+    "uv.lock", "poetry.lock", "Pipfile.lock", "pyproject.toml", "pytest.ini",
+    "tox.ini", "setup.cfg", ".ptest.toml",
 )
+
+#: Bounds for the static import scan behind the ``[selection]`` draft. The
+#: scan parses project code but never executes it.
+_IMPORT_SCAN_MAX_FILES = 8192
+_IMPORT_SCAN_MAX_DIRS = 16384
+_IMPORT_SCAN_MAX_BYTES = 256 * 1024
+
+#: Directories the import scan never descends into.
+_IMPORT_SCAN_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".venv", "venv", "__pycache__", "node_modules", ".tox",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache",
+})
 
 _SELECTION_DRAFT_NOTE = (
     "# DRAFT: the [selection] proposal below is a starting point. "
@@ -60,9 +76,14 @@ def _cfg(declaration: str) -> str:
 def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        inner = ", ".join(
+            f"{key} = {_toml_value(item)}" for key, item in value.items())
+        return "{ " + inner + " }" if inner else "{}"
     if isinstance(value, (tuple, list)):
-        return "[" + ", ".join(json.dumps(str(item), ensure_ascii=False)
-                               for item in value) + "]"
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     raise TypeError("unsupported fix value")
 
 
@@ -384,18 +405,496 @@ def _is_real_file(project_dir: Path, name: str) -> bool:
     return stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode)
 
 
-def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict]:
-    """Draft ``[selection]`` values from the source layout."""
-    roots = set(test_roots)
+def _src_package_entries(project_dir: Path) -> tuple:
+    """Top-level ``src/`` ``(name, rel)`` entries from the real layout.
+
+    Skips generated trees (``*.egg-info``), hidden entries, symlinks,
+    and names that could never validate as policy paths, so the draft
+    can never contradict a hand-tuned exclusion beneath ``src/``.
+    """
+    src = project_dir / "src"
     try:
-        if (project_dir / "src").is_dir() and not os.path.islink(
-                project_dir / "src"):
-            roots.add("src")
+        if os.path.islink(src) or not src.is_dir():
+            return ()
     except OSError:
-        pass
+        return ()
+    try:
+        entries = sorted(src.iterdir())
+    except OSError:
+        return ()
+    found: list[tuple] = []
+    for entry in entries:
+        name = entry.name
+        if (not name or name.startswith(".") or name.endswith(".egg-info")
+                or "\\" in name or len(name) > 64):
+            continue
+        try:
+            stamp = os.lstat(entry)
+        except OSError:
+            continue
+        if stat.S_ISLNK(stamp.st_mode):
+            continue
+        if stat.S_ISDIR(stamp.st_mode):
+            found.append((name, f"src/{name}"))
+        elif (stat.S_ISREG(stamp.st_mode) and name.endswith(".py")
+                and name[:-3].replace("_", "").isalnum()):
+            found.append((name[:-3], f"src/{name}"))
+    return tuple(found)
+
+
+def _is_test_file_name(name: str) -> bool:
+    """True for pytest's default collection basenames (never conftest)."""
+    return name.endswith(".py") and (
+        name.startswith("test_") or name[:-3].endswith("_test"))
+
+
+def _is_under(path: str, directory: str) -> bool:
+    return path != directory and path.startswith(directory + "/")
+
+
+def _parent_chain(path: str) -> list[str]:
+    parents: list[str] = []
+    parent = path.rpartition("/")[0]
+    while parent:
+        parents.append(parent)
+        parent = parent.rpartition("/")[0]
+    return parents
+
+
+def _under_any(rel: str, roots: tuple) -> bool:
+    return any(rel == root or _is_under(rel, root) for root in roots)
+
+
+def _real_py(path: Path) -> bool:
+    try:
+        stamp = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode) and not stat.S_ISLNK(stamp.st_mode)
+
+
+def _walk_py_files(base: Path) -> tuple[tuple[str, ...], bool]:
+    """Bounded walk of real ``.py`` files below ``base``.
+
+    Returns ``(relpaths, complete)``: ``complete`` is False when a bound
+    or an unreadable entry cut the walk short. Symlinks, hidden entries,
+    and generated/dependency trees are skipped.
+    """
+    found: list[str] = []
+    skipped = False
+    dirs_seen = 0
+    stack = [base]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            skipped = True
+            continue
+        for entry in entries:
+            name = entry.name
+            if not name or name.startswith("."):
+                continue
+            try:
+                stamp = os.lstat(entry)
+            except OSError:
+                skipped = True
+                continue
+            if stat.S_ISLNK(stamp.st_mode):
+                continue
+            if stat.S_ISDIR(stamp.st_mode):
+                if (name in _IMPORT_SCAN_SKIP_DIRS
+                        or name.endswith(".egg-info")):
+                    continue
+                dirs_seen += 1
+                if dirs_seen > _IMPORT_SCAN_MAX_DIRS:
+                    skipped = True
+                else:
+                    stack.append(entry)
+            elif stat.S_ISREG(stamp.st_mode) and name.endswith(".py"):
+                if len(found) >= _IMPORT_SCAN_MAX_FILES:
+                    skipped = True
+                else:
+                    found.append(entry.relative_to(base).as_posix())
+    return tuple(sorted(found)), not skipped
+
+
+def _read_scan_text(path: Path) -> str | None:
+    """Read one scan file, or None when it is missing, big, or undecodable."""
+    try:
+        stamp = os.lstat(path)
+    except OSError:
+        return None
+    if (stat.S_ISLNK(stamp.st_mode) or not stat.S_ISREG(stamp.st_mode)
+            or stamp.st_size > _IMPORT_SCAN_MAX_BYTES):
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _parse_imports(source: str) -> tuple[set[str], list, bool]:
+    """Split imports into absolute top-level names plus from/import records.
+
+    Each record is ``(module_parts_or_None, level, names)``. Returns
+    ``ok=False`` when the source does not parse; callers treat such files
+    as importing everything (fail safe, never silently skipped).
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set(), [], False
+    tops: set[str] = set()
+    records: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = tuple(alias.name.split("."))
+                if parts and parts[0]:
+                    tops.add(parts[0])
+                    records.append((parts, 0, ()))
+        elif isinstance(node, ast.ImportFrom):
+            module = tuple(node.module.split(".")) if node.module else None
+            names = tuple(alias.name for alias in node.names if alias.name)
+            if node.level == 0 and module and module[0]:
+                tops.add(module[0])
+            records.append((module, node.level, names))
+    return tops, records, True
+
+
+def _existing_module_files(base: Path, parts: tuple) -> list[Path]:
+    """Existing module file, package init, and parent inits for ``parts``."""
+    found: list[Path] = []
+    if (not parts or len(parts) > 32
+            or any(not part or part in (".", "..") or "/" in part
+                   or "\\" in part for part in parts)):
+        return found
+    rel = Path(*parts)
+    candidate = base / rel.parent / (rel.name + ".py")
+    if _real_py(candidate):
+        found.append(candidate)
+    package_init = base / rel / "__init__.py"
+    if _real_py(package_init):
+        found.append(package_init)
+    for depth in range(1, len(parts)):
+        init = base / Path(*parts[:depth]) / "__init__.py"
+        if _real_py(init):
+            found.append(init)
+    return found
+
+
+def _resolve_helper(project_dir: Path, test_roots: tuple, importer_rel: str,
+                    record: tuple) -> list[str]:
+    """Test-root helper files one import record pulls in, as rel paths."""
+    module, level, names = record
+    anchor: tuple = ()
+    if level and level > 0:
+        try:
+            importer_parts = tuple(Path(importer_rel).parent.parts)
+        except (ValueError, OSError):
+            return []
+        if level - 1 > len(importer_parts):
+            return []
+        anchor = importer_parts[:len(importer_parts) - (level - 1)]
+        bases = [project_dir]
+    else:
+        bases = [project_dir] + [project_dir / root for root in test_roots
+                                 if root != "."]
+    module_parts = tuple(module) if module else ()
+    if level and level > 0 and module_parts:
+        full = anchor + module_parts
+    elif level and level > 0:
+        full = anchor
+    else:
+        full = module_parts
+    probed = [full] if full else []
+    for name in names:
+        if name in ("*", ""):
+            continue
+        probed.append(full + (name,))
+    found: list[str] = []
+    for parts in probed:
+        for base in bases:
+            for path in _existing_module_files(base, parts):
+                try:
+                    rel = path.relative_to(project_dir).as_posix()
+                except ValueError:
+                    continue
+                name = path.name
+                if (name == "conftest.py" or _is_test_file_name(name)
+                        or not _under_any(rel, test_roots)):
+                    continue
+                found.append(rel)
+    return found
+
+
+def _src_dependency_graph(project_dir: Path,
+                          packages: tuple) -> tuple[dict, bool]:
+    """Map each src package to the sibling src packages it imports.
+
+    Static AST scan, bounded, never executed. A file the scan cannot read
+    counts as importing every sibling (fail safe). ``complete`` is False
+    when a walk bound cut the scan short.
+    """
+    names = {name for name, _ in packages}
+    graph: dict[str, set] = {}
+    complete = True
+    for name, rel in packages:
+        imported: set[str] = set()
+        base = project_dir / rel
+        if _real_py(base):
+            rels = (base.relative_to(project_dir).as_posix(),)
+            walk_ok = True
+        else:
+            try:
+                if os.path.islink(base) or not base.is_dir():
+                    graph[name] = set()
+                    continue
+            except OSError:
+                graph[name] = set()
+                continue
+            sub, walk_ok = _walk_py_files(base)
+            rels = tuple(f"{rel}/{item}" for item in sub)
+            complete = complete and walk_ok
+        for item in rels:
+            source = _read_scan_text(project_dir / item)
+            if source is None:
+                imported.update(names - {name})
+                continue
+            tops, _, ok = _parse_imports(source)
+            if not ok:
+                imported.update(names - {name})
+                continue
+            imported.update(tops & names - {name})
+        graph[name] = imported
+    return graph, complete
+
+
+def _transitive_dependents(graph: dict) -> dict:
+    """Map each package to itself plus every package importing it transitively."""
+    dependents: dict[str, set] = {}
+    for target in graph:
+        found = {target}
+        for candidate in graph:
+            if candidate == target:
+                continue
+            seen: set[str] = set()
+            stack = [candidate]
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                edges = graph.get(current, set())
+                if target in edges:
+                    found.add(candidate)
+                    break
+                stack.extend(edges - seen)
+        dependents[target] = found
+    return dependents
+
+
+def _scan_test_roots(project_dir: Path, test_roots: tuple,
+                     package_names: tuple) -> tuple:
+    """Scan test roots: ``(hits, helpers, tests, helper_files, complete)``.
+
+    ``hits`` maps each test file (any depth under the test roots) to the
+    src packages it imports; unreadable files map to every package (fail
+    safe). ``helpers`` holds non-test, non-conftest modules under the test
+    roots that test or conftest files import. ``tests`` and
+    ``helper_files`` are the full universes behind directory compression.
+    """
+    wanted = set(package_names)
+    hits: dict[str, set] = {}
+    helpers: set[str] = set()
+    universe_tests: set[str] = set()
+    universe_helpers: set[str] = set()
+    complete = True
+    for root in test_roots:
+        base = project_dir if root == "." else project_dir / root
+        try:
+            if os.path.islink(base) or not base.is_dir():
+                continue
+        except OSError:
+            complete = False
+            continue
+        rels, walk_ok = _walk_py_files(base)
+        complete = complete and walk_ok
+        for item in rels:
+            rel = item if root == "." else f"{root}/{item}"
+            name = item.rsplit("/", 1)[-1]
+            if name == "conftest.py":
+                source = _read_scan_text(base / item)
+                if source is not None:
+                    _, records, ok = _parse_imports(source)
+                    if ok:
+                        for record in records:
+                            helpers.update(_resolve_helper(
+                                project_dir, test_roots, rel, record))
+                continue
+            if _is_test_file_name(name):
+                universe_tests.add(rel)
+                source = _read_scan_text(base / item)
+                if source is None:
+                    hits[rel] = set(wanted)
+                    continue
+                tops, records, ok = _parse_imports(source)
+                hits[rel] = set(wanted) if not ok else set(tops & wanted)
+                if ok:
+                    for record in records:
+                        helpers.update(_resolve_helper(
+                            project_dir, test_roots, rel, record))
+            else:
+                universe_helpers.add(rel)
+    return hits, helpers, universe_tests, universe_helpers, complete
+
+
+def _compress_to_dirs(files: list, universe: set,
+                       blocked: set = frozenset()) -> list:
+    """Replace fully-covered directory contents with the directory itself.
+
+    A directory compresses only when every universe file beneath it is in
+    ``files``; correctness over brevity, so partial coverage stays listed.
+    Directories holding a ``blocked`` path never compress: a trigger
+    directory covering a test file would shadow that file's group and
+    force full on its change.
+    """
+    original = set(files)
+    if not original:
+        return []
+    members: dict[str, set] = {}
+    for path in universe:
+        parent = path.rpartition("/")[0]
+        while parent:
+            members.setdefault(parent, set()).add(path)
+            parent = parent.rpartition("/")[0]
+    tainted = {parent for path in blocked
+               for parent in _parent_chain(path)}
+    chosen = [directory for directory, paths in members.items()
+              if paths and paths <= original and directory not in tainted]
+    # A chosen dir nested under another chosen dir is subsumed by it.
+    final = [directory for directory in chosen
+             if not any(other != directory and _is_under(directory, other)
+                        for other in chosen)]
+    covered = {path for directory in final for path in members[directory]}
+    return sorted((original - covered) | set(final))
+
+
+def _selection_group_draft(project_dir: Path, test_roots: tuple,
+                           test_scan: tuple | None = None) -> tuple:
+    """Draft ``groups`` mapping src packages to their importing test files.
+
+    For each src package P the group tests are every test file (any depth
+    under the test roots) importing P or any package that transitively
+    imports P, as file paths compressed to fully-covered directories. A
+    package no test file imports falls back to the declared test roots;
+    an incomplete scan falls every group back to the roots (fail safe).
+    Without any ``src/`` layout each test root maps to itself.
+    """
+    groups: list[dict] = []
+    packages = _src_package_entries(project_dir)
+    if not packages:
+        for root in test_roots:
+            name = root if root != "." else "root"
+            groups.append({"name": name, "sources": [root],
+                           "tests": [root]})
+        return tuple(groups[:256])
+    fallback = tuple(test_roots) or ("tests",)
+    names = tuple(name for name, _ in packages)
+    graph, src_complete = _src_dependency_graph(project_dir, packages)
+    dependents = _transitive_dependents(graph)
+    if test_scan is None:
+        test_scan = _scan_test_roots(project_dir, tuple(test_roots), names)
+    hits, _, universe_tests, _, scan_complete = test_scan
+    complete = src_complete and scan_complete
+    for package, rel in packages:
+        if not complete:
+            tests = list(fallback)
+        else:
+            want = dependents[package]
+            files = sorted(path for path, imported in hits.items()
+                           if imported & want)
+            tests = _compress_to_dirs(files, universe_tests) or list(fallback)
+        groups.append({"name": package, "sources": [rel],
+                       "tests": tests})
+    return tuple(groups[:256])
+
+
+def _selection_key_is_default(have: dict, key: str) -> bool:
+    """True when a draftable selection key is absent or still at default.
+
+    ``closed_inputs`` defaults to false and the list keys default to
+    empty; only non-default values count as hand-tuned and are kept.
+    """
+    if key == "closed_inputs":
+        return have.get("closed_inputs") is not True
+    value = have.get(key)
+    return not isinstance(value, list) or len(value) == 0
+
+
+def _selection_needs_close(selection: object) -> bool:
+    """True when enablement or any draftable key still needs its draft."""
+    if not isinstance(selection, dict):
+        return True
+    if selection.get("enabled") is not True:
+        return True
+    return any(_selection_key_is_default(selection, key)
+               for key in ("closed_inputs", "input_roots",
+                           "full_triggers", "groups"))
+
+
+def _selection_conftest_draft(project_dir: Path) -> list[str]:
+    """Every ``conftest.py`` under the child, at any depth, as rel paths."""
+    try:
+        if os.path.islink(project_dir) or not project_dir.is_dir():
+            return []
+    except OSError:
+        return []
+    rels, _ = _walk_py_files(project_dir)
+    return sorted(item for item in rels if item.rsplit("/", 1)[-1] == "conftest.py")
+
+
+def _selection_draft(project_dir: Path, test_roots: tuple) -> tuple[dict, dict, dict]:
+    """Draft ``[selection]`` values from the source layout.
+
+    Source roots are the real top-level ``src/`` packages, never the
+    bare ``src/`` itself: generated trees beneath it (for example a
+    hand-tuned ``*.egg-info`` exclusion) must not overlap the drafted
+    inputs, or the policy would fail ptest's own validation. Groups come
+    from the static import scan; full triggers add every ``conftest.py``
+    and the test helper modules to the lockfile and pytest config files.
+    """
+    packages = _src_package_entries(project_dir)
+    roots = set(test_roots) | {rel for _, rel in packages}
+    if not packages:
+        try:
+            if (project_dir / "src").is_dir() and not os.path.islink(
+                    project_dir / "src"):
+                roots.add("src")
+        except OSError:
+            pass
+    names = tuple(name for name, _ in packages)
+    test_scan = _scan_test_roots(project_dir, tuple(test_roots), names)
+    _, helpers, universe_tests, helper_universe, _ = test_scan
     triggers = [name for name in _TRIGGER_CANDIDATES
                 if _is_real_file(project_dir, name)]
-    return {"input_roots": sorted(roots)}, {"full_triggers": triggers}
+    triggers.extend(_selection_conftest_draft(project_dir))
+    triggers.extend(_compress_to_dirs(sorted(helpers), helper_universe,
+                                      blocked=universe_tests))
+    seen = set(triggers)
+    triggers = sorted(seen)
+    triggers = [entry for entry in triggers
+                if not any(other != entry and _is_under(entry, other)
+                           for other in seen)]
+    groups = _selection_group_draft(project_dir, tuple(test_roots),
+                                    test_scan=test_scan)
+    return ({"input_roots": sorted(roots)}, {"full_triggers": triggers},
+            {"groups": groups})
 
 
 def plan_project(root: Path, declaration: str,
@@ -455,25 +954,27 @@ def plan_project(root: Path, declaration: str,
                 "selection", "non_input_outputs",
                 have_outputs + ("node_modules",)))
     if (kind is C.RunnerKind.PYTEST
+            and _has_cov(current_args)
             and (not isinstance(selection, dict)
-                 or selection.get("enabled") is not True)
-            and _has_cov(current_args)):
+                 or _selection_needs_close(selection))):
         # The enablement itself flips false (or missing) to true; every
-        # other key is only filled when absent, so hand-tuned values stay
-        # untouched and appear as kept context in the diff.
-        if not isinstance(selection, dict) or "enabled" not in selection:
+        # other key is drafted when absent OR still at its default, so
+        # init-fresh defaults (false/empty) are completed while hand-tuned
+        # non-default values stay untouched and appear as kept context.
+        have = selection if isinstance(selection, dict) else {}
+        if "enabled" not in have:
             changes.append(FieldChange(
                 "selection", "enabled", True, draft=True))
-        elif selection.get("enabled") is not True:
+        elif have.get("enabled") is not True:
             changes.append(FieldChange("selection", "enabled", True))
-        roots, triggers = _selection_draft(
+        roots, triggers, groups = _selection_draft(
             project_dir, tuple(config.runner.test_roots))
         draft = (("closed_inputs", True),
                  ("input_roots", tuple(roots["input_roots"])),
-                 ("full_triggers", tuple(triggers["full_triggers"])))
-        have = selection if isinstance(selection, dict) else {}
+                 ("full_triggers", tuple(triggers["full_triggers"])),
+                 ("groups", tuple(groups["groups"])))
         for key, value in draft:
-            if key not in have:
+            if _selection_key_is_default(have, key):
                 changes.append(FieldChange(
                     "selection", key, value, draft=True))
 

@@ -160,7 +160,7 @@ REASON_CODES = frozenset({
     "unknown-input", "policy-invalid", "policy-changed", "prior-failure",
     "full-gate-obligation", "project-filtered", "changed-during-run", "incomplete-inventory",
     "report-invalid", "state-unavailable", "no-tests-needed",
-    "selection-disabled", "scan-limit", "static-evidence-insufficient",
+    "selection-disabled", "selection-not-closed", "scan-limit", "static-evidence-insufficient",
     "probe-isolation-required", "unredacted-command-disclosure",
     "already-exists", "invalid-bound", "execution-timeout",
     "attempt-decision-timeout", "selection-shadow-quarantine",

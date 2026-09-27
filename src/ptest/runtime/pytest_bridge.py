@@ -2361,10 +2361,16 @@ class AdvancedPlugin(OwnedPlugin):
                                   str(getattr(implementation.function, "__name__", ""))))
         self._hook_facts = tuple(sorted(set(hooks)))
         dynamic = {"args", "file_or_dir", "rootdir", "inipath", "inifilename"}
+        # The coverage fail-under threshold changes only the exit gate, never
+        # which tests run or how they are observed; partial runs neutralise
+        # it (--cov-fail-under=0) while full runs keep the project gate, so
+        # it must not participate in the runtime identity. Narrowly only
+        # this option: every other effective option still identifies.
+        identity_exempt = {"cov_fail_under"}
         option = getattr(config, "option", None)
         self._effective_options = {
             str(key): repr(value) for key, value in vars(option).items()
-            if key not in dynamic
+            if key not in dynamic and key not in identity_exempt
         } if option is not None else {}
 
     def finalize_evidence(self) -> None:

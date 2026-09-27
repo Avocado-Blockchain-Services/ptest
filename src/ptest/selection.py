@@ -69,8 +69,10 @@ def choose_plan(config: C.Config, snapshot: C.InputSnapshot,
         return C.Plan(mode=request.mode, execution="scoped",
                       input_digest=snapshot.digest, compatibility=snapshot.compatibility, static_preview=True)
     policy = config.selection
-    if not policy.enabled or not policy.closed_inputs:
-        return _full(request, snapshot, "selection-disabled", "selection is not explicitly closed")
+    if not policy.enabled:
+        return _full(request, snapshot, "selection-disabled", "selection is not enabled")
+    if not policy.closed_inputs:
+        return _full(request, snapshot, "selection-not-closed", "selection is not explicitly closed")
     if _invalid_policy(policy, config.runner.test_roots):
         return _full(request, snapshot, "policy-invalid", "exclusion overlaps an input contract or contains an unsafe prefix")
     if history.selection_quarantine is not None:

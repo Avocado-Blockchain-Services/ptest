@@ -79,6 +79,11 @@ def test_changed_setup_later_writes_cov_and_selection_draft(tmp_path, monkeypatc
     assert "--cov-report" in args
     selection = _selection(tmp_path)
     assert selection is not None and selection.get("enabled") is True
+    # The draft is a complete, closed policy, not just flipped enablement.
+    assert selection.get("closed_inputs") is True
+    assert selection.get("input_roots")
+    assert selection.get("full_triggers")
+    assert selection.get("groups")
     assert calls == []
     out = capsys.readouterr().out
     assert "baseline" in out

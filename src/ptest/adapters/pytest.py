@@ -212,6 +212,25 @@ def _parallel_suffix(config: C.Config, slots: int) -> tuple[str, ...]:
     return ("-n", str(slots))
 
 
+def _coverage_gate_suffix(args: tuple[str, ...]) -> tuple[str, ...]:
+    """``("--cov-fail-under=0",)`` for a partial coverage run, else empty.
+
+    A scoped/selected subset can never reach the project's whole-suite
+    fail-under gate, so without this every partial ``--cov`` run exits 1
+    even when its tests pass. Full runs keep the project's own gate, and
+    an explicitly configured ``--cov-fail-under`` is never overridden.
+    """
+    if not any(token == "--cov" or token.startswith("--cov=")
+               for token in args):
+        return ()
+    for index, token in enumerate(args):
+        if token.startswith("--cov-fail-under="):
+            return ()
+        if token == "--cov-fail-under" and index + 1 < len(args):
+            return ()
+    return ("--cov-fail-under=0",)
+
+
 def _bridge_path() -> Path:
     """The guard executes this trusted file with the project interpreter."""
     return Path(__file__).parents[1] / "runtime" / "pytest_bridge.py"
@@ -330,6 +349,9 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
 
     require_python_launcher(config.runner.launcher)
     native = tuple(config.runner.args)
+    coverage_gate = (_coverage_gate_suffix(native)
+                     if plan.execution == "scoped" else ())
+    native += coverage_gate
     literal_controls = native + config.runner.full_args + plan.files
     if plan.execution == "full":
         literal_controls += config.runner.test_roots
@@ -348,6 +370,8 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
         generated = ()
     else:
         raise _problem("admission-invalid", "pytest admission grant carries no worker slot")
+    if coverage_gate:
+        generated += ("coverage.fail-under=0",)
     if plan.execution == "full":
         native += config.runner.test_roots
     native += suffix
@@ -413,11 +437,16 @@ def prepare_advanced(config: C.Config, plan: C.Plan, grant: C.Grant,
     if plan.execution == "full":
         _validate_full_roots(config.runner.test_roots)
     require_python_launcher(config.runner.launcher)
-    controls = tuple(config.runner.args) + tuple(config.runner.full_args)
+    coverage_gate = (_coverage_gate_suffix(tuple(config.runner.args))
+                     if plan.execution in {"scoped", "selected"} else ())
+    controls = (tuple(config.runner.args) + coverage_gate
+                + tuple(config.runner.full_args))
     controls += tuple(config.runner.test_roots if plan.execution == "full" else plan.files)
     reject_unowned_controls(controls, full=plan.execution == "full")
-    native = tuple(config.runner.args)
+    native = tuple(config.runner.args) + coverage_gate
     generated = ("pytest-xdist.workers=%d" % grant.slots,) if grant.slots > 1 else ()
+    if coverage_gate:
+        generated += ("coverage.fail-under=0",)
     if plan.execution == "selected":
         # The bridge binds selected files to the argv tail, so owned
         # worker controls (parallel "-n N" or the serial suffix) lead the

@@ -346,6 +346,8 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
         "enabled = false",
         'input_roots = ["tests", "libs/mylib"]',
         "closed_inputs = false",
+        'groups = [{name = "core", sources = ["src/core"], '
+        'tests = ["tests/test_core.py"]}]',
     ))
     monkeypatch.chdir(root)
     _no_review(monkeypatch)
@@ -353,17 +355,276 @@ def test_fix_keeps_hand_tuned_selection_values_and_enables_only(
     assert main(("doctor", "--fix", "--dry-run")) == 0
     out = capsys.readouterr().out
     assert "enabled = true" in out
-    assert "closed_inputs = true" not in out
+    # Default-valued keys count as unset: the draft closes and fills them.
+    assert "closed_inputs = true" in out
+    assert "full_triggers" in out
+    # Non-default hand-tuned values stay untouched (visible as context).
     assert '"libs/mylib"' in out
+    assert '"src/core"' in out
 
     assert main(("doctor", "--fix")) == 0
     capsys.readouterr()
     raw = (root / ".ptest.toml").read_text(encoding="utf-8")
-    assert "enabled = true" in raw
-    assert 'input_roots = ["tests", "libs/mylib"]' in raw
-    assert "closed_inputs = false" in raw
+    parsed = tomllib.loads(raw)
+    assert parsed["selection"]["enabled"] is True
+    assert parsed["selection"]["closed_inputs"] is True
+    assert parsed["selection"]["input_roots"] == ["tests", "libs/mylib"]
+    assert parsed["selection"]["groups"] == [
+        {"name": "core", "sources": ["src/core"],
+         "tests": ["tests/test_core.py"]}]
     # Absent keys are still filled from the draft.
-    assert "full_triggers" in raw
+    assert parsed["selection"]["full_triggers"]
+
+
+def test_fix_drafts_default_valued_selection_keys(tmp_path, monkeypatch, capsys):
+    """Init-fresh defaults (false/empty lists) count as unset: drafted."""
+    root = _write_pytest_project(tmp_path / "defaults", addopts="")
+    _write_config(root, args=("--cov",), extra_lines=(
+        "",
+        "[selection]",
+        "enabled = false",
+        "closed_inputs = false",
+        "input_roots = []",
+        "full_triggers = []",
+        "groups = []",
+    ))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "enabled = true" in out
+    assert "closed_inputs = true" in out
+    assert "input_roots" in out
+    assert "full_triggers" in out
+    assert "groups" in out
+    # Dry run writes nothing.
+    assert "closed_inputs = false" in (
+        root / ".ptest.toml").read_text(encoding="utf-8")
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    parsed = tomllib.loads((root / ".ptest.toml").read_text(encoding="utf-8"))
+    assert parsed["selection"]["enabled"] is True
+    assert parsed["selection"]["closed_inputs"] is True
+    assert parsed["selection"]["input_roots"]
+    assert parsed["selection"]["full_triggers"]
+    assert parsed["selection"]["groups"]
+    assert main(("doctor", "--fix")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+
+
+def test_fix_enabled_but_not_closed_is_out_of_date(
+        tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "notclosed", addopts="")
+    _write_config(root, args=("--cov",), extra_lines=(
+        "",
+        "[selection]",
+        "enabled = true",
+        "closed_inputs = false",
+    ))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "closed_inputs = true" in out
+    assert "config is up to date" not in out
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    assert main(("doctor", "--fix")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+
+
+def test_fix_drafts_groups_from_src_layout(tmp_path, monkeypatch, capsys):
+    root = _write_pytest_project(tmp_path / "pkgs", addopts="")
+    (root / "src" / "shop_cart").mkdir(parents=True)
+    (root / "src" / "shop_cart" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "src" / "shop_search").mkdir(parents=True)
+    (root / "src" / "shop_search" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tests" / "shop_cart").mkdir(exist_ok=True)
+    (root / "tests" / "shop_cart" / "test_cart.py").write_text(
+        "def test_cart():\n    assert True\n", encoding="utf-8")
+    _write_config(root, args=("--cov",))
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    parsed = tomllib.loads((root / ".ptest.toml").read_text(encoding="utf-8"))
+    assert parsed["selection"]["input_roots"] == [
+        "src/shop_cart", "src/shop_search", "tests"]
+    # Import-derived, not folder-name-derived: test_cart.py imports no src
+    # package, so no package claims it and every group falls back to the
+    # declared test roots (fail safe).
+    assert parsed["selection"]["groups"] == [
+        {"name": "shop_cart", "sources": ["src/shop_cart"],
+         "tests": ["tests"]},
+        {"name": "shop_search", "sources": ["src/shop_search"],
+         "tests": ["tests"]},
+    ]
+
+
+def _write_import_twin(root: Path) -> Path:
+    """Persea-like twin: pkg_b imports pkg_a; unit tests; factories; conftests."""
+    files = {
+        "pyproject.toml": '[project]\nname = "twin"\ndependencies = []\n',
+        "uv.lock": "",
+        "src/pkg_a/__init__.py": "VALUE = 1\n",
+        "src/pkg_a/core.py": (
+            "from pkg_a import VALUE\n\n"
+            "def double():\n    return VALUE * 2\n"),
+        "src/pkg_b/__init__.py": "",
+        "src/pkg_b/svc.py": (
+            "from pkg_a.core import double\n\n"
+            "def quad():\n    return double() * 2\n"),
+        "tests/__init__.py": "",
+        "tests/conftest.py": "",
+        "tests/unit/__init__.py": "",
+        "tests/unit/conftest.py": "",
+        "tests/unit/test_a.py": (
+            "from pkg_a.core import double\n\n"
+            "def test_double():\n    assert double() == 2\n"),
+        "tests/unit/test_both.py": (
+            "from pkg_a.core import double\n"
+            "from pkg_b.svc import quad\n\n"
+            "def test_quad():\n    assert quad() == 4\n"),
+        "tests/test_b.py": (
+            "from pkg_b.svc import quad\n\n"
+            "def test_quad_b():\n    assert quad() == 4\n"),
+        "tests/test_plain.py": "def test_plain():\n    assert True\n",
+        "tests/test_factory_user.py": (
+            "from tests.factories.f import make\n\n"
+            "def test_make():\n    assert make() == 1\n"),
+        "tests/factories/__init__.py": "",
+        "tests/factories/conftest.py": "",
+        "tests/factories/f.py": "def make():\n    return 1\n",
+    }
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _write_config(root, args=("--cov",))
+    return root
+
+
+def _twin_selection(root: Path) -> dict:
+    return tomllib.loads(
+        (root / ".ptest.toml").read_text(encoding="utf-8"))["selection"]
+
+
+def test_fix_drafts_import_derived_groups_with_transitive_deps(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "twin")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    selection = _twin_selection(root)
+    assert selection["input_roots"] == ["src/pkg_a", "src/pkg_b", "tests"]
+    # pkg_b transitively imports pkg_a, so a pkg_a change must also pull
+    # tests that only import pkg_b. tests/unit is fully covered by pkg_a's
+    # files and compresses to the directory.
+    assert selection["groups"] == [
+        {"name": "pkg_a", "sources": ["src/pkg_a"],
+         "tests": ["tests/test_b.py", "tests/unit"]},
+        {"name": "pkg_b", "sources": ["src/pkg_b"],
+         "tests": ["tests/test_b.py", "tests/unit/test_both.py"]},
+    ]
+
+
+def test_fix_drafts_full_triggers_cover_conftests_and_helpers(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "twin-triggers")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    triggers = _twin_selection(root)["full_triggers"]
+    assert ".ptest.toml" in triggers
+    assert "uv.lock" in triggers
+    assert "pyproject.toml" in triggers
+    # Every conftest.py under the child, at any depth.
+    assert "tests/conftest.py" in triggers
+    assert "tests/unit/conftest.py" in triggers
+    # The shared factories dir is imported by tests but holds no tests
+    # itself, so it compresses to one directory trigger (which also covers
+    # its nested conftest.py).
+    assert "tests/factories" in triggers
+    assert "tests/factories/conftest.py" not in triggers
+    # The tests package init executes on every tests.factories import.
+    assert "tests/__init__.py" in triggers
+
+
+def test_fix_leaves_unimported_test_file_out_of_every_group(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "twin-plain")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    groups = _twin_selection(root)["groups"]
+    assert groups
+    for group in groups:
+        assert "tests/test_plain.py" not in group["tests"]
+        assert "tests/test_factory_user.py" not in group["tests"]
+    # The importing tests are claimed exactly once per dependency direction.
+    by_name = {group["name"]: group["tests"] for group in groups}
+    assert "tests/unit/test_a.py" in by_name["pkg_a"] or "tests/unit" in by_name["pkg_a"]
+    assert "tests/unit/test_a.py" not in by_name["pkg_b"]
+    assert "tests/unit/test_both.py" in by_name["pkg_b"] or "tests/unit" in by_name["pkg_b"]
+
+
+def test_fix_never_compresses_triggers_over_test_dirs(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "twin-shadow")
+    (root / "tests" / "unit" / "helpers.py").write_text(
+        "def h():\n    return 1\n", encoding="utf-8")
+    test_a = root / "tests" / "unit" / "test_a.py"
+    test_a.write_text(
+        "from pkg_a.core import double\n"
+        "from tests.unit import helpers\n\n"
+        "def test_double():\n    assert double() == 2\n"
+        "    assert helpers.h() == 1\n",
+        encoding="utf-8")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    selection = _twin_selection(root)
+    # Every non-test module under tests/unit is imported, but the
+    # directory also holds tests: compressing the trigger to tests/unit
+    # would shadow the groups and force full on any unit-test change.
+    assert "tests/unit" not in selection["full_triggers"]
+    assert "tests/unit/helpers.py" in selection["full_triggers"]
+    assert "tests/unit/__init__.py" in selection["full_triggers"]
+    # Group compression is unaffected: pkg_a still covers tests/unit.
+    by_name = {group["name"]: group["tests"]
+               for group in selection["groups"]}
+    assert "tests/unit" in by_name["pkg_a"]
+
+
+def test_fix_treats_unparseable_test_file_as_importing_everything(
+        tmp_path, monkeypatch, capsys):
+    root = _write_import_twin(tmp_path / "twin-broken")
+    (root / "tests" / "test_broken.py").write_text(
+        "def broken(:\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    capsys.readouterr()
+    groups = _twin_selection(root)["groups"]
+    # Fail safe: a file the static scan cannot read is never silently
+    # skipped; it joins every group.
+    assert groups
+    for group in groups:
+        assert "tests/test_broken.py" in group["tests"]
 
 
 def test_fix_handles_quoted_table_header_without_duplication(
