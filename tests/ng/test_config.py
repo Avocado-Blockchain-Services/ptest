@@ -816,3 +816,62 @@ def test_fresh_pytest_serial_config_serializes_only_args_line(tmp_path):
     body = (tmp_path / ".ptest.toml").read_text(encoding="utf-8")
     assert 'args = ["-n", "0"]' in body
     assert "full_args = []" in body
+
+
+# ---- pytest test roots: what a full run must cover ---------------------------
+
+def _touch(path: Path, text: str = "def test_x():\n    pass\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_pytest_roots_cover_every_top_level_test_directory(tmp_path):
+    """fullon2 integrations: tests/ + launchpad/ + web/, no testpaths."""
+    from ptest.config import pytest_test_roots
+    _touch(tmp_path / "tests" / "test_a.py")
+    _touch(tmp_path / "launchpad" / "test_b.py")
+    _touch(tmp_path / "web" / "auth" / "test_c.py")
+    _touch(tmp_path / "src" / "pkg" / "mod.py", "x = 1\n")
+    _touch(tmp_path / ".venv" / "lib" / "test_vendored.py")
+    _touch(tmp_path / "node_modules" / "x" / "test_js.py")
+
+    assert pytest_test_roots(tmp_path) == ("launchpad", "tests", "web")
+
+
+@pytest.mark.parametrize("name,body", [
+    ("pytest.ini", "[pytest]\ntestpaths = tests integration\n"),
+    ("pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests", "integration"]\n'),
+    ("tox.ini", "[pytest]\ntestpaths =\n    tests\n    integration\n"),
+    ("setup.cfg", "[tool:pytest]\ntestpaths = tests integration\n"),
+])
+def test_pytest_roots_follow_declared_testpaths(tmp_path, name, body):
+    from ptest.config import pytest_test_roots
+    (tmp_path / name).write_text(body, encoding="utf-8")
+    _touch(tmp_path / "tests" / "test_a.py")
+    _touch(tmp_path / "integration" / "test_b.py")
+    _touch(tmp_path / "scripts" / "test_not_collected.py")
+
+    assert pytest_test_roots(tmp_path) == ("tests", "integration")
+
+
+def test_pytest_roots_ignore_glob_testpaths_and_scan(tmp_path):
+    from ptest.config import pytest_test_roots
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = pkg*/tests\n", encoding="utf-8")
+    _touch(tmp_path / "pkga" / "tests" / "test_a.py")
+
+    assert pytest_test_roots(tmp_path) == ("pkga",)
+
+
+def test_pytest_roots_root_level_test_file_is_dot(tmp_path):
+    from ptest.config import pytest_test_roots
+    _touch(tmp_path / "test_top.py")
+    _touch(tmp_path / "tests" / "test_a.py")
+
+    assert pytest_test_roots(tmp_path) == (".",)
+
+
+def test_pytest_roots_fallback_without_test_files(tmp_path):
+    from ptest.config import pytest_test_roots
+    (tmp_path / "tests").mkdir()
+    assert pytest_test_roots(tmp_path) == ("tests",)
+    assert pytest_test_roots(tmp_path / "tests") == (".",)

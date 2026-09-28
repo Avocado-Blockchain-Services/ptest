@@ -2995,7 +2995,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         gate_snapshot: C.InputSnapshot | None = None
 
         def decide_attempt() -> C.Reason | None:
-            nonlocal gate_snapshot
+            nonlocal gate_snapshot, input_before
             if setup_prepared is not None:
                 setup_reason = _finish_setup(
                     domain, effective, checkout, setup_fingerprint_before)
@@ -3013,7 +3013,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 return _reason(
                     "unknown-input",
                     "required pytest content identity is unavailable")
-            return _source_invalidation(input_before, gate_snapshot)
+            invalidation = _source_invalidation(input_before, gate_snapshot)
+            if (invalidation is not None and setup_prepared is not None
+                    and invalidation.code == "changed-during-run"
+                    and _changed_path_classes(input_before, gate_snapshot)
+                    == ("ignored",)):
+                # Setup writes gitignored outputs by design (npm/pnpm
+                # install, husky's prepare hook dir, uv sync); the run is
+                # judged against the post-setup state. Tracked or
+                # untracked changes by setup still invalidate it.
+                input_before = gate_snapshot
+                return None
+            return invalidation
 
         try:
             # Evidence must match what will actually run, not the request

@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+import support
+
 from ptest import contracts as C
 from ptest import platform, scheduler
 from ptest.cli import parse_argv
@@ -267,6 +269,46 @@ def test_setup_inputs_changed_prints_changed_reason(case):
     lines = _ptest_lines(completed)
     assert any(
         line == f"ptest: setup: {' '.join(argv)} (inputs changed)" for line in lines), lines
+
+
+def test_setup_writing_ignored_outputs_is_not_changed_during_run(case):
+    """Setup may write gitignored outputs (husky's prepare writes .husky/_).
+
+    fullon2 web: the first `pnpm install` ran husky, which created the
+    ignored .husky/_ directory between the pre-launch and gate snapshots,
+    and the run ended "changed-during-run: path classes: ignored" (exit 70).
+    """
+    domain = case.domain()
+    root = _command_project(case, domain, args=("literal",))
+    argv = [sys.executable, "-c",
+            "import pathlib; pathlib.Path('setup-out.txt').write_text('x'); "
+            "hooks = pathlib.Path('.husky/_'); hooks.mkdir(parents=True); "
+            "(hooks / 'pre-commit').write_text('hook')"]
+    _write_setup_config(root, argv, ["setup-out.txt"])
+    support.init_git_repo(root, files={".gitignore": "setup-out.txt\n.husky/_/\n"})
+
+    completed = case.invoke(domain, root, "--full", timeout=30)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert (root / ".husky" / "_" / "pre-commit").exists()
+    assert b"changed-during-run" not in completed.stderr
+
+
+def test_setup_rewriting_tracked_source_is_still_changed_during_run(case):
+    """Only ignored outputs are setup's own; a rewritten tracked file is not."""
+    domain = case.domain()
+    root = _command_project(case, domain, args=("literal",))
+    argv = [sys.executable, "-c",
+            "import pathlib; pathlib.Path('setup-out.txt').write_text('x'); "
+            "pathlib.Path('src.txt').write_text('rewritten')"]
+    _write_setup_config(root, argv, ["setup-out.txt"])
+    support.init_git_repo(root, files={".gitignore": "setup-out.txt\n",
+                                       "src.txt": "original"})
+
+    completed = case.invoke(domain, root, "--full", timeout=30)
+
+    assert completed.code != 0
+    assert b"changed-during-run" in completed.stderr
 
 
 # ---- R4: -v/--verbose and -q/--quiet ------------------------------------------

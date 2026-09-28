@@ -642,8 +642,13 @@ def test_full_pytest_toml_addopts_runs_labelled(case):
                for reason in data["reasons"])
 
 
-def test_full_reexported_collection_hook_is_refused(case):
-    """Section F HIGH: a hook imported into conftest is not defined there."""
+def test_full_reexported_project_collection_hook_is_project_filtered(case):
+    """A conftest may re-export a hook from its own project source.
+
+    fullon2's tests/conftest.py aliases its xdist and sessionfinish hooks
+    from tests/fixtures/testrig.py; the defining project file owns the hook
+    exactly like a conftest definition and the run is labeled filtered.
+    """
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
@@ -662,11 +667,44 @@ def test_full_reexported_collection_hook_is_refused(case):
 
     completed = case.invoke(domain, root, "--full", timeout=20)
 
+    assert completed.code == 0, completed.stderr.decode()
+    assert b"ptest-bridge-refusal" not in completed.stderr
+    assert (root / "a.marker").read_text() == "ran"
+    assert not (root / "b.marker").exists()
+    assert completed.result is not None
+    reasons = completed.result["data"]["reasons"]
+    assert any(reason["code"] == "project-filtered" for reason in reasons)
+
+
+def test_full_reexported_installed_collection_hook_is_refused(case):
+    """A hook re-exported from installed code under the checkout stays foreign."""
+    domain = case.domain(slots=1, jobs=1)
+    root = case.project(domain, kind="pytest")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    installed = root / "tests" / ".venv" / "lib" / "site-packages"
+    installed.mkdir(parents=True)
+    (installed / "hook_impl.py").write_text(
+        "def pytest_collection_modifyitems(items):\n"
+        "    items[:] = [item for item in items if 'test_b' not in item.nodeid]\n")
+    (root / "tests" / "conftest.py").write_text(
+        "import sys, pathlib\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).parent"
+        " / '.venv' / 'lib' / 'site-packages'))\n"
+        "from hook_impl import pytest_collection_modifyitems\n")
+    (root / "tests" / "test_native.py").write_text(
+        "from pathlib import Path\n"
+        "def test_a():\n    Path('a.marker').write_text('ran')\n"
+        "def test_b():\n    Path('b.marker').write_text('ran')\n")
+    _full_project_toml(root, project_id)
+    support.init_git_repo(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=20)
+
     assert completed.code == 4
     assert b"ptest-bridge-refusal" in completed.stderr
+    assert b"(pytest_collection_modifyitems from hook_impl)" in completed.stderr
     assert completed.result is not None
     assert completed.result["data"]["status"] == "incomplete"
-    assert completed.result["data"]["exit_origin"] == "ptest"
     assert not (root / "a.marker").exists()
     assert not (root / "b.marker").exists()
 

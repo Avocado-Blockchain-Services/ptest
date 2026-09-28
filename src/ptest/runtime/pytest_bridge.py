@@ -939,6 +939,25 @@ _FULL_COLLECTION_HOOKS = frozenset({
 # from anywhere, stay refused (a logreport/collectreport wrapper can rewrite
 # reports before any counter sees them; scoped mode still allows them as a
 # known limit).
+# Directories holding installed code: a hook defined under one is never
+# project source, even inside the checkout.
+_INSTALLED_PACKAGE_DIRS = frozenset({
+    "site-packages", "dist-packages", ".venv", "venv", ".tox", ".nox",
+    "node_modules", "__pypackages__",
+})
+
+def _work_tree_root(checkout: str) -> str:
+    """The enclosing Git work tree of ``checkout``, else ``checkout`` itself."""
+    current = checkout
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return checkout
+        current = parent
+
+
 _FULL_SESSIONFINISH_HOOKS = frozenset({
     "pytest_sessionfinish",
 })
@@ -1160,7 +1179,32 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
 # version pin: like pytest_asyncio/pytest_timeout, approval is by hook
 # ownership, not by version (the only version pin in this bridge is the
 # frozen pytest-cov/coverage evidence tuple, which is unrelated).
-_BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio")
+# Widely used plugins of the same class are approved the same way, each
+# checked against its hook implementations: hypothesis (its wrappers only
+# annotate reports, its modifyitems only adds a marker, its ignore_collect
+# only skips ``.hypothesis``), schemathesis (generates and wraps its own
+# schema tests), pytest_order (deterministic reordering, xdist-safe),
+# pytest_sugar and pytest_instafail (terminal reporting), faker and
+# pytest_mock (fixtures). Any other plugin is refused with a hint naming
+# ``-p no:<name>`` for the ptest runner args.
+_BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio",
+                                "_hypothesis_pytestplugin", "schemathesis",
+                                "pytest_order", "pytest_sugar",
+                                "pytest_instafail", "faker", "pytest_mock")
+
+
+def _plugin_disable_hint(module: str) -> str:
+    """`` · add "-p no:NAME" ...`` for an entry-point plugin, else ``""``."""
+    top = module.split(".", 1)[0]
+    try:
+        entries = importlib.metadata.entry_points(group="pytest11")
+    except Exception:  # noqa: BLE001 - a hint must never mask the refusal.
+        return ""
+    for entry in entries:
+        if str(entry.value).split(":", 1)[0].split(".", 1)[0] == top:
+            return (f' · add "-p no:{entry.name}" to [runner] args in'
+                    " .ptest.toml to run without it")
+    return ""
 
 
 def _coverage_plugin(loaded: Any) -> Any | None:
@@ -1169,9 +1213,10 @@ def _coverage_plugin(loaded: Any) -> Any | None:
     Accepts pluggy ``(name, plugin)`` pairs or bare plugin objects.
     Prefers the plugin that owns measured controller data (pytest-cov
     exposes both its import module and the controller plugin under
-    distinct names); presence alone means coverage was requested
-    (pytest-cov only registers its plugin when ``--cov`` supplies a
-    source), and the frozen tuple gate in :meth:`OwnedPlugin._validate`
+    distinct names); the controller plugin object's presence means
+    coverage was requested (pytest-cov registers it only when ``--cov``
+    supplies a source; its entry-point module is always registered and
+    never counts), and the frozen tuple gate in :meth:`OwnedPlugin._validate`
     decides whether it may run.
     """
     try:
@@ -1195,7 +1240,10 @@ def _coverage_plugin(loaded: Any) -> Any | None:
                 or module == "pytest_cov" or module.startswith("pytest_cov.")):
             if getattr(plugin, "cov_controller", None) is not None:
                 return plugin
-            if fallback is None:
+            # The pytest11 entry-point module is registered whenever
+            # pytest-cov is installed; only the ``_cov`` plugin object
+            # pytest-cov adds for ``--cov`` means coverage was requested.
+            if fallback is None and not isinstance(plugin, ModuleType):
                 fallback = plugin
     return fallback
 
@@ -1404,7 +1452,10 @@ class OwnedPlugin:
                     continue
                 owned = self._conftest_owner_path(implementation)
                 if owned is None:
-                    self._refuse("unqualified pytest execution hook is not owned by the parallel grant")
+                    self._refuse(
+                        "unqualified pytest execution hook is not owned by the parallel grant"
+                        f" (pytest_configure_node from {module})"
+                        + _plugin_disable_hint(module))
                 if self.execution == "full":
                     accepted_hooks.append(owned)
         for name in ("pytest_xdist_make_scheduler", "pytest_xdist_getremotemodule",
@@ -1523,17 +1574,41 @@ class OwnedPlugin:
         """Project-relative conftest path owning a hook implementation.
 
         The plugin object must itself be a ``conftest.py`` module under the
-        admitted checkout, and the hook function must be defined in it (a
-        re-exported import is refused). Missing file evidence fails closed.
+        admitted checkout. It owns a hook defined in it, and a hook it
+        re-exports (``pytest_x = helpers.pytest_x``) when the defining file
+        is project source: under the checkout or, for a monorepo child,
+        under the enclosing Git work tree, and never installed code
+        (``site-packages``, a virtualenv). Missing file evidence fails
+        closed.
         """
         plugin = getattr(implementation, "plugin", None)
         relpath = self._conftest_relpath(plugin)
         if relpath is None:
             return None
         function = getattr(implementation, "function", None)
-        if getattr(function, "__module__", None) != getattr(plugin, "__name__", None):
-            return None
-        return relpath
+        if getattr(function, "__module__", None) == getattr(plugin, "__name__", None):
+            return relpath
+        return relpath if self._is_project_source(function) else None
+
+    def _is_project_source(self, function: Any) -> bool:
+        """True when ``function`` is defined in a ``.py`` file of the project."""
+        code = getattr(inspect.unwrap(function), "__code__", None) \
+            if callable(function) else None
+        path = getattr(code, "co_filename", None)
+        if not isinstance(path, str) or not path.endswith(".py") \
+                or not self.checkout_root:
+            return False
+        try:
+            candidate = os.path.realpath(path)
+            root = _work_tree_root(os.path.realpath(self.checkout_root))
+            if not os.path.isfile(candidate) \
+                    or os.path.commonpath((root, candidate)) != root:
+                return False
+        except (OSError, ValueError):
+            return False
+        parts = os.path.relpath(candidate, root).split(os.sep)
+        return not any(part in _INSTALLED_PACKAGE_DIRS or part.endswith(".egg-info")
+                       for part in parts[:-1])
 
     def _project_conftest_hook(self, hook: str, implementation: Any) -> str | None:
         """Project-relative conftest path when a full-only hook is owned.
@@ -1777,7 +1852,8 @@ class OwnedPlugin:
                         implementation.function, "__module__", "") or "")
                     self._refuse(
                         "unqualified pytest execution hook is not owned by the serial grant"
-                        f" ({hook} from {module_name})")
+                        f" ({hook} from {module_name})"
+                        + _plugin_disable_hint(module_name))
             if parallel_controller:
                 self._validate_parallel_controller_hooks(manager, accepted_hooks)
             if parallel and self.execution == "full":

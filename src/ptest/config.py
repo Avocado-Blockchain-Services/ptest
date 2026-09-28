@@ -694,12 +694,117 @@ def _directory_exists(root: Path, name: str) -> bool:
     return stat.S_ISDIR(stamp.st_mode)
 
 
+_ROOT_SCAN_SKIP = frozenset({
+    "node_modules", "venv", "site-packages", "__pycache__", "build", "dist",
+    "htmlcov", "__pypackages__",
+})
+_TESTPATHS_GLOB = re.compile(r"[*?\[]")
+
+
+def _is_pytest_test_file(name: str) -> bool:
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _declared_testpaths(root: Path) -> tuple[str, ...] | None:
+    """``testpaths`` from the pytest config file pytest itself would pick.
+
+    None when no config file declares them, or when they are not plain
+    relative directories (globs, absolute, escaping) that ptest can pass on.
+    """
+    import configparser
+    value: object = None
+    for name, section in (("pytest.ini", "pytest"), (".pytest.ini", "pytest"),
+                          ("pyproject.toml", None), ("tox.ini", "pytest"),
+                          ("setup.cfg", "tool:pytest")):
+        path = root / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        if section is None:
+            try:
+                options = tomllib.loads(text).get("tool", {}).get("pytest", {})
+            except tomllib.TOMLDecodeError:
+                return None
+            if not isinstance(options, dict) or "ini_options" not in options:
+                continue
+            value = options["ini_options"].get("testpaths") \
+                if isinstance(options["ini_options"], dict) else None
+            break
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            return None
+        if parser.has_section(section):
+            value = parser.get(section, "testpaths", fallback=None)
+            break
+        if name.endswith("pytest.ini"):
+            break  # pytest.ini wins even without a [pytest] section.
+    if isinstance(value, str):
+        value = value.split()
+    if not isinstance(value, list) or not value:
+        return None
+    roots: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        rel = item.strip().rstrip("/") or "."
+        if (_TESTPATHS_GLOB.search(rel) or rel.startswith("/")
+                or ".." in rel.split("/") or not (root / rel).is_dir()):
+            return None
+        if rel not in roots:
+            roots.append(rel)
+    return tuple(roots)
+
+
+def _dir_has_test_files(base: Path) -> bool:
+    for current, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _ROOT_SCAN_SKIP]
+        if any(_is_pytest_test_file(name) for name in files):
+            return True
+    return False
+
+
+def pytest_test_roots(root: Path) -> tuple[str, ...]:
+    """Directories a full pytest run of ``root`` covers.
+
+    Declared ``testpaths`` when pytest has them; otherwise every top-level
+    directory holding ``test_*.py``/``*_test.py`` files (pytest's own
+    default collects all of them), ``.`` when test files sit at the root,
+    and ``tests`` (or ``.``) when nothing is found.
+    """
+    declared = _declared_testpaths(root)
+    if declared is not None:
+        return declared
+    found: list[str] = []
+    try:
+        entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name in _ROOT_SCAN_SKIP:
+            continue
+        try:
+            if entry.is_file(follow_symlinks=False) and _is_pytest_test_file(entry.name):
+                return (".",)
+            if entry.is_dir(follow_symlinks=False) and _dir_has_test_files(Path(entry.path)):
+                found.append(entry.name)
+        except OSError:
+            continue
+    if found:
+        return tuple(found)
+    return ("tests",) if _directory_exists(root, "tests") else (".",)
+
+
 def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
     if kind is C.RunnerKind.COMMAND:
         raise _problem("command-required", "an explicit command configuration is required")
     args: tuple[str, ...] = ()
     if kind is C.RunnerKind.PYTEST:
-        roots = ("tests",) if _directory_exists(root, "tests") else (".",)
+        roots = pytest_test_roots(root)
         locked = _native_present(root, "uv.lock")
         launcher = ("uv", "run", "--locked", "--no-sync", "python") \
             if locked else ("python",)

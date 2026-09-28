@@ -11,6 +11,8 @@ import shutil
 import tomllib
 import runpy
 
+import importlib.metadata
+
 import pytest
 
 from ptest import contracts as C
@@ -430,6 +432,61 @@ def test_anyio_hook_module_is_accepted_in_scoped_serial(module, bridge_env):
     full = _native_config()
     full.pluginmanager = manager
     pytest_bridge.OwnedPlugin(1, execution="full").pytest_configure(full)
+
+
+@pytest.mark.parametrize("hook", ["pytest_runtest_call", "pytest_runtest_makereport",
+                                  "pytest_collection_modifyitems", "pytest_ignore_collect"])
+@pytest.mark.parametrize("module", ["_hypothesis_pytestplugin", "schemathesis.pytest.plugin",
+                                    "pytest_order.plugin", "pytest_sugar",
+                                    "pytest_instafail", "faker.contrib.pytest.plugin",
+                                    "pytest_mock.plugin"])
+def test_common_additive_plugin_hooks_are_accepted(module, hook, bridge_env):
+    """Well-known plugins whose hooks only annotate, report or order.
+
+    fullon2 refused every run with "pytest_runtest_call from
+    _hypothesis_pytestplugin", then schemathesis' pytest_pyfunc_call.
+    """
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("hypothesispytest", plugin),),
+        [_hookimpl(hook, module, plugin)],
+    )
+    for execution in ("scoped", "full"):
+        config = _native_config()
+        config.pluginmanager = manager
+        pytest_bridge.OwnedPlugin(1, execution=execution).pytest_configure(config)
+
+
+def test_hypothesis_lookalike_hook_is_still_refused():
+    module = "_hypothesis_pytestplugin_evil"
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("lookalike", plugin),),
+        [_hookimpl("pytest_runtest_call", module, plugin)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match="not owned by the serial grant"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
+def test_unknown_plugin_refusal_names_the_disable_flag(monkeypatch):
+    entry = importlib.metadata.EntryPoint(
+        name="custom", value="pytest_customrunner.plugin", group="pytest11")
+    monkeypatch.setattr(pytest_bridge.importlib.metadata, "entry_points",
+                        lambda group: [entry] if group == "pytest11" else [])
+    module = "pytest_customrunner.plugin"
+    plugin = _module(module)
+    manager = _loaded_manager(
+        (("custom", plugin),),
+        [_hookimpl("pytest_pyfunc_call", module, plugin)],
+    )
+    config = _native_config()
+    config.pluginmanager = manager
+
+    with pytest.raises(pytest.UsageError, match='"-p no:custom" to \\[runner\\] args'):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
 
 
 @pytest.mark.parametrize("module", ["anyiox.pytest_plugin", "evil.anyio"])

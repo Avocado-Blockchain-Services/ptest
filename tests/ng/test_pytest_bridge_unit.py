@@ -162,3 +162,22 @@ def test_bridge_worker_record_rejects_unbounded_outcome_ids():
         "outcomes": {"t" * (C.TEST_ID_MAX_BYTES + 1): "passed"},
     }
     assert pytest_bridge._valid_worker_record(record, "gw0") is False
+
+
+def test_installed_pytest_cov_module_alone_is_not_coverage():
+    """pytest-cov's entry-point module is registered whenever it is installed.
+
+    fullon2 installs pytest-cov without passing --cov; its parallel runs
+    were refused by the frozen-tuple gate meant for coverage runs.
+    """
+    import types
+    module = types.ModuleType("pytest_cov.plugin")
+    assert pytest_bridge._coverage_plugin([("pytest_cov", module)]) is None
+
+
+def test_cov_controller_plugin_counts_as_coverage():
+    import types
+    module = types.ModuleType("pytest_cov.plugin")
+    controller = type("CovPlugin", (), {"cov_controller": object()})()
+    assert pytest_bridge._coverage_plugin(
+        [("pytest_cov", module), ("_cov", controller)]) is controller

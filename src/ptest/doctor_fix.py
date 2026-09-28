@@ -919,6 +919,23 @@ def plan_project(root: Path, declaration: str,
             changes.append(FieldChange("runner", "args", fresh_args))
             current_args = fresh_args
 
+    if kind is C.RunnerKind.PYTEST and isinstance(runner, dict):
+        # Older generators wrote ``tests`` whenever that directory existed,
+        # so a full run silently skipped test files pytest itself collects
+        # elsewhere (fullon2 integrations: 2 of 96 files). Widen only when
+        # the configured roots miss real test files.
+        configured = tuple(config.runner.test_roots)
+        detected = config_api.pytest_test_roots(project_dir)
+        missing = [item for item in detected
+                   if not any(item == have or item.startswith(have + "/")
+                              for have in configured)]
+        if ("." not in configured and "." not in detected and missing
+                and any(config_api._dir_has_test_files(project_dir / item)
+                        for item in missing)):
+            changes.append(FieldChange(
+                "runner", "test_roots",
+                tuple(dict.fromkeys(configured + tuple(missing)))))
+
     setup = parsed.get("setup", {})
     if isinstance(setup, dict) and isinstance(setup.get("argv"), list):
         current_argv = tuple(

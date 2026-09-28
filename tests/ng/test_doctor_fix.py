@@ -320,6 +320,38 @@ def test_fix_turns_on_graph_selection_without_cov(tmp_path, monkeypatch, capsys)
     assert "config is up to date" in capsys.readouterr().out
 
 
+def test_fix_widens_test_roots_that_miss_test_files(tmp_path, monkeypatch, capsys):
+    """fullon2 integrations: test_roots = ["tests"] ran 2 of 96 test files."""
+    root = _write_pytest_project(tmp_path / "wide", addopts=None)
+    (root / "web" / "auth").mkdir(parents=True)
+    (root / "web" / "auth" / "test_me.py").write_text(
+        "def test_me():\n    pass\n", encoding="utf-8")
+    _write_config(root)
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix")) == 0
+    raw = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'test_roots = ["tests", "web"]' in raw
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    assert "config is up to date" in capsys.readouterr().out
+
+
+def test_fix_keeps_test_roots_matching_declared_testpaths(tmp_path, monkeypatch, capsys):
+    """Files outside declared testpaths are not part of pytest's full run."""
+    root = _write_pytest_project(tmp_path / "narrow", addopts=None)
+    (root / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n", encoding="utf-8")
+    (root / "scripts").mkdir()
+    (root / "scripts" / "test_manual.py").write_text(
+        "def test_manual():\n    pass\n", encoding="utf-8")
+    _write_config(root)
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    assert "test_roots" not in capsys.readouterr().out
+
+
 def test_fix_keeps_explicit_off_when_selection_was_hand_tuned(tmp_path, monkeypatch, capsys):
     """enabled = false next to non-default selection keys is a deliberate choice."""
     root = _write_pytest_project(tmp_path / "tuned", addopts="")
