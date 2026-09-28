@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+
+- Licensed under MIT (`LICENSE`, declared in the package metadata).
+- `CLAUDE.md` imports `AGENTS.md`, so Claude Code reads the same repository
+  rules as other agents.
+
 ## 0.3.4
 
 Tested against 14 open-source projects (click, attrs, pluggy, flask,

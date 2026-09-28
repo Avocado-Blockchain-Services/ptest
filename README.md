@@ -425,3 +425,7 @@ gh release create vX.Y.Z /tmp/assets/* --title "ptest X.Y.Z" --notes-file notes.
 
 More: [installation](docs/installation.md) · [security](docs/security.md) ·
 [support matrix](docs/support-matrix.md) · [changelog](docs/changelog.md).
+
+## License
+
+[MIT](LICENSE)
