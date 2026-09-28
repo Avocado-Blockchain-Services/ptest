@@ -104,6 +104,11 @@ ptest               # after each edit: runs the tests your change reaches
 ptest --full        # once, before you hand the change off
 ```
 
+Bare `ptest` runs the tests your change reaches:
+changes since the last green run (or, before the first green run, since your
+branch left the default branch). No baseline or coverage step is needed.
+Run `ptest --full` once before handoff.
+
 `ptest init` looks at the repository, detects pytest/Vitest/Go/Cargo projects
 (including several in one monorepo), writes a `.ptest.toml` per project, and
 reports what it found:
@@ -176,8 +181,8 @@ Useful flags:
 ## How "the tests your change reaches" works
 
 1. **What changed.** Changes since the last green run of that project
-   (commit plus a fingerprint of uncommitted work); before the first green
-   run, changes since the merge-base with your default branch.
+   (its commit plus any uncommitted work); before the first green run,
+   changes since the merge-base with your default branch.
 2. **Noise is ignored.** Docs, build output (`build/`, `dist/`,
    `node_modules/`, caches) and non-code files outside source/test areas do
    not trigger tests.
