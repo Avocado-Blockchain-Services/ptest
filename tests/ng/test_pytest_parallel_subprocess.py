@@ -588,7 +588,7 @@ def test_parallel_unqualified_xdist_refused_before_collection(
     assert twin.report is not None
     assert twin.report["terminal_complete"] is False
     assert twin.report["problem"] == "bridge-refused"
-    assert any("pytest-xdist 0.0.0 is not qualified for parallel runs"
+    assert any("pytest-xdist 0.0.0 is not supported for parallel runs"
                in refusal.get("message", "") for refusal in twin.refusals)
     # Refused before collection: no test ever ran.
     assert not (root / "markers" / "workers.log").exists()

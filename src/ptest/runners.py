@@ -96,10 +96,12 @@ _REGISTRY: dict[C.RunnerKind, RunnerAdapter] = {
         _exclusive=True, automatic_full=True,
     ),
     C.RunnerKind.GO: RunnerAdapter(
-        C.RunnerKind.GO, simple_adapter.prepare, automatic_full=True,
+        C.RunnerKind.GO, simple_adapter.prepare,
+        _exclusive=True, automatic_full=True,
     ),
     C.RunnerKind.CARGO: RunnerAdapter(
-        C.RunnerKind.CARGO, simple_adapter.prepare, automatic_full=True,
+        C.RunnerKind.CARGO, simple_adapter.prepare,
+        _exclusive=True, automatic_full=True,
     ),
     C.RunnerKind.COMMAND: RunnerAdapter(
         C.RunnerKind.COMMAND, simple_adapter.prepare,

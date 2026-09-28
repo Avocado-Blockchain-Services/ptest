@@ -62,6 +62,17 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             "literal Vitest profiles do not accept public plan files",
         )
     _require_node_launcher(config.runner.launcher)
+    root = (config.checkout.root if config.checkout is not None
+            else config.config_path.parent if config.config_path is not None else None)
+    if config.setup is None and root is not None and not (root / VITEST_ENTRY).exists():
+        # Launching node here only prints a MODULE_NOT_FOUND stack trace that
+        # reads like a test failure; say what is missing instead.
+        from ptest.config import node_install_argv
+        install = " ".join(node_install_argv(root) or ("npm", "install"))
+        raise _problem(
+            "native-config-invalid",
+            f"vitest is not installed ({VITEST_ENTRY} is missing): run {install}, "
+            "or declare it as [setup] in .ptest.toml")
 
     tail = (tuple(config.runner.args) if plan.execution == "scoped"
             else tuple(config.runner.args) + tuple(config.runner.full_args))

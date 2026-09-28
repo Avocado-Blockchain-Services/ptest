@@ -242,7 +242,8 @@ def require_python_launcher(launcher: tuple[str, ...]) -> None:
     valid_python = interpreter.name in {
         "python", "python3", "python3.11", "python3.12", "python3.13", "python3.14",
     }
-    direct = len(launcher) == 1 and (interpreter.is_absolute() or launcher[0] == interpreter.name)
+    direct = len(launcher) == 1 and (interpreter.is_absolute() or launcher[0] == interpreter.name
+                                     or launcher[0] == ".venv/bin/python")
     locked_uv = launcher == ("uv", "run", "--locked", "--no-sync", "python")
     locked_project = (
         len(launcher) == 7

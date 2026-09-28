@@ -37,8 +37,6 @@ def _write_addopts(root: Path, addopts: str) -> None:
 
 
 def _stub_xdist_venv(root: Path) -> None:
-    from ptest.runtime.pytest_bridge import _COVERAGE_TUPLE
-
     packages = root / ".venv" / "lib" / "python3.12" / "site-packages"
     dist_info = packages / "pytest_xdist-3.8.0.dist-info"
     dist_info.mkdir(parents=True)
@@ -47,8 +45,8 @@ def _stub_xdist_venv(root: Path) -> None:
         encoding="utf-8",
     )
     # The tier probe reads versions from dist-info directory names only,
-    # so these stubs pin the frozen pytest-cov/coverage pair by name.
-    pytest_cov, coverage = _COVERAGE_TUPLE
+    # so these stubs name a supported pytest-cov/coverage pair.
+    pytest_cov, coverage = "7.1.0", "7.15.0"
     (packages / f"pytest_cov-{pytest_cov}.dist-info").mkdir(exist_ok=True)
     (packages / f"coverage-{coverage}.dist-info").mkdir(exist_ok=True)
     (root / ".venv" / "pyvenv.cfg").write_text(

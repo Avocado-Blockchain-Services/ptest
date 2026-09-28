@@ -408,7 +408,7 @@ def test_vitest_missing_entry_without_setup_is_not_executable(tmp_path):
     assert result.status == E.STATUS_NOT_EXECUTABLE
     assert result.reason == "node_modules/vitest/vitest.mjs is missing"
     assert result.fix == (
-        'install dependencies, or declare [setup] argv = ["npm", "ci"] in .ptest.toml')
+        'run npm install, or declare [setup] argv = ["npm", "install"] in .ptest.toml')
 
 
 def test_vitest_is_executable_with_exclusive_caveat(tmp_path):
@@ -1022,9 +1022,9 @@ def test_fact_keys_exact_order():
 
 
 def test_mirror_constants_have_frozen_values():
-    # T1 owns pytest_bridge.QUALIFIED_XDIST_VERSIONS / PARALLEL_DIST_MODES
-    # (absent at this base); T5 asserts the cross-module equality post-merge.
-    assert E.XDIST_QUALIFIED_VERSIONS == frozenset({"3.8.0"})
+    # pytest_bridge owns the supported xdist range; executability imports it.
+    assert E.xdist_supported("3.8.0") and E.xdist_supported("3.5.0")
+    assert not E.xdist_supported("3.4.0") and not E.xdist_supported("4.0.0")
     assert E.XDIST_DIST_MODES == frozenset(
         {"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
 
@@ -1230,14 +1230,13 @@ def test_parallel_cov_in_runner_args_admitted_with_frozen_tuple(tmp_path, venv_s
 def test_parallel_cov_version_mismatch_falls_back(tmp_path, venv_stub):
     write_file(tmp_path / "pyproject.toml",
            '[tool.pytest.ini_options]\naddopts = "-n 4 --cov"\n')
-    venv_stub(tmp_path, xdist="3.8.0", pytest_cov="7.0.0", coverage="7.16.1")
+    venv_stub(tmp_path, xdist="3.8.0", pytest_cov="4.1.0", coverage="7.16.1")
 
     req = E.parallel_request(_uv(tmp_path), project=".")
     assert req.active is True
     assert req.reason == (
-        "pytest-cov 7.0.0/coverage 7.16.1 is outside the frozen qualification "
-        "tuple (ptest supports pytest-cov 7.1.0 with coverage 7.15.0); "
-        "ptest runs serially")
+        "pytest-cov 4.1.0/coverage 7.16.1 is outside the supported range "
+        "(pytest-cov 5 to 7 with coverage 7); ptest runs serially")
     assert req.config_level is False
     assert req.runs is True
 
@@ -1272,8 +1271,8 @@ def test_parallel_unqualified_version_falls_back(tmp_path, venv_stub):
     result = E.check_config(_uv(tmp_path), project=".")
 
     assert result.parallel == (
-        "no — pytest-xdist 4.0.0 is not qualified (ptest supports 3.8.0); "
-        "ptest runs serially")
+        "no — pytest-xdist 4.0.0 is not qualified (ptest supports "
+        "pytest-xdist 3.5 or newer 3.x); ptest runs serially")
 
 
 def test_parallel_unverifiable_launcher_falls_back(tmp_path):

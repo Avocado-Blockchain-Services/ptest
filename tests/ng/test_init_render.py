@@ -335,7 +335,7 @@ def test_render_init_without_facts_uses_note_projects():
     text = render_init(result, None, repo_name="shop", width=80)
     assert "ptest initialized · shop" in text.splitlines()
     assert "  api  pytest" in text
-    assert "  .  vitest" in text
+    assert "\n  vitest\n" in text and "  .  vitest" not in text
     assert "runs:" not in text
 
 

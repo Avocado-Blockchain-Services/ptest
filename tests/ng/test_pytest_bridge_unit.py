@@ -38,13 +38,31 @@ def test_coverage_tuple_missing_package_refuses(monkeypatch):
     assert "unavailable" in error.value.message
 
 
-def test_coverage_tuple_off_table_pair_refuses(monkeypatch):
-    _stub_versions(monkeypatch, {"pytest-cov": "7.0.0", "coverage": "7.16.1"})
+def test_coverage_tuple_off_range_pair_refuses(monkeypatch):
+    _stub_versions(monkeypatch, {"pytest-cov": "4.1.0", "coverage": "7.16.1"})
 
     with pytest.raises(pytest_bridge.BridgeRefusal) as error:
         pytest_bridge._coverage_tuple()
     assert error.value.code == "unsupported-capability"
-    assert "outside the frozen qualification tuple" in error.value.message
+    assert "outside the supported range" in error.value.message
+
+
+@pytest.mark.parametrize("pytest_cov,coverage", [("5.0.0", "7.0.0"), ("6.2.1", "7.10.6"),
+                                                 ("7.1.0", "7.16.1")])
+def test_coverage_tuple_in_range_pairs_pass(monkeypatch, pytest_cov, coverage):
+    """fullon2 ships coverage 7.16.1, httpx pins 7.10.6: both are fine."""
+    _stub_versions(monkeypatch, {"pytest-cov": pytest_cov, "coverage": coverage})
+
+    assert pytest_bridge._coverage_tuple() == (pytest_cov, coverage)
+
+
+@pytest.mark.parametrize("version,ok", [
+    ("8.0.0", True), ("8.4.1", True), ("9.0.2", True), ("9.1.1", True),
+    ("9.2.0rc1", True), ("7.4.4", False), ("10.0.0", False), ("garbage", False),
+])
+def test_pytest_version_range(version, ok):
+    """click locks pytest 9.0.2, httpx pins 8.4.1: any 8.x/9.x runs."""
+    assert pytest_bridge.version_in(version, pytest_bridge.PYTEST_RANGE) is ok
 
 
 def test_coverage_tuple_half_present_refuses(monkeypatch):

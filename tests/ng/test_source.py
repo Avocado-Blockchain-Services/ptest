@@ -404,6 +404,26 @@ def test_pytest_scoped_snapshot_excludes_tool_byproducts(case):
     assert "src/__pycache__/a.cpython-313.pyc" not in paths
 
 
+def test_pytest_snapshot_excludes_cache_beside_nested_pytest_ini(case):
+    """rich keeps tests/pytest.ini, so pytest writes tests/.pytest_cache."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / "tests" / "pytest.ini").write_text("[pytest]\n")
+    (root / ".gitignore").write_text(".pytest_cache/\n")
+    git(root, "add", ".gitignore", "tests/pytest.ini"); git(root, "commit", "-m", "nested ini")
+    before = snapshot(domain, config, None, None)
+    cache = root / "tests" / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (root / "tests" / ".pytest_cache" / "CACHEDIR.TAG").write_text("cache")
+    (cache / "lastfailed").write_text("{}")
+    after = snapshot(domain, config, None, None)
+    assert after.digest == before.digest
+    assert not any(".pytest_cache" in item.path for item in after.files)
+
+
 def test_pytest_snapshot_excludes_hypothesis_database(case):
     """fullon2 server: hypothesis writes .hypothesis/ during every run."""
     from ptest.source import ensure_fingerprint_key

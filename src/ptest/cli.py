@@ -22,7 +22,7 @@ from typing import Sequence
 from . import agent_assessment, agent_providers, agent_rules, config as config_api
 from . import contracts as C
 from . import doctor, doctor_fix, executability, files, help as help_api, history
-from . import init_changed, init_render, init_smoke, lastgreen
+from . import init_render, init_smoke, lastgreen
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
 from . import render
@@ -100,7 +100,6 @@ class ParsedArgs:
     fix: bool = False
     doctor_request: bool | None = None
     smoke: bool | None = None
-    changed_setup: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,23 +292,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         review_concurrency = 4
         smoke: bool | None = None
         smoke_seen = no_smoke_seen = False
-        changed_setup: str | None = None
-        changed_setup_seen = False
         index = 0
         while index < len(args):
             token = args[index]
             if token == "--dry-run":
                 dry_run = True
-            elif token == "--changed-setup":
-                value, index = _value(args, index, token)
-                if changed_setup_seen:
-                    raise _problem("invalid-config", "option cannot be repeated")
-                changed_setup_seen = True
-                try:
-                    changed_setup = init_changed.parse_choice(value)
-                except C.Problem as problem:
-                    raise _problem(problem.code, problem.message) from None
-                continue
             elif token == "--reveal-command":
                 reveal = True
             elif token == "--runner":
@@ -416,8 +403,6 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             raise _problem("invalid-config", "init review cannot be combined with --json")
         if dry_run and (doctor_request is True or review_options_seen):
             raise _problem("invalid-config", "init review cannot be combined with --dry-run")
-        if "--json" in args and changed_setup is not None:
-            raise _problem("invalid-config", "init changed-setup cannot be combined with --json")
         return ParsedArgs(command=command, runner=runner, dry_run=dry_run,
                           reveal_command=reveal, json="--json" in args,
                           children=tuple(children), agents=agents,
@@ -431,7 +416,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           review_concurrency=review_concurrency,
                           review_concurrency_explicit=concurrency_seen,
                           doctor_request=doctor_request,
-                          smoke=smoke, changed_setup=changed_setup)
+                          smoke=smoke)
     if command == "register":
         if any(token not in {"--json"} for token in args):
             raise _problem("invalid-config", "unknown inspection option")
@@ -1016,65 +1001,6 @@ def _plan_targets(smoke_plans: tuple) -> tuple:
         for plan in smoke_plans if plan.config is not None)
 
 
-def _preview_targets(root: Path, result, parsed: ParsedArgs) -> tuple:
-    """``((declaration, probe config), ...)`` init would create, for dry-run.
-
-    Probe configs are built with the same ``_fresh_config`` init writes,
-    so the frozen-pair check previews the real outcome; nothing is read
-    from or written to disk.
-    """
-    if result.config is not None:
-        kind = result.config.runner_kind
-        if kind is not C.RunnerKind.PYTEST:
-            return ()
-        return ((".", config_api._fresh_config(
-            root, result.target, kind)),)
-    children = parsed.children or config_api._auto_monorepo_children(root)
-    targets = []
-    for declaration, kind in children:
-        if kind is not C.RunnerKind.PYTEST:
-            continue
-        child_root = root.joinpath(*declaration.split("/"))
-        targets.append((declaration, config_api._fresh_config(
-            child_root, child_root / ".ptest.toml", kind)))
-    return tuple(targets)
-
-
-def _run_changed_baseline(parsed: ParsedArgs, root: Path,
-                          declaration: str) -> None:
-    """Run one full baseline for a fresh `--changed` setup.
-
-    A failure never changes init's outcome or status: runner outcomes
-    surface through the normal run output, infrastructure problems
-    become one skip line.
-    """
-    from . import monorepo
-    resolution = config_api.resolve_config(root)
-    if declaration == ".":
-        config = resolution.config
-    else:
-        diagnosis = monorepo.diagnose_child(root, declaration)
-        config = diagnosis.config if diagnosis.kind == "ok" else None
-    if config is None:
-        print(f"{declaration}: baseline run skipped "
-              "(configuration is unavailable)")
-        return
-    try:
-        domain = platform.domain_paths(parsed.fixture_domain)
-        full = operations.execute(
-            domain, config,
-            C.RunRequest(mode=C.Mode.FULL, workers=parsed.workers,
-                         queue_timeout_s=parsed.queue_timeout_s,
-                         timeout_s=parsed.timeout_s,
-                         fixture_domain=parsed.fixture_domain))
-    except C.Problem as problem:
-        print(f"{declaration}: baseline run skipped ({problem.code})")
-        return
-    for reason in full.reasons:
-        print(render.terminal_text(f"{reason.code}: {reason.message}"),
-              file=sys.stderr)
-
-
 def _existing_changed_targets(root: Path) -> tuple:
     """``((declaration, config), ...)`` resolved read-only from disk.
 
@@ -1097,83 +1023,29 @@ def _existing_changed_targets(root: Path) -> tuple:
     return tuple(targets)
 
 
-def _report_existing_changed(config, project: str) -> None:
-    """One existing-config line: needs-cov, `doctor --fix`, or silence."""
-    if not init_changed.has_frozen_pair(config):
-        print(init_changed.NEEDS_COV_LINE.format(project=project))
-    elif not init_changed.selection_enabled(config):
-        print(init_changed.EXISTING_LINE.format(project=project))
+SELECTION_OFF_LINE = (
+    "{project}: selection is off; run `ptest doctor --fix` so bare ptest "
+    "runs only the tests your change reaches"
+)
 
 
-def _run_changed_setup(parsed: ParsedArgs, cwd: Path, result,
-                       smoke_plans: tuple = ()) -> None:
-    """Post-smoke `--changed` setup: question, config draft, baseline run.
+def _report_selection_off(parsed: ParsedArgs, result, smoke_plans: tuple = ()) -> None:
+    """One line per existing pytest config whose change selection is off.
 
-    One line per pytest project; vitest and other runners are never
-    asked. `--json` never reaches here (rejected at parse); dry runs
-    preview only; existing configs point at `doctor --fix` and are
-    never rewritten. A `no` choice stays silent everywhere, and a
-    dry-run preview of existing configs reports those configs instead
-    of a fresh write.
+    Fresh pytest configs already enable selection, so they stay silent;
+    existing configs are never rewritten here (``ptest doctor --fix`` is).
     """
-    if parsed.json:
+    if parsed.json or result.action is not C.InitAction.EXISTING:
         return
-    if parsed.dry_run:
-        choice = parsed.changed_setup
-        if choice is None:
-            choice = init_changed.DEFAULT_CHOICE
-        if choice == "no":
-            return
-        root = result.target.parent
-        if result.action is C.InitAction.EXISTING:
-            for declaration, config in _existing_changed_targets(root):
-                if config.runner.kind is not C.RunnerKind.PYTEST:
-                    continue
-                _report_existing_changed(
-                    config, render.terminal_text(declaration))
-            return
-        for declaration, probe in _preview_targets(root, result, parsed):
-            project = render.terminal_text(declaration)
-            if init_changed.has_frozen_pair(probe):
-                print(init_changed.DRY_RUN_LINE.format(project=project))
-            else:
-                print(init_changed.NEEDS_COV_LINE.format(project=project))
-        return
-    root = config_api.resolve_config(cwd).root
-    targets = _plan_targets(smoke_plans)
-    if result.action is C.InitAction.EXISTING:
-        if parsed.changed_setup == "no":
-            return
-        for declaration, config in targets:
-            if config.runner.kind is not C.RunnerKind.PYTEST:
-                continue
-            _report_existing_changed(
-                config, render.terminal_text(declaration))
-        return
+    root = result.target.parent
+    targets = (_existing_changed_targets(root) if parsed.dry_run
+               else _plan_targets(smoke_plans))
     for declaration, config in targets:
-        if config.runner.kind is not C.RunnerKind.PYTEST:
-            continue
-        project = render.terminal_text(declaration)
-        if not init_changed.has_frozen_pair(config):
-            if parsed.changed_setup == "no":
-                continue
-            print(init_changed.NEEDS_COV_LINE.format(project=project))
-            continue
-        choice = parsed.changed_setup
-        if choice is None:
-            if _interactive_review():
-                choice = init_changed.ask_choice(declaration)
-            else:
-                choice = init_changed.DEFAULT_CHOICE
-        if choice == "no":
-            continue
-        init_changed.apply_setup(
-            root, init_changed.SetupTarget(declaration, config))
-        if choice == "now":
-            print(init_changed.NOW_LINE.format(project=project))
-            _run_changed_baseline(parsed, root, declaration)
-        else:
-            print(init_changed.LATER_LINE.format(project=project))
+        selection = getattr(config, "selection", None)
+        if (config.runner.kind is C.RunnerKind.PYTEST
+                and not (selection is not None and selection.enabled is True)):
+            line = SELECTION_OFF_LINE.format(project=render.terminal_text(declaration))
+            print(line[len(".: "):] if declaration == "." else line)
 
 
 def _review_consent_problem() -> C.Problem:
@@ -2530,7 +2402,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     plans=smoke_plans, facts=facts)
                 if footer:
                     sys.stdout.write("\n" + footer)
-            _run_changed_setup(parsed, cwd, result, smoke_plans)
+            _report_selection_off(parsed, result, smoke_plans)
             offer_review = (
                 parsed.doctor_request is True
                 or (parsed.doctor_request is None and not parsed.json

@@ -63,7 +63,6 @@ Syntax:
              [--allow-model-review] [--review-timeout SECONDS]
              [--review-model MODEL] [--review-concurrency 1..8]
              [--smoke | --no-smoke]
-             [--changed-setup now|later|no]
 
 Notes:
   --dry-run previews without writing. --json is non-interactive (never
@@ -83,14 +82,9 @@ Notes:
   a smoke failure keeps the written config and the exit status. Declared
   setup never runs silently: a TTY is asked once per project before its
   smoke test, and non-interactive smoke skips with the setup command.
-  After the smoke step, init offers ptest --changed setup once per
-  pytest project whose environment holds the frozen pytest-cov/coverage
-  pair: now writes --cov/--cov-report plus the [selection] draft and
-  runs ptest --full for the baseline, later writes the same draft for
-  a later baseline, no writes nothing (a fresh pytest config already
-  enables selection, so bare ptest needs no setup). --changed-setup
-  now|later|no answers non-interactively (default: later); existing
-  configs are never rewritten (see ptest doctor --fix)."""
+  Fresh pytest configs enable change selection, so bare ptest runs only
+  the tests a change reaches with no coverage or baseline step; existing
+  configs are never rewritten (ptest doctor --fix turns selection on)."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 

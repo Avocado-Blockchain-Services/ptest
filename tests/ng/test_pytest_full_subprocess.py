@@ -137,7 +137,8 @@ def test_git_pytest_full_allows_root_cache_and_assertion_bytecode(case):
     assert any((root / "tests" / "__pycache__").glob("test_full.cpython-*.pyc"))
 
 
-def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
+def test_cache_at_nested_pytest_rootdir_is_a_byproduct(case):
+    """rich keeps tests/pytest.ini: pytest's rootdir cache is tool output."""
     domain = case.domain(slots=1, jobs=1)
     root = case.project(domain, kind="pytest")
     project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
@@ -151,9 +152,9 @@ def test_nested_native_cache_remains_input_and_makes_full_incomplete(case):
         "lifecycle = \"cooperative-process-group\"\n")
     support.init_git_repo(root)
     completed = case.invoke(domain, root, "--full", timeout=20)
-    assert completed.code == 70
+    assert completed.code == 0, completed.stderr.decode()
     assert (nested / ".pytest_cache").is_dir()
-    assert completed.result["data"]["status"] == "incomplete"
+    assert completed.result["data"]["status"] == "passed"
 
 
 @pytest.mark.parametrize("hook_source", [

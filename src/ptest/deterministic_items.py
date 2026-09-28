@@ -321,8 +321,7 @@ def _parallel_environment_fix(facts: dict, serial_reason: str,
         if "more than one pytest-cov" in serial_reason:
             return ("remove the duplicate pytest-cov install "
                     "from the project environment")
-        frozen = executability_api._COVERAGE_TUPLE
-        pair = f"pytest-cov {frozen[0]} with coverage {frozen[1]}"
+        pair = executability_api.COVERAGE_SUPPORTED
         if "cannot verify pytest-cov" in serial_reason:
             return ("set [runner] launcher to an absolute interpreter or "
                     '["uv", "run", "--locked", "--no-sync", "python"] '
@@ -332,15 +331,13 @@ def _parallel_environment_fix(facts: dict, serial_reason: str,
             return (f"run the project setup ({setup}) "
                     "so ptest can use pytest-cov with coverage")
         return f"install {pair}"
-    qualified = ", ".join(sorted(
-        executability_api.XDIST_QUALIFIED_VERSIONS))
     if "is not qualified" in serial_reason:
-        return f"install pytest-xdist {qualified}"
+        return f"install {executability_api.XDIST_SUPPORTED}"
     setup = facts.get("setup")
     if isinstance(setup, str) and setup.strip():
         return (f"run the project setup ({setup}) "
                 "so ptest can use pytest-xdist")
-    return f"install pytest-xdist {qualified}"
+    return f"install {executability_api.XDIST_SUPPORTED}"
 
 
 def _parallel_unknown(runner: str) -> str:

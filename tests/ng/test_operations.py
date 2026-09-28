@@ -918,10 +918,19 @@ _SETUP_SCRIPT = (
 )
 
 
+def _install_vitest_entry(root):
+    """What `npm install` leaves behind: the entry ptest launches."""
+    entry = root / "node_modules" / "vitest" / "vitest.mjs"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("// fake vitest\n", encoding="utf-8")
+
+
 def _vitest_project(case, domain, fake_exec_node, *, args=(), full_args=(),
                     setup=False):
     root = case.project(domain, kind="vitest")
     node = str(fake_exec_node(root))
+    if not setup:
+        _install_vitest_entry(root)
     project_id = (root / ".ptest.toml").read_text(encoding="utf-8").split(
         'project_id = "', 1
     )[1].split('"', 1)[0]
@@ -952,6 +961,21 @@ def _vitest_project(case, domain, fake_exec_node, *, args=(), full_args=(),
 
 def _node_record(root: Path) -> dict:
     return json.loads((root / "node-record.json").read_text(encoding="utf-8"))
+
+
+def test_vitest_without_install_or_setup_is_refused_before_node(case, fake_exec_node):
+    """ufo before pnpm install: say what is missing, never a node stack trace."""
+    domain = case.domain()
+    root = _vitest_project(case, domain, fake_exec_node)
+    shutil.rmtree(root / "node_modules")
+    (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+
+    completed = case.invoke(domain, root, "--", "src/a.test.ts", timeout=20)
+
+    assert completed.code == 2
+    assert b"vitest is not installed" in completed.stderr
+    assert b"pnpm install --frozen-lockfile" in completed.stderr
+    assert not (root / "node-record.json").exists()
 
 
 def test_vitest_scoped_executes_literal_exclusive_command(case, fake_exec_node):
@@ -1043,8 +1067,12 @@ def test_setup_summary_kind_matches_vitest_config(case, fake_exec_node):
     assert setup_prepared.summary.kind is C.RunnerKind.VITEST
 
 
-@pytest.mark.parametrize("kind", ["go", "cargo"])
-def test_native_go_cargo_execution_remains_deferred(case, kind):
+@pytest.mark.parametrize("kind,message", [
+    ("go", b"Go packages must be declared in test_roots"),
+    ("cargo", b"Cargo option or positional is not qualified"),
+])
+def test_native_go_cargo_execution_validates_the_profile(case, kind, message):
+    """Go/Cargo now execute; an unqualified profile is refused by the adapter."""
     domain = case.domain()
     root = case.project(domain, kind=kind)
     (root / ".ptest.toml").write_text(
@@ -1056,8 +1084,8 @@ def test_native_go_cargo_execution_remains_deferred(case, kind):
     completed = case.invoke(domain, root, timeout=20)
 
     assert completed.code == 2
-    assert b"native profile execution is deferred" in completed.stderr
-    assert completed.result is None
+    assert b"native profile execution is deferred" not in completed.stderr
+    assert message in completed.stderr
 
 
 def test_monorepo_scope_routes_to_vitest_child(case, fake_exec_node):
@@ -1066,6 +1094,7 @@ def test_monorepo_scope_routes_to_vitest_child(case, fake_exec_node):
     web = root / "web"
     web.mkdir()
     node = str(fake_exec_node(web))
+    _install_vitest_entry(web)
     (web / ".ptest.toml").write_text(
         "version = 1\n"
         f'project_id = "{"cd" * 16}"\n'

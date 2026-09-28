@@ -71,7 +71,7 @@ def test_go_disables_cached_success(tmp_path):
     prepared = prepare(_config(tmp_path, C.RunnerKind.GO), _plan(),
                        _grant(), _attempt())
     assert prepared.argv == (
-        "go", "test", "-count=1", "-p=1", "-parallel=2", "-cpu=2", ".",
+        "go", "test", "-count=1", "-p=1", "-parallel=2", "-cpu=2", "./...",
     )
     assert prepared.summary.generated_options == (
         "go.count=1", "go.packages=1", "go.parallel=2", "go.cpu=2",
@@ -322,7 +322,7 @@ def test_go_known_reporting_options_keep_literal_values(tmp_path):
     tokens = ("test", "-v", "--json", "-coverprofile", "coverage with spaces.out")
     prepared = prepare(_config(tmp_path, C.RunnerKind.GO, args=tokens),
                        _plan(), _grant(), _attempt())
-    assert prepared.argv[6:] == tokens[1:] + (".",)
+    assert prepared.argv[6:] == tokens[1:] + ("./...",)
 
 
 @pytest.mark.parametrize("root", ["-p=64", "--", "-args", "../other", "/tmp", "test.go"])
@@ -529,9 +529,10 @@ def test_native_launcher_prefixes_cannot_inject_wrappers(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind,required", [
-    (C.RunnerKind.COMMAND, True), (C.RunnerKind.GO, False), (C.RunnerKind.CARGO, False),
+    (C.RunnerKind.COMMAND, True), (C.RunnerKind.GO, True), (C.RunnerKind.CARGO, True),
 ])
-def test_admission_hook_requires_exclusive_only_for_literal_commands(tmp_path, kind, required):
+def test_admission_hook_requires_exclusive_for_self_parallel_runners(tmp_path, kind, required):
+    """Commands, go test and cargo test parallelize internally: exclusive."""
     assert simple.requires_exclusive(_config(tmp_path, kind)) is required
 
 
@@ -570,3 +571,15 @@ def test_fixture_matrix_prepares_real_projects_without_resolution_or_execution(t
             assert prepared.argv[:len(config.runner.launcher)] == config.runner.launcher
             if "expected_stdout_json" in case:
                 assert prepared.argv[-4:] == tuple(case["expected_stdout_json"])
+
+
+def test_cargo_criterion_bench_without_harness_is_not_a_test_target(tmp_path):
+    """itoa: [[bench]] harness = false never runs under cargo test --tests."""
+    config = _config(tmp_path, C.RunnerKind.CARGO, args=("--tests",))
+    manifest = tmp_path / "Cargo.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8")
+                        + '\n[[bench]]\nname = "bench"\nharness = false\n', encoding="utf-8")
+
+    prepared = prepare(config, _plan(), _grant(), _attempt())
+
+    assert "--tests" in prepared.argv

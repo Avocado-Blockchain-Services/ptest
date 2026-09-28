@@ -315,7 +315,7 @@ def test_parallel_coverage_fix_installs_frozen_tuple_from_runner_args(
         tmp_path, addopts="-n 4", config=config)["PARALLEL-001"]
     assert answer.status == "gap"
     assert answer.finding_change == (
-        "install pytest-cov 7.1.0 with coverage 7.15.0")
+        "install pytest-cov 5 to 7 with coverage 7")
 
 
 def test_parallel_coverage_fix_installs_frozen_tuple_from_addopts_twin(tmp_path):
@@ -324,7 +324,7 @@ def test_parallel_coverage_fix_installs_frozen_tuple_from_addopts_twin(tmp_path)
         tmp_path, addopts="-n 4 --cov")["PARALLEL-001"]
     assert answer.status == "gap"
     assert answer.finding_change == (
-        "install pytest-cov 7.1.0 with coverage 7.15.0")
+        "install pytest-cov 5 to 7 with coverage 7")
 
 
 def test_parallel_duplicate_cov_install_fix_removes_duplicate(tmp_path):
@@ -691,7 +691,7 @@ def test_parallel_missing_xdist_is_gap_with_environment_fix(tmp_path):
         "pytest configures xdist but pytest-xdist is not installed in "
         "the project environment yet; ptest runs serially until setup "
         "installs it")
-    assert answer.finding_change == "install pytest-xdist 3.8.0"
+    assert answer.finding_change == "install pytest-xdist 3.5 or newer 3.x"
     assert "Clear the serial fallback" not in answer.finding_change
     assert answer.finding_summary.count("ptest runs serially") == 1
 
@@ -742,10 +742,10 @@ def test_parallel_unqualified_xdist_is_gap_with_install_fix(tmp_path):
     from dataclasses import replace
 
     packages = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
-    dist_info = packages / "pytest_xdist-3.7.0.dist-info"
+    dist_info = packages / "pytest_xdist-3.4.0.dist-info"
     dist_info.mkdir(parents=True)
     (dist_info / "METADATA").write_text(
-        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.7.0\n",
+        "Metadata-Version: 2.1\nName: pytest-xdist\nVersion: 3.4.0\n",
         encoding="utf-8",
     )
     (tmp_path / ".venv" / "pyvenv.cfg").write_text(
@@ -762,7 +762,7 @@ def test_parallel_unqualified_xdist_is_gap_with_install_fix(tmp_path):
     answer = answers["PARALLEL-001"]
     assert answer.status == "gap"
     assert "is not qualified" in answer.reason
-    assert answer.finding_change == "install pytest-xdist 3.8.0"
+    assert answer.finding_change == "install pytest-xdist 3.5 or newer 3.x"
     assert "run the project setup" not in answer.finding_change
     assert "Clear the serial fallback" not in answer.finding_change
     assert answer.finding_summary.count("ptest runs serially") == 1

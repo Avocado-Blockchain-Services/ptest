@@ -4754,3 +4754,11 @@ PROTOCOL_V1_DESCRIPTOR: dict = {
         "test_id_max_bytes": TEST_ID_MAX_BYTES,
     },
 }
+
+
+def display_setup(argv: object) -> str:
+    """Setup argv as shown to people: a ``sh -c`` script shows just the script."""
+    parts = [str(part) for part in (argv or ())]
+    if len(parts) == 3 and parts[:2] == ["sh", "-c"]:
+        return parts[2]
+    return " ".join(parts)

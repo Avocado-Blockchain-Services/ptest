@@ -29,6 +29,8 @@ def _isolate_bridge_environment(monkeypatch):
                  "PTEST_PYTEST_EXECUTION", "PTEST_PYTEST_PROFILE",
                  "PTEST_PYTEST_CHECKOUT_ROOT", "PTEST_PYTEST_CONFIG_PATH"):
         monkeypatch.delenv(name, raising=False)
+    # Refusal markers print once per process; each test is its own process here.
+    monkeypatch.setattr(pytest_bridge, "_REFUSALS_PRINTED", set())
 
 
 def _config(*, workers: int = 1, args: tuple[str, ...] = (),
@@ -662,7 +664,7 @@ def test_run_accepts_only_enumerated_pytest_candidates(bridge_env, monkeypatch, 
     assert pytest_bridge.run([]) == 1
 
 
-@pytest.mark.parametrize("version", ["8.4.1", "9.0.4", "9.1.2", "10.0.0", "9.1.1.dev0"])
+@pytest.mark.parametrize("version", ["7.4.4", "10.0.0", "6.2.5"])
 def test_run_rejects_unknown_pytest_before_native_execution(bridge_env, monkeypatch, version):
     _install_fake_pytest(monkeypatch, lambda *a, **kw: pytest.fail("native runner reached"), version)
     with pytest.raises(RuntimeError, match="unsupported-capability"):
@@ -1212,6 +1214,14 @@ def test_native_refusal_emits_safe_machine_distinguishable_marker(capsys):
     prefix, payload = stderr.strip().split(": ", 1)
     assert prefix == "ptest-bridge-refusal"
     assert json.loads(payload) == {"code": "native-config-invalid", "message": "serial grant cannot use xdist"}
+
+
+def test_repeated_refusal_marker_prints_once(capsys):
+    """pluggy printed the same refusal three times (hook, handler, pytest)."""
+    for _ in range(2):
+        with pytest.raises(pytest.UsageError):
+            pytest_bridge.OwnedPlugin(1).pytest_configure(_native_config(numprocesses=4))
+    assert capsys.readouterr().err.count("ptest-bridge-refusal: ") == 1
 
 
 def test_script_entrypoint_returns_controlled_missing_pytest_error(bridge_env, monkeypatch, capsys):

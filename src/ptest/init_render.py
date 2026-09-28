@@ -225,11 +225,22 @@ def _note_projects(result: C.InitResult) -> list[tuple[str, str]]:
     return projects
 
 
+def _step_prefix(project: str) -> str:
+    """``"api  "`` before a next-step line; nothing for a single-project repo.
+
+    The header already names the repository, so a lone ``.`` column only
+    reads as noise.
+    """
+    return "" if project == "." else f"{project}  "
+
+
 def _project_fact_lines(facts: Mapping[str, object], width: int,
                         name_width: int = 6, *,
                         color: bool = False) -> list[str]:
     project = terminal_text(facts.get("project", "."))
     runner = terminal_text(facts.get("runner", "unknown"))
+    if project == ".":
+        project, name_width = "", 0
     prefix = f"  {project:<{name_width}}{runner}  "
     hang = " " * len(prefix)
     atoms = [terminal_text(atom) for atom in summary_atoms(facts)]
@@ -241,6 +252,8 @@ def _project_fact_lines(facts: Mapping[str, object], width: int,
     if not colors_enabled(color):
         return lines
     bold = len(project)
+    if not bold:
+        return lines
     return [(line[:2] + paint(line[2:2 + bold], "bold", color=True)
              + line[2 + bold:]) if len(line) > 2 and line[2] != " " else line
             for line in lines]
@@ -260,7 +273,8 @@ def _project_lines(result: C.InitResult,
             lines.extend(_project_fact_lines(item, width, name_width,
                                              color=color))
         return lines
-    return [f"  {paint(terminal_text(project), 'bold', color=color)}  "
+    return [f"  {terminal_text(runner)}" if project == "." else
+            f"  {paint(terminal_text(project), 'bold', color=color)}  "
             f"{terminal_text(runner)}"
             for project, runner in _note_projects(result)]
 
@@ -327,11 +341,11 @@ def _next_steps(facts: Sequence[Mapping[str, object]], smoke: Sequence[object],
         if not valid.get("runs"):
             fix = valid.get("runs_fix")
             if isinstance(fix, str) and fix:
-                steps.append(f"{project}  not runnable → {fix}")
+                steps.append(f"{_step_prefix(project)}not runnable → {fix}")
             continue
         parallel_fix = valid.get("parallel_fix")
         if isinstance(parallel_fix, str) and parallel_fix:
-            steps.append(f"{project}  parallel off → {parallel_fix}")
+            steps.append(f"{_step_prefix(project)}parallel off → {parallel_fix}")
     for plan in plans:
         setup_argv = getattr(plan, "setup_argv", None)
         if not setup_argv:
@@ -345,13 +359,13 @@ def _next_steps(facts: Sequence[Mapping[str, object]], smoke: Sequence[object],
             command = display_command(project, candidate)
         except Exception:
             command = f"ptest {project}" if project != "." else "ptest"
-        setup = " ".join(str(part) for part in setup_argv)
-        steps.append(f"{project}  setup pending → run: {command} "
+        setup = C.display_setup(setup_argv)
+        steps.append(f"{_step_prefix(project)}setup pending → run: {command} "
                      f"(runs {setup} first)")
     for item in smoke:
         if getattr(item, "status", None) == "failed":
             project = terminal_text(getattr(item, "project", "."))
-            steps.append(f"{project}  smoke failed → "
+            steps.append(f"{_step_prefix(project)}smoke failed → "
                          f"see the runner output above")
     return [terminal_text(step) for step in steps]
 

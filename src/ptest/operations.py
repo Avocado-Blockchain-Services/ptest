@@ -190,7 +190,9 @@ _SETUP_MARKER_NAME = "setup-fingerprint.json"
 _SETUP_MARKER_MAX_BYTES = 8192
 _SETUP_INPUTS = (
     "uv.lock", "pyproject.toml", "package-lock.json", "package.json",
-    "pnpm-lock.yaml", "yarn.lock",
+    "pnpm-lock.yaml", "yarn.lock", "setup.py", "setup.cfg",
+    "requirements.txt", "requirements-dev.txt", "requirements-test.txt",
+    "requirements-tests.txt", "dev-requirements.txt", "test-requirements.txt",
 )
 
 
@@ -2638,7 +2640,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             raise _problem("invalid-config", "--base is unavailable with explicit pytest full execution")
         if request.mode is C.Mode.FULL and "." in config.runner.test_roots:
             raise _problem("unsupported-capability", "pytest full execution does not support a dot test root")
-    elif config.runner.kind not in (C.RunnerKind.COMMAND, C.RunnerKind.VITEST):
+    elif config.runner.kind not in (C.RunnerKind.COMMAND, C.RunnerKind.VITEST,
+                                    C.RunnerKind.GO, C.RunnerKind.CARGO):
         raise _problem("unsupported-capability", "native profile execution is deferred")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
@@ -3400,7 +3403,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         )
                     elif not native_report.terminal_complete:
                         report_reason = _reason("unsupported-capability",
-                                                "pytest bridge refused test execution")
+                                                "pytest bridge refused test execution "
+                                                "(the ptest-bridge-refusal line above says why)")
                         # An authenticated bridge refusal is not a native test
                         # failure. Retain the observed child code for diagnosis.
                         result = replace(result, exit_origin="ptest")

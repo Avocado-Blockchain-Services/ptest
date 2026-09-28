@@ -32,11 +32,49 @@ class BridgeRefusal(RuntimeError):
 
 
 _REPORT_NAME = re.compile(r"native-a(00[1-9]|010)-[0-9a-f]{32}\.json\Z")
-_COVERAGE_TUPLE = ("7.1.0", "7.15.0")
+# Supported version ranges, [low, high). ptest relies on documented pytest,
+# pytest-xdist and pytest-cov hooks, so any release in a major line works;
+# pinning single releases refused most real projects (click locks pytest
+# 9.0.2). executability imports these, so there is one source of truth.
+PYTEST_RANGE = ((8, 0), (10,))
+XDIST_RANGE = ((3, 5), (4,))
+PYTEST_COV_RANGE = ((5, 0), (8,))
+COVERAGE_RANGE = ((7, 0), (8,))
+PYTEST_SUPPORTED = "pytest 8.x or 9.x"
+XDIST_SUPPORTED = "pytest-xdist 3.5 or newer 3.x"
+COVERAGE_SUPPORTED = "pytest-cov 5 to 7 with coverage 7"
 
-# Parallel-tier contract (T1; mirrored by executability.XDIST_QUALIFIED_VERSIONS
-# and executability.XDIST_DIST_MODES, asserted equal by the wave-2 tests).
-QUALIFIED_XDIST_VERSIONS = frozenset({"3.8.0"})
+
+def _version_key(text: object) -> tuple[int, ...]:
+    """Leading numeric release components: ``"9.0.2rc1"`` -> ``(9, 0, 2)``."""
+    parts: list[int] = []
+    for piece in str(text).split("."):
+        match = re.match(r"[0-9]+", piece)
+        if match is None:
+            break
+        parts.append(int(match.group()))
+        if match.end() != len(piece):
+            break
+    return tuple(parts)
+
+
+def version_in(text: object, bounds: tuple[tuple[int, ...], tuple[int, ...]]) -> bool:
+    key = _version_key(text)
+    low, high = bounds
+    return bool(key) and low <= key < high
+
+
+def xdist_supported(version: object) -> bool:
+    return version_in(version, XDIST_RANGE)
+
+
+def coverage_pair_supported(pytest_cov: object, coverage: object) -> bool:
+    return (version_in(pytest_cov, PYTEST_COV_RANGE)
+            and version_in(coverage, COVERAGE_RANGE))
+
+
+# Parallel-tier contract (T1; executability.XDIST_DIST_MODES mirrors the
+# dist modes, asserted equal by the wave-2 tests).
 PARALLEL_DIST_MODES = frozenset({"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
 # Internal controls prepended to the native argv when workers >= 2: every
 # worker imports this bridge as a plugin, and a crashed worker is never
@@ -89,15 +127,16 @@ def _mark_bridge_hooks(target: Any) -> Any:
 
 
 def _coverage_tuple() -> tuple[str, str]:
-    """Require the frozen pytest-cov/coverage pair before native tests run."""
+    """Require a supported pytest-cov/coverage pair before native tests run."""
     try:
         pytest_cov = importlib.metadata.version("pytest-cov")
         coverage = importlib.metadata.version("coverage")
     except importlib.metadata.PackageNotFoundError:
-        _fail("the frozen pytest-cov/coverage tuple is unavailable", "unsupported-capability")
-    if (pytest_cov, coverage) != _COVERAGE_TUPLE:
+        _fail("pytest-cov/coverage is unavailable", "unsupported-capability")
+    if not coverage_pair_supported(pytest_cov, coverage):
         _fail(
-            "pytest-cov/coverage versions are outside the frozen qualification tuple",
+            f"pytest-cov {pytest_cov}/coverage {coverage} is outside the supported "
+            f"range ({COVERAGE_SUPPORTED})",
             "unsupported-capability",
         )
     return pytest_cov, coverage
@@ -158,8 +197,16 @@ def _normalize_test_id(test_id: str, max_test_id_bytes: int) -> str:
     return head + suffix
 
 
+_REFUSALS_PRINTED: set[tuple[str, str]] = set()
+
+
 def _refusal_marker(code: str, message: str) -> None:
     # No argv, paths or project data: distinguish owned refusals from native exit 4.
+    # A refusal raised in a hook is reported again by the top-level handler;
+    # print each one once.
+    if (code, message) in _REFUSALS_PRINTED:
+        return
+    _REFUSALS_PRINTED.add((code, message))
     print("ptest-bridge-refusal: " + json.dumps({"code": code, "message": message}), file=sys.stderr)
 
 
@@ -1224,12 +1271,15 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
 # only skips ``.hypothesis``), schemathesis (generates and wraps its own
 # schema tests), pytest_order (deterministic reordering, xdist-safe),
 # pytest_sugar and pytest_instafail (terminal reporting), faker and
-# pytest_mock (fixtures). Any other plugin is refused with a hint naming
+# pytest_mock (fixtures), pytest_benchmark (its modifyitems only adds visible
+# skip markers under --benchmark-skip/--benchmark-only; its wrappers attach
+# and save benchmark data). Any other plugin is refused with a hint naming
 # ``-p no:<name>`` for the ptest runner args.
 _BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio",
                                 "_hypothesis_pytestplugin", "schemathesis",
                                 "pytest_order", "pytest_sugar",
-                                "pytest_instafail", "faker", "pytest_mock")
+                                "pytest_instafail", "faker", "pytest_mock",
+                                "pytest_benchmark")
 
 
 def _plugin_disable_hint(module: str) -> str:
@@ -1922,11 +1972,11 @@ class OwnedPlugin:
                 pytest_cov = importlib.metadata.version("pytest-cov")
                 coverage = importlib.metadata.version("coverage")
             except importlib.metadata.PackageNotFoundError:
-                self._refuse("the frozen pytest-cov/coverage tuple is unavailable")
-            if (pytest_cov, coverage) != _COVERAGE_TUPLE:
+                self._refuse("pytest-cov/coverage is unavailable")
+            if not coverage_pair_supported(pytest_cov, coverage):
                 self._refuse(
-                    "pytest-cov/coverage versions are outside the frozen "
-                    "qualification tuple")
+                    f"pytest-cov {pytest_cov}/coverage {coverage} is outside the "
+                    f"supported range ({COVERAGE_SUPPORTED})")
         if any(getattr(option, name, None) for name in ("px", "rsyncdir", "looponfail")):
             self._refuse("remote/proxy or loop-on-fail pytest execution is unsupported")
         try:
@@ -2990,9 +3040,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                         "PYTEST_XDIST_WORKER_COUNT"):
                 os.environ.pop(var, None)
             version = _xdist_version()
-            if version not in QUALIFIED_XDIST_VERSIONS:
-                _fail(f"pytest-xdist {version} is not qualified for parallel runs",
-                      "unsupported-capability")
+            if not xdist_supported(version):
+                _fail(f"pytest-xdist {version} is not supported for parallel runs "
+                      f"({XDIST_SUPPORTED})", "unsupported-capability")
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             native_argv = [*_WORKER_CONTROLS, *argv]
         else:
@@ -3002,8 +3052,9 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
         except ImportError:
             _fail("pytest is unavailable in the selected interpreter")
         runtime = str(pytest.__version__)
-        if runtime not in {"8.4.2", "9.0.3", "9.1.0", "9.1.1"}:
-            _fail("pytest version is outside the candidate table", "unsupported-capability")
+        if not version_in(runtime, PYTEST_RANGE):
+            _fail(f"pytest {runtime} is not supported ({PYTEST_SUPPORTED})",
+                  "unsupported-capability")
         # Mark hooks only after the selected interpreter and pytest have been checked.
         # The one shared table covers the serial marks above plus the
         # parallel worker-half and controller observation hooks; for the

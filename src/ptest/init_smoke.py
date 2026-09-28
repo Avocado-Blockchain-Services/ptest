@@ -242,7 +242,7 @@ def _plan_for_config(project: str, config: C.Config, root: Path,
 
 def setup_advice(plan: SmokePlan) -> str:
     """Working advice for a setup-owed plan that will not run setup."""
-    argv = " ".join(plan.setup_argv or ())
+    argv = C.display_setup(plan.setup_argv)
     return (f"setup baseline not recorded; run: "
             f"{display_command(plan.project, plan.candidate)} "
             f"(runs {argv} first)")

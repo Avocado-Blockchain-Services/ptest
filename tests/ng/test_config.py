@@ -890,3 +890,103 @@ def test_pytest_roots_accept_declared_test_files(tmp_path):
     _touch(tmp_path / "packages" / "mcp" / "tests" / "test_c.py")
 
     assert pytest_test_roots(tmp_path) == ("tests/test_m10.py", "tests/db", "tests/unit")
+
+
+def test_pytest_roots_skip_benchmark_and_docs_folders(tmp_path):
+    """attrs: bench/test_benchmarks.py needs pytest-benchmark and is not the suite."""
+    from ptest.config import pytest_test_roots
+    _touch(tmp_path / "tests" / "test_a.py")
+    _touch(tmp_path / "bench" / "test_benchmarks.py")
+    _touch(tmp_path / "docs" / "test_doctest_helpers.py")
+
+    assert pytest_test_roots(tmp_path) == ("tests",)
+
+
+def test_pytest_roots_keep_non_suite_folder_when_it_is_all_there_is(tmp_path):
+    from ptest.config import pytest_test_roots
+    _touch(tmp_path / "benchmarks" / "test_speed.py")
+
+    assert pytest_test_roots(tmp_path) == ("benchmarks",)
+
+
+# ---- projects without a uv.lock: setup builds a checkout .venv ---------------
+
+@pytest.mark.parametrize("files,expected", [
+    # httpx: requirements.txt names pytest and installs the project itself.
+    ({"pyproject.toml": '[project]\nname = "x"\n',
+      "requirements.txt": "-e .[http2]\npytest==8.4.1\n"},
+     ("-r", "requirements.txt")),
+    # click/attrs style: a PEP 735 group holds pytest.
+    ({"pyproject.toml": '[project]\nname = "x"\n[dependency-groups]\n'
+                        'tests = ["pytest", "pytest-xdist"]\n'},
+     ("-e", ".", "--group", "tests", "pytest")),
+    # a PEP 621 extra holds pytest.
+    ({"pyproject.toml": '[project]\nname = "x"\n[project.optional-dependencies]\n'
+                        'test = ["pytest>=8"]\n'},
+     ("-e .[test]", "pytest")),
+    # rich: Poetry dev dependencies.
+    ({"pyproject.toml": '[tool.poetry]\nname = "x"\n[tool.poetry.dev-dependencies]\n'
+                        'pytest = "^7"\nattrs = "*"\n'},
+     ("-e", ".", "pytest", "attrs")),
+    # setup.py only.
+    ({"setup.py": "from setuptools import setup\nsetup()\n"}, ("-e", ".", "pytest")),
+])
+def test_pytest_install_spec_follows_where_projects_declare_tests(tmp_path, files, expected):
+    from ptest.config import pytest_install_spec
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+    assert pytest_install_spec(tmp_path)[:len(expected)] == expected
+    assert pytest_install_spec(tmp_path).count("pytest") <= 1
+
+
+def test_fresh_pytest_config_without_lock_builds_a_venv(tmp_path):
+    from ptest.config import _fresh_config
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    _touch(tmp_path / "tests" / "test_a.py")
+
+    config = _fresh_config(tmp_path, tmp_path / ".ptest.toml", RunnerKind.PYTEST)
+
+    assert config.runner.launcher == (".venv/bin/python",)
+    assert config.setup.argv[:2] == ("sh", "-c")
+    assert "uv venv -q --allow-existing .venv" in config.setup.argv[2]
+    assert config.setup.required_paths == (".venv/bin/python",)
+    assert config.selection.non_input_outputs == (".venv",)
+
+
+@pytest.mark.parametrize("pyproject", [None, "[tool.pytest.ini_options]\naddopts = \"-q\"\n"])
+def test_fresh_pytest_config_for_bare_tests_keeps_ambient_python(tmp_path, pyproject):
+    """Tool settings alone declare nothing to install."""
+    from ptest.config import _fresh_config
+    if pyproject is not None:
+        (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    _touch(tmp_path / "tests" / "test_a.py")
+
+    config = _fresh_config(tmp_path, tmp_path / ".ptest.toml", RunnerKind.PYTEST)
+
+    assert config.runner.launcher == ("python",)
+    assert config.setup is None
+
+
+@pytest.mark.parametrize("files,expected", [
+    (("pnpm-lock.yaml",), ("pnpm", "install", "--frozen-lockfile")),
+    (("yarn.lock",), ("yarn", "install", "--frozen-lockfile")),
+    (("yarn.lock", ".yarnrc.yml"), ("yarn", "install", "--immutable")),
+    (("bun.lock",), ("bun", "install", "--frozen-lockfile")),
+    (("package-lock.json",), ("npm", "ci")),
+    ((), None),
+])
+def test_node_install_follows_the_lockfile(tmp_path, files, expected):
+    """ufo ships pnpm-lock.yaml; init used to suggest npm ci."""
+    from ptest.config import node_install_argv
+    for name in files:
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    assert node_install_argv(tmp_path) == expected
+
+
+def test_setup_display_shows_the_script_of_sh_c():
+    from ptest.contracts import display_setup
+    assert display_setup(("sh", "-c", "uv venv && uv pip install pytest")) == \
+        "uv venv && uv pip install pytest"
+    assert display_setup(("uv", "sync", "--locked")) == "uv sync --locked"

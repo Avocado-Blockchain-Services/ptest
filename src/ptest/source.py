@@ -671,8 +671,45 @@ def _coverage_data_bases(root: str) -> tuple[str, ...]:
     return tuple(bases)
 
 
+_PYTEST_CACHE_FILES = frozenset({
+    ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
+    ".pytest_cache/v/cache/nodeids", ".pytest_cache/v/cache/lastfailed",
+    ".pytest_cache/v/cache/stepwise",
+})
+_PYTEST_INI_MARKERS = {
+    "pytest.ini": None, ".pytest.ini": None, "tox.ini": "[pytest]",
+    "setup.cfg": "[tool:pytest]", "pyproject.toml": "[tool.pytest.ini_options]",
+}
+
+
+def _pytest_cache_parents(root: str, included: set[str]) -> tuple[str, ...]:
+    """Directory prefixes where pytest keeps ``.pytest_cache``: its rootdir.
+
+    The checkout root always; plus the directory of each included pytest
+    config file (rich keeps ``tests/pytest.ini``, so its cache is
+    ``tests/.pytest_cache``). A nested cache without such a config stays a
+    fingerprinted input.
+    """
+    parents = {""}
+    for relative in included:
+        directory, _, name = relative.rpartition("/")
+        if not directory or name not in _PYTEST_INI_MARKERS:
+            continue
+        marker = _PYTEST_INI_MARKERS[name]
+        if marker is not None:
+            try:
+                with open(os.path.join(root, relative), "rb") as handle:
+                    if marker.encode() not in handle.read(1024 * 1024):
+                        continue
+            except OSError:
+                continue
+        parents.add(directory + "/")
+    return tuple(sorted(parents))
+
+
 def _pytest_tool_generated(path: str, included: set[str],
-                           *, coverage_bases: tuple[str, ...] = ()) -> str | None:
+                           *, coverage_bases: tuple[str, ...] = (),
+                           cache_parents: tuple[str, ...] = ("",)) -> str | None:
     """Return the source relation for one exact Pytest tool byproduct.
 
     The native runner (cacheprovider) and the interpreter (bytecode,
@@ -687,12 +724,9 @@ def _pytest_tool_generated(path: str, included: set[str],
     source in the snapshot — returns None and stays a fingerprinted
     input (fail-closed).
     """
-    if path in {
-        ".pytest_cache/.gitignore", ".pytest_cache/CACHEDIR.TAG", ".pytest_cache/README.md",
-        ".pytest_cache/v/cache/nodeids", ".pytest_cache/v/cache/lastfailed",
-        ".pytest_cache/v/cache/stepwise",
-    }:
-        return ""
+    for parent in cache_parents:
+        if path.startswith(parent) and path[len(parent):] in _PYTEST_CACHE_FILES:
+            return ""
     # Hypothesis keeps its example database under the checkout-root
     # ``.hypothesis/`` and writes it during every run (fullon2 server).
     if path.startswith(".hypothesis/"):
@@ -704,7 +738,7 @@ def _pytest_tool_generated(path: str, included: set[str],
                 and _COVERAGE_SUFFIX_RE.fullmatch(path[len(base) + 1:])):
             return ""
     match = re.fullmatch(
-        r"(?P<parent>(?:[^/]+/)*)__pycache__/(?P<module>[^/]+)\.cpython-(?P<version>[0-9]+)(?:\.opt-[0-9]+|-pytest-(?:8\.4\.2|9\.0\.3|9\.1\.0|9\.1\.1))?\.pyc",
+        r"(?P<parent>(?:[^/]+/)*)__pycache__/(?P<module>[^/]+)\.cpython-(?P<version>[0-9]+)(?:\.opt-[0-9]+|-pytest-[0-9]+(?:\.[0-9A-Za-z]+)*)?\.pyc",
         path,
     )
     if match is None:
@@ -874,6 +908,7 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
                 _coverage_data_bases(os.fspath(root))
                 if _pytest_coverage_enabled(config) else ()
             )
+            cache_parents = _pytest_cache_parents(os.fspath(root), present)
             for path in untracked | undeclared_ignored:
                 if prefix is not None and path.startswith("../"):
                     # Root-level outputs are outside the child content scope;
@@ -881,7 +916,8 @@ def snapshot(domain: C.DomainPaths, config: C.Config, baseline: C.Baseline | Non
                     # filtered as tool byproducts.
                     continue
                 relation = _pytest_tool_generated(
-                    path, candidate_paths, coverage_bases=coverage_bases)
+                    path, candidate_paths, coverage_bases=coverage_bases,
+                    cache_parents=cache_parents)
                 if relation is None:
                     continue
                 # Filtering is allowed only after the same no-follow regular

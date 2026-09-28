@@ -32,7 +32,10 @@ from .review_context import (
     _test_block_arrays,
 )
 from .runtime.pytest_bridge import (
-    _COVERAGE_TUPLE,
+    COVERAGE_SUPPORTED,
+    XDIST_SUPPORTED,
+    coverage_pair_supported,
+    xdist_supported,
     cluster_narrow_name, full_ini_refusal_name, full_narrowing_text,
     full_redirect_name, full_refusal_name,
 )
@@ -99,7 +102,6 @@ FACT_KEYS: tuple[str, ...] = (
     "setup", "full_suite", "full_blocked",
 )
 
-XDIST_QUALIFIED_VERSIONS = frozenset({"3.8.0"})
 XDIST_DIST_MODES = frozenset({"load", "loadscope", "loadfile", "loadgroup", "worksteal"})
 
 # Mirror of pytest_bridge._FULL_VALUE_FILTERS (the bridge stays the source
@@ -490,7 +492,8 @@ def _project_venv(config: C.Config, dist: str) -> tuple[Path | None, str | None]
         "use an absolute interpreter or a uv launcher to run in parallel")
     root = _project_root(config, ".")
     venv: Path | None = None
-    if launcher == ("uv", "run", "--locked", "--no-sync", "python"):
+    if launcher in (("uv", "run", "--locked", "--no-sync", "python"),
+                    (".venv/bin/python",)):
         venv = root / ".venv"
     elif (len(launcher) == 7
             and launcher[:4] == ("uv", "run", "--locked", "--no-sync")
@@ -592,8 +595,8 @@ def coverage_environment_tuple(
 
     Returns ``((pytest_cov, coverage), None)`` when exactly one install of
     each is found, else ``((None, None), reason)`` with a serial fallback
-    text. The pair only admits the parallel tier when it equals the frozen
-    ``pytest_bridge._COVERAGE_TUPLE``. Static and bounded: directory
+    text. The pair only admits the parallel tier when
+    ``pytest_bridge.coverage_pair_supported`` accepts it. Static and bounded: directory
     listings only, symlinks never followed.
     """
     venv, reason = _project_venv(config, "pytest-cov")
@@ -645,14 +648,12 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
         if problem is not None:
             return ParallelRequest(
                 active, workers, auto, dist, problem, False, True)
-        if tuple(found) != tuple(_COVERAGE_TUPLE):
+        if not coverage_pair_supported(*found):
             pytest_cov, coverage = found
             return ParallelRequest(
                 active, workers, auto, dist,
                 f"pytest-cov {pytest_cov}/coverage {coverage} is outside the "
-                "frozen qualification tuple "
-                f"(ptest supports pytest-cov {_COVERAGE_TUPLE[0]} with "
-                f"coverage {_COVERAGE_TUPLE[1]}); ptest runs serially",
+                f"supported range ({COVERAGE_SUPPORTED}); ptest runs serially",
                 False, True)
     if _has_maxprocesses(tokens):
         return ParallelRequest(
@@ -666,11 +667,11 @@ def parallel_request(config: C.Config, *, project: str = ".") -> ParallelRequest
     version, problem = xdist_environment_version(config)
     if problem is not None:
         return ParallelRequest(active, workers, auto, dist, problem, False, True)
-    if version not in XDIST_QUALIFIED_VERSIONS:
+    if not xdist_supported(version):
         return ParallelRequest(
             active, workers, auto, dist,
-            f"pytest-xdist {version} is not qualified (ptest supports 3.8.0); "
-            "ptest runs serially",
+            f"pytest-xdist {version} is not qualified (ptest supports "
+            f"{XDIST_SUPPORTED}); ptest runs serially",
             False, True)
     if _has_serial_spelling(runner_args):
         cfg = _cfg(project)
@@ -1199,7 +1200,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 full_suite = "your pytest config: " + ", ".join(parts)
         else:
             full_blocked = unavailable[0] if unavailable else None
-        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        setup = C.display_setup(config.setup.argv) if config.setup is not None else None
         caveats: list[str] = [f"parallel: {parallel}"]
         if setup is not None:
             caveats.append(f"setup: {setup} (ptest runs it when needed)")
@@ -1227,16 +1228,19 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
                 fix=f'set [runner] launcher = ["node"] in {cfg}',
                 full=False, example=example)
         if not _regular_present(root, VITEST_ENTRY) and config.setup is None:
+            from .config import node_install_argv
+            install = node_install_argv(root) or ("npm", "install")
+            quoted = ", ".join(f'"{token}"' for token in install)
             return Executability(
                 project=project, runner=kind.value,
                 status=STATUS_NOT_EXECUTABLE, caveats=(),
                 reason="node_modules/vitest/vitest.mjs is missing",
-                fix='install dependencies, or declare [setup] argv = ["npm", "ci"]'
+                fix=f'run {" ".join(install)}, or declare [setup] argv = [{quoted}]'
                     f' in {cfg}',
                 full=False, example=example)
         parallel = "inside vitest (its own workers)"
         parallel_short = "inside vitest"
-        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        setup = C.display_setup(config.setup.argv) if config.setup is not None else None
         caveats = [f"parallel: {parallel}"]
         if setup is not None:
             caveats.append(f"setup: {setup} (ptest runs it when needed)")
@@ -1249,7 +1253,7 @@ def check_config(config: C.Config, *, project: str = ".") -> Executability:
             full_suite=None, full_blocked=None)
 
     if kind is C.RunnerKind.COMMAND:
-        setup = " ".join(config.setup.argv) if config.setup is not None else None
+        setup = C.display_setup(config.setup.argv) if config.setup is not None else None
         caveats = []
         if setup is not None:
             caveats.append(f"setup: {setup} (ptest runs it when needed)")

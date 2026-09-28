@@ -118,7 +118,7 @@ def format_waiting(*, needed: int, free: int | None, limit: int | None,
 def format_setup_start(argv: tuple[str, ...] | list[str], *, reason: str,
                        color: bool = False) -> str:
     return (f"{_prefix(color=color)} setup: "
-            f"{render.terminal_text(' '.join(argv))} ({reason})")
+            f"{render.terminal_text(C.display_setup(argv))} ({reason})")
 
 
 def format_setup_done(setup_s: float | None, *, color: bool = False) -> str:

@@ -64,7 +64,9 @@ def requires_exclusive(config: C.Config) -> bool:
     """
     if not isinstance(config, C.Config):
         raise TypeError("requires_exclusive requires Config")
-    return config.runner.kind is C.RunnerKind.COMMAND
+    # Go and Cargo parallelize internally, like literal commands.
+    return config.runner.kind in (C.RunnerKind.COMMAND, C.RunnerKind.GO,
+                                  C.RunnerKind.CARGO)
 
 
 def _native_context(config: C.Config, plan: C.Plan) -> None:
@@ -137,7 +139,9 @@ def _go(config: C.Config, plan: C.Plan, grant: C.Grant) -> C.PreparedRun:
     native += config.runner.full_args
     _go_options(native)
     _go_roots(config.runner.test_roots)
-    native += config.runner.test_roots
+    # "." is the whole module for a full gate, like pytest's "." root;
+    # `go test .` alone would test only the root package.
+    native += tuple("./..." if root == "." else root for root in config.runner.test_roots)
     workers = str(grant.slots)
     argv = config.runner.launcher + (
         "test", "-count=1", "-p=1", f"-parallel={workers}", f"-cpu={workers}",
@@ -242,6 +246,10 @@ def _reject_cargo_project_controls(root: Path) -> None:
         for entry in entries:
             if not isinstance(entry, dict):
                 raise _problem("native-config-invalid", "Cargo target declarations have an unqualified shape")
+            if kind in ("example", "bench") and entry.get("test", False) is False:
+                # Not built by `cargo test --tests`; a criterion bench's
+                # harness = false (itoa) never reaches the test gate.
+                continue
             if entry.get("harness", True) is not True:
                 raise _problem("unsupported-capability", "Cargo custom harnesses require an explicit command profile")
             if kind in ("example", "bench") and entry.get("test", False) is not False:

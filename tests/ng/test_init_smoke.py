@@ -721,7 +721,7 @@ def test_executability_and_smoke_lines_agree_on_setup_project(
     # project fact line (project, runner, runs fact) instead of the old
     # notes fallback ("  .  pytest"). The agreement property is unchanged:
     # the fact line names the same project/runner the caveat verdict covers.
-    assert re.search(r"^  \. +pytest  runs:", out, re.M)
+    assert re.search(r"^  pytest  runs:", out, re.M)
     assert "–" in out
     assert "setup baseline not recorded" in out
 

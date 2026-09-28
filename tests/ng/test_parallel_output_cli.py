@@ -978,8 +978,7 @@ def test_mirror_equality_with_wave1_names():
     assert (render.PTEST_ANSWER_PREFIX
             == assessment.PTEST_ANSWER_PREFIX == "Answered by ptest: ")
 
-    assert (t1.QUALIFIED_XDIST_VERSIONS
-            == exec_check.XDIST_QUALIFIED_VERSIONS)
+    assert t1.xdist_supported is exec_check.xdist_supported
     assert t1.PARALLEL_DIST_MODES == exec_check.XDIST_DIST_MODES
 
 

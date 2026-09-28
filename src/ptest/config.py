@@ -699,6 +699,13 @@ _ROOT_SCAN_SKIP = frozenset({
     "htmlcov", "__pypackages__",
 })
 _TESTPATHS_GLOB = re.compile(r"[*?\[]")
+# Top-level folders that hold benchmarks, docs, examples or tooling rather
+# than the suite (attrs' bench/ needs pytest-benchmark and is run on its own).
+# They count only when no other folder holds tests.
+_NON_SUITE_DIRS = frozenset({
+    "bench", "benchmark", "benchmarks", "doc", "docs", "example", "examples",
+    "script", "scripts", "tools", "tasks", "site",
+})
 
 
 def _is_pytest_test_file(name: str) -> bool:
@@ -797,9 +804,145 @@ def pytest_test_roots(root: Path) -> tuple[str, ...]:
                 found.append(entry.name)
         except OSError:
             continue
-    if found:
-        return tuple(found)
+    suite = [name for name in found if name.lower() not in _NON_SUITE_DIRS]
+    if suite or found:
+        return tuple(suite or found)
     return ("tests",) if _directory_exists(root, "tests") else (".",)
+
+
+# Where projects without a uv.lock keep their test requirements, in the
+# order they are preferred.
+_REQUIREMENT_FILES = (
+    "requirements-dev.txt", "requirements-test.txt", "requirements-tests.txt",
+    "dev-requirements.txt", "test-requirements.txt", "requirements/dev.txt",
+    "requirements/test.txt", "requirements/tests.txt", "requirements.txt",
+)
+VENV_PYTHON = ".venv/bin/python"
+
+
+def _read_small(root: Path, relative: str) -> str | None:
+    """A project file of at most 1 MiB, read no-follow; None when unavailable."""
+    if not _native_present(root, relative):
+        return None
+    try:
+        return read_regular(root, relative, 1024 * 1024).decode("utf-8")
+    except (C.Problem, OSError, UnicodeDecodeError):
+        return None
+
+
+def _mentions_pytest(requirements: object) -> bool:
+    if isinstance(requirements, dict):
+        requirements = list(requirements)
+    if not isinstance(requirements, list):
+        return False
+    return any(isinstance(item, str)
+               and re.match(r"\s*pytest(?![\w-])", item) is not None
+               for item in requirements)
+
+
+def _declares_python_dependencies(root: Path) -> bool:
+    """A package manifest or requirements file, not just tool settings.
+
+    A pyproject.toml that only configures pytest or ruff declares nothing
+    to install, so the ambient interpreter stays in charge.
+    """
+    if any(_native_present(root, name)
+           for name in ("setup.py", "setup.cfg", *_REQUIREMENT_FILES)):
+        return True
+    text = _read_small(root, "pyproject.toml")
+    if text is None:
+        return False
+    try:
+        pyproject = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
+    return ("project" in pyproject or "dependency-groups" in pyproject
+            or "poetry" in tool)
+
+
+def pytest_install_spec(root: Path) -> tuple[str, ...]:
+    """``uv pip install`` arguments for a pytest project without a uv.lock.
+
+    The project itself (editable) plus its test requirements from the first
+    place that names pytest: a requirements file, a PEP 621 extra, a PEP 735
+    dependency group, or Poetry dev dependencies. ``pytest`` is always added.
+    """
+    spec: list[str] = []
+    installs_project = False
+    for name in _REQUIREMENT_FILES:
+        text = _read_small(root, name)
+        if text is not None and re.search(r"(?m)^\s*pytest(?![\w-])", text):
+            spec += ["-r", name]
+            installs_project = bool(re.search(r"(?m)^\s*-e\s+\.", text))
+            break
+    pyproject: dict = {}
+    text = _read_small(root, "pyproject.toml")
+    if text is not None:
+        try:
+            pyproject = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            pyproject = {}
+    project = pyproject.get("project") if isinstance(pyproject.get("project"), dict) else None
+    buildable = (project is not None or _native_present(root, "setup.py")
+                 or _native_present(root, "setup.cfg")
+                 or isinstance(pyproject.get("tool", {}).get("poetry"), dict))
+    if not spec:
+        extras = project.get("optional-dependencies", {}) if project else {}
+        groups = pyproject.get("dependency-groups", {})
+        poetry = pyproject.get("tool", {}).get("poetry", {})
+        extra = next((key for key, deps in (extras.items() if isinstance(extras, dict) else ())
+                      if _mentions_pytest(deps)), None)
+        group = next((key for key, deps in (groups.items() if isinstance(groups, dict) else ())
+                      if _mentions_pytest(deps)), None)
+        if extra is not None and buildable:
+            spec.append(f"-e .[{extra}]")
+            installs_project = True
+        elif group is not None:
+            spec += ["--group", group]
+        elif isinstance(poetry, dict):
+            tables = [poetry.get("dev-dependencies")]
+            group_tables = poetry.get("group")
+            if isinstance(group_tables, dict):
+                tables += [value.get("dependencies") for value in group_tables.values()
+                           if isinstance(value, dict)]
+            names = [name for table in tables if isinstance(table, dict)
+                     for name in table if name != "python"]
+            if _mentions_pytest(names):
+                spec += list(dict.fromkeys(names))
+    if buildable and not installs_project:
+        spec.insert(0, "-e")
+        spec.insert(1, ".")
+    if "pytest" not in spec:
+        spec.append("pytest")
+    return tuple(spec)
+
+
+def _pytest_venv_setup(root: Path) -> C.SetupConfig:
+    """Setup for a pytest project without a uv.lock: a checkout .venv via uv."""
+    import shlex
+    install = shlex.join(("uv", "pip", "install", "-q", "--python", VENV_PYTHON,
+                          *pytest_install_spec(root)))
+    return C.SetupConfig(
+        argv=("sh", "-c", f"uv venv -q --allow-existing .venv && {install}"),
+        required_paths=(VENV_PYTHON,),
+        network=True, lifecycle_scripts=True,
+    )
+
+
+def node_install_argv(root: Path) -> tuple[str, ...] | None:
+    """The frozen install command of the package manager whose lockfile exists."""
+    if _native_present(root, "pnpm-lock.yaml"):
+        return ("pnpm", "install", "--frozen-lockfile")
+    if _native_present(root, "yarn.lock"):
+        # Yarn Berry (2+) marks itself with .yarnrc.yml and spells it --immutable.
+        return (("yarn", "install", "--immutable") if _native_present(root, ".yarnrc.yml")
+                else ("yarn", "install", "--frozen-lockfile"))
+    if _native_present(root, "bun.lock") or _native_present(root, "bun.lockb"):
+        return ("bun", "install", "--frozen-lockfile")
+    if _native_present(root, "package-lock.json"):
+        return ("npm", "ci")
+    return None
 
 
 def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
@@ -809,8 +952,12 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
     if kind is C.RunnerKind.PYTEST:
         roots = pytest_test_roots(root)
         locked = _native_present(root, "uv.lock")
-        launcher = ("uv", "run", "--locked", "--no-sync", "python") \
-            if locked else ("python",)
+        # Without a uv.lock, a project that declares its dependencies gets a
+        # checkout .venv built by setup; a bare folder of tests keeps the
+        # ambient interpreter.
+        declared = not locked and _declares_python_dependencies(root)
+        launcher = (("uv", "run", "--locked", "--no-sync", "python") if locked
+                    else (VENV_PYTHON,) if declared else ("python",))
         # A fresh pytest config serializes xdist only for config-level
         # parallel-tier fallbacks (unsupported --dist, --maxprocesses):
         # neutralize those with "-n 0". Environment reasons
@@ -823,25 +970,30 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         if locked:
             setup = C.SetupConfig(
                 argv=("uv", "sync", "--locked"),
-                required_paths=(".venv/bin/python",),
+                required_paths=(VENV_PYTHON,),
                 network=True, lifecycle_scripts=True,
             )
+        elif declared:
+            setup = _pytest_venv_setup(root)
     elif kind is C.RunnerKind.VITEST:
         roots = ("tests",) if _directory_exists(root, "tests") else (".",)
         launcher = ("node",)
         setup = None
-        if _native_present(root, "package-lock.json"):
+        install = node_install_argv(root)
+        if install is not None:
             setup = C.SetupConfig(
-                argv=("npm", "ci"), required_paths=("node_modules",),
+                argv=install, required_paths=("node_modules",),
                 network=True, lifecycle_scripts=True,
             )
     elif kind is C.RunnerKind.GO:
-        roots = (".",)
+        roots = (".",)   # the Go adapter runs "." as every package (./...)
         launcher = ("go",)
         setup = None
     else:
         roots = (".",)
         launcher = ("cargo",)
+        # lib, bin and integration-test targets; doctests stay out of the gate.
+        args = ("--tests",)
         setup = None
     config = C.Config(
         runner=C.RunnerConfig(
@@ -859,9 +1011,12 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         # the lockfile/setup fingerprint.
         selection=C.SelectionPolicy(
             enabled=kind is C.RunnerKind.PYTEST, closed_inputs=False,
+            # Every pytest project runs from a setup-built .venv (uv sync,
+            # or uv venv without a lock); Cargo builds into target/.
             non_input_outputs=(".venv",) if kind is C.RunnerKind.PYTEST
-            and _native_present(root, "uv.lock") else
-            ("node_modules",) if kind is C.RunnerKind.VITEST else (),
+            and setup is not None else
+            ("node_modules",) if kind is C.RunnerKind.VITEST else
+            ("target",) if kind is C.RunnerKind.CARGO else (),
         ),
         project_id=secrets.token_hex(16), config_path=target,
     )
