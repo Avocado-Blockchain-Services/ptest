@@ -107,6 +107,39 @@ def test_green_run_then_no_changes(tmp_path, monkeypatch, capsys):
             "ptest --full runs everything") in err
 
 
+def test_committing_the_green_dirty_state_unchanged_is_not_a_change(
+        tmp_path, monkeypatch, capsys):
+    """click: ptest init, ptest (green on the dirty tree), commit .ptest.toml:
+    the next bare ptest reran the full suite for a config it had just run."""
+    init_git_repo(tmp_path, branch="main", files={})
+    _standalone_cmd(tmp_path, monkeypatch)  # .ptest.toml stays uncommitted
+    calls = _capture(monkeypatch, [])
+
+    assert main(()) == 0
+    assert len(calls) == 1
+
+    git_commit_all(tmp_path, message="commit the ptest config")
+
+    assert main(()) == 0
+    assert len(calls) == 1
+    assert "no changes since last green run" in capsys.readouterr().err
+
+
+def test_committing_a_different_version_of_a_green_dirty_file_is_a_change(
+        tmp_path, monkeypatch, capsys):
+    init_git_repo(tmp_path, branch="main", files={})
+    _standalone_cmd(tmp_path, monkeypatch)
+    (tmp_path / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+    calls = _capture(monkeypatch, [])
+    assert main(()) == 0
+
+    (tmp_path / "service.py").write_text("VALUE = 2\n", encoding="utf-8")
+    git_commit_all(tmp_path, message="changed after the green run")
+
+    assert main(()) == 0
+    assert len(calls) == 2
+
+
 # --- twin 3: failing test file rerun until green ----------------------------
 
 def test_failing_test_file_rerun_until_green(tmp_path, monkeypatch, capsys):

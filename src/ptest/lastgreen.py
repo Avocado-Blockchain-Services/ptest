@@ -358,7 +358,12 @@ def consult(domain_root: str | Path, top: Path, project: str, *,
         if committed is None:
             raise OSError("committed range unavailable")
         dirty = dirty_vs_fingerprint(top, project, record)
-        names = [path for path in committed if _under(path, project)]
+        # A file that was already dirty at the green point and was then
+        # committed unchanged (ptest init, then commit .ptest.toml) is not
+        # a change since that run.
+        names = [path for path in committed if _under(path, project)
+                 and not (record.files.get(path) is not None
+                          and _content_hash(top, path) == record.files[path])]
         names.extend(_prefix(project, rel) for rel in dirty)
         names.extend(_prefix(project, item) for item in failed
                      if isinstance(item, str) and item)
