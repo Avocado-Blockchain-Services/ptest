@@ -775,7 +775,14 @@ def _source_invalidation(before: C.InputSnapshot,
                        "final source identity is unavailable; verify the final input state")
     if (before.digest != after.digest or
             (before.compatibility is not None and before.compatibility != after.compatibility)):
-        classes = ", ".join(_changed_path_classes(before, after))
+        changed = _changed_path_classes(before, after)
+        if (changed == ("ignored",) and before.digest != after.digest
+                and before.compatibility == after.compatibility):
+            # Gitignored paths are not source: tests and setup write logs,
+            # coverage data and caches there (fastapi: coverage/, log.txt;
+            # husky's .husky/_). Tracked and untracked changes still count.
+            return None
+        classes = ", ".join(changed)
         return _reason("changed-during-run",
                        "relevant source inputs changed during execution; "
                        f"path classes: {classes}; verify the final input state")

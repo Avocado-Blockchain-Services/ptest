@@ -311,6 +311,30 @@ def test_setup_rewriting_tracked_source_is_still_changed_during_run(case):
     assert b"changed-during-run" in completed.stderr
 
 
+def test_tests_writing_gitignored_output_still_pass(case):
+    """fastapi: tests write coverage/ data and log.txt, both gitignored."""
+    domain = case.domain()
+    root = _command_project(case, domain, args=("marker", "log.txt"))
+    support.init_git_repo(root, files={".gitignore": "log.txt\n"})
+
+    completed = case.invoke(domain, root, "--full", timeout=30)
+
+    assert completed.code == 0, completed.stderr.decode()
+    assert (root / "log.txt").exists()
+    assert b"changed-during-run" not in completed.stderr
+
+
+def test_tests_writing_untracked_source_still_invalidate_the_run(case):
+    domain = case.domain()
+    root = _command_project(case, domain, args=("marker", "generated.py"))
+    support.init_git_repo(root)
+
+    completed = case.invoke(domain, root, "--full", timeout=30)
+
+    assert completed.code == 70
+    assert b"changed-during-run" in completed.stderr
+
+
 # ---- R4: -v/--verbose and -q/--quiet ------------------------------------------
 
 def test_verbose_flag_in_option_position_is_a_ptest_option():
