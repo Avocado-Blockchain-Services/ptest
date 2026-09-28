@@ -3,8 +3,8 @@
 **Run only the tests your change reaches — locally, in parallel, safely next to
 other runs.**
 
-ptest is a local-first test coordinator for pytest and Vitest projects (plus
-simple Go/Cargo profiles). It sits in front of your test runner and:
+ptest is a local-first test coordinator for pytest and Vitest projects, and
+runs Go (`go test ./...`) and Cargo (`cargo test --tests`) suites too. It sits in front of your test runner and:
 
 - **runs the tests your edit reaches**, found from `git diff` and a static
   import graph — no coverage run, no baseline, no setup step;
@@ -283,18 +283,31 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 - **Vitest** runs as one exclusive `vitest run` that manages its own workers.
 - **Many runs at once**: every ptest on the machine shares one slot budget.
   Extra runs queue (`waiting for …`) instead of oversubscribing the CPU.
-- **Setup** (`uv sync`, `npm ci`, `pnpm install`) runs before the tests when
-  its required paths are missing or its lockfile changed, and is skipped
-  otherwise.
+- **Setup** runs before the tests when its required paths are missing or its
+  lockfile changed, and is skipped otherwise. `ptest init` picks it from the
+  project:
+
+  | Project has | Setup |
+  | --- | --- |
+  | `uv.lock` | `uv sync --locked` |
+  | `pyproject.toml` / `setup.py` / `requirements*.txt`, no lock | `uv venv` + `uv pip install` of the project and its test deps (from a requirements file, an extra or dependency group naming pytest, or Poetry dev deps) into `.venv` |
+  | `pnpm-lock.yaml` / `yarn.lock` / `bun.lock` / `package-lock.json` | `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` (`--immutable` on Yarn 2+) / `bun install --frozen-lockfile` / `npm ci` |
+
+  A bare folder of tests with no package manifest uses the `python` on your
+  `PATH`.
 
 ---
 
 ## pytest plugin compatibility
 
+Supported: pytest 8.x and 9.x, pytest-xdist 3.5 or newer 3.x (parallel runs),
+pytest-cov 5 to 7 with coverage 7 (parallel coverage).
+
 ptest checks which plugins hook into test execution, so that nothing it
 cannot observe decides the result. These run as normal: pytest-asyncio,
 anyio, pytest-timeout, pytest-cov, pytest-xdist, hypothesis, schemathesis,
-pytest-order, pytest-sugar, pytest-instafail, faker, pytest-mock. Your own
+pytest-order, pytest-sugar, pytest-instafail, faker, pytest-mock,
+pytest-benchmark. Your own
 `conftest.py` may filter collection, clean up at session end, and observe
 tests (timing, logging) — including hooks re-exported from your own helper
 modules.

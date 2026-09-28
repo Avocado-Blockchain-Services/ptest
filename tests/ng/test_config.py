@@ -990,3 +990,15 @@ def test_setup_display_shows_the_script_of_sh_c():
     assert display_setup(("sh", "-c", "uv venv && uv pip install pytest")) == \
         "uv venv && uv pip install pytest"
     assert display_setup(("uv", "sync", "--locked")) == "uv sync --locked"
+
+
+def test_pytest_roots_skip_folders_the_project_ignores_in_addopts(tmp_path):
+    """fastapi: addopts --ignore=docs_src keeps its tutorial code out."""
+    from ptest.config import pytest_test_roots
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = ["--strict-config", "--ignore=docs_src"]\n',
+        encoding="utf-8")
+    _touch(tmp_path / "tests" / "test_a.py")
+    _touch(tmp_path / "docs_src" / "app" / "test_main.py")
+
+    assert pytest_test_roots(tmp_path) == ("tests",)

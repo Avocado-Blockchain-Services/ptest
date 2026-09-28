@@ -778,6 +778,25 @@ def _dir_has_test_files(base: Path) -> bool:
     return False
 
 
+def _addopts_ignored_dirs(root: Path) -> set[str]:
+    """Top-level folders the project's own addopts ``--ignore`` (fastapi:
+    ``--ignore=docs_src``), so ``--full`` never passes them explicitly."""
+    try:
+        tokens = _executability._pytest_addopts(root)
+    except Exception:
+        return set()
+    ignored: set[str] = set()
+    for index, token in enumerate(tokens):
+        value = None
+        if token.startswith(("--ignore=", "--ignore-glob=")):
+            value = token.split("=", 1)[1]
+        elif token in ("--ignore", "--ignore-glob") and index + 1 < len(tokens):
+            value = tokens[index + 1]
+        if value:
+            ignored.add(value.strip("/").removeprefix("./").split("/", 1)[0])
+    return ignored
+
+
 def pytest_test_roots(root: Path) -> tuple[str, ...]:
     """Directories a full pytest run of ``root`` covers.
 
@@ -804,6 +823,8 @@ def pytest_test_roots(root: Path) -> tuple[str, ...]:
                 found.append(entry.name)
         except OSError:
             continue
+    ignored = _addopts_ignored_dirs(root)
+    found = [name for name in found if name not in ignored]
     suite = [name for name in found if name.lower() not in _NON_SUITE_DIRS]
     if suite or found:
         return tuple(suite or found)
