@@ -30,6 +30,9 @@ def _attempt(workers: int = 1) -> C.AttemptIdentity:
 
 
 def _config(case, **overrides):
+    entry = case.base / "node_modules" / "vitest" / "vitest.mjs"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("// installed\n", encoding="utf-8")
     config = case.config(runner_kind="vitest", config_path=case.base / "ptest.toml")
     runner = replace(config.runner, launcher=("node",))
     if overrides:
