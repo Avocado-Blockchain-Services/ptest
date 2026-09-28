@@ -301,7 +301,19 @@ def test_command_tracked_source_change_preserves_mode_exit_contract(case, mode, 
     assert scheduler.reconcile(domain)[0].state is C.LeaseState.RELEASED
 
 
-@pytest.mark.parametrize("path_class", ["untracked", "ignored"])
+def test_command_gitignored_modification_does_not_invalidate_the_run(case):
+    """Gitignored paths are output (logs, coverage data), not source."""
+    domain = case.domain()
+    root = _git_command_project(case, domain, args=("modify-exit", "ignored-input.txt", "0"))
+    (root / "ignored-input.txt").write_text("before")
+
+    result = _execute(root, domain)
+
+    assert (result.status, result.exit_code) == (C.Status.PASSED, 0)
+    assert not any(reason.code == "changed-during-run" for reason in result.reasons)
+
+
+@pytest.mark.parametrize("path_class", ["untracked"])
 def test_command_changed_path_class_evidence_excludes_paths_and_content(case, path_class):
     domain = case.domain()
     path = f"{path_class}-input.txt"
