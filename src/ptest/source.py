@@ -678,7 +678,8 @@ def _pytest_tool_generated(path: str, included: set[str],
     The native runner (cacheprovider) and the interpreter (bytecode,
     assertion-rewrite cache) write these while a run executes, so they can
     appear or change between the pre-launch and post-run snapshots of any
-    Pytest run, scoped or full.  When the ptest config itself enables
+    Pytest run, scoped or full; so does the Hypothesis plugin's example
+    database under ``.hypothesis/``.  When the ptest config itself enables
     coverage, pytest-cov data files (``.coverage``, parallel-mode
     ``.coverage.<suffix>`` at the checkout root, or the configured
     coverage ``data_file``) are expected byproducts too.  Anything outside
@@ -691,6 +692,10 @@ def _pytest_tool_generated(path: str, included: set[str],
         ".pytest_cache/v/cache/nodeids", ".pytest_cache/v/cache/lastfailed",
         ".pytest_cache/v/cache/stepwise",
     }:
+        return ""
+    # Hypothesis keeps its example database under the checkout-root
+    # ``.hypothesis/`` and writes it during every run (fullon2 server).
+    if path.startswith(".hypothesis/"):
         return ""
     for base in coverage_bases:
         if path == base:

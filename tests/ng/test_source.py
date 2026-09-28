@@ -404,8 +404,29 @@ def test_pytest_scoped_snapshot_excludes_tool_byproducts(case):
     assert "src/__pycache__/a.cpython-313.pyc" not in paths
 
 
+def test_pytest_snapshot_excludes_hypothesis_database(case):
+    """fullon2 server: hypothesis writes .hypothesis/ during every run."""
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case)
+    ensure_fingerprint_key(domain)
+    config = _config(case, domain)
+    (root / ".gitignore").write_text(".hypothesis/\n")
+    git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore hypothesis")
+    before = snapshot(domain, config, None, None)
+    examples = root / ".hypothesis" / "examples" / "ab12" / "cd34"
+    examples.parent.mkdir(parents=True)
+    examples.write_bytes(b"example")
+    (root / ".hypothesis" / "constants").mkdir()
+    (root / ".hypothesis" / "constants" / "ef56").write_bytes(b"constants")
+    after = snapshot(domain, config, None, None)
+    assert after.digest == before.digest
+    assert not any(item.path.startswith(".hypothesis/") for item in after.files)
+
+
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
-                                  "tests/__pycache__/sourceless.cpython-313.pyc"])
+                                  "tests/__pycache__/sourceless.cpython-313.pyc",
+                                  "nested/.hypothesis/examples/ab"])
 def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
     """The scoped byproduct filter stays fail-closed on unknown shapes."""
     from ptest.source import ensure_fingerprint_key
@@ -413,7 +434,8 @@ def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
     domain, root = _repository(case)
     ensure_fingerprint_key(domain)
     config = _config(case, domain)
-    (root / ".gitignore").write_text(".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\n")
+    (root / ".gitignore").write_text(
+        ".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\nnested/.hypothesis/\n")
     git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
     target = root / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"output")
     result = snapshot(domain, config, None, None)
@@ -421,14 +443,16 @@ def test_pytest_scoped_snapshot_retains_nonstandard_cache_outputs(case, path):
 
 
 @pytest.mark.parametrize("path", [".pytest_cache/custom", "nested/.pytest_cache/CACHEDIR.TAG",
-                                  "tests/__pycache__/sourceless.cpython-313.pyc"])
+                                  "tests/__pycache__/sourceless.cpython-313.pyc",
+                                  "nested/.hypothesis/examples/ab"])
 def test_pytest_full_snapshot_retains_nonstandard_cache_outputs(case, path):
     from ptest.source import ensure_fingerprint_key
 
     domain, root = _repository(case)
     ensure_fingerprint_key(domain)
     config = _config(case, domain)
-    (root / ".gitignore").write_text(".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\n")
+    (root / ".gitignore").write_text(
+        ".pytest_cache/\nnested/.pytest_cache/\ntests/__pycache__/\nnested/.hypothesis/\n")
     git(root, "add", ".gitignore"); git(root, "commit", "-m", "ignore caches")
     target = root / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"output")
     result = snapshot(domain, config, None, None, pytest_full_outputs=True)

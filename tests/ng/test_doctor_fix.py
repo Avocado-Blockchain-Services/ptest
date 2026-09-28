@@ -352,6 +352,25 @@ def test_fix_keeps_test_roots_matching_declared_testpaths(tmp_path, monkeypatch,
     assert "test_roots" not in capsys.readouterr().out
 
 
+def test_fix_keeps_test_roots_covering_declared_file_testpaths(tmp_path, monkeypatch, capsys):
+    """persea api: testpaths name a file and subdirectories of tests/."""
+    root = _write_pytest_project(tmp_path / "persea", addopts=None)
+    (root / "tests" / "db").mkdir()
+    (root / "tests" / "db" / "test_db.py").write_text(
+        "def test_db():\n    pass\n", encoding="utf-8")
+    (root / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = tests/test_example.py tests/db\n", encoding="utf-8")
+    (root / "scripts").mkdir()
+    (root / "scripts" / "test_manual.py").write_text(
+        "def test_manual():\n    pass\n", encoding="utf-8")
+    _write_config(root)
+    monkeypatch.chdir(root)
+    _no_review(monkeypatch)
+
+    assert main(("doctor", "--fix", "--dry-run")) == 0
+    assert "test_roots" not in capsys.readouterr().out
+
+
 def test_fix_keeps_explicit_off_when_selection_was_hand_tuned(tmp_path, monkeypatch, capsys):
     """enabled = false next to non-default selection keys is a deliberate choice."""
     root = _write_pytest_project(tmp_path / "tuned", addopts="")

@@ -709,7 +709,8 @@ def _declared_testpaths(root: Path) -> tuple[str, ...] | None:
     """``testpaths`` from the pytest config file pytest itself would pick.
 
     None when no config file declares them, or when they are not plain
-    relative directories (globs, absolute, escaping) that ptest can pass on.
+    relative paths to existing directories or files (globs, absolute,
+    escaping, missing) that ptest can pass on.
     """
     import configparser
     value: object = None
@@ -753,7 +754,7 @@ def _declared_testpaths(root: Path) -> tuple[str, ...] | None:
             return None
         rel = item.strip().rstrip("/") or "."
         if (_TESTPATHS_GLOB.search(rel) or rel.startswith("/")
-                or ".." in rel.split("/") or not (root / rel).is_dir()):
+                or ".." in rel.split("/") or not (root / rel).exists()):
             return None
         if rel not in roots:
             roots.append(rel)
@@ -761,6 +762,8 @@ def _declared_testpaths(root: Path) -> tuple[str, ...] | None:
 
 
 def _dir_has_test_files(base: Path) -> bool:
+    if base.is_file():
+        return _is_pytest_test_file(base.name)
     for current, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _ROOT_SCAN_SKIP]
         if any(_is_pytest_test_file(name) for name in files):

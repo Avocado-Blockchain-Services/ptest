@@ -875,3 +875,18 @@ def test_pytest_roots_fallback_without_test_files(tmp_path):
     (tmp_path / "tests").mkdir()
     assert pytest_test_roots(tmp_path) == ("tests",)
     assert pytest_test_roots(tmp_path / "tests") == (".",)
+
+
+def test_pytest_roots_accept_declared_test_files(tmp_path):
+    """persea api: testpaths lists a file next to directories."""
+    from ptest.config import pytest_test_roots
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\n'
+        'testpaths = ["tests/test_m10.py", "tests/db", "tests/unit"]\n', encoding="utf-8")
+    _touch(tmp_path / "tests" / "test_m10.py")
+    _touch(tmp_path / "tests" / "db" / "test_a.py")
+    _touch(tmp_path / "tests" / "unit" / "test_b.py")
+    _touch(tmp_path / "scripts" / "test_manual.py")
+    _touch(tmp_path / "packages" / "mcp" / "tests" / "test_c.py")
+
+    assert pytest_test_roots(tmp_path) == ("tests/test_m10.py", "tests/db", "tests/unit")

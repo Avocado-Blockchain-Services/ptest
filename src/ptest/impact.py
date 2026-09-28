@@ -146,6 +146,7 @@ _SKIP_DIRS = frozenset({"node_modules", "__pycache__", "site-packages",
 _OUTPUT_DIRS = frozenset({
     "build", "dist", "node_modules", ".venv", "venv", "__pycache__",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "htmlcov",
+    ".hypothesis",
 })
 
 _VITEST_CODE_EXTS = frozenset({
