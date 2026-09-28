@@ -14,9 +14,11 @@ Getting started:
   ptest help agents               # self-contained agent workflow
 
 Running tests from the repository root:
-  ptest tests/test_example.py     # scoped: smallest relevant scope
   ptest                           # default loop: tests your change reaches (changes since the last green run; no baseline needed)
-  ptest --full                    # integrated gate once the change lands
+  ptest api/tests                 # changed tests under one folder only
+  ptest api/tests/test_x.py       # one file (or file::test): always runs it
+  ptest --full api/tests          # every test under one folder
+  ptest --full                    # integrated gate, once before handoff
   ptest -- -k slow                # literal runner tail, standalone v1 only (see ptest help run)
 
 Inspect and review:

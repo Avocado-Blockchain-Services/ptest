@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# get.sh passes a uv-found CPython 3.11-3.14; plain python3 otherwise.
+python="${PTEST_PYTHON:-python3}"
 has_wheelhouse=false
 has_manifest=false
 for argument in "$@"; do
@@ -14,7 +16,7 @@ if [ "$has_wheelhouse" = true ] || [ "$has_manifest" = true ]; then
         echo "install.sh: --wheelhouse and --manifest must be supplied together" >&2
         exit 2
     fi
-    exec python3 "$source_dir/scripts/install.py" "$@"
+    exec "$python" "$source_dir/scripts/install.py" "$@"
 fi
 
 wheelhouse="$source_dir/wheelhouse"
@@ -40,7 +42,12 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
-python3 "$source_dir/scripts/install.py" --dest "$destination" \
+# A fresh account (typical on macOS) has no ~/.local yet; the installer only
+# accepts existing, private ancestors of the default destination.
+if [ "$destination" = "${HOME}/.local/ptest" ] && [ ! -e "${HOME}/.local" ]; then
+    (umask 022 && mkdir -p "${HOME}/.local")
+fi
+"$python" "$source_dir/scripts/install.py" --dest "$destination" \
     --wheelhouse "$wheelhouse" --manifest "$manifest" "${forwarded[@]}"
 
 # The default installation is a user command, so publish its PATH entry only

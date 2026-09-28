@@ -324,12 +324,13 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
         bundled_paths = list(paths)
         if fault == "after-one-wheel":
             raise RuntimeError("after-one-wheel")
-        subprocess.run(["uv", "venv", "--python", str(py), str(bundle / "venv")], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
+        subprocess.run(["uv", "venv", "-q", "--python", str(py), str(bundle / "venv")], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
         if fault == "after-venv":
             raise RuntimeError("after-venv")
-        subprocess.run(["uv", "pip", "install", "--python", str(bundle / "venv" / "bin" / "python"), "--no-index", "--no-deps", *(str(p) for p in bundled_paths)], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
-        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "--version"], check=True, timeout=30)
-        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "guide"], check=True, timeout=30)
+        subprocess.run(["uv", "pip", "install", "-q", "--python", str(bundle / "venv" / "bin" / "python"), "--no-index", "--no-deps", *(str(p) for p in bundled_paths)], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
+        # Smoke checks only: they must succeed, their output is not for the user.
+        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "--version"], check=True, timeout=30, stdout=subprocess.DEVNULL)
+        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "guide"], check=True, timeout=30, stdout=subprocess.DEVNULL)
         subprocess.run([str(bundle / "venv" / "bin" / "python"), "-c", "from importlib.resources import files; p=files('ptest'); assert p.joinpath('runtime/vitest_bridge.mjs').is_file(); assert p.joinpath('runtime/protocol-v1.json').is_file(); assert p.joinpath('resources/agent-guide.md').is_file(); assert any(p.joinpath('resources/recipes').iterdir())"], check=True, timeout=30)
         marker = {"version": 1, "bundle_id": bundle.name, "ptest_version": manifest["ptest_version"], "python_version": ".".join(map(str, sys.version_info[:3])), "wheel_sha256s": [e["sha256"] for e in manifest["wheels"]], "entrypoint": "venv/bin/ptest"}
         marker_path = bundle / "complete.json"
@@ -379,7 +380,8 @@ def main(argv=None) -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--allow-network", action="store_true")
     args = parser.parse_args(argv)
-    install_bundle(args.dest, args.wheelhouse, args.manifest, allow_network=args.allow_network, fault=os.environ.get("PTEST_INSTALL_FAULT"))
+    public = install_bundle(args.dest, args.wheelhouse, args.manifest, allow_network=args.allow_network, fault=os.environ.get("PTEST_INSTALL_FAULT"))
+    print(f"installed ptest at {public}")
     return 0
 
 

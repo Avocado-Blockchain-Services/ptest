@@ -10,7 +10,7 @@ Support labels are evidence levels, not guesses:
 | Independent pytest adoption | Blocked-unverified | Public immutable checkout and dependency setup still need an authorized run |
 | Independent Vitest adoption | Blocked-unverified | Public immutable checkout, Yarn availability, and lifecycle disclosure still need an authorized run |
 | Linux local filesystem | Observed platform scope | Only the measured runner/launcher tuple is supported |
-| macOS | Unverified | Repeat the install/lifecycle/adapter matrix on actual macOS |
+| macOS (arm64, x86_64) | Release bundles built and validated; unverified on real hardware | Repeat the install/lifecycle/adapter matrix on actual macOS |
 | Windows, hosted services, cloud APIs | Out of scope for v1 | ptest remains local-only |
 | Coding-agent TUIs | Generic CLI compatibility only | No provider API or agent launcher is required or implied |
 

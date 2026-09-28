@@ -1,140 +1,405 @@
-# ptest NG
+# ptest
 
-ptest is a local-first test coordinator. Normal test execution is local and
-model-independent; no cloud account, model API, or remote service is required
-to run tests. Run `ptest init`, then loop bare `ptest` after each edit (bare
-`ptest` runs the tests your change reaches: changes since the last green run,
-branch-base diff until the first green run; no baseline or coverage needed),
-target one test with `ptest <scoped paths>`,
-and finish with `ptest --full` once before handoff. `--full` skips already-verified inputs
-(`--again` forces them), and a duplicate full run joins the running full run
-instead of starting a second one.
+**Run only the tests your change reaches — locally, in parallel, safely next to
+other runs.**
 
-Doctor has an explicit offline static mode (`--offline`) and a separately
-consented CLI review design. `ptest doctor --json` emits the versioned
-review document; `ptest doctor --offline --json` emits the same document
-built from static facts only. Claude and Codex are qualified
-reviewers. OpenCode is not supported because its free tier refuses tool-free
-runs (HTTP 403 FreeTierError). Review sends bounded source text to the
-selected provider using your
-existing account; provider or account costs may apply. On a TTY without an
-explicit concrete --reviewer, review first asks which qualified installed
-reviewer to use (one is used directly; declining shows offline output).
-Choosing agents with
-`ptest init --agents` installs guidance only and does not authorize model
-review. See `ptest help doctor` for details; agents start at `ptest help agents`.
-The installed `docs/ptest-agent.md` lists every ptest output line and exit
-code with the action for each; runner internals (parallel tiers, setup,
-`-v`/`-q`) are documented here and in `ptest help run`.
+ptest is a local-first test coordinator for pytest and Vitest projects (plus
+simple Go/Cargo profiles). It sits in front of your test runner and:
 
-`ptest init` reports per-project status: each configured project shows its
-runner, whether it runs, its parallel workers, and its setup, and the
-footer lists only actionable next steps (not runnable, parallel off,
-setup pending, smoke failed) plus one line to restart coding agents when
-guidance changed. Projects that cannot run show the reason and the exact
-fix instead. Re-running init is idempotent and never rewrites user-edited
-guidance.
+- **runs the tests your edit reaches**, found from `git diff` and a static
+  import graph — no coverage run, no baseline, no setup step;
+- **understands monorepos**: a Python API, a React app and a CLI in one
+  repository, each with its own runner and config;
+- **coordinates concurrent runs** (you, your editor, three coding agents) with
+  a machine-wide slot scheduler, so parallel test runs queue instead of
+  fighting over CPU, ports and databases;
+- **refuses to lie**: a run that cannot prove its result (sources changed
+  mid-run, a plugin took over execution) ends `incomplete`, never `passed`;
+- **teaches coding agents** how to test: `ptest init` installs short guidance
+  for Claude Code, Codex, OpenCode and Gemini.
 
-Pytest runs in parallel under ptest when the project's checked-in pytest
-config enables xdist: `-n N` requests N workers, `-n auto` requests one
-worker per granted slot, and `ptest --workers W` caps the request. The
-scheduler grants the slots that are free; a smaller grant runs fewer
-workers and a single slot runs serially with a generated `-n 0`. When
-xdist cannot be verified (unsupported `--dist`, an unqualified
-pytest-xdist or pytest-cov/coverage pair, or an unverifiable launcher),
-ptest falls back to serial and says why. The first run in a fresh checkout
-may run serially until setup has installed pytest-cov/xdist. `ptest init`
-writes `-n 0` only for config-level reasons; `-n 0` in `[runner] args` opts
-out of parallel runs. Coverage (`--cov`) runs in parallel under xdist when the project
-environment holds the qualified pytest-cov/coverage pair. Vitest
-executes as one exclusive `vitest run` command through the project-local
-Vitest CLI and manages its own workers; declared `[setup]` (such as
-`npm ci`) runs first when its required paths are missing or the lockfile changed.
+No cloud account, model API or remote service is needed to run tests.
 
-While a run executes, ptest narrates itself on stderr with short
-`ptest:`-prefixed status lines: a start line, a waiting line when
-admission queues, setup lines, and an end line with ptest's own verdict,
-counts, and duration. Runner output is untouched. `ptest -v` adds
-scheduling and setup detail and also makes pytest/vitest verbose;
-`ptest -q` silences ptest's own lines while errors and refusals still
-print. Machine documents (`--json`, `--result-json`) never carry status
-lines. See `ptest help run`.
-
-`ptest doctor` review makes an initial model call for each checklist item
-that needs one after consent, then makes at most one bounded follow-up: an
-independent verification of a valid reply, or a fresh source-only recovery
-after a completed protocol, schema, or source-ID failure. Recovery reuses the
-original selected units and IDs and omits the invalid draft. Provider, tool, deadline,
-cancellation, and output-limit failures are not retried; an invalid follow-up
-ends as unknown. There is no third call or new source collection. Timing,
-selection and parallel execution items use ptest's own facts with no model
-call. The
-default requested models are Codex `gpt-6-sol` and Claude `opus`; an explicit
-`--review-model` or `PTEST_REVIEW_MODEL` overrides that choice. The selected
-model must pass the provider's normal qualification. `--review-concurrency`
-(1-8, default 4) bounds parallel calls. Before the prompt, ptest prints at
-most three short disclosure lines with the requested model and the maximum
-initial-plus-one-follow-up call count; full disclosure is in
-`ptest doctor --help`.
-Reviews cite opaque IDs for automatically selected setup, representative
-callers, helpers and cleanup. Findings cover only cited, reachable evidence;
-an omitted decisive caller or failure path remains unknown. A review is not a
-suite-wide execution certificate. `ptest doctor --offline` is static and
-sends nothing. The terminal shows a compact checklist with a reason on every
-unknown row.
-
-For normal use, download a verified release archive and run `./install.sh`; see
-[docs/installation.md](docs/installation.md). The installer validates bundled
-wheels before atomically switching the local command. Its explicit
-`--dest --wheelhouse --manifest` form remains available for offline and
-enterprise installation. Security gate instructions are in [docs/security.md](docs/security.md).
-
-To keep ptest's configuration, coordinator, history, and review-model cache in
-your workspace, set `PTEST_STATE_DIR` to an absolute path outside the repository
-before invoking ptest:
-
-```sh
-export PTEST_STATE_DIR=/abs/workspace/.ptest-state
+```text
+$ ptest
+ptest: server · changed since last green run (93843fe, 23s ago): tests/fullon_credentials/unit/test_backend_switch.py → 1 of 608 test files (1 direct · 0 via importers)
+============================== 7 passed in 2.43s ===============================
+ptest: passed · 7 tests · 6.6s
+ptest: api · no changes
+ptest: web · no changes
+ptest: total · passed · 6.6s · next: ptest --full before handoff
 ```
 
-Use the same value for every project that should share concurrency limits.
-See [workspace-local setup](docs/installation.md#workspace-local-setup) for
-running from a checkout without a global installation.
+---
 
-`ptest uninstall` reverses what ptest set up in a repository: it removes the
-`.ptest.toml` files, ptest-managed guidance, the un-edited
-`recommendations.md` report, and this checkout's private state (history,
-setup records, scheduler rows). Files you edited are kept and reported;
-symlinks and anything outside the repository root are never touched. The
-plan prints first (grouped by action); a TTY is asked once, while
-non-interactive runs require `--yes` and `--dry-run` changes nothing.
-Skipped entries are informational and exit 0. Run uninstall with the same
-PTEST_STATE_DIR used for runs, so it inspects the same machine-state
-location (the plan names it as `state: ...`).
-`ptest uninstall --self` also removes the local installation (only
-installer-created entries; anything else inside the root is kept). See
-`ptest help uninstall` for details.
+## Install
 
-## Checking agent guidance
+### One line (macOS and Linux)
 
-`scripts/agent_eval.py` checks whether LLMs can use ptest from its installed
-guidance: it builds a scratch monorepo in a temp dir from the current guide
-plus skill bytes (the same bytes `ptest init` installs), prompts each subject
-with 13 scenarios (`evals/agent-usage/scenarios.toml`), extracts the JSON
-answers, and scores them. It prints a compact subject × scenario table and
-exits 0 only if every subject passes every scenario. Stdlib only; `--dry-run`
-prints the prompt and repo path without calling any model:
+```sh
+curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | sh
+```
+
+The script detects your OS and CPU, downloads the matching release bundle,
+verifies its SHA-256, and installs it to `~/.local/ptest` with a `ptest`
+command in `~/.local/bin`. The bundle carries every wheel it needs; nothing
+else is fetched from PyPI.
+
+Requirements:
+
+| Need | Why | If missing |
+| --- | --- | --- |
+| [uv](https://docs.astral.sh/uv/) | builds ptest's private virtualenv | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| CPython 3.11–3.14 | ptest's runtime | the installer asks uv for one, and installs 3.13 with uv if none is found (the macOS system `python3` is too old) |
+| `curl`, `tar` | download and unpack | preinstalled on macOS and most Linux |
+
+If `~/.local/bin` is not on your `PATH`, add it:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+```
+
+Supported platforms: Linux x86_64 and aarch64 (glibc 2.28+), macOS arm64
+(Apple Silicon) and x86_64. Linux is what ptest is developed and verified on.
+The macOS bundles are built and validated from the same sources, but have not
+yet been verified end to end on real macOS hardware; please open an issue if
+anything misbehaves there. Windows is not supported.
+
+### Pin a version, upgrade, remove
+
+```sh
+# a specific version
+curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | PTEST_VERSION=0.3.3 sh
+
+# upgrade: run the one-liner again (the switch is atomic)
+curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | sh
+
+ptest --version
+ptest uninstall --self     # remove the installation (run ptest uninstall in a repo first to clean it)
+```
+
+### Manual install (air-gapped, audited)
+
+Download `ptest-VERSION-OS-ARCH.tar.gz` and its `.sha256` from the
+[releases page](https://github.com/Avocado-Blockchain-Services/ptest/releases),
+then:
+
+```sh
+sha256sum -c ptest-0.3.3-linux-x86_64.tar.gz.sha256     # macOS: shasum -a 256 -c
+tar -xzf ptest-0.3.3-linux-x86_64.tar.gz
+./ptest-0.3.3/install.sh                               # or: --dest /absolute/path
+```
+
+See [docs/installation.md](docs/installation.md) for the offline
+`--wheelhouse/--manifest` form and workspace-local setups.
+
+---
+
+## Quick start
+
+```sh
+cd your-repo
+ptest init          # detects runners, writes .ptest.toml, offers agent guidance
+ptest               # after each edit: runs the tests your change reaches
+ptest --full        # once, before you hand the change off
+```
+
+`ptest init` looks at the repository, detects pytest/Vitest/Go/Cargo projects
+(including several in one monorepo), writes a `.ptest.toml` per project, and
+reports what it found:
+
+```text
+$ ptest init --dry-run
+ptest init preview · your-repo
+
+  api  pytest
+  web  vitest
+```
+
+Run init again at any time; it is idempotent and never rewrites files you
+edited. Commit the `.ptest.toml` files.
+
+---
+
+## The five commands
+
+Always run ptest from the repository root.
+
+| You want | Command |
+| --- | --- |
+| After each edit: the tests your change reaches, whole repo | `ptest` |
+| The changed tests under one folder only | `ptest api/tests` |
+| One file or one test — always runs it | `ptest api/tests/test_billing.py` · `ptest api/tests/test_billing.py::test_tax` |
+| Every test under one folder | `ptest --full api/tests` |
+| The integrated gate, once before handoff | `ptest --full` |
+
+Any path routes to the nearest `.ptest.toml`, so every sub-project works the
+same way: `ptest web/src`, `ptest --full launchpad`, `ptest server/tests/unit`.
+
+### Examples
+
+```sh
+# edited api/app/billing.py
+ptest
+# ptest: api · changed since last green run (a1b2c3d, 4m ago): app/billing.py → 3 of 212 test files (1 direct · 2 via importers)
+
+# nothing changed since the last green run
+ptest
+# ptest: no changes vs HEAD — nothing to test · ptest --full runs everything
+
+# only look at one area
+ptest api/tests/unit
+# ptest: api · no changes under api/tests/unit — nothing to test · ptest --full api/tests/unit runs all of them
+
+# run one test, no matter what changed
+ptest api/tests/test_billing.py::test_tax
+
+# the whole web suite
+ptest --full web
+
+# the final gate over every project
+ptest --full
+```
+
+Useful flags:
+
+| Flag | Effect |
+| --- | --- |
+| `-v` | ptest's scheduling/setup detail, and a verbose runner |
+| `-q` | silence ptest's own lines (errors still print) |
+| `--again` | with `--full`: rerun even if these exact inputs already passed |
+| `--timeout 2700` | run deadline in seconds (default: from history, else estimated from the test count) |
+| `--workers N` | cap parallel workers for this run |
+
+---
+
+## How "the tests your change reaches" works
+
+1. **What changed.** Changes since the last green run of that project
+   (commit plus a fingerprint of uncommitted work); before the first green
+   run, changes since the merge-base with your default branch.
+2. **Noise is ignored.** Docs, build output (`build/`, `dist/`,
+   `node_modules/`, caches) and non-code files outside source/test areas do
+   not trigger tests.
+3. **Who imports it.** For pytest, a static AST import graph maps each
+   changed file to the test files that import it, directly or through other
+   modules. Package `__init__.py` re-exports count, because Python executes
+   them.
+4. **When to widen.** Lockfiles, `conftest.py`, pytest/ptest config and
+   declared `full_triggers` run the whole project's suite, as does a change
+   that reaches more than 70% of the test files (`full_ratio`).
+5. **Vitest** projects delegate to `vitest run --changed <base>`.
+
+Untouched projects in a monorepo print `<project> · no changes` and run
+nothing.
+
+---
+
+## Monorepos
+
+The root `.ptest.toml` declares the children; each child has its own config:
+
+```toml
+# .ptest.toml (repository root)
+version = 2
+
+[monorepo]
+children = ["api", "web"]
+```
+
+```toml
+# api/.ptest.toml
+version = 1
+project_id = "291b6f5e961ca600b86c8a5f688f1a21"
+
+[runner]
+kind = "pytest"
+launcher = ["uv", "run", "--locked", "--no-sync", "python"]
+args = []
+full_args = []
+test_roots = ["tests"]          # what --full runs: pytest testpaths, or every folder holding tests
+workers = 1
+lifecycle = "cooperative-process-group"
+
+[setup]                         # runs first when required paths are missing or the lockfile changed
+argv = ["uv", "sync", "--locked"]
+required_paths = [".venv/bin/python"]
+network = true
+lifecycle_scripts = true
+
+[selection]
+enabled = true                  # graph selection for bare `ptest`
+full_triggers = []              # extra files that force the whole suite
+non_input_outputs = [".venv"]   # outputs that never count as source changes
+full_ratio = 0.7
+```
+
+`ptest init` writes these; `ptest doctor --fix` updates older configs (turns
+on selection, widens `test_roots` that miss test files, adds missing output
+exemptions) without touching values you tuned.
+
+---
+
+## Reading the output
+
+ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
+
+| Line | Meaning |
+| --- | --- |
+| `changed: <path> → N of M test files` | the tests your change reaches |
+| `changed → full suite: <reason>` | this run *is* the full suite (trigger file, too many affected tests, selection off) |
+| `no changes … — nothing to test` | nothing to run (exit 0) |
+| `waiting for N slots … in use by …` | queued behind other ptest runs; it starts by itself |
+| `setup: uv sync --locked (first run)` | declared setup is running |
+| `passed · N tests` / `failed · …` | the verdict |
+| `next: ptest --full before handoff` | a changed-mode green; the gate is still to do |
+| `incomplete (exit 70)` + reason | ptest could not prove the result; rerun once, report if it repeats |
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | passed (or nothing to test) |
+| 1 | tests failed |
+| 2 | usage or config error |
+| 70 | incomplete: the result could not be proven |
+| 75 | queue or coordinator unavailable |
+| 124 | timeout (`--timeout` raises it) |
+| 130 | cancelled (Ctrl-C prints only `cancelled`) |
+
+---
+
+## Parallel runs and setup
+
+- **pytest + xdist**: when the project's pytest config enables xdist
+  (`-n 4`, `-n auto`), ptest requests that many slots and runs the granted
+  number of workers; a single slot runs serially. Without xdist, runs are
+  serial.
+- **Vitest** runs as one exclusive `vitest run` that manages its own workers.
+- **Many runs at once**: every ptest on the machine shares one slot budget.
+  Extra runs queue (`waiting for …`) instead of oversubscribing the CPU.
+- **Setup** (`uv sync`, `npm ci`, `pnpm install`) runs before the tests when
+  its required paths are missing or its lockfile changed, and is skipped
+  otherwise.
+
+---
+
+## pytest plugin compatibility
+
+ptest checks which plugins hook into test execution, so that nothing it
+cannot observe decides the result. These run as normal: pytest-asyncio,
+anyio, pytest-timeout, pytest-cov, pytest-xdist, hypothesis, schemathesis,
+pytest-order, pytest-sugar, pytest-instafail, faker, pytest-mock. Your own
+`conftest.py` may filter collection, clean up at session end, and observe
+tests (timing, logging) — including hooks re-exported from your own helper
+modules.
+
+A plugin that replaces execution is refused with a message naming it:
+
+```text
+unqualified pytest execution hook is not owned by the serial grant (pytest_pyfunc_call from pytest_custom.plugin) · add "-p no:custom" to [runner] args in .ptest.toml to run without it
+```
+
+---
+
+## Coding agents
+
+```sh
+ptest init --agents claude,codex      # or: all, none
+```
+
+installs `docs/ptest-agent.md` (the rules: the five commands, every output
+line, every exit code, test-quality rules), a managed block in
+`AGENTS.md`/`CLAUDE.md`, and a `ptest` skill per agent
+(`.claude/skills`, `.agents/skills`, `.opencode/skills`, `.gemini/skills`).
+When a new ptest ships newer guidance, `ptest` says
+`agent guidance is outdated — run ptest init to update`.
+
+`scripts/agent_eval.py` checks that models actually follow the guidance: it
+builds a scratch monorepo with the installed guidance, asks 14 scenarios
+(`evals/agent-usage/scenarios.toml`) and scores the answers.
 
 ```sh
 .venv/bin/python scripts/agent_eval.py --dry-run
+.venv/bin/python scripts/agent_eval.py \
+  --subject 'haiku=claude -p --model haiku {prompt} --add-dir {repo} --allowedTools Read Glob Grep'
 ```
 
-Live subjects are command templates with `{prompt}`, `{prompt_file}`, and
-`{repo}` placeholders (run without a shell); canned answer files can be
-scored with no model at all:
+---
+
+## Doctor: is the suite safe to run in parallel?
 
 ```sh
-.venv/bin/python scripts/agent_eval.py \
-  --subject "haiku=claude -p --model haiku {prompt}" \
-  --answers-file "muse=tests/ng/fixtures/agent_eval/answers-muse.json"
+ptest doctor --offline     # static scan, sends nothing
+ptest doctor --fix         # apply config updates (no prompts, no model)
+ptest doctor               # asks consent, then a bounded model review
 ```
+
+Doctor looks for what breaks parallel and repeatable test runs: global cache
+flushes, database cleanup without ownership, fixed ports, shared fixture
+mutation, live network targets, wall-clock sleeps. It writes cited findings
+to `recommendations.md`. The model review uses your own Claude Code or Codex
+CLI account (default models Codex `gpt-6-sol`, Claude `opus`; override with
+`--review-model`), makes one initial call per checklist item plus at most one
+bounded verification, and covers only the cited source. Findings are
+hypotheses to verify, not a certificate. `ptest help doctor` has the details.
+
+---
+
+## State, privacy, uninstall
+
+- Per-machine state (scheduler, history, review cache) lives under your user
+  state directory. To keep it elsewhere, set an absolute
+  `PTEST_STATE_DIR` outside any repository; use the same value everywhere you
+  want shared limits.
+- `ptest uninstall` removes what ptest set up in a repository (`.ptest.toml`
+  files, managed guidance, this checkout's state). Files you edited are kept.
+  It prints the plan first; `--dry-run` changes nothing.
+- `ptest uninstall --self` removes the installation.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `ptest: command not found` | add `~/.local/bin` to `PATH` |
+| `uv is required` during install | install uv, open a new shell, rerun the one-liner |
+| `selection is off in .ptest.toml` | `ptest doctor --fix` |
+| `--full` runs fewer tests than plain pytest | `ptest doctor --fix` widens `test_roots` |
+| `waiting for N slots …` for a long time | `ptest status` shows who holds them |
+| `incomplete (exit 70)` / `changed-during-run` | something wrote into the source tree during the run; the message names the path class (tracked, untracked, ignored) |
+| a plugin is refused | add `-p no:<name>` to `[runner] args`, or open an issue to get it reviewed |
+
+Every command has help: `ptest help`, `ptest help run`, `ptest help init`,
+`ptest doctor --help`.
+
+---
+
+## Developing ptest
+
+```sh
+git clone https://github.com/Avocado-Blockchain-Services/ptest && cd ptest
+uv sync --locked --extra test
+.venv/bin/ptest                         # the changed tests
+.venv/bin/ptest tests/ng/test_impact.py
+.venv/bin/ptest --full                  # ~4,400 tests, parallel, ~4 minutes
+```
+
+Releasing (maintainers):
+
+```sh
+# bump version: pyproject.toml, src/ptest/contracts.py, uv.lock, version tests
+.venv/bin/python scripts/export-schemas.py --check
+.venv/bin/ptest --full
+git tag vX.Y.Z && git push origin main vX.Y.Z
+uv build --wheel --out-dir /tmp/dist
+scripts/build-release-assets.py --ptest-wheel /tmp/dist/ptest_ng-X.Y.Z-py3-none-any.whl \
+    --version X.Y.Z --out /tmp/assets
+gh release create vX.Y.Z /tmp/assets/* --title "ptest X.Y.Z" --notes-file notes.md
+```
+
+`get.sh` always installs the release marked *latest*.
+
+More: [installation](docs/installation.md) · [security](docs/security.md) ·
+[support matrix](docs/support-matrix.md) · [changelog](docs/changelog.md).

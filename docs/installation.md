@@ -1,27 +1,38 @@
 # Local installation
 
+## One-line install (macOS and Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | sh
+```
+
+`get.sh` needs `curl`, `tar` and [uv](https://docs.astral.sh/uv/). It picks
+`ptest-VERSION-{linux-x86_64,linux-aarch64,macos-arm64,macos-x86_64}.tar.gz`
+from the latest GitHub release (or `PTEST_VERSION`), verifies the published
+SHA-256, finds a CPython 3.11-3.14 with `uv python find --system` (installing
+3.13 with uv when none exists), and runs the bundled `install.sh`.
+
 ## Published release archive
 
-Download the release archive and its SHA-256 value from the matching GitHub
+Download the release archive and its SHA-256 file from the matching GitHub
 release, verify the archive locally, then extract and install it:
 
 ```sh
-sha256sum -c ptest-VERSION-linux-x86_64.tar.gz.sha256
+sha256sum -c ptest-VERSION-linux-x86_64.tar.gz.sha256   # macOS: shasum -a 256 -c
 tar -xzf ptest-VERSION-linux-x86_64.tar.gz
-cd ptest-VERSION
-./install.sh
+./ptest-VERSION/install.sh
 ```
 
 That installs an isolated, atomically switchable `ptest` at
-`~/.local/ptest/ptest`. Add `~/.local/ptest` to `PATH`, or link that executable
-from a directory already on `PATH`. Choose another explicitly owned location
-with `./install.sh --dest /absolute/path`. The release archive contains the
-exact verified ptest-ng and psutil wheels; the installer does not download or
-execute remote code.
+`~/.local/ptest/ptest` and links it as `~/.local/bin/ptest`. Choose another
+explicitly owned location with `./install.sh --dest /absolute/path`. Set
+`PTEST_PYTHON` to pick the interpreter (default `python3`, which must be
+CPython 3.11-3.14). The release archive contains the exact verified ptest-ng
+and psutil wheels; the installer does not download or execute remote code.
 
-Release maintainers create the archive with
-`scripts/build-release-bundle.py`, passing the built ptest wheel, the pinned
-psutil wheel, compatible wheel tags, and an output `.tar.gz` path.
+Release maintainers build every platform archive and its `.sha256` file with
+`scripts/build-release-assets.py`, which takes the built ptest wheel and
+fetches each pinned psutil wheel from PyPI, checked against PyPI's SHA-256.
 
 ## Workspace-local setup
 
