@@ -303,16 +303,19 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 Supported: pytest 8.x and 9.x, pytest-xdist 3.5 or newer 3.x (parallel runs),
 pytest-cov 5 to 7 with coverage 7 (parallel coverage).
 
-ptest checks which plugins hook into test execution, so that nothing it
-cannot observe decides the result. These run as normal: pytest-asyncio,
-anyio, pytest-timeout, pytest-cov, pytest-xdist, hypothesis, schemathesis,
-pytest-order, pytest-sugar, pytest-instafail, faker, pytest-mock,
-pytest-benchmark. Your own
-`conftest.py` may filter collection, clean up at session end, and observe
-tests (timing, logging) — including hooks re-exported from your own helper
-modules.
+Installed pytest plugins run as normal (pytest-django, hypothesis,
+pytest-asyncio, pytest-benchmark, pytest-codspeed, schemathesis, ...): they
+are the project's own declared test dependencies. Your own `conftest.py` may
+filter collection, clean up at session end, and observe tests (timing,
+logging), including hooks re-exported from your own helper modules.
 
-A plugin that replaces execution is refused with a message naming it:
+Plugins that re-run or distribute tests change what "passed" means and are
+refused: pytest-rerunfailures, flaky, pytest-retry, pytest-flakefinder,
+pytest-repeat, pytest-forked, pytest-parallel (and pytest-xdist outside the
+parallel tier). A hook that comes from neither your checkout nor an installed
+package is refused too.
+
+A refusal names the hook and how to run without it:
 
 ```text
 unqualified pytest execution hook is not owned by the serial grant (pytest_pyfunc_call from pytest_custom.plugin) · add "-p no:custom" to [runner] args in .ptest.toml to run without it
@@ -387,7 +390,8 @@ hypotheses to verify, not a certificate. `ptest help doctor` has the details.
 | `--full` runs fewer tests than plain pytest | `ptest doctor --fix` widens `test_roots` |
 | `waiting for N slots …` for a long time | `ptest status` shows who holds them |
 | `incomplete (exit 70)` / `changed-during-run` | something wrote into the source tree during the run; the message names the path class (tracked, untracked, ignored) |
-| a plugin is refused | add `-p no:<name>` to `[runner] args`, or open an issue to get it reviewed |
+| a plugin is refused | it re-runs or distributes tests: add `-p no:<name>` to `[runner] args` |
+| tests fail with `ModuleNotFoundError` for an optional dependency | ptest installs the test deps only; add the extra to `[setup] argv` (e.g. `--all-extras` or `--extra azure` for `uv sync`) |
 
 Every command has help: `ptest help`, `ptest help run`, `ptest help init`,
 `ptest doctor --help`.

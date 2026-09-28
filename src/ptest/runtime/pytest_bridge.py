@@ -1927,7 +1927,10 @@ class OwnedPlugin:
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")
                 package = str(module).split(".", 1)[0].removeprefix("pytest_")
                 if normalized in executors or package in executors:
-                    self._refuse("pytest execution-control plugin is not owned by the serial grant")
+                    self._refuse(
+                        "pytest execution-control plugin is not owned by the serial grant"
+                        f" ({name} re-runs or distributes tests) · add \"-p no:{name}\""
+                        " to [runner] args in .ptest.toml to run without it")
             # Inspect registered hook owners, including specname aliases.
             # Reporters and ordinary fixtures remain additive; an unqualified
             # executor cannot bypass the serial loop even without a -n flag.
