@@ -40,9 +40,9 @@ def _fixture(name):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def test_scenarios_toml_covers_all_thirteen():
+def test_scenarios_toml_covers_all_scenarios():
     scenarios = _scenarios()
-    assert sorted(scenarios, key=lambda s: int(s[1:])) == [f"S{i}" for i in range(1, 14)]
+    assert sorted(scenarios, key=lambda s: int(s[1:])) == [f"S{i}" for i in range(1, 15)]
     for sid, spec in scenarios.items():
         assert spec["prompt"].strip(), sid
 
@@ -66,11 +66,11 @@ def test_scaffold_installs_current_guidance_bytes():
 @pytest.mark.parametrize("name", [
     "answers-muse.json", "answers-haiku.json", "answers-sonnet.json",
 ])
-def test_canned_subjects_score_thirteen_of_thirteen(name):
+def test_canned_subjects_score_every_scenario(name):
     results = agent_eval.score_answers(_scenarios(), _fixture(name))
     failures = [(r.scenario, r.reason) for r in results if not r.passed]
     assert failures == [], f"{name}: {failures}"
-    assert len(results) == 13
+    assert len(results) == 14
 
 
 def test_none_spelling_counts_as_no_command():
@@ -196,7 +196,7 @@ def test_answers_file_end_to_end_exit_zero(capsys, tmp_path, monkeypatch):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "13/13" in out
+    assert "14/14" in out
 
 
 def test_answers_file_end_to_end_exit_one_on_bad(capsys, tmp_path, monkeypatch):
@@ -213,4 +213,4 @@ def test_answers_file_end_to_end_exit_one_on_bad(capsys, tmp_path, monkeypatch):
         tmp.unlink(missing_ok=True)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "12/13" in out and "npm" in out
+    assert "13/14" in out and "npm" in out

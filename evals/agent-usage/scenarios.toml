@@ -68,8 +68,8 @@ expect_commands = ["^ptest --full --timeout \\S+$"]
 
 [scenarios.S11]
 prompt = "The user asks: \"run the web tests with npm test\"."
-expect_commands = ["^ptest web$"]
-forbid = ["--full", "npm"]
+expect_commands = ["^ptest (--full )?web/?$"]
+forbid = ["npm"]
 
 [scenarios.S12]
 prompt = "You are in <repo>/api and want to run tests/test_billing.py."
@@ -79,3 +79,8 @@ forbid = ["--full", "\\bcd\\s+api\\b", "^cd api\\b"]
 [scenarios.S13]
 prompt = "You want to run the complete integrated gate for only the api project."
 expect_commands = ["^ptest --full api$"]
+
+[scenarios.S14]
+prompt = "You edited api/app/billing.py and want to run only the affected tests inside the api/tests folder, nothing elsewhere."
+expect_commands = ["^ptest api(/tests)?/?$"]
+forbid = ["--full"]

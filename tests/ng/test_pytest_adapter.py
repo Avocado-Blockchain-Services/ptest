@@ -1721,3 +1721,82 @@ def test_runtime_identity_ignores_only_cov_fail_under(monkeypatch):
     other = facts(cov_fail_under=None, verbose=1)
     assert (pytest_bridge.AdvancedPlugin._facts_identity(base)
             != pytest_bridge.AdvancedPlugin._facts_identity(other))
+
+
+_FULLON2_OBSERVERS = (
+    "import time\n"
+    "import pytest\n"
+    "_test_info = {}\n"
+    "@pytest.hookimpl(tryfirst=True)\n"
+    "def pytest_runtest_protocol(item, nextitem):\n"
+    "    worker_id = getattr(item.config, 'workerinput', {}).get('workerid', 'main')\n"
+    "    _test_info[item.nodeid] = {'start_time': time.time(), 'worker': worker_id}\n"
+    "    return None\n"
+    "@pytest.hookimpl(tryfirst=True)\n"
+    "def pytest_runtest_logreport(report):\n"
+    "    if report.when == 'call' and report.nodeid in _test_info:\n"
+    "        print(report.nodeid, time.time() - _test_info[report.nodeid]['start_time'])\n"
+)
+
+
+def _loaded_conftest(tmp_path, source):
+    import importlib.util
+    path = tmp_path / "tests" / "conftest.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("conftest", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _observer_impl(module, hook, argnames, **flags):
+    return hook, SimpleNamespace(plugin=module, function=getattr(module, hook),
+                                 argnames=argnames, **flags)
+
+
+@pytest.mark.parametrize("execution", ["scoped", "full"])
+def test_project_timing_observer_hooks_are_accepted(bridge_env, tmp_path, monkeypatch,
+                                                    execution):
+    """fullon2 server: tests/fullon_exchange/conftest.py times every test."""
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    module = _loaded_conftest(tmp_path, _FULLON2_OBSERVERS)
+    manager = _loaded_manager(
+        (("conftest", module),),
+        [_observer_impl(module, "pytest_runtest_protocol", ("item", "nextitem"),
+                        tryfirst=True),
+         _observer_impl(module, "pytest_runtest_logreport", ("report",), tryfirst=True)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution=execution).pytest_configure(config)
+
+
+@pytest.mark.parametrize("source,flags", [
+    ("def pytest_runtest_protocol(item, nextitem):\n    return True\n", {}),
+    ("def pytest_runtest_protocol(item, nextitem):\n    item.ihook = None\n", {}),
+    ("def pytest_runtest_protocol(item, nextitem):\n    yield\n", {"wrapper": True}),
+])
+def test_project_protocol_hook_that_takes_over_is_refused(bridge_env, tmp_path, monkeypatch,
+                                                          source, flags):
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    module = _loaded_conftest(tmp_path, source)
+    manager = _loaded_manager(
+        (("conftest", module),),
+        [_observer_impl(module, "pytest_runtest_protocol", ("item", "nextitem"), **flags)],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="pytest_runtest_protocol from conftest"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
+
+
+def test_project_logreport_that_rewrites_outcome_is_refused(bridge_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("PTEST_PYTEST_CHECKOUT_ROOT", str(tmp_path))
+    module = _loaded_conftest(
+        tmp_path, "def pytest_runtest_logreport(report):\n    report.outcome = 'passed'\n")
+    manager = _loaded_manager(
+        (("conftest", module),),
+        [_observer_impl(module, "pytest_runtest_logreport", ("report",))],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="pytest_runtest_logreport from conftest"):
+        pytest_bridge.OwnedPlugin(1, execution="full").pytest_configure(config)

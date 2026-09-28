@@ -181,3 +181,30 @@ def test_cov_controller_plugin_counts_as_coverage():
     controller = type("CovPlugin", (), {"cov_controller": object()})()
     assert pytest_bridge._coverage_plugin(
         [("pytest_cov", module), ("_cov", controller)]) is controller
+
+
+def test_observation_store_of_fresh_value_into_own_global_passes(tmp_path):
+    """fullon2: `_info[item.nodeid] = {..., 'worker': worker_id}` is bookkeeping."""
+    module = _load_hook(
+        tmp_path,
+        "import time\n_info = {}\n"
+        "def pytest_runtest_protocol(item, nextitem):\n"
+        "    worker_id = getattr(item.config, 'workerinput', {}).get('workerid', 'main')\n"
+        "    _info[item.nodeid] = {'start': time.time(), 'worker': worker_id}\n"
+        "    _info[item.nodeid]['seen'] = True\n",
+        name="fresh_store_mod")
+    assert pytest_bridge._is_observation_only(
+        module.pytest_runtest_protocol, ("item", "nextitem")) is True
+
+
+def test_observation_alias_stored_then_mutated_is_refused(tmp_path):
+    """Stashing the report itself and writing through the stash is a write."""
+    module = _load_hook(
+        tmp_path,
+        "_seen = {}\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    _seen['r'] = report\n"
+        "    _seen['r'].outcome = 'passed'\n",
+        name="alias_store_mod")
+    assert pytest_bridge._is_observation_only(
+        module.pytest_runtest_logreport, ("report",)) is False

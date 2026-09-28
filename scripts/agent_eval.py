@@ -3,7 +3,7 @@
 
 Builds a scratch monorepo in a temp dir from the CURRENT package resources
 (the guide plus skill templates via ``ptest.agent_rules`` -- the same bytes
-``ptest init`` installs), writes the 13-scenario planning prompt, runs each
+``ptest init`` installs), writes the scenario planning prompt, runs each
 subject command given on the CLI, extracts the JSON answers, scores them
 against ``evals/agent-usage/scenarios.toml`` and prints a compact table.
 
@@ -38,7 +38,7 @@ sys.path.insert(0, str(_CHECKOUT / "src"))
 from ptest import agent_rules  # noqa: E402  (current checkout, same bytes init installs)
 
 DEFAULT_SCENARIOS = _CHECKOUT / "evals" / "agent-usage" / "scenarios.toml"
-SCENARIO_IDS = [f"S{i}" for i in range(1, 14)]
+SCENARIO_IDS = [f"S{i}" for i in range(1, 15)]
 
 # Runner-misuse that is wrong in every scenario (scenario-local forbids such
 # as --full or cd where not expected live in scenarios.toml).
@@ -61,7 +61,7 @@ PROMPT_HEADER = (
     "modify files. For each scenario answer: the exact command(s) you would run next (or \"none\"), and in "
     "one sentence what you would do/tell the user.\n"
     "Print ONLY a JSON object of the form {{\"S1\": {{\"commands\": [\"...\"], \"action\": \"...\"}}, ...}} "
-    "as your final message, with all 13 scenario ids S1..S13."
+    "as your final message, with all {count} scenario ids S1..S{count}."
 )
 
 BILLING_PY = "def charge(amount):\n    return round(amount * 1.19, 2)\n"
@@ -94,7 +94,7 @@ def build_scratch_repo() -> Path:
 
 
 def build_prompt(scenarios: dict, repo: Path) -> str:
-    lines = [PROMPT_HEADER.format(repo=str(repo)), ""]
+    lines = [PROMPT_HEADER.format(repo=str(repo), count=len(SCENARIO_IDS)), ""]
     for sid in SCENARIO_IDS:
         text = scenarios[sid]["prompt"].replace("<repo>", str(repo))
         lines.append(f"{sid}. {text}")

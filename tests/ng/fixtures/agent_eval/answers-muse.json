@@ -1,1 +1,78 @@
-{"S1":{"action":"Verify the edit with the normal changed-tests loop.","commands":["ptest"]},"S10":{"action":"Raise the execution budget with --timeout and rerun the full suite.","commands":["ptest --full --timeout 1200"]},"S11":{"action":"Run the web project through ptest instead of npm test.","commands":["ptest web"]},"S12":{"action":"Run from the monorepo root with the child-prefixed path, not from inside api.","commands":["ptest api/tests/test_billing.py"]},"S13":{"action":"Run the integrated gate scoped to the api project.","commands":["ptest --full api"]},"S2":{"action":"Run just the billing test file via ptest from the repo root.","commands":["ptest api/tests/test_billing.py"]},"S3":{"action":"Run the integrated gate once before handing off.","commands":["ptest --full"]},"S4":{"action":"The run just started and is still going, so wait for its end line.","commands":[]},"S5":{"action":"The run is queued behind another ptest, so wait and do not start another run.","commands":[]},"S6":{"action":"The result is unproven, so rerun the same ptest invocation once alone and report it if it repeats without changing code.","commands":["ptest"]},"S7":{"action":"Fix the code under test first, then rerun ptest, without weakening or deleting tests.","commands":[]},"S8":{"action":"Force the rerun over already-verified inputs with --again since nothing changed.","commands":["ptest --full --again"]},"S9":{"action":"Report the pass but note no baseline was recorded due to uncommitted changes, and do not commit just for the baseline.","commands":[]}}
+{
+  "S1": {
+    "action": "Verify the edit with the normal changed-tests loop.",
+    "commands": [
+      "ptest"
+    ]
+  },
+  "S10": {
+    "action": "Raise the execution budget with --timeout and rerun the full suite.",
+    "commands": [
+      "ptest --full --timeout 1200"
+    ]
+  },
+  "S11": {
+    "commands": [
+      "ptest --full web"
+    ],
+    "action": "Run all web tests through ptest instead of npm."
+  },
+  "S12": {
+    "action": "Run from the monorepo root with the child-prefixed path, not from inside api.",
+    "commands": [
+      "ptest api/tests/test_billing.py"
+    ]
+  },
+  "S13": {
+    "action": "Run the integrated gate scoped to the api project.",
+    "commands": [
+      "ptest --full api"
+    ]
+  },
+  "S2": {
+    "action": "Run just the billing test file via ptest from the repo root.",
+    "commands": [
+      "ptest api/tests/test_billing.py"
+    ]
+  },
+  "S3": {
+    "action": "Run the integrated gate once before handing off.",
+    "commands": [
+      "ptest --full"
+    ]
+  },
+  "S4": {
+    "action": "The run just started and is still going, so wait for its end line.",
+    "commands": []
+  },
+  "S5": {
+    "action": "The run is queued behind another ptest, so wait and do not start another run.",
+    "commands": []
+  },
+  "S6": {
+    "action": "The result is unproven, so rerun the same ptest invocation once alone and report it if it repeats without changing code.",
+    "commands": [
+      "ptest"
+    ]
+  },
+  "S7": {
+    "action": "Fix the code under test first, then rerun ptest, without weakening or deleting tests.",
+    "commands": []
+  },
+  "S8": {
+    "action": "Force the rerun over already-verified inputs with --again since nothing changed.",
+    "commands": [
+      "ptest --full --again"
+    ]
+  },
+  "S9": {
+    "action": "Report the pass but note no baseline was recorded due to uncommitted changes, and do not commit just for the baseline.",
+    "commands": []
+  },
+  "S14": {
+    "commands": [
+      "ptest api/tests"
+    ],
+    "action": "Run only the affected api tests."
+  }
+}

@@ -1059,6 +1059,31 @@ def _tainted_root(node: Any, tainted: set[str]) -> bool:
     return False
 
 
+# Per-test hooks a project conftest commonly implements to time or log
+# tests (fullon2: a tryfirst runtest_protocol that records a start time and
+# returns None, plus a logreport printer). A plain, observation-only
+# implementation that never returns a value leaves pytest's own protocol
+# and reports in charge, so it is admitted; wrappers stay refused.
+_ITEM_OBSERVER_HOOKS = frozenset({
+    "pytest_runtest_protocol", "pytest_runtest_logreport", "pytest_collectreport",
+})
+
+
+def _returns_only_none(function: Any) -> bool:
+    """True when every ``return`` in ``function`` yields nothing or ``None``."""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    except (OSError, TypeError, SyntaxError, ValueError, MemoryError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Yield, ast.YieldFrom, ast.Await)):
+            return False
+        if isinstance(node, ast.Return) and node.value is not None and not (
+                isinstance(node.value, ast.Constant) and node.value.value is None):
+            return False
+    return True
+
+
 def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
     """True when a hook function provably only observes its parameters.
 
@@ -1104,6 +1129,20 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
             if isinstance(node, ast.Assign):
                 value = node.value
                 for target_node in node.targets:
+                    if isinstance(target_node, (ast.Subscript, ast.Attribute)):
+                        # Storing into the project's own container
+                        # (``_info[item.nodeid] = {...}``) taints that
+                        # container only when the value aliases parameter
+                        # state itself, not when a fresh value merely
+                        # mentions a derived name.
+                        if _tainted_root(node.value, tainted):
+                            root = target_node
+                            while isinstance(root, (ast.Subscript, ast.Attribute)):
+                                root = root.value
+                            if isinstance(root, ast.Name) and root.id not in tainted:
+                                tainted.add(root.id)
+                                changed = True
+                        continue
                     bound.extend(_names_in(target_node)
                                  if not isinstance(target_node, ast.Name)
                                  else [target_node.id])
@@ -1551,6 +1590,18 @@ class OwnedPlugin:
         accepted_hooks.append(owned)
         return True
 
+    def _item_observer(self, implementation: Any) -> bool:
+        """True for a project conftest's plain per-test observer hook."""
+        if (getattr(implementation, "wrapper", False)
+                or getattr(implementation, "hookwrapper", False)):
+            return False
+        if self._conftest_owner_path(implementation) is None:
+            return False
+        function = getattr(implementation, "function", None)
+        params = tuple(getattr(implementation, "argnames", None) or ())
+        return bool(params) and _is_observation_only(function, params) \
+            and _returns_only_none(function)
+
     @staticmethod
     def _is_bridge_worker_impl(implementation: Any) -> bool:
         """True for this bridge's own worker-half module hooks.
@@ -1838,6 +1889,9 @@ class OwnedPlugin:
                         continue
                     if any(str(module) == prefix or str(module).startswith(prefix + ".")
                            for prefix in getattr(self, "_approved_hook_modules", ())):
+                        continue
+                    if hook in _ITEM_OBSERVER_HOOKS \
+                            and self._item_observer(implementation):
                         continue
                     owned = self._project_conftest_hook(hook, implementation)
                     if owned is not None:
