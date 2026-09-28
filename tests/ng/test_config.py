@@ -276,7 +276,7 @@ def test_explicit_children_reject_more_than_runtime_manifest_limit(tmp_path):
     _git_root(root)
     children = tuple((f"child-{index}", RunnerKind.PYTEST) for index in range(257))
 
-    with pytest.raises(Problem, match="between two and 256"):
+    with pytest.raises(Problem, match="between one and 256"):
         init_project(root, InitOptions(
             runner=None, dry_run=False, reveal_command=False, children=children,
         ))
@@ -1002,3 +1002,34 @@ def test_pytest_roots_skip_folders_the_project_ignores_in_addopts(tmp_path):
     _touch(tmp_path / "docs_src" / "app" / "test_main.py")
 
     assert pytest_test_roots(tmp_path) == ("tests",)
+
+
+def test_workspace_root_with_one_runner_child_becomes_a_monorepo(tmp_path):
+    """full-stack-fastapi-template: a uv workspace root, pytest in backend/."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "pyproject.toml").write_text(
+        '[tool.uv.workspace]\nmembers = ["backend"]\n', encoding="utf-8")
+    backend = root / "backend"
+    backend.mkdir()
+    (backend / "pyproject.toml").write_text(
+        '[project]\nname = "app"\n[dependency-groups]\ndev = ["pytest"]\n', encoding="utf-8")
+    _touch(backend / "tests" / "test_a.py")
+    (root / "frontend").mkdir()
+
+    init_project(root, InitOptions(runner=None, dry_run=False, reveal_command=False))
+
+    manifest = (root / ".ptest.toml").read_text(encoding="utf-8")
+    assert 'children = ["backend"]' in manifest
+    assert (backend / ".ptest.toml").exists()
+
+
+def test_init_without_any_runner_says_what_to_do(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git_root(root)
+    (root / "README.md").write_text("docs only\n", encoding="utf-8")
+
+    with pytest.raises(Problem, match="no pytest, vitest, go or cargo project found"):
+        init_project(root, InitOptions(runner=None, dry_run=False, reveal_command=False))

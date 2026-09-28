@@ -1273,13 +1273,39 @@ def _is_observation_only(function: Any, params: tuple[str, ...]) -> bool:
 # pytest_sugar and pytest_instafail (terminal reporting), faker and
 # pytest_mock (fixtures), pytest_benchmark (its modifyitems only adds visible
 # skip markers under --benchmark-skip/--benchmark-only; its wrappers attach
-# and save benchmark data). Any other plugin is refused with a hint naming
-# ``-p no:<name>`` for the ptest runner args.
+# and save benchmark data). Other installed plugins are accepted by
+# ``_installed_plugin_function``; a hook from anywhere else is refused with a
+# hint naming ``-p no:<name>`` for the ptest runner args.
 _BASIC_APPROVED_HOOK_MODULES = ("pytest_asyncio", "pytest_timeout", "anyio",
                                 "_hypothesis_pytestplugin", "schemathesis",
                                 "pytest_order", "pytest_sugar",
                                 "pytest_instafail", "faker", "pytest_mock",
                                 "pytest_benchmark")
+
+
+# Installed pytest plugins are the project's declared test dependencies:
+# every real project brought one the approved list did not name (fastapi
+# pytest-codspeed, django-rest-framework pytest-django, ...). A hook whose
+# code lives in an installed package is accepted like project code; plugins
+# that re-run or distribute tests stay refused by name (execution-control
+# check above), and xdist, pytest-cov and this bridge keep their own rules.
+_INSTALLED_DIRS = frozenset({"site-packages", "dist-packages"})
+_SELF_GOVERNED_PACKAGES = frozenset({"xdist", "pytest_cov", "pytest_bridge"})
+
+
+def _installed_plugin_function(function: Any) -> bool:
+    module = str(getattr(function, "__module__", "") or "")
+    if not module or module.split(".", 1)[0] in _SELF_GOVERNED_PACKAGES:
+        return False
+    code = getattr(inspect.unwrap(function), "__code__", None) if callable(function) else None
+    path = getattr(code, "co_filename", None)
+    if not isinstance(path, str) or not path.endswith(".py"):
+        return False
+    try:
+        parts = Path(os.path.realpath(path)).parts
+    except (OSError, ValueError):
+        return False
+    return any(part in _INSTALLED_DIRS for part in parts[:-1])
 
 
 def _plugin_disable_hint(module: str) -> str:
@@ -1896,7 +1922,8 @@ class OwnedPlugin:
                     # never does.
                     if not parallel:
                         self._refuse("pytest xdist is not owned by the serial grant")
-                executors = {"forked", "parallel", "rerunfailures", "repeat", "loop"}
+                executors = {"forked", "parallel", "rerunfailures", "repeat", "loop",
+                             "flaky", "retry", "flakefinder"}
                 normalized = str(name).replace("-", "_").removeprefix("pytest_")
                 package = str(module).split(".", 1)[0].removeprefix("pytest_")
                 if normalized in executors or package in executors:
@@ -1942,6 +1969,11 @@ class OwnedPlugin:
                         continue
                     if hook in _ITEM_OBSERVER_HOOKS \
                             and self._item_observer(implementation):
+                        continue
+                    # Only a plugin pytest registered itself; a hook a
+                    # conftest re-exports goes through the conftest rules.
+                    if (self._conftest_relpath(getattr(implementation, "plugin", None)) is None
+                            and _installed_plugin_function(implementation.function)):
                         continue
                     owned = self._project_conftest_hook(hook, implementation)
                     if owned is not None:

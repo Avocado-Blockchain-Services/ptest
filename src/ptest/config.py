@@ -675,7 +675,11 @@ def _auto_monorepo_children(root: Path) -> tuple[tuple[str, C.RunnerKind], ...]:
         except OSError:
             raise _problem("state-unavailable", "repository contents are unavailable")
         if len(candidates) > 1:
-            raise _problem("invalid-config", "an explicit runner choice is required")
+            kinds = ", ".join(kind.value for kind in candidates)
+            raise _problem(
+                "invalid-config",
+                f"{entry.name} has more than one test runner ({kinds}): declare it with "
+                f"ptest init --child {entry.name} --runner <kind>")
         if len(candidates) == 1:
             found.append((entry.name, candidates[0]))
     return tuple(found)
@@ -989,8 +993,13 @@ def _fresh_config(root: Path, target: Path, kind: C.RunnerKind) -> C.Config:
         _serial_fallback = _executability.pytest_xdist_active(root)
         setup = None
         if locked:
+            # pydantic-settings keeps pytest in a non-default "testing"
+            # group: plain `uv sync` would leave pytest uninstalled.
+            from . import doctor_fix
+            argv: tuple[str, ...] = ("uv", "sync", "--locked")
+            argv = doctor_fix._setup_extras_fix(root, kind, argv, args) or argv
             setup = C.SetupConfig(
-                argv=("uv", "sync", "--locked"),
+                argv=argv,
                 required_paths=(VENV_PYTHON,),
                 network=True, lifecycle_scripts=True,
             )
@@ -1152,8 +1161,8 @@ class _ChildInit:
 
 
 def _plan_monorepo_init(root: Path, options: C.InitOptions) -> tuple[tuple[_ChildInit, ...], bytes]:
-    if not 2 <= len(options.children) <= _MAX_MONOREPO_CHILDREN:
-        raise _problem("invalid-config", "monorepo initialization requires between two and 256 children")
+    if not 1 <= len(options.children) <= _MAX_MONOREPO_CHILDREN:
+        raise _problem("invalid-config", "monorepo initialization requires between one and 256 children")
     declarations = []
     paths = []
     for declaration, runner in options.children:
@@ -1326,7 +1335,9 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     root_candidates = _native_candidates(root) if not children else ()
     if not children and options.runner is None and len(root_candidates) != 1:
         auto_children = _auto_monorepo_children(root)
-        if len(auto_children) >= 2:
+        # A workspace root with no runner of its own and one runner child
+        # (full-stack-fastapi-template: backend/) is still a monorepo.
+        if len(auto_children) >= 2 or (auto_children and not root_candidates):
             children = auto_children
 
     if children:
@@ -1369,8 +1380,17 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         kind = options.runner
     else:
         candidates = _native_candidates(root)
-        if len(candidates) != 1:
-            raise _problem("invalid-config", "an explicit runner choice is required")
+        if len(candidates) > 1:
+            kinds = ", ".join(kind.value for kind in candidates)
+            raise _problem(
+                "invalid-config",
+                f"found {kinds} here: choose one with ptest init --runner <kind>, or "
+                "declare each project with --child DIR --runner KIND")
+        if not candidates:
+            raise _problem(
+                "invalid-config",
+                "no pytest, vitest, go or cargo project found here or in its top-level "
+                "folders: run ptest init --runner <kind> to set one up anyway")
         kind = candidates[0]
     config = _fresh_config(root, target, kind)
     fresh_notes = _executability_notes(

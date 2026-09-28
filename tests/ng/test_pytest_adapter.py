@@ -1810,3 +1810,46 @@ def test_project_logreport_that_rewrites_outcome_is_refused(bridge_env, tmp_path
     config = _native_config(); config.pluginmanager = manager
     with pytest.raises(pytest.UsageError, match="pytest_runtest_logreport from conftest"):
         pytest_bridge.OwnedPlugin(1, execution="full").pytest_configure(config)
+
+
+def _installed_plugin(tmp_path, module_name, source):
+    import importlib.util
+    path = tmp_path / "venv" / "lib" / "python3.14" / "site-packages" / f"{module_name}.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("execution", ["scoped", "full"])
+@pytest.mark.parametrize("hook", ["pytest_runtest_protocol", "pytest_collection_modifyitems",
+                                  "pytest_runtest_makereport"])
+def test_installed_plugin_hooks_are_accepted(bridge_env, tmp_path, execution, hook):
+    """fastapi brings pytest-codspeed, DRF pytest-django: installed plugins run."""
+    module = _installed_plugin(
+        tmp_path, "pytest_fancyplugin",
+        f"def {hook}(*args, **kwargs):\n    return None\n")
+    manager = _loaded_manager(
+        (("fancyplugin", module),),
+        [(hook, SimpleNamespace(plugin=module, function=getattr(module, hook)))],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    pytest_bridge.OwnedPlugin(1, execution=execution).pytest_configure(config)
+
+
+@pytest.mark.parametrize("name", ["rerunfailures", "flaky", "retry", "flakefinder"])
+def test_installed_rerun_plugins_are_still_refused(bridge_env, tmp_path, name):
+    """Re-running tests changes what passed means: refused by name."""
+    module = _installed_plugin(
+        tmp_path, f"pytest_{name}",
+        "def pytest_runtest_protocol(item, nextitem):\n    return None\n")
+    manager = _loaded_manager(
+        ((name, module),),
+        [("pytest_runtest_protocol",
+          SimpleNamespace(plugin=module, function=module.pytest_runtest_protocol))],
+    )
+    config = _native_config(); config.pluginmanager = manager
+    with pytest.raises(pytest.UsageError, match="execution-control plugin"):
+        pytest_bridge.OwnedPlugin(1, execution="scoped").pytest_configure(config)
