@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.4
+
+Tested against 14 open-source projects (click, attrs, pluggy, flask,
+requests, django-rest-framework, fastapi, pydantic-settings, rich, httpx,
+ufo, h3, uuid, itoa, full-stack-fastapi-template); none of the first eight
+ran out of the box before this release.
+
+- Supported version ranges instead of exact pins: pytest 8-9, pytest-xdist
+  3.5+, pytest-cov 5-7 with coverage 7.
+- Projects without a uv.lock get a setup-built `.venv` (uv venv + uv pip
+  install of the project and its test deps from a requirements file, an
+  extra, a dependency group or Poetry dev deps). uv projects whose pytest
+  sits in a non-default group get `--group` added.
+- Installed pytest plugins run (pytest-django, pytest-codspeed, ...);
+  plugins that re-run or distribute tests stay refused, naming the plugin
+  and the `-p no:<name>` escape.
+- Vitest setup follows the lockfile (pnpm, yarn, bun, npm); a missing
+  vitest is refused with the install command.
+- Go (`go test ./...`) and Cargo (`cargo test --tests`) suites run.
+- Gitignored writes during a run (logs, coverage data, caches, husky
+  hooks) no longer mark it incomplete; tracked and untracked changes do.
+- Test roots skip benchmark/docs/example folders and folders the project
+  ignores in addopts; a workspace root with one runner child becomes a
+  one-child monorepo; init errors say what was found and what to run.
+- Committing the green dirty state unchanged is not a change.
+- Removed the coverage-era `--changed-setup` init flow.
+
 ## 0.3.3
 
 - Command model: `ptest` (changed tests, whole repo), `ptest <folder>`
