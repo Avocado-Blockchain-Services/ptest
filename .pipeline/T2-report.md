@@ -1,117 +1,72 @@
-# T2 report — CLI: --from-main, config-uncommitted surfacing, run warning, commit_paths, doctor mention
+# T2 report — faster `rank_candidates`, identical selection
 
-Worktree: `/home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T2`
-Branch: `feature/worktree-safe-config-T2` (off `feature/worktree-safe-config` @ 5159175)
-Commit: `3343450 T2: --from-main flag, config-uncommitted CLI surfacing, run warning, commit_paths, doctor mention`
-TDD: 26 new tests written first → 16 failed / 10 passed pre-change (the 10 passed via T1 core) → implemented → all green.
+- taskWorktree: `/home/ingmar/worktrees/ptest/cc-doctor-offline/ptest-T2`
+- taskBranch: `feature/doctor-offline-T2`
+- base commit: `09f6f40` (chain branch head at task start)
+- task commit: `0976d17` — "T2: faster rank_candidates with identical selection"
+- status: DONE (all acceptance criteria met; no BLOCKED)
 
-## Files changed
+## What changed (owned files only)
 
-- `src/ptest/cli.py` (+104): the only source file touched.
-  - `ParsedArgs.from_main` + init parser `--from-main` flag (repeat-harmless); `--from-main` with `--runner`/`--child` raises the frozen `invalid-config` text.
-  - Init branch: `config_uncommitted` pre-check before any prompt (exit 2, nothing written); `from_main` passed into `C.InitOptions`; `commit_paths` extended with created/updated `guidance` agent-rule targets, only inside a git checkout (`git_root is not None`).
-  - Reroute: condition widened to `{"initialization-required", "config-uncommitted"}`; on `("missing", typed)` raises `config_uncommitted(scope_dir)`, falling back to `config_uncommitted(cwd)` (scope paths are usually absent from the worktree since uncommitted main files never arrive); otherwise the old "no ptest project … — run ptest init there" line, byte-identical.
-  - `_warn_uncommitted_config` (frozen 1 / N>1 texts, `progress.emit(..., quiet=quiet)`, try/except-all), called right after `_warn_stale_guidance`.
-  - `where`: `config-uncommitted` warnings entry for `--json` (exit 0); one stderr line after stdout for human.
-  - `doctor` branch: first-statement raise on `config-uncommitted` (before `--fix`/`--probe`/offline/consent).
-  - `_uncommitted_mention` (frozen text, `include_agent_rules=True`, None on empty/exception); printed after the offline grid next to `_fix_mention`, and after `_run_review_entry` returns in the online path when not declined and not `--json` (declined funnels through the static grid, so the line still appears exactly once; never for `--json`/`--fix`/`--probe`).
-- `tests/ng/test_cli.py` (+440): 21 new `test_t2_*` tests (26 with params), frozen `_linked_worktree` helper copied verbatim, `_git_only_popen` helper, `commit_paths` added to the init JSON key-set assertion; 4 pre-existing doctor/Popen-ban tests given a git-only carve-out (see stragglers).
-- `tests/ng/test_init_smoke.py` (1 line): `commit_paths` added to the init JSON key-set assertion.
+- `src/ptest/review_evidence.py` (+129/−31):
+  - `_ContextIndex` (frozen, slots: `roles` Mapping, `outgoing`/`incoming`/`config_paths` frozensets), `_build_context_index`, `_context_index` (memoized under `signal_cache[("context-index", id(context))] = (context, index)`, reused only when stored object `is context`; the stored ref pins the id against reuse).
+  - `_relation_score` / `_source_role` / `_is_config_path` keep positional parameters, gain keyword-only `index`. `_item_rank` / `_has_item_anchor` gain keyword-only `index`, resolved via `_context_index(context, signal_cache)` when absent.
+  - `_compiled_patterns` (`functools.lru_cache(maxsize=256)`); `_resource_patterns` delegates to it.
+  - `_call_names_hit(patterns, call_names)`: joins names once as `"\n".join(f"{n}\n{n}(" ...)`, one MULTILINE prefilter search per pattern (variant cached per pattern in `_CALL_HIT_PREFILTERS`), exact per-name loop only on prefilter hit; sources containing `\A`, `\Z`, `(?<`, `(?=`, `(?!` always use the exact loop. Used by `_item_signal`.
+  - `_IDENTIFIER_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|_+")`; `_python_identifier_text` does one `.sub` per text.
+  - `rank_candidates` / `rank_item_candidates` use a local `{}` when given `None`, build the index once, pass it down. `item_source_chains` also localizes a `None` cache (memo-only, outputs identical).
+  - Public signatures of `rank_candidates`, `rank_item_candidates`, `select_item_sources`, `item_source_chains`, `source_units`, `source_id` UNCHANGED.
+- `tests/ng/test_rank_candidates_perf.py` (NEW, 11 tests): base goldens, differential oracles, operation counts.
+- `scripts/bench_rank_candidates.py` (NEW, not a test): generates ~1000-file/2-child fixture, times `build_packets` (exercises ranking), prints one JSON line.
 
-No other source file touched. `graphify update .` run.
+## Acceptance criteria
 
-## Acceptance item → test
+1. Per-context lookups precomputed once per call — proven by `test_context_index_built_once_per_rank_candidates` (counts `_build_context_index`: exactly 1 per `rank_candidates` / `rank_item_candidates` call, `None` or explicit cache).
+2. One pattern match against joined call names per file — proven by `test_call_names_hit_prefilters_without_exact_searches` (zero exact-loop searches + exactly `len(patterns)` prefilter searches on the no-hit path).
+3. Single regex pass for identifiers — proven by `test_python_identifier_text_single_regex_pass` (exactly 1 `.sub` via module-attribute proxy).
+4. Identical results — 5 base-captured golden tests (rank tuple, DB-001 rank, chains, standalone `packet_sha256`, v2 child `packet_sha256`) plus 3 differential oracles (identifier corpus incl. `camelCase`, `HTTPServer`, `a1B`, `__dunder__`, `snake__case_`, non-ASCII, syntax-error text; relation/role/config over every fixture path; call-hit over every catalog entry's patterns plus crafted `^ $ \b \s \A` lookbehind/lookahead patterns).
+5. Bench before/after (below).
+6. Public signatures unchanged — verified by grep + passing callers (`agent_assessment.py:1932`, existing `test_review_evidence.py` unmodified).
 
-1. Bare/scoped run in wt exits 2, `config-uncommitted:` + `Do not run ptest init here`, runner never executes, no `run ptest init there` / `run ptest init to update` advice → `test_t2_bare_and_scoped_run_in_worktree_exit_config_uncommitted[() | (tests/test_x.py,)]` (operations.execute mocked to fail). Deviation: the design's literal `main(("tests",))` cannot reach the run path — bare `tests` is an `unknown command` in the closed prefix grammar (pre-existing); `tests/test_x.py` exercises the intended scoped-run path.
-2. Reroute names `main/api/.ptest.toml`; non-worktree keeps old line → `test_t2_path_reroute_names_main_child_config`, `test_t2_missing_path_outside_worktree_keeps_old_line` (exact old-line match). Note: the wt setup commits `api/README.md` so `wt/api` exists — `config_uncommitted` needs an existing directory (`_absolute_directory` raises on missing paths, T1 behavior); the cwd fallback covers scopes absent from the worktree.
-3. Init refuses (no prompt via failing `input`, nothing written); `--json` error doc; `--from-main --agents none` copies bytes, exit 0, stopgap warning, no `Commit these files` reminder; `--json` gives `commit_paths == []` + `config-uncommitted` warning; `--from-main` with `--runner`/`--child` → `invalid-config`; main tree snapshot (paths+bytes) identical → `test_t2_init_refuses_in_worktree_without_prompt`, `test_t2_init_json_error_document_in_worktree`, `test_t2_init_from_main_copies_with_stopgap_and_no_commit_reminder`, `test_t2_init_from_main_json_has_empty_commit_paths`, `test_t2_from_main_rejects_runner_and_child[runner|child]`.
-4. register/plan/history `--json` error docs; `where --json` warnings entry + human stderr line; doctor `--offline`/`--fix`/`--json` exit 2, `input` mocked to fail → `test_t2_register_plan_history_json_error_in_worktree`, `test_t2_where_json_carries_warning_in_worktree`, `test_t2_where_human_shows_stderr_line_in_worktree`, `test_t2_doctor_refuses_before_consent_in_worktree`, `test_t2_doctor_json_refuses_in_worktree`.
-5. Run warning: exact single line; `-q` suppresses; stdout+exit identical committed vs uncommitted; silent when committed / non-git; monorepo child listed; raising helper leaves run unaffected → `test_t2_run_warns_once_for_untracked_config`, `test_t2_run_warning_quiet_and_committed_and_nongit`, `test_t2_run_warning_matches_committed_outcome`, `test_t2_run_warning_lists_untracked_monorepo_child` (`web/tests/test_x.py` scope; bare monorepo runs execute nothing without changes), `test_t2_run_unaffected_when_uncommitted_check_raises`.
-6. `init --json` in git repo lists `.ptest.toml` + created rule paths (all exist on disk); non-git gives `[]`; key-sets updated → `test_t2_init_json_commit_paths_lists_config_and_rules`, `test_t2_init_json_commit_paths_empty_outside_git`.
-7. Doctor mention after offline grid when uncommitted; absent when committed and for `--json` → `test_t2_doctor_mention_after_offline_grid_for_uncommitted`.
-8. Scoped run green → `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py tests/ng/test_init_smoke.py` → `ptest: passed · 382 tests · 56.5s` (commit 3343450, clean tree).
+## Golden capture record
 
-## Straggler files (existing tests updated)
+- Capture commands (throwaway probes, kept out of the repo at `/tmp/capture_goldens.py`, `/tmp/capture_packets.py`):
+  `uv run --locked --extra test python /tmp/capture_goldens.py` and `... /tmp/capture_packets.py`, run on UNMODIFIED code at `09f6f40`; literals pasted into the test file before implementing.
+- Perf fixture: 30 py + 10 js + 6 tests + conftest + config + helper + setup = 50 roles (>30), 12 relations incl. `fixture-use` edges, fixed content (no `.ptest.toml` project_id needed for rank goldens; packet goldens use `doctor_assessment_project(root, "aa"*8)` and a v2 `api` child with `agent_v1_config_text("bb"*16, "pytest")`).
 
-`tests/ng/test_cli.py` (owned by T2) — 4 tests failed identically on the clean chain tip 5159175 (verified in a detached scratch worktree at that SHA, then removed): `test_static_dispatch_is_read_only_redacted_and_contract_valid[{True,False}-doctor]`, `test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet`, `test_offline_doctor_stays_static_without_launch`. Cause: their blanket `subprocess.Popen` ban vs T3's specified one-shot `git ls-tree` for the `config.uncommitted` finding (`doctor.inspect_workspace` → `_config_findings`). `pytest.fail` inherits `BaseException`, so it escapes T1's `except Exception` best-effort guard — test-mock interaction only; production behavior is per design. Minimal update: Popen mock now allows `git` and still fails on any runner/network subprocess (new `_git_only_popen` / `_forbid_launch_except_git` helpers); assertions unchanged.
+## Verification (commands run in the task worktree)
 
-Neighbor sweep (unowned, untouched, all green): `ptest --workers 2 --queue-timeout 1800 tests/ng/test_run_output.py tests/ng/test_natural_loop.py tests/ng/test_init.py tests/ng/test_acceptance.py tests/ng/test_doctor.py` → `ptest: passed · 299 tests · 1m50s`. No stragglers there.
+- RED: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_rank_candidates_perf.py` on base → new-name tests FAILED (`_call_names_hit` etc. absent), goldens passed. Direct probe also showed all 7 new names absent.
+- GREEN: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_rank_candidates_perf.py tests/ng/test_review_evidence.py tests/ng/test_agent_assessment.py tests/ng/test_review_context.py` → **268 passed** (exit 0). Re-run of the perf file post-stash → **11 passed**.
+- No wall-clock assertions in tests. No migration. No push/merge/deploy. `graphify update .` run; committed `0976d17`; worktree clean.
 
-## Deviations from design §3.4 (documented, texts still byte-for-byte)
+## Benchmark (informative only, not asserted)
 
-- Reroute missing-branch additionally falls back to `config_uncommitted(Path.cwd())` when the scope dir yields None. Reason: scope paths are usually absent from the worktree, and T1's `config_uncommitted` returns None for nonexistent directories — without the fallback, acceptance item 1 (frozen helper setup, main root config untracked) prints the old line. The raised problem is the identical frozen one.
-- Doctor-branch mention prints only when not declined: the declined path funnels through `_doctor_static_output`, which already prints the line — unconditional printing would duplicate it. Visible in both outcomes, exactly once.
-- Item-1 scope `("tests",)` replaced by `("tests/test_x.py",)` (bare word is `unknown command` in the closed grammar, pre-existing behavior T2 does not own).
+- Base (stashed src change): `{"mode": "rank_candidates", "files": 1002, "seconds": 13.156}`
+- After: `{"mode": "rank_candidates", "files": 1002, "seconds": 7.628}`, repeat `7.696` → ~1.7× on the ranking path.
 
-## Honest close
+## Re-read findings (dan-jefferies Pass 1/3, summary)
 
-- Implemented: all §3.4 bullets + 8 acceptance items. Verified: 382-test scoped file run green; 299-test neighbor sweep green; main-checkout snapshot unchanged around `--from-main` (test-pinned).
-- Not verified: the global suite (`--full` is the orchestrator's gate).
-- Deferred: none.
-- Discovered but not fixed (out of scope, for integration): `executability`'s "run ptest init from the repository root" fix text is still reachable in partial-doctor scans (design §7 follow-up); the 4 straggler tests above were already red at the chain tip due to T3's `git ls-tree` in offline doctor.
-- Confidence: high — every acceptance item maps to a named test that failed pre-change (or passes via T1 core with a T2 regression pin) and passes now; no source file outside `cli.py` touched.
+- One benign note: `_CALL_HIT_PREFILTERS` keys on pattern objects, so callers must pass hashable patterns — true for every producer (`_compiled_patterns` outputs, test proxies). No handling added; an unhashable pattern would fail loudly, not silently.
+- No stubs/TODOs; no duplicate concept (grep for synonyms: no existing memo/context-index/call-hit helper); `_unit_priority` takes no context so no index threading applied there; contract drift checked — all producers/consumers of touched helpers are inside `review_evidence.py` except public rank functions and one positional `_source_role` test call, all green.
+- Edge paths: empty patterns/names → `False`; syntax-error text → `""`; `signal_cache=None` → local dict; stale/different context under same cache → identity check rebuilds. All covered by tests above.
+- Claimed-vs-shipped delta: none. Deferred: none. Out-of-scope smells: none observed.
 
-## Fix round 1 (audit response, branch feature/worktree-safe-config-T2)
+## Integration notes
 
-Worktree: `/home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T2` (existing; no new worktree).
-Strict TDD: every new/strengthened assertion below was observed failing
-against the pre-fix code (or proved non-vacuous by mutation / a sibling
-fail-first run — noted per item), then fixed.
-Verify: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py
-tests/ng/test_init_smoke.py tests/ng/test_worktree.py tests/ng/test_doctor.py
-tests/ng/test_config.py tests/ng/test_init.py` → `ptest: passed · 855 tests`.
+- No seam: T2 touches only its owned files and needs nothing from T1/T3. T1's identity test will exercise T2's ranking inside the reference full path after merge; goldens here guarantee selection is unchanged.
+- Confidence: high — identical-output proof is golden + differential, reductions are operation-counted, and the full scoped suite passes unmodified.
 
-1. Stale-guidance warn before config-uncommitted refusal (BLOCKING):
-   `main()` now skips `_warn_stale_guidance` when
-   `resolution.problem.code == "config-uncommitted"` (`cli.py` ~3450).
-   Only call site (verified by grep); other "run ptest init" hints
-   checked: the reroute old-line fires only when `config_uncommitted`
-   is None for scope dir and cwd, `_fix_mention` names `--fix` not
-   init, `executability` fix text is unreachable here (doctor refuses
-   first, D6). Test: item-1 test parametrize is now `[(), ("-k",
-   "foo")]` with `agent_rules.guidance_outdated` monkeypatched to
-   True — both params failed pre-fix, pass now.
-2. Init-refusal TTY pin: test sets `sys.stdin.isatty -> True` with
-   `input -> fail`, asserts exit 2 plus a before/after tree snapshot
-   ("nothing written"). Pin is live: the same TTY+input tripwire was
-   observed firing in this exact init path (item 8 pre-fix run).
-3. Non-git `commit_paths` pin: test uses `--agents all` (rule file
-   asserted on disk) with `commit_paths == []`. Mutation-proved:
-   deleting the `git_root` guard makes it fail; guard restored.
-4. Doctor `--json` negative: test creates a new untracked marked
-   `.claude/skills/ptest/SKILL.md`, asserts the helper is non-empty
-   while `--json` stdout lacks the line; also asserts
-   `index("0 calls") < index("not committed:")` (mention after grid).
-5. Carve-out narrowed: `_git_only_popen` now allows only argv
-   containing `"ls-tree"` and is documented doctor-only; the 14
-   static-dispatch cases, the monorepo doctor test, the offline-static
-   test and the new hostile-paths test run under the full
-   `_forbid_launch` ban; `_forbid_launch_except_git` deleted. Item-9
-   re-check: the carve-out is still needed exactly once — the
-   doctor-mention test in a real git repo, where genuine `git ls-tree`
-   output is required (probe-recorded argv confirms only `ls-tree`
-   fires from doctor). Fixture `git add/commit` scaffolding runs
-   outside the gate via explicit `_gate`/`_ungate`.
-6. Doctor mention sanitized: `_uncommitted_mention` wraps the line in
-   `render.terminal_text` (`cli.py` ~2131). Test feeds
-   `("evil\x85/.ptest.toml", "bad\u2028/.ptest.toml")` through the
-   mocked helper and asserts both raw chars absent (failed pre-fix).
-7. Run-warning outcome equality uses the real echo runner (stub
-   removed; checkout moved inside the fixture domain for scheduling).
-   Probe finding: the echo child writes past `capsys` to the fd, so
-   the test uses `capfd` and asserts `"hello" in out` plus
-   byte-identical stdout and exit 0 in both states.
-8. `init --from-main` outside a linked worktree on a TTY refused
-   before the agents prompt: new `elif` raises `invalid-config` with
-   T1's exact message reused via `config_api._FROM_MAIN_REFUSAL` (no
-   text duplication; cross-module private access is deliberate). The
-   `.path is None` condition preserves the existing-config
-   from_main-is-ignored path. Test (isatty True, input fails) failed
-   pre-fix with the prompt firing; green now.
-9. (T1 file, allowed) `worktree._uncommitted_inner` returns `()`
-   without any subprocess when `git_root(os.path.realpath(root))` is
-   None (deferred import — no cycle with `config`). `realpath` keeps
-   the existing symlinked-root contract green. New
-   `test_uncommitted_config_files_non_git_spawns_no_subprocess`
-   (Popen `pytest.fail`, incl. `include_agent_rules`) failed pre-fix;
-   full `test_worktree.py` (43 tests) green.
+## Fix round 1 (audit response: bench now isolates ranking time)
+
+- Finding: `scripts/bench_rank_candidates.py` timed the whole `AA.build_packets` call and labelled it `{"mode": "rank_candidates"}`; the 13.156 s → 7.628 s figures were whole-pipeline totals, not ranking. Design §T2 step 4 requires timing `rank_candidates` captured through `build_packets`.
+- Fix (task worktree `ptest-T2`, commit `563a447`, one file): `main()` warms up unwrapped, then monkeypatches the `review_evidence.rank_candidates` module attribute with a wall-time-accumulating wrapper for the timed `build_packets` call, restoring it in `finally`. `_build_one_packet` does `from . import review_evidence as RE` at call time (`src/ptest/agent_assessment.py:1929`) and calls `RE.rank_candidates` once per child (`:1932`, the only ranking call in the packet path), so the patch intercepts every ranking call and nothing else. Output is now `{"mode": "rank_candidates", "files", "seconds" (= ranking-only sum), "total_seconds" (= whole-pipeline span), "rank_calls"}`. `rank_calls == 2` on every run below is the non-vacuous guard: a missed patch would report `seconds: 0.0, rank_calls: 0`.
+- Re-recorded with the amended script (1002 files; base = `src/ptest/review_evidence.py` at `09f6f40` swapped over the worktree, HEAD = `0976d17` + fix; box load ~13, so wall clock is noisy — figures informative only):
+  - Base ranking-only `seconds`: `13.279`, `13.851` (totals `17.63`, `18.704`).
+  - HEAD ranking-only `seconds`: `12.616`, `5.346`, `9.23`, `8.028` (totals `15.526`, `6.94`, `12.73`, `11.251`).
+  - Medians: ~13.6 s base vs ~8.6 s HEAD on the ranking path (~1.6×); the old whole-pipeline numbers are superseded and must not be quoted as ranking.
+- Verification: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_review_evidence.py` in `ptest-T2` → `ptest: passed · 36 tests` (exit 0; `36 passed in 47.06s`). Bench selection-identity is unchanged by construction (wrapper delegates to the original); goldens/differentials from the main report still hold and no src file was touched in this round.
+- Incidents: a `git stash push -- src/ptest/review_evidence.py` for the base run reported "No local changes to save" (the T2 src change is committed), and the trailing `git stash pop` consumed a pre-existing stash (`92155c2`) that rewrote `.ptest.toml` (workers 8→1, split cov args, dev-group setup argv, rotated project_id). `.ptest.toml` is not T2-owned; it was restored to HEAD (`git checkout -- .ptest.toml`) and the tree is otherwise untouched — final diff of this round is the bench script only. Base runs were done by explicit `git show 09f6f40:...` file swap with byte restore afterwards (verified via `git status`: only the bench script modified).
+- dan-jefferies passes: re-read the diff (found nothing beyond the intended hunk; `functools.wraps` metadata copy is inert here); re-anchored to the finding (wrap module attribute ✓, report sum + optional total ✓, re-record both ✓, scoped tests ✓); smell sweep — no src change, no new helper (no shared timing helper exists; `perf_counter` appears only in this script), no consumers of the bench JSON in-repo, restore-on-exception covered, edge `rank_calls: 0` case would self-evidently report zeros.
+- Status: implemented — bench isolates ranking time; verified — 36-test scoped run green, interception proved by `rank_calls: 2`, base/after re-recorded; not verified — full suite (`--full` is the orchestrator's gate); deferred — none; discovered-but-not-fixed — none in scope (the `.ptest.toml` rewrite source is unknown; flagged here, file restored).
+- Confidence: medium-high — the isolation mechanism is proven by `rank_calls`, but absolute speedups are load-noisy and should be re-taken on a quiet box before quoting.
