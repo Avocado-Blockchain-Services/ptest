@@ -388,6 +388,29 @@ def _restart_line(result: C.InitResult, rules: object,
     return _RESTART_NEW
 
 
+def _commit_reminder_lines(result: C.InitResult, width: int, *,
+                           dry_run: bool) -> list[str]:
+    """Commit reminder tail: the exact files init wrote or changed.
+
+    Shown only for completed (non-preview) results with a non-empty
+    ``commit_paths``. Paths are sanitized through ``terminal_text`` and
+    the first line wraps with ``hang="  "`` continuations.
+    """
+    if dry_run or result.action is C.InitAction.PREVIEW:
+        return []
+    # Tolerant read: the T1 ``commit_paths`` field defaults to () and is
+    # absent on a pre-integration tree, where the reminder stays hidden.
+    paths = [terminal_text(path)
+             for path in tuple(getattr(result, "commit_paths", ()) or ())]
+    paths = [path for path in paths if path]
+    if not paths:
+        return []
+    lines = wrap_words(f"Commit these files: {', '.join(paths)}", width,
+                       indent="", hang="  ")
+    lines.append("Worktrees and clones only get committed config.")
+    return lines
+
+
 def render_init_footer(result: C.InitResult, rules: object = None, *,
                        dry_run: bool = False,
                        smoke: Sequence[object] = (),
@@ -423,6 +446,11 @@ def render_init_footer(result: C.InitResult, rules: object = None, *,
         if lines:
             lines.append("")
         lines.append(restart)
+    commit = _commit_reminder_lines(result, resolved, dry_run=dry_run)
+    if commit:
+        if lines:
+            lines.append("")
+        lines.extend(commit)
     if not lines:
         return ""
     return "\n".join(lines) + "\n"

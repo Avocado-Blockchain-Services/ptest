@@ -408,3 +408,78 @@ def test_hostile_fact_characters_never_reach_terminal_raw():
     text = render_init(_result(), None, facts=facts, width=80)
     assert bidi not in text
     assert csi not in text
+
+
+# --- commit reminder ---------------------------------------------------------
+
+
+def _committed_result(commit_paths, action=C.InitAction.CREATED, exists=True,
+                      warnings=(), details=()):
+    try:
+        return C.InitResult(action=action, target=Path("/repo/.ptest.toml"),
+                            exists=exists, config=None, warnings=warnings,
+                            details=details, commit_paths=tuple(commit_paths))
+    except TypeError:
+        # Pre-T1 base: InitResult has no commit_paths field yet (T1 adds it
+        # with a () default and validation). Attach the seam directly; the
+        # renderer reads it tolerantly, and the real kwarg path above takes
+        # over the moment T1 lands. Remove the fallback once T1 integrates.
+        result = C.InitResult(action=action, target=Path("/repo/.ptest.toml"),
+                              exists=exists, config=None, warnings=warnings,
+                              details=details)
+        object.__setattr__(result, "commit_paths", tuple(commit_paths))
+        return result
+
+
+def test_commit_reminder_is_last_block_after_restart():
+    """A no-op footer would omit the commit list the agent must relay."""
+    rules = _rules(
+        _detail(".claude/skills/ptest/SKILL.md", "created", "guidance"))
+    result = _committed_result(
+        (".ptest.toml", "docs/ptest-agent.md", "AGENTS.md"))
+    footer = render_init_footer(result, rules, width=80)
+    lines = footer.splitlines()
+    assert lines[-2:] == [
+        "Commit these files: .ptest.toml, docs/ptest-agent.md, AGENTS.md",
+        "Worktrees and clones only get committed config.",
+    ]
+    restart_at = lines.index(
+        "Restart your coding agents to load the new ptest skill.")
+    assert lines[restart_at + 1] == ""
+    assert restart_at + 2 == len(lines) - 2
+
+
+def test_commit_reminder_absent_for_empty_preview_or_dry_run():
+    """Preview, dry-run and pathless results end without a commit block."""
+    assert "Commit these files" not in render_init_footer(
+        _result(), None, width=80)
+    preview = _committed_result((".ptest.toml",),
+                               action=C.InitAction.PREVIEW, exists=False)
+    assert "Commit these files" not in render_init_footer(
+        preview, None, width=80)
+    created = _committed_result((".ptest.toml",))
+    assert "Commit these files" not in render_init_footer(
+        created, None, dry_run=True, width=80)
+
+
+def test_commit_reminder_wraps_at_narrow_width():
+    """Width 40 (clamped to the 60-column floor) wraps the path list."""
+    result = _committed_result(
+        (".ptest.toml", "docs/ptest-agent.md", "AGENTS.md"))
+    footer = render_init_footer(result, None, width=40)
+    assert footer.splitlines()[-3:] == [
+        "Commit these files: .ptest.toml, docs/ptest-agent.md,",
+        "  AGENTS.md",
+        "Worktrees and clones only get committed config.",
+    ]
+
+
+def test_commit_reminder_sanitizes_control_characters():
+    """Control characters in commit paths stay escaped on the terminal."""
+    nasty = "we\x07ird.md"
+    result = _committed_result((".ptest.toml", nasty))
+    footer = render_init_footer(result, None, width=80)
+    assert "\x07" not in footer
+    assert "we\\x07ird.md" in footer
+    assert footer.splitlines()[-1] == \
+        "Worktrees and clones only get committed config."

@@ -675,6 +675,76 @@ def _check_limits(limits: C.ScanLimits) -> None:
         raise C.Problem(code="invalid-bound", message="doctor output limit is below the finite minimum", phase=_PHASE)
 
 
+def _config_findings(root: Path) -> tuple[C.Finding, ...]:
+    """One ``config.uncommitted`` finding per uncommitted ptest file.
+
+    Covers the root config, v2 child configs and managed agent-rule files
+    (``include_agent_rules=True``). Best-effort: any failure, including the
+    worktree module being absent on a pre-integration tree, yields ``()``,
+    so doctor never fails here.
+    """
+    try:
+        from . import worktree as worktree_api
+        paths = worktree_api.uncommitted_config_files(root, include_agent_rules=True)
+    except Exception:
+        return ()
+    findings: list[C.Finding] = []
+    for relative in paths or ():
+        try:
+            findings.append(C.Finding(
+                code="config.uncommitted", severity="medium", confidence="high",
+                path=relative, line=None, evidence_type="git-tree",
+                consequence="New git worktrees and clones will not contain this ptest file.",
+                remediation="Ask the user to commit it on the base branch; do not run ptest init in a worktree.",
+                verification="git ls-tree HEAD lists the file and ptest doctor no longer reports config.uncommitted."))
+        except Exception:
+            return ()
+    return tuple(findings)
+
+
+def _admit_config_findings(scan: _Scan, root: Path) -> int:
+    """Admit config findings first under the same bounds as source findings."""
+    admitted = 0
+    for finding in _config_findings(root):
+        size = _finding_bytes(finding)
+        if len(scan.findings) >= scan.limits.findings:
+            scan.limit("Doctor finding limit reached.")
+            break
+        if scan.admit_output and (
+                scan.output_bytes + size + _OUTPUT_LIMIT_BYTES > scan.payload_limit):
+            scan._hit_output_limit()
+            break
+        scan.findings.append(finding)
+        scan.output_bytes += size
+        admitted += 1
+    return admitted
+
+
+def _config_uncommitted_readiness(problem: C.Problem) -> tuple[C.Readiness, ...] | None:
+    """Blocked readiness naming the config-uncommitted problem, or None.
+
+    Mirrors the unconfigured shape with the problem's own code and message
+    instead of ``initialization-required``. None when the reason code is
+    unavailable (pre-integration tree), letting the caller keep the default.
+    """
+    try:
+        reason = _reason(problem.code, problem.message)
+    except Exception:
+        return None
+    try:
+        return (
+            C.Readiness(area="execution", state="blocked", reasons=(reason,)),
+            C.Readiness(area="parallel", state="unknown", reasons=(
+                _reason("static-evidence-insufficient",
+                        "Static inspection cannot prove run/worker isolation."),)),
+            C.Readiness(area="selection", state="blocked", reasons=(reason,)),
+            C.Readiness(area="timing", state="unknown", reasons=(
+                _reason("static-evidence-insufficient", _TIMING_MISSING),)),
+        )
+    except Exception:
+        return None
+
+
 def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLimits,
             scope: str | None) -> C.DoctorReport:
     """Return bounded static hypotheses without executing code or reading state.
@@ -699,8 +769,29 @@ def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLim
                 scan.skip("Doctor rejected an unsafe priority root.")
                 continue
             priority.append(item)
+    admitted_config = 0
+    if display_scope is None:
+        admitted_config = _admit_config_findings(scan, root)
     _run_scan(scan, display_scope or "", tuple(priority))
     resolved = config.config
+    problem = config.problem
+    override = None
+    if (resolved is None and problem is not None
+            and problem.code == "config-uncommitted"):
+        override = _config_uncommitted_readiness(problem)
+    if admitted_config or override is not None:
+        # Readiness is computed from the non-config findings so config
+        # findings never move it; a config-uncommitted resolution instead
+        # names its own problem code and message.
+        selection_enabled = True if resolved is None else bool(resolved.selection.enabled)
+        if override is not None:
+            readiness = override
+        else:
+            readiness = _readiness(bool(scan.findings[admitted_config:]),
+                                   bool(scan.limitations),
+                                   selection_enabled=selection_enabled,
+                                   configured=resolved is not None)
+        return _evict_to_fit(scan, _scope_tuple(display_scope), readiness)
     return _finalize_report(
         scan, display_scope,
         selection_enabled=True if resolved is None else bool(resolved.selection.enabled),
@@ -911,6 +1002,13 @@ def inspect_workspace(domain: C.DomainPaths, resolution: C.ConfigResolution,
     # debits this one workspace-wide budget.
     ledger = _Scan(root, limits, requested)
     global_deadline = ledger.began + limits.elapsed_s
+    if requested is None:
+        # Config findings (root plus v2 children, via the worktree helper)
+        # are admitted before the source findings; aggregate readiness comes
+        # from the per-repository reports, so it never moves here.
+        for finding in _config_findings(root):
+            if not _admit_finding(ledger, finding):
+                break
     repositories: list[RepositoryInspection] = []
     for index, (declaration, local) in enumerate(selected):
         child_scope = (declaration,) if local is None else (requested or declaration,)

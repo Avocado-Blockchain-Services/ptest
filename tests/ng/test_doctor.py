@@ -4,6 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import os
+import stat
+import subprocess
+import sys
+import tomllib
+import types
 from dataclasses import asdict, fields, replace
 import json
 
@@ -12,6 +17,121 @@ import pytest
 from ptest import contracts as C
 from ptest.doctor import inspect
 from ptest.render import render_doctor
+from support import git, init_git_repo, write_ptest_toml
+
+
+# --- T1 barrier seam (worktree-safe config) ----------------------------------
+# T1 (src/ptest/worktree.py plus the contracts codes) has not integrated on
+# this base, so the frozen T1 shapes below are declared locally, verbatim from
+# the frozen interfaces (design §3.1), for this module's tests. Everything
+# here is conditional: the moment T1 lands, the real module, codes and fields
+# shadow these declarations and this block becomes a no-op. Remove this block
+# once T1 is integrated.
+_T1_AGENT_RULE_FILES = (
+    "docs/ptest-agent.md",
+    "AGENTS.md", "CLAUDE.md", "GEMINI.md",
+    ".agents/skills/ptest/SKILL.md", ".claude/skills/ptest/SKILL.md",
+    ".gemini/skills/ptest/SKILL.md", ".opencode/skills/ptest/SKILL.md",
+)
+_T1_MANAGED_MARKER = "<!-- ptest-agent-rules:start -->"
+
+if "config.uncommitted" not in C.FINDING_CODES:
+    C.FINDING_CODES = C.FINDING_CODES | {"config.uncommitted"}
+if "config-uncommitted" not in C.REASON_CODES:
+    C.REASON_CODES = C.REASON_CODES | {"config-uncommitted"}
+
+
+def _t1_regular(root: Path, relative: str) -> bool:
+    """Regular file that is not a symlink (lstat, never follows)."""
+    try:
+        stamp = os.lstat(root / relative)
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode)
+
+
+def _t1_manifest_children(root: Path) -> tuple[str, ...]:
+    """Declared v2 children whose config exists in this checkout."""
+    try:
+        raw = (root / ".ptest.toml").read_bytes()
+    except OSError:
+        return ()
+    if len(raw) > 256 * 1024:
+        return ()
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except Exception:
+        return ()
+    if data.get("version") != 2:
+        return ()
+    monorepo = data.get("monorepo")
+    children = monorepo.get("children") if isinstance(monorepo, dict) else None
+    if not isinstance(children, list):
+        return ()
+    kept = []
+    for child in children:
+        if (isinstance(child, str) and child and not child.startswith("/")
+                and ".." not in child.split("/")
+                and _t1_regular(root, f"{child}/.ptest.toml")):
+            kept.append(child)
+    return tuple(kept)
+
+
+def _t1_uncommitted_config_files(root, *, include_agent_rules=False):
+    """Local stand-in for T1's worktree.uncommitted_config_files.
+
+    Same candidate order (root config, v2 children, agent-rule files), same
+    marker rule for the three instruction files, same single
+    ``ls-tree -r -z --name-only HEAD`` tracked check; any error (including
+    unborn HEAD and non-git) yields (). Used only while ptest.worktree is
+    absent; the real module shadows it after T1 integrates.
+    """
+    root = Path(root)
+    candidates: list[str] = []
+    if _t1_regular(root, ".ptest.toml"):
+        candidates.append(".ptest.toml")
+        for child in _t1_manifest_children(root):
+            candidates.append(f"{child}/.ptest.toml")
+    if include_agent_rules:
+        for name in _T1_AGENT_RULE_FILES:
+            if not _t1_regular(root, name):
+                continue
+            if name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+                try:
+                    content = (root / name).read_bytes()
+                except OSError:
+                    continue
+                if _T1_MANAGED_MARKER.encode("utf-8") not in content:
+                    continue
+            candidates.append(name)
+    if not candidates:
+        return ()
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only",
+             "HEAD", "--", *candidates),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=30, check=True)
+    except Exception:
+        return ()
+    tracked = {entry for entry in
+               completed.stdout.decode("utf-8", "replace").split("\x00") if entry}
+    return tuple(item for item in candidates if item not in tracked)
+
+
+def _t1_worktree_double():
+    module = types.ModuleType("ptest.worktree")
+    module.CONFIG_NAME = ".ptest.toml"
+    module.AGENT_RULE_FILES = _T1_AGENT_RULE_FILES
+    module.MANAGED_MARKER = _T1_MANAGED_MARKER
+    module.uncommitted_config_files = _t1_uncommitted_config_files
+    return module
+
+
+try:
+    import ptest.worktree  # noqa: F401
+except ImportError:
+    sys.modules["ptest.worktree"] = _t1_worktree_double()
 
 
 def _resolution(case, root: Path) -> C.ConfigResolution:
@@ -1348,3 +1468,145 @@ def test_match_rules_is_pure_and_returns_codes_only():
     assert codes == frozenset({"time.blocking-sleep"})
     assert isinstance(codes, frozenset)
     assert all(isinstance(code, str) for code in codes)
+
+
+# --- config.uncommitted findings (worktree-safe config) -----------------------
+
+
+def _uncommitted_repo(tmp_path: Path) -> Path:
+    """Git repo with untracked .ptest.toml, docs guide and managed AGENTS.md."""
+    root = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
+    write_ptest_toml(root)
+    docs = root / "docs" / "ptest-agent.md"
+    docs.parent.mkdir(parents=True, exist_ok=True)
+    docs.write_text("# ptest agent notes\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text(
+        "<!-- ptest-agent-rules:start -->\n# agent notes\n", encoding="utf-8")
+    return root
+
+
+def test_config_uncommitted_findings_list_untracked_ptest_files(case, tmp_path):
+    """Replacing config finding collection with a no-op hides uncommitted files."""
+    domain = case.domain()
+    root = _uncommitted_repo(tmp_path)
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+
+    assert [(item.code, item.path) for item in report.findings] == [
+        ("config.uncommitted", ".ptest.toml"),
+        ("config.uncommitted", "docs/ptest-agent.md"),
+        ("config.uncommitted", "AGENTS.md"),
+    ]
+    first = report.findings[0]
+    assert first.severity == "medium"
+    assert first.confidence == "high"
+    assert first.line is None
+    assert first.evidence_type == "git-tree"
+    assert first.consequence == \
+        "New git worktrees and clones will not contain this ptest file."
+    assert first.remediation == \
+        "Ask the user to commit it on the base branch; do not run ptest init in a worktree."
+    assert first.verification == \
+        "git ls-tree HEAD lists the file and ptest doctor no longer reports config.uncommitted."
+
+
+def test_config_uncommitted_absent_when_committed_or_non_git(case, tmp_path):
+    """Committed ptest files and non-git checkouts report no config.uncommitted."""
+    domain = case.domain()
+    root = _uncommitted_repo(tmp_path)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "ptest files")
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+    assert [item for item in report.findings
+            if item.code == "config.uncommitted"] == []
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    write_ptest_toml(plain)
+    report = inspect(domain, _resolution(case, plain), C.DEFAULT_SCAN_LIMITS, None)
+    assert [item for item in report.findings
+            if item.code == "config.uncommitted"] == []
+
+
+def test_config_uncommitted_scoped_request_gives_none(case, tmp_path):
+    """A scoped doctor request never carries whole-repository config findings."""
+    domain = case.domain()
+    root = _uncommitted_repo(tmp_path)
+    report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, "docs")
+    assert [item for item in report.findings
+            if item.code == "config.uncommitted"] == []
+
+
+def test_config_uncommitted_respects_finding_bound(case, tmp_path):
+    """Config findings are admitted first and still honor the finding bound."""
+    domain = case.domain()
+    root = _uncommitted_repo(tmp_path)
+    limits = replace(C.DEFAULT_SCAN_LIMITS, findings=1)
+    report = inspect(domain, _resolution(case, root), limits, None)
+
+    assert [(item.code, item.path) for item in report.findings] == [
+        ("config.uncommitted", ".ptest.toml"),
+    ]
+    assert any(reason.code == "scan-limit" and "finding limit" in reason.message
+               for reason in report.limitations)
+
+
+def test_config_uncommitted_leaves_readiness_unchanged(case, tmp_path):
+    """Config findings must not move readiness; the committed twin agrees."""
+    domain = case.domain()
+    root = _uncommitted_repo(tmp_path)
+    before = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+    assert any(item.code == "config.uncommitted" for item in before.findings)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "ptest files")
+    after = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, None)
+    assert not any(item.code == "config.uncommitted" for item in after.findings)
+    assert before.readiness == after.readiness
+
+
+def test_config_uncommitted_resolution_readiness_names_problem(case, tmp_path):
+    """A config-uncommitted resolution blocks on its own code, never init advice."""
+    domain = case.domain()
+    root = tmp_path / "empty"
+    root.mkdir()
+    message = ("this is a linked git worktree without .ptest.toml; the main checkout has "
+               "/main/.ptest.toml. Worktrees only receive committed files. Ask the user to "
+               "commit .ptest.toml on the base branch. Do not run ptest init here.")
+    resolution = C.ConfigResolution(
+        root=root, path=None, config=None, provenance=(), warnings=(),
+        problem=C.Problem(code="config-uncommitted", phase="config", message=message),
+    )
+    report = inspect(domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+
+    states = {item.area: item.state for item in report.readiness}
+    assert states == {"execution": "blocked", "parallel": "unknown",
+                      "selection": "blocked", "timing": "unknown"}
+    execution = next(item for item in report.readiness if item.area == "execution")
+    selection = next(item for item in report.readiness if item.area == "selection")
+    assert [(reason.code, reason.message) for reason in execution.reasons] == [
+        ("config-uncommitted", message)]
+    assert [(reason.code, reason.message) for reason in selection.reasons] == [
+        ("config-uncommitted", message)]
+    assert "initialization-required" not in {
+        reason.code for item in report.readiness for reason in item.reasons}
+    assert "run ptest init there" not in " ".join(
+        reason.message for item in report.readiness for reason in item.reasons)
+
+
+def test_config_uncommitted_lists_monorepo_child(case, tmp_path):
+    """A monorepo with untracked child config names the child in findings."""
+    from ptest.doctor import inspect_workspace
+    from ptest import config as config_api
+
+    domain = case.domain()
+    root = init_git_repo(tmp_path / "mono", files={"README.md": "x\n"})
+    (root / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    (root / "api").mkdir()
+    write_ptest_toml(root / "api")
+    resolution = config_api.resolve_config(root)
+    assert resolution.monorepo is not None
+    workspace = inspect_workspace(domain, resolution, C.DEFAULT_SCAN_LIMITS, None)
+
+    pairs = [(item.code, item.path) for item in workspace.aggregate.findings]
+    assert ("config.uncommitted", ".ptest.toml") in pairs
+    assert ("config.uncommitted", "api/.ptest.toml") in pairs
