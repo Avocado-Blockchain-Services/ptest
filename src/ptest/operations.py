@@ -124,6 +124,7 @@ def estimate_test_count(config: C.Config, root: Path,
 def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
                              evidence: tuple[float | None, int | None],
                              estimate: int | None = None,
+                             *, kill_s: float | None = None,
                              ) -> tuple[float, str]:
     """Resolve the compound execution deadline and name its source.
 
@@ -134,7 +135,8 @@ def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
     ("default").  The dynamic deadline is max(last duration x safety
     factor, test count x per-test budget), clamped to [MIN, MAX_DYNAMIC];
     the estimate is count x per-test budget with a 600 s floor, clamped to
-    MAX_DYNAMIC.
+    MAX_DYNAMIC. ``kill_s`` (a recent non-full run killed by its deadline)
+    only ever raises a dynamic result to kill_s x safety factor.
     """
     if request.timeout_s is not None:
         return (float(request.timeout_s), "cli")
@@ -150,14 +152,20 @@ def resolve_compound_timeout(runner: C.RunnerConfig, request: C.RunRequest,
         signals.append(total_tests * C.COMPOUND_TIMEOUT_PER_TEST_S)
     if signals:
         limited = max(signals)
-        limited = min(max(limited, C.MIN_COMPOUND_TIMEOUT_S),
-                      C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
-        return (limited, "history")
-    if estimate is not None:
+        limit, source = (min(max(limited, C.MIN_COMPOUND_TIMEOUT_S),
+                             C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S), "history")
+    elif estimate is not None:
         estimated = max(float(estimate) * C.COMPOUND_TIMEOUT_PER_TEST_S,
                         C.DEFAULT_COMPOUND_TIMEOUT_S)
-        return (min(estimated, C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S), "estimate")
-    return (C.DEFAULT_COMPOUND_TIMEOUT_S, "default")
+        limit, source = min(estimated, C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S), "estimate"
+    else:
+        limit, source = C.DEFAULT_COMPOUND_TIMEOUT_S, "default"
+    if kill_s is not None:
+        raised = min(kill_s * C.COMPOUND_TIMEOUT_SAFETY_FACTOR,
+                     C.MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
+        if raised > limit:
+            return (raised, "history")
+    return (limit, source)
 
 
 def _no_history_estimate(config: C.Config, checkout: C.CheckoutIdentity,
@@ -1805,8 +1813,8 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             return _source_invalidation(input_before, gate_after)
 
         # The shadow compound always runs the full-gate attempt (a002) next
-        # to the selected attempt (a001), so its deadline must come from
-        # full-family evidence even though the request mode is AUTOMATIC.
+        # to the selected attempt (a001), so its deadline comes from full
+        # evidence alone even though the request mode is AUTOMATIC.
         shadow_evidence = history.comparable_run_evidence(
             domain, checkout, full=True)
         limit, source = resolve_compound_timeout(
@@ -3049,19 +3057,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
             return invalidation
 
         try:
-            # Evidence must match what will actually run, not the request
-            # label: a bare AUTOMATIC request is recorded with
-            # mode=AUTOMATIC but may execute the full gate, so a scoped
-            # single-file row must never set the deadline for that run.
-            # FULL requests always plan execution "full", so the plan check
-            # covers both cases.
+            # Evidence follows what will actually run, not the request label:
+            # a bare AUTOMATIC request may execute the full gate. Every run
+            # reads full-run evidence; only a non-full run adds the newest
+            # scoped deadline kill, which can only raise its bound.
+            full_run = plan.execution == "full"
             run_evidence = history.comparable_run_evidence(
-                domain, checkout,
-                full=(plan.execution == "full"))
+                domain, checkout, full=full_run)
             limit, source = resolve_compound_timeout(
                 effective.runner, request, run_evidence,
                 _no_history_estimate(effective, checkout, request,
-                                     history_view, run_evidence))
+                                     history_view, run_evidence),
+                kill_s=None if full_run else history.non_full_kill_s(domain, checkout))
             if request.verbose:
                 progress.emit(
                     f"ptest: -v compound deadline: {limit:.0f}s ({source})",

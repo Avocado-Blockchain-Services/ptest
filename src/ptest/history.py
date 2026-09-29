@@ -2923,7 +2923,7 @@ def read_history_summaries(
 def _comparable_entry(summary: object) -> tuple[float, int | None, bool] | None:
     """Split one summary into (execution_s, total_tests, is_full) or None.
 
-    Comparable means the same mode family (full vs non-full), a terminal
+    Comparable means a terminal
     passed|failed status (or an incomplete run killed by the compound
     deadline, which still proves the suite needs at least that long), and
     a numeric execution duration. The family is what actually ran
@@ -2987,6 +2987,9 @@ def _compound_killed(summary: dict) -> bool:
         for item in reasons)
 
 
+_FULL_EVIDENCE_WINDOW = 200
+
+
 def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                             *, full: bool) -> tuple[float | None, int | None]:
     """(execution_s, total_tests) of the most recent comparable full run.
@@ -2996,12 +2999,14 @@ def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
     duration. Every request, full or not, reads the latest such full run:
     history does not record which scope a scoped or selected run covered,
     so one says nothing about the next, while the full suite bounds every
-    subset. ``full`` names the caller's family and no longer changes the
-    answer. Reads at most 20 summaries and never raises: any store, shape,
-    or decode problem yields (None, None).
+    subset. ``full`` names the caller's family; a non-full caller adds
+    ``non_full_kill_s`` on top, which can only raise the bound. Every bare
+    ``ptest`` records a scoped row, so the lookup reads as far back as the
+    store allows (200 summaries). Never raises: any store, shape, or decode
+    problem yields (None, None).
     """
     try:
-        summaries = read_history_summaries(domain, checkout, 20)
+        summaries = read_history_summaries(domain, checkout, _FULL_EVIDENCE_WINDOW)
     except Exception:
         return (None, None)
     try:
@@ -3015,6 +3020,29 @@ def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
     except Exception:
         return (None, None)
     return (None, None)
+
+
+def non_full_kill_s(domain: C.DomainPaths,
+                    checkout: C.CheckoutIdentity) -> float | None:
+    """Duration of the newest non-full run killed by its compound deadline.
+
+    Looks at the latest 20 summaries. A kill proves that run needed longer
+    than its bound, so callers may only use it to raise the next non-full
+    deadline, never to lower one. Per-attempt kills do not qualify. Never
+    raises: any store, shape, or decode problem yields None.
+    """
+    try:
+        summaries = read_history_summaries(domain, checkout, 20)
+        for summary in summaries:
+            entry = _comparable_entry(summary)
+            if entry is None:
+                continue
+            execution_s, _total, is_full = entry
+            if not is_full and summary.get("status") == "incomplete":
+                return execution_s
+    except Exception:
+        return None
+    return None
 
 
 def read_history_payload(

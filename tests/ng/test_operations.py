@@ -1428,3 +1428,21 @@ def test_queue_deadline_problem_is_identical_whichever_path_detects_it(
     problem = raised.value
     assert (problem.code, problem.message, problem.phase, problem.retryable) == (
         "queue-timeout", "admission queue deadline expired", "execution", True)
+
+
+def test_queue_deadline_while_enqueue_stays_locked_is_the_same_problem(case, monkeypatch):
+    domain = case.domain()
+    root = _command_project(case, domain, args=("exit", "0"))
+    config = config_api.resolve_config(root).config
+
+    def locked(*_args):
+        raise storage.TransientContention(
+            message="database is locked", phase="scheduler")
+
+    monkeypatch.setattr(scheduler, "enqueue", locked)
+    with pytest.raises(C.Problem) as raised:
+        operations.execute(domain, config, C.RunRequest(
+            mode=C.Mode.FULL, queue_timeout_s=1))
+    problem = raised.value
+    assert (problem.code, problem.message, problem.phase, problem.retryable) == (
+        "queue-timeout", "admission queue deadline expired", "execution", True)

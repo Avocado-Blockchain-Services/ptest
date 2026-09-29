@@ -412,7 +412,9 @@ def test_comparable_evidence_prefers_latest_matching_full_run(monkeypatch):
     monkeypatch.setattr(history_api, "read_history_summaries", fake_reader)
     assert history_api.comparable_run_evidence(
         object(), object(), full=True) == (100.0, 400)
-    assert seen["limit"] == 20
+    # Every bare `ptest` records a scoped row, so the lookup for the last
+    # full run reaches as far back as the store allows.
+    assert seen["limit"] == 200
 
 
 def test_comparable_evidence_skips_unusable_rows(monkeypatch):
@@ -469,6 +471,79 @@ def test_small_scoped_run_never_sets_the_deadline_of_a_bigger_one(monkeypatch):
                         lambda domain, checkout, limit=None: tuple(newest_first))
     assert history_api.comparable_run_evidence(
         object(), object(), full=False) == (None, None)
+
+
+def test_full_run_beyond_twenty_scoped_rows_is_still_found(monkeypatch):
+    newest_first = [_summary("scoped", "passed", 2.0, 4)] * 25 + [
+        _summary("full", "passed", 300.0, 965)]
+    monkeypatch.setattr(history_api, "read_history_summaries",
+                        lambda domain, checkout, limit=None: tuple(newest_first[:limit]))
+    assert history_api.comparable_run_evidence(
+        object(), object(), full=False) == (300.0, 965)
+
+
+def _killed(mode, seconds, message=None):
+    return {**_summary(mode, "incomplete", seconds, "missing"),
+            "reasons": [{"code": "execution-timeout", "message": message or (
+                f"compound execution deadline expired after {seconds:.0f}s (estimate)")}]}
+
+
+def test_non_full_kill_is_the_newest_scoped_compound_kill(monkeypatch):
+    newest_first = [
+        _summary("scoped", "passed", 10.0, 40),
+        _killed("scoped", 600.2),
+        _killed("scoped", 200.0),
+        _summary("full", "passed", 300.0, 965),
+    ]
+    monkeypatch.setattr(history_api, "read_history_summaries",
+                        lambda domain, checkout, limit=None: tuple(newest_first))
+    assert history_api.non_full_kill_s(object(), object()) == 600.2
+
+
+def test_non_full_kill_ignores_full_kills_and_attempt_kills(monkeypatch):
+    newest_first = [
+        _killed("full", 900.0),
+        _killed("scoped", 30.0, "attempt execution deadline expired"),
+        _summary("scoped", "failed", 50.0, 100),
+    ]
+    monkeypatch.setattr(history_api, "read_history_summaries",
+                        lambda domain, checkout, limit=None: tuple(newest_first))
+    assert history_api.non_full_kill_s(object(), object()) is None
+
+
+def test_non_full_kill_never_raises(monkeypatch):
+    def raising_reader(domain, checkout, limit=None):
+        raise OSError("store gone")
+    monkeypatch.setattr(history_api, "read_history_summaries", raising_reader)
+    assert history_api.non_full_kill_s(object(), object()) is None
+
+
+def test_scoped_kill_raises_the_next_scoped_deadline():
+    # A kill proves the bound was too small: the next scoped run gets three
+    # times the killed duration when that beats the full-run evidence.
+    runner = _minimal_runner()
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (300.0, 965), kill_s=600.2) == (
+            pytest.approx(1800.6), "history")
+
+
+def test_scoped_kill_never_lowers_the_deadline():
+    # An old or --timeout kill (60 s) must not undercut the estimate that
+    # would otherwise apply; kill evidence only ever raises the bound.
+    runner = _minimal_runner()
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (None, None), 4000, kill_s=60.3) == (
+            2000.0, "estimate")
+    assert operations.resolve_compound_timeout(
+        runner, _scoped_request(), (300.0, 965), kill_s=60.3) == (
+            900.0, "history")
+
+
+def test_explicit_timeouts_ignore_kill_evidence():
+    runner = _minimal_runner()
+    request = replace(_scoped_request(), timeout_s=45)
+    assert operations.resolve_compound_timeout(
+        runner, request, (300.0, 965), kill_s=6000.0) == (45.0, "cli")
 
 
 def test_comparable_evidence_empty_history_yields_nothing(monkeypatch):
@@ -827,19 +902,26 @@ def test_execute_full_gate_uses_full_family_evidence(case, monkeypatch):
         wanted.setdefault("full", []).append(full)
         return (None, None)
 
+    def record_kill(_domain, _checkout):
+        wanted.setdefault("kill", []).append(True)
+        return None
+
     def fail(*args):
         raise OSError("injected launch failure")
 
     monkeypatch.setattr(history_api, "comparable_run_evidence", record_evidence)
+    monkeypatch.setattr(history_api, "non_full_kill_s", record_kill)
     monkeypatch.setattr(operations, "_launch_guard", fail)
     # A bare AUTOMATIC command run executes the full gate even though the
     # request (and its history row) is recorded as AUTOMATIC: the deadline
-    # must come from full-family evidence, never a scoped single-file row.
+    # comes from full evidence and scoped kills never apply to it.
     operations.execute(domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC))
     assert wanted["full"] == [True]
-    # A scoped run keeps non-full evidence (with its fallback to full).
+    assert "kill" not in wanted
+    # A scoped run reads the same full evidence plus the scoped-kill floor.
     operations.execute(domain, config, _scoped_request())
     assert wanted["full"] == [True, False]
+    assert wanted["kill"] == [True]
 
 
 def test_bare_automatic_full_gate_history_round_trips(case, monkeypatch):
@@ -862,8 +944,9 @@ def test_bare_automatic_full_gate_history_round_trips(case, monkeypatch):
     sources = []
     real_resolve = operations.resolve_compound_timeout
 
-    def spy_resolve(runner, request, evidence, estimate=None):
-        limit, source = real_resolve(runner, request, evidence, estimate)
+    def spy_resolve(runner, request, evidence, estimate=None, *, kill_s=None):
+        limit, source = real_resolve(runner, request, evidence, estimate,
+                                     kill_s=kill_s)
         sources.append(source)
         return (limit, source)
 
