@@ -1182,7 +1182,9 @@ def test_init_commit_paths_for_created_preview_existing(tmp_path):
         repo, InitOptions(runner=RunnerKind.PYTEST, dry_run=False,
                           reveal_command=False))
     assert existing.action is InitAction.EXISTING
-    assert existing.commit_paths == ()
+    # T3 (brief requirement 4): the reminder lists every uncommitted ptest
+    # file, so the `.ptest.toml` created above is still reported here.
+    assert existing.commit_paths == (".ptest.toml",)
 
     preview_dir = tmp_path / "preview"
     preview_dir.mkdir()

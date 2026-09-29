@@ -1389,14 +1389,21 @@ def test_human_banner_bounds_deep_paths_without_raw_controls(
 
 # --- Agent-doctor parser/help slice: review grammar, closed modes. ---
 
-def _forbid_launch(monkeypatch):
+def _forbid_launch(monkeypatch, allow_git_ls_tree=False):
     import socket
     import subprocess
 
     def forbidden(*args, **kwargs):
         pytest.fail("invalid invocation crossed an execution/network boundary")
 
-    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    if allow_git_ls_tree:
+        # Init's commit reminder (T3) performs one best-effort `git ls-tree`
+        # read. Gate Popen first so the wrapper captures the genuine Popen;
+        # sockets and runner launches stay forbidden below.
+        _git_only_popen(monkeypatch,
+                        "invalid invocation crossed an execution/network boundary")
+    else:
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(socket, "create_connection", forbidden)
     monkeypatch.setattr("ptest.operations.execute", forbidden)
 
@@ -1404,9 +1411,10 @@ def _forbid_launch(monkeypatch):
 def _git_only_popen(monkeypatch, message):
     """Ban subprocesses except one best-effort `git ls-tree` read.
 
-    Doctor-only: the config.uncommitted finding and the doctor mention
-    shell a single `git ls-tree` to detect uncommitted ptest files
-    (worktree-safe config); runners and anything else stay forbidden.
+    Doctor/init-reminder-only: the config.uncommitted finding, the doctor
+    mention, and init's commit reminder shell a single `git ls-tree` to
+    detect uncommitted ptest files (worktree-safe config); runners and
+    anything else stay forbidden.
     """
     import subprocess
 
@@ -1718,7 +1726,9 @@ def test_init_doctor_without_explicit_consent_keeps_files_and_reports_consent(
     """
     import sys
 
-    _forbid_launch(monkeypatch)
+    # T3: init's commit reminder performs one best-effort `git ls-tree`
+    # read; allow exactly that, keep everything else forbidden.
+    _forbid_launch(monkeypatch, allow_git_ls_tree=True)
     fake_git_marker(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
     monkeypatch.chdir(tmp_path)
@@ -1739,7 +1749,9 @@ def test_init_doctor_on_existing_config_without_consent_keeps_bytes_and_reports_
     """Existing config uses a separate setup step, then init --doctor still gates."""
     import sys
 
-    _forbid_launch(monkeypatch)
+    # T3: init's commit reminder performs one best-effort `git ls-tree`
+    # read; allow exactly that, keep everything else forbidden.
+    _forbid_launch(monkeypatch, allow_git_ls_tree=True)
     fake_git_marker(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["pytest>=8"]\n')
     monkeypatch.chdir(tmp_path)
