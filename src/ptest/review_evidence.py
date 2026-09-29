@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import functools
 import hashlib
 import io
 import posixpath
 import re
 import tokenize
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .checklist import CATALOG
@@ -112,14 +114,19 @@ def source_id(packet_sha256: str, item_id: str, unit: SourceUnit) -> str:
     return "src-" + hashlib.sha256("\0".join(parts).encode()).hexdigest()[:24]
 
 
-def _resource_patterns(entry) -> tuple[re.Pattern, ...]:
+@functools.lru_cache(maxsize=256)
+def _compiled_patterns(text_patterns: tuple[str, ...]) -> tuple[re.Pattern, ...]:
     patterns = []
-    for value in entry.text_patterns:
+    for value in text_patterns:
         try:
             patterns.append(re.compile(value, re.IGNORECASE))
         except re.error:
             continue
     return tuple(patterns)
+
+
+def _resource_patterns(entry) -> tuple[re.Pattern, ...]:
+    return _compiled_patterns(tuple(entry.text_patterns))
 
 
 def _matches_path(path: str, entry) -> tuple[bool, bool]:
@@ -139,21 +146,53 @@ def _matches_path(path: str, entry) -> tuple[bool, bool]:
     return specific, generic
 
 
-def _relation_score(path: str, context) -> int:
-    roles = dict(context.roles)
-    outgoing = {source for source, _target, _kind in context.relations}
-    incoming = {target for _source, target, _kind in context.relations}
+@dataclass(frozen=True, slots=True)
+class _ContextIndex:
+    """Per-context lookups precomputed once per ranking call."""
 
-    def matches(candidate: str) -> bool:
-        return candidate == path
+    roles: Mapping[str, str]
+    outgoing: frozenset[str]
+    incoming: frozenset[str]
+    config_paths: frozenset[str]
 
+
+def _build_context_index(context) -> _ContextIndex:
+    return _ContextIndex(
+        roles=dict(getattr(context, "roles", ())),
+        outgoing=frozenset(
+            source for source, _target, _kind in getattr(
+                context, "relations", ())),
+        incoming=frozenset(
+            target for _source, target, _kind in getattr(
+                context, "relations", ())),
+        config_paths=frozenset(getattr(context, "config_paths", ())),
+    )
+
+
+def _context_index(context, signal_cache: dict | None) -> _ContextIndex:
+    """Memoize one index per context object under the signal cache."""
+    if signal_cache is None:
+        return _build_context_index(context)
+    key = ("context-index", id(context))
+    stored = signal_cache.get(key)
+    if stored is not None:
+        previous, index = stored
+        if previous is context:
+            return index
+    index = _build_context_index(context)
+    signal_cache[key] = (context, index)
+    return index
+
+
+def _relation_score(path: str, context, *,
+                    index: _ContextIndex | None = None) -> int:
+    resolved = index if index is not None else _build_context_index(context)
     score = 0
-    if any(matches(candidate) for candidate in outgoing):
+    if path in resolved.outgoing:
         score += 2
-    if any(matches(candidate) for candidate in incoming):
+    if path in resolved.incoming:
         score += 3
-    role = next((value for candidate, value in roles.items()
-                 if matches(candidate)), None)
+    role = resolved.roles.get(path)
     if role in {"config", "setup", "fixture"}:
         score += 5
     elif role == "helper":
@@ -185,6 +224,9 @@ def _executable_text(path: str, text: str) -> str:
     return "".join(masked)
 
 
+_IDENTIFIER_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|_+")
+
+
 def _python_identifier_text(text: str) -> str:
     """Normalize executable Python identifiers for semantic word matching."""
     try:
@@ -192,11 +234,45 @@ def _python_identifier_text(text: str) -> str:
             io.StringIO(text).readline) if token.type == tokenize.NAME]
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return ""
-    words = []
-    for name in names:
-        split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
-        words.append(re.sub(r"_+", " ", split))
-    return " ".join(words)
+    return _IDENTIFIER_SPLIT_RE.sub(" ", " ".join(names))
+
+
+_EXACT_LOOP_MARKERS = ("\\A", "\\Z", "(?<", "(?=", "(?!")
+
+_CALL_HIT_PREFILTERS: dict = {}
+
+
+def _needs_exact_loop(pattern) -> bool:
+    source = pattern.pattern
+    if not isinstance(source, str):
+        return True
+    return any(marker in source for marker in _EXACT_LOOP_MARKERS)
+
+
+def _prefilter_for(pattern) -> re.Pattern:
+    """One MULTILINE prefilter search per pattern, cached per pattern."""
+    variant = _CALL_HIT_PREFILTERS.get(pattern)
+    if variant is None:
+        variant = re.compile(pattern.pattern, pattern.flags | re.MULTILINE)
+        _CALL_HIT_PREFILTERS[pattern] = variant
+    return variant
+
+
+def _call_names_hit(patterns, call_names: tuple[str, ...]) -> bool:
+    """Match the old per-name double loop with one search per pattern."""
+    patterns = tuple(patterns)
+    call_names = tuple(call_names)
+    if not patterns or not call_names:
+        return False
+    joined = "\n".join(f"{name}\n{name}(" for name in call_names)
+    for pattern in patterns:
+        if not _needs_exact_loop(pattern):
+            if _prefilter_for(pattern).search(joined) is None:
+                continue
+        if any(pattern.search(name) or pattern.search(name + "(")
+               for name in call_names):
+            return True
+    return False
 
 
 def _call_name(node: ast.AST) -> str:
@@ -453,8 +529,7 @@ def _item_signal(path: str, text: str, entry,
     criterion_control = (entry.id == "TIME-001"
                          and _TIME_SPECIFIC_RE.search(code) is not None)
     if path.endswith(".py"):
-        call_hit = any(pattern.search(name) or pattern.search(name + "(")
-                       for name in call_names for pattern in patterns)
+        call_hit = _call_names_hit(patterns, tuple(call_names))
         if entry.id == "TIME-001":
             criterion_control = criterion_control or any(
                 _TIME_SPECIFIC_RE.search(name + "(")
@@ -750,9 +825,14 @@ _ROOT_MANIFEST_NAMES = frozenset({
 })
 
 
-def _is_config_path(path: str, context=None) -> bool:
+def _is_config_path(path: str, context=None, *,
+                    index: _ContextIndex | None = None) -> bool:
     """Recognize deciding config and child-root manifests only."""
-    if (path in getattr(context, "config_paths", ())
+    if index is not None:
+        if (path in index.config_paths
+                or index.roles.get(path) == "config"):
+            return True
+    elif (path in getattr(context, "config_paths", ())
             or dict(getattr(context, "roles", ())).get(path) == "config"):
         return True
     declaration = getattr(context, "declaration", ".")
@@ -765,12 +845,15 @@ def _is_config_path(path: str, context=None) -> bool:
 
 
 def _item_rank(path: str, text: str, entry, context,
-               signal_cache: dict | None = None) -> tuple:
+               signal_cache: dict | None = None, *,
+               index: _ContextIndex | None = None) -> tuple:
     call_hit, body_hit, generic_control, criterion_control = _item_signal(
         path, text, entry, signal_cache)
     path_specific, path_generic = _matches_path(path, entry)
-    context_score = _relation_score(path, context)
-    role = _source_role(path, context)
+    resolved = index if index is not None else _context_index(
+        context, signal_cache)
+    context_score = _relation_score(path, context, index=resolved)
+    role = _source_role(path, context, index=resolved)
     caller = role == "test" and _TEST_PATH_RE.search(path) is not None
     injected_network = (entry is not None
                         and entry.id == "NETWORK-001"
@@ -783,7 +866,7 @@ def _item_rank(path: str, text: str, entry, context,
     strong = _strong_item_operation(path, text, entry, signal_cache)
     # Generic cleanup can only order already relevant candidates. A finally
     # block in an unrelated helper never makes it an item candidate.
-    return (not _is_config_path(path, context),
+    return (not _is_config_path(path, context, index=resolved),
             not strong,
             not injected_network,
             not criterion_control,
@@ -794,15 +877,19 @@ def _item_rank(path: str, text: str, entry, context,
 
 
 def _has_item_anchor(path: str, text: str, entry, context,
-                     signal_cache: dict | None = None) -> bool:
+                     signal_cache: dict | None = None, *,
+                     index: _ContextIndex | None = None) -> bool:
     call_hit, body_hit, _control, criterion_control = _item_signal(
         path, text, entry, signal_cache)
     path_specific, _path_generic = _matches_path(path, entry)
+    resolved = index if index is not None else _context_index(
+        context, signal_cache)
     return (call_hit or body_hit or criterion_control or path_specific
             or (entry is not None and entry.id == "NETWORK-001"
                 and path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs"))
                 and _js_network_injected_request_owner(
-                    path, text, entry, _source_role(path, context),
+                    path, text, entry,
+                    _source_role(path, context, index=resolved),
                     signal_cache))
             or _strong_item_operation(path, text, entry, signal_cache))
 
@@ -910,7 +997,10 @@ def rank_candidates(context, candidates, texts, catalog, *,
         raise TypeError("texts must be a dict of path to text")
     if not isinstance(declaration, str) or not declaration:
         raise TypeError("declaration must be a nonempty string")
+    if signal_cache is None:
+        signal_cache = {}
     context = _with_declaration_prefix(context, declaration)
+    index = _context_index(context, signal_cache)
     paths = sorted({path for path in candidates if isinstance(path, str)
                     and isinstance(texts.get(path), str)})
     paths = _active_paths(paths, context)
@@ -920,7 +1010,7 @@ def rank_candidates(context, candidates, texts, catalog, *,
         if item.id in DETERMINISTIC_ITEM_IDS:
             continue
         ranked = sorted(paths, key=lambda path: _item_rank(
-            path, texts[path], item, context, signal_cache))
+            path, texts[path], item, context, signal_cache, index=index))
         rows.append(ranked)
     result: list[str] = []
     seen: set[str] = set()
@@ -955,12 +1045,15 @@ def rank_item_candidates(context, candidates, texts, item_id: str, *,
     entry = next((item for item in CATALOG if item.id == item_id), None)
     if entry is None:
         raise ValueError("unknown checklist item")
+    if signal_cache is None:
+        signal_cache = {}
     context = _with_declaration_prefix(context, declaration)
+    index = _context_index(context, signal_cache)
     paths = [path for path in candidates
              if isinstance(path, str) and isinstance(texts.get(path), str)]
     paths = _active_paths(paths, context)
     return tuple(sorted(set(paths), key=lambda path: _item_rank(
-        path, texts[path], entry, context, signal_cache)))
+        path, texts[path], entry, context, signal_cache, index=index)))
 
 
 def _python_test_owners(source, text, entry, tree, signal_cache=None):
@@ -2285,6 +2378,8 @@ def item_source_chains(item_id: str, texts, context, candidate_paths, *,
         raise TypeError("texts must be a dict of path to text")
     if not isinstance(candidate_paths, (set, frozenset, tuple, list)):
         raise TypeError("candidate_paths must be a finite collection")
+    if signal_cache is None:
+        signal_cache = {}
     candidates = set(candidate_paths)
     context = _with_declaration_prefix(context, declaration)
     role_by_path = dict(context.roles)
@@ -2915,10 +3010,13 @@ def select_item_sources(packet, item_id: str):
             tuple(missing[:64]))
 
 
-def _source_role(path: str, context) -> str:
+def _source_role(path: str, context, *,
+                 index: _ContextIndex | None = None) -> str:
     """Resolve only an explicitly normalized source path."""
-    if _is_config_path(path, context):
+    if _is_config_path(path, context, index=index):
         return "config"
+    if index is not None:
+        return index.roles.get(path, "source")
     roles = dict(context.roles)
     return roles.get(path, "source")
 
