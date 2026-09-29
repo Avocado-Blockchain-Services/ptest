@@ -31,6 +31,7 @@ Inspect and review:
   ptest guide                     # render bundled repair guide text
   ptest rules                     # preview agent guidance
   ptest uninstall                 # remove what ptest set up (see ptest help uninstall)
+  ptest update                    # install the latest release (see ptest help update)
 
 Local state:
   PTEST_STATE_DIR=/absolute/path  # config, coordination, history, review cache
@@ -38,10 +39,10 @@ Local state:
   Use one value across projects to share limits. Explicit --fixture-domain wins.
 
 Machine output:
-  --json on init/register/where/status/history/plan/doctor; guide is text-only.
+  --json on init/register/where/status/history/plan/doctor/update; guide is text-only.
 
 Discover commands:
-  ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall
+  ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall update
   ptest <inspection-command> --help  # e.g. ptest doctor --help
   ptest --help | -h               # this overview
 
@@ -412,6 +413,32 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    blanket-drop, or use fixed paths, fixed ports, detached processes, live
    network targets, or wall-clock sleeps."""
 
+_UPDATE = """ptest update: install the latest ptest release, verified and side by side.
+
+Syntax:
+  ptest update [--check] [--version X.Y.Z] [--json]
+
+Without flags, ptest resolves the latest release (or the named --version),
+downloads ptest-X-<os>-<arch>.tar.gz and its .sha256 over HTTPS from the
+fixed GitHub release host, verifies the SHA-256 before anything from the
+bundle runs, extracts safely (at most 64 MiB), and installs side by side
+through the bundled install.sh, switching the launcher atomically. Older
+bundles are never deleted and a failed install keeps the old launcher. An
+explicit --version may name an older release; without it there is never a
+downgrade. Already current prints `ptest is up to date (Y)` and exits 0.
+--check only reports (`ptest X is available (installed Y) — run: ptest update`)
+without downloading. --json emits the versioned update document.
+
+Before every other command, ptest looks for a newer release at most once a
+day (24 h cache in the state directory, honouring PTEST_STATE_DIR; a 2 s
+network limit; offline means no notice). At a terminal it asks
+`Update now? [Y/n]`, then runs your command on the new version; running
+processes keep their version. Without a terminal it prints
+`ptest: update available: X (installed Y) — run: ptest update` and carries
+on. PTEST_NO_UPDATE_CHECK=1, a truthy CI, --fixture-domain and -q turn the
+check off. From a source checkout ptest says `installed from source; update
+it with git pull` and `ptest update` refuses with that text."""
+
 _TOPIC_TEXTS = {
     "init": _INIT,
     "register": _REGISTER,
@@ -425,6 +452,7 @@ _TOPIC_TEXTS = {
     "run": _RUN,
     "agents": _AGENTS,
     "uninstall": _UNINSTALL,
+    "update": _UPDATE,
 }
 
 TOPICS = tuple(_TOPIC_TEXTS)

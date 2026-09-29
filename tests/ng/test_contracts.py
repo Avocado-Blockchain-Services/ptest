@@ -326,6 +326,11 @@ def _full_payloads():
                      "path_symlink_removed": False, "kept": []},
             "domain_root": "/state/coordination", "domain_from_env": True,
         },
+        "update": {
+            "running_version": "0.3.7", "target_version": "0.3.8",
+            "action": "available", "check_only": True,
+            "install_root": "/home/user/.local/ptest",
+        },
     }
 
 
@@ -1482,6 +1487,8 @@ _PUBLIC_DATA_KEYS = {
                  "required_actions", "warnings"},
     "uninstall": {"root", "dry_run", "plan", "result", "self",
                   "domain_root", "domain_from_env"},
+    "update": {"running_version", "target_version", "action",
+               "check_only", "install_root"},
 }
 
 
@@ -1541,6 +1548,8 @@ def _dirty_payloads(sentinel):
     uninstall["plan"] = [dict(uninstall["plan"][0], future_entry=sentinel)]
     uninstall["result"] = dict(uninstall["result"], future_result=sentinel)
     uninstall["self"] = dict(uninstall["self"], future_self=sentinel)
+    update = payloads["update"]
+    update["future_update"] = sentinel
     return payloads
 
 
@@ -2103,3 +2112,43 @@ def test_init_schema_file_matches_descriptors():
         "properties"]
     assert "commit_paths" not in C.PUBLIC_SCHEMAS["init"]["properties"][
         "data"]["required"]
+
+
+def test_update_schema_file_matches_descriptors():
+    from pathlib import Path as _Path
+    schema_path = _Path(__file__).resolve().parents[2] / "docs" / "schemas" \
+        / "v1" / "update.json"
+    expected = json.dumps(C.PUBLIC_SCHEMAS["update"], indent=2, sort_keys=True) \
+        + "\n"
+    assert schema_path.read_text(encoding="utf-8") == expected
+    data_schema = C.PUBLIC_SCHEMAS["update"]["properties"]["data"]
+    assert set(data_schema["required"]) == {
+        "running_version", "target_version", "action",
+        "check_only", "install_root"}
+    assert set(data_schema["properties"]) == {
+        "running_version", "target_version", "action",
+        "check_only", "install_root"}
+
+
+def test_update_document_parses_and_projects():
+    doc = C.decode_public_document(C.encode_public_document(
+        "update", _full_payloads()["update"]))
+    assert doc.kind == "update"
+    assert doc.data["action"] == "available"
+    assert doc.data["check_only"] is True
+    assert doc.data["install_root"] == "/home/user/.local/ptest"
+
+
+def test_update_rejects_unknown_action():
+    bad = dict(_full_payloads()["update"], action="downloading")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("update", bad))
+
+
+def test_update_smuggled_field_is_dropped():
+    hostile = dict(_full_payloads()["update"], argv=["smuggled"])
+    projected = C.decode_public_document(
+        C.encode_public_document("update", hostile))
+    assert set(projected.data) == {
+        "running_version", "target_version", "action",
+        "check_only", "install_root"}

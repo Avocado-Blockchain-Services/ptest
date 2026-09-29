@@ -116,7 +116,30 @@ def isolated_env(monkeypatch, tmp_path_factory) -> IsolatedEnv:
     for name, value in env.environ.items():
         monkeypatch.setenv(name, value)
     patch_account_home(monkeypatch, env.home)
+    monkeypatch.setenv("PTEST_NO_UPDATE_CHECK", "1")
     return env
+
+
+@pytest.fixture(autouse=True)
+def _deny_update_network(monkeypatch):
+    """Fail any test that reaches the update network without a fake.
+
+    ``pytest.fail`` raises a BaseException, so it escapes the startup
+    check's ``except Exception`` silence. Tests in ``test_update.py``
+    that exercise the check delete the opt-out above and pass or patch
+    their own transport.
+    """
+    from ptest import update as update_api
+
+    def deny(timeout_s: float) -> str:
+        pytest.fail("update network access in tests")
+
+    def deny_download(url, sink, max_bytes, timeout_s) -> None:
+        pytest.fail("update network access in tests")
+
+    monkeypatch.setattr(update_api, "default_transport",
+                        lambda: update_api.Transport(
+                            latest_location=deny, download=deny_download))
 
 
 @pytest.fixture(autouse=True)

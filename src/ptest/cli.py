@@ -25,6 +25,7 @@ from . import doctor, doctor_fix, executability, files, help as help_api, histor
 from . import init_render, init_smoke, lastgreen
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
+from . import update as update_api
 from . import worktree as worktree_api
 from . import render
 from .adapters import pytest as pytest_adapter
@@ -34,8 +35,9 @@ from .runners import adapter_for
 
 _INSPECTION = frozenset({
     "init", "register", "where", "status", "history", "plan",
-    "doctor", "guide", "rules", "uninstall",
+    "doctor", "guide", "rules", "uninstall", "update",
 })
+_UPDATE_CHECK_EXEMPT = frozenset({"help", "version", "update"})
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
@@ -84,6 +86,8 @@ class ParsedArgs:
     apply_rules: bool = False
     uninstall_self: bool = False
     uninstall_yes: bool = False
+    update_check: bool = False
+    update_version: str | None = None
     children: tuple = ()
     agents: tuple[str, ...] = ()
     agents_explicit: bool = False
@@ -177,9 +181,13 @@ def _walk_cli_prefix(args: Sequence[str]) -> _CliPrefix:
         if fixture is None:
             fixture = path
         index = next_index
-    command = (args[index] if index < len(args)
-               and isinstance(args[index], str)
-               and args[index] in _INSPECTION else None)
+    word = (args[index] if index < len(args)
+              and isinstance(args[index], str) else None)
+    # `upgrade` is the only alias that routes: the init aliases stay
+    # suggestions so `ptest install` keeps its closed-grammar refusal.
+    if word == "upgrade":
+        word = "update"
+    command = word if word in _INSPECTION else None
     return _CliPrefix(fixture, index, command, problem)
 
 
@@ -451,6 +459,52 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           dry_run=uninstall_dry,
                           uninstall_self=uninstall_self,
                           uninstall_yes=uninstall_yes)
+    if command == "update":
+        update_check = update_json = False
+        update_version = None
+        seen: set[str] = set()
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--check":
+                if "check" in seen:
+                    raise _problem("invalid-config",
+                                   "option cannot be repeated")
+                seen.add("check")
+                update_check = True
+                index += 1
+            elif token == "--json":
+                if "json" in seen:
+                    raise _problem("invalid-config",
+                                   "option cannot be repeated")
+                seen.add("json")
+                update_json = True
+                index += 1
+            elif token == "--version":
+                if "version" in seen:
+                    raise _problem("invalid-config",
+                                   "option cannot be repeated")
+                try:
+                    value, index = _value(args, index, token)
+                except C.Problem:
+                    raise _problem(
+                        "invalid-config",
+                        "--version must be a release number like 0.3.7",
+                    ) from None
+                seen.add("version")
+                if update_api.valid_version(value) is None:
+                    raise _problem(
+                        "invalid-config",
+                        "--version must be a release number like 0.3.7")
+                update_version = value
+            else:
+                raise _problem("invalid-config", "unknown inspection option")
+        if update_check and update_version is not None:
+            raise _problem("invalid-config",
+                           "--check and --version cannot be combined")
+        return ParsedArgs(command=command, json=update_json,
+                          update_check=update_check,
+                          update_version=update_version)
     if command in {"where", "status", "plan"}:
         allowed = {"--json", "--reveal-command"} if command == "where" else {"--json"}
         base = None
@@ -680,7 +734,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
 
 _COMMAND_WORD = re.compile(r"[a-z][a-z-]{0,31}")
 # Words people reach for that mean an existing command.
-_COMMAND_ALIASES = {"install": "init", "setup": "init", "configure": "init"}
+_COMMAND_ALIASES = {"install": "init", "setup": "init", "configure": "init",
+                    "upgrade": "update"}
 
 
 class _UnknownCommand(C.Problem):
@@ -914,7 +969,10 @@ def _emit_error(problem: C.Problem, *, kind: str, json_output: bool,
         return 124
     if problem.code in {"review-cancelled", "cancelled"}:
         return 130
-    return 2 if problem.code not in {"coordinator-unavailable", "queue-timeout"} else 75
+    if problem.code in {"coordinator-unavailable", "queue-timeout",
+                        "update-unavailable"}:
+        return 75
+    return 2
 
 
 def _interactive_review() -> bool:
@@ -2436,6 +2494,23 @@ def _run_uninstall(parsed: ParsedArgs, cwd: Path) -> int:
                            json_output=parsed.json, domain=domain)
 
 
+def _run_update(parsed: ParsedArgs) -> int:
+    domain: C.DomainPaths | None = None
+    try:
+        domain = platform.domain_paths(parsed.fixture_domain)
+        result = update_api.run_update(requested=parsed.update_version,
+                                       check_only=parsed.update_check)
+        if parsed.json:
+            sys.stdout.buffer.write(_document(
+                "update", update_api.document_data(result), domain=domain))
+        else:
+            sys.stdout.write(update_api.render_text(result))
+        return 0
+    except C.Problem as problem:
+        return _emit_error(problem, kind="update",
+                           json_output=parsed.json, domain=domain)
+
+
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     command = parsed.command
     if command == "help":
@@ -2471,6 +2546,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             return _emit_error(problem, kind="rules", json_output=False)
     if command == "uninstall":
         return _run_uninstall(parsed, cwd)
+    if command == "update":
+        return _run_update(parsed)
     if command == "init":
         try:
             if not parsed.from_main:
@@ -3493,6 +3570,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     json_requested = _inspection_json_requested(raw_args, prefix)
     try:
         parsed = _parse_args(raw_args, prefix)
+        if parsed.command not in _UPDATE_CHECK_EXEMPT:
+            update_api.startup_check(
+                raw_args, quiet=parsed.quiet,
+                json_output=parsed.json,
+                fixture=parsed.fixture_domain is not None)
         if parsed.command in _INSPECTION or parsed.command in {"help", "version"}:
             return _static_dispatch(parsed, Path.cwd())
         resolution = config_api.resolve_config(Path.cwd())

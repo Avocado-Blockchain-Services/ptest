@@ -7,7 +7,8 @@ from ptest import contracts as C
 from ptest.cli import main, parse_argv
 
 VALID_TOPICS = ("init", "register", "where", "status", "history", "plan",
-                "doctor", "guide", "rules", "run", "agents", "uninstall")
+                "doctor", "guide", "rules", "run", "agents", "uninstall",
+                "update")
 
 
 def _no_execution(monkeypatch):
@@ -74,6 +75,7 @@ def test_help_topic_contents_are_command_specific(tmp_path, monkeypatch, capsys)
         "guide": ("--write",),
         "history": ("--limit",),
         "uninstall": ("--self", "--yes", "--dry-run", "--json"),
+        "update": ("--check", "--version", "--json", "PTEST_NO_UPDATE_CHECK"),
     }
     for topic, markers in expectations.items():
         assert main(("help", topic)) == 0
@@ -163,7 +165,8 @@ def test_user_facing_text_has_no_banned_terms():
 
     bodies = [help_api.overview()]
     for topic in ("init", "register", "where", "status", "history", "plan",
-                  "doctor", "guide", "rules", "run", "agents", "uninstall"):
+                  "doctor", "guide", "rules", "run", "agents", "uninstall",
+                  "update"):
         bodies.append(help_api.topic(topic))
     bodies.append(files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(

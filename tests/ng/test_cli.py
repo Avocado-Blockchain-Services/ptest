@@ -4411,3 +4411,62 @@ def test_where_reports_a_capped_vitest_as_bounded(case, monkeypatch, capsys):
     assert capability["execution"] == "bounded_native"
     from ptest.adapters import vitest as vitest_adapter
     assert capability["limitations"][0]["message"] == vitest_adapter.VITEST_CAPPED_NOTE
+
+
+def test_update_parser_accepts_grammar_forms():
+    from ptest.cli import ParsedArgs
+
+    assert parse_argv(("update",)) == ParsedArgs(command="update")
+    assert parse_argv(("update", "--check")) == ParsedArgs(
+        command="update", update_check=True)
+    assert parse_argv(("update", "--version", "0.3.8")) == ParsedArgs(
+        command="update", update_version="0.3.8")
+    assert parse_argv(("update", "--json")) == ParsedArgs(
+        command="update", json=True)
+    assert parse_argv(("update", "--check", "--json")) == ParsedArgs(
+        command="update", update_check=True, json=True)
+    assert parse_argv(("upgrade", "--check")) == ParsedArgs(
+        command="update", update_check=True)
+
+
+@pytest.mark.parametrize("argv", [
+    ("update", "--check", "--check"),
+    ("update", "--json", "--json"),
+    ("update", "--version", "0.3.8", "--version", "0.3.9"),
+])
+def test_update_parser_rejects_repeated_flags(argv):
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(argv)
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "option cannot be repeated"
+
+
+def test_update_parser_rejects_check_with_version():
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(("update", "--check", "--version", "0.3.8"))
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "--check and --version cannot be combined"
+
+
+def test_update_parser_rejects_missing_version_value():
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(("update", "--version"))
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "--version must be a release number like 0.3.7"
+
+
+@pytest.mark.parametrize("hostile", [
+    "1.2", "v1.2.3", "../1.2.3", "1.2.3/x", "1.2.3\n", "--check",
+])
+def test_update_parser_rejects_hostile_version(hostile):
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(("update", "--version", hostile))
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "--version must be a release number like 0.3.7"
+
+
+def test_update_parser_rejects_unknown_option():
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(("update", "--bogus"))
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "unknown inspection option"

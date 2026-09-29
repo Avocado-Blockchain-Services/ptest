@@ -31,7 +31,7 @@ GUARD_PROTOCOL_VERSION = 2
 PUBLIC_KINDS = (
     "init", "register", "plan", "where",
     "status", "history", "doctor", "run",
-    "agent-assessment", "uninstall",
+    "agent-assessment", "uninstall", "update",
 )
 
 
@@ -2883,6 +2883,26 @@ def _validate_uninstall_payload(data: dict) -> None:
                        "uninstall.domain_from_env must be a boolean")
 
 
+_UPDATE_ACTIONS = ("up-to-date", "available", "updated")
+
+
+def _validate_update_payload(data: dict) -> None:
+    _need_str(data, "running_version")
+    _need_str(data, "target_version")
+    if data.get("action") not in _UPDATE_ACTIONS:
+        raise _invalid("report-invalid", "update.action is unknown")
+    _need_bool(data, "check_only")
+    _need_str(data, "install_root", allow_none=True)
+
+
+def _project_update_payload(data: dict) -> dict:
+    return {"running_version": data["running_version"],
+            "target_version": data["target_version"],
+            "action": data["action"],
+            "check_only": data["check_only"],
+            "install_root": data["install_root"]}
+
+
 def _validate_register_payload(data: dict) -> None:
     _need_str(data, "root")
     _need_bool(data, "initialized")
@@ -3329,6 +3349,7 @@ _PAYLOAD_VALIDATORS = {
     "register": _validate_register_payload,
     "agent-assessment": _validate_agent_assessment_payload,
     "uninstall": _validate_uninstall_payload,
+    "update": _validate_update_payload,
 }
 
 
@@ -3671,6 +3692,7 @@ _PROJECTORS: dict = {
     "register": _project_register_payload,
     "agent-assessment": _project_agent_assessment_payload,
     "uninstall": _project_uninstall_payload,
+    "update": _project_update_payload,
 }
 
 
@@ -4707,6 +4729,18 @@ PUBLIC_SCHEMAS: dict = {
             "domain_from_env": {"type": "boolean"},
         },
         "required": ["root", "dry_run", "plan", "result", "self"],
+    }),
+    "update": _envelope_schema("update", {
+        "type": "object",
+        "properties": {
+            "running_version": {"type": "string"},
+            "target_version": {"type": "string"},
+            "action": {"type": "string", "enum": list(_UPDATE_ACTIONS)},
+            "check_only": {"type": "boolean"},
+            "install_root": {"type": ["string", "null"]},
+        },
+        "required": ["running_version", "target_version", "action",
+                     "check_only", "install_root"],
     }),
 }
 

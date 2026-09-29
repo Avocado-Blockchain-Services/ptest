@@ -329,9 +329,12 @@ def install_bundle(dest: Path, wheelhouse: Path, manifest_path: Path, *, allow_n
             raise RuntimeError("after-venv")
         subprocess.run(["uv", "pip", "install", "-q", "--python", str(bundle / "venv" / "bin" / "python"), "--no-index", "--no-deps", *(str(p) for p in bundled_paths)], check=True, env={**os.environ, "UV_OFFLINE": "true", "UV_PYTHON_DOWNLOADS": "never"}, timeout=300)
         # Smoke checks only: they must succeed, their output is not for the user.
-        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "--version"], check=True, timeout=30, stdout=subprocess.DEVNULL)
-        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "guide"], check=True, timeout=30, stdout=subprocess.DEVNULL)
-        subprocess.run([str(bundle / "venv" / "bin" / "python"), "-c", "from importlib.resources import files; p=files('ptest'); assert p.joinpath('runtime/vitest_bridge.mjs').is_file(); assert p.joinpath('runtime/protocol-v1.json').is_file(); assert p.joinpath('resources/agent-guide.md').is_file(); assert any(p.joinpath('resources/recipes').iterdir())"], check=True, timeout=30)
+        # The update check stays off: the new bundle's `guide` is not exempt,
+        # and a TTY or a pinned older version would otherwise prompt or hit
+        # the network in the middle of an install.
+        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "--version"], check=True, timeout=30, stdout=subprocess.DEVNULL, env={**os.environ, "PTEST_NO_UPDATE_CHECK": "1"})
+        subprocess.run([str(bundle / "venv" / "bin" / "ptest"), "guide"], check=True, timeout=30, stdout=subprocess.DEVNULL, env={**os.environ, "PTEST_NO_UPDATE_CHECK": "1"})
+        subprocess.run([str(bundle / "venv" / "bin" / "python"), "-c", "from importlib.resources import files; p=files('ptest'); assert p.joinpath('runtime/vitest_bridge.mjs').is_file(); assert p.joinpath('runtime/protocol-v1.json').is_file(); assert p.joinpath('resources/agent-guide.md').is_file(); assert any(p.joinpath('resources/recipes').iterdir())"], check=True, timeout=30, env={**os.environ, "PTEST_NO_UPDATE_CHECK": "1"})
         marker = {"version": 1, "bundle_id": bundle.name, "ptest_version": manifest["ptest_version"], "python_version": ".".join(map(str, sys.version_info[:3])), "wheel_sha256s": [e["sha256"] for e in manifest["wheels"]], "entrypoint": "venv/bin/ptest"}
         marker_path = bundle / "complete.json"
         if fault == "before-complete":
