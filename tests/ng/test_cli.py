@@ -3940,7 +3940,7 @@ def _fake_run(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("argv", [(), ("-k", "foo")])
+@pytest.mark.parametrize("argv", [(), ("-k", "foo"), ("tests/test_x.py",)])
 def test_t2_bare_and_scoped_run_in_worktree_exit_config_uncommitted(
         tmp_path, monkeypatch, capsys, argv):
     from ptest import agent_rules
@@ -4338,7 +4338,8 @@ def test_t2_doctor_mention_after_offline_grid_for_uncommitted(
     captured = capsys.readouterr()
     assert "not committed: docs/ptest-agent.md" in captured.out
     assert "commit them on the base branch" in captured.out
-    assert captured.out.index("0 calls") < captured.out.index("not committed:")
+    lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert lines[-1].startswith("not committed:")
 
     _ungate()
     git(root, "add", "-A")

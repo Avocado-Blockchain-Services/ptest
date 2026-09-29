@@ -2404,7 +2404,7 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 # before the agents prompt asks anything. An existing
                 # config keeps the from_main-is-ignored path below.
                 raise _problem("invalid-config",
-                               config_api._FROM_MAIN_REFUSAL)
+                               config_api.FROM_MAIN_REFUSAL)
             agents = _init_agents(parsed, json_output=parsed.json)
             root = config_api.repository_root(cwd)
             plan = agent_rules.preview(root, agents=agents) if agents else None

@@ -1394,7 +1394,7 @@ def _commit_paths(boundary: Path | None, root: Path,
         return ()
 
 
-_FROM_MAIN_REFUSAL = (
+FROM_MAIN_REFUSAL = (
     "--from-main only works in a linked git worktree whose main checkout "
     "has .ptest.toml at this path; nothing was copied"
 )
@@ -1406,7 +1406,7 @@ def _init_from_main(physical_cwd: Path, dry_run: bool) -> C.InitResult:
     found = _worktree.main_config(physical_cwd, boundary) \
         if boundary is not None else None
     if found is None:
-        raise _problem("invalid-config", _FROM_MAIN_REFUSAL)
+        raise _problem("invalid-config", FROM_MAIN_REFUSAL)
     name = _CONFIG_NAME if found.relative == "." else \
         f"{found.relative}/{_CONFIG_NAME}"
     if found.relative == ".":
@@ -1511,7 +1511,7 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             raise resolution.problem
         return _init_from_main(physical_cwd, options.dry_run)
     if options.from_main:
-        raise _problem("invalid-config", _FROM_MAIN_REFUSAL)
+        raise _problem("invalid-config", FROM_MAIN_REFUSAL)
 
     # Initialization anchors at the repository boundary even when invoked from
     # a nested source directory. Runtime resolution remains nearest-config and
