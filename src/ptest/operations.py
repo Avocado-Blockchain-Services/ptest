@@ -2503,10 +2503,11 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
                    and record.scope == scope and record.policy_digest == policy]
         if not records:
             return None
+        first_identity = records[0].runtime_identity
         first = _capture_source(
             domain, config, request, ensure_key=False,
             execution_tier=C.ExecutionTier.ADVANCED,
-            runtime_identity=records[0].runtime_identity, baseline=None)
+            runtime_identity=first_identity, baseline=None)
         if not first.clean or not first.digest:
             return None
         records = [record for record in records
@@ -2518,7 +2519,7 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
                 and latest.get("status") != C.Status.PASSED.value):
             # This checkout already saw this exact tree fail or not finish.
             return None
-        snapshots = {records[0].runtime_identity: first}
+        snapshots = {first_identity: first}
         for record in records:
             identity = record.runtime_identity
             if identity not in snapshots:

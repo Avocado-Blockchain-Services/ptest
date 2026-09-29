@@ -12,7 +12,8 @@
   Installed dependencies are not compared: the tracked lockfile stands in
   for them. A failed or unfinished full run on the same tree in any checkout
   withdraws the record; `--again` still forces a run. The check costs one
-  source capture however many worktrees exist.
+  source capture, plus one only for a matching record from a checkout with
+  another runtime identity, however many worktrees exist.
 - A pytest full gate that cannot reuse a green run says why on one line:
   `ptest: full gate runs: <reason>` (no green run yet, a new commit,
   uncommitted changes, limited source evidence, a changed policy or config,

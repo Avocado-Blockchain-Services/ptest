@@ -755,3 +755,35 @@ def test_many_other_worktrees_cost_one_source_capture(case, monkeypatch):
         domain, config, operations._checkout(config),
         C.RunRequest(mode=C.Mode.FULL)) is None
     assert len(calls) == 1
+
+
+def test_an_older_matching_green_is_reused_when_a_newer_record_differs(case, monkeypatch):
+    # Runtime identities differ per checkout. The newest record (another
+    # tree, identity b) must not stand in for the older matching one (a).
+    from ptest import verified
+    domain, main_root, _ = _worktree_pair(case)
+    config = _config(main_root)
+    head = git(main_root, "rev-parse", "HEAD")
+    policy = operations._policy_digest(config)
+
+    def record(n, identity, digest, commit):
+        return verified.Record(
+            run_id=f"{n:032x}", head=commit, input_digest=digest,
+            compatibility=f"compat-{identity[:1]}", policy_digest=policy,
+            runtime_identity=identity, scope=".", checkout_id=f"{n + 100:032x}",
+            root=f"/w/{n}", created_at="2026-09-25T00:00:00+00:00")
+
+    verified.record_green(domain, config.project_id, record(1, "a" * 64, _DIGEST, head))
+    verified.record_green(domain, config.project_id, record(2, "b" * 64, "22" * 32, "0" * 40))
+    calls = []
+
+    def capture(*args, runtime_identity=None, **kwargs):
+        calls.append(runtime_identity)
+        return C.InputSnapshot(digest=_DIGEST, head=head, clean=True,
+                               compatibility=f"compat-{runtime_identity[:1]}")
+
+    monkeypatch.setattr(operations, "_capture_source", capture)
+    found = operations._full_verified_elsewhere(
+        domain, config, operations._checkout(config), C.RunRequest(mode=C.Mode.FULL))
+    assert found is not None and found[2] == "/w/1"
+    assert calls == ["b" * 64, "a" * 64]
