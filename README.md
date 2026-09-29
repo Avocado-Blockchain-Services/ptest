@@ -277,7 +277,7 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
 | `changed: <path> → N of M test files` | the tests your change reaches |
 | `changed → full suite: <reason>` | this run *is* the full suite (trigger file, too many affected tests, selection off) |
 | `no changes … — nothing to test` | nothing to run (exit 0) |
-| `waiting for N slots … in use by …` | queued behind other ptest runs; it starts by itself |
+| `waiting for N slots …` / `waiting: <reason>` | queued behind other ptest runs (the reason names what holds it); it starts by itself |
 | `setup: uv sync --locked (first run)` | declared setup is running |
 | `passed · N tests` / `failed · …` | the verdict |
 | `next: ptest --full before handoff` | a changed-mode green; the gate is still to do |
@@ -303,12 +303,17 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
   (`-n 4`, `-n auto`), ptest requests that many slots and runs the granted
   number of workers; a single slot runs serially. Without xdist, runs are
   serial.
-- **Vitest 3 and later**: ptest caps Vitest at the granted slots
-  (`--maxWorkers`, plus the `poolOptions` caps Vitest 3 needs) and runs it
+- **Vitest 3 and later**: ptest bounds Vitest to the granted slots through
+  its environment (`VITEST_MAX_WORKERS`/`_THREADS`/`_FORKS`) and runs it
   alongside other runs. It asks for the project's `workers` when above 1,
-  else half the machine; `--workers N` lowers that. A project that pins its
-  own workers or pool in runner args, or an unknown Vitest version, runs as
-  one exclusive `vitest run` that reserves the whole machine.
+  else half the machine, never more than a literal `maxWorkers`,
+  `maxThreads`, `maxForks`, `fileParallelism: false` or single-fork setting
+  in the Vitest config; `--workers N` lowers that. Worker settings ptest
+  cannot read statically, `--config`/`--pool`/worker flags in the args,
+  Vitest 3 workspaces, or an unknown Vitest version keep one exclusive
+  `vitest run` that reserves the whole machine. Suites that share a fixed
+  port or database across worktrees should declare a `[resources] locks`
+  name so their runs never overlap.
 - **Many runs at once**: every ptest on the machine shares one slot budget.
   Extra runs queue instead of oversubscribing the CPU, and the waiting line
   says why: slots (`waiting for 2 slots (1 of 8 free)`) or what really holds
@@ -419,7 +424,7 @@ hypotheses to verify, not a certificate. `ptest help doctor` has the details.
 | `uv is required` during install | install uv, open a new shell, rerun the one-liner |
 | `selection is off in .ptest.toml` | `ptest doctor --fix` |
 | `--full` runs fewer tests than plain pytest | `ptest doctor --fix` widens `test_roots` |
-| `waiting for N slots …` for a long time | `ptest status` shows who holds them |
+| `waiting …` for a long time | `ptest status` shows who holds the machine; `waiting: …` names the blocker |
 | `incomplete (exit 70)` / `changed-during-run` | something wrote into the source tree during the run; the message names the path class (tracked, untracked, ignored) |
 | a plugin is refused | it re-runs or distributes tests: add `-p no:<name>` to `[runner] args` |
 | tests fail with `ModuleNotFoundError` for an optional dependency | ptest installs the test deps only; add the extra to `[setup] argv` (e.g. `--all-extras` or `--extra azure` for `uv sync`) |

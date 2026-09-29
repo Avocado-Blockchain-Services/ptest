@@ -6,21 +6,25 @@ caller scope is already appended there by the orchestrator), so
 ``plan.files`` must stay empty. ptest claims no per-test results; the vitest
 exit code is the outcome.
 
-When the installed Vitest version is known and the project does not pin its
-own workers or pool in runner args, ptest caps Vitest at the granted slots
-so the run shares the machine like any bounded runner. Otherwise it runs as
-one exclusive command that reserves the whole machine. Measured on real
-installs: Vitest 3 ignores ``--maxWorkers`` when the project config sets
-``poolOptions.<pool>`` limits but honours the CLI poolOptions caps; Vitest 4
-and later dropped poolOptions (the flags are unknown options) and honour
-``--maxWorkers``.
+When the installed Vitest (3 or later) and the project's worker settings are
+known, ptest bounds Vitest to the granted slots through its environment
+(``VITEST_MAX_WORKERS``/``_THREADS``/``_FORKS`` and ``VITEST_MIN_THREADS``/
+``_FORKS`` = 1), and the run shares the machine like any bounded runner. The
+environment caps every pool on Vitest 3, 4 and 5, including 4.x projects,
+without version-specific flags, so a setup that changes the version cannot
+break the command. A project's own lower literal ceiling (``maxWorkers``,
+``maxThreads``, ``maxForks``, ``fileParallelism: false``, ``singleThread``,
+``singleFork``) is kept, never raised. Anything ptest cannot read statically
+keeps the old exclusive command that reserves the whole machine.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 from ptest import contracts as C
@@ -34,9 +38,41 @@ _VERSION_FILE = "node_modules/vitest/package.json"
 _VERSION_MAX_BYTES = 65536
 _VERSION_RE = re.compile(r"^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?$")
 _MIN_CAPPED_MAJOR = 3
-# Runner-arg controls through which a project owns Vitest's parallelism.
+# Runner-arg controls through which a project owns Vitest's parallelism or
+# points at a config ptest cannot read.
 _WORKER_CONTROLS = ("--maxWorkers", "--minWorkers", "--pool", "--poolOptions",
-                    "--fileParallelism", "--no-file-parallelism")
+                    "--fileParallelism", "--no-file-parallelism", "--config",
+                    "--workspace", "--project")
+_SHORT_CONTROLS = ("-c",)
+_CONFIG_MAX_BYTES = 256 * 1024
+_VITEST_CONFIGS = tuple(f"vitest.config.{ext}" for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
+_VITE_CONFIGS = tuple(f"vite.config.{ext}" for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
+_WORKSPACE_FILES = tuple(f"vitest.workspace.{ext}"
+                         for ext in ("ts", "mts", "cts", "js", "mjs", "cjs", "json"))
+_MAX_KEY = re.compile(r"\b(maxWorkers|maxThreads|maxForks)\s*:\s*([^,}\n]*)")
+_SERIAL_KEY = re.compile(r"\b(singleThread|singleFork|fileParallelism)\s*:\s*([^,}\n]*)")
+_PROJECTS_KEY = re.compile(r"\b(projects|workspace)\s*:")
+# The environment ptest sets on a bounded run; each Vitest major reads the
+# names it knows and ignores the rest.
+_CAP_ENV = ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS")
+_FLOOR_ENV = ("VITEST_MIN_THREADS", "VITEST_MIN_FORKS")
+
+
+@dataclass(frozen=True, slots=True)
+class VitestBound:
+    """ptest may bound this Vitest run; ``limit`` is the project's own ceiling."""
+
+    limit: int | None
+
+
+# The admission decision, handed to prepare so both see the same answer.
+_UNSET = object()
+DECISION: contextvars.ContextVar = contextvars.ContextVar(
+    "ptest_vitest_decision", default=_UNSET)
+
+
+class _Unknown(Exception):
+    """A worker setting ptest cannot read statically."""
 
 
 def _problem(code: str, message: str) -> C.Problem:
@@ -75,7 +111,7 @@ def _installed_major(root: Path) -> int | None:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as stream:
             data = json.loads(stream.read(_VERSION_MAX_BYTES + 1).decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None
     version = data.get("version") if isinstance(data, dict) else None
     match = _VERSION_RE.match(version) if isinstance(version, str) else None
@@ -85,11 +121,65 @@ def _installed_major(root: Path) -> int | None:
 def _owns_workers(args: tuple[str, ...]) -> bool:
     return any(token == control or token.startswith(control + "=")
                or token.startswith(control + ".")
-               for token in args for control in _WORKER_CONTROLS)
+               for token in args for control in _WORKER_CONTROLS) or any(
+        token == short or (token.startswith(short) and len(token) > len(short)
+                           and not token.startswith("--"))
+        for token in args for short in _SHORT_CONTROLS)
 
 
-def capped_major(config: C.Config) -> int | None:
-    """The Vitest major ptest can cap, or None when the run stays exclusive."""
+def _read_config(root: Path, name: str) -> str | None:
+    path = root / name
+    try:
+        stamp = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _Unknown(name) from exc
+    if not stat.S_ISREG(stamp.st_mode) or stamp.st_size > _CONFIG_MAX_BYTES:
+        raise _Unknown(name)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            return stream.read(_CONFIG_MAX_BYTES + 1).decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _Unknown(name) from exc
+
+
+def _config_limit(root: Path, major: int) -> int | None:
+    """The project's own literal worker ceiling, None when it sets none.
+
+    Raises _Unknown for anything that is not a literal: an expression, a
+    percentage, or (Vitest 3) projects/workspace, whose pools each get
+    their own workers.
+    """
+    if major < 4 and any(_read_config(root, name) is not None for name in _WORKSPACE_FILES):
+        raise _Unknown("workspace")
+    texts = [text for text in (_read_config(root, name) for name in _VITEST_CONFIGS)
+             if text is not None]
+    if not texts:
+        texts = [text for text in (_read_config(root, name) for name in _VITE_CONFIGS)
+                 if text is not None]
+    limits: list[int] = []
+    for text in texts:
+        for _key, value in _MAX_KEY.findall(text):
+            value = value.strip()
+            if not re.fullmatch(r"[1-9][0-9]{0,3}", value):
+                raise _Unknown(value)
+            limits.append(int(value))
+        for key, value in _SERIAL_KEY.findall(text):
+            value = value.strip()
+            serial = "false" if key == "fileParallelism" else "true"
+            if value == serial:
+                limits.append(1)
+            elif value not in ("true", "false"):
+                raise _Unknown(value)
+        if major < 4 and _PROJECTS_KEY.search(text):
+            raise _Unknown("projects")
+    return min(limits) if limits else None
+
+
+def bound(config: C.Config) -> VitestBound | None:
+    """How ptest may bound this Vitest run, or None to stay exclusive."""
     if not isinstance(config, C.Config) or config.runner.kind is not C.RunnerKind.VITEST:
         return None
     if _owns_workers(tuple(config.runner.args) + tuple(config.runner.full_args)):
@@ -99,23 +189,23 @@ def capped_major(config: C.Config) -> int | None:
     except C.Problem:
         return None
     major = _installed_major(root)
-    return major if major is not None and major >= _MIN_CAPPED_MAJOR else None
+    if major is None or major < _MIN_CAPPED_MAJOR:
+        return None
+    try:
+        return VitestBound(limit=_config_limit(root, major))
+    except (_Unknown, RecursionError):
+        return None
 
 
 def requires_exclusive(config: C.Config) -> bool:
-    """Exclusive admission unless ptest can cap this Vitest install."""
-    return capped_major(config) is None
+    """Exclusive admission unless ptest can bound this Vitest run."""
+    return bound(config) is None
 
 
-def worker_caps(major: int, workers: int) -> tuple[str, ...]:
-    """CLI flags that bound Vitest to ``workers`` for the given major."""
-    if major >= 4:
-        return (f"--maxWorkers={workers}",)
-    return (f"--maxWorkers={workers}", "--minWorkers=1",
-            f"--poolOptions.threads.maxThreads={workers}", "--poolOptions.threads.minThreads=1",
-            f"--poolOptions.forks.maxForks={workers}", "--poolOptions.forks.minForks=1",
-            f"--poolOptions.vmThreads.maxThreads={workers}", "--poolOptions.vmThreads.minThreads=1",
-            f"--poolOptions.vmForks.maxForks={workers}", "--poolOptions.vmForks.minForks=1")
+def worker_env(workers: int) -> tuple[tuple[str, str], ...]:
+    """Environment that bounds Vitest 3+ to ``workers`` across every pool."""
+    return (tuple((name, str(workers)) for name in _CAP_ENV)
+            + tuple((name, "1") for name in _FLOOR_ENV))
 
 
 def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
@@ -153,14 +243,18 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
 
     tail = (tuple(config.runner.args) if plan.execution == "scoped"
             else tuple(config.runner.args) + tuple(config.runner.full_args))
-    major = capped_major(config)
-    caps = () if major is None else worker_caps(major, grant.slots)
-    argv = tuple(config.runner.launcher) + (VITEST_ENTRY, "run") + caps + tail
+    decided = DECISION.get()
+    bounded = bound(config) if decided is _UNSET else decided
+    argv = tuple(config.runner.launcher) + (VITEST_ENTRY, "run") + tail
+    workers = grant.slots
+    if bounded is not None and bounded.limit is not None:
+        workers = min(workers, bounded.limit)
+    env = () if bounded is None else worker_env(workers)
     try:
         summary = C.summarize_command(
             C.RunnerKind.VITEST, plan.mode, argv,
             workers=grant.slots,
-            provenance=(("vitest-exclusive-command",) if major is None
+            provenance=(("vitest-exclusive-command",) if bounded is None
                         else ("vitest-capped-command",)),
         )
     except (TypeError, ValueError) as exc:
@@ -169,15 +263,15 @@ def prepare(config: C.Config, plan: C.Plan, grant: C.Grant,
             "literal Vitest argv violates the configured bounds",
         ) from exc
     return C.PreparedRun(
-        argv=argv, cwd=_project_root(config), env_updates=(),
+        argv=argv, cwd=_project_root(config), env_updates=env,
         capability=C.Capability(
-            execution=(C.ExecutionTier.EXCLUSIVE_COMMAND if major is None
+            execution=(C.ExecutionTier.EXCLUSIVE_COMMAND if bounded is None
                        else C.ExecutionTier.BOUNDED_NATIVE),
             selection=False,
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(
                 code="unsupported-capability",
-                message=VITEST_EXCLUSIVE_NOTE if major is None else VITEST_CAPPED_NOTE,
+                message=VITEST_EXCLUSIVE_NOTE if bounded is None else VITEST_CAPPED_NOTE,
             ),),
         ),
         summary=summary,

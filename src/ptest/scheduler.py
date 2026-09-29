@@ -1626,7 +1626,7 @@ def admission_blocker(domain: DomainPaths, run_id: str) -> str | None:
     """
     try:
         conn, _ = _open_state(domain, create=False, read_only=True)
-    except Problem:
+    except (Problem, OSError):
         return None
     try:
         conn.execute("BEGIN")
@@ -1643,7 +1643,7 @@ def admission_blocker(domain: DomainPaths, run_id: str) -> str | None:
         verb = "is" if index == 1 else "are"
         ahead = f"{_count(index, 'earlier run')} {verb} queued first"
         return ahead if reason is None else f"{ahead}; {reason}"
-    except (sqlite3.Error, Problem, KeyError, TypeError, ValueError):
+    except (sqlite3.Error, Problem, OSError, KeyError, TypeError, ValueError):
         return None
     finally:
         conn.close()

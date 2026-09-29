@@ -1486,11 +1486,47 @@ def test_capped_vitest_shares_the_machine_with_bounded_slots(
 
     assert result.status is C.Status.PASSED
     assert seen == [(False, expected)]
-    argv = _node_record(root)["argv"][1:]
-    assert argv[:4] == ["node_modules/vitest/vitest.mjs", "run",
-                        f"--maxWorkers={expected}", "--minWorkers=1"]
-    assert f"--poolOptions.threads.maxThreads={expected}" in argv
-    assert argv[-1] == "src/a.test.ts"
+    record = _node_record(root)
+    assert record["argv"][1:] == ["node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
+    assert record["vitest_env"] == {
+        "VITEST_MAX_WORKERS": str(expected), "VITEST_MAX_THREADS": str(expected),
+        "VITEST_MAX_FORKS": str(expected), "VITEST_MIN_THREADS": "1",
+        "VITEST_MIN_FORKS": "1"}
+
+
+def test_caller_worker_flags_decide_admission_once(case, fake_exec_node, monkeypatch):
+    # `ptest src/a.test.ts --pool=threads`: the caller owns the pool, so the
+    # run is admitted exclusive and gets no caps -- never bounded slots
+    # with an uncapped command.
+    domain = case.domain(slots=4, jobs=2)
+    root = _vitest_project(case, domain, fake_exec_node)
+    _install_vitest_version(root, "3.2.6")
+    config = config_api.resolve_config(root).config
+    seen = _recording_enqueue(monkeypatch)
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, argv=("src/a.test.ts", "--pool=threads")))
+
+    assert result.status is C.Status.PASSED
+    assert seen == [(True, 1)]
+    assert _node_record(root)["vitest_env"] == {}
+
+
+def test_a_projects_own_ceiling_lowers_the_slot_request(case, fake_exec_node, monkeypatch):
+    domain = case.domain(slots=4, jobs=2)
+    root = _vitest_project(case, domain, fake_exec_node)
+    _install_vitest_version(root, "5.0.1")
+    (root / "vitest.config.ts").write_text(
+        "export default { test: { maxWorkers: 1 } }", encoding="utf-8")
+    config = config_api.resolve_config(root).config
+    seen = _recording_enqueue(monkeypatch)
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, argv=("src/a.test.ts",)))
+
+    assert result.status is C.Status.PASSED
+    assert seen == [(False, 1)]
+    assert _node_record(root)["vitest_env"]["VITEST_MAX_WORKERS"] == "1"
 
 
 def test_uncappable_vitest_keeps_exclusive_admission(case, fake_exec_node, monkeypatch):
@@ -1506,3 +1542,4 @@ def test_uncappable_vitest_keeps_exclusive_admission(case, fake_exec_node, monke
     assert seen == [(True, 1)]
     assert _node_record(root)["argv"][1:] == [
         "node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]
+    assert _node_record(root)["vitest_env"] == {}

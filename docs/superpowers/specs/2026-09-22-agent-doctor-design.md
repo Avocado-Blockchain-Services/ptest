@@ -515,3 +515,6 @@ readiness UI.
   pytest-asyncio/pytest-timeout hooks are accepted under the serial grant; pytest stays basic-serial.
 - A8: `kind = "vitest"` executes as an exclusive literal command; declared setup runs for command/vitest profiles.
 - A9: init reports per-project executability and only verified next steps.
+
+
+> Amendment (0.3.8): A8's 'vitest executes as an exclusive literal command' now holds only when ptest cannot bound Vitest; Vitest 3+ with statically known worker settings runs bounded with environment caps and non-exclusive admission.

@@ -1,7 +1,8 @@
-"""Vitest exclusive-command preparation contracts.
+"""Vitest command preparation contracts.
 
-``kind = "vitest"`` executes as one literal exclusive command through the
-project-local Vitest CLI. Scope arrives through the effective runner args
+``kind = "vitest"`` executes through the project-local Vitest CLI: bounded by
+environment caps when ptest can read the install and worker settings, else as
+one literal exclusive command. Scope arrives through the effective runner args
 (the caller scope is already appended there); ``plan.files`` must stay empty.
 """
 from __future__ import annotations
@@ -139,61 +140,93 @@ def test_vitest_entry_literal_is_stable():
 
 # --- worker caps: vitest stops taking the whole machine ---------------------
 #
-# Measured on real installs: vitest 3.2.6 ignores --maxWorkers when the
-# project config sets poolOptions.<pool>.max*, but honours the CLI
-# poolOptions caps; vitest 5.0.1 honours --maxWorkers and rejects any
-# --poolOptions flag as an unknown option.
+# Measured on real installs (3.1.4, 3.2.6, 4.0.18, 4.1.11, 5.0.1): the
+# VITEST_MAX_WORKERS/_THREADS/_FORKS environment (with MIN_THREADS/FORKS=1)
+# caps every pool, including Vitest 4.x projects where --maxWorkers is
+# ignored, and needs no version-specific flags.
 
-def _versioned(case, version, **overrides):
+def _versioned(case, version, config_text=None, **overrides):
     config = _config(case, **overrides)
     (case.base / "node_modules" / "vitest" / "package.json").write_text(
         '{"name": "vitest", "version": "%s"}' % version, encoding="utf-8")
+    if config_text is not None:
+        (case.base / "vitest.config.ts").write_text(config_text, encoding="utf-8")
     return config
 
 
-def _v3_caps(n):
-    return (f"--maxWorkers={n}", "--minWorkers=1",
-            f"--poolOptions.threads.maxThreads={n}", "--poolOptions.threads.minThreads=1",
-            f"--poolOptions.forks.maxForks={n}", "--poolOptions.forks.minForks=1",
-            f"--poolOptions.vmThreads.maxThreads={n}", "--poolOptions.vmThreads.minThreads=1",
-            f"--poolOptions.vmForks.maxForks={n}", "--poolOptions.vmForks.minForks=1")
+def _env(n):
+    return (("VITEST_MAX_WORKERS", str(n)), ("VITEST_MAX_THREADS", str(n)),
+            ("VITEST_MAX_FORKS", str(n)), ("VITEST_MIN_THREADS", "1"),
+            ("VITEST_MIN_FORKS", "1"))
 
 
-@pytest.mark.parametrize("version", ["3.1.4", "3.2.6", "3.2.7"])
-def test_vitest_3_is_capped_at_the_granted_slots(case, version):
-    config = _versioned(case, version, args=("src/a.test.ts",))
+def _prepare(config, slots):
     plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=())
+    return vitest_adapter.prepare(config, plan, _grant(slots), _attempt())
 
-    prepared = vitest_adapter.prepare(config, plan, _grant(3), _attempt())
 
-    assert prepared.argv == ("node", vitest_adapter.VITEST_ENTRY, "run",
-                             *_v3_caps(3), "src/a.test.ts")
+@pytest.mark.parametrize("version", ["3.1.4", "3.2.6", "4.1.11", "5.0.1"])
+def test_known_vitest_is_bounded_through_its_environment(case, version):
+    config = _versioned(case, version, args=("src/a.test.ts",))
+
+    prepared = _prepare(config, 3)
+
+    assert prepared.argv == ("node", vitest_adapter.VITEST_ENTRY, "run", "src/a.test.ts")
+    assert prepared.env_updates == _env(3)
     assert prepared.capability.execution is C.ExecutionTier.BOUNDED_NATIVE
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is False
 
 
-@pytest.mark.parametrize("version", ["4.0.0", "5.0.1"])
-def test_vitest_4_and_later_are_capped_with_max_workers_only(case, version):
-    config = _versioned(case, version, args=("--reporter", "verbose"),
-                        full_args=("--coverage",))
-    plan = C.Plan(mode=C.Mode.FULL, execution="full", files=())
+@pytest.mark.parametrize("text,limit", [
+    ("export default { test: { maxWorkers: 1 } }", 1),
+    ("export default { test: { poolOptions: { forks: { maxForks: 2 } } } }", 2),
+    ("export default { test: { poolOptions: { threads: { minThreads: 4, maxThreads: 8 } } } }", 8),
+    ("export default { test: { fileParallelism: false } }", 1),
+    ("export default { test: { poolOptions: { forks: { singleFork: true } } } }", 1),
+    ("export default { test: { fileParallelism: true, globals: true } }", None),
+])
+def test_a_projects_own_literal_ceiling_is_kept_never_raised(case, text, limit):
+    config = _versioned(case, "3.2.6", text)
 
-    prepared = vitest_adapter.prepare(config, plan, _grant(2), _attempt())
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=limit)
+    expected = 4 if limit is None else min(4, limit)
+    assert _prepare(config, 4).env_updates == _env(expected)
 
-    assert prepared.argv == ("node", vitest_adapter.VITEST_ENTRY, "run",
-                             "--maxWorkers=2", "--reporter", "verbose", "--coverage")
-    assert prepared.capability.execution is C.ExecutionTier.BOUNDED_NATIVE
-    assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is False
+
+@pytest.mark.parametrize("text", [
+    "export default { test: { maxWorkers: process.env.CI ? 2 : 8 } }",
+    "export default { test: { maxWorkers: '50%' } }",
+    "export default { test: { poolOptions: { threads: { singleThread: isCi } } } }",
+    "export default { test: { projects: ['packages/*'] } }",
+])
+def test_unreadable_worker_settings_keep_vitest_3_exclusive(case, text):
+    config = _versioned(case, "3.2.6", text)
+
+    prepared = _prepare(config, 4)
+
+    assert prepared.env_updates == ()
+    assert prepared.capability.execution is C.ExecutionTier.EXCLUSIVE_COMMAND
+    assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
+
+
+def test_vitest_4_projects_are_bounded(case):
+    config = _versioned(case, "4.1.11", "export default { test: { projects: ['a', 'b'] } }")
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=None)
+
+
+def test_a_vitest_3_workspace_file_keeps_it_exclusive(case):
+    config = _versioned(case, "3.2.6")
+    (case.base / "vitest.workspace.ts").write_text("export default ['a']", encoding="utf-8")
+    assert vitest_adapter.bound(config) is None
 
 
 @pytest.mark.parametrize("version", ["2.1.9", "not-a-version", "", "3"])
 def test_unknown_or_unsupported_vitest_versions_stay_exclusive(case, version):
     config = _versioned(case, version)
-    plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=())
 
-    prepared = vitest_adapter.prepare(config, plan, _grant(4), _attempt())
+    prepared = _prepare(config, 4)
 
-    assert prepared.argv == ("node", vitest_adapter.VITEST_ENTRY, "run")
+    assert prepared.env_updates == ()
     assert prepared.capability.execution is C.ExecutionTier.EXCLUSIVE_COMMAND
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
 
@@ -203,20 +236,27 @@ def test_missing_vitest_package_json_stays_exclusive(case):
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
 
 
+def test_deeply_nested_package_json_stays_exclusive(case):
+    config = _config(case)
+    (case.base / "node_modules" / "vitest" / "package.json").write_text(
+        "[" * 60000, encoding="utf-8")
+    assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
+
+
 @pytest.mark.parametrize("args", [
     ("--maxWorkers=2",), ("--maxWorkers", "2"), ("--minWorkers=1",),
     ("--pool=forks",), ("--pool", "threads"), ("--poolOptions.threads.maxThreads=2",),
     ("--no-file-parallelism",), ("--fileParallelism=false",),
+    ("--config", "other.config.ts"), ("-c", "other.config.ts"), ("-cother.config.ts",),
+    ("--project", "api"),
 ])
 def test_project_owned_worker_controls_keep_vitest_exclusive(case, args):
-    # A project that pins its own workers or pool in runner args owns the
-    # parallelism; ptest must not stack a second, conflicting cap on it.
     config = _versioned(case, "3.2.6", args=args)
-    plan = C.Plan(mode=C.Mode.SCOPED, execution="scoped", files=())
 
-    prepared = vitest_adapter.prepare(config, plan, _grant(4), _attempt())
+    prepared = _prepare(config, 4)
 
     assert prepared.argv == ("node", vitest_adapter.VITEST_ENTRY, "run", *args)
+    assert prepared.env_updates == ()
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
 
 
@@ -226,3 +266,15 @@ def test_symlinked_vitest_package_json_stays_exclusive(case):
     real.write_text('{"version": "3.2.6"}', encoding="utf-8")
     (case.base / "node_modules" / "vitest" / "package.json").symlink_to(real)
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
+
+
+def test_prepare_follows_the_admission_decision(case):
+    # Admission decided once; prepare must not re-decide from a changed tree.
+    config = _versioned(case, "3.2.6")
+    token = vitest_adapter.DECISION.set(None)
+    try:
+        prepared = _prepare(config, 4)
+    finally:
+        vitest_adapter.DECISION.reset(token)
+    assert prepared.env_updates == ()
+    assert prepared.capability.execution is C.ExecutionTier.EXCLUSIVE_COMMAND

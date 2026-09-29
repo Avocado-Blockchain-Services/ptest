@@ -28,6 +28,7 @@ from pathlib import Path
 from . import contracts as C
 from . import (config as config_api, executability, files, history, platform, progress, render,
                reports, scheduler, selection, source)
+from .adapters import vitest as vitest_adapter
 from .runners import adapter_for
 
 
@@ -2675,9 +2676,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
     # A non-native runner is exclusive unless its adapter can bound its own
     # workers; only capped Vitest can today, everything else keeps the whole
     # machine.
-    bounded_runner = not native_runner and not adapter.requires_exclusive(config)
-    exclusive_admission = not native_runner and not bounded_runner
-    if bounded_runner and config.runner.kind is not C.RunnerKind.VITEST:
+    if (not native_runner and config.runner.kind is not C.RunnerKind.VITEST
+            and not adapter.requires_exclusive(config)):
         raise _problem("unsupported-capability", "command execution requires exclusive admission")
     run_id = secrets.token_hex(16)
     planning_runtime = (
@@ -2763,6 +2763,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 args=tuple(tier_config.runner.args) + ("-v",)))
     tier = (executability.parallel_request(tier_config)
             if native_pytest else None)
+    # A non-native runner reserves the whole machine unless ptest can bound
+    # it: today only Vitest 3+ with statically known worker settings. The
+    # decision is made once, on the same effective args the adapter binds,
+    # and handed to prepare so admission and the command always agree.
+    vitest_bound = (vitest_adapter.bound(tier_config)
+                    if config.runner.kind is C.RunnerKind.VITEST else None)
+    bounded_runner = vitest_bound is not None
+    exclusive_admission = not native_runner and not bounded_runner
     # A qualified xdist pytest project requests its tier worker count on
     # the basic path. An advanced full or scoped run may do the same: a
     # full run's complete coverage/worker evidence can earn the
@@ -2789,6 +2797,9 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # than --workers.
         requested_slots = (config.runner.workers if config.runner.workers > 1
                            else max(1, (scheduler.effective_limits(domain).max_slots or 2) // 2))
+        if vitest_bound.limit is not None:
+            # Never raise a ceiling the project set itself.
+            requested_slots = min(requested_slots, vitest_bound.limit)
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
@@ -2890,10 +2901,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
                         if limit is not None else None)
                 # When enough slots are free, slots are not the reason: name
                 # what the run really waits for instead of "N of M free".
+                # The scheduler grants min(requested, max_slots): compare
+                # and show that, never an impossible request.
+                needed = (min(requested_slots, limit) if limit is not None
+                          else requested_slots)
                 blocker = (scheduler.admission_blocker(domain, run_id)
-                           if free is None or free >= requested_slots else None)
+                           if free is None or free >= needed else None)
                 progress.emit(progress.format_waiting(
-                    needed=requested_slots, free=free, limit=limit,
+                    needed=needed, free=free, limit=limit,
                     timeout_s=request.queue_timeout_s, holders=holders,
                     elapsed_s=None if first else elapsed,
                     position=state.position if request.verbose else None,
@@ -2937,6 +2952,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             if (advanced and plan.execution == "selected"
                 and history_view.baseline is not None)
             else None)
+        decision = (vitest_adapter.DECISION.set(vitest_bound)
+                    if config.runner.kind is C.RunnerKind.VITEST else None)
         try:
             prepared = (adapter.prepare_advanced(
                 effective, plan, grant, attempt,
@@ -2945,8 +2962,13 @@ def execute(domain: C.DomainPaths, config: C.Config,
         except BaseException:
             # No guard exists yet, so an adapter rejection must not leave a
             # never-registered GRANTED lease charging the checkout.
+            if decision is not None:
+                vitest_adapter.DECISION.reset(decision)
+                decision = None
             scheduler.cancel_pending(domain, ticket, owner)
             raise
+        if decision is not None:
+            vitest_adapter.DECISION.reset(decision)
         prepared = replace(prepared, env_updates=prepared.env_updates + (
             ("PTEST_PROJECT_ID", checkout.project_id),
             ("PTEST_CHECKOUT_ID", checkout.checkout_id),

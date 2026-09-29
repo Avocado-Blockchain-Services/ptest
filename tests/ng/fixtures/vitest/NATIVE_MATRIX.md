@@ -25,3 +25,5 @@ follow-up). They are not executed by any test.
 Project config and hooks are trusted local code, not a sandbox; the adapter
 refuses non-node launchers and public plan files but does not claim to
 contain the command's side effects.
+
+> 0.3.8: Vitest 3+ with statically known worker settings runs bounded (environment caps, non-exclusive admission); everything else keeps the exclusive literal command described above.

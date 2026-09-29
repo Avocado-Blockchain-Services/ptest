@@ -820,7 +820,7 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
     if config.runner.kind is C.RunnerKind.PYTEST:
         inspected = pytest_adapter.inspect_capability(config)
     elif config.runner.kind is C.RunnerKind.VITEST:
-        capped = vitest_adapter.capped_major(config) is not None
+        capped = vitest_adapter.bound(config) is not None
         inspected = C.Capability(
             execution=(C.ExecutionTier.BOUNDED_NATIVE if capped
                        else C.ExecutionTier.EXCLUSIVE_COMMAND),

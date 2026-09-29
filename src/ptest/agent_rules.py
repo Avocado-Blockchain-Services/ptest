@@ -786,6 +786,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     # fcdfe1e: guide with the config-uncommitted row before the
     # update-this-branch reword (R1 review fix round 1).
     "8bb7d5d62b1ae957c59d9c27c943d6e5710e17b63085eda84c55e43df3643322",
+    # 0.3.6-0.3.7: guide before the `waiting: <reason>` wait-line row.
+    "2639d68b4727643280c02301e1f21c6813dbcce4596d04b5666f2d0fb6b081c2",
 })
 
 

@@ -41,7 +41,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `no changes under <folder> — nothing to test` | the change reaches no tests under that folder (exit 0) | Nothing; `ptest --full <folder>` runs everything there. |
 | `<project> · no changes` | that child is untouched (one line per untouched child) | Nothing. |
 | `· next: ptest --full before handoff` | changed-mode green; the integrated gate is still needed | Keep iterating with `ptest`; run `ptest --full` once only when you are done. |
-| `waiting for N slots … in use by …` | queued behind other runs | Wait; do not start another run. |
+| `waiting for N slots …` / `waiting: <reason>` | queued behind other runs; the reason names the real blocker | Wait; do not start another run. |
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
