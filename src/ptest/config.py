@@ -1399,6 +1399,43 @@ def _commit_paths(boundary: Path | None, root: Path,
         return ()
 
 
+def _merged_commit_paths(boundary: Path | None, config_root: Path,
+                         written: tuple[str, ...]) -> tuple[str, ...]:
+    """``written`` first (order kept), then every uncommitted ptest file.
+
+    Merges what init wrote with ``worktree.uncommitted_config_files``,
+    deduplicated in stable order as boundary-relative posix paths. ``()``
+    when ``boundary`` is None. Never raises: on any failure the written
+    list is kept.
+    """
+    ordered = tuple(dict.fromkeys(written))
+    if boundary is None:
+        return ()
+    try:
+        extra = list(_worktree.uncommitted_config_files(
+            boundary, include_agent_rules=True))
+        if config_root != boundary:
+            try:
+                relative = config_root.relative_to(boundary)
+            except ValueError:
+                relative = None
+            if relative is not None:
+                prefix = relative.as_posix() + "/"
+                extra.extend(
+                    prefix + name
+                    for name in _worktree.uncommitted_config_files(
+                        config_root, include_agent_rules=False))
+        seen = set(ordered)
+        merged = list(ordered)
+        for name in extra:
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
+        return tuple(merged)
+    except Exception:
+        return ordered
+
+
 FROM_MAIN_REFUSAL = (
     "--from-main only works in a linked git worktree whose main checkout "
     "has .ptest.toml at this path; nothing was copied"
@@ -1503,6 +1540,19 @@ def _init_from_main(physical_cwd: Path, dry_run: bool) -> C.InitResult:
     )
 
 
+def _existing_with_commit_paths(physical_cwd: Path,
+                                result: C.InitResult) -> C.InitResult:
+    """Attach every uncommitted ptest file to an unchanged-config result."""
+    try:
+        boundary = _git_boundary(physical_cwd)
+    except C.Problem:
+        boundary = None
+    return replace(
+        result,
+        commit_paths=_merged_commit_paths(
+            boundary, result.target.parent, ()))
+
+
 def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     """Preview or exclusively create one fresh native project config."""
     if not isinstance(options, C.InitOptions):
@@ -1510,7 +1560,9 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     physical_cwd = _absolute_directory(cwd)
     resolution = resolve_config(physical_cwd)
     if resolution.path is not None:
-        return _existing_result(resolution.root, resolution.path, resolution)
+        return _existing_with_commit_paths(
+            physical_cwd,
+            _existing_result(resolution.root, resolution.path, resolution))
     if resolution.problem is not None \
             and resolution.problem.code == CONFIG_UNCOMMITTED:
         if not options.from_main:
@@ -1528,10 +1580,14 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     try:
         _, target_exists = _candidate_config(root)
     except C.Problem as problem:
-        return _existing_result(root, target, C.ConfigResolution(
-            root=root, path=target, config=None, problem=problem))
+        return _existing_with_commit_paths(
+            physical_cwd,
+            _existing_result(root, target, C.ConfigResolution(
+                root=root, path=target, config=None, problem=problem)))
     if target_exists:
-        return _existing_result(root, target, resolve_config(root))
+        return _existing_with_commit_paths(
+            physical_cwd,
+            _existing_result(root, target, resolve_config(root)))
 
     children = options.children
     root_candidates = _native_candidates(root) if not children else ()
@@ -1580,7 +1636,9 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             config=None, warnings=(),
             details=(_config_detail(_CONFIG_NAME, "created"),) + child_details
             + _executability_notes(planned_items),
-            commit_paths=_commit_paths(boundary, root, created_names),
+            commit_paths=_merged_commit_paths(
+                boundary, root,
+                _commit_paths(boundary, root, created_names)),
         )
 
     if options.runner is not None:
@@ -1613,11 +1671,14 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
                          private=False)
     except C.Problem as problem:
         if problem.code == "already-exists":
-            return _existing_result(root, target, resolve_config(root))
+            return _existing_with_commit_paths(
+                physical_cwd,
+                _existing_result(root, target, resolve_config(root)))
         raise
     return C.InitResult(
         action=C.InitAction.CREATED, target=target, exists=True,
         config=_summary(config), warnings=(),
         details=(_config_detail(_CONFIG_NAME, "created"),) + fresh_notes,
-        commit_paths=_commit_paths(boundary, root, (_CONFIG_NAME,)),
+        commit_paths=_merged_commit_paths(
+            boundary, root, _commit_paths(boundary, root, (_CONFIG_NAME,))),
     )

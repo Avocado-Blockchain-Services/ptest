@@ -390,7 +390,7 @@ def _restart_line(result: C.InitResult, rules: object,
 
 def _commit_reminder_lines(result: C.InitResult, width: int, *,
                            dry_run: bool) -> list[str]:
-    """Commit reminder tail: the exact files init wrote or changed.
+    """Commit reminder tail: every uncommitted ptest file.
 
     Shown only for completed (non-preview) results with a non-empty
     ``commit_paths``. Paths are sanitized through ``terminal_text`` and
