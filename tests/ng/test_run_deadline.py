@@ -844,8 +844,10 @@ def test_real_expiry_message_names_scope_and_remedy(case, scope):
         assert driver.read().kind == "registered"
         assert driver.read().kind == "attempt-ready"
         assert driver.read().kind == "phase"
-        peer, _ = driver.ready_listener.accept()
-        peer.settimeout(_WATCHDOG_S)
+        # No accept on the ready socket: with a 0.5 s deadline a loaded
+        # machine may start the workload interpreter only after the guard
+        # already killed it, and the expiry facts below never depended on
+        # the workload reaching its connect.
         facts = driver.finish()
     finally:
         driver.close()
