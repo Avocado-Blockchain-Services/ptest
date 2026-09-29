@@ -569,7 +569,7 @@ Append this entry as the last element of `_PREVIOUS_GUIDE_SHA256S`, before `})`:
 ### 5.3 `test_agent_rules.py`
 
 Add `test_previous_hashes_cover_pre_update_row_guide`. It asserts that the hash above is in
-`_PREVIOUS_GUIDE_SHA256S`, that the shipped guide contains `ptest: update available:` and `run \`ptest update\``,
+`_PREVIOUS_GUIDE_SHA256S`, that the shipped guide contains `ptest: update available:` and ``Run `ptest update`, then continue``,
 and that `len(guide.splitlines()) <= 100`.
 
 ### 5.4 README
@@ -628,7 +628,7 @@ the installer smoke check now runs with `PTEST_NO_UPDATE_CHECK=1`.
       `ptest --workers 2 --queue-timeout 1800 tests/ng/test_agent_rules.py tests/ng/test_resources.py tests/ng/test_init_changed.py tests/ng/test_help.py tests/ng/test_uninstall.py`.
       This covers `test_every_shipped_guide_version_hashes_into_previous_set` *after
       committing*, plus the banned-terms check on the README and guide.
-- [ ] No reference to `ptest help update` outputs beyond S1 to S11 (T2 cannot run T1's code).
+- [ ] T2 quotes only the strings frozen in section 3.1. It does not invent other ptest output text, because T2 cannot run T1's code.
 - [ ] `graphify update .` has been run. Commit only in the T2 worktree.
 
 ---
