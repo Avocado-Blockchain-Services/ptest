@@ -11,6 +11,12 @@
           ],
           "type": "string"
         },
+        "commit_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "config": {
           "properties": {
             "closed_inputs": {
