@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.6
 
 - `config-uncommitted`: in a linked git worktree whose main checkout holds
   a `.ptest.toml` at the same path, ptest refuses with exit 2
