@@ -188,7 +188,8 @@ def config_uncommitted(cwd: Path | str) -> C.Problem | None:
             f"this is a linked git worktree without {name}; "
             f"the main checkout has {found.path}. "
             f"Worktrees only receive committed files. "
-            f"Ask the user to commit {name} on the base branch. "
+            f"Ask the user to commit {name} on the base branch, or, "
+            f"if it is already committed there, to update this branch from it. "
             f"Do not run ptest init here."
         ),
     )
@@ -1460,7 +1461,8 @@ def _init_from_main(physical_cwd: Path, dry_run: bool) -> C.InitResult:
         code=CONFIG_UNCOMMITTED,
         message=f"copied {name} from the main checkout {found.path}; "
         f"this copy is a temporary stopgap that may go stale. "
-        f"The fix is to ask the user to commit {name} on the base branch.",
+        f"The fix is to ask the user to commit {name} on the base branch. "
+        f"Delete the copied file(s) before updating the branch.",
         paths=(),
     )
     target = dest / _CONFIG_NAME

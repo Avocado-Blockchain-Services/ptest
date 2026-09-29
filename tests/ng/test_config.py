@@ -1069,9 +1069,29 @@ def test_resolve_config_in_linked_worktree_without_config_is_uncommitted(tmp_pat
         "this is a linked git worktree without .ptest.toml; "
         f"the main checkout has {main}/.ptest.toml. "
         "Worktrees only receive committed files. "
-        "Ask the user to commit .ptest.toml on the base branch. "
+        "Ask the user to commit .ptest.toml on the base branch, or, "
+        "if it is already committed there, to update this branch from it. "
         "Do not run ptest init here."
     )
+
+
+def test_resolve_config_branch_predates_committed_config_mentions_update(tmp_path):
+    """A worktree branched before main committed the config names the update fix."""
+    from support import git, init_git_repo, write_ptest_toml
+
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    # The base branch commits .ptest.toml only AFTER the worktree branched.
+    write_ptest_toml(main)
+    git(main, "add", ".ptest.toml")
+    git(main, "commit", "-q", "-m", "config")
+
+    resolution = resolve_config(wt)
+
+    assert resolution.problem is not None
+    assert resolution.problem.code == "config-uncommitted"
+    assert "update this branch" in resolution.problem.message
 
 
 def test_resolve_config_never_reads_main_content(tmp_path):

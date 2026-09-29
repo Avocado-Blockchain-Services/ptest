@@ -251,6 +251,20 @@ def uncommitted_config_files(
         return ()
 
 
+def _is_submodule_checkout(root: Path, child: str) -> bool:
+    """True when the child directory holds its own `.git` entry.
+
+    `git ls-tree -r HEAD` in the root repo never lists files inside a
+    submodule, so a committed config there would otherwise be reported
+    as uncommitted on every run. lstat: no symlinks followed.
+    """
+    try:
+        stamp = os.lstat(root / child / ".git")
+    except OSError:
+        return False
+    return stat.S_ISREG(stamp.st_mode) or stat.S_ISDIR(stamp.st_mode)
+
+
 def _uncommitted_inner(root: Path, *, include_agent_rules: bool) -> tuple[str, ...]:
     root = _norm(root if isinstance(root, Path) else Path(root))
     # Deferred import: config imports this module at top level, so an
@@ -265,6 +279,8 @@ def _uncommitted_inner(root: Path, *, include_agent_rules: bool) -> tuple[str, .
     if _is_regular_file(root, CONFIG_NAME):
         candidates.append(CONFIG_NAME)
         for child in _local_v2_children(root):
+            if _is_submodule_checkout(root, child):
+                continue
             name = f"{child}/{CONFIG_NAME}"
             if _is_regular_file(root, name):
                 candidates.append(name)

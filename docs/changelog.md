@@ -3,8 +3,9 @@
 ## Unreleased
 
 - `config-uncommitted`: in a linked git worktree whose main checkout holds
-  an uncommitted `.ptest.toml` at the same path, ptest refuses with exit 2
-  instead of running. The fix is to commit the config on the base branch;
+  a `.ptest.toml` at the same path, ptest refuses with exit 2
+  instead of running. The fix is to commit the config on the base branch
+  (or, if it is already committed there, to update the branch from it);
   never run `ptest init` in the worktree.
 - `ptest init --from-main` copies the main checkout's config verbatim as a
   temporary stopgap that may go stale; it cannot be combined with `--runner`
@@ -12,9 +13,9 @@
 - A successful `ptest init` ends by listing the files to commit
   (`commit_paths`, also in `init --json`): worktrees and clones only get
   committed config.
-- A run warns once on stderr when its config is not committed, and
-  `ptest doctor` lists uncommitted ptest files; both say to commit them on
-  the base branch.
+- A run warns once on stderr when its config is not committed
+  (`new worktrees won't have it`), and `ptest doctor` lists uncommitted
+  ptest files with the commit-on-the-base-branch fix.
 - The agent guide, `ptest help init`, `ptest help agents`, and the README
   teach the stop rule: `config-uncommitted` means stop and tell the user,
   never run `ptest init`.

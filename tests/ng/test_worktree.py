@@ -275,6 +275,32 @@ def test_uncommitted_config_files_lists_monorepo_children(tmp_path):
     assert W.uncommitted_config_files(main) == ()
 
 
+def test_uncommitted_config_files_skips_submodule_children(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    (main / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    (main / "api").mkdir()
+    write_ptest_toml(main / "api")
+    # A child directory holding its own .git entry is a submodule checkout:
+    # `git ls-tree -r HEAD` in the root never lists files inside it.
+    (main / "api" / ".git").write_text("gitdir: ../.git/modules/api\n")
+
+    assert W.uncommitted_config_files(main) == (".ptest.toml",)
+
+
+def test_agent_rule_lists_match_agent_rules_module():
+    """worktree.AGENT_RULE_FILES/MANAGED_MARKER must not drift from agent_rules."""
+    from ptest import agent_rules as rules
+
+    assert W.MANAGED_MARKER == rules._MARKER_START
+    expected = (
+        (rules._GUIDE_PATH,) + tuple(rules._AGENT_FILES)
+        + tuple(rules._PROVIDER_SKILLS.values())
+    )
+    assert set(W.AGENT_RULE_FILES) == set(expected)
+    assert len(W.AGENT_RULE_FILES) == len(expected)
+
+
 def test_uncommitted_config_files_agent_rules_opt_in(tmp_path):
     main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
     write_ptest_toml(main)

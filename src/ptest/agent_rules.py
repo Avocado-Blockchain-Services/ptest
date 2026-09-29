@@ -783,6 +783,9 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "5fd9544b2fbbb648cd32e51a820c57231dd2ff7e840314923e359724ca304aa5",
     # 80392ca (0.3.3-0.3.5): guide before the config-uncommitted row.
     "4fd66f8dea3d1fa6bdb691daa0fe329ec54dd43670a0e2d88bb297552e621f9d",
+    # fcdfe1e: guide with the config-uncommitted row before the
+    # update-this-branch reword (R1 review fix round 1).
+    "8bb7d5d62b1ae957c59d9c27c943d6e5710e17b63085eda84c55e43df3643322",
 })
 
 

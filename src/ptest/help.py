@@ -86,10 +86,11 @@ Notes:
   Fresh pytest configs enable change selection, so bare ptest runs only
   the tests a change reaches with no coverage or baseline step; existing
   configs are never rewritten (ptest doctor --fix turns selection on).
-  In a linked git worktree whose main checkout holds an uncommitted
-  `.ptest.toml` at the same path, init refuses with `config-uncommitted`:
+  In a linked git worktree whose main checkout holds a `.ptest.toml`
+  at the same path, init refuses with `config-uncommitted`:
   worktrees only receive committed files, so the fix is to commit the
-  config on the base branch. `--from-main` copies the main checkout's
+  config on the base branch, or, if it is already committed there, to
+  update this branch from it. `--from-main` copies the main checkout's
   config verbatim as a temporary stopgap that may go stale; it cannot be
   combined with `--runner` or `--child`. A successful init ends by
   listing the files to commit: worktrees and clones only get committed
@@ -353,7 +354,8 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    exactly one child; arbitrary runner flags are rejected by root scope
    validation.
    `config-uncommitted` means stop and tell the user to commit `.ptest.toml`
-   on the base branch; never run ptest init in a linked worktree.
+   on the base branch, or to update this branch if it is already
+   committed there; never run ptest init in a linked worktree.
 
 3. Loop changed, then gate full:
      ptest                           # default loop after each edit (runs the tests the change reaches: changes since the last green run, no baseline or coverage needed)

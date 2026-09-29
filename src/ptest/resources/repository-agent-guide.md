@@ -48,7 +48,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
 | `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
-| `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch; never run `ptest init` here. |
+| `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
 | `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
 
 ## Exit codes
