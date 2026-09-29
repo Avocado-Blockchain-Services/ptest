@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.7
+
+- A scoped or changed-tests run no longer takes its execution deadline from
+  an earlier, smaller scoped run. History does not record which scope a run
+  covered, so a 5-test run could set a 60 s deadline that killed a healthy
+  larger run (and its retry at three times that). Non-full runs now derive
+  the deadline from the latest full run (looking back up to 200 runs), else
+  from the test-count estimate; a scoped run killed by its deadline still
+  raises the next scoped deadline, and never lowers it.
+- An expired queue deadline always reports
+  `queue-timeout: admission queue deadline expired` (retryable, exit 75),
+  whichever part of ptest notices it first. JSON error documents for it now
+  carry phase `execution` and `retryable: true`.
+- Test suite: load-sensitive tests fixed at their cause. The cancellation
+  test no longer races real pytest teardown against the 3 s cancel grace,
+  the invoke helper rejects hang guards under 20 s unless the timeout itself
+  is under test, and the doctor byte-cap test no longer depends on the scan
+  deadline. Three consecutive full runs pass at load average 20-24.
+
 ## 0.3.6
 
 - `config-uncommitted`: in a linked git worktree whose main checkout holds

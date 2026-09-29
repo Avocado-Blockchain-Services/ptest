@@ -2224,7 +2224,7 @@ def test_assembled_child_as_public_dict_minus_execution_validates(tmp_path):
                                "path": "recommendations.md",
                                "sha256": "12" * 32}}
     raw = json.dumps({"schema_version": 1, "kind": "agent-assessment",
-                      "ptest_version": "0.3.6", "domain": None, "data": payload,
+                      "ptest_version": "0.3.7", "domain": None, "data": payload,
                       "error": None}).encode()
     document = C.decode_public_document(raw)
     assert document.kind == "agent-assessment"
