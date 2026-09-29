@@ -60,8 +60,9 @@ _INDIRECT = re.compile(
 _IMPORT_SOURCE = re.compile(
     r"""(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"`]([^'"`]+)['"`]""",
     re.MULTILINE)
-_LINE_COMMENT = re.compile(r"(^|[\s;,{(\[])//[^\n]*")
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_IMPORT_BINDING = re.compile(
+    r"""^\s*import\s+([^'"`;]+?)\s+from\s*['"`]([^'"`]+)['"`]""", re.MULTILINE)
+_SOURCE_SUFFIXES = ("", ".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json")
 _ANCESTOR_LIMIT = 32
 _ENV_LIMITS = ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS")
 # The environment ptest sets on a bounded run; each Vitest major reads the
@@ -158,8 +159,72 @@ def _read_config(root: Path, name: str) -> str | None:
 
 
 def _strip_comments(text: str) -> str:
-    """Drop JS comments so prose never counts as a setting (URLs keep their //)."""
-    return _LINE_COMMENT.sub(lambda match: match.group(1), _BLOCK_COMMENT.sub(" ", text))
+    """Drop JS comments outside string and template literals.
+
+    Globs such as ``'tests/*.test.js'`` hold ``/*`` and ``*/`` inside
+    strings; a comment regex would pair them and delete real settings in
+    between. Unterminated strings or comments (e.g. a regex literal holding
+    a quote) are unknown, never guessed.
+    """
+    out: list[str] = []
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if char in "'\"`":
+            end = index + 1
+            while end < length and text[end] != char:
+                end += 2 if text[end] == "\\" else 1
+            if end >= length:
+                raise _Unknown("unterminated string")
+            out.append(text[index:end + 1])
+            index = end + 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = length if end < 0 else end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                raise _Unknown("unterminated comment")
+            out.append(" ")
+            index = end + 2
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def _imported_text(root: Path, source: str) -> str | None:
+    """One level of a relative import, or raise _Unknown when unreadable."""
+    base = (root / source) if not source.startswith("/") else Path(source)
+    candidates = [Path(str(base) + suffix) for suffix in _SOURCE_SUFFIXES]
+    candidates += [base / f"index{suffix}" for suffix in _SOURCE_SUFFIXES[1:]]
+    for candidate in candidates:
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            raise _Unknown(source)
+        text = _read_config(root, str(relative))
+        if text is not None:
+            return text
+    raise _Unknown(source)
+
+
+def _bare_binding_used_as_config(code: str) -> bool:
+    """A package import whose binding is spread or used as the config value."""
+    for names, source in _IMPORT_BINDING.findall(code):
+        if source.startswith((".", "/")) or source in ("vitest/config", "vite", "vitest"):
+            continue
+        for name in re.findall(r"[A-Za-z_$][\w$]*", names.replace(" as ", " ")):
+            if name in ("type", "default"):
+                continue
+            used = re.compile(
+                r"\.\.\.\s*" + re.escape(name) + r"\b"
+                r"|\btest\s*:\s*" + re.escape(name) + r"\b"
+                r"|\bdefine(?:Config|Project)\s*\(\s*" + re.escape(name) + r"\b"
+                r"|\bexport\s+default\s+" + re.escape(name) + r"\b")
+            if used.search(code):
+                return True
+    return False
 
 
 def _config_like(source: str) -> bool:
@@ -204,8 +269,17 @@ def _config_limit(root: Path, major: int) -> int | None:
         code = _strip_comments(text)
         if _INDIRECT.search(code):
             raise _Unknown("indirect")
-        if any(_config_like(source) for source in _IMPORT_SOURCE.findall(code)):
+        sources = _IMPORT_SOURCE.findall(code)
+        if any(_config_like(source) for source in sources):
             raise _Unknown("imported config")
+        if _bare_binding_used_as_config(code):
+            raise _Unknown("package config")
+        for source in sources:
+            if not source.startswith((".", "/")):
+                continue
+            imported = _strip_comments(_imported_text(root, source))
+            if _WORKER_WORD.search(imported) or _INDIRECT.search(imported):
+                raise _Unknown(source)
         literal = _MAX_KEY.findall(code) + _SERIAL_KEY.findall(code)
         if len(_WORKER_WORD.findall(code)) != len(literal):
             raise _Unknown("worker key form")

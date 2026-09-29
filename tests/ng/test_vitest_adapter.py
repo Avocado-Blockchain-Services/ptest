@@ -339,3 +339,48 @@ def test_prepare_follows_the_admission_decision(case):
         vitest_adapter.DECISION.reset(token)
     assert prepared.env_updates == ()
     assert prepared.capability.execution is C.ExecutionTier.EXCLUSIVE_COMMAND
+
+
+def test_comment_markers_inside_glob_strings_never_hide_settings(case):
+    # '/*' in 'tests/*.test.js' and '*/' in '**/node_modules/**' are string
+    # content; pairing them as a comment used to delete maxWorkers: 1.
+    config = _versioned(case, "5.0.1", (
+        "export default { test: {\n"
+        "  include: ['tests/*.test.js'],\n"
+        "  maxWorkers: 1,\n"
+        "  exclude: ['**/node_modules/**'],\n"
+        "} }\n"))
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=1)
+
+
+@pytest.mark.parametrize("files,text", [
+    ({"shared.mjs": "export default { test: { maxWorkers: 1 } }"},
+     "import s from './shared'\nexport default { test: { ...s.test } }"),
+    ({}, "import base from '../base'\nexport default { test: base.test }"),
+    ({}, "import shared from '@acme/shared'\nexport default defineConfig(shared)"),
+    ({}, "import preset from '@acme/vitest-preset'\nexport default { test: { ...preset.test } }"),
+    ({}, "import s from './missing'\nexport default { test: { ...s.test } }"),
+    ({}, "export default { test: { include: ['unterminated] } }"),
+])
+def test_settings_behind_imports_or_unreadable_text_keep_vitest_exclusive(case, files, text):
+    config = _versioned(case, "5.0.1", text)
+    for name, content in files.items():
+        (case.base / name).write_text(content, encoding="utf-8")
+    assert vitest_adapter.bound(config) is None
+
+
+def test_a_harmless_relative_import_stays_bounded(case):
+    config = _versioned(case, "3.2.6", (
+        "import { defineConfig, configDefaults } from 'vitest/config';\n"
+        "import react from '@vitejs/plugin-react';\n"
+        "import { COVERAGE_THRESHOLDS } from './src/test/coverage-thresholds';\n"
+        "export default defineConfig({ plugins: [react()], test: {\n"
+        "  fileParallelism: true, pool: 'threads',\n"
+        "  poolOptions: { threads: { minThreads: 4, maxThreads: 8 } },\n"
+        "  exclude: [...configDefaults.exclude, 'e2e/**'],\n"
+        "  coverage: { thresholds: COVERAGE_THRESHOLDS } } })\n"))
+    target = case.base / "src" / "test"
+    target.mkdir(parents=True)
+    (target / "coverage-thresholds.ts").write_text(
+        "export const COVERAGE_THRESHOLDS = { lines: 80 }\n", encoding="utf-8")
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=8)
