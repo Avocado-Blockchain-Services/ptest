@@ -88,7 +88,7 @@ def test_repository_guide_default_loop_is_changed():
     assert "| Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |" in guide
     assert "| One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |" in guide
     assert "| All tests under one folder | `ptest --full <folder>` |" in guide
-    assert "| Integrated change, before handoff | `ptest --full` once |" in guide
+    assert "| Before handoff or merge | bring the base branch in first, then `ptest --full`; fix and rerun until green |" in guide
     lowered = guide.lower()
     assert "no baseline or coverage needed" not in lowered
     assert "baseline" not in lowered
