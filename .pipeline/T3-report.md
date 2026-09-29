@@ -1,166 +1,118 @@
-# T3 report — doctor uncommitted-files finding and init terminal commit reminder
+# T3 report — init commit reminder lists every uncommitted ptest file
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T3
-- taskBranch: feature/worktree-safe-config-T3
-- commit: 9e42ff0 ("T3: config.uncommitted doctor findings and init commit reminder")
-- status: done — scoped suite fully green (179 passed)
+- taskWorktree: /home/ingmar/worktrees/ptest/cc-doctor-offline/ptest-T3
+- taskBranch: feature/doctor-offline-T3
+- base: 09f6f40 (design freeze) / 985d43e (0.3.7)
+- status: DONE except one integration-owned assertion update (see §5)
+- commits: `2274a14` T3: init commit reminder lists every uncommitted ptest file;
+  `e39874c` T3: keep from-main stopgap copies out of commit_paths
 
-## What changed (owned files only, 4 files, +463/-0)
+## 1. What changed (owned files only)
 
-- `src/ptest/doctor.py` (+98) — behavior as designed; untouched since review:
-  - `_config_findings(root)` (new): one `C.Finding` per path from
-    `worktree.uncommitted_config_files(root, include_agent_rules=True)` with the
-    frozen shape (`config.uncommitted` / medium / high / `line=None` /
-    `git-tree` + frozen consequence/remediation/verification). Best-effort:
-    lazy `from . import worktree` plus broad `except Exception -> ()`, so doctor
-    never fails — including when the T1 module is absent.
-  - `_admit_config_findings(scan, root)` (new): admits config findings FIRST,
-    under the same bounds as `scan.source` (finding count + output bytes, with
-    `scan.limit("Doctor finding limit reached.")` / `_hit_output_limit()`).
-  - `_config_uncommitted_readiness(problem)` (new): blocked execution/selection
-    readiness naming the problem's own `config-uncommitted` code + message
-    (parallel/timing mirror the unconfigured shape); None when the reason code
-    is unavailable, keeping the default.
-  - `inspect()`: admits config findings only when scope is None; computes
-    readiness from the NON-config findings so readiness is identical
-    with/without them; a `config-uncommitted` resolution (config None) gets the
-    override readiness. Falls through to the untouched legacy
-    `_finalize_report` path whenever neither condition holds.
-  - `inspect_workspace()`: monorepo branch admits `_config_findings(root)`
-    into the ledger via `_admit_finding` before child source findings, only
-    when scope is None. Standalone path untouched (handled in `inspect()`).
-- `src/ptest/init_render.py` (+28) — untouched since review:
-  - `_commit_reminder_lines(result, width, *, dry_run)` (new): last-block tail
-    shown only when not `dry_run`, action is not PREVIEW, and `commit_paths`
-    is non-empty. Line 1 `Commit these files: <, -joined>` via
-    `wrap_words(width, indent="", hang="  ")`, line 2
-    `Worktrees and clones only get committed config.` Paths through
-    `terminal_text`. No new renderer parameters; `render_init` unchanged.
-  - `render_init_footer()`: appends the block last (after restart, one blank
-    line). Reads `result.commit_paths` via tolerant `getattr(..., ())`.
-- `tests/ng/test_doctor.py` (+262): 7 behavior tests (exact finding list +
-  frozen fields; absent when committed/non-git; absent when scoped; bound
-  admits first + limitation; readiness equal to committed twin; resolution
-  readiness names code+message; monorepo root+child) PLUS a conditional T1
-  seam block (see below).
-- `tests/ng/test_init_render.py` (+75): separate `_committed_result` helper
-  with `commit_paths` seam fallback (existing `_result` untouched); 4 tests
-  (exact last block after restart; absent for empty/PREVIEW/dry-run; wrap at
-  width 40 over the 60-column floor; control-char sanitization).
+- `src/ptest/config.py`
+  - NEW `_merged_commit_paths(boundary, config_root, written)` (:1398): `written`
+    first (deduped, order kept), then `worktree.uncommitted_config_files(boundary,
+    include_agent_rules=True)`, then — only when `config_root != boundary` and
+    inside it — `uncommitted_config_files(config_root, include_agent_rules=False)`
+    prefixed with the boundary-relative dir. Deduped, stable order, `()` when
+    boundary is None, never raises (falls back to written).
+  - NEW `_existing_with_commit_paths(physical_cwd, result)` (:1539): boundary via
+    `_git_boundary` with raised `Problem` treated as None; merges with `written=()`
+    and `config_root=result.target.parent`. Applied at all four `init_project`
+    `_existing_result` return sites (:1559, :1579, :1584, :1670).
+  - Monorepo + standalone CREATED returns merge written names through the helper
+    (:1635, :1678). PREVIEW/`--dry-run` and `_init_from_main` returns untouched.
+  - `--from-main` guard (:1558-1564): an existing result under `options.from_main`
+    keeps `()` — a from-main config is a stopgap copy that must not be committed
+    in that worktree; the stopgap warning governs it.
+- `src/ptest/init_render.py` — `_commit_reminder_lines` docstring (:393) now reads
+  "every uncommitted ptest file". No behavior change (still renders from
+  `result.commit_paths`, still sanitizes via `terminal_text`).
+- NEW `tests/ng/test_init_commit_reminder.py` — 13 tests (see §3). No migration.
 
-## T1 seam (declared locally, conditional, removable after T1 integrates)
+`cli.py` untouched: the existing guidance merge (~2420) appends
+`agent_rules.apply` targets verbatim and keeps working; JSON `commit_paths`
+flows through `serialize_init_result` unchanged.
 
-T1 (`src/ptest/worktree.py`, contracts codes/fields) is not integrated on this
-base, so the three frozen shapes are declared inside the owned test files only
-— shipped `doctor.py`/`init_render.py` behavior is unchanged:
+## 2. Verification (all through ptest, capped `--workers 2 --queue-timeout 1800`)
 
-- `test_doctor.py` top block: unions `config.uncommitted` /
-  `config-uncommitted` into `C.FINDING_CODES` / `C.REASON_CODES` (guarded, a
-  no-op once T1 adds them to the literals), and installs a faithful
-  `ptest.worktree` double in `sys.modules` ONLY if the real import fails. The
-  double follows design §3.1 verbatim (candidate order, marker rule, single
-  `ls-tree -r -z --name-only HEAD`, any-error → `()`), using real git.
-- `test_init_render.py` `_committed_result`: tries the real
-  `InitResult(..., commit_paths=...)` kwarg first (exercising T1 validation
-  post-integration), falls back to `object.__setattr__` pre-T1.
-- Post-T1 every declaration dissolves (real module/codes/kwarg shadow it) and
-  the committed tests exercise the real T1 shapes with zero T3 changes. Delete
-  the marked blocks once T1 is integrated.
+- `ptest --workers 2 --queue-timeout 1800 tests/ng/test_init_commit_reminder.py`
+  → **12 passed** (then 13/13 after adding the from-main test; see run3).
+- `ptest --workers 2 --queue-timeout 1800 tests/ng/test_init_commit_reminder.py tests/ng/test_init.py`
+  → **1 failed, 82 passed** (`/tmp/t3_run3.log`); the single failure is
+  `test_init.py:1185`, owned by the integrator (§5). All 13 T3 tests pass.
+- `ptest --workers 2 --queue-timeout 1800 tests/ng/test_init_commit_reminder.py tests/ng/test_init.py tests/ng/test_agent_rules.py tests/ng/test_agent_doctor_acceptance.py`
+  → **2 failed, 137 passed** (`/tmp/t3_scoped.log`, pre-guard run); after the
+  guard only the §5 assertion remains. `test_agent_rules.py` and
+  `test_agent_doctor_acceptance.py` contain zero `from_main` references, so the
+  guard cannot affect them — their green stands.
+- No-op sensitivity: the core tests fail on pre-fix code by source inspection
+  (`_existing_result` built `InitResult` without `commit_paths`, i.e. `()`), so
+  `test_unchanged_config_*` cannot pass vacuously. (Pre-fix runner observation
+  was not cleanly captured: the first queued run raced mid-run edits; honest
+  state — failure proved by code path, not by a clean pre-fix run.)
+- No wall-clock assertions; every `invoke` is in-process `cli.main`.
 
-## Verification (observed)
+## 3. Acceptance criteria (§T3.1), each ticked
 
-- TDD red first: 9 failed / 170 passed before implementation (each failure
-  mapped to a missing T1 shape: `ModuleNotFoundError: ptest.worktree`,
-  `ValueError: unknown finding/reason code`, `TypeError: commit_paths`).
-- Logic proof: `/tmp/t3_probe.py` (throwaway, not committed) drove the REAL
-  repo code with a spec-faithful T1 simulation → 19/19 PASS (finding
-  list/fields, readiness equality, bound order + limitation, scoped-none,
-  resolution codes, monorepo root+child, footer tail/block/absent/wrap/sanitize).
-- Final scoped run, same command from the T3 worktree root:
-  `ptest --workers 2 --queue-timeout 1800 tests/ng/test_doctor.py tests/ng/test_init_render.py`
-  → **179 passed in 35.42s** (`ptest: passed · 179 tests · 6m50s`, exit 0).
-- Coverage gate: none (per context pack). No migration generated. No test uses
-  timeouts above default; no live/external-API tests. Committed inside the
-  worktree only; never pushed; default branch untouched; no deploy.
+- Untracked `.ptest.toml` + `api/.ptest.toml` + `web/.ptest.toml` (v2) +
+  `.claude/skills/ptest/SKILL.md` → text `ptest init` prints `Commit these files:`
+  with all four; `--json` `data.commit_paths` equals the same ordered list
+  (`test_unchanged_config_*`, 3 tests).
+- After `git add -A` + commit: no reminder, `commit_paths == []`
+  (`test_committed_everything_clears_reminder`).
+- Fresh standalone create with pre-existing untracked `docs/ptest-agent.md` →
+  `(".ptest.toml", "docs/ptest-agent.md")`, written first, deduped
+  (`test_fresh_standalone_create_orders_written_first_deduped`).
+- `--agents claude` with a pre-existing legacy skill file: skill appears exactly
+  once, guide created this run appended, no duplicates
+  (`test_agent_rule_files_created_this_run_appended_once`).
+- Untracked `notes.toml`/`TODO.md` never listed
+  (`test_untracked_non_ptest_files_never_listed`).
+- Non-git dir → `[]` (`test_non_git_directory_gives_empty`).
+- `--dry-run` → no reminder and `[]`; PREVIEW `commit_paths == ()`
+  (`test_dry_run_gives_no_reminder`).
+- Nested config root → `("sub/.ptest.toml",)` boundary-relative
+  (`test_nested_config_root_lists_boundary_relative_path`).
+- `uncommitted_config_files` monkeypatched to `()` → falls back to written
+  (`test_scan_failure_falls_back_to_written_list`).
+- Control-character path rendered sanitized (`test_control_characters_render_sanitized`).
+- From-main first + second run keep `()` (`test_from_main_second_run_keeps_empty_commit_paths`).
 
-## Honest closing (dan-jefferies passes)
+## 4. Smell sweep (core, with locations)
 
-- Pass 1 (re-read diff): found and fixed one thing before committing — the
-  `inspect()` branch initially took the explicit `_evict_to_fit` path whenever
-  a config-uncommitted problem was present even with override None;
-  restructured to `if admitted_config or override is not None` so the legacy
-  path is taken whenever there is nothing new to express. Seeded a probe
-  scenario bug of my own (modified-but-tracked file is NOT uncommitted) and
-  fixed the scenario, not the code.
-- Pass 2 (acceptance): every T3 checkbox in design §T3 plus the task-level
-  criteria is implemented and now green, including the `--from-main` footer
-  behavior (stopgap warning travels via existing `result.warnings` header
-  rendering — no footer work needed).
-- Pass 3 (smell sweep): no duplicated concepts; no signatures changed
-  (`render_init_footer`, `inspect`, `inspect_workspace` intact, so T2's CLI
-  wiring is unaffected); broad `except`s fenced to best-effort helpers and
-  backstopped by tests asserting non-empty output; finding construction mirrors
-  the existing `scan.source` site. The test double duplicates T1's candidate
-  logic by necessity — it is conditional, documented, and marked for removal.
-- implemented: all T3 source + tests. verified: 179/179 scoped green plus
-  19/19 probe checks on real code paths. deferred: none.
-  discovered-but-not-fixed: none in owned files.
-- Confidence: high — green on the real suite; post-T1 the seam blocks dissolve
-  and the same assertions pin the real integration.
+- Bugs: `_merged_commit_paths` prefix uses `relative_to` in try/except ValueError
+  (`config.py:1413`); boundary-None returns `()` before any scan (:1408); helper
+  never raises (:1425). `replace()` on frozen `InitResult` keeps all other fields.
+- Duplicates: grepped `merged_commit|uncommitted` in `config.py` — no prior merge
+  helper; reuses `worktree.uncommitted_config_files` and `_commit_paths` as specified.
+- Wrong layer: merge lives in `config.py` next to `_commit_paths`; `cli.py`,
+  `worktree.py`, `contracts.py` untouched (verified via diff).
+- Workarounds/stubs/TODOs: none added.
+- Contract drift: public signatures unchanged (`init_project`, `InitResult`,
+  `rank_*` untouched); new names are private (`_merged_commit_paths`,
+  `_existing_with_commit_paths`); only caller of the cli merge is unchanged.
+- Security: only ptest-owned names listed (worktree allowlist); git subprocess
+  stays inside the existing 2 s bounded helper, fails closed to `()`; reminder
+  paths go through `terminal_text`.
 
-## Fix report (integration repair, 2026-09-29)
+## 5. Claimed-vs-shipped delta (integration note — action required at merge)
 
-Rebased T3 onto the integrated T1 tip and removed every pre-integration
-workaround, then fixed the real-helper clock interaction the stub had hidden.
+ONE existing assertion needs the T3.2-permitted update, which T3 is mechanically
+forbidden from making (T3 may not touch `tests/ng/test_init.py`):
 
-- Base: `git rebase --onto 32de6ed 890e1ee` (T1 tip
-  `feature/worktree-safe-config-T1 @ 32de6ed`); replayed the single T3 commit
-  cleanly, no conflicts. New head `4ef2e3c` at time of fix (plus this repair).
-- Deleted seams/shims (net -157/+26 over the 4 owned files):
-  - `tests/ng/test_doctor.py`: removed the whole T1 barrier seam block
-    (local `uncommitted_config_files` double, `sys.modules` injection, global
-    `C.FINDING_CODES`/`C.REASON_CODES` mutation) and its now-unused
-    `stat`/`subprocess`/`sys`/`tomllib`/`types` imports.
-  - `tests/ng/test_init_render.py`: `_committed_result` now constructs
-    `C.InitResult(..., commit_paths=...)` directly; `object.__setattr__`
-    fallback deleted.
-  - `src/ptest/doctor.py`: top-level `from . import worktree as worktree_api`;
-    lazy import in `_config_findings` deleted (best-effort `except -> ()`
-    kept for real git failures); `_config_uncommitted_readiness` tolerance
-    `try/except -> None` replaced with an explicit
-    `problem.code != "config-uncommitted"` guard.
-  - `src/ptest/init_render.py`: `getattr(result, "commit_paths", ())`
-    replaced with direct `result.commit_paths`.
-- Clock fix (`tests/ng/test_doctor.py`, deadline leg of
-  `test_doctor_handles_symlink_swap_output_and_deadline_without_state_access`):
-  fake clock is now `lambda: next(ticks, 9.0)` instead of bare `next(ticks)`.
-  Reason: the real T1 helper reads the same patched `time.monotonic` (its own
-  bounded ~2 s git deadline plus the `source._git` deadline check), so the
-  scripted 3-tick sequence was exhausted inside `_run_scan` (`StopIteration`).
-  The stub never touched the patched clock because its `subprocess` timeout
-  clock is bound at import time — that is why the failure stayed hidden.
-  Scripted values still pin scan `began` at 0.0 with "now" at 9.0 (past the
-  1 s budget); the saturated 9.0 default keeps that true however many
-  readings the helper takes, including zero when there are no candidates.
-  Production order unchanged (config findings admitted after `_Scan`
-  construction), so `elapsed_s` semantics are untouched.
-- Verification (observed, from the T3 worktree root on the integrated tree):
-  - `ptest --workers 2 --queue-timeout 1800 tests/ng/test_doctor.py tests/ng/test_init_render.py`
-    → **179 passed** (`ptest: passed · 179 tests · 42.6s`, exit 0) — the
-    previously failing pre-existing deadline test now passes against the real
-    T1 helper, and T3's 7+4 behavior tests now pin the real T1 shapes over
-    real git instead of the double.
-  - `ptest --workers 2 --queue-timeout 1800 tests/ng/test_worktree.py tests/ng/test_config.py tests/ng/test_init.py`
-    → **316 passed** (`ptest: passed · 316 tests · 40.7s`, exit 0).
-- Durable coverage: no new test file — the pre-existing deadline test is now
-  the regression test for the helper/clock interaction (red on the integrated
-  tree before this fix, green after), and T3's existing behavior tests cover
-  the real-helper finding path. No live/external-API tests; no long timeouts.
-- implemented: rebase + seam/shim deletion + clock fix. verified: 179/179 and
-  316/316 scoped gates on the integrated tree. deferred: none.
-  discovered-but-not-fixed: `elapsed_s` still includes the bounded git lookup
-  (≤2 s) because config findings are admitted after `_Scan` construction;
-  reordering would shift `began` past the scripted test ticks, so this stays
-  as a documented trade-off, not a defect.
-- Confidence: high — both required gates are green on the T1+T3 tree, and the
-  previously red pre-existing test is the proof the integration is real.
+- `tests/ng/test_init.py:1185`
+  (`test_init_commit_paths_for_created_preview_existing`):
+  `assert existing.commit_paths == ()` → `assert existing.commit_paths == (".ptest.toml",)`.
+  Reason: the created `.ptest.toml` is genuinely uncommitted in that fixture, so
+  the new rule correctly lists it. Tightens, never loosens.
+
+No other existing assertion changed; `test_init_from_main_second_run_is_existing`
+(`:1127`, `commit_paths == ()`) stays green via the §1 guard. No stubs, no
+TODOs, no deferred behavior. Out-of-scope smell: none found.
+
+Final status: implemented — §1 + 13 new tests; verified — §2 runs above;
+not verified — clean pre-fix runner failure (code-path proof only);
+deferred — §5 assertion update (integrator-owned);
+discovered-but-not-fixed — none. Confidence: high — every criterion has a
+passing test and the only red is the named, permitted, integration-side update.
