@@ -1,388 +1,718 @@
-# Design — changed-by-default (KISS)
+# Design — worktree-safe ptest config (committed config only, no hidden fallback)
 
-Base: `feature/changed-by-default` @ fb1b8f6. Authoritative over `.pipeline/context-pack.md`
-where they differ (differences are listed in "Deviations" at the end).
+Date: 2026-09-29. Base: `feature/worktree-safe-config` @ 73f0707 (0.3.5).
+Spec: `.pipeline/brief.md`. This document is authoritative over
+`.pipeline/context-pack.md` where they differ; the differences are listed in
+"Deviations from the context pack" at the end.
 
-## 1. What changes, in one paragraph
+## 1. Decisions
 
-Bare `ptest` and `ptest --changed` (no scope, no `--shadow`, no `--probe`) stop sending an
-AUTOMATIC request to the history/baseline engine. Instead the CLI asks a new pure module
-`ptest.impact` "what changed vs the branch base, and which tests does that reach?", then
-sends an ordinary SCOPED (selected files, or `vitest --changed <sha>`) or FULL request to the
-unchanged `operations.execute`, with a one-line blast-radius note for the start line and a
-next-step hint on the end line. The AUTOMATIC engine stays as is (still used by `--shadow`, the
-Python API and its tests); only the monorepo baseline-head plumbing that fed bare/`--changed`
-is deleted.
+D1. **No fallback.** When a checkout has no nearest `.ptest.toml`, ptest never
+reads the main checkout's config to *run*. It only checks that the file exists
+there so it can name it in the error. `ptest init --from-main` is the one
+explicit path that reads main config bytes, and it only copies them. It never
+parses them to execute anything.
 
-## 2. Decisions
+D2. **Static linked-worktree detection** lives in the new module
+`src/ptest/worktree.py`. It follows `.git` file → `gitdir:` → `<gitdir>/commondir`
+→ common dir named `.git` → main root = parent of the common dir. It also checks
+the back-link `<gitdir>/gitdir` == `<root>/.git`. All reads are bounded
+`files.read_regular` reads. Every path component goes through the lstat
+no-symlink walk. Detection never raises: any doubt returns `None`, so behavior
+falls back to today's `initialization-required`. This fail-closed default keeps
+bare repos, submodules (no `commondir`), broken or forged `.git` files, symlinked
+layouts and non-git directories unchanged. No git subprocess is used for
+detection.
 
-| # | Decision | Why |
-|---|---|---|
-| D1 | Changed set = `git diff <base> HEAD` + `git diff HEAD` + untracked (non-ignored), via the existing `monorepo.worktree_changed_files(top, sha)`. | Reuse; already validated/no-hook. |
-| D2 | Base: `--base REF` → merge-base(HEAD, REF), label = REF text. Else default ref = target of `refs/remotes/origin/HEAD` (e.g. `origin/dev`), else first existing local `main`, `master`, `dev`. If the current branch short name equals the default ref's branch name → `Base(None, "HEAD")` (uncommitted only). Else `Base(merge-base(HEAD, ref), ref)`. No default ref / unborn HEAD / merge-base failure → `Base(None, "HEAD")`. | Spec (1). Explicit REF also uses merge-base so an advanced `main` never shows its own commits as "changed". |
-| D3 | Import graph: FILE level, static `ast` scan, name-keyed reverse index, BFS from the changed file's module names. Only test files' import chains count (conftest/fixture-mediated dependencies are NOT edges). | Spec (2) literally; KISS. The end-line hint `next: ptest --full before handoff` is the safety net. |
-| D4 | Graph is built lazily: only when at least one relevant changed file is a non-test `.py`. Test-file counting always walks (cheap). | Keep bare `ptest` fast when only tests changed. |
-| D5 | `[selection] enabled = false` → full for pytest ("selection is off …, set [selection] enabled = true"). Vitest ignores `enabled` and always delegates. Other runners → full on any relevant change. | Spec (2). |
-| D6 | The config GENERATOR writes `[selection] enabled = true` for new pytest configs (§4.8.1). An existing config with `enabled = false` stays full-suite with the §4.2 reason. `ptest doctor --fix` flips `enabled` to true without `--cov` only for a generator-shaped table (§4.8.2). `init --changed-setup` only configures the optional coverage engine (`--shadow`) (§4.8.4). Owned by T3, except the `doctor --fix` next-step line, which lives in `cli.py` (T1, §4.8.3). | User requirement: changed is the default, even with no parameters. Measured ripple is 5 assertions, all in T3's files (§5 T3). |
-| D7 | Impact `full` → `C.Mode.FULL` for every runner, `base=None` (pytest FULL rejects a base). No git evidence → full "git changes are unavailable". | Fail closed, one mapping, no legacy branch. |
-| D8 | Nothing runs → no `--result-json` document is written, exit 0. | Nothing executed; KISS. |
-| D9 | Monorepo: every child is planned against the same repo-level changed set. A path outside a child counts for that child only if it sits in an ancestor directory of the child AND its basename is a trigger basename (root `.ptest.toml`, root `uv.lock`, …). | Replaces the deleted `_classify` outside-trigger rule with one simple rule. |
-| D10 | Deleted as dead: in `monorepo.py` → `ChangedChild`, `_COMMIT_RE`, `_child_baseline_head`, `child_baseline_heads`, `_committed_since`, `_run_all`, `select_changed_children`, `_classify`, `_vitest_base`, `child_changed_request` (and the `_matches` import if unused). Kept: `_git_blob`, `_repo_path`, `_nul_paths`, `worktree_changed_files`. `progress.format_changed_selected / format_changed_start / explain_changed_full_reason` and operations' AUTOMATIC start-line branch are KEPT (still reachable through `operations.execute` AUTOMATIC). | Spec: delete dead code, don't layer; but do not rip out the still-used engine. |
-| D11 | `init --changed-setup` behaviour (coverage argv + `[selection]` draft + optional baseline run, gated in `cli._run_changed_setup` / `_report_existing_changed`) is unchanged. Only its strings change (§4.8.4). | It still configures the AUTOMATIC/`--shadow` engine. Graph selection needs none of it. |
+D3. **Same relative path, nearest-first.** The main-checkout lookup repeats
+`_find_config`'s walk: for each directory from cwd up to the worktree root,
+nearest first, it checks `<main_root>/<same relative dir>/.ptest.toml`. The
+first regular file wins. Unreadable, symlinked or oversize main files count as
+absent.
 
-## 3. Task split (re-scoped so all three are parallel-safe)
+D4. **Problem code `config-uncommitted`**, phase `config`, exit status 2. It
+has one exact message (§3.3). The message does not mention `--from-main`,
+because the agent instruction must be simply "stop, tell the user, never run
+ptest init". The `--from-main` stopgap is documented for humans in help/README.
 
-The triage's T1 (impact) and T2 (wiring) cannot run in parallel: the wiring imports `ptest.impact`
-and its tests need the real graph. They are merged into **T1**. **T2** is re-scoped to the CLI
-help text + README; **T3** keeps the agent guide / skill / own config. No task imports anything
-another task writes; there is no shared-file edit.
+D5. **Where the code surfaces.** `resolve_config` returns it instead of
+`initialization-required`, so every existing `raise resolution.problem` site
+(bare run, run with runner args, `plan`, `history`, `doctor --fix`,
+`doctor --probe`, and `doctor` through `inspect_workspace`) now emits it with no
+per-site change. Explicit changes are limited to these:
+- **path reroute:** the "missing" branch raises it instead of
+  "run ptest init there".
+- **init:** refuses before prompting.
+- **register:** refuses through init's dry-run.
+- **doctor:** refuses before the consent prompt. This replaces the old
+  "run `ptest init`" limitation in this situation.
+- **where:** exits 0 and emits a `warnings` entry plus a stderr line.
+- **status:** does not read config, so it is out of scope.
 
-| Task | Owns (exclusive) |
-|---|---|
-| **T1** impact + wiring | NEW `src/ptest/impact.py`, NEW `tests/ng/test_impact.py`, NEW `tests/ng/test_changed_default.py`; edits `src/ptest/cli.py`, `src/ptest/operations.py`, `src/ptest/progress.py`, `src/ptest/contracts.py`, `src/ptest/monorepo.py`, and the legacy tests the routing change breaks: `tests/ng/test_monorepo_changed.py`, `tests/ng/test_changed_explain.py`, `tests/ng/test_natural_loop.py`, `tests/ng/test_run_output.py`, `tests/ng/test_operations.py`, `tests/ng/test_pytest_adapter.py`, `tests/ng/test_pytest_scoped_subprocess.py`, `tests/ng/test_monorepo_snapshot.py`, `tests/ng/test_shadow.py`, `tests/ng/test_files.py`, `tests/ng/test_parallel_output_cli.py`, `tests/ng/test_cli.py` (only if a routing assertion breaks) |
-| **T2** help + README | `src/ptest/help.py`, `README.md`, `tests/ng/test_help.py` |
-| **T3** guide + skill + config default | `src/ptest/resources/repository-agent-guide.md`, `src/ptest/agent_rules.py`, `src/ptest/uninstall.py` (the `_decide_skill` tuple only), `src/ptest/config.py` (the `_fresh_config` `enabled=` literal only), `src/ptest/init_changed.py` (string constants + module docstring only), `src/ptest/doctor_fix.py` (the §4.8.2 flip only), `.ptest.toml`, `tests/ng/test_agent_rules.py`, `tests/ng/test_resources.py`, `tests/ng/test_init_changed.py`, `tests/ng/test_uninstall.py` (one new test only), `tests/ng/test_init.py`, `tests/ng/test_config.py`, `tests/ng/test_doctor_fix.py` |
+D6. **Doctor in that situation fails hard (exit 2)** instead of scanning with a
+limitation. A partial doctor scan would surface `executability`'s
+"run ptest init from the repository root" fix text, which is exactly the advice
+this feature must remove. `executability.py` is not owned by any task.
 
-`tests/ng/test_init_changed.py` belongs to T3 alone. Its help/README assertions
-(`test_getting_started_shows_changed`) pin T2's wording, which T3's worktree never sees, so the
-assertions are split: T3 deletes that one test from `test_init_changed.py`, and T2 re-adds the
-same checks with the new wording (frozen in §4.7) as a new test in `tests/ng/test_help.py`. Each
-task's scoped-green command then runs every assertion that pins the wording that task changes.
-Nobody but T3 touches `src/ptest/config.py`, `init_changed.py`, `doctor_fix.py`, `uninstall.py` or
-their tests.
+D7. **Tracked means "in HEAD's tree".** Check it with one `git ls-tree -r -z
+--name-only HEAD -- <paths>` call through the existing hardened
+`source._git`, with a 2 s `_Scan` deadline. Staged but uncommitted files still
+count as uncommitted, which is correct because a new worktree will not have
+them. An unborn HEAD, git failure, timeout or non-git directory returns `()`
+and prints no warning. The check is best-effort and never raises.
 
-The `ptest doctor --fix` next-step line is printed by `cli._run_doctor_fix` (T1). It is split the
-same way: T1 changes the printed string and pins it in T1's `tests/ng/test_changed_default.py`
-(§4.8.3). T3 deletes the old-string assertion at `tests/ng/test_doctor_fix.py:322` and asserts no
-next-step wording, because T3's worktree still prints the old line. T1 edits only that one `print`
-in `_run_doctor_fix`. T1 does not touch `_report_existing_changed` or `_run_changed_setup`, and T3
-does not change `doctor_fix.selection_enabled_by`, so the merged code prints the new line for both
-the `--cov` flip and the new §4.8.2 flip.
+D8. **`InitResult.commit_paths`** is the single source of truth for the commit
+reminder. `config.init_project` fills it with the config files it *created*,
+relative to the git root, and only inside a git checkout. `cli.py` extends it
+with agent-rule files that `agent_rules.apply` created or updated, again only
+inside a git checkout. The human footer (T3) and `init --json` both read
+`result.commit_paths`. It is empty for preview, existing and `--from-main`
+results: the copy must not be committed on the worktree branch, and the fix is
+a commit on the base branch.
 
-## 4. FROZEN INTERFACES
+D9. **`init --json` gains optional `commit_paths`.** It follows the additive
+`where.domain_root` precedent: the property appears in the schema but is not in
+`required`, the validator accepts it if present, and the projector always emits
+it (default `[]`). The schema file is generated from `contracts.PUBLIC_SCHEMAS`
+by `scripts/export-schemas.py`, so its owner is the contracts owner (T1).
 
-### 4.1 `src/ptest/impact.py` (T1, new)
+D10. **Run warning:** one stderr line per executing run, sent through
+`progress.emit(..., quiet=parsed.quiet)`. It covers only `.ptest.toml` files:
+the root one and, for a v2 manifest, the declared children. Agent-rule files
+are not included. It is emitted only when a config or monorepo resolved, and it
+is wrapped in `try/except Exception`.
+
+D11. **Doctor report:** the file list includes agent-rule files. The
+`config.uncommitted` `C.Finding`s (one per file) appear in the offline grid's
+"Static findings". `cli.py` adds one mention line after doctor's terminal
+output, like `_fix_mention`, so the online review also shows it.
+`doctor --json` is unchanged: the agent-assessment schema carries no static
+findings, and this avoids a schema change. The finding does not change
+readiness.
+
+D12. **`--from-main` copies bytes verbatim**, so the `project_id` is the same.
+It copies the matched config and, if it is a v2 manifest, every declared
+child's config that exists in main. It only uses `create_exclusive`, so it
+never overwrites. Children whose directory is missing in the worktree are
+skipped with a warning. A child config that already exists in the worktree is
+skipped ("already present"). Main is only ever opened read-only.
+
+## 2. Ordering (read this first)
+
+Tasks run in parallel off the same base, but there is exactly one barrier:
+
+- **T1 is a BARRIER for T2 and T3.** T2 and T3 import `ptest.worktree` and
+  use `InitOptions.from_main`, `InitResult.commit_paths`,
+  `REASON_CODES ∋ "config-uncommitted"`, `FINDING_CODES ∋ "config.uncommitted"`,
+  `config.config_uncommitted` and `config.git_root`, all of which T1 creates.
+  The orchestrator integrates T1 onto the chain branch first. T2 and T3 then
+  branch from that tip.
+- **T4 has no dependency and runs in wave 1 alongside T1.**
+- **T2 and T3 are independent of each other.** T2 never calls a new
+  `init_render` parameter; T3 reads `result.commit_paths` directly. Both run in
+  wave 2.
+- If T2 or T3 starts on a base without `src/ptest/worktree.py`, it must stop
+  immediately and report `BLOCKED: T1 barrier not integrated`. It must not stub
+  or re-implement T1's API.
+
+Wave 1: T1, T4. Wave 2 (after T1 is integrated): T2, T3.
+
+## 3. Frozen interfaces
+
+### 3.1 `src/ptest/worktree.py` (new, T1)
 
 ```python
+"""Static linked-worktree detection and committed-state checks for ptest files."""
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from . import contracts as C
 
-MAX_SCAN_FILES = 20000          # more .py files under the project -> full "import graph too large"
-MAX_FILE_BYTES = 2 * 1024 * 1024  # larger files are skipped (a changed one -> "could not be parsed")
-MAX_SELECTED = 200              # RunRequest.argv caps at 256 tokens
+CONFIG_NAME = ".ptest.toml"
+# Agent-rule files ptest init may write; the three instruction files count
+# only when they contain the managed marker below.
+AGENT_RULE_FILES: tuple[str, ...] = (
+    "docs/ptest-agent.md",
+    "AGENTS.md", "CLAUDE.md", "GEMINI.md",
+    ".agents/skills/ptest/SKILL.md", ".claude/skills/ptest/SKILL.md",
+    ".gemini/skills/ptest/SKILL.md", ".opencode/skills/ptest/SKILL.md",
+)
+MANAGED_MARKER = "<!-- ptest-agent-rules:start -->"
 
 @dataclass(frozen=True, slots=True)
-class Base:
-    sha: str | None   # None = compare against HEAD (uncommitted work only)
-    label: str        # "origin/dev", "main", "HEAD", or the --base REF text as typed
+class LinkedWorktree:
+    root: Path       # linked worktree top: the directory holding the `.git` file
+    main_root: Path  # main worktree top: parent of the common `.git` directory
 
 @dataclass(frozen=True, slots=True)
-class Impact:
-    kind: str                     # "none" | "selected" | "full" | "vitest"
-    changed: tuple[str, ...] = () # project-relative; relevant paths first (sorted), then ignored ones (sorted)
-    files: tuple[str, ...] = ()   # selected test files, project-relative, sorted (kind "selected" only)
-    direct: int = 0               # changed test files among files
-    via: int = 0                  # files reached through importers; direct + via == len(files)
-    total: int = 0                # test files in the project (kind "selected" only; else 0 allowed)
-    reason: str = ""              # kind "full" only; exact words from 4.2
+class MainConfig:
+    worktree: LinkedWorktree
+    relative: str               # "." or posix "a/b": config directory relative to BOTH roots
+    path: Path                  # main_root / relative / ".ptest.toml" (absolute, regular file)
+    children: tuple[str, ...]   # v2 manifest declarations whose config exists in main; () if standalone
 
-def git_top(start: Path) -> Path | None
-    # `rev-parse --show-toplevel` via monorepo._git_blob; None when not a work tree / git unusable.
+def linked_worktree(root: Path) -> LinkedWorktree | None: ...
+def main_config(cwd: Path, root: Path) -> MainConfig | None: ...
+def uncommitted_config_files(root: Path, *, include_agent_rules: bool = False) -> tuple[str, ...]: ...
 
-def resolve_base(top: Path | None, explicit: str | None) -> Base
-    # D2. explicit with top None -> C.Problem(code="invalid-config",
-    #   message="--base needs a git repository", phase="config", retryable=False).
-    # explicit empty / starting "-" / containing NUL / not `rev-parse --verify --quiet REF^{commit}`
-    #   / no merge-base -> C.Problem(code="invalid-config",
-    #   message="--base is not a commit in this repository", phase="config", retryable=False).
-
-def changed_files(top: Path | None, base: Base) -> tuple[str, ...] | None
-    # None when top is None; else monorepo.worktree_changed_files(top, base.sha).
-
-def plan(top: Path | None, project_root: Path, config: C.Config,
-         repo_changed: tuple[str, ...] | None) -> Impact
+__all__ = ["CONFIG_NAME", "AGENT_RULE_FILES", "MANAGED_MARKER", "LinkedWorktree",
+           "MainConfig", "linked_worktree", "main_config", "uncommitted_config_files"]
 ```
 
-`plan` algorithm (order matters; first full wins, iterating paths sorted):
+Behavior (normative):
 
-1. `top is None` or `repo_changed is None` or `project_root` not inside `top` → `Impact("full", reason="git changes are unavailable")`.
-   `prefix` = project_root relative to top as posix (`""` for the root).
-2. `changed` = paths under prefix, made project-relative. Outside paths are only checked for the
-   ancestor-trigger rule (D9): dirname is `""` or an ancestor of prefix, and basename is a trigger
-   basename → full `"<repo-relative path> is a full trigger"`.
-3. Nothing under prefix and no ancestor trigger → `Impact("none")`.
-4. Trigger (any runner): basename in `{uv.lock, poetry.lock, Pipfile.lock, pyproject.toml, setup.py,
-   setup.cfg, pytest.ini, tox.ini, conftest.py, package.json, package-lock.json, pnpm-lock.yaml,
-   yarn.lock, .ptest.toml}`, or basename matching `requirements*.txt`, or basename starting with
-   `vitest.config.` / `vite.config.` / `jest.config.`, or `selection._matches(path,
-   config.selection.full_triggers)` → full `"<path> is a full trigger"`.
-5. Ignored (not relevant): any path component starting with `.`; suffix `.md` `.rst` `.txt`;
-   basename in `{LICENSE, CODEOWNERS}`; `selection._matches` against `selection.no_tests`,
-   `selection.ignored_inputs`, `selection.non_input_outputs`. No relevant path left →
-   `Impact("none", changed=...)`.
-6. Runner vitest → `Impact("vitest", changed=...)`.
-7. Runner not pytest → full `"<runner kind value> has no import graph"` (e.g. `command has no import graph`).
-8. `config.selection.enabled is False` → full `"selection is off in .ptest.toml — set [selection] enabled = true"`.
-9. Classify each relevant path:
-   - not `.py` → full `"<path> is outside the import graph"`;
-   - **test file** = basename `test_*.py` or `*_test.py` AND under a test root
-     (`path == root or path.startswith(root + "/")`; root `"."` matches everything): existing → direct; deleted → skip;
-   - **test support** = other `.py` under a test root (root `"."` counts only for paths with a
-     `tests` or `test` directory component) → full `"<path> is test support"`;
-   - existing file unreadable / > MAX_FILE_BYTES / `SyntaxError` / `ValueError` from `ast.parse` → full `"<path> could not be parsed"`;
-   - otherwise **source** (existing or deleted) → seed for the graph.
-10. Graph (only when there are seeds, D4): walk `project_root` (no symlink follow; skip dir names
-    starting `.`, `node_modules`, `__pycache__`, `site-packages`); > MAX_SCAN_FILES `.py` → full
-    `"import graph too large"`. Unchanged files that fail to read/parse are skipped silently.
-    - Module names of a file `a/b/c.py` (or `a/b/__init__.py` → `a/b`): dotted path from
-      project root; the same without a leading `src.`; and the dotted path from its package root
-      (first ancestor directory without `__init__.py`).
-    - Edges from every `ast.Import` / `ast.ImportFrom` anywhere in the file (`ast.walk`, so
-      function-level imports count): `import a.b.c` → names `a`, `a.b`, `a.b.c`;
-      `from a.b import c` → `a`, `a.b`, `a.b.c`; relative `from ..x import y` resolved against the
-      file's package-root name (an `__init__.py` is its own package).
-    - Reverse index: name → importing files. BFS from the seeds' names; each reached file adds
-      its own names to the queue; reached test files (definition above) are selected `via`
-      unless already `direct`.
-11. `files` = sorted(direct ∪ via). Empty → `Impact("none", changed=...)`.
-    `len(files) >= full_ratio * total` → full `"<n> of <total> test files reaches full_ratio <ratio:g>"`.
-    `len(files) > MAX_SELECTED` → full `"<n> test files exceed the 200-file scoped limit"`.
-    Else `Impact("selected", changed, files, direct, via, total)`.
+- `linked_worktree(root)`: `root` is the static git boundary (the directory
+  that contains `.git`). Steps:
+  1. `os.lstat(root/".git")` must be a regular file, not a symlink.
+  2. Read it with `read_regular(root, ".git", 4097)`. More than 4096 bytes
+     returns `None`.
+  3. Decode as strict UTF-8. The content must be exactly one line
+     `gitdir: <value>` (trailing `\n`/`\r\n` allowed), with no NUL or C0
+     controls in `<value>`.
+  4. `gitdir = normpath(value if absolute else root/value)`.
+  5. Read `commondir` with `read_regular(gitdir, "commondir", 4097)`. If it is
+     missing, return `None` (the submodule case).
+  6. `common = normpath(gitdir/text)` if relative, else `text`.
+  7. Back-link: `read_regular(gitdir, "gitdir", 4097)`, stripped and
+     normalized (relative values resolve against `gitdir`), must equal
+     `root/".git"`.
+  8. `common.name == ".git"`, and `common` is a real directory. Otherwise
+     (bare repo) return `None`.
+  9. `main_root = common.parent`, with `main_root != root`.
+  10. `gitdir`, `common` and `main_root` must all pass a no-symlink lstat walk
+      from `/`. Reuse the logic of `files._check_no_symlink_prefixes` and catch
+      its `Problem`.
+  11. Any exception (`C.Problem`, `OSError`, `UnicodeError`, `ValueError`)
+      returns `None`.
+- `main_config(cwd, root)`:
+  1. Return `None` unless `cwd == root` or `root in cwd.parents`, and
+     `linked_worktree(root)` is not `None`.
+  2. Walk `cursor` from `cwd` up to and including `root`. Set
+     `rel = cursor.relative_to(root).as_posix()`, and name =
+     `".ptest.toml"` if `rel == "."` else `f"{rel}/.ptest.toml"`.
+  3. Use the first `main_root/name` that `read_regular(main_root, name,
+     256*1024+1)` reads successfully with ≤ 256 KiB.
+  4. `children`: if `tomllib` parses the file as `version == 2`, run
+     `monorepo.parse_monorepo_manifest(raw, path)` (a lazy import). Keep each
+     declared child whose `main_root/rel/child/.ptest.toml` is readable the
+     same way. A parse `Problem` means `()`.
+  5. Never raises; returns `None` on any error.
+  6. Read-only.
+- `uncommitted_config_files(root, *, include_agent_rules=False)`:
+  1. Candidates are `".ptest.toml"` if it is a regular file (lstat, no
+     symlink) under `root`.
+  2. If it parses as a v2 manifest, add `f"{child}/.ptest.toml"` for each
+     declared child whose file is a regular file.
+  3. When `include_agent_rules`, add each entry of `AGENT_RULE_FILES` that
+     exists as a regular file (`read_regular`, 256 KiB bound). `AGENTS.md`,
+     `CLAUDE.md` and `GEMINI.md` count only if their bytes contain
+     `MANAGED_MARKER`.
+  4. If there are no candidates, return `()` without running git.
+  5. Otherwise make exactly one call:
+     `source._git(root, source._Scan(deadline=time.monotonic() + 2.0), "ls-tree",
+     "-r", "-z", "--name-only", "HEAD", "--", *candidates)` (a lazy import).
+     Output names are NUL-separated and relative to `root`.
+  6. Return the candidates not in the output, in candidate order.
+  7. Any exception, including `source._Unavailable`, returns `()`. Never
+     raises and never writes.
 
-`total` = count of existing test files under the test roots (walk, same skips).
+### 3.2 `src/ptest/contracts.py` (T1)
 
-### 4.2 Impact reason strings (exact; T2/T3 quote them in docs)
-
-`git changes are unavailable` · `<path> is a full trigger` · `<runner> has no import graph` ·
-`selection is off in .ptest.toml — set [selection] enabled = true` · `<path> is outside the import graph` ·
-`<path> is test support` · `<path> could not be parsed` · `import graph too large` ·
-`<n> of <total> test files reaches full_ratio <ratio>` · `<n> test files exceed the 200-file scoped limit`
-
-### 4.3 `contracts.RunRequest` (T1) — two new trailing fields
+Exact edits:
 
 ```python
-    changed_note: str | None = None   # start-line text after "ptest: <project> · "
-    next_hint: bool = False           # append the next-step hint to this run's end line
-```
-Validation in `__post_init__`: `changed_note` → `_check_str("request.changed_note", ...)` when not
-None; `next_hint` → `_check_bool("request.next_hint", ...)`.
+# REASON_CODES: add one member (keep the frozenset otherwise unchanged)
+    "config-uncommitted",
+# FINDING_CODES: add one member
+    "config.uncommitted",
 
-### 4.4 `progress.py` (T1) — additions
+@dataclass(frozen=True, kw_only=True)
+class InitOptions:
+    runner: RunnerKind | None
+    dry_run: bool
+    reveal_command: bool
+    children: tuple = ()
+    agents: tuple[str, ...] = ()
+    from_main: bool = False          # NEW; validated with _check_bool("init.from_main", ...)
+
+@dataclass(frozen=True, kw_only=True)
+class InitResult:
+    action: InitAction
+    target: Path
+    exists: bool
+    config: ConfigSummary | None
+    warnings: tuple = ()
+    details: tuple = ()
+    commit_paths: tuple = ()         # NEW; _as_str_tuple("init.commit_paths", ...);
+                                     # each entry repo-relative posix, no leading "/", no ".." part (ValueError)
+
+def serialize_init_result(result: InitResult) -> dict:
+    return {
+        "action": result.action.value,
+        "target": str(result.target),
+        "exists": result.exists,
+        "warnings": [_reason_dict(item) for item in result.warnings],
+        "config": _config_summary_dict(result.config),
+        "commit_paths": list(result.commit_paths),
+    }
+
+# _validate_init_payload: append
+    if "commit_paths" in data:
+        _check_str_list(_need_list(data, "commit_paths"), "init.commit_paths")
+
+# _project_init_payload: add key
+        "commit_paths": list(data.get("commit_paths", [])),
+
+# PUBLIC_SCHEMAS["init"] data properties: add (NOT in "required")
+            "commit_paths": {"type": "array", "items": {"type": "string"}},
+```
+
+Regenerate the schemas with `uv run python scripts/export-schemas.py`. Only
+`docs/schemas/v1/init.json` may change. Its exact expected bytes are in the
+sharedFileContent field, also listed in §6. Afterwards,
+`uv run python scripts/export-schemas.py --check` must print nothing and exit 0.
+
+### 3.3 `src/ptest/config.py` (T1)
 
 ```python
-NEXT_FULL = "next: ptest --full before handoff"
-NEXT_FIX = "fix the code under test, then rerun ptest"
+CONFIG_UNCOMMITTED = "config-uncommitted"
 
-def next_step(status: C.Status, narrowed: bool) -> str | None
-    # FAILED -> NEXT_FIX; PASSED/NO_TESTS_NEEDED and narrowed -> NEXT_FULL; else None
-def format_impact(project: str, note: str, *, color: bool = False) -> str
-    # f"{_prefix(color)} {_project(project, color)} · {note}"
-def format_nothing_changed(label: str, *, color: bool = False) -> str
-    # f"{_prefix(color)} no changes vs {label} — nothing to test · ptest --full runs everything"
-def format_end(status, *, counts, duration_s, exit_code, hint=False, lead=None,
-               color=False, next_step: str | None = None) -> str
-    # after "(exit N)": if next_step: " · {next_step}" (the -v HINT is then omitted); elif hint: " · {HINT}"
+def config_uncommitted(cwd: Path | str) -> C.Problem | None:
+    """config-uncommitted Problem when cwd sits in a linked worktree with no
+    nearest .ptest.toml and the main checkout has one at the same relative
+    path (nearest-first); else None. Never raises, never loads main config."""
+
+def git_root(cwd: Path | str) -> Path | None:
+    """Static git boundary containing cwd (no subprocess), or None for
+    non-git / unsafe / unavailable. Never raises."""
 ```
-Notes are built in `cli.py` (private `_impact_note(impact, label) -> str`), escaped with
-`render.terminal_text` per path/label.
 
-### 4.5 Output lines (exact)
+`config_uncommitted` works as follows. First,
+`physical = _absolute_directory(cwd)`. It then returns `None` if either of these
+holds:
+- `_find_config(physical)` found a config, or reported a problem other than
+  `initialization-required`;
+- `_git_boundary(physical)` is `None`.
 
-| Case | Line (stderr) |
+Otherwise it returns `found = worktree.main_config(physical, boundary)`, and if
+that is not `None`:
+
+```python
+C.Problem(code="config-uncommitted", phase="config", retryable=False, message=(
+    f"this is a linked git worktree without {name}; the main checkout has {found.path}. "
+    f"Worktrees only receive committed files. Ask the user to commit {name} on the base "
+    f"branch. Do not run ptest init here."))
+```
+
+Here `name = ".ptest.toml" if found.relative == "." else f"{found.relative}/.ptest.toml"`.
+Rendered through `_emit_error`, the human line is
+`config-uncommitted: this is a linked git worktree without .ptest.toml; the main checkout has /abs/main/.ptest.toml. Worktrees only receive committed files. Ask the user to commit .ptest.toml on the base branch. Do not run ptest init here.`
+
+`resolve_config`: wherever it currently returns the `initialization-required`
+problem, it first tries `config_uncommitted(physical_cwd)` and returns that
+problem instead when it is not `None`. The resolution keeps `root=physical_cwd`,
+`path=None`, `config=None` and `monorepo=None`. No other resolution changes.
+
+`init_project(cwd, options)`:
+1. `resolution = resolve_config(...)`. An existing local config still returns
+   `_existing_result` unchanged, and `from_main` is ignored, so re-running
+   after a copy is idempotent.
+2. If `resolution.problem.code == "config-uncommitted"` and not
+   `options.from_main`, raise that problem. This also applies to `dry_run`,
+   which is how `register` refuses.
+3. If `options.from_main` and the problem is anything else, raise
+   `Problem("invalid-config", "--from-main only works in a linked git worktree whose main checkout has .ptest.toml at this path; nothing was copied")`.
+4. If `options.from_main` and `config-uncommitted`, copy from main:
+   1. `found = worktree.main_config(...)`.
+   2. Set `dest = found.worktree.root` when `relative == "."`, else
+      `_safe_init_child(found.worktree.root, found.relative)`. If the directory
+      is missing in the worktree, raise `state-unavailable`.
+   3. Read the root bytes with `read_regular(found.worktree.main_root, name, 256 KiB+1)`.
+   4. For each child in `found.children`:
+      - If `_safe_init_child(dest, child)` fails, skip it and add the warning
+        `C.Reason("config-uncommitted", f"did not copy {child}/.ptest.toml: that directory is missing in this worktree", ())`.
+      - If the child config already exists, the detail is "already present".
+      - Otherwise read the main bytes and queue a create.
+   5. `dry_run` returns `PREVIEW` (`exists=False`, `config=None`) with
+      "would create" details.
+   6. Otherwise run `create_exclusive(..., private=False)`, children first and
+      then the root. If the root returns `already-exists`, return
+      `_existing_result`.
+   7. Return `CREATED`, `target=dest/.ptest.toml`, `exists=True`, and
+      `config=_summary(resolve_config(dest).config)` if it is not `None`, else
+      `None`.
+   8. Details are `_config_detail(".ptest.toml", "created")` plus the child
+      details.
+   9. `warnings = (stopgap, *skip_warnings)` with
+      `stopgap = C.Reason(code="config-uncommitted", paths=(), message=f"copied {name} from the main checkout {found.path}; this copy is a temporary stopgap that may go stale. The fix is to ask the user to commit {name} on the base branch.")`.
+   10. `commit_paths=()`.
+5. The normal create paths (standalone and monorepo) set
+   `commit_paths = tuple(<created config paths relative to boundary, posix>)`
+   when `_git_boundary(physical_cwd)` is not `None`, else `()`. The standalone
+   path gives `(".ptest.toml",)` relative to the boundary. Monorepo gives the
+   children created, then the root. PREVIEW and EXISTING give `()`.
+
+### 3.4 `src/ptest/cli.py` (T2) — texts frozen
+
+- `ParsedArgs.from_main: bool = False`. The `init` parser accepts `--from-main`
+  (a bool flag; repeats are harmless like `--dry-run`). Combining it with
+  `--runner` or `--child` raises
+  `_problem("invalid-config", "--from-main copies the main checkout's config; it cannot be combined with --runner or --child")`.
+- In the `init` branch, before `_init_agents(...)`: if not `parsed.from_main`
+  and `(p := config_api.config_uncommitted(cwd)) is not None`, raise `p`. The
+  result is exit 2, `code: message` on stderr, or the JSON error document with
+  `--json`. Nothing is written and no prompt appears. Pass
+  `from_main=parsed.from_main` into `C.InitOptions`.
+- After `agent_rules.apply`, when `config_api.git_root(cwd) is not None` and
+  `applied is not None`:
+  `result = dataclasses.replace(result, commit_paths=result.commit_paths + tuple(d.target for d in applied.details if d.source == "guidance" and d.action in ("created", "updated") and d.target not in result.commit_paths))`.
+  The payload and renderers then use this `result`. With `--from-main`, rule
+  paths are appended the same way, but config paths stay out (D8).
+- Reroute: the `main()` condition becomes
+  `resolution.problem.code in {"initialization-required", "config-uncommitted"}`.
+  On `("missing", typed)`, compute the scope directory the way
+  `_nearest_config_dir` does (`start if start.is_dir() else start.parent`). If
+  `config_api.config_uncommitted(that_dir)` is not `None`, raise it (exit 2).
+  Otherwise print the old "no ptest project for X — run ptest init there" line.
+  If the reroute returns `None` (a non-path scope), the problem is raised as
+  before.
+- In the later `resolution.config is None` block, the
+  `unsupported-capability` conversion stays only for `initialization-required`.
+  A `config-uncommitted` problem is raised as is.
+- Run warning `_warn_uncommitted_config(resolution, *, quiet: bool) -> None` is
+  called right after `_warn_stale_guidance(resolution.root)`:
+  - It is a no-op unless `resolution.config is not None or resolution.monorepo is not None`.
+  - It gets `paths = worktree.uncommitted_config_files(resolution.root)`.
+  - Line for one path: `f"ptest: {p} is not committed — new worktrees won't have it"`.
+    For more than one:
+    `f"ptest: {', '.join(paths[:3])}{f' (+{len(paths)-3} more)' if len(paths) > 3 else ''} are not committed — new worktrees won't have them"`.
+  - It emits through `progress.emit(render.terminal_text(line), quiet=quiet)`
+    and wraps everything in `try/except Exception: return`.
+- `where`: when `resolution.problem` has code `config-uncommitted`, the
+  unconfigured payload's `"warnings"` becomes
+  `[{"code": "config-uncommitted", "message": problem.message, "paths": []}]`.
+  Human `where` prints `render.terminal_text(problem)` to stderr as one line,
+  after the stdout lines. Exit 0.
+- `doctor` branch: first statement is `if resolution.problem is not None and
+  resolution.problem.code == "config-uncommitted": raise resolution.problem`.
+  This comes before `--fix`, `--probe`, offline, or any consent prompt.
+- Doctor mention `_uncommitted_mention(resolution) -> str | None`:
+  - `paths = worktree.uncommitted_config_files(resolution.root, include_agent_rules=True)`.
+  - It returns `None` on empty or any exception.
+  - Otherwise it returns
+    `f"not committed: {', '.join(paths[:5])}{f' (+{len(paths)-5} more)' if len(paths) > 5 else ''} — new worktrees and clones won't have them; commit them on the base branch"`.
+  - It is written to stdout (plus `"\n"`) after the offline grid, next to
+    `_fix_mention`, and after `_run_review_entry` returns in the online path
+    (declined or not).
+  - It is never printed for `--json`, `--fix` or `--probe`.
+
+### 3.5 `src/ptest/init_render.py` (T3) — text frozen
+
+`render_init_footer` appends the commit reminder as the very last block, after
+the restart line. It is shown only when not `dry_run`, `result.action is not
+PREVIEW` and `result.commit_paths` is non-empty. It is separated from earlier
+lines by one blank line:
+
+```
+Commit these files: .ptest.toml, docs/ptest-agent.md, AGENTS.md
+Worktrees and clones only get committed config.
+```
+
+The first line is wrapped with `wrap_words(..., width, indent="", hang="  ")`.
+Paths go through `terminal_text`. There is no new function parameter, and
+`render_init` (the header) is unchanged.
+
+### 3.6 `src/ptest/doctor.py` (T3)
+
+`_config_findings(root: Path) -> tuple[C.Finding, ...]` returns one finding per
+path from `worktree.uncommitted_config_files(root, include_agent_rules=True)`:
+
+```python
+C.Finding(code="config.uncommitted", severity="medium", confidence="high",
+          path=rel, line=None, evidence_type="git-tree",
+          consequence="New git worktrees and clones will not contain this ptest file.",
+          remediation="Ask the user to commit it on the base branch; do not run ptest init in a worktree.",
+          verification="git ls-tree HEAD lists the file and ptest doctor no longer reports config.uncommitted.")
+```
+
+- They are admitted only when the requested doctor scope is `None` (whole
+  repository). They go through the existing ledger admission (`_admit_finding`,
+  or the `_Scan` equivalent in `inspect`), so finding and output bounds still
+  hold, and they are admitted **before** the source findings.
+- For a standalone project, root = `config.root`. For a monorepo, root =
+  `resolution.root`, and children are included by the worktree helper.
+- **Readiness must be identical** with and without these findings. Compute
+  readiness from the non-config findings.
+
+## 4. Per-task scope and acceptance
+
+Common rules:
+- Tests go through ptest only, scoped:
+  `ptest --workers 2 --queue-timeout 1800 <your test files>`.
+- No test may use a timeout above the default.
+- Git fixtures use `support.git` and `support.init_git_repo`, which are
+  hermetic.
+- Commit inside your own worktree only.
+- Run `graphify update .` after source changes.
+- Do not edit files you do not own. If an unowned test breaks, report it in
+  your final message; the orchestrator fixes it at integration.
+
+Frozen test helper. Copy it verbatim into each test module that needs it:
+
+```python
+from support import git, init_git_repo, write_ptest_toml
+
+def _linked_worktree(tmp_path, *, commit_config=False, **toml):
+    """main checkout (committed README) + linked worktree at tmp_path/wt."""
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main, **toml)
+    if commit_config:
+        git(main, "add", ".ptest.toml")
+        git(main, "commit", "-q", "-m", "config")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    return main, wt
+```
+
+### T1 — core (BARRIER for T2 and T3)
+
+Owns:
+- `src/ptest/worktree.py` (new)
+- `src/ptest/config.py`
+- `src/ptest/contracts.py`
+- `docs/schemas/v1/init.json` (regenerated)
+- `tests/ng/test_worktree.py` (new)
+- `tests/ng/test_config.py`
+- `tests/ng/test_init.py`
+- `tests/ng/test_contracts.py`
+
+Acceptance:
+1. `linked_worktree` works on a real `git worktree add` and returns
+   `(wt, main)`. It returns `None` for:
+   - the main checkout
+   - a non-git directory
+   - a bare-repo worktree (`git init --bare m.git` + `worktree add`)
+   - a submodule-style `.git` file (no `commondir`)
+   - a `.git` symlink
+   - a `.git` file over 4096 bytes
+   - garbage or multi-line content
+   - a back-link mismatch
+   - a gitdir path that crosses a symlink
+
+   None of these cases raises.
+2. `main_config` does a nearest-first walk and finds the same relative path
+   (`wt/api/x` finds `main/api/.ptest.toml` before `main/.ptest.toml`). It
+   lists v2 children, ignores a symlinked main config, and returns `None` when
+   `cwd` is outside `root`.
+3. `uncommitted_config_files` behaves as follows:
+   - it returns `(".ptest.toml",)` for an untracked or staged-only config;
+   - it returns `()` once the config is committed, in a non-git directory, and
+     in an unborn-HEAD repo;
+   - monorepo children are listed;
+   - agent-rule files appear only with `include_agent_rules=True`, and an
+     `AGENTS.md` without the marker is not listed;
+   - with git absent from PATH (monkeypatch PATH) it returns `()`.
+4. `resolve_config(wt)` returns `config=None`, `monorepo=None` and problem
+   code `config-uncommitted`, with the exact §3.3 message naming the main
+   path. It never reads main content. Prove this by making the main config
+   invalid TOML: the code is still `config-uncommitted`, not `invalid-config`.
+5. `resolve_config` is unchanged for:
+   - a normal checkout
+   - a worktree with a committed config
+   - a bare-repo worktree
+   - a non-git directory
+   - a worktree where main also has no config (`initialization-required`)
+6. `init_project` in `wt`:
+   - It raises `config-uncommitted`, also with `dry_run=True`.
+   - With `from_main=True` it copies byte-identical files (same
+     `project_id`), including v2 children, and skips missing child
+     directories with a warning. The result is `CREATED`, with the stopgap
+     warning and `commit_paths == ()`.
+   - `dry_run` + `from_main` gives `PREVIEW` and writes nothing.
+   - A second `from_main` run gives `EXISTING`.
+   - `from_main` outside a worktree raises `invalid-config` with the frozen
+     message.
+   - The main checkout tree (paths, bytes, mtimes) is identical before and
+     after every one of these cases.
+7. A normal init inside a git repo gives `commit_paths == (".ptest.toml",)`.
+   Monorepo init lists the children, then the root. Init in a non-git
+   `tmp_path` gives `()`. PREVIEW and EXISTING give `()`.
+8. Contracts:
+   - `InitOptions(from_main="x")` raises `TypeError`.
+   - `InitResult` rejects absolute or `..` entries in `commit_paths`.
+   - `serialize_init_result` includes `commit_paths`.
+   - An encode/decode roundtrip keeps it, and a decoded old document without
+     it projects `[]`.
+   - `config-uncommitted` is in `REASON_CODES` and `config.uncommitted` is in
+     `FINDING_CODES`.
+   - The existing key-set assertions (`test_contracts.py` ~1234, ~1475) are
+     updated.
+   - A new test asserts that `docs/schemas/v1/init.json` equals
+     `json.dumps(C.PUBLIC_SCHEMAS["init"], indent=2, sort_keys=True) + "\n"`.
+9. `git_root` and `config_uncommitted` never raise, including on missing,
+   symlinked or relative inputs.
+10. Scoped run: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_worktree.py tests/ng/test_config.py tests/ng/test_init.py tests/ng/test_contracts.py`
+    is green. Coverage for `worktree.py` is at least 90%, and `config.py` does
+    not regress.
+
+### T2 — CLI (wave 2, after T1)
+
+Owns:
+- `src/ptest/cli.py`
+- `tests/ng/test_cli.py`
+- `tests/ng/test_init_smoke.py` (only the init JSON key-set assertion at ~323)
+
+Acceptance:
+1. `main(())` and `main(("tests",))` in `wt` exit 2 with stderr containing
+   `config-uncommitted:` and "Do not run ptest init here". The runner never
+   executes: monkeypatch `operations.execute` to fail. The text "run ptest
+   init" does not appear.
+2. Path reroute: in `wt`, `main(("api/tests",))`, where main has only
+   `api/.ptest.toml` untracked, raises `config-uncommitted` naming
+   `main/api/.ptest.toml`. In a non-worktree directory with no config, the old
+   "no ptest project for … — run ptest init there" line is unchanged.
+3. `main(("init",))` in `wt` exits 2, does not prompt (monkeypatch `input` to
+   fail) and writes nothing. `("init", "--json")` returns an error document
+   with code `config-uncommitted`. `("init", "--from-main", "--agents",
+   "none")` copies the file, exits 0, prints the stopgap warning and no commit
+   reminder. The `--json` form gives `commit_paths == []` and a warning with
+   code `config-uncommitted`. `--from-main --runner pytest` exits 2 with
+   `invalid-config`.
+4. `register --json`, `plan --json` and `history --json` in `wt` return error
+   documents with code `config-uncommitted`. `where --json` exits 0 with the
+   warnings entry, and human `where` shows the stderr line. `doctor --offline`,
+   `doctor --fix` and `doctor --json` in `wt` exit 2 with `config-uncommitted`
+   and no consent prompt.
+5. Run warning:
+   - A git repo with an untracked `.ptest.toml` (command runner `echo`) prints
+     exactly one matching stderr line.
+   - `-q` suppresses it.
+   - The exit code and runner stdout are identical to the committed case.
+   - Once the config is committed there is no line.
+   - A non-git `tmp_path` has no line.
+   - A monorepo with an untracked child prints one line listing it.
+   - If `worktree.uncommitted_config_files` is monkeypatched to raise, the run
+     is still unaffected.
+6. `init --json` in a git repo gives `commit_paths` with `.ptest.toml` plus
+   the created agent-rule paths. In a non-git `tmp_path` it gives `[]`. Update
+   `test_init_json_is_non_interactive_and_byte_exact` and the
+   `test_init_smoke.py` key sets to include `commit_paths`.
+7. The doctor mention line appears after offline doctor output when there are
+   uncommitted files, and is absent for `--json` and when everything is
+   committed.
+8. Scoped run: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py tests/ng/test_init_smoke.py`
+   is green.
+
+### T3 — doctor finding and init reminder (wave 2, after T1)
+
+Owns:
+- `src/ptest/doctor.py`
+- `src/ptest/init_render.py`
+- `tests/ng/test_doctor.py`
+- `tests/ng/test_init_render.py`
+
+Acceptance:
+1. `render_init_footer` shows the two frozen lines last, when `commit_paths`
+   is non-empty. It shows nothing for empty `commit_paths`, PREVIEW or
+   `dry_run`. Wrapping works at width 40, and control characters in paths are
+   sanitized. Existing footer tests pass, updated only where the new tail
+   appears.
+2. `doctor.inspect_workspace` on a git repo with an untracked `.ptest.toml` and
+   `docs/ptest-agent.md` gives `config.uncommitted` findings for both. When
+   they are committed there are none. A scoped request gives none. The
+   findings bound is respected (limit=1 admits at most one). Readiness is
+   equal to the committed-repo readiness. A monorepo lists the child config.
+3. Scoped run: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_doctor.py tests/ng/test_init_render.py`
+   is green.
+
+### T4 — docs, guide, help (wave 1, no dependency)
+
+Owns:
+- `src/ptest/resources/repository-agent-guide.md`
+- `src/ptest/agent_rules.py`
+- `src/ptest/help.py`
+- `README.md`
+- `docs/changelog.md`
+- `tests/ng/test_agent_rules.py`
+- `tests/ng/test_help.py`
+
+It no longer owns `docs/schemas/v1/init.json` (moved to T1, D9).
+
+Acceptance:
+1. The guide's "Reading ptest output" table gains this row, placed before the
+   `unsafe-path` row:
+   `` | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch; never run `ptest init` here. | ``
+   It also gets one line in "Reporting" or right after the table:
+   "Untracked config: `ptest: .ptest.toml is not committed` — tell the user;
+   do not commit it yourself unless asked."
+2. `agent_rules._PREVIOUS_GUIDE_SHA256S` gains the entry below, with this
+   comment:
+   `# 80392ca (0.3.3-0.3.5): guide before the config-uncommitted row.`
+   `"4fd66f8dea3d1fa6bdb691daa0fe329ec54dd43670a0e2d88bb297552e621f9d",`
+   `test_every_shipped_guide_version_hashes_into_previous_set` and the
+   upgrade-in-place tests must pass.
+3. `help.py`:
+   - The `_INIT` syntax adds `[--from-main]`.
+   - Its notes explain that init refuses in a linked worktree whose main
+     checkout has an uncommitted `.ptest.toml` (`config-uncommitted`), that
+     `--from-main` copies the main checkout's config verbatim as a temporary
+     stopgap that may go stale, and that the fix is committing on the base
+     branch.
+   - The notes say init ends by listing the files to commit.
+   - The `agents` topic gets one sentence: `config-uncommitted` means stop and
+     tell the user; never run ptest init.
+4. `README.md` gets a short "Worktrees and clones" section covering: commit
+   the ptest files; `config-uncommitted`; `--from-main` is a stopgap; the
+   run warning and the doctor line. It also updates the `ptest init` flag list.
+5. `docs/changelog.md` gets a new top section `## Unreleased`. The release
+   step renames it to 0.3.6. It has bullets for the five behaviors.
+6. `test_user_facing_text_has_no_banned_terms` passes. New `test_help`
+   assertions cover the init and agents topic texts. A new `test_agent_rules`
+   assertion checks that the shipped guide contains `config-uncommitted` and
+   "never run `ptest init`".
+7. Scoped run: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_agent_rules.py tests/ng/test_help.py`
+   is green.
+
+## 5. Negative contracts (regression evidence each task must show)
+
+| Contract | Test owner |
 |---|---|
-| selected | `ptest: api · changed: services/credits.py (+2 files) → 34 of 704 test files (3 direct · 31 via importers)` |
-| full | `ptest: api · changed → full suite: uv.lock is a full trigger` |
-| vitest | `ptest: web · changed: src/a.ts (+1 file) → vitest --changed origin/dev` |
-| none, some changes (docs/unimported) | `ptest: api · changed: README.md → no tests affected · ptest --full runs everything` |
-| none, monorepo child untouched | `ptest: web · no changes` (existing `format_no_changes`) |
-| nothing changed anywhere | `ptest: no changes vs origin/dev — nothing to test · ptest --full runs everything` (exit 0) |
-| end, narrowed pass | `ptest: passed · 12 tests · 1.2s · next: ptest --full before handoff` |
-| end, failure | `ptest: failed · 1 failed, 11 passed · 1.2s (exit 1) · fix the code under test, then rerun ptest` |
-| end, changed-mode full pass / explicit `--full` | unchanged end line, no hint |
+| No config from outside the checkout is ever executed or parsed for a run | T1 (item 4: invalid main config still gives config-uncommitted), T2 (item 1: execute never called) |
+| Main checkout never modified | T1 (item 6 tree snapshot), T2 (item 3 snapshot around `--from-main`) |
+| No git subprocess for detection | T1: `linked_worktree` and `main_config` pass with `subprocess.Popen` monkeypatched to fail |
+| Unchanged behavior for normal checkout, committed worktree, bare repo, non-git | T1 (item 5), T2 (item 2 second half, item 5 non-git) |
+| Warning never alters output or exit status, never fails a run | T2 (item 5) |
+| `--from-main` never overwrites | T1: pre-existing child config bytes unchanged |
 
-`(+N files)`: omitted when exactly one changed path; `+1 file` singular. The shown path is
-`impact.changed[0]`. Project = `checkout.root.name` in operations (start line); declaration or
-`resolution.root.name` for lines cli prints itself.
+## 6. Shared-file content
 
-### 4.6 Request mapping (T1, cli)
-
-Route when `parsed.mode is C.Mode.AUTOMATIC and not parsed.shadow and parsed.probe is None`
-(single project) / the existing `parsed.changed or parsed.mode is C.Mode.AUTOMATIC` branch
-(monorepo root). Base and changed set are computed ONCE per invocation from
-`impact.git_top(resolution.root)`.
-
-| Impact.kind | mode | argv | base | changed_note | next_hint |
-|---|---|---|---|---|---|
-| selected | SCOPED | `impact.files` | None | note | True single / False child |
-| vitest | SCOPED | `("--changed", base.sha or "HEAD")` | None | note | True single / False child |
-| full | FULL | `()` | None | `"changed → full suite: " + reason` | True single / False child |
-| none | not executed | — | — | — | — |
-
-All other request fields carry over from `parsed` as today (workers, queue_timeout_s, timeout_s,
-no_setup, result_path, fixture_domain, verbose, quiet). Monorepo total line:
-`next_step(worst_status, narrowed)` where narrowed = any child ran SCOPED or was `none` with
-changes; children never carry the hint (`next_hint=False`). If every child is `none` with no
-changes → only `format_nothing_changed`, no per-child lines, no total, exit 0.
-
-operations (T1): `_emit_start` — when `request.changed_note is not None` emit
-`progress.format_impact(project, request.changed_note)` (+ the existing `-v plan` line) and return.
-`_emit_end` — `next = progress.next_step(result.status, request.mode is C.Mode.SCOPED) if request.next_hint else None`; claim the `-v` hint only when `next` is None.
-
-### 4.7 Frozen doc wording (the exact substrings the tests assert)
-
-T2 (asserted by T2's new test in `tests/ng/test_help.py`):
-- `help.overview()` contains `default loop: tests your change reaches (= --changed)` (overview line 18,
-  keep the `#` column alignment).
-- `help.topic("agents")` contains `bare ptest runs the tests your change reaches`.
-- `README.md`, whitespace-normalised (`" ".join(text.split())`, so line wrapping does not matter),
-  contains `` `ptest` runs the tests your change reaches ``.
-
-T3 (asserted by T3 in `tests/ng/test_init_changed.py`):
-- Guide row, exact line: ``| After each edit | `ptest` (bare `ptest` runs the tests your change reaches: git diff vs the branch base, no baseline or coverage needed) |``
-- Guide keeps ``| Integrated change, before handoff | `ptest --full` once |``, keeps `baseline recorded`, stays ≤ 100 lines, and no longer contains `the first run records a baseline`.
-- `_provider_text("claude")` contains `` `ptest` after each edit runs the tests your change reaches `` and `` `ptest --full` once before handoff `` and `docs/ptest-agent.md`.
-
-T2 (asserted by T2 in `tests/ng/test_help.py`):
-- `help.topic("init")` (the paragraph at help.py:84-90), whitespace-normalised, contains
-  `Graph selection (bare ptest) is on in every new config and needs neither.` and no longer contains
-  `no leaves selection off`.
-
-### 4.8 Config default, `doctor --fix` flip, and setup wording
-
-#### 4.8.1 Generator (T3, `config._fresh_config`)
-Only this literal changes: `enabled=False` becomes `enabled=kind is C.RunnerKind.PYTEST`. `closed_inputs`
-stays `False`, and the parse default for a missing `[selection]` table or `enabled` key stays `False`
-(config.py:402/482 unchanged). Vitest, go and cargo configs keep `enabled = false`. Only pytest reads
-the flag for graph selection (D5).
-
-#### 4.8.2 `doctor --fix` flip (T3, `doctor_fix.plan_project`)
-- The existing `--cov` branch (doctor_fix.py:958-980) is unchanged. `--cov` present plus a table that
-  still needs closing gives the enabled flip plus the closed_inputs/input_roots/full_triggers/groups draft,
-  exactly as today.
-- New, placed after that branch: if the runner is PYTEST, no `("selection", "enabled")` change is planned
-  yet, and `_generator_default_off(parsed.get("selection"))` is true, then append
-  `FieldChange("selection", "enabled", True)` (`draft=False`). Nothing else is appended: there is no cov
-  gate and no draft. A generated table has every key already, so `_apply_changes` rewrites the
-  `enabled = false` line in place.
-- Discriminator, a new private function `_generator_default_off(selection: object) -> bool`. It is true
-  exactly when:
-  1. `selection` is a dict whose key set is EXACTLY `{enabled, closed_inputs, input_roots,
-     ignored_inputs, environment, full_triggers, always, no_tests, non_input_outputs, full_ratio}`,
-     the ten keys `config._serialize_fresh` writes;
-  2. `enabled is False` and `closed_inputs is False`;
-  3. `input_roots`, `ignored_inputs`, `environment`, `full_triggers`, `always` and `no_tests` are each `[]`;
-  4. `non_input_outputs` is `[]` or `[".venv"]`;
-  5. `full_ratio == 0.7`.
-- Anything else counts as an explicit user choice, and doctor proposes nothing for it. That covers a
-  missing `[selection]` table, a table missing any of the ten keys (for example a hand-written
-  `[selection]\nenabled = false`), any extra key (for example `groups`), and any non-default value (for
-  example `full_ratio = 0.5`).
-- Accepted limitation, stated in the function docstring: a user who deliberately typed `enabled = false`
-  into an otherwise untouched generated table cannot be told apart from a generator default. For such a
-  table, `ptest doctor` reports "config is out of date" and `doctor --fix` flips it. Changing or deleting
-  any other `[selection]` line makes the choice durable.
-- `selection_enabled_by`, `_selection_needs_close`, `_selection_key_is_default` and `_has_cov` are unchanged.
-
-#### 4.8.3 `doctor --fix` next-step line (T1, `cli._run_doctor_fix`)
-When `doctor_fix.selection_enabled_by(plan)` is true after the apply step, the line
-`run a parallel full baseline once to record a baseline` is replaced by exactly:
-`selection enabled: bare ptest now runs the tests your change reaches (no baseline needed); run ptest --full once before handoff`
-Nothing else in `_run_doctor_fix` changes.
-
-#### 4.8.4 `init --changed-setup` strings (T3, `init_changed.py` constants; placeholders, `CHOICES`, `DEFAULT_CHOICE`, `COV_ARGV` and all functions unchanged)
-| Constant | Exact new value |
-|---|---|
-| `QUESTION` | `Set up the optional coverage engine (ptest --shadow) for {project}? Bare ptest already runs the tests your change reaches without it. Adds coverage to test runs; needs one full run as a baseline. [now/later/no] (default: later)` |
-| `NEEDS_COV_LINE` | `{project}: the optional coverage engine (ptest --shadow) needs pytest-cov; bare ptest does not` |
-| `LATER_LINE` | `{project}: coverage engine drafted; its baseline is recorded on the first passing --full on a clean tree` |
-| `NOW_LINE` | `{project}: coverage engine drafted; running ptest --full for the baseline` |
-| `EXISTING_LINE` | `{project}: selection is off in this config — set [selection] enabled = true, or run ptest doctor --fix` |
-| `DRY_RUN_LINE` | `would set up the coverage engine for {project}: write --cov/--cov-report plus the [selection] draft; the baseline is recorded on the first passing --full on a clean tree` |
-
-None of these strings contains `ptest --changed`.
-
-## 5. Acceptance criteria
-
-### T1 — impact + wiring
-- [ ] `impact.py` matches 4.1 exactly (names, fields, order of checks, reason strings 4.2); no new dependency; `from .monorepo import _git_blob, worktree_changed_files` and `from .selection import _matches` are the only git/policy helpers used.
-- [ ] `tests/ng/test_impact.py` (real git repos via `support.init_git_repo`/`git`, `tmp_path`) covers: default base on a feature branch (merge-base vs `main`), `origin/HEAD` preferred (`git update-ref refs/remotes/origin/main HEAD` + `git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main`), on the default branch → `Base(None,"HEAD")`, explicit `--base`, bad ref → Problem; changed set includes committed-since-base, staged, unstaged, untracked; plan: direct test, transitive via importer (test→a→b, change b), relative import, `src/` layout, package `__init__`, deleted source, function-level import, each trigger family (lockfile, nested `conftest.py`, `.ptest.toml`, ancestor root trigger for a child prefix), test support, unparsable changed file, non-`.py` file, docs/hidden-only → none with changed, full_ratio, `MAX_SELECTED` (monkeypatch small), selection disabled, vitest, command runner, `repo_changed=None`, sibling-child change → none.
-- [ ] Bare `ptest` and `ptest --changed` route per 4.6 for standalone and monorepo root; output per 4.5; `--full`, scoped paths, `--shadow`, `--probe` unchanged.
-- [ ] `tests/ng/test_changed_default.py` (in-process `ptest.cli.main`, `operations.execute` monkeypatched to capture requests, as in `test_natural_loop.py`) asserts: requests + notes for selected / full / vitest; nothing-changed line + exit 0 + no execute; monorepo per-child lines and total hint; real `_emit_end` hint wording for pass/fail via `progress.format_end(next_step=...)` and `operations._emit_end` with `next_hint`.
-- [ ] `cli._run_doctor_fix` prints the §4.8.3 line in place of `run a parallel full baseline once to record a baseline` (that one `print` is the only `_run_doctor_fix` change). `tests/ng/test_changed_default.py` pins it in-process. It monkeypatches `cli.doctor_fix.plan_all` to return a `doctor_fix.FixPlan` whose single `FileFix` carries `FieldChange("selection", "enabled", True)`, `cli.doctor_fix.render_diff` to return `""`, and `cli.doctor_fix.apply_plan` to return `(".ptest.toml",)`. It runs `main(("doctor", "--fix"))` with cwd set to a `tmp_path` holding a minimal pytest config (`from support import write_ptest_toml`) and asserts exit 0, the exact §4.8.3 line in stdout, and `record a baseline` not in stdout. `grep -rn "record a baseline" src/ptest/cli.py` is empty.
-- [ ] Dead code in D10 deleted; `grep -rn "child_baseline_heads\|select_changed_children\|child_changed_request" src tests` is empty.
-- [ ] Legacy tests keep their intent and assertions: tests that used CLI `--changed` to drive the AUTOMATIC engine switch to in-process `operations.execute(domain, config, C.RunRequest(mode=C.Mode.AUTOMATIC, ...))` (pattern: `test_operations._execute`) and keep every assertion (translated from JSON dict to `RunResult` fields); tests that only needed "run the project" keep bare if still green, else pass `--full`; tests that committed a change on `main` and expect it to count create a feature branch first (on the default branch only uncommitted work counts).
-- [ ] Scoped green: `.venv/bin/ptest --workers 2 tests/ng/test_impact.py tests/ng/test_changed_default.py tests/ng/test_monorepo_changed.py tests/ng/test_changed_explain.py tests/ng/test_natural_loop.py tests/ng/test_run_output.py tests/ng/test_operations.py tests/ng/test_pytest_adapter.py tests/ng/test_pytest_scoped_subprocess.py tests/ng/test_monorepo_snapshot.py tests/ng/test_shadow.py tests/ng/test_files.py tests/ng/test_parallel_output_cli.py tests/ng/test_cli.py`.
-
-### T2 — help + README
-- [ ] `help.py`: overview line 18 and the execution section say bare `ptest` = `--changed` = tests reached by the change vs the branch base (merge-base with origin/HEAD, else main/master/dev; on the default branch only uncommitted work), no baseline or coverage needed; `--base REF` compares against the merge-base with REF; the loop section drops "The first loop run may run everything to record a baseline" and says `ptest --full` once before handoff. In the `init` topic, the `--changed-setup` paragraph (help.py:84-90) describes it as the optional coverage engine for `ptest --shadow` and replaces `no leaves selection off` per §4.7 T2. The syntax line `[--changed-setup now|later|no]` and the `now`/`later` descriptions stay.
-- [ ] `README.md` loop wording matches (no claim that `--changed` needs a baseline or coverage).
-- [ ] Wording matches §4.7 (T2) exactly.
-- [ ] `tests/ng/test_help.py` updated/extended for the new sentences, including a new `test_getting_started_shows_graph_default` that asserts the three §4.7 T2 substrings and a new `test_init_help_changed_setup_is_optional` that asserts the §4.7 T2 `init`-topic substring and absence (it replaces `test_init_changed.py::test_getting_started_shows_changed`, which T3 deletes; T2 does not edit `test_init_changed.py`). `.venv/bin/ptest --workers 2 tests/ng/test_help.py` green.
-
-### T3 — guide + skill + config default
-- [ ] `repository-agent-guide.md`: loop table row "After each edit" says bare `ptest` runs the tests the change reaches (git diff vs branch base; no baseline or coverage needed); "Reading ptest output" rows replaced/added for every line in 4.5 and the reasons in 4.2 (what to do: nothing for selected/full/none; `ptest --full` once before handoff after `next:`; fix code after failure); baseline rows stay (they describe `--full`). Exit-code table unchanged.
-- [ ] `agent_rules.py`: sha256 of the base-commit guide bytes (`2c9ec366c57d69f24053268632132915938098f1ff540dade0963b8206667fe7`, last changed in `5467c52`) added to `_PREVIOUS_GUIDE_SHA256S` with a comment; the current `_provider_text` bytes frozen into a new `_pre_graph_provider_text(provider)` (same pattern as `_pre_rewrite_provider_text`) and added to the recognised tuple; new `_provider_text` loop line: "`ptest` after each edit runs the tests your change reaches (git diff vs the branch base; no baseline or coverage needed); `ptest <path>` runs one test file; `ptest --full` once before handoff runs the integrated gate." Body stays within fifteen lines.
-- [ ] `uninstall._decide_skill`: `agent_rules._pre_graph_provider_text(provider)` added to its managed tuple (it keeps its own list, separate from `agent_rules._provider_target`). New test in `tests/ng/test_uninstall.py`: a repo whose `.claude/skills/ptest/SKILL.md` holds `_pre_graph_provider_text("claude")` bytes → `ptest uninstall` plans that file as REMOVE "managed skill" (not KEPT "edited"), and it is gone after `--yes`.
-- [ ] `tests/ng/test_init_changed.py`: `test_repository_guide_default_loop_is_changed` and `test_skill_template_defaults_to_changed` assert the §4.7 T3 wording (the `the first run records a baseline` assertion is dropped because that row is replaced); `test_getting_started_shows_changed` is deleted (T2 re-adds it in `test_help.py`); every other assertion is kept, apart from the default-flip and string updates listed below.
-- [ ] Generator (§4.8.1): `config._fresh_config` changes only its `enabled=` literal. The five measured assertions that break change as follows (measured in a throwaway worktree at 8f2640b with the literal flipped for every runner plus a prototype of §4.8.2: `ptest --full --workers 2` failed on exactly these five and nothing else, and prototypes of the (b)/(c) tests below passed):
-  1. `test_init.py::test_init_creates_one_fresh_config_exclusively`: `selection.enabled is False` becomes `is True`.
-  2. `test_init_changed.py::test_changed_setup_no_leaves_selection_off`: rename it to `test_changed_setup_no_writes_no_coverage`. `_selection(...).get("enabled") is not True` becomes `is True`. The `--cov` absence and `calls == []` assertions stay.
-  3. and 4. `test_init_changed.py::test_changed_setup_preview_matches_real_run[True-later]` and `[True-now]`: in the `existing` branch, after the first `init --changed-setup no`, rewrite `enabled = true` to `enabled = false` in `.ptest.toml` (this simulates a 0.2.x config) and only then capture `before`. All assertions stay, including `EXISTING_LINE` for preview and real run and the byte-identical config.
-  5. `test_init_changed.py::test_changed_setup_existing_config_points_to_doctor_fix`: the same `enabled = false` rewrite before `before`. The `doctor --fix` and byte-identical assertions stay.
-  Also add `enabled = true` for a fresh pytest config and `enabled = false` for a fresh vitest config, as assertions in `tests/ng/test_config.py` or `test_init.py`.
-- [ ] Strings (§4.8.4): `init_changed.py` constants equal §4.8.4 byte-for-byte. `test_init_changed.py` string assertions follow them: lines 140/170 assert `Set up the optional coverage engine (ptest --shadow) for`; line 226 asserts the exact new `NEEDS_COV_LINE` text for project `.`; line 251 asserts `Set up the optional coverage engine` not in stderr; `_CHANGED_MARKERS` becomes `("coverage engine", "selection is off in this config", "would set up", "baseline")`. A new test asserts that no constant in `(QUESTION, NEEDS_COV_LINE, LATER_LINE, NOW_LINE, EXISTING_LINE, DRY_RUN_LINE)` contains `ptest --changed`.
-- [ ] `doctor --fix` flip (§4.8.2) in `tests/ng/test_doctor_fix.py`:
-  (a) `test_fix_proposes_selection_draft_with_cov`: delete only the line-322 assertion `run a parallel full baseline once to record a baseline` (T1 pins the new line). All other assertions stay.
-  Both new tests below define a module constant `_GENERATED_SELECTION`: the ten `[selection]` lines exactly as 0.2.x `_serialize_fresh` writes them for a uv pytest project (`enabled = false`, `closed_inputs = false`, six `= []` lists, `non_input_outputs = [".venv"]`, `full_ratio = 0.7`). They write it with `_write_config(root, args=("-n", "0"), extra_lines=("", "[selection]", *lines))` on `_write_pytest_project(...)`, the same setup as `test_fix_second_run_reports_up_to_date`. The assertions check the parsed `selection` table, not the whole file, so unrelated runner/setup fixes cannot mask the result.
-  (b) Generator-shaped, no `--cov`: `doctor --fix --dry-run` output contains `enabled = true` and does not contain `closed_inputs = true`, and the file bytes are unchanged. After `doctor --fix`, parsed `selection["enabled"] is True`, the other nine keys equal their written values, and there is no `groups` key. A second `doctor --fix` prints `config is up to date`.
-  (c) Explicit choices, parametrised, no `--cov`: a hand-written `[selection]` + `enabled = false` only; `_GENERATED_SELECTION` with `full_ratio = 0.5`; `_GENERATED_SELECTION` plus `groups = []`; `_GENERATED_SELECTION` without its `always = []` line. After `doctor --fix`, the parsed `selection` table equals the table before the run (`enabled` stays `False`).
-  (d) The existing `test_fix_preserves_unmanaged_settings_byte_for_byte` stays green unchanged, so it still asserts `enabled = false` is kept.
-- [ ] `.ptest.toml` (ptest's own): `[selection] enabled = true`; nothing else.
-- [ ] `.venv/bin/ptest --workers 2 tests/ng/test_agent_rules.py tests/ng/test_resources.py tests/ng/test_init_changed.py tests/ng/test_uninstall.py tests/ng/test_config.py tests/ng/test_init.py tests/ng/test_doctor_fix.py` green (including `test_every_shipped_guide_version_hashes_into_previous_set`).
-
-## 6. Test approach
-- Every task: `uv sync --locked --extra test` in its own worktree first; run only through that worktree's `.venv/bin/ptest`, always `--workers 2` (the machine was saturated: an 8-minute slot wait was observed while designing). Never `--full` inside a task.
-- Fixtures: `tmp_path` repos, `support.init_git_repo(branch="main")`, `support.git`; no network, no sleeps, no fixed ports; ≥ 4 test files in graph fixtures so `full_ratio` 0.7 does not mask selection.
-- Controller, after merge: one `.venv/bin/ptest --full --workers 2`, then the persea smoke test.
+`docs/schemas/v1/init.json`: the full, exact final bytes are in this design's
+`sharedFileContent` return field. They equal the current file plus a
+`commit_paths` property inserted between `action` and `config`. T1 generates it
+with `scripts/export-schemas.py`, and a transcription pass must be a
+byte-identical no-op. No other shared files (routers, `__init__`, exports) are
+touched. `ptest/__init__.py` does not re-export modules.
 
 ## 7. Risks
-| Risk | Mitigation |
-|---|---|
-| Fixture-/conftest-mediated dependencies are not edges → under-selection (e.g. FastAPI `client` fixture) | End line always says `next: ptest --full before handoff`; guide states it. |
-| Persea smoke: `.ptest.toml`, `api/.ptest.toml`, `web/.ptest.toml` are UNTRACKED there, so every bare run is "changed → full suite: .ptest.toml is a full trigger" | Controller: smoke in a scratch persea worktree (`~/worktrees/persea/cc-changed-smoke/...`) with those configs committed on a scratch branch, touch one service file, run bare `ptest`. Never commit in the user's checkout. |
-| AST of newer Python syntax than ptest's interpreter | Changed file → full "could not be parsed"; unchanged file skipped. |
-| Legacy test churn in T1 | Explicit ownership list; intent-preserving migration rules in T1 criteria. |
 
-## 8. Open questions (for the controller, not blocking)
-- None. The generator flip and the `--changed-setup` rewording are decided in D6/§4.8.
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Unowned tests assert exact stderr for runs in uncommitted-config git fixtures | integration failures in `ptest --full` | Most fixtures commit everything (`init_git_repo`, `ptest_project(git=True)`). The orchestrator fixes stragglers at integration, and T2 reports any it sees. |
+| Unowned tests assert exact human init footer in git repos | same | The reminder only appears inside git repos, and most init tests use a non-git `tmp_path`. |
+| `git ls-tree` cost on every run | ~5 ms | One call, 2 s deadline, skipped when there are no candidates. |
+| Monorepo root committed but a child config uncommitted, in a worktree | the run fails with the existing "monorepo child is unavailable" (no init advice) | Out of scope. The main-checkout run warning lists the child, which prevents this. Noted as a follow-up. |
+| `executability` still says "run ptest init from the repository root" for a missing child config | misleading only in the out-of-scope case above | Follow-up; not reachable in the config-uncommitted situation because D6 makes doctor and init fail early. |
 
-## Deviations from the context pack
-1. Tasks re-scoped (T1 absorbs wiring; T2 = help/README; T3 = guide/skill/own config) — the original T1/T2 were silently sequential.
-2. Generator default flipped for pytest, and `doctor --fix` flips generator-shaped `enabled = false` tables without `--cov` (D6, §4.8).
-3. `RunRequest` gains two fields (`changed_note`, `next_hint`), not one — children must not print the hint.
-4. Explicit `--base` also uses the merge-base (D2); hidden-path and docs ignore list added (step 5); none-with-changes line added.
+## 8. Deviations from the context pack
 
-## Controller amendment (folded in)
-The controller reversed the original D6: changed-by-default must hold even with no parameters. The
-amendment is now spelled out in D6, D11, §3, §4.7 (T2 `init` topic), §4.8 and the §5 T1/T2/T3 criteria,
-and nothing outside those sections restates it.
-
-## Revision 1 (review findings)
-- `tests/ng/test_init_changed.py` is owned by T3 alone (§3). Its help/README test moves to T2's `test_help.py`
-  (§5 T2), and every doc substring the tests assert is frozen in §4.7, so each task's scoped green covers
-  the wording that task changes.
-- T3 also owns `src/ptest/uninstall.py` (`_decide_skill` tuple) and one new test in `tests/ng/test_uninstall.py`,
-  so a 0.2.5 `SKILL.md` (`_pre_graph_provider_text`) is still removed by `ptest uninstall`.
-
-## Revision 2 (review findings)
-- The "generator-default" discriminator is now concrete (§4.8.2 `_generator_default_off`). Tables with no
-  `--cov` that pass it get only the `enabled` flip, with no draft. The `--cov` branch is unchanged, and
-  anything else is treated as the user's choice. The accepted limitation is stated.
-- The `--changed-setup` strings are frozen (§4.8.4), and so is the help `init` paragraph (§4.7 T2). The five
-  broken assertions are named, with their exact updates, in §5 T3. The contradictions in D6, Deviation 2,
-  §8 and T3 are removed.
-- The `doctor --fix` next-step line is now owned by T1 (§4.8.3, `cli._run_doctor_fix`) and pinned in T1's
-  `test_changed_default.py`. T3 only drops the old-string assertion at `test_doctor_fix.py:322`. This keeps
-  ownership disjoint, and the merged output no longer tells users to record a baseline.
+- Task labels follow the triage (T1 core, T2 CLI, T3 doctor + init_render,
+  T4 docs). The pack's contract section labelled them differently.
+- `main_config_paths(root, relative)` became `main_config(cwd, root) -> MainConfig | None`
+  (a nearest-first walk, with the matched relative path and children).
+  `uncommitted_ptest_files` was renamed `uncommitted_config_files`.
+- Tracked means "in HEAD's tree" (`ls-tree`), not "in the index".
+- `docs/schemas/v1/init.json` moved from T4 to T1, because it is generated from
+  `contracts.py`.
+- Doctor in the config-uncommitted situation fails with exit 2 instead of
+  showing a limitation (D6).
+- The commit reminder text and placement are frozen here (§3.5). T3 reads
+  `result.commit_paths`, and there is no new renderer parameter.
