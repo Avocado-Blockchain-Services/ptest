@@ -1540,17 +1540,30 @@ def _init_from_main(physical_cwd: Path, dry_run: bool) -> C.InitResult:
     )
 
 
-def _existing_with_commit_paths(physical_cwd: Path,
-                                result: C.InitResult) -> C.InitResult:
-    """Attach every uncommitted ptest file to an unchanged-config result."""
+def _existing_with_commit_paths(physical_cwd: Path, result: C.InitResult,
+                                *, dry_run: bool = False) -> C.InitResult:
+    """Attach every uncommitted ptest file to an unchanged-config result.
+
+    A dry run lists nothing, like its terminal output. In a linked worktree
+    whose main checkout holds the same config, an uncommitted config here is
+    the --from-main stopgap copy, which must be committed on the base branch
+    instead; it is never listed."""
+    if dry_run:
+        return replace(result, commit_paths=())
     try:
         boundary = _git_boundary(physical_cwd)
     except C.Problem:
         boundary = None
-    return replace(
-        result,
-        commit_paths=_merged_commit_paths(
-            boundary, result.target.parent, ()))
+    paths = _merged_commit_paths(boundary, result.target.parent, ())
+    try:
+        stopgap = (boundary is not None
+                   and _worktree.main_config(physical_cwd, boundary) is not None)
+    except Exception:
+        stopgap = False
+    if stopgap:
+        paths = tuple(path for path in paths
+                      if path != _CONFIG_NAME and not path.endswith("/" + _CONFIG_NAME))
+    return replace(result, commit_paths=paths)
 
 
 def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
@@ -1567,7 +1580,8 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
                 resolution.root, resolution.path, resolution)
         return _existing_with_commit_paths(
             physical_cwd,
-            _existing_result(resolution.root, resolution.path, resolution))
+            _existing_result(resolution.root, resolution.path, resolution),
+            dry_run=options.dry_run)
     if resolution.problem is not None \
             and resolution.problem.code == CONFIG_UNCOMMITTED:
         if not options.from_main:
@@ -1588,11 +1602,13 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         return _existing_with_commit_paths(
             physical_cwd,
             _existing_result(root, target, C.ConfigResolution(
-                root=root, path=target, config=None, problem=problem)))
+                root=root, path=target, config=None, problem=problem)),
+            dry_run=options.dry_run)
     if target_exists:
         return _existing_with_commit_paths(
             physical_cwd,
-            _existing_result(root, target, resolve_config(root)))
+            _existing_result(root, target, resolve_config(root)),
+            dry_run=options.dry_run)
 
     children = options.children
     root_candidates = _native_candidates(root) if not children else ()
@@ -1678,7 +1694,8 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         if problem.code == "already-exists":
             return _existing_with_commit_paths(
                 physical_cwd,
-                _existing_result(root, target, resolve_config(root)))
+                _existing_result(root, target, resolve_config(root)),
+                dry_run=options.dry_run)
         raise
     return C.InitResult(
         action=C.InitAction.CREATED, target=target, exists=True,

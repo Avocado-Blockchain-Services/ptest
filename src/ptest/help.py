@@ -142,7 +142,7 @@ Review syntax (default mode):
                [--review-model MODEL] [--review-concurrency 1..8]
 
 Offline static syntax (never launches a provider or writes a report):
-  ptest doctor --offline [--json] [--scope PATH] [--max-entries N]
+  ptest doctor --offline [--json] [-q | --quiet] [--scope PATH] [--max-entries N]
                [--max-files N] [--max-file-bytes N] [--max-total-bytes N]
 
 Fix syntax (never runs a model review; static plan plus guarded write):
@@ -155,6 +155,8 @@ Probe syntax (EXECUTES tests and setup; not a static inspection; single-project 
                [--no-setup] [--result-json PATH]
 
 Notes:
+  Offline static inspection prints one progress line per project to stderr on a
+  TTY; -q/--quiet suppresses it.
   Without an explicit concrete --reviewer, default review on a TTY lists the
   qualified installed reviewers in a stable order: one is used directly, while
   two or more are offered once by number (an empty, invalid, out-of-range, or

@@ -1218,3 +1218,24 @@ def test_init_commit_paths_lists_monorepo_children_then_root(tmp_path):
     assert result.action is InitAction.CREATED
     assert result.commit_paths == (
         "a/.ptest.toml", "b/.ptest.toml", ".ptest.toml")
+
+
+def test_a_later_plain_init_never_asks_to_commit_the_stopgap_copy(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+    init_project(wt, _from_main_options())
+
+    result = init_project(wt, _options())
+
+    assert result.action is InitAction.EXISTING
+    assert ".ptest.toml" not in result.commit_paths
+
+
+def test_a_dry_run_on_an_existing_config_lists_nothing_to_commit(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+    init_project(wt, _from_main_options())
+    (main / ".ptest.toml").unlink()
+
+    result = init_project(wt, _options(dry_run=True))
+
+    assert result.action is InitAction.EXISTING
+    assert result.commit_paths == ()

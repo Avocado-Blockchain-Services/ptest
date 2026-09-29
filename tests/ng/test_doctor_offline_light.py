@@ -631,3 +631,12 @@ def test_projected_admitted_field_validation():
         agent_assessment.replace(packet, _projected_admitted=True)
     with pytest.raises(ValueError):
         agent_assessment.replace(packet, _projected_admitted=-1)
+
+
+def test_help_doctor_documents_the_quiet_flag(capsys):
+    from ptest.cli import main
+    assert main(("help", "doctor")) == 0
+    out = capsys.readouterr().out
+    assert "ptest doctor --offline [--json] [-q | --quiet]" in out
+    assert ("Offline static inspection prints one progress line per project to stderr on a\n"
+            "  TTY; -q/--quiet suppresses it.") in out
