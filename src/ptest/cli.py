@@ -3010,6 +3010,40 @@ def _warn_stale_guidance(root: Path) -> None:
                       "to update", quiet=False)
 
 
+def _notice_config_upgrade(resolution: C.ConfigResolution, parsed) -> None:
+    """Once per ptest version and checkout: say when doctor --fix would
+    improve this config. init never rewrites an existing .ptest.toml, so an
+    upgrade reaches old configs only through doctor --fix. Best-effort and
+    read-only for the project; any problem means silence."""
+    try:
+        if resolution.config is None and resolution.monorepo is None:
+            return
+        domain = platform.domain_paths(parsed.fixture_domain)
+        state = Path(domain.root)
+        if not state.is_dir():
+            return
+        seen_dir = state / "seen-versions"
+        if not seen_dir.exists():
+            files.ensure_private_dir(state, "seen-versions")
+        name = hashlib.sha256(os.fsencode(os.path.realpath(resolution.root))).hexdigest()[:32]
+        try:
+            seen = files.read_regular(seen_dir, name, 64).decode("ascii").strip()
+        except (C.Problem, UnicodeDecodeError):
+            seen = ""
+        if seen == C.PTEST_VERSION:
+            return
+        files.publish_atomic(seen_dir, name, C.PTEST_VERSION.encode("ascii"))
+        plan = doctor_fix.plan_all(resolution.root, resolution)
+        count = int(plan.change_count)
+        if count:
+            progress.emit(
+                f"ptest: ptest {C.PTEST_VERSION} can improve this config "
+                f"({count} change{'s' if count != 1 else ''}) — run ptest doctor --fix",
+                quiet=parsed.quiet)
+    except Exception:
+        return
+
+
 def _warn_uncommitted_config(resolution: C.ConfigResolution, *,
                              quiet: bool) -> None:
     """One stderr line per executing run when config is not committed.
@@ -3617,6 +3651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or resolution.problem.code != "config-uncommitted"):
             _warn_stale_guidance(resolution.root)
         _warn_uncommitted_config(resolution, quiet=parsed.quiet)
+        _notice_config_upgrade(resolution, parsed)
         if resolution.monorepo is not None:
             from . import monorepo
             domain = platform.domain_paths(parsed.fixture_domain)

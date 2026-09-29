@@ -50,6 +50,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
 | `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
+| `update available: X … run: ptest update` / `ptest X can improve this config … run ptest doctor --fix` | a newer ptest exists / this config predates it | Run `ptest update` (running jobs keep their version) / run `ptest doctor --fix`; then continue. If it says `installed from source`, tell the user. |
 
 ## Exit codes
 
@@ -89,8 +90,7 @@ explicit. `ptest doctor --offline` is static and sends nothing. Reviews cover
 cited reachable units only; omitted decisive callers or failure paths remain
 unknown. Timing, selection, and parallel-execution items use ptest's own facts.
 
-Untracked config: `ptest: .ptest.toml is not committed` — tell the user;
-do not commit it yourself unless asked.
+Untracked config: `ptest: .ptest.toml is not committed` — tell the user; do not commit it yourself unless asked.
 
 Requesting doctor, guide, or a prompt grants assessment authority only. Source
 repair requires a separate user instruction; never treat an assessment as

@@ -12,6 +12,50 @@ from the latest GitHub release (or `PTEST_VERSION`), verifies the published
 SHA-256, finds a CPython 3.11-3.14 with `uv python find --system` (installing
 3.13 with uv when none exists), and runs the bundled `install.sh`.
 
+## Updating
+
+An installed bundle updates itself in place:
+
+```sh
+ptest update                    # install the latest release
+ptest update --check            # only report whether a newer release exists
+ptest update --version 0.3.3    # a specific version, older ones included
+ptest update --json             # machine-readable `update` document
+```
+
+Full grammar: `ptest update [--check] [--version X.Y.Z] [--json]`.
+`--check` only reports: `ptest X is available (installed Y) — run: ptest update`
+when a newer release exists, `ptest is up to date (Y)` otherwise. A
+successful update prints `ptest updated to X (was Y)` and switches the
+launcher to the new bundle. `--version` installs exactly the named
+release, older ones included; `--check` and `--version` cannot be combined.
+
+What it verifies: the bundle downloads over HTTPS from the GitHub release
+only, its SHA-256 is checked before anything runs or extracts, downloads
+are capped at 64 MiB, extraction is confined to the bundle directory, and
+the install runs the same bundled `install.sh` as `get.sh`.
+
+Bundles install side by side under the install root and the launcher
+switches atomically to the new bundle; old bundles stay until you remove
+them. A failed update keeps the old bundle and launcher: the current
+install is unchanged.
+
+Before most commands, ptest also looks for a newer release (at most once
+a day: a 24 h cache under the ptest state area, `PTEST_STATE_DIR` when
+set, with a 2 s network limit; offline or unreachable means no notice).
+At a terminal it asks `ptest X is available (you have Y). Update now? [Y/n]`
+and, on accept, runs your command on the new version. Without a terminal
+it prints `ptest: update available: X (installed Y) — run: ptest update`
+and carries on. Running processes keep their version, so updating is safe
+mid-work. `PTEST_NO_UPDATE_CHECK=1`, a truthy `CI`, `--fixture-domain`
+and `-q` turn the check off. From a source checkout ptest says
+`installed from source; update it with git pull`, and `ptest update`
+refuses there with the same message.
+
+Exit codes: 0 for success (`ptest is up to date (Y)` counts as success),
+2 for refusal or failure, 75 when the ptest releases on GitHub cannot be
+reached.
+
 ## Published release archive
 
 Download the release archive and its SHA-256 file from the matching GitHub

@@ -4470,3 +4470,26 @@ def test_update_parser_rejects_unknown_option():
         parse_argv(("update", "--bogus"))
     assert excinfo.value.code == "invalid-config"
     assert excinfo.value.message == "unknown inspection option"
+
+
+def test_config_upgrade_notice_appears_once_per_version(case, monkeypatch, capsys):
+    from ptest import doctor_fix
+
+    domain = case.domain()
+    root = case.project(domain, kind="command")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(doctor_fix, "plan_all",
+                        lambda root, resolution: type("Plan", (), {"change_count": 2})())
+    run = ("--fixture-domain", str(domain.root), "--full")
+    notice = "can improve this config (2 changes) — run ptest doctor --fix"
+
+    main(run)
+    assert notice in capsys.readouterr().err
+    main(run)
+    assert notice not in capsys.readouterr().err
+    monkeypatch.setattr(C, "PTEST_VERSION", "99.0.0")
+    main(("-q",) + run)
+    assert notice not in capsys.readouterr().err
+    monkeypatch.setattr(C, "PTEST_VERSION", "99.0.1")
+    main(run)
+    assert "ptest 99.0.1 can improve this config" in capsys.readouterr().err

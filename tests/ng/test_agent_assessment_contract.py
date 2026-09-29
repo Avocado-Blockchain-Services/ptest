@@ -35,12 +35,12 @@ EXPECTED_IDS = (
     "SELECT-001", "TIMING-001", "PARALLEL-001",
 )
 
-# Golden bytes recorded before the registry extension (RED baseline); re-recorded for 0.4.1 (the version is part of the document bytes).
+# Golden bytes recorded before the registry extension (RED baseline); re-recorded for 0.4.2 (the version is part of the document bytes).
 DOCTOR_GOLDEN_SHA256 = (
-    "a1fe3eb2e65f8a752bc833ae6faa8a2e07ba72d777fb2f5fd4b9d17c3bdb85a9"
+    "d2c9645a0f433532fff9b3d74e80a4ce5e7377aea52e0c5d8987f5d378866639"
 )
 DOCTOR_ERROR_GOLDEN_SHA256 = (
-    "e988d9d36fe998a6c3edf8e030d1f977b6fee99c544ad0e5a871c9ab957ecbec"
+    "719e1ed87cc0a2ed9bab6f796403a2f4e075ec8501110524046563555d1b6723"
 )
 
 
@@ -102,7 +102,7 @@ def _payload(children=None, limitations=(), publication=None):
 
 def _hostile(data):
     return json.dumps({"schema_version": 1, "kind": "agent-assessment",
-                       "ptest_version": "0.4.1", "domain": None,
+                       "ptest_version": "0.4.2", "domain": None,
                        "data": data, "error": None}).encode()
 
 
@@ -193,7 +193,7 @@ def test_error_documents_carry_null_payload():
         C.encode_public_document("agent-assessment", _payload(),
                                  error=problem)
     hostile = json.dumps({"schema_version": 1, "kind": "agent-assessment",
-                          "ptest_version": "0.4.1", "domain": None,
+                          "ptest_version": "0.4.2", "domain": None,
                           "data": _payload(),
                           "error": {"code": "x", "message": "y",
                                     "phase": "z", "retryable": False},

@@ -65,18 +65,28 @@ The macOS bundles are built and validated from the same sources, but have not
 yet been verified end to end on real macOS hardware; please open an issue if
 anything misbehaves there. Windows is not supported.
 
-### Pin a version, upgrade, remove
+### Update, pin a version, remove
 
 ```sh
-# a specific version
-curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | PTEST_VERSION=0.3.3 sh
+ptest update                   # install the latest release (verified, side by side)
+ptest update --check           # only report whether a newer release exists
+ptest update --version 0.3.3   # a specific version, older ones included
 
-# upgrade: run the one-liner again (the switch is atomic)
-curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | sh
+# or with the one-liner (pin with PTEST_VERSION)
+curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | PTEST_VERSION=0.3.3 sh
 
 ptest --version
 ptest uninstall --self     # remove the installation (run ptest uninstall in a repo first to clean it)
 ```
+
+ptest looks for a newer release at most once a day (2 s network limit,
+cached in the state directory; offline means no notice). At a terminal it
+asks `ptest 0.3.8 is available (you have 0.3.7). Update now? [Y/n]`, then
+runs your command on the new version. Without a terminal (agents, CI,
+pipes) it prints `ptest: update available: 0.3.8 (installed 0.3.7) — run: ptest update`
+and carries on. Running ptest processes keep their version, so updating is safe
+mid-work. `PTEST_NO_UPDATE_CHECK=1`, a truthy `CI`, and `-q` turn the check
+off. From a source checkout ptest says `installed from source; update it with git pull`.
 
 ### Manual install (air-gapped, audited)
 
@@ -442,6 +452,7 @@ hypotheses to verify, not a certificate. `ptest help doctor` has the details.
 | `incomplete (exit 70)` / `changed-during-run` | something wrote into the source tree during the run; the message names the path class (tracked, untracked, ignored) |
 | a plugin is refused | it re-runs or distributes tests: add `-p no:<name>` to `[runner] args` |
 | tests fail with `ModuleNotFoundError` for an optional dependency | ptest installs the test deps only; add the extra to `[setup] argv` (e.g. `--all-extras` or `--extra azure` for `uv sync`) |
+| `ptest: update available: …` | `ptest update` (safe while other runs are active) |
 
 Every command has help: `ptest help`, `ptest help run`, `ptest help init`,
 `ptest doctor --help`.

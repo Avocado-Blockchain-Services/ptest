@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.2
+
+- `ptest update` installs the latest release in place: `ptest update
+  [--check] [--version X.Y.Z] [--json]`. The bundle downloads over HTTPS
+  from the GitHub release only, its SHA-256 is verified before anything
+  runs or extracts, downloads are capped at 64 MiB, and the install runs
+  the same bundled `install.sh`. Bundles install side by side and the
+  launcher switches atomically; a failed update keeps the old bundle.
+  `--check` only reports; `--version` installs exactly the named release;
+  `--json` emits the `update` public document.
+- Startup update check: before most commands ptest looks for a newer
+  release at most once a day (24 h cache, 2 s network limit, silent when
+  offline). At a terminal it prompts `ptest X is available (you have Y).
+  Update now? [Y/n]` and re-runs your command on the new version;
+  otherwise it prints `ptest: update available: X (installed Y) — run:
+  ptest update` and carries on. `PTEST_NO_UPDATE_CHECK=1`, a truthy `CI`,
+  `--fixture-domain` and `-q` opt out; source checkouts say `installed
+  from source; update it with git pull`.
+- The first run of a new ptest version in a checkout checks once whether
+  `ptest doctor --fix` would improve its `.ptest.toml` (init never rewrites
+  an existing config) and says so: `ptest X can improve this config
+  (N changes) — run ptest doctor --fix`.
+- The agent guide has a row for both lines: run `ptest update` / `ptest
+  doctor --fix`, then continue.
+
 ## 0.4.1
 
 - The offline doctor (`ptest doctor --offline`, and the fallback `ptest init`

@@ -790,6 +790,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "2639d68b4727643280c02301e1f21c6813dbcce4596d04b5666f2d0fb6b081c2",
     # 0.3.8: guide before the 0.4.0 full-gate workflow.
     "ed005461b423ccc09fd50433c6fdb0fc0ffceb2f95caf80f158a70ae1e7ede82",
+    # 0.4.0-0.4.1: guide before the update rows.
+    "00ae397ca4360593e329854af6cf4ce6b24624195d2a3083c3379128f771af44",
 })
 
 
