@@ -326,14 +326,17 @@ def _check_bundle_root(root: Path) -> Layout | None:
 
 
 def _bounded_copy(source: BinaryIO, target: Path, max_bytes: int) -> None:
-    """Copy at most ``max_bytes`` into an exclusively created 0600 file."""
-    fd = None
+    """Copy at most ``max_bytes`` into an exclusively created 0600 file.
+
+    A target that already exists is rejected and left untouched: only a
+    file this call created is ever unlinked on failure.
+    """
     try:
-        try:
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                         | os.O_NOFOLLOW, 0o600)
-        except OSError:
-            raise _failed("cannot stage download") from None
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise _failed("cannot stage download") from None
+    try:
         total = 0
         while True:
             chunk = source.read(min(65536, max_bytes - total + 1))
@@ -353,11 +356,10 @@ def _bounded_copy(source: BinaryIO, target: Path, max_bytes: int) -> None:
             pass
         raise
     finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _download_to(transport: Transport, url: str, target: Path,
@@ -854,6 +856,7 @@ def _startup_check(argv: Sequence[str], *, quiet: bool, json_output: bool,
         return
     sys.stderr.write(f"ptest: updated to {result.target_version} "
                      f"(was {result.running_version})\n")
+    sys.stdout.flush()
     sys.stderr.flush()
     launcher = str(layout.root / "ptest")
     try:

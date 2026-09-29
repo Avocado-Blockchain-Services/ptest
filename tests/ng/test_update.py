@@ -134,7 +134,8 @@ def _fake_install_sh(recorder: Path, dest_var: Path, new_version: str,
         + (f"exit 1\n" if fail else
            f"DEST=\"$2\"; V=\"{new_version}\";\n"
            f"mkdir -p \"$DEST/.ptest-bundles/$V-test/venv/bin\"\n"
-           + (f"printf '{{\"version\":1,\"bundle_id\":\"$V-test\",\"ptest_version\":\"$V\"}}' "
+           + (f"printf '{{\"version\":1,\"bundle_id\":\"{new_version}-test\","
+               f"\"ptest_version\":\"{new_version}\"}}' "
                f"> \"$DEST/.ptest-bundles/$V-test/complete.json\"\n"
                f": > \"$DEST/.ptest-bundles/$V-test/venv/bin/ptest\"\n"
                f"ln -sfn \"$DEST/.ptest-bundles/$V-test/venv/bin/ptest\" \"$DEST/ptest\"\n"
