@@ -36,3 +36,7 @@ design/review artifacts. Use only the current task brief and pipeline records
 dated 2026-09-22 or later, unless the user explicitly asks for older history.
 Do not invoke broad history/graph searches that pull those records into
 context. Inspect the current source, tests, and task-owned files directly.
+
+<!-- ptest-agent-rules:start -->
+Before running or changing tests, read `docs/ptest-agent.md`.
+<!-- ptest-agent-rules:end -->
