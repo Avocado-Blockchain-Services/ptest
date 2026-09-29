@@ -3,7 +3,12 @@
 Generates a deterministic ~1000-file, ~700-role fixture in a temporary
 directory, builds one online packet through ``build_packets`` on the
 generated child (which exercises ``rank_candidates`` over the pool), and
-prints one JSON line: {"mode", "files", "seconds"}.
+prints one JSON line: {"mode", "files", "seconds", ...}.
+
+``seconds`` is the summed wall time spent *inside* ``rank_candidates``
+only, captured by monkeypatching the ``review_evidence.rank_candidates``
+module attribute around the timed ``build_packets`` call (``total_seconds``
+reports the whole-pipeline span separately for context).
 
 Runs on base 985d43e/09f6f40 as well as on the optimized tree; record both
 numbers in the T2 report. Must be launched from the checkout under test so
@@ -11,6 +16,7 @@ numbers in the T2 report. Must be launched from the checkout under test so
 """
 from __future__ import annotations
 
+import functools
 import json
 import sys
 import tempfile
@@ -106,13 +112,40 @@ def main() -> None:
         resolution = config_api.resolve_config(root)
         workspace = doctor.inspect_workspace(
             _domain(root), resolution, C.DEFAULT_SCAN_LIMITS, None)
-        # Warm up caches once so the timed run measures steady-state ranking.
+        from ptest import review_evidence as RE
+        # Warm up caches once (unwrapped) so the timed run measures
+        # steady-state ranking.
         AA.build_packets(workspace, resolution)
-        started = time.perf_counter()
-        AA.build_packets(workspace, resolution)
-        seconds = time.perf_counter() - started
+        # Time rank_candidates itself, as seen through build_packets:
+        # _build_one_packet resolves RE via
+        # ``from . import review_evidence as RE`` at call time, so patching
+        # the module attribute intercepts every ranking call.
+        original = RE.rank_candidates
+        rank_seconds = 0.0
+        rank_calls = 0
+
+        @functools.wraps(original)
+        def _timed_rank_candidates(*args, **kwargs):
+            nonlocal rank_seconds, rank_calls
+            started_rank = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                rank_seconds += time.perf_counter() - started_rank
+                rank_calls += 1
+
+        RE.rank_candidates = _timed_rank_candidates
+        try:
+            started = time.perf_counter()
+            AA.build_packets(workspace, resolution)
+            total_seconds = time.perf_counter() - started
+        finally:
+            RE.rank_candidates = original
         print(json.dumps({"mode": "rank_candidates",
-                          "files": total, "seconds": round(seconds, 3)}))
+                          "files": total,
+                          "seconds": round(rank_seconds, 3),
+                          "total_seconds": round(total_seconds, 3),
+                          "rank_calls": rank_calls}))
 
 
 if __name__ == "__main__":
