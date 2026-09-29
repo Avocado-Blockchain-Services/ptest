@@ -87,18 +87,24 @@ def _project_dir(domain: C.DomainPaths, project_id: str, *, create: bool) -> Pat
     return project
 
 
-def _read(directory: Path) -> list[Record]:
+def _read(directory: Path, *, strict: bool = False) -> list[Record] | None:
+    """Records, [] for no ledger; a read error is [] (or None when strict,
+    so a writer never replaces a ledger it could not read)."""
+    if not (directory / _LEDGER).exists() and not (directory / _LEDGER).is_symlink():
+        return []
     try:
         raw = files.read_regular(directory, _LEDGER, _MAX_BYTES + 1)
     except C.Problem:
-        return []
+        return None if strict else []
     if len(raw) > _MAX_BYTES:
         return []
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         return []
-    items = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return []
+    items = data.get("records")
     if not isinstance(items, list):
         return []
     return [record for record in (_valid(item) for item in items) if record is not None]
@@ -138,7 +144,10 @@ def record_green(domain: C.DomainPaths, project_id: str, record: Record) -> None
         if directory is None:
             return
         with _locked(directory):
-            kept = [item for item in _read(directory)
+            current = _read(directory, strict=True)
+            if current is None:
+                return
+            kept = [item for item in current
                     if (item.input_digest, item.scope) != (record.input_digest, record.scope)]
             _write(directory, [record, *kept][:MAX_RECORDS])
     except Exception:
@@ -152,7 +161,9 @@ def forget(domain: C.DomainPaths, project_id: str, input_digest: str) -> None:
         if directory is None:
             return
         with _locked(directory):
-            records = _read(directory)
+            records = _read(directory, strict=True)
+            if records is None:
+                return
             kept = [item for item in records if item.input_digest != input_digest]
             if len(kept) != len(records):
                 _write(directory, kept)

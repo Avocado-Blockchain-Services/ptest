@@ -2611,8 +2611,7 @@ def checkout_scope(root: Path) -> str:
 def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                           result: C.RunResult, published: C.PublishResult) -> None:
     """Share a committed green full baseline with the project's other
-    checkouts, and withdraw any record for a tree whose full run failed.
-    Best-effort: the checkout's own history stays the authority."""
+    checkouts. Best-effort: the checkout's own history stays the authority."""
     try:
         if (not published.committed or result.plan is None
                 or result.plan.execution != "full"):
@@ -2630,8 +2629,20 @@ def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                 scope=checkout_scope(checkout.root),
                 checkout_id=checkout.checkout_id, root=str(checkout.root),
                 created_at=baseline.created_at))
-        elif (result.status is C.Status.FAILED and result.input_before is not None
-              and result.input_before.clean and result.input_before.digest):
+    except Exception:
+        return
+
+
+def _withdraw_verified(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                       result: C.RunResult) -> None:
+    """A full run that failed or did not finish on a clean tree withdraws
+    that tree from the ledger, whether or not its own history commits. A
+    user cancellation proves nothing about the tests and withdraws nothing."""
+    try:
+        if (result.plan is not None and result.plan.execution == "full"
+                and result.status in (C.Status.FAILED, C.Status.INCOMPLETE)
+                and result.input_before is not None
+                and result.input_before.clean and result.input_before.digest):
             verified.forget(domain, checkout.project_id, result.input_before.digest)
     except Exception:
         return
@@ -2649,6 +2660,7 @@ def publish_outcome(
         raise TypeError("history result must be RunResult")
     if inventory is not None and not isinstance(inventory, C.Inventory):
         raise TypeError("history inventory must be Inventory or None")
+    _withdraw_verified(domain, checkout, result)
     for attempt in range(2):
         try:
             marker_code = _disabled_marker(domain, checkout)

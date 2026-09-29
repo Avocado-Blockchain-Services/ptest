@@ -110,13 +110,18 @@ branch left the default branch). No baseline or coverage step is needed.
 Run `ptest --full` once before handoff.
 
 Before merging, bring the base branch into your branch, run `ptest --full`,
-fix and rerun until it is green, then fast-forward the base branch. A green
-full gate is shared by every checkout of the project, so `ptest --full` on the
-fast-forwarded base prints `already verified at <sha> in <worktree>` and runs
-nothing. When a full gate cannot reuse a green run it says why on one line
+fix and rerun until it is green, then fast-forward the base branch. For pytest
+projects a green full gate is shared by every checkout of the project, so
+`ptest --full` on the fast-forwarded base prints
+`already verified at <sha> in <worktree>` and runs nothing. It must match the
+commit, source digest, config and selection policy; installed dependencies are
+not compared (the tracked lockfile stands in for them), and a failed or
+unfinished full run on the same tree in any checkout withdraws it. When a
+pytest full gate cannot reuse a green run it says why on one line
 (`ptest: full gate runs: <reason>`), for example gitignored paths that count as
-test inputs; add those to `[selection] non_input_outputs` so a green run can be
-recorded (a symlinked `.env` shared by worktrees may be declared there).
+test inputs: list those tests never read in `[selection] non_input_outputs`
+and those they read in `ignored_inputs`. A worktree's symlinked `.env` may be
+declared as an output; edits to it then need `ptest --full --again`.
 
 `ptest init` looks at the repository, detects pytest/Vitest/Go/Cargo projects
 (including several in one monorepo), writes a `.ptest.toml` per project, and

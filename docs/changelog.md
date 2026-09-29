@@ -2,23 +2,27 @@
 
 ## 0.4.0
 
-- A green full gate is shared by every checkout of a project. When a full
-  gate passes and records its baseline, ptest adds it to a private,
+- A green full gate is shared by every checkout of a pytest project. When a
+  full gate passes and records its baseline, ptest adds it to a private,
   project-wide ledger; `ptest --full` in another checkout (a worktree, or the
   main checkout after a fast-forward merge) skips with
   `already verified at <sha> in <checkout>` when its clean tree has the same
   commit, source digest, compatibility, selection policy and position in the
-  repository. A full run that fails on the same tree withdraws the record.
-  `--again` still forces a run.
-- A full gate that cannot reuse a green run says why on one line:
+  repository, and its own latest full run on that tree did not fail.
+  Installed dependencies are not compared: the tracked lockfile stands in
+  for them. A failed or unfinished full run on the same tree in any checkout
+  withdraws the record; `--again` still forces a run. The check costs one
+  source capture however many worktrees exist.
+- A pytest full gate that cannot reuse a green run says why on one line:
   `ptest: full gate runs: <reason>` (no green run yet, a new commit,
-  uncommitted changes, a changed policy or config). Gitignored paths that
-  count as test inputs are named, collapsed to the shortest directory that
-  holds no tracked file, with the fix: add them to
-  `[selection] non_input_outputs`.
+  uncommitted changes, limited source evidence, a changed policy or config,
+  or a last full run on this tree that did not pass). Gitignored paths that
+  count as test inputs are named, collapsed only to directories that hold no
+  tracked, untracked or deleted file, with the choice of declaring them in
+  `[selection] non_input_outputs` (tests never read them) or `ignored_inputs`.
 - `[selection] non_input_outputs` entries may be symlinks (for example a
   worktree's `.env` shared from the main checkout); paths ptest reads stay
-  symlink-free.
+  symlink-free. Edits to a path declared this way need `ptest --full --again`.
 - The agent guide, `ptest help agents` and the README teach the merge loop:
   bring the base branch in, `ptest --full`, fix and rerun until green,
   fast-forward, and never rerun for the merge.

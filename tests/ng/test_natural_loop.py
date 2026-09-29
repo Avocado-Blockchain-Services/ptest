@@ -629,15 +629,49 @@ def _dirty(*changes):
                                         new=path, kind=kind) for kind, path in changes))
 
 
+def _files(*paths):
+    return tuple(C.FileFingerprint(path=path, digest="aa" * 32, mode=0o100644, size=1)
+                 for path in paths)
+
+
 def test_undeclared_gitignored_inputs_are_named_with_their_fix():
-    reason = operations.full_run_reason(
-        _baseline(), _dirty(("ignored", "logs/app.log"), ("ignored", "build/x"),
-                            ("ignored", ".env"), ("ignored", "graphify-out/g.json")),
-        "dd" * 32)
+    snapshot = replace(_dirty(("ignored", "logs/app.log"), ("ignored", "build/x"),
+                              ("ignored", ".env"), ("ignored", "graphify-out/g.json")),
+                       files=_files("src/app.py", "logs/app.log", "build/x", ".env",
+                                    "graphify-out/g.json"))
+    reason = operations.full_run_reason(_baseline(), snapshot, "dd" * 32)
     assert reason == (
         "gitignored paths count as test inputs: .env, build, graphify-out (+1 more)"
-        " — add them to [selection] non_input_outputs in .ptest.toml so a green"
-        " run can be recorded and reused")
+        " — in .ptest.toml [selection], list the ones tests never read in"
+        " non_input_outputs and the ones they read in ignored_inputs")
+
+
+def test_an_untracked_sibling_keeps_its_directory_from_being_declared():
+    snapshot = replace(_dirty(("ignored", "newpkg/debug.log"), ("untracked", "newpkg/mod.py")),
+                       files=_files("newpkg/debug.log", "newpkg/mod.py"))
+    reason = operations.full_run_reason(_baseline(), snapshot, "dd" * 32)
+    assert reason.startswith("gitignored paths count as test inputs: newpkg/debug.log —")
+
+
+def test_a_degraded_snapshot_reports_its_limitation_not_a_fix():
+    snapshot = replace(_dirty(("ignored", "src/app/settings_local.py")),
+                       limitations=(C.Reason(code="unknown-input",
+                                             message="file mode differs from Git index"),))
+    assert operations.full_run_reason(_baseline(), snapshot, "dd" * 32) == (
+        "source evidence is limited: file mode differs from Git index")
+
+
+def test_uncommitted_changes_point_at_git_status():
+    reason = operations.full_run_reason(
+        _baseline(), _dirty(("modified", "src/a.py"), ("untracked", "notes.md")),
+        "dd" * 32)
+    assert reason == "uncommitted changes in the working tree (see git status)"
+
+
+def test_a_tree_whose_last_full_run_failed_says_so():
+    assert operations.full_run_reason(
+        _baseline(), _snapshot("a" * 40), "dd" * 32, last_failed=True) == (
+            "the last full run on this tree did not pass")
 
 
 def test_an_ignored_file_beside_tracked_sources_is_named_exactly():
@@ -653,13 +687,6 @@ def test_an_ignored_file_beside_tracked_sources_is_named_exactly():
     assert reason.startswith("gitignored paths count as test inputs: logs, src/generated.py —")
 
 
-def test_uncommitted_changes_are_listed():
-    reason = operations.full_run_reason(
-        _baseline(), _dirty(("modified", "src/a.py"), ("untracked", "notes.md")),
-        "dd" * 32)
-    assert reason == "uncommitted changes: M src/a.py, ? notes.md"
-
-
 @pytest.mark.parametrize("baseline,snapshot,policy,expected", [
     (None, _snapshot("a" * 40), "dd" * 32,
      "no green full run is recorded for this checkout yet"),
@@ -673,3 +700,58 @@ def test_uncommitted_changes_are_listed():
 def test_clean_trees_name_what_differs_from_the_last_green(baseline, snapshot, policy, expected):
     base = _baseline() if baseline == "default" else baseline
     assert operations.full_run_reason(base, snapshot, policy) == expected
+
+
+def test_an_incomplete_full_run_on_the_same_tree_withdraws_the_evidence(case, monkeypatch):
+    domain, main_root, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    snapshot = _snapshot(head)
+    _green_in(domain, linked, snapshot)
+    config = _config(linked)
+    checkout = operations._checkout(config)
+    incomplete = replace(_failed_full(domain, checkout, snapshot,
+                                      operations._policy_digest(config)),
+                         status=C.Status.INCOMPLETE, exit_code=70)
+    history_api.publish_outcome(domain, checkout, incomplete, None)
+    main_config = _config(main_root)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: snapshot)
+    assert operations._full_verified_elsewhere(
+        domain, main_config, operations._checkout(main_config),
+        C.RunRequest(mode=C.Mode.FULL)) is None
+
+
+def test_a_local_failure_on_this_tree_blocks_reuse_from_another_checkout(case, monkeypatch):
+    domain, main_root, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    snapshot = _snapshot(head)
+    main_config = _config(main_root)
+    main_checkout = operations._checkout(main_config)
+    monkeypatch.setattr(operations, "_latest_full_summary",
+                        lambda domain, checkout: {"status": "incomplete",
+                                                  "plan": {"input_digest": _DIGEST}})
+    _green_in(domain, linked, snapshot)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: snapshot)
+    assert operations._full_verified_elsewhere(
+        domain, main_config, main_checkout, C.RunRequest(mode=C.Mode.FULL)) is None
+
+
+def test_many_other_worktrees_cost_one_source_capture(case, monkeypatch):
+    from ptest import verified
+    domain, main_root, _ = _worktree_pair(case)
+    config = _config(main_root)
+    for n in range(20):
+        verified.record_green(domain, config.project_id, verified.Record(
+            run_id=f"{n + 1:032x}", head=f"{n + 1:040x}", input_digest=f"{n + 1:064x}",
+            compatibility=_COMPAT, policy_digest=operations._policy_digest(config),
+            runtime_identity=f"{n + 1:064x}", scope=".", checkout_id=f"{n + 100:032x}",
+            root=f"/w/{n}", created_at="2026-09-25T00:00:00+00:00"))
+    calls = []
+    head = git(main_root, "rev-parse", "HEAD")
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: calls.append(1) or _snapshot(head))
+    assert operations._full_verified_elsewhere(
+        domain, config, operations._checkout(config),
+        C.RunRequest(mode=C.Mode.FULL)) is None
+    assert len(calls) == 1

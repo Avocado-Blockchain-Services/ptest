@@ -2426,25 +2426,22 @@ def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
     return (head[:7], age_s)
 
 
-_KIND_MARK = {"modified": "M", "raw": "M", "mode": "M", "deleted": "D",
-              "untracked": "?", "ignored": "!", "added": "A", "renamed": "R"}
-
-
 def _declarable_outputs(ignored: list[str], snapshot: C.InputSnapshot) -> list[str]:
-    """Collapse ignored files to the shortest directory holding no tracked
-    input, so declaring it can never hide a real source file."""
-    untracked = {change.new or change.old for change in snapshot.changes
-                 if change.kind in ("untracked", "ignored")}
-    tracked = [item.path for item in snapshot.files if item.path not in untracked]
-    tracked_dirs = {"/".join(path.split("/")[:index])
-                    for path in tracked for index in range(1, path.count("/") + 1)}
+    """Collapse ignored files to the shortest directory holding no tracked,
+    untracked or deleted path, so declaring it can never hide another file."""
+    ignored_set = set(ignored)
+    protected = {item.path for item in snapshot.files if item.path not in ignored_set}
+    protected.update(path for change in snapshot.changes if change.kind != "ignored"
+                     for path in (change.old, change.new) if path)
+    protected_dirs = {"/".join(path.split("/")[:index])
+                      for path in protected for index in range(1, path.count("/") + 1)}
     declare = []
     for path in ignored:
         parts = path.split("/")
         chosen = path
         for index in range(1, len(parts)):
             prefix = "/".join(parts[:index])
-            if prefix not in tracked_dirs:
+            if prefix not in protected_dirs:
                 chosen = prefix
                 break
         declare.append(chosen)
@@ -2452,28 +2449,20 @@ def _declarable_outputs(ignored: list[str], snapshot: C.InputSnapshot) -> list[s
 
 
 def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
-                    policy_digest: str) -> str | None:
-    """Why a full gate cannot reuse its last green run, for one stderr line.
-
-    Undeclared gitignored inputs are named with their fix: they make every
-    tree dirty, so no baseline is recorded and nothing is ever skipped.
-    """
-    working = [change for change in snapshot.changes if change.kind in _KIND_MARK]
-    ignored = [change.new or change.old or "" for change in working
+                    policy_digest: str, *, last_failed: bool = False) -> str | None:
+    """Why a full gate cannot reuse its last green run, for one stderr line."""
+    if snapshot.limitations:
+        return f"source evidence is limited: {snapshot.limitations[0].message}"
+    ignored = [change.new or change.old or "" for change in snapshot.changes
                if change.kind == "ignored"]
-    if not snapshot.clean and ignored:
+    if not snapshot.clean and ignored and snapshot.files:
         declare = _declarable_outputs(ignored, snapshot)
         shown = ", ".join(declare[:3]) + (f" (+{len(declare) - 3} more)" if len(declare) > 3 else "")
-        return (f"gitignored paths count as test inputs: {shown} — add them to "
-                "[selection] non_input_outputs in .ptest.toml so a green run can "
-                "be recorded and reused")
+        return (f"gitignored paths count as test inputs: {shown} — in .ptest.toml "
+                "[selection], list the ones tests never read in non_input_outputs "
+                "and the ones they read in ignored_inputs")
     if not snapshot.clean:
-        paths = [f"{_KIND_MARK.get(change.kind, '?')} {change.new or change.old}"
-                 for change in working]
-        if paths:
-            shown = ", ".join(paths[:3]) + (f" (+{len(paths) - 3} more)" if len(paths) > 3 else "")
-            return f"uncommitted changes: {shown}"
-        return "the source tree is not clean"
+        return "uncommitted changes in the working tree (see git status)"
     if baseline is None:
         return "no green full run is recorded for this checkout yet"
     if snapshot.head != baseline.head:
@@ -2483,7 +2472,18 @@ def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
         return "the selection policy changed since the last green"
     if snapshot.digest != baseline.input_digest or snapshot.compatibility != baseline.compatibility:
         return "inputs, config or runner changed since the last green"
+    if last_failed:
+        return "the last full run on this tree did not pass"
     return None
+
+
+def _summary_digest(summary: dict) -> str | None:
+    plan = summary.get("plan") if isinstance(summary, dict) else None
+    digest = plan.get("input_digest") if isinstance(plan, dict) else None
+    if not digest:
+        before = summary.get("input_before") if isinstance(summary, dict) else None
+        digest = before.get("digest") if isinstance(before, dict) else None
+    return digest if isinstance(digest, str) else None
 
 
 def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
@@ -2491,18 +2491,35 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
                              ) -> tuple[str, float, str] | None:
     """(short sha, age_s, checkout root) when another checkout of the same
     project passed exactly these inputs: same position in the repository,
-    policy, commit, clean source digest and compatibility. None otherwise."""
+    policy, commit, clean source digest and compatibility, and this
+    checkout's own latest full run on the same tree did not fail. None
+    otherwise. One source capture unless a matching record needs its own
+    runtime identity."""
     try:
         scope = history.checkout_scope(checkout.root)
+        policy = _policy_digest(config)
         records = [record for record in verified.find(domain, checkout.project_id)
-                   if record.checkout_id != checkout.checkout_id and record.scope == scope]
+                   if record.checkout_id != checkout.checkout_id
+                   and record.scope == scope and record.policy_digest == policy]
         if not records:
             return None
-        policy = _policy_digest(config)
-        snapshots: dict = {}
+        first = _capture_source(
+            domain, config, request, ensure_key=False,
+            execution_tier=C.ExecutionTier.ADVANCED,
+            runtime_identity=records[0].runtime_identity, baseline=None)
+        if not first.clean or not first.digest:
+            return None
+        records = [record for record in records
+                   if record.head == first.head and record.input_digest == first.digest]
+        if not records:
+            return None
+        latest = _latest_full_summary(domain, checkout)
+        if (latest is not None and _summary_digest(latest) == first.digest
+                and latest.get("status") != C.Status.PASSED.value):
+            # This checkout already saw this exact tree fail or not finish.
+            return None
+        snapshots = {records[0].runtime_identity: first}
         for record in records:
-            if record.policy_digest != policy:
-                continue
             identity = record.runtime_identity
             if identity not in snapshots:
                 snapshots[identity] = _capture_source(
@@ -2657,8 +2674,15 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
     except BaseException:
         # Pre-admission only (see above): the admitted flow re-raises.
         return ("run", None, False)
-    if not request.again:
-        reason = full_run_reason(baseline, snapshot, _policy_digest(config))
+    if not request.again and config.runner.kind is C.RunnerKind.PYTEST:
+        # Only runners that record a green baseline can ever skip; others
+        # would be told to fix something that never helps.
+        latest = _latest_full_summary(domain, checkout)
+        reason = full_run_reason(
+            baseline, snapshot, _policy_digest(config),
+            last_failed=(latest is not None
+                         and _summary_digest(latest) == snapshot.digest
+                         and latest.get("status") != C.Status.PASSED.value))
         if reason is not None:
             progress.emit(f"ptest: full gate runs: {render.terminal_text(reason)}",
                           quiet=request.quiet)
