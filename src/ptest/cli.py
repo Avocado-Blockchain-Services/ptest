@@ -820,12 +820,16 @@ def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None)
     if config.runner.kind is C.RunnerKind.PYTEST:
         inspected = pytest_adapter.inspect_capability(config)
     elif config.runner.kind is C.RunnerKind.VITEST:
+        capped = vitest_adapter.capped_major(config) is not None
         inspected = C.Capability(
-            execution=C.ExecutionTier.EXCLUSIVE_COMMAND, selection=False,
+            execution=(C.ExecutionTier.BOUNDED_NATIVE if capped
+                       else C.ExecutionTier.EXCLUSIVE_COMMAND),
+            selection=False,
             lifecycle="cooperative-process-group",
             limitations=(C.Reason(
                 code="unsupported-capability",
-                message=vitest_adapter.VITEST_EXCLUSIVE_NOTE,
+                message=(vitest_adapter.VITEST_CAPPED_NOTE if capped
+                         else vitest_adapter.VITEST_EXCLUSIVE_NOTE),
             ),),
         )
     else:

@@ -23,7 +23,7 @@ import pytest
 import support
 
 from ptest import contracts as C
-from ptest import platform, scheduler
+from ptest import platform, progress, scheduler
 from ptest.cli import parse_argv
 
 _COMMAND_FIXTURE = Path(__file__).parent / "fixtures" / "command" / "command.py"
@@ -868,3 +868,51 @@ def test_status_lines_are_identical_on_tty_and_non_tty():
     assert tty_text == non_tty_text
     assert "\r" not in tty_text  # never a spinner stream
     assert tty_text.count("\n") == 3
+
+
+def test_waiting_line_names_the_real_blocker_when_slots_are_free():
+    # "waiting for 1 slot (2 of 4 free)" was a lie: slots were free and an
+    # exclusive run held the machine. With a blocker the line says so.
+    first = progress.format_waiting(
+        needed=1, free=2, limit=4, timeout_s=60,
+        holders="repo-api (pid 3763337)",
+        blocker="an exclusive run holds the whole machine")
+    assert first == ("ptest: waiting: an exclusive run holds the whole machine"
+                     " — in use by repo-api (pid 3763337) · queue timeout 1m")
+    again = progress.format_waiting(
+        needed=1, free=2, limit=4, timeout_s=60, elapsed_s=16.5,
+        blocker="an exclusive run holds the whole machine")
+    assert again == ("ptest: still waiting: an exclusive run holds the whole"
+                     " machine · 16.5s")
+
+
+def test_waiting_line_keeps_the_slot_wording_without_a_blocker():
+    assert progress.format_waiting(needed=2, free=1, limit=4, timeout_s=60) == (
+        "ptest: waiting for 2 slots (1 of 4 free) · queue timeout 1m")
+
+
+def test_queued_run_behind_an_exclusive_holder_names_it(case):
+    domain = case.domain(slots=2, jobs=2)
+    root = _command_project(case, domain, args=("literal",))
+    # An exclusive holder on a 2-slot machine leaves a slot free: the old
+    # line would have claimed "1 of 2 free" as the reason for waiting.
+    owner = platform.process_identity(os.getpid())
+    holder = C.AdmissionRequest(
+        run_id=secrets.token_hex(16),
+        checkout=C.CheckoutIdentity(project_id="ab" * 16, checkout_id="cd" * 16, root=root),
+        owner=owner, slots=1, exclusive=True, locks=(), memory_mb=None,
+        deadline=time.monotonic() + 300, fixture=True)
+    ticket = scheduler.enqueue(domain, holder)
+    assert scheduler.poll(domain, ticket).state is C.LeaseState.GRANTED
+    try:
+        completed = case.invoke(domain, root, "--full", "--queue-timeout", "3", timeout=30)
+    finally:
+        scheduler.cancel_pending(domain, ticket, owner)
+    lines = _ptest_lines(completed)
+    waiting = [line for line in lines if "waiting" in line]
+    # The queued command run is exclusive itself, so the truthful reason is
+    # that it needs the whole machine while the holder is active.
+    assert waiting and waiting[0].startswith(
+        "ptest: waiting: this run needs the whole machine; 1 run is still active"
+        " — in use by "), lines
+    assert "free)" not in waiting[0]

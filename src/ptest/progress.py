@@ -94,17 +94,23 @@ def format_waiting(*, needed: int, free: int | None, limit: int | None,
                    timeout_s: float, holders: str = "",
                    elapsed_s: float | None = None,
                    position: int | None = None, hint: bool = False,
+                   blocker: str | None = None,
                    color: bool = False) -> str:
+    """Queue wait line. ``blocker`` replaces the slot wording when slots are
+    free and something else (an exclusive run, the job limit, a lock, the
+    same checkout, earlier queued runs) is what the run waits for."""
     if limit is None or free is None:
         capacity = "capacity unknown"
     else:
         capacity = f"{free} of {limit} free"
     need = C.plural(needed, "slot")
     waiting = render.paint("waiting", "yellow", color=color)
+    reason = (f": {render.terminal_text(blocker)}" if blocker
+              else f" for {need} ({capacity})")
     if elapsed_s is not None:
-        return (f"{_prefix(color=color)} still {waiting} for {need} ({capacity})"
+        return (f"{_prefix(color=color)} still {waiting}{reason}"
                 f" · {format_duration(elapsed_s)}")
-    line = f"{_prefix(color=color)} {waiting} for {need} ({capacity})"
+    line = f"{_prefix(color=color)} {waiting}{reason}"
     if holders:
         line += f" — in use by {holders}"
     line += f" · queue timeout {format_timeout(timeout_s)}"

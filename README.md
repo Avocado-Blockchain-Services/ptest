@@ -303,9 +303,17 @@ ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.
   (`-n 4`, `-n auto`), ptest requests that many slots and runs the granted
   number of workers; a single slot runs serially. Without xdist, runs are
   serial.
-- **Vitest** runs as one exclusive `vitest run` that manages its own workers.
+- **Vitest 3 and later**: ptest caps Vitest at the granted slots
+  (`--maxWorkers`, plus the `poolOptions` caps Vitest 3 needs) and runs it
+  alongside other runs. It asks for the project's `workers` when above 1,
+  else half the machine; `--workers N` lowers that. A project that pins its
+  own workers or pool in runner args, or an unknown Vitest version, runs as
+  one exclusive `vitest run` that reserves the whole machine.
 - **Many runs at once**: every ptest on the machine shares one slot budget.
-  Extra runs queue (`waiting for …`) instead of oversubscribing the CPU.
+  Extra runs queue instead of oversubscribing the CPU, and the waiting line
+  says why: slots (`waiting for 2 slots (1 of 8 free)`) or what really holds
+  the run (`waiting: an exclusive run holds the whole machine`, the job limit,
+  a held lock, the same checkout, or earlier queued runs).
 - **Setup** runs before the tests when its required paths are missing or its
   lockfile changed, and is skipped otherwise. `ptest init` picks it from the
   project:

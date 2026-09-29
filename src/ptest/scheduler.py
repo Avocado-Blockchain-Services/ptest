@@ -1584,6 +1584,71 @@ def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, 
         conn.close()
 
 
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
+def _row_blocker(conn: sqlite3.Connection, row: sqlite3.Row, info: dict) -> str | None:
+    """Why ``row`` is not admitted now, in _resources_available's order.
+
+    None means slots (or memory) are the only shortfall; the caller's slot
+    line already says that truthfully.
+    """
+    active = conn.execute(
+        "SELECT run_id,slots,exclusive,checkout_id FROM jobs WHERE state IN (%s)"  # nosec B608 - placeholders are generated for closed enum values
+        % ",".join("?" for _ in _ACTIVE), tuple(_ACTIVE),
+    ).fetchall()
+    if row["exclusive"] and active:
+        verb = "is" if len(active) == 1 else "are"
+        return f"this run needs the whole machine; {_count(len(active), 'run')} {verb} still active"
+    if len(active) >= int(info["config_jobs"]):
+        return (f"the job limit is reached ({len(active)} of "
+                f"{int(info['config_jobs'])} running)")
+    if any(bool(item["exclusive"]) for item in active):
+        return "an exclusive run holds the whole machine"
+    if any(item["checkout_id"] == row["checkout_id"] for item in active):
+        return "this checkout already has a run in progress"
+    wanted = _row_resources(conn, row["run_id"])
+    for item in active:
+        held = sorted(wanted & _row_resources(conn, item["run_id"]))
+        if held:
+            return f"lock '{held[0]}' is held by another run"
+    return None
+
+
+def admission_blocker(domain: DomainPaths, run_id: str) -> str | None:
+    """Best-effort, read-only reason a queued run is still waiting.
+
+    Display-only: None for runs that are not queued, for a slot-only
+    shortfall, and on any state problem. Strict FIFO means earlier queued
+    runs are admitted first, so they are counted ahead of the run's own
+    blocker.
+    """
+    try:
+        conn, _ = _open_state(domain, create=False, read_only=True)
+    except Problem:
+        return None
+    try:
+        conn.execute("BEGIN")
+        info = _domain_info(conn)
+        queued = conn.execute(
+            "SELECT * FROM jobs WHERE state='QUEUED' ORDER BY sequence").fetchall()
+        index = next((position for position, row in enumerate(queued)
+                      if row["run_id"] == run_id), None)
+        if index is None:
+            return None
+        reason = _row_blocker(conn, queued[index], info)
+        if index == 0:
+            return reason
+        verb = "is" if index == 1 else "are"
+        ahead = f"{_count(index, 'earlier run')} {verb} queued first"
+        return ahead if reason is None else f"{ahead}; {reason}"
+    except (sqlite3.Error, Problem, KeyError, TypeError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
 @_transient_retry
 def forget_checkouts(domain: DomainPaths, ids) -> int:
     """Delete only terminal scheduler rows for ``ids``, under one lock.
@@ -1868,5 +1933,6 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
 __all__ = [
     "enqueue", "poll", "register_guard", "mark_draining", "cancel_pending",
     "begin_finalization", "reconcile", "finish", "effective_limits",
+    "admission_blocker",
     "prepare_state_directory",
 ]

@@ -2066,3 +2066,83 @@ def test_partial_parallel_grant_and_queued_request(case, world):
     queued = poll(busy, second)
     assert queued.grant is None
     assert queued.state is C.LeaseState.QUEUED
+
+
+# --- admission_blocker: say what really holds a queued run -----------------
+
+def _live(case, domain, label, **kwargs):
+    request = _request(case, domain, label, deadline=time.monotonic() + 120, **kwargs)
+    ticket = scheduler.enqueue(domain, request)
+    assert scheduler.poll(domain, ticket).state is C.LeaseState.GRANTED
+    return request
+
+
+def _queued(case, domain, label, **kwargs):
+    request = _request(case, domain, label, deadline=time.monotonic() + 120, **kwargs)
+    ticket = scheduler.enqueue(domain, request)
+    assert scheduler.poll(domain, ticket).state is C.LeaseState.QUEUED
+    return request
+
+
+def test_blocker_names_an_exclusive_run_holding_the_machine(case):
+    domain = case.domain(slots=4, jobs=2)
+    _live(case, domain, "vitest", exclusive=True)
+    waiting = _queued(case, domain, "pytest")
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "an exclusive run holds the whole machine")
+
+
+def test_blocker_names_an_exclusive_request_waiting_for_the_machine(case):
+    domain = case.domain(slots=4, jobs=2)
+    _live(case, domain, "pytest")
+    waiting = _queued(case, domain, "vitest", exclusive=True)
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "this run needs the whole machine; 1 run is still active")
+
+
+def test_blocker_names_the_job_limit(case):
+    domain = case.domain(slots=4, jobs=1)
+    _live(case, domain, "first")
+    waiting = _queued(case, domain, "second")
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "the job limit is reached (1 of 1 running)")
+
+
+def test_blocker_names_the_same_checkout(case):
+    domain = case.domain(slots=4, jobs=2)
+    active = _live(case, domain, "repo")
+    waiting = replace(active, run_id="cd" * 16, deadline=time.monotonic() + 120)
+    assert scheduler.poll(domain, scheduler.enqueue(domain, waiting)).state is C.LeaseState.QUEUED
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "this checkout already has a run in progress")
+
+
+def test_blocker_names_a_held_lock(case):
+    domain = case.domain(slots=4, jobs=2)
+    _live(case, domain, "api", locks=("postgres",))
+    waiting = _queued(case, domain, "web", locks=("postgres",))
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "lock 'postgres' is held by another run")
+
+
+def test_blocker_counts_earlier_queued_runs_first(case):
+    domain = case.domain(slots=4, jobs=2)
+    _live(case, domain, "vitest", exclusive=True)
+    _queued(case, domain, "first")
+    waiting = _queued(case, domain, "second")
+    assert scheduler.admission_blocker(domain, waiting.run_id) == (
+        "1 earlier run is queued first; an exclusive run holds the whole machine")
+
+
+def test_blocker_is_none_when_only_slots_are_short(case):
+    domain = case.domain(slots=2, jobs=2)
+    _live(case, domain, "big", slots=2)
+    waiting = _queued(case, domain, "small")
+    assert scheduler.admission_blocker(domain, waiting.run_id) is None
+
+
+def test_blocker_is_none_for_unknown_or_admitted_runs(case):
+    domain = case.domain(slots=4, jobs=2)
+    active = _live(case, domain, "only")
+    assert scheduler.admission_blocker(domain, active.run_id) is None
+    assert scheduler.admission_blocker(domain, "ef" * 16) is None

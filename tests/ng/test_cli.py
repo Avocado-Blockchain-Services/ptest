@@ -4381,3 +4381,21 @@ def test_t2_doctor_mention_sanitizes_hostile_paths(
     assert "not committed:" in out
     assert "\x85" not in out
     assert "\u2028" not in out
+
+
+def test_where_reports_a_capped_vitest_as_bounded(case, monkeypatch, capsys):
+    domain = case.domain()
+    root = case.project(domain, kind="vitest")
+    package = root / "node_modules" / "vitest" / "package.json"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    package.write_text('{"name": "vitest", "version": "3.2.6"}', encoding="utf-8")
+    project_id = (root / ".ptest.toml").read_text().split('project_id = "', 1)[1].split('"', 1)[0]
+    write_ptest_toml(root, kind="vitest", launcher=("node",), args=(), full_args=(),
+                     test_roots=("tests",), workers=1, project_id=project_id)
+    monkeypatch.chdir(root)
+
+    assert main(("--fixture-domain", str(domain.root), "where", "--json")) == 0
+    capability = C.decode_public_document(capsys.readouterr().out).data["capability"]
+    assert capability["execution"] == "bounded_native"
+    from ptest.adapters import vitest as vitest_adapter
+    assert capability["limitations"][0]["message"] == vitest_adapter.VITEST_CAPPED_NOTE

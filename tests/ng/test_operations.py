@@ -1446,3 +1446,63 @@ def test_queue_deadline_while_enqueue_stays_locked_is_the_same_problem(case, mon
     problem = raised.value
     assert (problem.code, problem.message, problem.phase, problem.retryable) == (
         "queue-timeout", "admission queue deadline expired", "execution", True)
+
+
+def _install_vitest_version(root, version):
+    (root / "node_modules" / "vitest" / "package.json").write_text(
+        json.dumps({"name": "vitest", "version": version}), encoding="utf-8")
+
+
+def _recording_enqueue(monkeypatch):
+    seen = []
+    real = scheduler.enqueue
+
+    def record(domain, admission):
+        seen.append((admission.exclusive, admission.slots))
+        return real(domain, admission)
+
+    monkeypatch.setattr(scheduler, "enqueue", record)
+    return seen
+
+
+@pytest.mark.parametrize("config_workers,cli_workers,expected", [
+    (1, None, 2),   # init's default workers=1 is not a choice: half the machine
+    (3, None, 3),   # an explicit project worker count is honoured
+    (1, 1, 1),      # --workers still lowers the request
+])
+def test_capped_vitest_shares_the_machine_with_bounded_slots(
+        case, fake_exec_node, monkeypatch, config_workers, cli_workers, expected):
+    domain = case.domain(slots=4, jobs=2)
+    root = _vitest_project(case, domain, fake_exec_node)
+    _install_vitest_version(root, "3.2.6")
+    toml = root / ".ptest.toml"
+    toml.write_text(toml.read_text(encoding="utf-8").replace(
+        "workers = 1\n", f"workers = {config_workers}\n"), encoding="utf-8")
+    config = config_api.resolve_config(root).config
+    seen = _recording_enqueue(monkeypatch)
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, argv=("src/a.test.ts",), workers=cli_workers))
+
+    assert result.status is C.Status.PASSED
+    assert seen == [(False, expected)]
+    argv = _node_record(root)["argv"][1:]
+    assert argv[:4] == ["node_modules/vitest/vitest.mjs", "run",
+                        f"--maxWorkers={expected}", "--minWorkers=1"]
+    assert f"--poolOptions.threads.maxThreads={expected}" in argv
+    assert argv[-1] == "src/a.test.ts"
+
+
+def test_uncappable_vitest_keeps_exclusive_admission(case, fake_exec_node, monkeypatch):
+    domain = case.domain(slots=4, jobs=2)
+    root = _vitest_project(case, domain, fake_exec_node)
+    config = config_api.resolve_config(root).config
+    seen = _recording_enqueue(monkeypatch)
+
+    result = operations.execute(domain, config, C.RunRequest(
+        mode=C.Mode.SCOPED, argv=("src/a.test.ts",)))
+
+    assert result.status is C.Status.PASSED
+    assert seen == [(True, 1)]
+    assert _node_record(root)["argv"][1:] == [
+        "node_modules/vitest/vitest.mjs", "run", "src/a.test.ts"]

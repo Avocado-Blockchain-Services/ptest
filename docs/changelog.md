@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.8
+
+- Vitest no longer takes the whole machine. Every Vitest run used to be
+  admitted as exclusive, so with several agents one Vitest run at a time
+  stalled every other run behind it. ptest now reads the installed Vitest
+  version and caps it at the granted slots: Vitest 3 gets `--maxWorkers`,
+  `--minWorkers=1` and the `poolOptions` thread/fork caps (it ignores
+  `--maxWorkers` when the project config sets pool limits), Vitest 4 and
+  later get `--maxWorkers`. The run then shares the machine like pytest. It
+  asks for the project's `workers` when above 1, else half the machine.
+  Unknown versions and projects that pin workers or pool in runner args keep
+  the old exclusive run.
+- The waiting line names what a queued run really waits for when slots are
+  free: an exclusive run holding the machine, a run that needs the whole
+  machine, the job limit, a held lock, the same checkout, or earlier queued
+  runs. `waiting for N slots (M of L free)` now only appears when slots are
+  the shortfall.
+
 ## 0.3.7
 
 - A scoped or changed-tests run no longer takes its execution deadline from

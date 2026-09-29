@@ -42,6 +42,7 @@ class RunnerAdapter:
     _compound_support: CompoundSupportFn = _unsupported_support
     _qualified_profile: QualifiedProfileFn | None = None
     _prepare_advanced: PrepareAdvanced | None = None
+    _exclusive_for: Callable[[C.Config], bool] | None = None
 
     def prepare(self, config: C.Config, plan: C.Plan, grant: C.Grant,
                 attempt: C.AttemptIdentity) -> C.PreparedRun:
@@ -77,6 +78,8 @@ class RunnerAdapter:
     def requires_exclusive(self, config: C.Config) -> bool:
         if not isinstance(config, C.Config) or config.runner.kind is not self.kind:
             raise TypeError("runner adapter requires matching Config")
+        if self._exclusive_for is not None:
+            return self._exclusive_for(config)
         return self._exclusive
 
     def mode_for_automatic(self) -> str:
@@ -94,6 +97,7 @@ _REGISTRY: dict[C.RunnerKind, RunnerAdapter] = {
     C.RunnerKind.VITEST: RunnerAdapter(
         C.RunnerKind.VITEST, vitest_adapter.prepare,
         _exclusive=True, automatic_full=True,
+        _exclusive_for=vitest_adapter.requires_exclusive,
     ),
     C.RunnerKind.GO: RunnerAdapter(
         C.RunnerKind.GO, simple_adapter.prepare,

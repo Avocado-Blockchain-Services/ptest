@@ -2672,7 +2672,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raise _problem("unsupported-capability", "native profile execution is deferred")
     if request.mode is not C.Mode.SCOPED and request.argv:
         raise _problem("invalid-config", "literal command arguments require scoped mode")
-    if not native_runner and not adapter.requires_exclusive(config):
+    # A non-native runner is exclusive unless its adapter can bound its own
+    # workers; only capped Vitest can today, everything else keeps the whole
+    # machine.
+    bounded_runner = not native_runner and not adapter.requires_exclusive(config)
+    exclusive_admission = not native_runner and not bounded_runner
+    if bounded_runner and config.runner.kind is not C.RunnerKind.VITEST:
         raise _problem("unsupported-capability", "command execution requires exclusive admission")
     run_id = secrets.token_hex(16)
     planning_runtime = (
@@ -2777,6 +2782,16 @@ def execute(domain: C.DomainPaths, config: C.Config,
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
+    elif bounded_runner:
+        # ptest caps a bounded runner at its grant, so the request is its
+        # parallelism: an explicit project worker count, else half the
+        # machine (init's default workers=1 is not a choice), never more
+        # than --workers.
+        requested_slots = (config.runner.workers if config.runner.workers > 1
+                           else max(1, (scheduler.effective_limits(domain).max_slots or 2) // 2))
+        if request.workers is not None:
+            requested_slots = min(requested_slots, request.workers)
+        requested_slots = min(requested_slots, 64)
     else:
         requested_slots = 1 if (native_pytest and not advanced) else min(
             config.runner.workers,
@@ -2830,7 +2845,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         memory = config.resources.memory_mb_per_worker or None
         admission = C.AdmissionRequest(
             run_id=run_id, checkout=checkout, owner=owner,
-            slots=requested_slots, exclusive=not native_runner,
+            slots=requested_slots, exclusive=exclusive_admission,
             locks=config.resources.locks, memory_mb=memory,
             deadline=time.monotonic() + request.queue_timeout_s,
             fixture=domain.fixture,
@@ -2840,7 +2855,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             progress.emit(
                 f"ptest: -v admission: requested {requested_slots} "
                 f"slot{'s' if requested_slots != 1 else ''}"
-                f"{', exclusive' if not native_runner else ''}",
+                f"{', exclusive' if exclusive_admission else ''}",
                 quiet=request.quiet)
         waited = False
         wait_last = 0.0
@@ -2873,12 +2888,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 in_use, limit, holders = _waiting_snapshot(domain, run_id)
                 free = (max(0, limit - in_use)
                         if limit is not None else None)
+                # When enough slots are free, slots are not the reason: name
+                # what the run really waits for instead of "N of M free".
+                blocker = (scheduler.admission_blocker(domain, run_id)
+                           if free is None or free >= requested_slots else None)
                 progress.emit(progress.format_waiting(
                     needed=requested_slots, free=free, limit=limit,
                     timeout_s=request.queue_timeout_s, holders=holders,
                     elapsed_s=None if first else elapsed,
                     position=state.position if request.verbose else None,
-                    hint=first and progress.claim_hint()), quiet=request.quiet)
+                    hint=first and progress.claim_hint(),
+                    blocker=blocker), quiet=request.quiet)
             time.sleep(min(C.SCHEDULER_POLL_S, max(0, admission.deadline - time.monotonic())))
         if grant is None:
             raise _problem("ownership-uncertain", "scheduler grant was incomplete")
