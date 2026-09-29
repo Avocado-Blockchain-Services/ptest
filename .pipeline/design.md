@@ -11,13 +11,14 @@ edits and no transcription step.
 
 | Task | Owns (only these files) |
 |---|---|
-| T1 offline static path | `src/ptest/agent_assessment.py`, `src/ptest/cli.py`, `src/ptest/doctor.py` (no edit expected), NEW `tests/ng/test_doctor_offline_light.py`, NEW `scripts/bench_doctor_offline.py` |
+| T1 offline static path | `src/ptest/agent_assessment.py`, `src/ptest/cli.py`, `src/ptest/help.py` (doctor topic only, D3a), `src/ptest/doctor.py` (no edit expected), NEW `tests/ng/test_doctor_offline_light.py`, NEW `scripts/bench_doctor_offline.py` |
 | T2 ranking speed | `src/ptest/review_evidence.py`, NEW `tests/ng/test_rank_candidates_perf.py`, NEW `scripts/bench_rank_candidates.py` |
 | T3 commit reminder | `src/ptest/config.py`, `src/ptest/init_render.py`, NEW `tests/ng/test_init_commit_reminder.py` |
 
 The following are read-only for every task: `worktree.py`, `review_context.py`,
 `deterministic_items.py`, `render.py`, `contracts.py`, `tests/ng/support.py`,
-`tests/ng/factories_agents.py`, and every existing test file except where a criterion below
+`tests/ng/factories_agents.py`, `tests/ng/test_help.py` (it must pass unmodified; T1's new
+help assertions live in T1's new test file), and every existing test file except where a criterion below
 says a task may update an existing assertion that its intended behaviour change breaks.
 
 ---
@@ -117,8 +118,10 @@ Then:
    - else `emu_files += 1`, `emu_bytes += chunk`, and if `was_cut`, `truncated += 1`
 
    This step changes only `state.skipped` and `state.truncated`. It never touches the
-   candidate read ledger, `state.excerpts`, `byte_count` or `paths`. Name it
-   `_project_static_admission(state, candidates: list[tuple[str, int]], limits) -> None`.
+   candidate read ledger, `state.excerpts`, `byte_count` or `paths`. It returns the number of
+   emulated admissions (the count of `emu_files += 1` steps). Name it
+   `_project_static_admission(state, candidates: list[tuple[str, int]], limits) -> int`.
+   The return value becomes the packet's `_projected_admitted` (step 6, D2a).
 4. **Dependencies.** `_dependency_facts(...)` runs exactly as today on the static `paths` and
    state, with `package.json` text taken from the core excerpt.
 5. **Prompt cap.** The prompt-cap trim loop runs unchanged.
@@ -127,7 +130,7 @@ Then:
    are built differently and cannot be confused. Set
    `_item_chains = tuple((digest, item.id, ()) for item in model_items)` so that
    `RE.select_item_sources` uses the bound empty chains and **never** calls
-   `item_source_chains` offline.
+   `item_source_chains` offline. Set `_projected_admitted` to step 3's return value.
 7. **Never called with `static=True`:** `_candidate_text_pool`, `RE.rank_candidates`,
    `RE.item_source_chains`, `_resolve_tier4`, `complete_chain` and `admit_chain`. No
    non-core, non-marker file is read by admission.
@@ -137,8 +140,47 @@ Then:
 - `project_id`, `runner_kind` and `scope` are resolved exactly as at the head of
   `_build_one_packet`, including the fallback for `declaration == "."` with no config.
 - `excerpts=()`, `dependencies=()`, all counts `0`, `context=None` (becomes
-  `RC.empty_context`), `_inventory_sha256=None`.
+  `RC.empty_context`), `_inventory_sha256=None`, `_projected_admitted=0`.
 - `_item_chains` is bound to its own digest, as in step 6.
+
+### D2a. Evidence presence survives the static packet (frozen, T1)
+
+`_assessment_limitations` (cli.py:1651, 1666) branches on `not packet.excerpts` to choose
+between "No source files were admitted to this project packet. " and "Evidence limits: ",
+and to decide whether a `partial-evidence` limitation exists at all. A static packet admits
+only core and marker files, so under `--scope <subdir>` (every rel is nested, so there are
+no priority-0 root files, and conftest.py has role `fixture`, not `setup`) or in an
+uninitialized repo with no root decision or marker file, `excerpts == ()`. The full path
+would late-admit the tree's non-test files there. The static packet therefore carries the
+projected admission count, and the limitation reads evidence presence through one helper:
+
+```python
+# src/ptest/agent_assessment.py  (FROZEN)
+@dataclass(frozen=True, slots=True)
+class EvidencePacket:
+    ...                                   # every existing field unchanged, same order
+    _inventory_sha256: str | None = None
+    _projected_admitted: int = 0          # NEW, last field. Static packets only; 0 on every
+                                          # packet built by build_packets. __post_init__
+                                          # rejects bool and negative values (TypeError/ValueError).
+
+def packet_has_evidence(packet) -> bool:
+    """bool(packet.excerpts) or getattr(packet, "_projected_admitted", 0) > 0."""
+```
+
+- `_projected_admitted` is **not** part of `_packet_body`, `packet_hash` or any rendered or
+  serialized field. Online `packet_sha256` values and T2's base-captured goldens are
+  unaffected.
+- `cli._assessment_limitations` replaces both `not packet.excerpts` tests (the `if`
+  condition and the message prefix choice) with `not agent_assessment.packet_has_evidence(packet)`.
+  This is the only edit to a function the online path shares. It is behaviour-neutral
+  there because `build_packets` packets always have `_projected_admitted == 0`, and
+  existing tests that build packets or fakes directly (`test_agent_assessment.py:1346-1389`)
+  must pass unmodified. `getattr` keeps fakes without the attribute working.
+- Why this is exact: under the exactness condition (D4), every candidate that step 3 counts as
+  admitted is a non-empty UTF-8 file that the full path late-admits, so
+  `packet_has_evidence(static) == bool(full.excerpts)` whenever step 3 admits at least one
+  file or a core or marker file was admitted. The remaining case is D4 row 4.
 
 ### D3. cli wiring (frozen shapes, T1)
 
@@ -170,15 +212,46 @@ def _offline_progress(parsed: ParsedArgs, resolution) -> Callable[[str, int], No
   `_assessment_limitations(packets, top_level=True)` and the initialization blocker, keeping
   the existing `[:64]` bound. No new limitation code is added: `contracts.py` is untouched.
 - `_offline_progress` returns `None` when `parsed.quiet` is set or `sys.stderr.isatty()` is
-  false. Otherwise it returns an emitter that writes exactly one line per call to **stderr
+  false. `parsed.quiet` can be True on this path only through `doctor --offline -q` (D3a).
+  `ptest init` and default `ptest doctor` gain no quiet flag, so their declined-review
+  fallback always has `quiet == False` and narrates only on a TTY (a declined review has
+  already interacted on that TTY). Otherwise it returns an emitter that writes exactly one line per call to **stderr
   only**, flushed:
   `ptest: doctor: inspecting {label} · {C.plural(file_count, 'file')}`.
   `label` is the `declaration`, or `resolution.root.name` for `"."`, passed through
   `render.terminal_text`. Match the non-UTF-8 fallback of the existing `ptest:` stderr
   narration. The emitter swallows `OSError`. Stdout is never written, including under `--json`.
-- The online path (`_run_doctor_review`) and `build_packets` get **zero** edits.
+- The online path (`_run_doctor_review`) and `build_packets` get **zero** edits. The only
+  shared-function edit is the behaviour-neutral `_assessment_limitations` change in D2a.
 - `doctor.py` needs no change: the file count comes from the packet walk. If T1 finds it must
   edit `doctor.py`, the change stays within `inspect_workspace` and changes no output.
+
+### D3a. `doctor --offline -q | --quiet` grammar (frozen public CLI contract, T1)
+
+Only the `doctor` branch of `_parse_inspection` changes. The `init` parser and the execution
+parser are untouched.
+
+- Tokens: `-q` and `--quiet`, which are synonyms. Track `quiet_seen`. A second occurrence of
+  either token raises `invalid-config` "option cannot be repeated" (same rule as doctor's `-v`).
+- Validation, in the parser's existing order (first failing rule wins):
+  1. With `--probe`, the existing output-mode check becomes
+     `if json_output or verbose_seen or quiet_seen:` and raises the existing
+     "doctor probe cannot combine output modes".
+  2. With `--fix`, the existing check becomes `if json_output or scope is not None or limits or quiet_seen:`
+     and raises the existing "--fix takes no output, scope, or scan-limit options".
+  3. After the `--fix` block and before `if fix_dry or verbose_seen:`, add:
+     `if quiet_seen and not offline: raise _problem("invalid-config", "--quiet requires --offline")`.
+  4. Otherwise `--offline -q` is accepted with and without `--json`, `--scope` and the scan
+     limits. The final `ParsedArgs(...)` gets `quiet=quiet_seen`. Under `--json` it is a
+     no-op, because JSON never narrates.
+- Effect: it suppresses only the D3 offline progress lines. Stdout, the exit status and
+  every other stderr line are unchanged.
+- Help (`src/ptest/help.py`, `_DOCTOR` only): the offline syntax line becomes
+  `ptest doctor --offline [--json] [-q | --quiet] [--scope PATH] [--max-entries N]` (the
+  continuation line is unchanged). Add one Notes sentence: "Offline static inspection
+  prints one progress line per project to stderr on a TTY; -q/--quiet suppresses it."
+  No other help topic, README or guide text changes. The text must pass the existing
+  `test_help.py` checks unmodified, including the banned-terms check.
 
 ### D4. Documented, unavoidable differences (offline only; the online path is unchanged)
 
@@ -187,11 +260,18 @@ def _offline_progress(parsed: ParsedArgs, resolution) -> Callable[[str, int], No
 | `children[*].packet_sha256` (JSON only; never in the grid) | Always differs from 0.3.7: it is the static packet's body hash | The old value commits to ranked late excerpts and the pool inventory digest, which requirement 1 forbids building. Offline publication is always `skipped` and no report is written, so nothing compares it with an online identity. |
 | `partial-evidence` counts, and in rare cases whether that limitation exists (so the grid's partial marker) | Can differ when a per-child cap binds (more than 64 admitted files, more than 512 KiB, or an exhausted candidate ledger), or when a non-core candidate is binary, non-UTF-8 or unreadable | The static accounting projects outcomes from size metadata only. Content and rank order are unknowable without the forbidden reads. |
 | Lock `locked` vs `uninspectable`; scoped `ref_path` when two marker files share a basename | Can differ only when the full path's candidate ledger is exhausted, or when duplicate marker basenames exist in a scoped run | The static ledger is not drained by pool reads, and marker admission order is `rel`-sorted rather than rank-ordered. |
+| The child's `partial-evidence` limitation (so the grid's partial marker, and the deduplicated top-level copy) when the static packet has **no evidence**: no core file, no marker file, and step 3 projects zero admissions. Typical cases are `--scope <dir>` over a tree of only test-role files plus empty `__init__.py`, and an uninitialized repo that holds only tests. | Static always emits "No source files were admitted to this project packet. ..." for that child. The full path emits the same text only if it admitted no test chain; otherwise it emits "Evidence limits: ..." or no `partial-evidence` limitation. | Every remaining file is test-role. The full path admits test files only as chain callers selected by `RE.item_source_chains` over read and ranked test texts. Knowing whether any chain exists requires exactly those reads, which requirement 1 forbids. The static message is literally true: the static packet admitted no source files. |
 
-**Exactness condition (tested).** No per-child cap binds, and every non-core candidate is
-either empty or UTF-8 text without NUL; this includes empty `__init__.py` files and
-single-file cut beyond `max_bytes_per_file`. Under that condition the grid text (duration
-masked) is byte-identical to today's, and so is the JSON document except
+**Exactness condition (tested).** All of the following hold:
+- No per-child cap binds.
+- Every non-core candidate is either empty or UTF-8 text without NUL. This covers empty
+  `__init__.py` files and a single non-test file cut at `max_bytes_per_file`.
+- No chain-admitted test file exceeds `max_bytes_per_file`.
+- The static packet has evidence (`packet_has_evidence`, D2a); that is, row 4 does not
+  apply.
+
+This holds for scoped runs and uninitialized repos too. Under that condition the grid text
+(duration masked) is byte-identical to today's, and so is the JSON document except
 `children[*].packet_sha256`.
 
 ## 3. T2 decisions: faster `rank_candidates`, identical selection
@@ -312,13 +392,37 @@ under 2 s: fixtures are small and function-scoped. Commit only in your own workt
    - `_offline_assessment_parts` child rows, findings, scores, execution, facts and
      limitations equal.
 
-   Fixtures, all within the exactness condition: standalone
-   (`factories_agents.doctor_assessment_project`); a 2-child v2 monorepo; a pytest child with
-   empty `__init__.py` files and one file larger than `MAX_BYTES_PER_FILE`; a child with a
-   root `setup.py` (an unsupported marker); and a node child with `package.json`.
-3. **Documented difference.** A fixture with more than 64 non-test files: both paths show a
-   `partial-evidence` limitation for that child and identical rows. Only counts and
-   `packet_sha256` may differ; assert exactly that.
+   The fake must accept and ignore `build_static_packets`' keyword arguments.
+
+   Fixtures, all within the exactness condition:
+   - standalone (`factories_agents.doctor_assessment_project`);
+   - a 2-child v2 monorepo;
+   - a pytest child with empty `__init__.py` files and one non-test file larger than
+     `MAX_BYTES_PER_FILE`;
+   - a child with a root `setup.py` (an unsupported marker);
+   - a node child with `package.json`;
+   - **scoped:** the 2-child monorepo run as `doctor --offline --scope api/tests` and
+     `--offline --json --scope api/tests`, where `api/tests` holds test files, empty
+     `__init__.py` and a non-empty `conftest.py`. Also a standalone project run with
+     `--scope src/pkg`, holding one non-test module;
+   - **uninitialized:** a standalone directory with no `.ptest.toml`, no root decision file
+     and no marker, holding `src/app.py` and `tests/test_app.py`.
+
+   For the scoped and uninitialized fixtures, also assert on the static packets directly
+   that `excerpts == ()` and `_projected_admitted > 0`. This proves that D2a's branch, not
+   luck, keeps the output identical.
+3. **Documented differences.**
+   - Cap row (D4 row 2): a fixture with more than 64 non-test files. Both paths show a
+     `partial-evidence` limitation for that child and identical rows. Only counts and
+     `packet_sha256` may differ; assert exactly that.
+   - No-evidence row (D4 row 4): the 2-child monorepo with `--scope api/tests`, where
+     `api/tests` holds only `test_*.py` files and empty `__init__.py`. The static child's
+     limitations contain the `partial-evidence` entry whose message starts
+     "No source files were admitted to this project packet. ". Rows are identical. After
+     removing `children[*].packet_sha256` and every `partial-evidence` entry whose paths
+     are `["api/tests"]` (child and top level), the static and reference JSON are equal.
+     Assert exactly that, and nothing about the reference's message, because whether it
+     admits a chain depends on ranking.
 4. **Read contract.** In static mode, wrap `agent_assessment.read_regular` to record paths.
    No admission-phase read touches a non-core, non-marker source file, for example
    `src/app/service.py` in a pytest fixture. Context-collection reads are allowed; attribute
@@ -333,12 +437,29 @@ under 2 s: fixtures are small and function-scoped. Commit only in your own workt
 6. **Progress.** Fake `sys.stderr.isatty` to True: exactly one
    `ptest: doctor: inspecting <label> · N files` line per child, with N equal to the child's
    regular-file count after lock removal, `.` rendered as the repo directory name, and
-   singular `1 file`. `-q` gives no lines. When stderr is not a TTY there are no lines and
-   existing `err == ""` assertions still hold. `--json` stdout contains no progress bytes.
-   A declaration containing control characters is sanitized.
+   singular `1 file`. When stderr is not a TTY there are no lines and existing
+   `err == ""` assertions still hold. `--json` stdout contains no progress bytes. A
+   declaration containing control characters is sanitized.
+   **Quiet, through the CLI (D3a).** With the TTY faked, `main(("doctor","--offline","-q"))`
+   and `main(("doctor","--offline","--quiet"))` exit 0 and write no progress line. Their
+   stdout equals the un-quieted run's stdout, with the duration masked.
+   `main(("doctor","--offline","--json","-q"))` exits 0 with the same JSON bytes as without
+   `-q`. Parser contract through `cli.parse_argv`:
+   - `("doctor","--offline","-q")` and `("doctor","--offline","--json","--quiet")` give
+     `quiet is True`.
+   - `("doctor","-q")` raises `invalid-config` "--quiet requires --offline".
+   - `("doctor","--offline","-q","--quiet")` raises "option cannot be repeated".
+   - `("doctor","--fix","-q")` raises "--fix takes no output, scope, or scan-limit options".
+   - `("doctor","--probe","--scope","tests/x.py","-q")` raises "doctor probe cannot combine
+     output modes".
+   - **Negative contract:** `("init","-q")` still raises "unknown inspection option".
+
+   `main(("help","doctor"))` output contains `[-q | --quiet]` and the D3a Notes sentence.
 7. **Online unchanged.** `build_packets` gives the same `packet_sha256` as before on the
    standalone fixture: compute it through `build_packets` in the test and assert it differs
    from the static digest while `build_packets` itself was not edited (diff check in review).
+   Every `build_packets` packet has `_projected_admitted == 0`, and adding that field leaves
+   its `packet_sha256` unchanged.
    Existing online tests in `test_agent_assessment.py` and `test_agent_doctor_acceptance.py`
    pass unmodified.
 8. **Benchmark.** `scripts/bench_doctor_offline.py` is self-contained and deterministic. It
@@ -350,7 +471,7 @@ under 2 s: fixtures are small and function-scoped. Commit only in your own workt
    from a detached base worktree under `/home/ingmar/worktrees/ptest/cc-doctor-offline/`
    with its own `uv sync`. Run it once before and once after, and record both in the T1
    report. It is not collected as a test.
-9. Scoped runs: `tests/ng/test_doctor_offline_light.py tests/ng/test_agent_doctor_acceptance.py tests/ng/test_doctor_grid.py tests/ng/test_cli.py tests/ng/test_agent_assessment.py tests/ng/test_init.py`.
+9. Scoped runs: `tests/ng/test_doctor_offline_light.py tests/ng/test_agent_doctor_acceptance.py tests/ng/test_doctor_grid.py tests/ng/test_cli.py tests/ng/test_agent_assessment.py tests/ng/test_init.py tests/ng/test_help.py tests/ng/test_doctor_fix.py`.
 
 ### T2: ranking speed
 
