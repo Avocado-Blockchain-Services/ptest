@@ -1,134 +1,117 @@
-# T2 report — route bare ptest / --changed through impact
+# T2 report — CLI: --from-main, config-uncommitted surfacing, run warning, commit_paths, doctor mention
 
-- taskWorktree: /home/ingmar/worktrees/ptest/cc-changed-by-default/ptest-T2
-- taskBranch: feature/changed-by-default-T2
-- commit: fd52674 ("Route bare ptest/--changed through impact selection")
-- status: done (scoped suite green; one integration seam noted below)
+Worktree: `/home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T2`
+Branch: `feature/worktree-safe-config-T2` (off `feature/worktree-safe-config` @ 5159175)
+Commit: `3343450 T2: --from-main flag, config-uncommitted CLI surfacing, run warning, commit_paths, doctor mention`
+TDD: 26 new tests written first → 16 failed / 10 passed pre-change (the 10 passed via T1 core) → implemented → all green.
 
-## What changed (owned files only, 9 files)
+## Files changed
 
-- `src/ptest/contracts.py` — `RunRequest` gains trailing `changed_note: str | None = None`
-  (validated with `_check_str` when not None) and `next_hint: bool = False`
-  (validated with `_check_bool`), per design §4.3.
-- `src/ptest/progress.py` — adds `NEXT_FULL`, `NEXT_FIX`, `next_step(status, narrowed)`,
-  `format_impact(project, note)`, `format_nothing_changed(label)`; `format_end` gains
-  keyword-only `next_step`, appended after `(exit N)`, suppressing the `-v` HINT.
-  Old helpers (`format_changed_selected`, `format_changed_start`,
-  `explain_changed_full_reason`) KEPT — still reachable via `operations.execute` AUTOMATIC.
-- `src/ptest/operations.py` — `_emit_start` prints `ptest: <project> · <note>` (+ `-v plan`
-  line) when `changed_note` is set; `_emit_end` computes
-  `next_step(status, mode is SCOPED)` when `next_hint`, claiming the `-v` hint only
-  when the next-step is None.
-- `src/ptest/cli.py` — `_impact_note` (exact §4.5 wording, paths/label/reason escaped),
-  `_impact_run_request` mapping (selected→SCOPED files / vitest→SCOPED
-  `('--changed', sha or 'HEAD')` / full→FULL `changed → full suite: reason` /
-  none→skip, all with `base=None`), `_run_impact_standalone` (own `next_hint=True`;
-  none-with-changes prints the no-tests line, none-empty prints nothing-changed, exit 0,
-  no execute), `_run_impact_monorepo` (base+changed computed ONCE; per-child plans;
-  all-none-empty → only nothing-changed, no total; children `next_hint=False`; total
-  carries `next_step(worst, narrowed)`), `_run_monorepo_automatic` fallback for
-  shadow/probe at a monorepo root (keeps the AUTOMATIC engine, flags carried through).
-  Routing condition standalone: `mode is AUTOMATIC and not shadow and probe is None`.
-  `_run_doctor_fix` prints the §4.8.3 line; no `record a baseline` remains in cli.py.
-- `src/ptest/monorepo.py` — deleted per D10: `ChangedChild`, `_COMMIT_RE`,
-  `_child_baseline_head`, `child_baseline_heads`, `_committed_since`, `_run_all`,
-  `select_changed_children`, `_classify`, `_vitest_base`, `child_changed_request`,
-  and the now-unused `selection._matches` import. Kept `_git_blob`, `_repo_path`,
-  `_nul_paths`, `worktree_changed_files`.
-- `tests/ng/test_changed_default.py` (new, 28 tests) — routing pinned with a
-  `sys.modules["ptest.impact"]` stub: request mapping + notes for selected/full/vitest,
-  single-file counters, HEAD fallback, none/nothing lines + exit 0 + no execute,
-  `--base` forwarding, bad-`--base` Problem, shadow/`--full` bypass, monorepo
-  per-child lines + total hint + failure hint, `next_step` matrix, `format_end`
-  hint suppression, real `_emit_end`/`_emit_start` wiring, `RunRequest` validation,
-  doctor `--fix` §4.8.3 line.
-- `tests/ng/test_monorepo_changed.py` — rewritten to impact routing (stubbed);
-  `worktree_changed_files` + skip-line style tests kept verbatim.
-- `tests/ng/test_natural_loop.py` — section 1 rewritten (bare≡--changed now means
-  identical SCOPED requests; clean monorepo root → nothing-changed, no total).
-- `tests/ng/test_run_output.py` — bare invokes that only needed "run the project"
-  now pass `--full` (14 sites); `-v plan: full · mode automatic` pinned in-process
-  via `operations.execute(AUTOMATIC)`; quiet-refusal now pins the full-gate
-  `native-config-invalid` refusal (comment explains the route).
-- `tests/ng/test_changed_explain.py` — untouched, still green (AUTOMATIC path kept).
+- `src/ptest/cli.py` (+104): the only source file touched.
+  - `ParsedArgs.from_main` + init parser `--from-main` flag (repeat-harmless); `--from-main` with `--runner`/`--child` raises the frozen `invalid-config` text.
+  - Init branch: `config_uncommitted` pre-check before any prompt (exit 2, nothing written); `from_main` passed into `C.InitOptions`; `commit_paths` extended with created/updated `guidance` agent-rule targets, only inside a git checkout (`git_root is not None`).
+  - Reroute: condition widened to `{"initialization-required", "config-uncommitted"}`; on `("missing", typed)` raises `config_uncommitted(scope_dir)`, falling back to `config_uncommitted(cwd)` (scope paths are usually absent from the worktree since uncommitted main files never arrive); otherwise the old "no ptest project … — run ptest init there" line, byte-identical.
+  - `_warn_uncommitted_config` (frozen 1 / N>1 texts, `progress.emit(..., quiet=quiet)`, try/except-all), called right after `_warn_stale_guidance`.
+  - `where`: `config-uncommitted` warnings entry for `--json` (exit 0); one stderr line after stdout for human.
+  - `doctor` branch: first-statement raise on `config-uncommitted` (before `--fix`/`--probe`/offline/consent).
+  - `_uncommitted_mention` (frozen text, `include_agent_rules=True`, None on empty/exception); printed after the offline grid next to `_fix_mention`, and after `_run_review_entry` returns in the online path when not declined and not `--json` (declined funnels through the static grid, so the line still appears exactly once; never for `--json`/`--fix`/`--probe`).
+- `tests/ng/test_cli.py` (+440): 21 new `test_t2_*` tests (26 with params), frozen `_linked_worktree` helper copied verbatim, `_git_only_popen` helper, `commit_paths` added to the init JSON key-set assertion; 4 pre-existing doctor/Popen-ban tests given a git-only carve-out (see stragglers).
+- `tests/ng/test_init_smoke.py` (1 line): `commit_paths` added to the init JSON key-set assertion.
 
-## Verification (observed)
+No other source file touched. `graphify update .` run.
 
-- `test_changed_default.py` red first: 24 failed / 3 passed before implementation.
-- Final: `.venv/bin/ptest --workers 2 tests/ng/test_changed_default.py
-  tests/ng/test_monorepo_changed.py tests/ng/test_changed_explain.py
-  tests/ng/test_natural_loop.py tests/ng/test_run_output.py` → **130 passed**
-  (worktree `/home/ingmar/worktrees/ptest/cc-changed-by-default/ptest-T2`, exit 0).
-- `grep -rn "child_baseline_heads\|select_changed_children\|child_changed_request" src tests`
-  → empty. `grep -rn "record a baseline" src/ptest/cli.py` → empty.
-- Never ran `--full` suite, never pushed; no migration; no live/external tests.
+## Acceptance item → test
 
-## Integration note (seam for the controller / T1)
+1. Bare/scoped run in wt exits 2, `config-uncommitted:` + `Do not run ptest init here`, runner never executes, no `run ptest init there` / `run ptest init to update` advice → `test_t2_bare_and_scoped_run_in_worktree_exit_config_uncommitted[() | (tests/test_x.py,)]` (operations.execute mocked to fail). Deviation: the design's literal `main(("tests",))` cannot reach the run path — bare `tests` is an `unknown command` in the closed prefix grammar (pre-existing); `tests/test_x.py` exercises the intended scoped-run path.
+2. Reroute names `main/api/.ptest.toml`; non-worktree keeps old line → `test_t2_path_reroute_names_main_child_config`, `test_t2_missing_path_outside_worktree_keeps_old_line` (exact old-line match). Note: the wt setup commits `api/README.md` so `wt/api` exists — `config_uncommitted` needs an existing directory (`_absolute_directory` raises on missing paths, T1 behavior); the cwd fallback covers scopes absent from the worktree.
+3. Init refuses (no prompt via failing `input`, nothing written); `--json` error doc; `--from-main --agents none` copies bytes, exit 0, stopgap warning, no `Commit these files` reminder; `--json` gives `commit_paths == []` + `config-uncommitted` warning; `--from-main` with `--runner`/`--child` → `invalid-config`; main tree snapshot (paths+bytes) identical → `test_t2_init_refuses_in_worktree_without_prompt`, `test_t2_init_json_error_document_in_worktree`, `test_t2_init_from_main_copies_with_stopgap_and_no_commit_reminder`, `test_t2_init_from_main_json_has_empty_commit_paths`, `test_t2_from_main_rejects_runner_and_child[runner|child]`.
+4. register/plan/history `--json` error docs; `where --json` warnings entry + human stderr line; doctor `--offline`/`--fix`/`--json` exit 2, `input` mocked to fail → `test_t2_register_plan_history_json_error_in_worktree`, `test_t2_where_json_carries_warning_in_worktree`, `test_t2_where_human_shows_stderr_line_in_worktree`, `test_t2_doctor_refuses_before_consent_in_worktree`, `test_t2_doctor_json_refuses_in_worktree`.
+5. Run warning: exact single line; `-q` suppresses; stdout+exit identical committed vs uncommitted; silent when committed / non-git; monorepo child listed; raising helper leaves run unaffected → `test_t2_run_warns_once_for_untracked_config`, `test_t2_run_warning_quiet_and_committed_and_nongit`, `test_t2_run_warning_matches_committed_outcome`, `test_t2_run_warning_lists_untracked_monorepo_child` (`web/tests/test_x.py` scope; bare monorepo runs execute nothing without changes), `test_t2_run_unaffected_when_uncommitted_check_raises`.
+6. `init --json` in git repo lists `.ptest.toml` + created rule paths (all exist on disk); non-git gives `[]`; key-sets updated → `test_t2_init_json_commit_paths_lists_config_and_rules`, `test_t2_init_json_commit_paths_empty_outside_git`.
+7. Doctor mention after offline grid when uncommitted; absent when committed and for `--json` → `test_t2_doctor_mention_after_offline_grid_for_uncommitted`.
+8. Scoped run green → `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py tests/ng/test_init_smoke.py` → `ptest: passed · 382 tests · 56.5s` (commit 3343450, clean tree).
 
-- `src/ptest/impact.py` did not exist in this worktree, so `cli.py` imports it lazily
-  (`_impact_api()`: `from . import impact` at the routing boundary) against the frozen
-  §4.1 interface (`git_top` / `resolve_base` / `changed_files` / `plan`, `Base`/`Impact`
-  fields, reason strings). All routing tests stub `sys.modules["ptest.impact"]`; none of
-  the committed tests need the real module. After merge with T1's `impact.py`, the
-  `test_run_output.py` bare→`--full` migrations stay valid (they pin mode-agnostic
-  output), and bare runs will additionally produce the new start/nothing lines —
-  no test asserts the old bare start line anymore.
-- `_run_monorepo_automatic` (shadow/probe at monorepo root) is new small behavior:
-  previously those flags were silently dropped in the changed loop; now each child runs
-  AUTOMATIC with the flags carried through. No test covers it (same as before).
-- `RunRequest` has two new fields (`changed_note`, `next_hint`) per design §4.3/D-deviation-3,
-  not one — the task bullet saying "only `changed_note`" is superseded by the frozen §4.3.
-- dan-jefferies passes: re-read full diff (fixed a redundant `_impact_api()` call;
-  added the bad-`--base` test); re-anchored every acceptance bullet above;
-  smell sweep clean (escaping via `render.terminal_text`, fail-closed unknown kinds→FULL,
-  no new deps). Confidence: high for routing/mapping/output; medium for graph interplay
-  (real `impact.py` arrives via T1 — interface conformance is the controller's merge check).
+## Straggler files (existing tests updated)
 
-## Fix report — sys.modules stub ignored after T1 merge (audit finding, 2026-09-27)
+`tests/ng/test_cli.py` (owned by T2) — 4 tests failed identically on the clean chain tip 5159175 (verified in a detached scratch worktree at that SHA, then removed): `test_static_dispatch_is_read_only_redacted_and_contract_valid[{True,False}-doctor]`, `test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet`, `test_offline_doctor_stays_static_without_launch`. Cause: their blanket `subprocess.Popen` ban vs T3's specified one-shot `git ls-tree` for the `config.uncommitted` finding (`doctor.inspect_workspace` → `_config_findings`). `pytest.fail` inherits `BaseException`, so it escapes T1's `except Exception` best-effort guard — test-mock interaction only; production behavior is per design. Minimal update: Popen mock now allows `git` and still fails on any runner/network subprocess (new `_git_only_popen` / `_forbid_launch_except_git` helpers); assertions unchanged.
 
-- Cause: the three routing-test stubs installed the fake via
-  `monkeypatch.setitem(sys.modules, "ptest.impact", mod)`, but
-  `cli._impact_api()` (`src/ptest/cli.py:2789`) does `from . import impact`,
-  which reads the `impact` attribute off the `ptest` package before consulting
-  `sys.modules`. T1's `tests/ng/test_impact.py` does
-  `from ptest import impact as I` at module level, so on any merged run the
-  real module is already bound and every stub was silently ignored (real
-  `resolve_base` answered, e.g. `no changes vs HEAD` instead of
-  `no changes vs origin/dev`).
-- Fix (test-only, 3 files, no src change): each stub helper now also does
-  `monkeypatch.setattr("ptest.cli._impact_api", lambda: mod)` —
-  `tests/ng/test_changed_default.py:_install_impact`,
-  `tests/ng/test_monorepo_changed.py:_install_impact`,
-  `tests/ng/test_natural_loop.py:_stub_impact`. The `sys.modules` entry is
-  kept for direct lookups; the setattr is the binding that matters. Module
-  docstrings updated to say seam instead of sys.modules-only.
-- Proof on a scratch T1+T2 merge (/tmp/t1t2-merge: T2 HEAD + T1's
-  `src/ptest/impact.py`, `tests/ng/test_impact.py`, and the `--no-renames`
-  `worktree_changed_files` hunk, own `.venv` via `uv sync`):
-  - control with the setattr lines stripped (old stubs):
-    `.venv/bin/ptest --workers 2 tests/ng/test_impact.py
-    tests/ng/test_changed_default.py tests/ng/test_monorepo_changed.py
-    tests/ng/test_natural_loop.py` → `23 failed, 85 passed` (matches the
-    finding exactly; `2 workers [108 items]`).
-  - with the fix, same command → `108 passed` (`2 workers [108 items]`,
-    exit 0).
-  - `.venv/bin/ptest --workers 2 tests/ng/test_impact.py` on the merged tree
-    → `52 passed`, exit 0 (T1 suite unaffected).
-- T2 isolation still green:
-  `.venv/bin/ptest --workers 2 tests/ng/test_changed_default.py
-  tests/ng/test_monorepo_changed.py tests/ng/test_changed_explain.py
-  tests/ng/test_natural_loop.py tests/ng/test_run_output.py` → `130 passed`
-  (worktree `ptest-T2`, exit 0).
-- dan-jefferies passes: re-read full test-only diff (caught one stale comment
-  saying "instead" while both bindings are kept — reworded); re-anchored
-  against the finding (seam stub in all 3 files + merged 4-file run +
-  test_impact.py run + report append); smell sweep — no new helpers/deps,
-  double-install in `_route_standalone` harmless (second setattr wins, both
-  undone at teardown), control run proves the tests are non-vacuous
-  (23 failures unfixed → 0 fixed). No src/ contract drift (`_impact_api`
-  signature untouched).
-- Status: implemented (3 test files) / verified (108 merged + 52 impact-only
-  + 130 T2-isolation, all exit 0) / not verified (full `--full` suite — never
-  run, per scope) / deferred (none) / discovered-but-not-fixed (none).
-  Confidence: high — the failure reproduced byte-identical pre-fix and is
-  fully green post-fix.
+Neighbor sweep (unowned, untouched, all green): `ptest --workers 2 --queue-timeout 1800 tests/ng/test_run_output.py tests/ng/test_natural_loop.py tests/ng/test_init.py tests/ng/test_acceptance.py tests/ng/test_doctor.py` → `ptest: passed · 299 tests · 1m50s`. No stragglers there.
+
+## Deviations from design §3.4 (documented, texts still byte-for-byte)
+
+- Reroute missing-branch additionally falls back to `config_uncommitted(Path.cwd())` when the scope dir yields None. Reason: scope paths are usually absent from the worktree, and T1's `config_uncommitted` returns None for nonexistent directories — without the fallback, acceptance item 1 (frozen helper setup, main root config untracked) prints the old line. The raised problem is the identical frozen one.
+- Doctor-branch mention prints only when not declined: the declined path funnels through `_doctor_static_output`, which already prints the line — unconditional printing would duplicate it. Visible in both outcomes, exactly once.
+- Item-1 scope `("tests",)` replaced by `("tests/test_x.py",)` (bare word is `unknown command` in the closed grammar, pre-existing behavior T2 does not own).
+
+## Honest close
+
+- Implemented: all §3.4 bullets + 8 acceptance items. Verified: 382-test scoped file run green; 299-test neighbor sweep green; main-checkout snapshot unchanged around `--from-main` (test-pinned).
+- Not verified: the global suite (`--full` is the orchestrator's gate).
+- Deferred: none.
+- Discovered but not fixed (out of scope, for integration): `executability`'s "run ptest init from the repository root" fix text is still reachable in partial-doctor scans (design §7 follow-up); the 4 straggler tests above were already red at the chain tip due to T3's `git ls-tree` in offline doctor.
+- Confidence: high — every acceptance item maps to a named test that failed pre-change (or passes via T1 core with a T2 regression pin) and passes now; no source file outside `cli.py` touched.
+
+## Fix round 1 (audit response, branch feature/worktree-safe-config-T2)
+
+Worktree: `/home/ingmar/worktrees/ptest/cc-worktree-safe-config/ptest-T2` (existing; no new worktree).
+Strict TDD: every new/strengthened assertion below was observed failing
+against the pre-fix code (or proved non-vacuous by mutation / a sibling
+fail-first run — noted per item), then fixed.
+Verify: `ptest --workers 2 --queue-timeout 1800 tests/ng/test_cli.py
+tests/ng/test_init_smoke.py tests/ng/test_worktree.py tests/ng/test_doctor.py
+tests/ng/test_config.py tests/ng/test_init.py` → `ptest: passed · 855 tests`.
+
+1. Stale-guidance warn before config-uncommitted refusal (BLOCKING):
+   `main()` now skips `_warn_stale_guidance` when
+   `resolution.problem.code == "config-uncommitted"` (`cli.py` ~3450).
+   Only call site (verified by grep); other "run ptest init" hints
+   checked: the reroute old-line fires only when `config_uncommitted`
+   is None for scope dir and cwd, `_fix_mention` names `--fix` not
+   init, `executability` fix text is unreachable here (doctor refuses
+   first, D6). Test: item-1 test parametrize is now `[(), ("-k",
+   "foo")]` with `agent_rules.guidance_outdated` monkeypatched to
+   True — both params failed pre-fix, pass now.
+2. Init-refusal TTY pin: test sets `sys.stdin.isatty -> True` with
+   `input -> fail`, asserts exit 2 plus a before/after tree snapshot
+   ("nothing written"). Pin is live: the same TTY+input tripwire was
+   observed firing in this exact init path (item 8 pre-fix run).
+3. Non-git `commit_paths` pin: test uses `--agents all` (rule file
+   asserted on disk) with `commit_paths == []`. Mutation-proved:
+   deleting the `git_root` guard makes it fail; guard restored.
+4. Doctor `--json` negative: test creates a new untracked marked
+   `.claude/skills/ptest/SKILL.md`, asserts the helper is non-empty
+   while `--json` stdout lacks the line; also asserts
+   `index("0 calls") < index("not committed:")` (mention after grid).
+5. Carve-out narrowed: `_git_only_popen` now allows only argv
+   containing `"ls-tree"` and is documented doctor-only; the 14
+   static-dispatch cases, the monorepo doctor test, the offline-static
+   test and the new hostile-paths test run under the full
+   `_forbid_launch` ban; `_forbid_launch_except_git` deleted. Item-9
+   re-check: the carve-out is still needed exactly once — the
+   doctor-mention test in a real git repo, where genuine `git ls-tree`
+   output is required (probe-recorded argv confirms only `ls-tree`
+   fires from doctor). Fixture `git add/commit` scaffolding runs
+   outside the gate via explicit `_gate`/`_ungate`.
+6. Doctor mention sanitized: `_uncommitted_mention` wraps the line in
+   `render.terminal_text` (`cli.py` ~2131). Test feeds
+   `("evil\x85/.ptest.toml", "bad\u2028/.ptest.toml")` through the
+   mocked helper and asserts both raw chars absent (failed pre-fix).
+7. Run-warning outcome equality uses the real echo runner (stub
+   removed; checkout moved inside the fixture domain for scheduling).
+   Probe finding: the echo child writes past `capsys` to the fd, so
+   the test uses `capfd` and asserts `"hello" in out` plus
+   byte-identical stdout and exit 0 in both states.
+8. `init --from-main` outside a linked worktree on a TTY refused
+   before the agents prompt: new `elif` raises `invalid-config` with
+   T1's exact message reused via `config_api._FROM_MAIN_REFUSAL` (no
+   text duplication; cross-module private access is deliberate). The
+   `.path is None` condition preserves the existing-config
+   from_main-is-ignored path. Test (isatty True, input fails) failed
+   pre-fix with the prompt firing; green now.
+9. (T1 file, allowed) `worktree._uncommitted_inner` returns `()`
+   without any subprocess when `git_root(os.path.realpath(root))` is
+   None (deferred import — no cycle with `config`). `realpath` keeps
+   the existing symlinked-root contract green. New
+   `test_uncommitted_config_files_non_git_spawns_no_subprocess`
+   (Popen `pytest.fail`, incl. `include_agent_rules`) failed pre-fix;
+   full `test_worktree.py` (43 tests) green.
