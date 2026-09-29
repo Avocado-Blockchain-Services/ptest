@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0
+
+- A green full gate is shared by every checkout of a project. When a full
+  gate passes and records its baseline, ptest adds it to a private,
+  project-wide ledger; `ptest --full` in another checkout (a worktree, or the
+  main checkout after a fast-forward merge) skips with
+  `already verified at <sha> in <checkout>` when its clean tree has the same
+  commit, source digest, compatibility, selection policy and position in the
+  repository. A full run that fails on the same tree withdraws the record.
+  `--again` still forces a run.
+- A full gate that cannot reuse a green run says why on one line:
+  `ptest: full gate runs: <reason>` (no green run yet, a new commit,
+  uncommitted changes, a changed policy or config). Gitignored paths that
+  count as test inputs are named, collapsed to the shortest directory that
+  holds no tracked file, with the fix: add them to
+  `[selection] non_input_outputs`.
+- `[selection] non_input_outputs` entries may be symlinks (for example a
+  worktree's `.env` shared from the main checkout); paths ptest reads stay
+  symlink-free.
+- The agent guide, `ptest help agents` and the README teach the merge loop:
+  bring the base branch in, `ptest --full`, fix and rerun until green,
+  fast-forward, and never rerun for the merge.
+- Vitest config reading treats a `//` right after a backslash (the end of a
+  regex literal) as code, so a worker setting on the same line is still read.
+
 ## 0.3.8
 
 - Vitest no longer takes the whole machine. Every Vitest run used to be
