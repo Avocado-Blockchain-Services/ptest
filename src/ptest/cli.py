@@ -37,7 +37,7 @@ _INSPECTION = frozenset({
     "init", "register", "where", "status", "history", "plan",
     "doctor", "guide", "rules", "uninstall", "update",
 })
-_UPDATE_CHECK_EXEMPT = frozenset({"help", "version", "update"})
+_UPDATE_CHECK_EXEMPT = frozenset({"help", "version", "update", "uninstall"})
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
@@ -775,6 +775,16 @@ def _parse_args(args: tuple[str, ...], prefix: _CliPrefix) -> ParsedArgs:
             parsed = ParsedArgs(command="help", help_topic=prefix.command)
         else:
             parsed = _parse_inspection(prefix.command, rest)
+            word = remaining[0]
+            if parsed.command == "update" and not rest and os.path.lexists(word):
+                # Commands win over paths, but a bare `ptest update` beside
+                # an `update/` test folder would install software where the
+                # user most likely meant to run tests: make them choose.
+                raise _problem(
+                    "invalid-config",
+                    f"{word} is both a ptest command and a path here: run "
+                    f"`ptest ./{word}` for its tests, or `ptest update` from "
+                    f"another directory to update ptest")
     elif remaining and remaining[0] == "help":
         # The topic is never echoed: unknown input stays out of the error so
         # hostile bytes cannot reach output; the fixed hint names the topics.

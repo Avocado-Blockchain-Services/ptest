@@ -311,6 +311,7 @@ def _install_success_setup(tmp_path, monkeypatch, version=NEWER,
     layout = _fake_root(tmp_path)
     python = tmp_path / "fake-python"
     python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
     bindir = tmp_path / "bin"
     _uv_shim(bindir, python)
     monkeypatch.setenv("PATH",
@@ -1399,7 +1400,7 @@ def test_post_verify_rejects_missing_and_mismatched_bundles(tmp_path):
         update_api._post_verify(layout.root, RUNNING)
 
 
-def test_find_python_rejects_relative_symlink_and_oserror(
+def test_find_python_rejects_relative_and_follows_symlinks(
         monkeypatch, tmp_path):
     monkeypatch.setattr(update_api.shutil, "which",
                         lambda name: str(tmp_path / "uv"))
@@ -1422,6 +1423,14 @@ def test_find_python_rejects_relative_symlink_and_oserror(
                               "stdout": f"{link}\n"})()
 
     monkeypatch.setattr(update_api.subprocess, "run", run_link)
+    # A link to a non-executable file is refused ...
+    with pytest.raises(C.Problem):
+        update_api._find_python()
+    # ... but system and Homebrew pythons are symlinks to real interpreters
+    # (/usr/bin/python3 -> python3.14) and must be accepted as get.sh does.
+    target.chmod(0o755)
+    assert update_api._find_python() == str(link)
+    target.unlink()
     with pytest.raises(C.Problem):
         update_api._find_python()
 
@@ -1431,6 +1440,123 @@ def test_find_python_rejects_relative_symlink_and_oserror(
     monkeypatch.setattr(update_api.subprocess, "run", run_boom)
     with pytest.raises(C.Problem):
         update_api._find_python()
+
+
+def test_safe_extract_truncated_bundle_is_a_refusal(tmp_path):
+    # A damaged archive whose checksum still matched must be an update
+    # refusal (exit 2 / JSON error), never a traceback.
+    payload = os.urandom(256 * 1024)
+    member = tarfile.TarInfo(f"ptest-{NEWER}/big.bin")
+    member.size = len(payload)
+    body = _make_bundle_tar(NEWER, extra_members=[(member, io.BytesIO(payload))])
+    archive = tmp_path / "bundle.tar.gz"
+    archive.write_bytes(body[: len(body) // 2])
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(C.Problem) as excinfo:
+        update_api._safe_extract(archive, dest, NEWER)
+    assert excinfo.value.code == "update-failed"
+    assert "cannot extract" in excinfo.value.message
+
+
+def test_safe_extract_write_failure_is_a_refusal(tmp_path):
+    archive = tmp_path / "bundle.tar.gz"
+    archive.write_bytes(_make_bundle_tar(NEWER))
+    dest = tmp_path / "readonly"
+    dest.mkdir()
+    dest.chmod(0o500)
+    try:
+        with pytest.raises(C.Problem) as excinfo:
+            update_api._safe_extract(archive, dest, NEWER)
+    finally:
+        dest.chmod(0o700)
+    assert excinfo.value.code == "update-failed"
+    assert "cannot extract" in excinfo.value.message
+    assert "duplicate" not in excinfo.value.message
+
+
+def test_staging_dir_failure_is_a_refusal(tmp_path, monkeypatch):
+    layout, fake, _ = _install_success_setup(tmp_path, monkeypatch)
+
+    def no_tmp(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(update_api.tempfile, "mkdtemp", no_tmp)
+    with pytest.raises(C.Problem) as excinfo:
+        _run_install(NEWER, layout, fake, tmp_path, monkeypatch)
+    assert excinfo.value.code == "update-failed"
+
+
+def test_disk_full_download_is_not_reported_as_offline(tmp_path):
+    import errno
+
+    def full(url, sink, max_bytes, timeout_s):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    transport = update_api.Transport(latest_location=lambda t: "",
+                                     download=full)
+    target = tmp_path / "bundle.tar.gz"
+    with pytest.raises(C.Problem) as excinfo:
+        update_api._download_to(transport, "https://github.com/x", target,
+                                1024, 1.0)
+    assert excinfo.value.code == "update-failed"
+    assert "No space left" in excinfo.value.message
+    assert not target.exists()
+
+
+def test_bare_update_beside_same_named_path_refuses(tmp_path, monkeypatch,
+                                                     capsys):
+    from ptest import cli as cli_api
+
+    fake = FakeTransport({}, location=_tag_url(NEWER))
+    monkeypatch.setattr(update_api, "default_transport",
+                        lambda: fake.to_transport())
+    monkeypatch.chdir(tmp_path)
+    for word in ("update", "upgrade"):
+        (tmp_path / word).mkdir()
+        assert cli_api.main((word,)) == 2
+        err = capsys.readouterr().err
+        assert f"`ptest ./{word}`" in err
+        (tmp_path / word).rmdir()
+    assert fake.latest_calls == [] and fake.download_calls == []
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def test_installer_timeout_kills_the_whole_installer_group(tmp_path,
+                                                           monkeypatch):
+    # install.sh runs install.py as a child; a timeout must not leave that
+    # child running to switch the launcher after we reported "unchanged".
+    pid_file = tmp_path / "child.pid"
+    body = ("#!/bin/sh\n"
+            f"sh -c 'echo $$ > \"{pid_file}\"; exec sleep 60'\n")
+    tarball = _make_bundle_tar(NEWER, install_sh=body)
+    fake = FakeTransport(_update_files(NEWER, tarball),
+                         location=_tag_url(NEWER))
+    layout, _, _ = _install_success_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(update_api, "INSTALL_TIMEOUT_S", 1)
+    with pytest.raises(C.Problem) as excinfo:
+        _run_install(NEWER, layout, fake, tmp_path, monkeypatch)
+    assert "did not finish" in excinfo.value.message
+    child = int(pid_file.read_text().strip())
+    deadline = time.monotonic() + 5
+    while not _process_gone(child) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _process_gone(child)
+
+
+def test_uninstall_skips_startup_check():
+    import ptest.cli as cli_api
+
+    # Offering an update right before `uninstall --self` would download
+    # and install a bundle only to delete it.
+    assert "uninstall" in cli_api._UPDATE_CHECK_EXEMPT
 
 
 def test_safe_extract_rejects_garbage(tmp_path):
@@ -1465,6 +1591,7 @@ def test_stage_paths_reject_existing_files(tmp_path):
 def test_run_installer_reports_oserror(tmp_path, monkeypatch, capsys):
     python = tmp_path / "fake-python"
     python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
     bindir = tmp_path / "bin"
     _uv_shim(bindir, python)
     monkeypatch.setenv("PATH",

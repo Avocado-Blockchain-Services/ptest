@@ -420,8 +420,8 @@ Syntax:
 
 Without flags, ptest resolves the latest release (or the named --version),
 downloads ptest-X-<os>-<arch>.tar.gz and its .sha256 over HTTPS from the
-fixed GitHub release host, verifies the SHA-256 before anything from the
-bundle runs, extracts safely (at most 64 MiB), and installs side by side
+fixed GitHub release host (at most 64 MiB), verifies the SHA-256 before
+anything from the bundle runs, extracts safely, and installs side by side
 through the bundled install.sh, switching the launcher atomically. Older
 bundles are never deleted and a failed install keeps the old launcher. An
 explicit --version may name an older release; without it there is never a

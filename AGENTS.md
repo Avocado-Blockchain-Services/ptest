@@ -23,6 +23,8 @@ worktree is provisional; do not modify it or assume its decisions are approved.
 - Each parallel task owns declared files in its own worktree; do not revert others.
 - Commit only inside your assigned worktree. Never merge to main, push, publish,
   deploy, or replace the installed CLI. No real database migrations or cloud ops.
+- In this repository, `ptest: update available … run: ptest update` means tell
+  the user; never run `ptest update` here (it replaces the installed CLI).
 - The orchestrator integrates approved task commits onto the chain branch only.
 
 Model routing and review gates are recorded in `.pipeline/context.md`.

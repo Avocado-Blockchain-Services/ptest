@@ -9,6 +9,7 @@ the bundled ``install.sh`` exactly as ``get.sh`` does.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import io
@@ -16,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess  # nosec B404 - argv-only execution, never a shell
 import sys
@@ -375,6 +377,11 @@ def _download_to(transport: Transport, url: str, target: Path,
                 transport.download(url, sink, max_bytes, timeout_s)
             except C.Problem:
                 raise
+            except OSError as exc:
+                if exc.errno in _LOCAL_WRITE_ERRNOS:
+                    raise _failed(f"cannot save the download ({exc.strerror}); "
+                                  "the current install is unchanged") from None
+                raise _unavailable() from None
             except Exception:
                 raise _unavailable() from None
     except C.Problem:
@@ -383,6 +390,12 @@ def _download_to(transport: Transport, url: str, target: Path,
         except OSError:
             pass
         raise
+
+
+_LOCAL_WRITE_ERRNOS = frozenset(
+    code for code in (getattr(errno, name, None)
+                      for name in ("ENOSPC", "EDQUOT", "EROFS", "EFBIG"))
+    if code is not None)
 
 
 def _parse_sha256(raw: bytes, asset_name: str) -> str:
@@ -423,6 +436,18 @@ def _check_member(top: str, member: tarfile.TarInfo) -> list[str]:
 
 
 def _safe_extract(archive: Path, dest: Path, version: str) -> Path:
+    try:
+        return _extract_members(archive, dest, version)
+    except C.Problem:
+        raise
+    except (OSError, tarfile.TarError, EOFError) as exc:
+        reason = (exc.strerror if isinstance(exc, OSError) and exc.strerror
+                  else "the archive is damaged")
+        raise _failed(f"cannot extract ptest {version} bundle ({reason}); "
+                      "the current install is unchanged") from None
+
+
+def _extract_members(archive: Path, dest: Path, version: str) -> Path:
     top = f"ptest-{version}"
     total = 0
     count = 0
@@ -466,19 +491,14 @@ def _safe_extract(archive: Path, dest: Path, version: str) -> Path:
                     raise _failed(f"unsafe archive member {member.name!r}; "
                                   "the current install is unchanged")
                 mode = 0o700 if (member.mode & 0o111) else 0o600
-                fd = None
                 try:
                     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                  | os.O_NOFOLLOW, mode)
-                    shutil.copyfileobj(extracted, os.fdopen(fd, "wb"))
-                except OSError:
-                    if fd is not None:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
+                except FileExistsError:
                     raise _failed(f"unsafe duplicate archive member {member.name!r}; "
                                   "the current install is unchanged") from None
+                with os.fdopen(fd, "wb") as sink:
+                    shutil.copyfileobj(extracted, sink)
     extracted_top = dest / top
     installer = extracted_top / "install.sh"
     try:
@@ -511,12 +531,14 @@ def _find_python() -> str:
             or not os.path.isabs(candidate)):
         raise _failed("no usable Python found for the ptest install; "
                       "the current install is unchanged")
+    # System and Homebrew interpreters are symlinks (python3 -> python3.1x);
+    # judge the file the link resolves to, exactly as get.sh accepts it.
     try:
-        stamp = os.lstat(candidate)
+        stamp = os.stat(candidate)
     except OSError:
         raise _failed("no usable Python found for the ptest install; "
                       "the current install is unchanged") from None
-    if stat.S_ISLNK(stamp.st_mode) or not stat.S_ISREG(stamp.st_mode):
+    if not stat.S_ISREG(stamp.st_mode) or not os.access(candidate, os.X_OK):
         raise _failed("no usable Python found for the ptest install; "
                       "the current install is unchanged")
     return candidate
@@ -533,17 +555,31 @@ def _run_installer(bundle_dir: Path, root: Path, work: Path,
     try:
         # Fixed argv: the verified bundle's install.sh plus --dest. The
         # bundle's SHA-256 was verified before extraction, and the script
-        # path itself is never derived from network or user input.
-        completed = subprocess.run(  # nosec B603 - verified bundle script
+        # path itself is never derived from network or user input. Its own
+        # session lets a timeout kill install.py too, so no orphan can
+        # switch the launcher after we reported the install unchanged.
+        process = subprocess.Popen(  # nosec B603 - verified bundle script
             [str(script), "--dest", str(root)],
             cwd=str(work), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=INSTALL_TIMEOUT_S, check=False, env=env)
+            env=env, start_new_session=True)
     except (OSError, subprocess.SubprocessError):
         raise _failed("the ptest installer could not run; "
                       "the current install is unchanged") from None
-    if completed.returncode != 0:
-        text = (completed.stdout or b"").decode("utf-8", "replace")[-65536:]
+    try:
+        output, _ = process.communicate(timeout=INSTALL_TIMEOUT_S)
+    except BaseException as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        process.wait()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise _failed("the ptest installer did not finish; "
+                          "the current install is unchanged") from None
+        raise
+    if process.returncode != 0:
+        text = (output or b"").decode("utf-8", "replace")[-65536:]
         lines = text.splitlines()[-20:]
         for line in lines:
             log.write(line + "\n")
@@ -618,7 +654,11 @@ def run_update(*, requested: str | None, check_only: bool,
         return UpdateResult(running_version=running, target_version=target,
                             action="available", check_only=True,
                             install_root=active_layout.root)
-    work = Path(tempfile.mkdtemp(prefix="ptest-update-"))
+    try:
+        work = Path(tempfile.mkdtemp(prefix="ptest-update-"))
+    except OSError:
+        raise _failed("cannot stage the ptest download; "
+                      "the current install is unchanged") from None
     try:
         stamp = os.lstat(work)
         if (not stat.S_ISDIR(stamp.st_mode)

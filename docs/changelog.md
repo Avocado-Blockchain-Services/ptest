@@ -10,6 +10,9 @@
   launcher switches atomically; a failed update keeps the old bundle.
   `--check` only reports; `--version` installs exactly the named release;
   `--json` emits the `update` public document.
+  A bare `ptest update` (or `upgrade`) run beside a path of that name
+  refuses and names `ptest ./update` for its tests. System and Homebrew
+  Pythons (symlinked interpreters) are accepted, as `get.sh` accepts them.
 - Startup update check: before most commands ptest looks for a newer
   release at most once a day (24 h cache, 2 s network limit, silent when
   offline). At a terminal it prompts `ptest X is available (you have Y).
