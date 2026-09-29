@@ -231,6 +231,26 @@ def test_uncommitted_config_files_non_git_is_empty(tmp_path):
     assert W.uncommitted_config_files(plain) == ()
 
 
+def test_uncommitted_config_files_non_git_spawns_no_subprocess(
+        tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / ".ptest.toml").write_text("version = 1\n", encoding="utf-8")
+    (plain / "docs").mkdir()
+    (plain / "docs" / "ptest-agent.md").write_text(
+        "<!-- ptest-agent-rules:start -->\nold\n", encoding="utf-8")
+
+    def _fail(*args, **kwargs):
+        # BaseException on purpose: uncommitted_config_files swallows
+        # Exception, so AssertionError would pass vacuously.
+        pytest.fail("uncommitted check must not spawn git outside git")
+
+    monkeypatch.setattr(subprocess, "Popen", _fail)
+
+    assert W.uncommitted_config_files(plain) == ()
+    assert W.uncommitted_config_files(plain, include_agent_rules=True) == ()
+
+
 def test_uncommitted_config_files_unborn_head_is_empty(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

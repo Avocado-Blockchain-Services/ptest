@@ -2130,8 +2130,9 @@ def _uncommitted_mention(resolution: C.ConfigResolution) -> str | None:
         return None
     head = ", ".join(paths[:5])
     tail = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
-    return (f"not committed: {head}{tail} — new worktrees and clones "
-            "won't have them; commit them on the base branch")
+    return render.terminal_text(
+        f"not committed: {head}{tail} — new worktrees and clones "
+        "won't have them; commit them on the base branch")
 
 
 def _fix_mention(resolution: C.ConfigResolution) -> str | None:
@@ -2397,6 +2398,13 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 uncommitted = config_api.config_uncommitted(cwd)
                 if uncommitted is not None:
                     raise uncommitted
+            elif (config_api.config_uncommitted(cwd) is None
+                    and config_api.resolve_config(cwd).path is None):
+                # init_project would refuse invalid-config here; fail
+                # before the agents prompt asks anything. An existing
+                # config keeps the from_main-is-ignored path below.
+                raise _problem("invalid-config",
+                               config_api._FROM_MAIN_REFUSAL)
             agents = _init_agents(parsed, json_output=parsed.json)
             root = config_api.repository_root(cwd)
             plan = agent_rules.preview(root, agents=agents) if agents else None
@@ -3442,7 +3450,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not kept and not parsed.full:
                     parsed = replace(parsed, mode=C.Mode.AUTOMATIC)
         progress.reset()
-        _warn_stale_guidance(resolution.root)
+        # A config-uncommitted refusal follows below and forbids `ptest
+        # init`; the stale-guidance hint must not name it first.
+        if (resolution.problem is None
+                or resolution.problem.code != "config-uncommitted"):
+            _warn_stale_guidance(resolution.root)
         _warn_uncommitted_config(resolution, quiet=parsed.quiet)
         if resolution.monorepo is not None:
             from . import monorepo

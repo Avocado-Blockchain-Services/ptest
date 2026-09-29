@@ -557,18 +557,10 @@ def _tree_bytes(root):
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_static_dispatch_is_read_only_redacted_and_contract_valid(
         inspection_project, monkeypatch, capsys, command, json_mode):
-    import socket
-    import subprocess
-
     domain, root = inspection_project
     before = _tree_bytes(domain.root)
 
-    def no_execution(*args, **kwargs):
-        pytest.fail("static inspection crossed an execution/network boundary")
-
-    _git_only_popen(
-        monkeypatch, "static inspection crossed an execution/network boundary")
-    monkeypatch.setattr(socket, "create_connection", no_execution)
+    _forbid_launch(monkeypatch)
     options = ((("--offline", "--json") if command == "doctor" else ("--json",))
                if json_mode else
                (("--offline",) if command == "doctor" else ()))
@@ -1085,14 +1077,10 @@ def _monorepo_cli_root(monorepo, base, declarations=("api", "web")):
 def test_doctor_from_monorepo_root_renders_declared_rows_and_worksheet(
         tmp_path, monkeypatch, capsys, monorepo):
     """Root content must not leak into child rows; every child stays numbered."""
-    import socket
-    import subprocess
-
     _monorepo_cli_root(monorepo, tmp_path)
     (tmp_path / "root_noise_test.py").write_text("cache.flushall()\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    _git_only_popen(monkeypatch, "doctor executed a runner")
-    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("doctor made a network request"))
+    _forbid_launch(monkeypatch)
     assert main(("doctor", "--offline")) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
@@ -1414,11 +1402,11 @@ def _forbid_launch(monkeypatch):
 
 
 def _git_only_popen(monkeypatch, message):
-    """Ban subprocesses except one best-effort `git` read.
+    """Ban subprocesses except one best-effort `git ls-tree` read.
 
-    Offline doctor and the run warning shell a single `git ls-tree` to
-    detect uncommitted ptest files (worktree-safe config); runners and
-    anything else stay forbidden.
+    Doctor-only: the config.uncommitted finding and the doctor mention
+    shell a single `git ls-tree` to detect uncommitted ptest files
+    (worktree-safe config); runners and anything else stay forbidden.
     """
     import subprocess
 
@@ -1427,23 +1415,11 @@ def _git_only_popen(monkeypatch, message):
     def _allow_git_only(*args, **kwargs):
         command = args[0] if args else kwargs.get("args")
         if (isinstance(command, (tuple, list)) and command
-                and command[0] == "git"):
+                and command[0] == "git" and "ls-tree" in command):
             return real_popen(*args, **kwargs)
         pytest.fail(message)
 
     monkeypatch.setattr(subprocess, "Popen", _allow_git_only)
-
-
-def _forbid_launch_except_git(monkeypatch):
-    import socket
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("invalid invocation crossed an execution/network boundary")
-
-    _git_only_popen(
-        monkeypatch, "invalid invocation crossed an execution/network boundary")
-    monkeypatch.setattr(socket, "create_connection", forbidden)
-    monkeypatch.setattr("ptest.operations.execute", forbidden)
 
 
 def test_doctor_parser_defaults_request_review_without_launch_flags():
@@ -1720,7 +1696,7 @@ def test_explicit_json_without_consent_reports_consent_required(
 
 def test_offline_doctor_stays_static_without_launch(
         inspection_project, monkeypatch, capsys):
-    _forbid_launch_except_git(monkeypatch)
+    _forbid_launch(monkeypatch)
     domain, _ = inspection_project
     before = _tree_bytes(domain.root)
 
@@ -3964,12 +3940,17 @@ def _fake_run(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("argv", [(), ("tests/test_x.py",)])
+@pytest.mark.parametrize("argv", [(), ("-k", "foo")])
 def test_t2_bare_and_scoped_run_in_worktree_exit_config_uncommitted(
         tmp_path, monkeypatch, capsys, argv):
+    from ptest import agent_rules
+
     _main, wt = _linked_worktree(tmp_path)
     monkeypatch.chdir(wt)
     _fail_execute(monkeypatch)
+    # Force the stale-guidance hint so its absence below is a real
+    # assertion: without the config-uncommitted skip it prints first.
+    monkeypatch.setattr(agent_rules, "guidance_outdated", lambda root: True)
 
     assert main(argv) == 2
     err = capsys.readouterr().err
@@ -4009,15 +3990,42 @@ def test_t2_missing_path_outside_worktree_keeps_old_line(tmp_path, monkeypatch, 
 
 
 def test_t2_init_refuses_in_worktree_without_prompt(tmp_path, monkeypatch, capsys):
+    import sys
+
     _main, wt = _linked_worktree(tmp_path)
     monkeypatch.chdir(wt)
+    # Pinned to a TTY: without isatty the agents prompt never fires and
+    # the input tripwire below would pass vacuously.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input",
                         lambda *args, **kwargs: pytest.fail("init prompted"))
+    before = {path.relative_to(wt): path.read_bytes() if path.is_file() else None
+              for path in wt.rglob("*") if ".git" not in path.parts}
 
     assert main(("init",)) == 2
     err = capsys.readouterr().err
     assert "config-uncommitted:" in err
     assert not (wt / ".ptest.toml").exists()
+    after = {path.relative_to(wt): path.read_bytes() if path.is_file() else None
+             for path in wt.rglob("*") if ".git" not in path.parts}
+    assert after == before
+
+
+def test_t2_init_from_main_outside_worktree_refuses_before_prompt(
+        tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input",
+                        lambda *args, **kwargs: pytest.fail("init prompted"))
+
+    assert main(("init", "--from-main")) == 2
+    err = capsys.readouterr().err
+    assert "invalid-config" in err
+    assert ("--from-main only works in a linked git worktree whose main "
+            "checkout has .ptest.toml at this path; nothing was copied") in err
+    assert not (tmp_path / ".ptest.toml").exists()
 
 
 def test_t2_init_json_error_document_in_worktree(tmp_path, monkeypatch, capsys):
@@ -4203,19 +4211,26 @@ def test_t2_run_warning_quiet_and_committed_and_nongit(
 
 
 def test_t2_run_warning_matches_committed_outcome(
-        tmp_path, monkeypatch, capsys, case):
-    root = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
-    write_ptest_toml(root)
+        tmp_path, monkeypatch, capfd, case):
+    # Real echo runner, deliberately unstubbed: exit status and runner
+    # stdout below come from a genuine execution in both states. capfd
+    # (not capsys): the echo child writes past python-level capture to
+    # the fd. The checkout lives inside the fixture domain so
+    # scheduling accepts it.
     domain = case.domain()
+    root = init_git_repo(domain.root / "repo", files={"README.md": "x\n"})
+    write_ptest_toml(root)
     monkeypatch.chdir(root)
-    _fake_run(monkeypatch)
 
     assert main(("--fixture-domain", str(domain.root), "tests/test_x.py")) == 0
-    uncommitted = capsys.readouterr()
+    uncommitted = capfd.readouterr()
+    assert "hello" in uncommitted.out
+    assert [line for line in uncommitted.err.splitlines()
+            if "not committed" in line] != []
     git(root, "add", ".ptest.toml")
     git(root, "commit", "-q", "-m", "config")
     assert main(("--fixture-domain", str(domain.root), "tests/test_x.py")) == 0
-    committed = capsys.readouterr()
+    committed = capfd.readouterr()
     assert committed.out == uncommitted.out
     assert [line for line in committed.err.splitlines()
             if "not committed" in line] == []
@@ -4282,17 +4297,21 @@ def test_t2_init_json_commit_paths_lists_config_and_rules(
 
 def test_t2_init_json_commit_paths_empty_outside_git(
         tmp_path, monkeypatch, capsys):
+    # --agents all creates rule files, so [] pins the git_root guard:
+    # without it the created rule paths would leak into commit_paths.
     monkeypatch.chdir(tmp_path)
 
-    assert main(("init", "--runner", "pytest", "--agents", "none",
+    assert main(("init", "--runner", "pytest", "--agents", "all",
                  "--json")) == 0
     document = C.decode_public_document(capsys.readouterr().out)
     assert document.data["commit_paths"] == []
+    assert (tmp_path / ".claude" / "skills" / "ptest" / "SKILL.md").is_file()
 
 
 def test_t2_doctor_mention_after_offline_grid_for_uncommitted(
         tmp_path, monkeypatch, capsys):
     import socket
+    import subprocess
 
     root = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
     write_ptest_toml(root)
@@ -4302,21 +4321,62 @@ def test_t2_doctor_mention_after_offline_grid_for_uncommitted(
     (root / "docs" / "ptest-agent.md").write_text(
         "<!-- ptest-agent-rules:start -->\nold\n", encoding="utf-8")
     monkeypatch.chdir(root)
-    _git_only_popen(monkeypatch, "doctor executed a runner")
     monkeypatch.setattr(socket, "create_connection",
                         lambda *a, **k: pytest.fail("doctor network"))
+    # The ls-tree-only gate guards subject behavior (main); fixture
+    # git scaffolding runs ungated between phases.
+    real_popen = subprocess.Popen
 
+    def _gate():
+        _git_only_popen(monkeypatch, "doctor executed a runner")
+
+    def _ungate():
+        monkeypatch.setattr(subprocess, "Popen", real_popen)
+
+    _gate()
     assert main(("doctor", "--offline")) == 0
     captured = capsys.readouterr()
     assert "not committed: docs/ptest-agent.md" in captured.out
     assert "commit them on the base branch" in captured.out
+    assert captured.out.index("0 calls") < captured.out.index("not committed:")
 
+    _ungate()
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "rules")
+    _gate()
     assert main(("doctor", "--offline")) == 0
     assert "not committed" not in capsys.readouterr().out
 
-    (root / "docs" / "ptest-agent.md").write_text(
+    # A new untracked marked rule file keeps the helper non-empty, so
+    # the --json absence below is a real assertion (a mere edit of a
+    # committed file stays in HEAD's tree and lists nothing).
+    from ptest import worktree as worktree_api
+
+    (root / ".claude" / "skills" / "ptest").mkdir(parents=True)
+    (root / ".claude" / "skills" / "ptest" / "SKILL.md").write_text(
         "<!-- ptest-agent-rules:start -->\nnew\n", encoding="utf-8")
+    assert worktree_api.uncommitted_config_files(
+        root, include_agent_rules=True) != ()
     assert main(("doctor", "--offline", "--json")) == 0
     assert "not committed" not in capsys.readouterr().out
+
+
+def test_t2_doctor_mention_sanitizes_hostile_paths(
+        tmp_path, monkeypatch, capsys):
+    from ptest import worktree as worktree_module
+
+    root = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
+    write_ptest_toml(root)
+    git(root, "add", ".ptest.toml")
+    git(root, "commit", "-q", "-m", "config")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(worktree_module, "uncommitted_config_files",
+                        lambda *a, **k: ("evil\x85/.ptest.toml",
+                                         "bad\u2028/.ptest.toml"))
+    _forbid_launch(monkeypatch)
+
+    assert main(("doctor", "--offline")) == 0
+    out = capsys.readouterr().out
+    assert "not committed:" in out
+    assert "\x85" not in out
+    assert "\u2028" not in out

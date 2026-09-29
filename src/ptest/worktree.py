@@ -253,6 +253,14 @@ def uncommitted_config_files(
 
 def _uncommitted_inner(root: Path, *, include_agent_rules: bool) -> tuple[str, ...]:
     root = _norm(root if isinstance(root, Path) else Path(root))
+    # Deferred import: config imports this module at top level, so an
+    # eager import would cycle. Outside git there is no HEAD tree to
+    # compare against; return without spawning any subprocess. The
+    # membership check follows symlinks (callers may pass a linked
+    # path); git itself resolves the same directory.
+    from .config import git_root
+    if git_root(os.path.realpath(root)) is None:
+        return ()
     candidates: list[str] = []
     if _is_regular_file(root, CONFIG_NAME):
         candidates.append(CONFIG_NAME)
