@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1
+
+- The offline doctor (`ptest doctor --offline`, and the fallback `ptest init`
+  runs when no reviewer is chosen) no longer builds the model-review
+  evidence it throws away. On a 2,000-file monorepo it took 210 s and printed
+  nothing, which looked like a hang; the same output now takes about 25 s,
+  most of it the static workspace scan. It prints one progress line per
+  project on a terminal (`-q` silences it) and has a deadline.
+- Candidate ranking for real model reviews is faster, with the same
+  evidence selected.
+- `ptest init`'s "Commit these files" lists every uncommitted ptest file in
+  the checkout, not only the ones it wrote this run. It never lists a
+  `--from-main` stopgap copy, and a dry run lists nothing.
+
 ## 0.4.0
 
 - A green full gate is shared by every checkout of a pytest project. When a
