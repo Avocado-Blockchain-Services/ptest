@@ -1,560 +1,675 @@
-# Design: offline doctor static path, bounded ranking, complete commit reminder
+# Design: startup update check and `ptest update`
 
-Date: 2026-09-29. Author: architect. Base: `feature/doctor-offline` at 985d43e (0.3.7).
-Spec: `/tmp/claude-1000/-home-ingmar-code-tools-ptest/e8898983-6043-4619-a933-8d5abd5c42c4/scratchpad/doctor-offline-brief.md`.
-Context pack: `.pipeline/context-pack.md`. Precedent: `src/ptest/agent_assessment.py`
-(`build_packets` / `_build_one_packet`, `_review_checkpoint`, frozen dataclasses, `_fail`).
+Date: 2026-09-29. Base: `feature/update-check` @ 72bca43 (ptest 0.3.7).
+Spec (authoritative for intent):
+`/tmp/claude-1000/-home-ingmar-code-tools-ptest/e8898983-6043-4619-a933-8d5abd5c42c4/scratchpad/update-check-brief.md`.
+Context pack: `.pipeline/context-pack.md`. This design is authoritative over
+the context pack where they differ. The differences are listed in section 1.
 
-Three tasks run in parallel on the same base, each in its own worktree. Their file sets are
-disjoint and no task imports anything that another task creates. There are no shared-file
-edits and no transcription step.
+Two tasks run in parallel from the same base in separate worktrees:
 
-| Task | Owns (only these files) |
-|---|---|
-| T1 offline static path | `src/ptest/agent_assessment.py`, `src/ptest/cli.py`, `src/ptest/help.py` (doctor topic only, D3a), `src/ptest/doctor.py` (no edit expected), NEW `tests/ng/test_doctor_offline_light.py`, NEW `scripts/bench_doctor_offline.py` |
-| T2 ranking speed | `src/ptest/review_evidence.py`, NEW `tests/ng/test_rank_candidates_perf.py`, NEW `scripts/bench_rank_candidates.py` |
-| T3 commit reminder | `src/ptest/config.py`, `src/ptest/init_render.py`, NEW `tests/ng/test_init_commit_reminder.py` |
+- **T1** writes all the code: `update.py`, CLI wiring, help, the contract/schema, and tests.
+- **T2** writes the docs: README, installation, changelog, the agent guide, and the guide-hash entry.
 
-The following are read-only for every task: `worktree.py`, `review_context.py`,
-`deterministic_items.py`, `render.py`, `contracts.py`, `tests/ng/support.py`,
-`tests/ng/factories_agents.py`, `tests/ng/test_help.py` (it must pass unmodified; T1's new
-help assertions live in T1's new test file), and every existing test file except where a criterion below
-says a task may update an existing assertion that its intended behaviour change breaks.
+Neither task imports anything the other one writes. The only link between
+them is user-visible text: T2's docs quote strings that T1's code prints.
+Those strings are frozen in section 3.
 
 ---
 
-## 1. Findings that drive the design
+## 1. Corrections to the context pack
 
-1. Today every offline mode (`doctor --offline`, offline `--json`, and init's declined-review
-   fallback via `_declined_review_output` -> `_doctor_static_output`) calls
-   `cli._offline_assessment_parts` -> `agent_assessment.build_packets(workspace, resolution)`.
-   That call has no deadline and no progress. `_build_one_packet` then runs
-   `_candidate_text_pool` -> `RE.rank_candidates` -> `RE.item_source_chains` -> chain admission
-   -> `_resolve_tier4` -> late admission.
-2. What the offline output actually reads from a packet:
-   - Rows. Model items become `unknown` rows with no evidence. Deterministic answers cite only
-     the child `.ptest.toml` and the pytest config files, which `_answer_child_row` looks up by
-     path. Those are *root-decision* (core) excerpts, admitted before any ranking. Skip rows
-     cite tier-0 manifests, and `_plan_one` produces none today.
-   - `_assessment_limitations`. It reads `excerpts` (empty or not), `excluded_count`,
-     `truncated_count`, `context.config_status`, `len(context.known_excluded)` and
-     `dependencies`.
-   - `dependencies`. `_dependency_facts(set(paths), ...)` takes the **basenames of every
-     admitted excerpt**. Root `setup.py`, `Gemfile`, `CMakeLists.txt`, `meson.build` and
-     `build.gradle` are *not* root decisions: the full path admits them late. The static
-     packet must still admit them, or the `dependency-unsupported` limitation would disappear.
-   - `packet_sha256` (JSON only). It hashes the whole admitted excerpt list, in rank-dependent
-     order, plus `_inventory_sha256` over the whole candidate text pool.
-   - The grid renders rows, findings, the per-child "partial evidence" marker (whether any
-     `partial-evidence` limitation exists), and the dependency limitation lines. It never
-     renders `packet_sha256`.
-3. `_admit_candidate` never returns False, so the full path *attempts* every non-core
-   non-test regular file (chain or late) exactly once. Each attempt ends as admitted,
-   `skipped += 1` (empty, NUL, non-UTF-8 or unreadable) or `truncated += 1` (a cap was hit, or
-   the file was cut at `max_bytes_per_file`).
-4. Consequence: `packet_sha256` **cannot** stay byte-identical without reading and ranking the
-   pool, which requirement 1 forbids. All other fields can stay identical on fixtures within
-   the documented conditions (section 2.4).
+These corrections are binding. The file ownership lists in section 6 already include them.
 
-## 2. T1 decisions: offline static packet
+1. **The agent-guide row belongs in `src/ptest/resources/repository-agent-guide.md`,
+   not `agent-guide.md`.** `docs/ptest-agent.md` is a byte-for-byte copy of
+   `repository-agent-guide.md`: `ptest init` writes it and
+   `agent_rules._guide()` reads it. `agent-guide.md` is the `ptest guide`
+   repair text and has no output table. T2 owns
+   `repository-agent-guide.md` and leaves `agent-guide.md` untouched.
+2. **A change to the guide requires adding the old guide's hash** to
+   `agent_rules._PREVIOUS_GUIDE_SHA256S`. Without it,
+   `test_every_shipped_guide_version_hashes_into_previous_set` fails once the
+   change is committed, and every repository that holds the 0.3.6/0.3.7 guide
+   gets `already-exists` from `ptest rules`/`init`. The precedent is commit 5159175. T2 owns
+   `src/ptest/agent_rules.py`, but only for that one entry, plus
+   `tests/ng/test_agent_rules.py` for one regression test.
+3. **The guide is exactly 100 lines, and tests cap it at `<= 100`**
+   (`test_resources.py`, `test_agent_rules.py`, `test_init_changed.py`). T2
+   adds one table row and joins two lines elsewhere (section 5.1), so the
+   total stays at 100.
+4. **`tests/ng/conftest.py` goes to T1.** The autouse `isolated_env` fixture strips every
+   `PTEST_*` variable, so the suite cannot inherit an opt-out. The startup
+   check would otherwise reach the network from hundreds of in-process
+   `cli.main()` tests. T1 adds the opt-out and a network deny guard there
+   (section 4.6).
+5. **`scripts/install.py` goes to T1, as a single edit.** Its smoke check runs the
+   *new* bundle's `ptest guide`. `guide` is not exempt from the check. With a
+   TTY, and with an older `--version` or a pinned `get.sh` install, the check would
+   prompt, or reach the network, in the middle of an install. T1 adds
+   `PTEST_NO_UPDATE_CHECK=1` to the environment of the three smoke
+   `subprocess.run` calls. `test_install.py`'s fakes accept `**kwargs`,
+   so nothing breaks.
+6. **`src/ptest/runtime/protocol-v1.json` should not change.**
+   `PROTOCOL_V1_DESCRIPTOR` does not list public kinds. T1 still runs
+   `scripts/export-schemas.py`. The only expected new file is
+   `docs/schemas/v1/update.json`.
+7. **The JSON schema is T1's work, even though the brief's triage note put it in the docs task.**
+   The schema is generated from `contracts.py` and drift-checked there. T1 owns help,
+   contract and schema, which matches the triage the orchestrator produced.
 
-### D1. Separate public builder; `build_packets` is untouched
+---
 
-The online path keeps calling `build_packets` exactly as today, with the same signature and
-bytes. Offline calls a new builder:
+## 2. Decisions
 
-```python
-# src/ptest/agent_assessment.py  (FROZEN; T1-internal but fixed here)
-@dataclass(frozen=True, slots=True)
-class StaticPackets:
-    packets: tuple[EvidencePacket, ...]          # one per selected child, workspace order
-    deadline_expired: tuple[str, ...]            # declarations whose static packet stopped at the deadline, in order
+- **One module.** `src/ptest/update.py` owns version parsing, latest-version resolution,
+  the cache, the network, verification, extraction, running the installer,
+  layout detection, the startup check, rendering, and the document payload.
+  `cli.py` only parses arguments and calls it. It follows the precedent of `uninstall.py` and `_run_uninstall`.
+- **Layout detection reuses `uninstall.py` helpers**, which are imported and
+  not copied, so there is a single source of truth: `uninstall._root_from_binary`,
+  `uninstall._is_bundle_dir` and `uninstall._public_link_in_bundles`.
+  `uninstall.py` itself does not change.
+- **Reuse the installer instead of reimplementing it.** Run the extracted `ptest-<v>/install.sh`
+  directly, the same way `get.sh` does. `PTEST_PYTHON` comes from
+  `uv python find --system '>=3.11,<3.15'`. Always pass `--dest <install root>`,
+  where the root is the realpath of the running install. Omitting `--dest` would let a changed
+  `$HOME` install somewhere else. For the default root, the path matches
+  `$HOME/.local/ptest` as text, so `install.sh` also refreshes
+  `~/.local/bin/ptest`, exactly as with `get.sh`. `install.py` already
+  publishes the new bundle side by side and swaps `<root>/ptest` atomically
+  with `os.replace`. It never deletes old bundles.
+- **Network access happens only through a `Transport` seam** (section 3.2). The real
+  transport uses urllib with an allowlist check on every redirect. Tests
+  inject fakes. No environment variable can change the base URL.
+  Standard proxy variables are still honoured, because TLS to `github.com` is
+  verified end to end through a CONNECT tunnel, so the destination cannot be
+  redirected.
+- **Latest-version resolution** requests `/releases/latest` *without following
+  the redirect*. It reads `Location`, resolves it against the request
+  URL, and requires an exact match of
+  `https://github.com/Avocado-Blockchain-Services/ptest/releases/tag/v<X.Y.Z>`.
+- **A hard 2 s bound** for the startup fetch comes from a daemon thread plus `join(2.0)`.
+  Socket timeouts alone cannot bound DNS lookups or a slow trickle of data. If the thread
+  is still running at 2 s, it is abandoned and treated as a failed fetch.
+- **Claim-then-fetch cache.** When the cache is stale, the check first
+  writes `checked_at = now` and keeps the old `latest`, then fetches. Concurrent
+  agents see a fresh claim and skip the fetch. A failed fetch backs off for 24 h, so being
+  offline never costs 2 s on every command. **The fetch happens only if the claim write
+  succeeded.** If there is no usable state area, the check never fetches.
+- **`-q` turns off the whole check**, not just the output line. That means no output and no fetch.
+  The prompt never appears under `-q`.
+- **`--json` with a TTY prints the one-line notice on stderr and never prompts.**
+- **The source layout never prompts.** It prints the notice line with
+  the source hint, both on and off a TTY.
+- **`ptest update` itself never prompts.** An explicit command is
+  consent. This is what agents run.
+- **`--check` and `--version` together are rejected** as `invalid-config`.
+- **Source layout refuses every form of `ptest update`, including `--check`.** It returns
+  `not-install-layout` with exit 2, before any network access.
+- **Offline or unreachable during `ptest update`** returns `update-unavailable`,
+  retryable, with exit 75. Every other update failure is `update-failed`, exit 2.
+- **An EOF at the prompt means decline.** The prompt reads a line with `sys.stdin.readline()`,
+  not `input()`, because `input()` writes to stdout. An empty
+  string (EOF) declines. `"\n"`, `y` and `yes` accept. Anything else declines.
+- **Ctrl-C at the prompt, or during a prompted update,** prints a newline and
+  raises `SystemExit(130)`. The user cancelled, and the command never ran.
+- **A failed prompted update records a decline** for that version for 24 h, so a
+  broken release cannot nag on every command.
+- **No re-exec loop guard through the environment.** Changing the environment would leak into runner
+  children. After a successful update the new process runs the target version,
+  and the cache says `latest == target`, so it prints nothing.
+- **The update-check cache survives `ptest uninstall`.** It is shared machine state, like
+  `machine.toml`. This follows the existing uninstall contract ("shared records are never
+  touched").
+- **Spec kept as written: `uninstall` is not exempt from the check.** A human running
+  `ptest uninstall --self` at a TTY may be asked to update first. That wastes time but does no
+  harm. This is recorded as an open question, not implemented as a deviation.
 
-def build_static_packets(workspace, resolution,
-                         limits: EvidenceLimits = EvidenceLimits(), *,
-                         deadline: float | None = None,
-                         on_child: Callable[[str, int], None] | None = None,
-                         ) -> StaticPackets: ...
-```
+---
 
-- It uses the same type checks as `build_packets`, the same 256-child bound, the same
-  `invalid-config` check, and the same `_packet_scope_context` validation for all children
-  first. `unsafe-path` and similar problems propagate unchanged.
-- Per child it calls `_build_one_packet(..., deadline=deadline, progress=None, static=True, on_child=on_child)`.
-  `static` and `on_child` are new keyword-only parameters on `_build_one_packet`, defaulting
-  to `False` and `None`. With `static=False`, code and behaviour are byte-for-byte today's.
-- **Graceful deadline.** If `deadline` has already passed before a child starts, or that
-  child's build raises `C.Problem` with `code == "review-timeout"`, then that child and every
-  later child get `_deadline_packet(root, repo, resolution, scope_context)` and their
-  declarations go into `deadline_expired`. Any other Problem propagates. `build_static_packets`
-  never raises `review-timeout`.
-- `on_child(declaration, file_count)` is called exactly once per child that is walked, right
-  after `_iter_regular_files` and the lockfile filter. `file_count = len(regular)` after lock
-  removal, before suite skips. Children cut off by the deadline before the walk get no call.
+## 3. Frozen interfaces
 
-### D2. What a static packet (`static=True`) does
+### 3.1 User-visible strings
 
-In order: walk, lockfile filter, `_collect_packet_context`, and `_conclusive_suite_skips`
-with the `known_excluded` update. These are identical to the full path; context collection
-is offline-visible fact collection (config status, suite exclusions, roles) and is kept.
-Then:
+T1 prints these strings byte for byte, and T2 quotes them. `X` is the newer or target
+version and `Y` is the running version, both validated `N.N.N`. The long dash is
+U+2014 (`—`).
 
-1. **Core admission.** Admit `core_paths` (root decisions plus configured setups), computed
-   exactly as today.
-2. **Marker admission.** Take every regular file (after suite skips) that is not in
-   `core_paths` and whose basename is in `_DECLARATIONS` or `_UNSUPPORTED_MARKERS`. Sort by
-   `rel` and admit each through `_admit_candidate`. These files feed dependency facts, which
-   offline shows.
-3. **Metadata-projected accounting.** This step reads nothing. The candidates `N` are the
-   regular files (after suite skips) that are not core and not markers, with test-role files
-   excluded unless `unresolved_suite` holds (the same test filter as today's `late`). Sort `N`
-   by `(_context_priority(rel, role_of, linked, config_paths), _admission_tier(rel), rel)`.
-   Starting from `emu_files = len(state.excerpts)` and `emu_bytes = state.byte_count`, walk
-   `N` and mirror the order of checks in `_admit_candidate` using sizes only:
-   - if `emu_files >= limits.max_files_per_child`, then `truncated += 1`
-   - else set `chunk = min(size, limits.max_bytes_per_file)` and `was_cut = size > limits.max_bytes_per_file`
-   - if `chunk == 0`, then `skipped += 1`
-   - else if `emu_bytes + chunk > limits.max_bytes_per_child`, then `truncated += 1`
-   - else `emu_files += 1`, `emu_bytes += chunk`, and if `was_cut`, `truncated += 1`
-
-   This step changes only `state.skipped` and `state.truncated`. It never touches the
-   candidate read ledger, `state.excerpts`, `byte_count` or `paths`. It returns the number of
-   emulated admissions (the count of `emu_files += 1` steps). Name it
-   `_project_static_admission(state, candidates: list[tuple[str, int]], limits) -> int`.
-   The return value becomes the packet's `_projected_admitted` (step 6, D2a).
-4. **Dependencies.** `_dependency_facts(...)` runs exactly as today on the static `paths` and
-   state, with `package.json` text taken from the core excerpt.
-5. **Prompt cap.** The prompt-cap trim loop runs unchanged.
-6. **Packet fields.** `_inventory_sha256=None`. `packet_sha256 = packet_hash(packet)`, which is
-   the body hash; an online packet always carries an inventory digest, so the two identities
-   are built differently and cannot be confused. Set
-   `_item_chains = tuple((digest, item.id, ()) for item in model_items)` so that
-   `RE.select_item_sources` uses the bound empty chains and **never** calls
-   `item_source_chains` offline. Set `_projected_admitted` to step 3's return value.
-7. **Never called with `static=True`:** `_candidate_text_pool`, `RE.rank_candidates`,
-   `RE.item_source_chains`, `_resolve_tier4`, `complete_chain` and `admit_chain`. No
-   non-core, non-marker file is read by admission.
-
-`_deadline_packet(root, repo, resolution, scope_context) -> EvidencePacket`:
-
-- `project_id`, `runner_kind` and `scope` are resolved exactly as at the head of
-  `_build_one_packet`, including the fallback for `declaration == "."` with no config.
-- `excerpts=()`, `dependencies=()`, all counts `0`, `context=None` (becomes
-  `RC.empty_context`), `_inventory_sha256=None`, `_projected_admitted=0`.
-- `_item_chains` is bound to its own digest, as in step 6.
-
-### D2a. Evidence presence survives the static packet (frozen, T1)
-
-`_assessment_limitations` (cli.py:1651, 1666) branches on `not packet.excerpts` to choose
-between "No source files were admitted to this project packet. " and "Evidence limits: ",
-and to decide whether a `partial-evidence` limitation exists at all. A static packet admits
-only core and marker files, so under `--scope <subdir>` (every rel is nested, so there are
-no priority-0 root files, and conftest.py has role `fixture`, not `setup`) or in an
-uninitialized repo with no root decision or marker file, `excerpts == ()`. The full path
-would late-admit the tree's non-test files there. The static packet therefore carries the
-projected admission count, and the limitation reads evidence presence through one helper:
-
-```python
-# src/ptest/agent_assessment.py  (FROZEN)
-@dataclass(frozen=True, slots=True)
-class EvidencePacket:
-    ...                                   # every existing field unchanged, same order
-    _inventory_sha256: str | None = None
-    _projected_admitted: int = 0          # NEW, last field. Static packets only; 0 on every
-                                          # packet built by build_packets. __post_init__
-                                          # rejects bool and negative values (TypeError/ValueError).
-
-def packet_has_evidence(packet) -> bool:
-    """bool(packet.excerpts) or getattr(packet, "_projected_admitted", 0) > 0."""
-```
-
-- `_projected_admitted` is **not** part of `_packet_body`, `packet_hash` or any rendered or
-  serialized field. Online `packet_sha256` values and T2's base-captured goldens are
-  unaffected.
-- `cli._assessment_limitations` replaces both `not packet.excerpts` tests (the `if`
-  condition and the message prefix choice) with `not agent_assessment.packet_has_evidence(packet)`.
-  This is the only edit to a function the online path shares. It is behaviour-neutral
-  there because `build_packets` packets always have `_projected_admitted == 0`, and
-  existing tests that build packets or fakes directly (`test_agent_assessment.py:1346-1389`)
-  must pass unmodified. `getattr` keeps fakes without the attribute working.
-- Why this is exact: under the exactness condition (D4), every candidate that step 3 counts as
-  admitted is a non-empty UTF-8 file that the full path late-admits, so
-  `packet_has_evidence(static) == bool(full.excerpts)` whenever step 3 admits at least one
-  file or a core or marker file was admitted. The remaining case is D4 row 4.
-
-### D3. cli wiring (frozen shapes, T1)
-
-```python
-# src/ptest/cli.py
-_OFFLINE_DEADLINE_MESSAGE = ("Offline static inspection stopped at the doctor deadline "
-                             f"({_REVIEW_TOTAL_TIMEOUT_S} s); this project was not fully inspected.")
-
-def _offline_assessment_parts(resolution, domain, workspace, *,
-                              deadline: float | None = None,
-                              on_child: Callable[[str, int], None] | None = None): ...
-def _doctor_offline_assessment_json(resolution, domain, workspace, *,
-                                    deadline: float | None = None,
-                                    on_child: Callable[[str, int], None] | None = None) -> bytes: ...
-def _offline_progress(parsed: ParsedArgs, resolution) -> Callable[[str, int], None] | None: ...
-```
-
-- `_doctor_static_output` keeps `started = time.monotonic()` as its first statement. It sets
-  `deadline = started + _REVIEW_TOTAL_TIMEOUT_S`, reusing the existing 1800 s review budget
-  and inventing no new constant, and passes `deadline` and `_offline_progress(parsed, resolution)`
-  to both the JSON and grid paths.
-- `_offline_assessment_parts` calls `agent_assessment.build_static_packets(workspace, resolution, deadline=deadline, on_child=on_child)`
-  through the module attribute, so tests can monkeypatch it. Everything after it is unchanged
-  (`_plan_item_reviews`, `_assemble_with_parallel`, `_child_assessment_data`), iterating
-  `result.packets`.
-- For each packet whose declaration is in `deadline_expired`, append
-  `{"code": "partial-evidence", "message": _OFFLINE_DEADLINE_MESSAGE, "paths": [packet.scope]}`
-  to that child's limitations, deduplicated. Also append it to the top-level limitations after
-  `_assessment_limitations(packets, top_level=True)` and the initialization blocker, keeping
-  the existing `[:64]` bound. No new limitation code is added: `contracts.py` is untouched.
-- `_offline_progress` returns `None` when `parsed.quiet` is set or `sys.stderr.isatty()` is
-  false. `parsed.quiet` can be True on this path only through `doctor --offline -q` (D3a).
-  `ptest init` and default `ptest doctor` gain no quiet flag, so their declined-review
-  fallback always has `quiet == False` and narrates only on a TTY (a declined review has
-  already interacted on that TTY). Otherwise it returns an emitter that writes exactly one line per call to **stderr
-  only**, flushed:
-  `ptest: doctor: inspecting {label} · {C.plural(file_count, 'file')}`.
-  `label` is the `declaration`, or `resolution.root.name` for `"."`, passed through
-  `render.terminal_text`. Match the non-UTF-8 fallback of the existing `ptest:` stderr
-  narration. The emitter swallows `OSError`. Stdout is never written, including under `--json`.
-- The online path (`_run_doctor_review`) and `build_packets` get **zero** edits. The only
-  shared-function edit is the behaviour-neutral `_assessment_limitations` change in D2a.
-- `doctor.py` needs no change: the file count comes from the packet walk. If T1 finds it must
-  edit `doctor.py`, the change stays within `inspect_workspace` and changes no output.
-
-### D3a. `doctor --offline -q | --quiet` grammar (frozen public CLI contract, T1)
-
-Only the `doctor` branch of `_parse_inspection` changes. The `init` parser and the execution
-parser are untouched.
-
-- Tokens: `-q` and `--quiet`, which are synonyms. Track `quiet_seen`. A second occurrence of
-  either token raises `invalid-config` "option cannot be repeated" (same rule as doctor's `-v`).
-- Validation, in the parser's existing order (first failing rule wins):
-  1. With `--probe`, the existing output-mode check becomes
-     `if json_output or verbose_seen or quiet_seen:` and raises the existing
-     "doctor probe cannot combine output modes".
-  2. With `--fix`, the existing check becomes `if json_output or scope is not None or limits or quiet_seen:`
-     and raises the existing "--fix takes no output, scope, or scan-limit options".
-  3. After the `--fix` block and before `if fix_dry or verbose_seen:`, add:
-     `if quiet_seen and not offline: raise _problem("invalid-config", "--quiet requires --offline")`.
-  4. Otherwise `--offline -q` is accepted with and without `--json`, `--scope` and the scan
-     limits. The final `ParsedArgs(...)` gets `quiet=quiet_seen`. Under `--json` it is a
-     no-op, because JSON never narrates.
-- Effect: it suppresses only the D3 offline progress lines. Stdout, the exit status and
-  every other stderr line are unchanged.
-- Help (`src/ptest/help.py`, `_DOCTOR` only): the offline syntax line becomes
-  `ptest doctor --offline [--json] [-q | --quiet] [--scope PATH] [--max-entries N]` (the
-  continuation line is unchanged). Add one Notes sentence: "Offline static inspection
-  prints one progress line per project to stderr on a TTY; -q/--quiet suppresses it."
-  No other help topic, README or guide text changes. The text must pass the existing
-  `test_help.py` checks unmodified, including the banned-terms check.
-
-### D4. Documented, unavoidable differences (offline only; the online path is unchanged)
-
-| Field | Difference | Why |
+| Id | Where | Exact text |
 |---|---|---|
-| `children[*].packet_sha256` (JSON only; never in the grid) | Always differs from 0.3.7: it is the static packet's body hash | The old value commits to ranked late excerpts and the pool inventory digest, which requirement 1 forbids building. Offline publication is always `skipped` and no report is written, so nothing compares it with an online identity. |
-| `partial-evidence` counts, and in rare cases whether that limitation exists (so the grid's partial marker) | Can differ when a per-child cap binds (more than 64 admitted files, more than 512 KiB, or an exhausted candidate ledger), or when a non-core candidate is binary, non-UTF-8 or unreadable | The static accounting projects outcomes from size metadata only. Content and rank order are unknowable without the forbidden reads. |
-| Lock `locked` vs `uninspectable`; scoped `ref_path` when two marker files share a basename | Can differ only when the full path's candidate ledger is exhausted, or when duplicate marker basenames exist in a scoped run | The static ledger is not drained by pool reads, and marker admission order is `rel`-sorted rather than rank-ordered. |
-| The child's `partial-evidence` limitation (so the grid's partial marker, and the deduplicated top-level copy) when the static packet has **no evidence**: no core file, no marker file, and step 3 projects zero admissions. Typical cases are `--scope <dir>` over a tree of only test-role files plus empty `__init__.py`, and an uninitialized repo that holds only tests. | Static always emits "No source files were admitted to this project packet. ..." for that child. The full path emits the same text only if it admitted no test chain; otherwise it emits "Evidence limits: ..." or no `partial-evidence` limitation. | Every remaining file is test-role. The full path admits test files only as chain callers selected by `RE.item_source_chains` over read and ranked test texts. Knowing whether any chain exists requires exactly those reads, which requirement 1 forbids. The static message is literally true: the static packet admitted no source files. |
+| S1 prompt | stderr, no newline, then flush | `ptest X is available (you have Y). Update now? [Y/n] ` |
+| S2 agent notice | stderr, one line | `ptest: update available: X (installed Y) — run: ptest update` |
+| S3 source notice | stderr, one line | `ptest: update available: X (installed Y) — installed from source; update it with git pull` |
+| S4 source hint (`SOURCE_HINT`) | Problem message | `installed from source; update it with git pull` |
+| S5 up to date | stdout (`ptest update`) | `ptest is up to date (Y)` |
+| S6 check available | stdout (`ptest update --check`) | `ptest X is available (installed Y) — run: ptest update` |
+| S7 updated | stdout (`ptest update`) | `ptest updated to X (was Y)` |
+| S8 prompted update ok | stderr (startup) | `ptest: updated to X (was Y)` |
+| S9 re-exec impossible | stderr (startup) | `ptest: updated to X; the update takes effect on the next run` |
+| S10 prompted update failed | stderr (startup) | `ptest: update failed: <problem.message>; continuing with Y` |
+| S11 download progress | stderr (`ptest update`, prompted) | `ptest: downloading ptest X for <os>-<arch>` |
 
-**Exactness condition (tested).** All of the following hold:
-- No per-child cap binds.
-- Every non-core candidate is either empty or UTF-8 text without NUL. This covers empty
-  `__init__.py` files and a single non-test file cut at `max_bytes_per_file`.
-- No chain-admitted test file exceeds `max_bytes_per_file`.
-- The static packet has evidence (`packet_has_evidence`, D2a); that is, row 4 does not
-  apply.
+Refusals go through the existing `_emit_error` and print as
+`<code>: <message>` on stderr, or as an error document with `--json`:
 
-This holds for scoped runs and uninitialized repos too. Under that condition the grid text
-(duration masked) is byte-identical to today's, and so is the JSON document except
-`children[*].packet_sha256`.
+| Code | Exit | Message (exact where given) |
+|---|---|---|
+| `not-install-layout` | 2 | S4 |
+| `update-unavailable` (retryable) | 75 | `could not reach the ptest releases on GitHub` |
+| `update-failed` | 2 | `checksum mismatch for ptest-X-<suffix>.tar.gz; the current install is unchanged` (other `update-failed` messages are free text but must end with `; the current install is unchanged` when nothing was switched) |
+| `invalid-config` | 2 | `--version must be a release number like 0.3.7` / `--check and --version cannot be combined` / `unknown inspection option` |
 
-## 3. T2 decisions: faster `rank_candidates`, identical selection
+The `update-failed` message for a missing release: `no ptest X release for <suffix>`.
 
-Public signatures are unchanged: `rank_candidates`, `rank_item_candidates`,
-`select_item_sources`, `item_source_chains`, `source_units` and `source_id`. Existing private
-helpers keep their current positional parameters. Any new parameter is keyword-only with a
-default, because `select_item_sources` and the chain code call them positionally.
-
-Frozen private names (tests target them):
+### 3.2 `src/ptest/update.py` public surface (T1)
 
 ```python
+REPOSITORY = "Avocado-Blockchain-Services/ptest"
+RELEASES_URL = "https://github.com/Avocado-Blockchain-Services/ptest/releases"
+LATEST_URL = RELEASES_URL + "/latest"
+ALLOWED_HOSTS = frozenset({"github.com", "objects.githubusercontent.com",
+                           "release-assets.githubusercontent.com"})
+CHECK_INTERVAL_S = 24 * 3600
+CHECK_TIMEOUT_S = 2.0            # startup wall-clock bound (thread join)
+RESOLVE_TIMEOUT_S = 10.0         # explicit `ptest update`
+DOWNLOAD_TIMEOUT_S = 300.0       # total per file, monotonic deadline
+INSTALL_TIMEOUT_S = 900
+MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_SHA_BYTES = 4096
+MAX_EXTRACT_BYTES = 256 * 1024 * 1024
+MAX_MEMBERS = 10_000
+CACHE_NAME = "update-check.json"
+CACHE_MAX_BYTES = 4096
+SOURCE_HINT = "installed from source; update it with git pull"
+
 @dataclass(frozen=True, slots=True)
-class _ContextIndex:
-    roles: Mapping[str, str]          # dict(context.roles), last value wins (== old next(...) scan)
-    outgoing: frozenset[str]          # relation sources
-    incoming: frozenset[str]          # relation targets
-    config_paths: frozenset[str]      # getattr(context, "config_paths", ())
+class Transport:
+    # timeout_s -> raw Location header of LATEST_URL (redirect NOT followed)
+    latest_location: Callable[[float], str]
+    # (url, sink, max_bytes, timeout_s) -> None; writes the body to sink.
+    # Real impl: HTTPS + ALLOWED_HOSTS on the URL and on every redirect
+    # (max 5), no userinfo, port None/443, Content-Length and streamed byte
+    # cap, monotonic deadline. Raises C.Problem or OSError.
+    download: Callable[[str, BinaryIO, int, float], None]
 
-def _build_context_index(context) -> _ContextIndex: ...
-def _context_index(context, signal_cache: dict | None) -> _ContextIndex:
-    """Memoized under signal_cache[("context-index", id(context))] = (context, index);
-    reuse only if the stored object `is context` (the stored ref pins the id)."""
+@dataclass(frozen=True, slots=True)
+class Layout:
+    root: Path        # realpath of the install root (holds .ptest-bundles and ptest)
+    bundle_id: str    # running bundle dir name
 
-def _relation_score(path, context, *, index: _ContextIndex | None = None) -> int
-def _source_role(path, context, *, index: _ContextIndex | None = None) -> str
-def _is_config_path(path, context=None, *, index: _ContextIndex | None = None) -> bool
+@dataclass(frozen=True, slots=True)
+class UpdateResult:
+    running_version: str
+    target_version: str
+    action: str       # "up-to-date" | "available" | "updated"
+    check_only: bool
+    install_root: Path | None
 
-@functools.lru_cache(maxsize=256)
-def _compiled_patterns(text_patterns: tuple[str, ...]) -> tuple[re.Pattern, ...]
-    # _resource_patterns(entry) returns _compiled_patterns(tuple(entry.text_patterns))
-
-def _call_names_hit(patterns, call_names: tuple[str, ...]) -> bool
-    # == any(p.search(n) or p.search(n + "(") for n in call_names for p in patterns)
-
-_IDENTIFIER_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|_+")
-    # _python_identifier_text: _IDENTIFIER_SPLIT_RE.sub(" ", " ".join(names)), one pass per text
+def default_transport() -> Transport: ...
+def valid_version(text: object) -> str | None:
+    """str matching re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", text, re.ASCII),
+    len <= 32, else None. No leading 'v', no whitespace, no unicode digits."""
+def is_newer(candidate: str, current: str) -> bool:   # int-tuple compare
+def platform_suffix() -> str:
+    """os.uname(): Linux->linux, Darwin->macos; x86_64/amd64->x86_64;
+    arm64/aarch64 -> arm64 on macos, aarch64 on linux. Else raises
+    C.Problem update-failed. Same table as get.sh."""
+def detect_layout(module_file: str | None = None) -> Layout | None:
+    """module_file defaults to this file. Bundle layout iff realpath lies in
+    <root>/.ptest-bundles/<id>/..., uninstall._is_bundle_dir(<root>/.ptest-bundles, id)
+    and uninstall._public_link_in_bundles(root). Anything else -> None (source)."""
+def resolve_latest(transport: Transport | None = None, *, timeout_s: float) -> str:
+    """Raises C.Problem update-unavailable (retryable) on any failure or on a
+    Location that does not match the exact tag URL / valid_version."""
+def run_update(*, requested: str | None, check_only: bool,
+               transport: Transport | None = None,
+               layout: Layout | None = None,
+               log: TextIO | None = None) -> UpdateResult:
+    """Explicit `ptest update`. layout None -> detect_layout(); still None ->
+    C.Problem not-install-layout (SOURCE_HINT) before any network. Raises
+    C.Problem only. log defaults to sys.stderr (resolved at call time)."""
+def startup_check(argv: Sequence[str], *, quiet: bool, json_output: bool,
+                  fixture: bool, transport: Transport | None = None,
+                  now: float | None = None) -> None:
+    """Best-effort pre-command hook. Never raises (except SystemExit(130) on
+    Ctrl-C at the prompt/prompted update). Never writes stdout. May
+    _execv(<root>/ptest, [<root>/ptest, *argv]) and not return."""
+def render_text(result: UpdateResult) -> str:        # S5 / S6 / S7 + "\n"
+def document_data(result: UpdateResult) -> dict:     # section 3.4 payload
 ```
 
-Rules:
+Private seams that T1 tests may monkeypatch (names are frozen inside T1):
+`update._execv` (defaults to `os.execv`), `update.default_transport`, and
+`update.CHECK_TIMEOUT_S`. Tests may lower `CHECK_TIMEOUT_S` to about 0.2 s so they never wait 2 s.
 
-- `rank_candidates` uses a local `signal_cache = {}` when given `None`. The cache only
-  memoizes, so the output is unchanged. `_item_rank`, `_has_item_anchor` and
-  `_unit_priority` get the index through `_context_index(context, signal_cache)`.
-- `_call_names_hit` joins the names once:
-  `joined = "\n".join(f"{n}\n{n}(" for n in call_names)`. For each pattern it runs a sound
-  prefilter compiled with `pattern.flags | re.MULTILINE`, cached per pattern. **Only** when
-  the prefilter hits does it run the exact original per-name loop for that pattern. Patterns
-  whose source contains `\A`, `\Z`, `(?<`, `(?=` or `(?!` skip the prefilter and always use
-  the exact loop. Result: one search per pattern per file on the common no-hit path, with
-  semantics identical to the old code.
-- Optional exact memoization is allowed: per-file `_GENERIC_CONTROL_RE`/`_TIME_*` results,
-  and per-(file, pattern) `body_hit` results, in `signal_cache`. Any other optimization
-  **must** keep `rank_candidates`, `item_source_chains` and `select_item_sources` outputs
-  identical.
-- No change to `_item_rank` tuple shape, to catalog data, or to any file outside
-  `review_evidence.py`.
+### 3.3 Startup-check algorithm (T1; T2 documents it)
 
-## 4. T3 decisions: complete commit reminder
+1. Return without doing anything if any of these holds: `fixture`, `quiet`,
+   `_truthy(PTEST_NO_UPDATE_CHECK)`, or `_truthy(CI)`.
+   `_truthy(v) = v is not None and v.strip().lower() not in {"", "0", "false", "no", "off"}`.
+   The command gate is in cli (`help`, `version`, `update` are exempt).
+2. `domain = ptest.platform.domain_paths(None)`. The cache is
+   `domain.root / CACHE_NAME`, where `domain.root` is the coordination dir and
+   respects `PTEST_STATE_DIR`. Any exception makes the check return silently.
+3. Read with `files.read_regular(domain.root, CACHE_NAME, CACHE_MAX_BYTES + 1)`.
+   A missing, oversized, symlinked, non-JSON or schema-invalid file counts as an empty cache.
+   Cache schema, frozen:
+   `{"schema": 1, "checked_at": float, "latest": str|null, "declined": str|null, "declined_at": float|null}`.
+   Versions inside the cache are re-validated with `valid_version`.
+4. The cache is stale if `checked_at` is missing, `now - checked_at >= CHECK_INTERVAL_S`,
+   or `checked_at > now + 300` (clock skew). When stale: write the claim with
+   `files.publish_atomic` (0600). If the claim write fails, return. Then run
+   `resolve_latest(timeout_s=CHECK_TIMEOUT_S)` in a daemon thread and
+   `join(CHECK_TIMEOUT_S)`. On success, write the cache with the new
+   `latest`. On failure or timeout, keep the claim and stay silent.
+5. If `latest` is missing, or `not is_newer(latest, C.PTEST_VERSION)`, return.
+6. `layout = detect_layout()`. If it is None, print S3 and return.
+7. Interactive means `sys.stdin.isatty() and sys.stderr.isatty() and not json_output`.
+   If not interactive, print S2 and return.
+8. If `declined == latest` and `now - declined_at < CHECK_INTERVAL_S`, return silently.
+9. Print prompt S1 and read one line. On decline, record `declined`/`declined_at` and return.
+10. Accept: run `run_update(requested=latest, check_only=False, layout=layout, log=sys.stderr)`.
+    If it raises Problem or Exception, print S10, record a decline, and return.
+    On success, print S8, flush stdout and stderr, and call
+    `_execv(str(layout.root / "ptest"), [str(layout.root / "ptest"), *argv])`.
+    On OSError, print S9 and return, so the command runs on the current version.
 
-The helper is frozen and lives in `config.py`:
+### 3.4 `update` public document (T1)
+
+`contracts.PUBLIC_KINDS` gains `"update"`, **appended last**, because
+`test_agent_assessment_contract` pins `PUBLIC_KINDS[:8]`. The payload is
+exactly this:
 
 ```python
-def _merged_commit_paths(boundary: Path | None, config_root: Path,
-                         written: tuple[str, ...]) -> tuple[str, ...]:
-    """`written` first (order kept), then every uncommitted ptest file, deduplicated,
-    as boundary-relative posix paths. () when boundary is None."""
+_UPDATE_ACTIONS = ("up-to-date", "available", "updated")
+
+def _validate_update_payload(data: dict) -> None:
+    _need_str(data, "running_version")
+    _need_str(data, "target_version")
+    if data.get("action") not in _UPDATE_ACTIONS:
+        raise _invalid("report-invalid", "update.action is unknown")
+    _need_bool(data, "check_only")
+    _need_str(data, "install_root", allow_none=True)
+
+def _project_update_payload(data: dict) -> dict:
+    return {"running_version": data["running_version"],
+            "target_version": data["target_version"],
+            "action": data["action"],
+            "check_only": data["check_only"],
+            "install_root": data["install_root"]}
+
+# PUBLIC_SCHEMAS["update"]
+_envelope_schema("update", {
+    "type": "object",
+    "properties": {
+        "running_version": {"type": "string"},
+        "target_version": {"type": "string"},
+        "action": {"type": "string", "enum": list(_UPDATE_ACTIONS)},
+        "check_only": {"type": "boolean"},
+        "install_root": {"type": ["string", "null"]},
+    },
+    "required": ["running_version", "target_version", "action",
+                 "check_only", "install_root"],
+})
 ```
 
-- It scans `_worktree.uncommitted_config_files(boundary, include_agent_rules=True)`. If
-  `config_root != boundary` and `config_root` lies inside `boundary`, it also scans
-  `uncommitted_config_files(config_root, include_agent_rules=False)`, prefixed with
-  `config_root.relative_to(boundary).as_posix() + "/"`. The helper never raises: the worktree
-  helper already returns `()` on any failure, and `written` is kept.
-- `init_project` applies it to **every non-preview result it returns**:
-  - `_existing_result` returns (config unchanged). Wrap at the `init_project` return sites;
-    do not change `_existing_result`'s signature, because `_init_from_main` also uses it.
-  - Monorepo CREATED returns.
-  - Standalone CREATED returns.
+Register the validator in `_PAYLOAD_VALIDATORS` and the projector in `_PROJECTORS`.
+`docs/schemas/v1/update.json` is generated with
+`uv run --locked --no-sync python scripts/export-schemas.py`. It is never hand-written.
 
-  `boundary = _git_boundary(physical_cwd)` (already computed for created paths; compute it
-  the same way for early returns, treating a raised Problem as `None`).
-  `config_root = result.target.parent`.
-- Unchanged, and asserted as negative contracts:
-  - PREVIEW (`--dry-run`) results keep `commit_paths=()`.
-  - `--from-main` results keep `()`: the stopgap warning governs them.
-  - Non-git directories give `()`.
-  - Files that are not ptest files are never listed.
-- `cli.py` needs **no** edit. The existing guidance merge at `cli.py` around line 2420
-  appends files that `agent_rules.apply` created or updated in this run, skipping any path
-  already in `result.commit_paths`. That covers files written after `init_project`'s scan.
-  JSON `commit_paths` follows automatically through `C.serialize_init_result`.
-- `init_render._commit_reminder_lines`: update its docstring to "every uncommitted ptest
-  file". It still renders from `result.commit_paths` and still wraps (no cap, no
-  truncation). Paths stay sanitized through `terminal_text`.
+### 3.5 CLI grammar and wiring (T1)
 
-## 5. Per-task acceptance criteria
+- `_INSPECTION` gains `"update"`. `_COMMAND_ALIASES` gains `"upgrade": "update"`.
+- `ParsedArgs` gains `update_check: bool = False` and `update_version: str | None = None`.
+- Grammar: `ptest update [--check] [--version X.Y.Z] [--json]`. Each option may
+  appear at most once. `--version` takes its value through `_value`, which rejects a missing value
+  or one that starts with `--`, and then `update.valid_version`. `--check` combined with
+  `--version` is rejected. `--help` / `-h` go through the existing generic route
+  (`help update`).
+- In `main()`, right after `parsed = _parse_args(raw_args, prefix)`:
+  ```python
+  if parsed.command not in _UPDATE_CHECK_EXEMPT:   # frozenset({"help", "version", "update"})
+      update_api.startup_check(raw_args, quiet=parsed.quiet,
+                               json_output=parsed.json,
+                               fixture=parsed.fixture_domain is not None)
+  ```
+  Import it as `from . import update as update_api`.
+- `_static_dispatch`: `if command == "update": return _run_update(parsed)`.
+  `_run_update` calls `run_update(requested=parsed.update_version,
+  check_only=parsed.update_check)`. With `--json`, it writes
+  `_document("update", update_api.document_data(result))` to stdout. Otherwise
+  it writes `update_api.render_text(result)` to stdout. Errors go through
+  `_emit_error(problem, kind="update", json_output=parsed.json)`.
+- `_emit_error` adds `"update-unavailable"` to the exit-75 set.
+- Installer output never reaches stdout (section 3.6), so `--json` stdout is
+  exactly one document.
 
-All test runs go through `ptest --workers 2 --queue-timeout 1800 <paths>`. No test may
-assert on wall-clock speed or sleep. `invoke()` timeouts are at least 20 s. Keep each test
-under 2 s: fixtures are small and function-scoped. Commit only in your own worktree, run
-`graphify update .` after source changes, and never push or merge.
+### 3.6 `ptest update` pipeline (T1)
 
-### T1: offline static path
+`run_update` works in this order:
 
-1. `tests/ng/test_doctor_offline_light.py`. **Negative contract:** with
-   `ptest.review_evidence.rank_candidates`, `ptest.review_evidence.item_source_chains`,
-   `ptest.agent_assessment._candidate_text_pool` and `ptest.agent_assessment._resolve_tier4`
-   monkeypatched to `pytest.fail`, all three paths exit 0 and produce the document:
-   `main(("doctor","--offline"))`, `main(("doctor","--offline","--json"))`, and init's
-   declined-review fallback (`_declined_review_output`).
-2. **Identity** (same test file). Compute the reference by monkeypatching
-   `agent_assessment.build_static_packets` to return
-   `StaticPackets(agent_assessment.build_packets(workspace, resolution), ())`, which is
-   today's full path. Compare it with the static result:
-   - JSON bytes equal after replacing each `children[*].packet_sha256`.
-   - Grid stdout equal after masking only the header duration token.
-   - `_offline_assessment_parts` child rows, findings, scores, execution, facts and
-     limitations equal.
+1. Detect the layout. If it is source, raise `not-install-layout` with no network access.
+2. Compute `platform_suffix()`.
+3. Set `target = requested or resolve_latest(timeout_s=RESOLVE_TIMEOUT_S)`.
+4. Pick the action:
+   - `requested is None and not is_newer(target, running)`: `up-to-date`.
+   - `requested == running`: `up-to-date`.
+   - `check_only`: `available`.
+   - Otherwise install. A requested older version installs only because `--version` named it.
+     Without `--version` there is never a downgrade.
+5. Install:
+   1. `tmp = tempfile.mkdtemp(prefix="ptest-update-")`. Assert that it is owned and mode 0700.
+      Delete it with `shutil.rmtree` in `finally` on **every** path.
+   2. Download `ptest-X-<suffix>.tar.gz` (max `MAX_BUNDLE_BYTES`) and `.sha256` (max
+      `MAX_SHA_BYTES`) from `RELEASES_URL/download/vX/...` into
+      `O_CREAT|O_EXCL|O_NOFOLLOW` 0600 files.
+   3. Parse `.sha256`: the first token must be 64 lowercase hex characters. The second
+      token, if present, must equal the asset name or `*` + the asset name.
+      Compare with `hmac.compare_digest`. A mismatch is `update-failed`, raised before
+      any extraction.
+   4. Extract by hand with `tarfile.open(mode="r:gz")`, iterating members and never calling `extractall`.
+      Only regular files and directories are allowed. Symlinks, hard links, character or block
+      devices, FIFOs and other types are rejected. Absolute names, `..` parts, NUL
+      and empty parts are rejected. Every name must be `ptest-X` or start with `ptest-X/`.
+      There may be at most `MAX_MEMBERS` members, and the summed sizes may be at most
+      `MAX_EXTRACT_BYTES`. Duplicates are rejected (`O_EXCL`). Directories are created 0700.
+      Files are 0700 if any exec bit is set in the member, else 0600.
+   5. Require `ptest-X/install.sh` to be a regular file with an exec bit.
+   6. Find the interpreter: `shutil.which("uv")`, then
+      `uv python find --system '>=3.11,<3.15'` (60 s timeout). The output must be an absolute
+      existing file. Otherwise raise `update-failed`.
+   7. Run `[install.sh, "--dest", str(layout.root)]` with `cwd=tmp`,
+      `stdin=DEVNULL`, and `stdout=PIPE, stderr=STDOUT`. Keep the output bounded to the last 64 KiB.
+      Use `timeout=INSTALL_TIMEOUT_S`. The environment is `os.environ` minus
+      `PTEST_INSTALL_FAULT`, plus `PTEST_PYTHON=<found>` and
+      `PTEST_NO_UPDATE_CHECK=1`. On a non-zero exit or timeout, write the last 20 or fewer output
+      lines to `log` and raise `update-failed`.
+   8. Post-verify: `realpath(<root>/ptest)` must be inside
+      `<root>/.ptest-bundles/<id>/`, `_is_bundle_dir` must hold, and
+      `complete.json.ptest_version == X`. Otherwise raise `update-failed`
+      (`the installer did not switch the launcher to X`).
+6. Return `UpdateResult(running_version=C.PTEST_VERSION, target_version=target, ...)`.
 
-   The fake must accept and ignore `build_static_packets`' keyword arguments.
+---
 
-   Fixtures, all within the exactness condition:
-   - standalone (`factories_agents.doctor_assessment_project`);
-   - a 2-child v2 monorepo;
-   - a pytest child with empty `__init__.py` files and one non-test file larger than
-     `MAX_BYTES_PER_FILE`;
-   - a child with a root `setup.py` (an unsupported marker);
-   - a node child with `package.json`;
-   - **scoped:** the 2-child monorepo run as `doctor --offline --scope api/tests` and
-     `--offline --json --scope api/tests`, where `api/tests` holds test files, empty
-     `__init__.py` and a non-empty `conftest.py`. Also a standalone project run with
-     `--scope src/pkg`, holding one non-test module;
-   - **uninitialized:** a standalone directory with no `.ptest.toml`, no root decision file
-     and no marker, holding `src/app.py` and `tests/test_app.py`.
+## 4. Task T1: update check and `ptest update`
 
-   For the scoped and uninitialized fixtures, also assert on the static packets directly
-   that `excerpts == ()` and `_projected_admitted > 0`. This proves that D2a's branch, not
-   luck, keeps the output identical.
-3. **Documented differences.**
-   - Cap row (D4 row 2): a fixture with more than 64 non-test files. Both paths show a
-     `partial-evidence` limitation for that child and identical rows. Only counts and
-     `packet_sha256` may differ; assert exactly that.
-   - No-evidence row (D4 row 4): the 2-child monorepo with `--scope api/tests`, where
-     `api/tests` holds only `test_*.py` files and empty `__init__.py`. The static child's
-     limitations contain the `partial-evidence` entry whose message starts
-     "No source files were admitted to this project packet. ". Rows are identical. After
-     removing `children[*].packet_sha256` and every `partial-evidence` entry whose paths
-     are `["api/tests"]` (child and top level), the static and reference JSON are equal.
-     Assert exactly that, and nothing about the reference's message, because whether it
-     admits a chain depends on ranking.
-4. **Read contract.** In static mode, wrap `agent_assessment.read_regular` to record paths.
-   No admission-phase read touches a non-core, non-marker source file, for example
-   `src/app/service.py` in a pytest fixture. Context-collection reads are allowed; attribute
-   them by running with `_collect_packet_context` wrapped. Static packets have
-   `_inventory_sha256 is None` and every `_item_chains` entry is `()`.
-5. **Deadline.** With `cli._REVIEW_TOTAL_TIMEOUT_S` monkeypatched to `0`, the offline grid
-   and JSON exit 0. Every child is unknown/unscored, each child and the top level carry the
-   `_OFFLINE_DEADLINE_MESSAGE` partial-evidence limitation, and the JSON decodes through
-   `C.decode_public_document`. A direct `build_static_packets(..., deadline=time.monotonic() - 1)`
-   returns every declaration in `deadline_expired` and does not raise. A non-timeout Problem,
-   such as an unsafe scope, still raises.
-6. **Progress.** Fake `sys.stderr.isatty` to True: exactly one
-   `ptest: doctor: inspecting <label> · N files` line per child, with N equal to the child's
-   regular-file count after lock removal, `.` rendered as the repo directory name, and
-   singular `1 file`. When stderr is not a TTY there are no lines and existing
-   `err == ""` assertions still hold. `--json` stdout contains no progress bytes. A
-   declaration containing control characters is sanitized.
-   **Quiet, through the CLI (D3a).** With the TTY faked, `main(("doctor","--offline","-q"))`
-   and `main(("doctor","--offline","--quiet"))` exit 0 and write no progress line. Their
-   stdout equals the un-quieted run's stdout, with the duration masked.
-   `main(("doctor","--offline","--json","-q"))` exits 0 with the same JSON bytes as without
-   `-q`. Parser contract through `cli.parse_argv`:
-   - `("doctor","--offline","-q")` and `("doctor","--offline","--json","--quiet")` give
-     `quiet is True`.
-   - `("doctor","-q")` raises `invalid-config` "--quiet requires --offline".
-   - `("doctor","--offline","-q","--quiet")` raises "option cannot be repeated".
-   - `("doctor","--fix","-q")` raises "--fix takes no output, scope, or scan-limit options".
-   - `("doctor","--probe","--scope","tests/x.py","-q")` raises "doctor probe cannot combine
-     output modes".
-   - **Negative contract:** `("init","-q")` still raises "unknown inspection option".
+**Owns:** `src/ptest/update.py` (new), `src/ptest/cli.py`,
+`src/ptest/help.py`, `src/ptest/contracts.py`,
+`docs/schemas/v1/update.json` (new, generated),
+`src/ptest/runtime/protocol-v1.json` (regenerated, expected unchanged),
+`scripts/install.py` (smoke environment only), `tests/ng/test_update.py` (new),
+`tests/ng/test_cli.py`, `tests/ng/test_help.py`, `tests/ng/test_contracts.py`,
+`tests/ng/conftest.py`.
 
-   `main(("help","doctor"))` output contains `[-q | --quiet]` and the D3a Notes sentence.
-7. **Online unchanged.** `build_packets` gives the same `packet_sha256` as before on the
-   standalone fixture: compute it through `build_packets` in the test and assert it differs
-   from the static digest while `build_packets` itself was not edited (diff check in review).
-   Every `build_packets` packet has `_projected_admitted == 0`, and adding that field leaves
-   its `packet_sha256` unchanged.
-   Existing online tests in `test_agent_assessment.py` and `test_agent_doctor_acceptance.py`
-   pass unmodified.
-8. **Benchmark.** `scripts/bench_doctor_offline.py` is self-contained and deterministic. It
-   generates a monorepo with about 1000 files (2 children, pytest and vitest shaped, fixed
-   `.ptest.toml` with a fixed `project_id`) in a `tempfile.TemporaryDirectory`, then times
-   `ptest doctor --offline` and `--offline --json` in-process through `ptest.cli.main` from
-   this checkout (never the installed CLI). It prints one JSON line per mode:
-   `{"mode", "files", "seconds"}`. It must also run on base 985d43e: the before numbers come
-   from a detached base worktree under `/home/ingmar/worktrees/ptest/cc-doctor-offline/`
-   with its own `uv sync`. Run it once before and once after, and record both in the T1
-   report. It is not collected as a test.
-9. Scoped runs: `tests/ng/test_doctor_offline_light.py tests/ng/test_agent_doctor_acceptance.py tests/ng/test_doctor_grid.py tests/ng/test_cli.py tests/ng/test_agent_assessment.py tests/ng/test_init.py tests/ng/test_help.py tests/ng/test_doctor_fix.py`.
+Do not touch `uninstall.py`, `get.sh`, `install.sh`, `agent_rules.py`, or any
+file T2 owns.
 
-### T2: ranking speed
+### 4.1 Help (`help.py`)
 
-1. `tests/ng/test_rank_candidates_perf.py`. **Goldens captured at base.** First, write a
-   test that builds deterministic fixtures and records `rank_candidates(...)` tuples and
-   `build_packets(...)` `packet_sha256` values. Run it once on **unmodified** code, paste the
-   literals, then optimize; the literals must still match afterwards. Fixtures:
-   - a generated ~60-file python-and-JS child with more than 30 context roles, relations and
-     fixture-use edges, and a fixed `.ptest.toml` project_id;
-   - `factories_agents.doctor_assessment_project`;
-   - one v2 child with a declaration prefix.
+- Add `_UPDATE` to `_TOPIC_TEXTS["update"]`, after `uninstall`. `TOPICS` and `HINT`
+  follow automatically.
+- In the overview, add the line `  ptest update                    # install the latest release (see ptest help update)`
+  under "Inspect and review". Add `update` to the `ptest help <topic>` list.
+  Add `update` to the `--json on ...` line.
+- `_UPDATE` must contain the syntax line `ptest update [--check] [--version X.Y.Z] [--json]`
+  and strings S2, S4 and S5. It must name `PTEST_NO_UPDATE_CHECK=1`, truthy `CI`,
+  `--fixture-domain` and `-q` as opt-outs, the 24 h cache, the 2 s bound,
+  `PTEST_STATE_DIR`, `Update now? [Y/n]`, and the fact that running processes keep their
+  version. It must not contain the banned terms `fingerprint`,
+  `ready with caveats`, or `expected:`.
 
-   Record the capture command and base commit in the T2 report.
-2. **Differential oracles.** Keep the old implementations verbatim in the test as reference
-   functions and compare them with the new ones over the fixture texts and a generated
-   identifier corpus that includes `camelCase`, `HTTPServer`, `a1B`, `__dunder__`,
-   `snake__case_`, non-ASCII identifiers, and syntax-error text:
-   - `_python_identifier_text`
-   - `_relation_score`, `_source_role` and `_is_config_path` over every path in the context
-   - call-hit (old double loop vs `_call_names_hit`) over every catalog entry's patterns,
-     plus crafted patterns using `^`, `$`, `\b`, `\s`, `\A` and lookbehind
-3. **Operation counts** (deterministic):
-   - `_build_context_index` runs once per `rank_candidates` call, independent of
-     files × items; count it with a monkeypatched wrapper.
-   - With no pattern hits, `_call_names_hit` performs at most `len(patterns)` prefilter
-     searches and zero exact-loop searches; count by wrapping the prefilter cache or passing
-     counting pattern proxies.
-   - `_python_identifier_text` calls `_IDENTIFIER_SPLIT_RE.sub` once per text; count through
-     a module-attribute proxy.
-4. `scripts/bench_rank_candidates.py`: a self-contained generator of about 1000 files and
-   about 700 roles. It times `rank_candidates`, captured through `build_packets` on the
-   generated child, and must run on base as well. Record before and after once in the T2
-   report.
-5. Scoped runs: `tests/ng/test_rank_candidates_perf.py tests/ng/test_review_evidence.py tests/ng/test_agent_assessment.py tests/ng/test_review_context.py`. Existing tests pass unmodified.
+### 4.2 Contracts
 
-### T3: commit reminder
+Apply section 3.4 verbatim, then regenerate the schemas.
 
-1. `tests/ng/test_init_commit_reminder.py`, using `support.init_git_repo`, `git` and
-   `write_ptest_toml`:
-   - A git repo with a committed unrelated file and **untracked** `.ptest.toml`,
-     `api/.ptest.toml`, `web/.ptest.toml` (v2 manifest) and
-     `.claude/skills/ptest/SKILL.md`. Running `ptest init` (config unchanged, no agents) lists
-     all four in `Commit these files:`, and `init --json` `commit_paths` equals the same
-     ordered list.
-   - The same repo after `git add` and commit shows no reminder and `commit_paths == []`.
-   - A fresh standalone create has `.ptest.toml` first, followed by other pre-existing
-     uncommitted ptest files, deduplicated.
-   - Agent-rule files created in this run are appended once (cli merge) with no duplicates.
-   - Untracked `README.md` and `notes.toml` never appear.
-   - A non-git directory gives `[]`.
-   - `--dry-run` gives no reminder and `[]`.
-   - A nested config root (init from a subdirectory of the git root, config written at the
-     cwd) lists that config with its boundary-relative path.
-   - When `worktree.uncommitted_config_files` is monkeypatched to return `()`, the result
-     falls back to the written list.
-   - A path containing control characters is rendered sanitized.
-2. Existing `tests/ng/test_init.py` and `tests/ng/test_agent_rules.py` assertions that pin
-   `commit_paths` may be updated **only** where the new rule adds a file that is genuinely
-   uncommitted in that fixture. List each changed assertion and the reason in the T3 report.
-   Never delete or loosen an assertion.
-3. Scoped runs: `tests/ng/test_init_commit_reminder.py tests/ng/test_init.py tests/ng/test_agent_rules.py tests/ng/test_agent_doctor_acceptance.py`.
+### 4.3 `scripts/install.py`
 
-## 6. Security and abuse cases (secure-by-spec)
+On the three smoke `subprocess.run` calls (`--version`, `guide`,
+`python -c`), add `env={**os.environ, "PTEST_NO_UPDATE_CHECK": "1"}`. Change nothing else.
 
-- **No provider launch and no report write offline.** The existing acceptance tests
-  monkeypatch `resolve_reviewer`/`launch_reviews` to fail and assert an unchanged tree; they
-  must stay green.
-- **No reads beyond necessity.** Static admission reads only core and marker files through
-  the existing no-follow, byte-bounded `read_regular`. The walk still never follows symlinks.
-- **Deadline cannot be bypassed.** Every existing `_review_checkpoint` is kept in the static
-  path, with `progress=None` and `deadline` set. A timeout degrades to a deadline packet and
-  never produces a traceback.
-- **Terminal injection.** Progress labels and reminder paths go through
-  `render.terminal_text`, and progress never touches stdout.
-- **Commit reminder.** Only ptest-owned names from `worktree.AGENT_RULE_FILES` and the
-  config set are listed. The git subprocess stays bounded (2 s inside the helper) and fails
-  closed to `()`.
-- **Online integrity.** `build_packets` and the online review are unedited by T1. T2 is
-  guarded by base-captured goldens and differential oracles.
+### 4.4 Abuse cases and negative contracts (secure-by-spec step 1)
 
-## 7. Integration (orchestrator)
+| Axis | Abuse case | Must not happen | Test (in `test_update.py` unless noted) |
+|---|---|---|---|
+| Input | hostile `--version` (`1.2`, `1.2.3.4`, `../1.2.3`, `1.2.3/x`, `v1.2.3`, `1.2.3\n`, full-width digits, 40-char) | reaching any URL or path | `test_hostile_version_rejected_before_network` (cli parse and `valid_version`) |
+| Input | `Location` pointing to another host/repo/scheme, or a bad tag | a version accepted from it | `test_latest_location_must_be_exact_tag_url` |
+| Input | redirect to `http://`, a foreign host, userinfo, port 8443 | following it | `test_redirect_outside_allowlist_refused` (unit test on the real redirect handler and URL check, no socket) |
+| Input | body over the cap (streamed and via Content-Length) | unbounded disk/memory | `test_download_over_cap_fails_and_cleans_temp` (bounded-copy helper with a small cap) |
+| Input | `.sha256` wrong, malformed, not hex, naming another file | installer runs | `test_checksum_mismatch_never_runs_installer_and_keeps_launcher` |
+| Input | tar with absolute path, `..`, symlink, hard link, device/FIFO, member outside `ptest-X/`, duplicate | writing outside the extraction root or running anything | `test_unsafe_archive_member_rejected[...]` (parametrized) |
+| State | installer exits non-zero | launcher moves or old bundle is removed | `test_failed_install_keeps_old_bundle_and_launcher` |
+| State | installer "succeeds" but does not switch | success reported | `test_post_verify_rejects_unswitched_launcher` |
+| State | every failure path | a leftover `ptest-update-*` temp dir | assert that `TMPDIR` is empty after each path |
+| State | `PTEST_BASE_URL` or other env set | download URL changes | `test_env_cannot_redirect_download_urls` |
+| State | two stale-cache runs in a row, network down | a 2 s cost on each run | `test_failed_fetch_backs_off_via_claim` |
+| State | transport hangs | the command is delayed beyond the bound | `test_startup_fetch_is_wall_clock_bounded` (`CHECK_TIMEOUT_S`=0.2, released event) |
+| State | cache is a symlink, oversized, bad JSON, or has a future `checked_at` | crash, follow, or trust | `test_corrupt_cache_is_a_miss_never_followed` |
+| Exposure | notice or prompt on stdout, or under `--json` | stdout or JSON bytes change | `test_notice_is_stderr_only_and_json_stdout_unchanged` (cli) |
+| Exposure | check changes exit status | changed exit code | `test_startup_check_never_changes_exit_status` (cli, with raising transport) |
+| Identity/layout | source/editable run of `ptest update` / `--check` | network access or install | `test_source_layout_refuses_without_network` (real `detect_layout` plus deny guard) |
+| Opt-out | `PTEST_NO_UPDATE_CHECK=1`, `CI=true`, `--fixture-domain`, `-q` | transport called | `test_opt_outs_never_touch_transport[...]`; also `CI=0` and `CI=false` **do** check |
+| Opt-out | `help`, `version`, `update` | `startup_check` called | `test_exempt_commands_skip_startup_check` (cli) |
+| TTY | EOF at the prompt | treated as Yes | `test_prompt_eof_declines` |
+| TTY | decline | re-prompt within 24 h | `test_decline_remembered_for_24h_then_asks_again` |
+| TTY | accept | wrong argv on re-exec | `test_accept_updates_then_reexecs_with_literal_argv` (patched `_execv`) |
+| TTY | `execv` fails | lost command | `test_reexec_failure_continues_with_next_run_notice` |
+| TTY | prompted update fails | nag loop / exit change | `test_prompted_update_failure_continues_and_records_decline` |
+| Install | smoke run of the new bundle | nested update prompt | `test_install_smoke_runs_disable_update_check` (loads `scripts/install.py` like `test_install.py` does, fakes `subprocess.run`, asserts env) |
+| Install | installer environment | leaked `PTEST_INSTALL_FAULT` / missing `PTEST_PYTHON` / missing `--dest` | asserted in `test_success_installs_side_by_side_and_switches` (the fake `install.sh` records argv and env) |
 
-Merge T1, T2 and T3 onto the chain branch in any order; no conflicts are expected because
-the file sets are disjoint. Then run one integrated `ptest --full`. After merge, T1's
-identity test exercises T2's ranking inside the reference full path. It must still pass,
-which is an end-to-end check that T2 preserved selection.
+Positive tests: up to date (S5, exit 0); `--check` available (S6, exit 0,
+nothing downloaded); success (S7, the old bundle dir still exists, the new link points at
+the new bundle); explicit older `--version` installs; latest lower than running is
+up to date (no downgrade); non-TTY notice S2 exact; source notice S3 exact;
+`ptest update --json` round-trips through `C.decode_public_document` with
+exactly the five data keys; `ptest update --help` shows the topic.
+
+**Fixture approach.** Build tarballs in memory with `tarfile`. The fake
+`ptest-X/install.sh` is a `#!/bin/sh` script. It records `"$@"` and the relevant
+environment variables into a file under tmp. It creates
+`<dest>/.ptest-bundles/X-test/{complete.json,venv/bin/ptest}` with a valid
+marker (`{"version":1,"bundle_id":...,"ptest_version":X}`) and swaps
+`<dest>/ptest` with `ln -s` + `mv -f`. A failing variant runs `exit 1`. `uv` is a
+PATH shim that prints an absolute fake python path. A fake `Transport`
+serves bytes from a dict keyed by URL and records calls. The install root and
+`TMPDIR` live under `tmp_path`. The real install is never touched, and the
+session guard in conftest enforces that.
+
+### 4.5 Changes to existing tests
+
+- `test_contracts.py`:
+  - Add an `"update"` payload to `_full_payloads()`, which covers `test_nine_public_documents_parse`
+    (the name stays).
+  - Add an `"update"` entry to `_PUBLIC_DATA_KEYS` and `_dirty_payloads` with a smuggled field.
+  - Add an `update.json` file-equals-descriptor test modelled on
+    `test_init_schema_file_matches_descriptors`.
+  - Add a rejection test for an unknown `action`.
+- `test_help.py`: add `update` to `VALID_TOPICS`, to the topic-contents map
+  (`"--check", "--version", "--json", "PTEST_NO_UPDATE_CHECK"`) and to the
+  banned-terms topic loop.
+- `test_cli.py`: add parse tests for the grammar in section 3.5 (valid forms, repeated
+  flags, `--check --version`, missing or hostile value, `upgrade` suggestion).
+
+### 4.6 `tests/ng/conftest.py`
+
+In `isolated_env`, after the environment is built, add
+`monkeypatch.setenv("PTEST_NO_UPDATE_CHECK", "1")`. Subprocess `invoke()`
+inherits it through `os.environ`. Add an autouse fixture
+`_deny_update_network` that monkeypatches `ptest.update.default_transport` to
+return a `Transport` whose two callables call
+`pytest.fail("update network access in tests")`. `pytest.fail` raises a
+BaseException, so it escapes the startup check's `except Exception`. Tests
+in `test_update.py` that exercise the check call `monkeypatch.delenv("PTEST_NO_UPDATE_CHECK")`
+and pass or patch their own transport.
+
+### 4.7 T1 acceptance criteria
+
+- [ ] Every row in 4.4 has a test. Each abuse test was observed failing for its
+      intended reason before the implementation existed (red, then green). Record this in the T1 report.
+- [ ] Strings S1 to S11 and the codes and exits in section 3.1 are byte-exact and asserted in tests.
+- [ ] `uv run --locked --no-sync python scripts/export-schemas.py --check` is clean.
+      `docs/schemas/v1/update.json` exists. `protocol-v1.json` has no diff.
+- [ ] Scoped gate, passing:
+      `ptest --workers 2 --queue-timeout 1800 tests/ng/test_update.py tests/ng/test_cli.py tests/ng/test_help.py tests/ng/test_contracts.py tests/ng/test_install.py tests/ng/test_uninstall.py`
+      (`test_install`/`test_uninstall` are added because `install.py` and the layout helpers are shared).
+      The coverage table shows `ptest/update.py` at 90% or more.
+- [ ] No test takes 3 s or longer. No test uses a timeout under 20 s with `invoke()`. No real
+      network access. No real install root touched.
+- [ ] SAST: `uv run --locked --no-sync bandit -q -r src/ptest/update.py` has no
+      unexplained findings. Any `# nosec` carries a reason, following the style of the existing `install.py`
+      comments.
+- [ ] `graphify update .` has been run. Commit only in the T1 worktree.
+
+---
+
+## 5. Task T2: docs
+
+**Owns:** `README.md`, `docs/installation.md`, `docs/changelog.md`,
+`src/ptest/resources/repository-agent-guide.md`, `docs/ptest-agent.md`,
+`src/ptest/agent_rules.py` (one hash entry only), `tests/ng/test_agent_rules.py`
+(one test). `src/ptest/resources/agent-guide.md` is **not** touched.
+
+### 5.1 Agent guide (`repository-agent-guide.md`; `docs/ptest-agent.md` is a byte-for-byte copy)
+
+Append this row as the **last row** of the `## Reading ptest output` table, after
+the `unsafe-path` row:
+
+```
+| `ptest: update available: X (installed Y) — run: ptest update` | a newer ptest release exists | Run `ptest update`, then continue; running jobs keep their version. If the line says `installed from source`, tell the user instead. |
+```
+
+Replace these two lines:
+
+```
+Untracked config: `ptest: .ptest.toml is not committed` — tell the user;
+do not commit it yourself unless asked.
+```
+
+with this single line:
+
+```
+Untracked config: `ptest: .ptest.toml is not committed` — tell the user; do not commit it yourself unless asked.
+```
+
+The result is 100 lines. It must not contain `baseline`, `coverage`, `graphify`,
+`fast-forward`, `fingerprint`, or `expected:`. Then run
+`cp src/ptest/resources/repository-agent-guide.md docs/ptest-agent.md`.
+
+### 5.2 `agent_rules.py`
+
+Append this entry as the last element of `_PREVIOUS_GUIDE_SHA256S`, before `})`:
+
+```python
+    # 1d9ef59 (0.3.6-0.3.7): guide before the update-available row.
+    "2639d68b4727643280c02301e1f21c6813dbcce4596d04b5666f2d0fb6b081c2",
+```
+
+### 5.3 `test_agent_rules.py`
+
+Add `test_previous_hashes_cover_pre_update_row_guide`. It asserts that the hash above is in
+`_PREVIOUS_GUIDE_SHA256S`, that the shipped guide contains `ptest: update available:` and `run \`ptest update\``,
+and that `len(guide.splitlines()) <= 100`.
+
+### 5.4 README
+
+- Rename `### Pin a version, upgrade, remove` to `### Update, pin a version, remove`.
+  The code block becomes:
+  ```sh
+  ptest update                   # install the latest release (verified, side by side)
+  ptest update --check           # only report whether a newer release exists
+  ptest update --version 0.3.3   # a specific version, older ones included
+
+  # or with the one-liner (pin with PTEST_VERSION)
+  curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | PTEST_VERSION=0.3.3 sh
+
+  ptest --version
+  ptest uninstall --self     # remove the installation (run ptest uninstall in a repo first to clean it)
+  ```
+  Follow it with this paragraph:
+  "ptest looks for a newer release at most once a day (2 s network limit,
+  cached in the state directory; offline means no notice). At a terminal it
+  asks `ptest 0.3.8 is available (you have 0.3.7). Update now? [Y/n]`, then
+  runs your command on the new version. Without a terminal (agents, CI,
+  pipes) it prints `ptest: update available: 0.3.8 (installed 0.3.7) — run: ptest update`
+  and carries on. Running ptest processes keep their version, so updating is safe
+  mid-work. `PTEST_NO_UPDATE_CHECK=1`, a truthy `CI`, and `-q` turn the check
+  off. From a source checkout ptest says `installed from source; update it with git pull`."
+- Troubleshooting table: add the row
+  `| \`ptest: update available: …\` | \`ptest update\` (safe while other runs are active) |`.
+- Keep `ptest uninstall` and `PTEST_STATE_DIR` in the README, because `test_uninstall.py` asserts them.
+
+### 5.5 `docs/installation.md`
+
+After `## One-line install`, add `## Updating`. Cover:
+- `ptest update [--check] [--version X.Y.Z] [--json]`.
+- What it verifies: HTTPS to the GitHub release only, SHA-256 before anything runs,
+  a 64 MiB cap, safe extraction, and the same bundled `install.sh`.
+- Side-by-side bundles, an atomic launcher switch, and a failed update keeping the old one.
+- The startup check (24 h cache under the ptest state area / `PTEST_STATE_DIR`, 2 s bound, silent on
+  errors), the opt-outs, and the source-checkout refusal (S4).
+- Exit codes: 0 success or up to date, 2 refusal or failure, 75 GitHub unreachable.
+
+### 5.6 `docs/changelog.md`
+
+Insert a new `## Unreleased` section above `## 0.3.7`. Cover `ptest update` (flags,
+verification, side-by-side install, `update` JSON document plus schema), the
+startup check (prompt at a terminal and re-run, the one-line notice otherwise,
+the 24 h cache, the 2 s bound, silent offline, the opt-outs), the agent-guide row, and the fact that
+the installer smoke check now runs with `PTEST_NO_UPDATE_CHECK=1`.
+
+### 5.7 T2 acceptance criteria
+
+- [ ] The quoted strings match section 3.1 byte for byte (U+2014 dash).
+- [ ] `docs/ptest-agent.md` is byte-identical to `repository-agent-guide.md`.
+      The guide is 100 lines or fewer.
+- [ ] Scoped gate, passing:
+      `ptest --workers 2 --queue-timeout 1800 tests/ng/test_agent_rules.py tests/ng/test_resources.py tests/ng/test_init_changed.py tests/ng/test_help.py tests/ng/test_uninstall.py`.
+      This covers `test_every_shipped_guide_version_hashes_into_previous_set` *after
+      committing*, plus the banned-terms check on the README and guide.
+- [ ] No reference to `ptest help update` outputs beyond S1 to S11 (T2 cannot run T1's code).
+- [ ] `graphify update .` has been run. Commit only in the T2 worktree.
+
+---
+
+## 6. File ownership (disjoint; no shared-file edits)
+
+| File | Task | New? |
+|---|---|---|
+| `src/ptest/update.py` | T1 | new |
+| `tests/ng/test_update.py` | T1 | new |
+| `docs/schemas/v1/update.json` | T1 | new (generated) |
+| `src/ptest/cli.py`, `src/ptest/help.py`, `src/ptest/contracts.py` | T1 | edit |
+| `src/ptest/runtime/protocol-v1.json` | T1 | regenerate, expected unchanged |
+| `scripts/install.py` | T1 | edit (smoke env) |
+| `tests/ng/test_cli.py`, `tests/ng/test_help.py`, `tests/ng/test_contracts.py`, `tests/ng/conftest.py` | T1 | edit |
+| `README.md`, `docs/installation.md`, `docs/changelog.md` | T2 | edit |
+| `src/ptest/resources/repository-agent-guide.md`, `docs/ptest-agent.md` | T2 | edit |
+| `src/ptest/agent_rules.py`, `tests/ng/test_agent_rules.py` | T2 | edit |
+
+No file is edited by both tasks, so there is **no shared-file content** to
+transcribe. Merge order does not matter. After both merge, the orchestrator runs one
+integrated `ptest --full`. Integration risk is limited to `test_help.py`'s
+banned-terms check reading T2's README and guide, which T2 already runs.
+
+---
+
+## 7. Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| The suite reaches the network through the startup check | flaky and unsafe tests | conftest env opt-out, a `default_transport` deny guard that escapes `except Exception`, and subprocess `invoke()` always using `--fixture-domain` |
+| A guide change breaks managed-guide recognition | `already-exists` in user repositories | the section 5.2 hash plus the section 5.3 test |
+| The guide goes over 100 lines | three tests fail | the section 5.1 line join |
+| The install smoke run prompts for an update | a hung or recursive install | the section 4.3 env; `ptest update` also sets it for `install.sh` |
+| GitHub moves asset redirects to a new CDN host | `ptest update` fails closed | allowlist in one constant; fails as `update-unavailable`/`update-failed`, never unsafe |
+| Two concurrent `ptest update` runs | two new bundles, last swap wins | both bundles are valid, and `install.py` publishes atomically. Accepted; no lock |
+| Python 3.11.0-3.11.3 has no tar `filter` | unsafe extraction | manual per-member extraction, never `extractall` |
+
+## 8. Open questions (not blocking)
+
+- Should `uninstall` be exempt from the startup check? The spec lists only
+  `help`, `version` and `update`, so it stays checked for now.
+- Should `ptest update --check` exit non-zero when an update exists? Chosen: 0.
+  The JSON `action` field carries the answer.
