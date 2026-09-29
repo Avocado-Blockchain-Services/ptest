@@ -89,10 +89,13 @@ def test_isolated_env_strips_inherited_control_vars(isolated_env):
                 | {"PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT"})
     for name in stripped:
         assert os.environ.get(name) is None, name
-    # GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM are set BY the isolation
-    # itself (the private gitconfig); nothing else GIT_* may survive.
+    # GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM (the private gitconfig) and
+    # PTEST_NO_UPDATE_CHECK (no test may reach GitHub) are set BY the
+    # isolation itself; nothing else GIT_*/PTEST_* may survive.
+    assert os.environ.get("PTEST_NO_UPDATE_CHECK") == "1"
     for name in tuple(os.environ):
-        if name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+        if name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+                    "PTEST_NO_UPDATE_CHECK"):
             continue
         assert not name.startswith(
             ("PTEST_", "GIT_", "PYTEST_XDIST_", "COV_CORE_")), name

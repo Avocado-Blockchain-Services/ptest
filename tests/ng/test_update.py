@@ -1504,6 +1504,34 @@ def test_disk_full_download_is_not_reported_as_offline(tmp_path):
     assert not target.exists()
 
 
+def test_disk_full_at_final_flush_is_a_refusal(tmp_path, monkeypatch):
+    import errno
+
+    class FullOnClose(io.BufferedWriter):
+        def close(self):
+            super().close()
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    real_fdopen = os.fdopen
+
+    def fdopen(fd, mode="r", *args, **kwargs):
+        if mode == "wb":
+            return FullOnClose(io.FileIO(fd, "wb", closefd=True))
+        return real_fdopen(fd, mode, *args, **kwargs)
+
+    monkeypatch.setattr(update_api.os, "fdopen", fdopen)
+    transport = update_api.Transport(
+        latest_location=lambda t: "",
+        download=lambda url, sink, max_bytes, timeout_s: sink.write(b"x"))
+    target = tmp_path / "bundle.tar.gz.sha256"
+    with pytest.raises(C.Problem) as excinfo:
+        update_api._download_to(transport, "https://github.com/x", target,
+                                1024, 1.0)
+    assert excinfo.value.code == "update-failed"
+    assert "No space left" in excinfo.value.message
+    assert not target.exists()
+
+
 def test_bare_update_beside_same_named_path_refuses(tmp_path, monkeypatch,
                                                      capsys):
     from ptest import cli as cli_api

@@ -372,18 +372,23 @@ def _download_to(transport: Transport, url: str, target: Path,
     except OSError:
         raise _failed("cannot stage download") from None
     try:
-        with os.fdopen(fd, "wb") as sink:
-            try:
-                transport.download(url, sink, max_bytes, timeout_s)
-            except C.Problem:
-                raise
-            except OSError as exc:
-                if exc.errno in _LOCAL_WRITE_ERRNOS:
-                    raise _failed(f"cannot save the download ({exc.strerror}); "
-                                  "the current install is unchanged") from None
-                raise _unavailable() from None
-            except Exception:
-                raise _unavailable() from None
+        try:
+            with os.fdopen(fd, "wb") as sink:
+                try:
+                    transport.download(url, sink, max_bytes, timeout_s)
+                except C.Problem:
+                    raise
+                except OSError as exc:
+                    if exc.errno in _LOCAL_WRITE_ERRNOS:
+                        raise
+                    raise _unavailable() from None
+                except Exception:
+                    raise _unavailable() from None
+        except OSError as exc:
+            # A local write error, including the final buffered flush when
+            # the file closes, is never "could not reach GitHub".
+            raise _failed(f"cannot save the download ({exc.strerror or 'write failed'}); "
+                          "the current install is unchanged") from None
     except C.Problem:
         try:
             os.unlink(target)
