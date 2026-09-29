@@ -398,10 +398,8 @@ def _commit_reminder_lines(result: C.InitResult, width: int, *,
     """
     if dry_run or result.action is C.InitAction.PREVIEW:
         return []
-    # Tolerant read: the T1 ``commit_paths`` field defaults to () and is
-    # absent on a pre-integration tree, where the reminder stays hidden.
     paths = [terminal_text(path)
-             for path in tuple(getattr(result, "commit_paths", ()) or ())]
+             for path in tuple(result.commit_paths or ())]
     paths = [path for path in paths if path]
     if not paths:
         return []

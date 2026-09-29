@@ -4,11 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import os
-import stat
-import subprocess
-import sys
-import tomllib
-import types
 from dataclasses import asdict, fields, replace
 import json
 
@@ -18,120 +13,6 @@ from ptest import contracts as C
 from ptest.doctor import inspect
 from ptest.render import render_doctor
 from support import git, init_git_repo, write_ptest_toml
-
-
-# --- T1 barrier seam (worktree-safe config) ----------------------------------
-# T1 (src/ptest/worktree.py plus the contracts codes) has not integrated on
-# this base, so the frozen T1 shapes below are declared locally, verbatim from
-# the frozen interfaces (design §3.1), for this module's tests. Everything
-# here is conditional: the moment T1 lands, the real module, codes and fields
-# shadow these declarations and this block becomes a no-op. Remove this block
-# once T1 is integrated.
-_T1_AGENT_RULE_FILES = (
-    "docs/ptest-agent.md",
-    "AGENTS.md", "CLAUDE.md", "GEMINI.md",
-    ".agents/skills/ptest/SKILL.md", ".claude/skills/ptest/SKILL.md",
-    ".gemini/skills/ptest/SKILL.md", ".opencode/skills/ptest/SKILL.md",
-)
-_T1_MANAGED_MARKER = "<!-- ptest-agent-rules:start -->"
-
-if "config.uncommitted" not in C.FINDING_CODES:
-    C.FINDING_CODES = C.FINDING_CODES | {"config.uncommitted"}
-if "config-uncommitted" not in C.REASON_CODES:
-    C.REASON_CODES = C.REASON_CODES | {"config-uncommitted"}
-
-
-def _t1_regular(root: Path, relative: str) -> bool:
-    """Regular file that is not a symlink (lstat, never follows)."""
-    try:
-        stamp = os.lstat(root / relative)
-    except OSError:
-        return False
-    return stat.S_ISREG(stamp.st_mode)
-
-
-def _t1_manifest_children(root: Path) -> tuple[str, ...]:
-    """Declared v2 children whose config exists in this checkout."""
-    try:
-        raw = (root / ".ptest.toml").read_bytes()
-    except OSError:
-        return ()
-    if len(raw) > 256 * 1024:
-        return ()
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-    except Exception:
-        return ()
-    if data.get("version") != 2:
-        return ()
-    monorepo = data.get("monorepo")
-    children = monorepo.get("children") if isinstance(monorepo, dict) else None
-    if not isinstance(children, list):
-        return ()
-    kept = []
-    for child in children:
-        if (isinstance(child, str) and child and not child.startswith("/")
-                and ".." not in child.split("/")
-                and _t1_regular(root, f"{child}/.ptest.toml")):
-            kept.append(child)
-    return tuple(kept)
-
-
-def _t1_uncommitted_config_files(root, *, include_agent_rules=False):
-    """Local stand-in for T1's worktree.uncommitted_config_files.
-
-    Same candidate order (root config, v2 children, agent-rule files), same
-    marker rule for the three instruction files, same single
-    ``ls-tree -r -z --name-only HEAD`` tracked check; any error (including
-    unborn HEAD and non-git) yields (). Used only while ptest.worktree is
-    absent; the real module shadows it after T1 integrates.
-    """
-    root = Path(root)
-    candidates: list[str] = []
-    if _t1_regular(root, ".ptest.toml"):
-        candidates.append(".ptest.toml")
-        for child in _t1_manifest_children(root):
-            candidates.append(f"{child}/.ptest.toml")
-    if include_agent_rules:
-        for name in _T1_AGENT_RULE_FILES:
-            if not _t1_regular(root, name):
-                continue
-            if name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
-                try:
-                    content = (root / name).read_bytes()
-                except OSError:
-                    continue
-                if _T1_MANAGED_MARKER.encode("utf-8") not in content:
-                    continue
-            candidates.append(name)
-    if not candidates:
-        return ()
-    try:
-        completed = subprocess.run(
-            ("git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only",
-             "HEAD", "--", *candidates),
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=30, check=True)
-    except Exception:
-        return ()
-    tracked = {entry for entry in
-               completed.stdout.decode("utf-8", "replace").split("\x00") if entry}
-    return tuple(item for item in candidates if item not in tracked)
-
-
-def _t1_worktree_double():
-    module = types.ModuleType("ptest.worktree")
-    module.CONFIG_NAME = ".ptest.toml"
-    module.AGENT_RULE_FILES = _T1_AGENT_RULE_FILES
-    module.MANAGED_MARKER = _T1_MANAGED_MARKER
-    module.uncommitted_config_files = _t1_uncommitted_config_files
-    return module
-
-
-try:
-    import ptest.worktree  # noqa: F401
-except ImportError:
-    sys.modules["ptest.worktree"] = _t1_worktree_double()
 
 
 def _resolution(case, root: Path) -> C.ConfigResolution:
@@ -509,8 +390,14 @@ def test_doctor_handles_symlink_swap_output_and_deadline_without_state_access(ca
     with pytest.raises(C.Problem, match="invalid-bound"):
         inspect(domain, _resolution(case, root), cap, None)
 
+    # The fake clock stays at 9.0 once the scripted ticks run out: the
+    # worktree helper behind _config_findings also reads this same patched
+    # time.monotonic (its own bounded 2 s git deadline), so a bare
+    # next(ticks) would raise StopIteration once config lookup takes its
+    # readings. Scripted values still fix scan began at 0.0 with "now" at
+    # 9.0, past the 1 s budget, whatever the helper consumes.
     ticks = iter((0.0, 9.0, 9.0))
-    monkeypatch.setattr(doctor.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: next(ticks, 9.0))
     deadline = C.ScanLimits(entries=20, files=20, file_bytes=4096, total_bytes=8192,
                             findings=20, output_bytes=8192, elapsed_s=1, depth=8, ast_nodes=1000)
     report = inspect(domain, _resolution(case, root), deadline, None)

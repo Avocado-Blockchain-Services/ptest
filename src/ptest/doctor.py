@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import contracts as C
 from . import render
+from . import worktree as worktree_api
 from .files import _open_dir, _walk_to_parent, read_regular
 
 _PHASE = "doctor"
@@ -679,12 +680,10 @@ def _config_findings(root: Path) -> tuple[C.Finding, ...]:
     """One ``config.uncommitted`` finding per uncommitted ptest file.
 
     Covers the root config, v2 child configs and managed agent-rule files
-    (``include_agent_rules=True``). Best-effort: any failure, including the
-    worktree module being absent on a pre-integration tree, yields ``()``,
+    (``include_agent_rules=True``). Best-effort: any failure yields ``()``,
     so doctor never fails here.
     """
     try:
-        from . import worktree as worktree_api
         paths = worktree_api.uncommitted_config_files(root, include_agent_rules=True)
     except Exception:
         return ()
@@ -724,25 +723,21 @@ def _config_uncommitted_readiness(problem: C.Problem) -> tuple[C.Readiness, ...]
     """Blocked readiness naming the config-uncommitted problem, or None.
 
     Mirrors the unconfigured shape with the problem's own code and message
-    instead of ``initialization-required``. None when the reason code is
-    unavailable (pre-integration tree), letting the caller keep the default.
+    instead of ``initialization-required``. None unless the problem carries
+    the ``config-uncommitted`` code, letting the caller keep the default.
     """
-    try:
-        reason = _reason(problem.code, problem.message)
-    except Exception:
+    if problem.code != "config-uncommitted":
         return None
-    try:
-        return (
-            C.Readiness(area="execution", state="blocked", reasons=(reason,)),
-            C.Readiness(area="parallel", state="unknown", reasons=(
-                _reason("static-evidence-insufficient",
-                        "Static inspection cannot prove run/worker isolation."),)),
-            C.Readiness(area="selection", state="blocked", reasons=(reason,)),
-            C.Readiness(area="timing", state="unknown", reasons=(
-                _reason("static-evidence-insufficient", _TIMING_MISSING),)),
-        )
-    except Exception:
-        return None
+    reason = _reason(problem.code, problem.message)
+    return (
+        C.Readiness(area="execution", state="blocked", reasons=(reason,)),
+        C.Readiness(area="parallel", state="unknown", reasons=(
+            _reason("static-evidence-insufficient",
+                    "Static inspection cannot prove run/worker isolation."),)),
+        C.Readiness(area="selection", state="blocked", reasons=(reason,)),
+        C.Readiness(area="timing", state="unknown", reasons=(
+            _reason("static-evidence-insufficient", _TIMING_MISSING),)),
+    )
 
 
 def inspect(domain: C.DomainPaths, config: C.ConfigResolution, limits: C.ScanLimits,

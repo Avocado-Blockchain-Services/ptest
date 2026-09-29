@@ -415,20 +415,9 @@ def test_hostile_fact_characters_never_reach_terminal_raw():
 
 def _committed_result(commit_paths, action=C.InitAction.CREATED, exists=True,
                       warnings=(), details=()):
-    try:
-        return C.InitResult(action=action, target=Path("/repo/.ptest.toml"),
-                            exists=exists, config=None, warnings=warnings,
-                            details=details, commit_paths=tuple(commit_paths))
-    except TypeError:
-        # Pre-T1 base: InitResult has no commit_paths field yet (T1 adds it
-        # with a () default and validation). Attach the seam directly; the
-        # renderer reads it tolerantly, and the real kwarg path above takes
-        # over the moment T1 lands. Remove the fallback once T1 integrates.
-        result = C.InitResult(action=action, target=Path("/repo/.ptest.toml"),
-                              exists=exists, config=None, warnings=warnings,
-                              details=details)
-        object.__setattr__(result, "commit_paths", tuple(commit_paths))
-        return result
+    return C.InitResult(action=action, target=Path("/repo/.ptest.toml"),
+                        exists=exists, config=None, warnings=warnings,
+                        details=details, commit_paths=tuple(commit_paths))
 
 
 def test_commit_reminder_is_last_block_after_restart():
