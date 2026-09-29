@@ -166,6 +166,7 @@ REASON_CODES = frozenset({
     "attempt-decision-timeout", "selection-shadow-quarantine",
     "probe-no-conflict-observed", "probe-conflict-observed",
     "parallel-workers",
+    "config-uncommitted",
 })
 
 FINDING_CODES = frozenset({
@@ -173,6 +174,7 @@ FINDING_CODES = frozenset({
     "resource.fixed-name", "network.fixed-port", "time.blocking-sleep",
     "network.live-target", "process.detached-child", "fixture.shared-mutation",
     "timing.slow-test", "selection.unknown-input",
+    "config.uncommitted",
 })
 
 REQUIRED_ACTIONS = frozenset({
@@ -1737,11 +1739,12 @@ class InitOptions:
     reveal_command: bool
     children: tuple = ()
     agents: tuple[str, ...] = ()
+    from_main: bool = False
 
     def __post_init__(self) -> None:
         if self.runner is not None:
             object.__setattr__(self, "runner", _check_enum("init.runner", self.runner, RunnerKind))
-        for field in ("dry_run", "reveal_command"):
+        for field in ("dry_run", "reveal_command", "from_main"):
             object.__setattr__(self, field, _check_bool(f"init.{field}", getattr(self, field)))
         children = _check_tuple("init.children", self.children)
         for item in children:
@@ -1795,6 +1798,17 @@ def _check_action_records(name: str, value: object) -> tuple:
     return items
 
 
+def _check_commit_paths(value: object) -> tuple:
+    items = _as_str_tuple("init.commit_paths", value)
+    for item in items:
+        if (not item or item.startswith("/") or "\\" in item
+                or item.startswith("./") or "\x00" in item
+                or any(part in ("", ".", "..") for part in item.split("/"))):
+            raise ValueError(
+                "init.commit_paths entries must be repo-relative posix paths")
+    return items
+
+
 @dataclass(frozen=True, kw_only=True)
 class InitResult:
     action: InitAction
@@ -1803,6 +1817,7 @@ class InitResult:
     config: ConfigSummary | None
     warnings: tuple = ()
     details: tuple = ()
+    commit_paths: tuple = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", _check_enum("init.action", self.action, InitAction))
@@ -1821,6 +1836,8 @@ class InitResult:
         object.__setattr__(self, "warnings", items)
         object.__setattr__(
             self, "details", _check_action_records("init.details", self.details))
+        object.__setattr__(
+            self, "commit_paths", _check_commit_paths(self.commit_paths))
 
 
 def select_init_action(*, target_exists: bool, dry_run: bool,
@@ -1850,6 +1867,7 @@ def serialize_init_result(result: InitResult) -> dict:
         "exists": result.exists,
         "warnings": [_reason_dict(item) for item in result.warnings],
         "config": _config_summary_dict(result.config),
+        "commit_paths": list(result.commit_paths),
     }
 
 
@@ -2803,6 +2821,8 @@ def _validate_init_payload(data: dict) -> None:
     if "config" not in data:
         raise _invalid("report-invalid", "missing required field 'config'")
     _check_config_summary_dict(data["config"], "init.config")
+    if "commit_paths" in data:
+        _check_str_list(_need_list(data, "commit_paths"), "init.commit_paths")
 
 
 def _validate_doctor_payload(data: dict) -> None:
@@ -3505,6 +3525,7 @@ def _project_init_payload(data: dict) -> dict:
         "warnings": [_project_reason(entry)
                      for entry in data["warnings"]],
         "config": _project_config_summary(data["config"]),
+        "commit_paths": list(data.get("commit_paths", [])),
     }
 
 
@@ -4627,6 +4648,7 @@ PUBLIC_SCHEMAS: dict = {
             "exists": {"type": "boolean"},
             "warnings": {"type": "array", "items": _reason_schema()},
             "config": _config_summary_schema(),
+            "commit_paths": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["action", "target", "exists", "warnings", "config"],
     }),

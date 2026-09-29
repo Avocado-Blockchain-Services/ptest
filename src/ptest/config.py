@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import contracts as C
 from . import executability as _executability
+from . import worktree as _worktree
 from .files import create_exclusive, read_regular
 
 _PHASE = "config"
@@ -127,6 +128,70 @@ def repository_root(cwd: Path | str) -> Path:
     """Return the static Git root used by repository bootstrap operations."""
     physical = _absolute_directory(cwd)
     return _git_boundary(physical) or physical
+
+
+CONFIG_UNCOMMITTED = "config-uncommitted"
+
+
+def git_root(cwd: Path | str) -> Path | None:
+    """Static git boundary containing cwd (no subprocess), or None.
+
+    None for non-git, unsafe or unavailable inputs. Never raises.
+    """
+    try:
+        physical = _absolute_directory(cwd)
+    except Exception:
+        return None
+    try:
+        return _git_boundary(physical)
+    except Exception:
+        return None
+
+
+def config_uncommitted(cwd: Path | str) -> C.Problem | None:
+    """config-uncommitted Problem for a linked worktree missing local config.
+
+    Returns the problem when cwd sits in a linked worktree with no nearest
+    ``.ptest.toml`` and the main checkout has one at the same relative path
+    (nearest-first); else None. Never raises, never loads main config.
+    """
+    try:
+        physical = _absolute_directory(cwd)
+    except Exception:
+        return None
+    try:
+        _, _, _, found_problem = _find_config(physical)
+    except Exception:
+        return None
+    if found_problem is None:
+        return None
+    if found_problem.code != "initialization-required":
+        return None
+    try:
+        boundary = _git_boundary(physical)
+    except Exception:
+        return None
+    if boundary is None:
+        return None
+    try:
+        found = _worktree.main_config(physical, boundary)
+    except Exception:
+        return None
+    if found is None:
+        return None
+    name = _CONFIG_NAME if found.relative == "." else f"{found.relative}/{_CONFIG_NAME}"
+    return C.Problem(
+        code=CONFIG_UNCOMMITTED,
+        phase=_PHASE,
+        retryable=False,
+        message=(
+            f"this is a linked git worktree without {name}; "
+            f"the main checkout has {found.path}. "
+            f"Worktrees only receive committed files. "
+            f"Ask the user to commit {name} on the base branch. "
+            f"Do not run ptest init here."
+        ),
+    )
 
 
 def _candidate_config(root: Path) -> tuple[Path, bool]:
@@ -521,9 +586,18 @@ def resolve_config(cwd: Path) -> C.ConfigResolution:
                                   problem=problem)
     root, path, raw, problem = _find_config(physical_cwd)
     if problem is not None:
+        if problem.code == "initialization-required":
+            uncommitted = config_uncommitted(physical_cwd)
+            if uncommitted is not None:
+                return C.ConfigResolution(root=physical_cwd, path=None,
+                                          config=None, problem=uncommitted)
         return C.ConfigResolution(root=root, path=path, config=None,
                                   problem=problem)
     if raw is None or path is None:
+        uncommitted = config_uncommitted(physical_cwd)
+        if uncommitted is not None:
+            return C.ConfigResolution(root=physical_cwd, path=None,
+                                      config=None, problem=uncommitted)
         return C.ConfigResolution(
             root=physical_cwd, path=None, config=None,
             problem=_problem("initialization-required",
@@ -1308,6 +1382,121 @@ def _existing_result(root: Path, target: Path, resolution: C.ConfigResolution) -
     )
 
 
+def _commit_paths(boundary: Path | None, root: Path,
+                  names: tuple[str, ...]) -> tuple[str, ...]:
+    """Created config paths relative to the git boundary (posix), or ()."""
+    if boundary is None:
+        return ()
+    try:
+        return tuple((root / name).relative_to(boundary).as_posix()
+                     for name in names)
+    except ValueError:
+        return ()
+
+
+_FROM_MAIN_REFUSAL = (
+    "--from-main only works in a linked git worktree whose main checkout "
+    "has .ptest.toml at this path; nothing was copied"
+)
+
+
+def _init_from_main(physical_cwd: Path, dry_run: bool) -> C.InitResult:
+    """Copy the main checkout's config bytes verbatim into this worktree."""
+    boundary = _git_boundary(physical_cwd)
+    found = _worktree.main_config(physical_cwd, boundary) \
+        if boundary is not None else None
+    if found is None:
+        raise _problem("invalid-config", _FROM_MAIN_REFUSAL)
+    name = _CONFIG_NAME if found.relative == "." else \
+        f"{found.relative}/{_CONFIG_NAME}"
+    if found.relative == ".":
+        dest = found.worktree.root
+    else:
+        dest = _safe_init_child(found.worktree.root, found.relative)
+    try:
+        root_raw = read_regular(
+            found.worktree.main_root, name, _CONFIG_MAX_BYTES + 1)
+    except C.Problem:
+        raise _problem("state-unavailable",
+                       "main checkout configuration is unavailable")
+    if len(root_raw) > _CONFIG_MAX_BYTES:
+        raise _problem("invalid-config",
+                       "main checkout configuration is invalid")
+    skip_warnings: list[C.Reason] = []
+    pending: list[tuple[str, Path, bytes, int]] = []
+    child_details: list[C.ActionRecord] = []
+    for child in found.children:
+        try:
+            child_root = _safe_init_child(dest, child)
+        except C.Problem:
+            skip_warnings.append(C.Reason(
+                code=CONFIG_UNCOMMITTED,
+                message=f"did not copy {child}/{_CONFIG_NAME}: "
+                f"that directory is missing in this worktree",
+                paths=(),
+            ))
+            continue
+        _, exists = _candidate_config(child_root)
+        if exists:
+            child_details.append(
+                _config_detail(f"{child}/{_CONFIG_NAME}", "already present"))
+            continue
+        child_name = f"{child}/{_CONFIG_NAME}" if found.relative == "." else \
+            f"{found.relative}/{child}/{_CONFIG_NAME}"
+        try:
+            child_raw = read_regular(
+                found.worktree.main_root, child_name, _CONFIG_MAX_BYTES + 1)
+        except C.Problem:
+            raise _problem("state-unavailable",
+                           "main checkout configuration is unavailable")
+        if len(child_raw) > _CONFIG_MAX_BYTES:
+            raise _problem("invalid-config",
+                           "main checkout configuration is invalid")
+        pending.append((child, child_root, child_raw, len(child_details)))
+        child_details.append(
+            _config_detail(f"{child}/{_CONFIG_NAME}",
+                           "would create" if dry_run else "created"))
+    stopgap = C.Reason(
+        code=CONFIG_UNCOMMITTED,
+        message=f"copied {name} from the main checkout {found.path}; "
+        f"this copy is a temporary stopgap that may go stale. "
+        f"The fix is to ask the user to commit {name} on the base branch.",
+        paths=(),
+    )
+    target = dest / _CONFIG_NAME
+    if dry_run:
+        return C.InitResult(
+            action=C.InitAction.PREVIEW, target=target, exists=False,
+            config=None, warnings=tuple(skip_warnings),
+            details=(_config_detail(_CONFIG_NAME, "would create"),)
+            + tuple(child_details),
+        )
+    for _, child_root, child_raw, detail_index in pending:
+        try:
+            create_exclusive(child_root, _CONFIG_NAME, child_raw,
+                             private=False)
+        except C.Problem as problem:
+            if problem.code != "already-exists":
+                raise
+            child_details[detail_index] = _config_detail(
+                child_details[detail_index].target, "already present")
+    try:
+        create_exclusive(dest, _CONFIG_NAME, root_raw, private=False)
+    except C.Problem as problem:
+        if problem.code == "already-exists":
+            return _existing_result(dest, target, resolve_config(dest))
+        raise
+    fresh = resolve_config(dest)
+    return C.InitResult(
+        action=C.InitAction.CREATED, target=target, exists=True,
+        config=_summary(fresh.config) if fresh.config is not None else None,
+        warnings=(stopgap, *skip_warnings),
+        details=(_config_detail(_CONFIG_NAME, "created"),)
+        + tuple(child_details),
+        commit_paths=(),
+    )
+
+
 def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     """Preview or exclusively create one fresh native project config."""
     if not isinstance(options, C.InitOptions):
@@ -1316,6 +1505,13 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     resolution = resolve_config(physical_cwd)
     if resolution.path is not None:
         return _existing_result(resolution.root, resolution.path, resolution)
+    if resolution.problem is not None \
+            and resolution.problem.code == CONFIG_UNCOMMITTED:
+        if not options.from_main:
+            raise resolution.problem
+        return _init_from_main(physical_cwd, options.dry_run)
+    if options.from_main:
+        raise _problem("invalid-config", _FROM_MAIN_REFUSAL)
 
     # Initialization anchors at the repository boundary even when invoked from
     # a nested source directory. Runtime resolution remains nearest-config and
@@ -1369,11 +1565,16 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
             if child.data is not None:
                 create_exclusive(child.root, _CONFIG_NAME, child.data, private=False)
         create_exclusive(root, _CONFIG_NAME, root_data, private=False)
+        created_names = tuple(
+            f"{child.declaration}/{_CONFIG_NAME}" for child in planned
+            if child.data is not None
+        ) + (_CONFIG_NAME,)
         return C.InitResult(
             action=C.InitAction.CREATED, target=target, exists=True,
             config=None, warnings=(),
             details=(_config_detail(_CONFIG_NAME, "created"),) + child_details
             + _executability_notes(planned_items),
+            commit_paths=_commit_paths(boundary, root, created_names),
         )
 
     if options.runner is not None:
@@ -1412,4 +1613,5 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
         action=C.InitAction.CREATED, target=target, exists=True,
         config=_summary(config), warnings=(),
         details=(_config_detail(_CONFIG_NAME, "created"),) + fresh_notes,
+        commit_paths=_commit_paths(boundary, root, (_CONFIG_NAME,)),
     )

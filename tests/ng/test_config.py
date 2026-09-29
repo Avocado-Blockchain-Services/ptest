@@ -1033,3 +1033,124 @@ def test_init_without_any_runner_says_what_to_do(tmp_path):
 
     with pytest.raises(Problem, match="no pytest, vitest, go or cargo project found"):
         init_project(root, InitOptions(runner=None, dry_run=False, reveal_command=False))
+
+
+# --- config-uncommitted (linked worktree without committed config) ---
+
+from ptest import config as config_api
+from support import git, init_git_repo, write_ptest_toml
+
+
+def _linked_worktree(tmp_path, *, commit_config=False, **toml):
+    """main checkout (committed README) + linked worktree at tmp_path/wt."""
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main, **toml)
+    if commit_config:
+        git(main, "add", ".ptest.toml")
+        git(main, "commit", "-q", "-m", "config")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    return main, wt
+
+
+def test_resolve_config_in_linked_worktree_without_config_is_uncommitted(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+
+    resolution = resolve_config(wt)
+
+    assert resolution.config is None
+    assert resolution.monorepo is None
+    assert resolution.path is None
+    assert resolution.problem is not None
+    assert resolution.problem.code == "config-uncommitted"
+    assert resolution.problem.phase == "config"
+    assert resolution.problem.retryable is False
+    assert resolution.problem.message == (
+        "this is a linked git worktree without .ptest.toml; "
+        f"the main checkout has {main}/.ptest.toml. "
+        "Worktrees only receive committed files. "
+        "Ask the user to commit .ptest.toml on the base branch. "
+        "Do not run ptest init here."
+    )
+
+
+def test_resolve_config_never_reads_main_content(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    (main / ".ptest.toml").write_text("version = 999\n[broken\n", encoding="utf-8")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+
+    resolution = resolve_config(wt)
+
+    assert resolution.problem is not None
+    assert resolution.problem.code == "config-uncommitted"
+
+
+def test_resolve_config_nested_relative_path_names_subdir(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    api = main / "api"
+    api.mkdir()
+    write_ptest_toml(api)
+    (main / "api" / "x").mkdir()
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    (wt / "api" / "x").mkdir(parents=True)
+
+    resolution = resolve_config(wt / "api" / "x")
+
+    assert resolution.problem is not None
+    assert resolution.problem.code == "config-uncommitted"
+    assert "without api/.ptest.toml" in resolution.problem.message
+    assert f"the main checkout has {main}/api/.ptest.toml" in resolution.problem.message
+
+
+def test_resolve_config_unchanged_outside_linked_worktrees(tmp_path):
+    main, wt = _linked_worktree(tmp_path, commit_config=True)
+
+    committed = resolve_config(wt)
+    assert committed.problem is None
+    assert committed.config is not None
+
+    bare_src = init_git_repo(tmp_path / "src", files={"README.md": "x\n"})
+    git(tmp_path, "clone", "-q", "--bare", str(bare_src), "m.git")
+    bare_wt = tmp_path / "bare-wt"
+    git(tmp_path / "m.git", "worktree", "add", "--detach", str(bare_wt))
+    bare_resolution = resolve_config(bare_wt)
+    assert bare_resolution.problem is not None
+    assert bare_resolution.problem.code == "initialization-required"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    plain_resolution = resolve_config(plain)
+    assert plain_resolution.problem is not None
+    assert plain_resolution.problem.code == "initialization-required"
+
+
+def test_resolve_config_worktree_where_main_has_no_config(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+
+    resolution = resolve_config(wt)
+
+    assert resolution.problem is not None
+    assert resolution.problem.code == "initialization-required"
+
+
+def test_git_root_and_config_uncommitted_never_raise(tmp_path):
+    assert config_api.git_root(tmp_path / "missing") is None
+    assert config_api.config_uncommitted(tmp_path / "missing") is None
+    assert config_api.git_root("relative/path") is None
+    assert config_api.config_uncommitted("relative/path") is None
+
+    link = tmp_path / "link"
+    target = tmp_path / "target"
+    target.mkdir()
+    link.symlink_to(target, target_is_directory=True)
+    assert config_api.git_root(link) is None
+    assert config_api.config_uncommitted(link) is None
+
+    main, wt = _linked_worktree(tmp_path / "ok")
+    assert config_api.git_root(wt) == wt
+    assert config_api.git_root(main) == main
+    assert config_api.config_uncommitted(main) is None

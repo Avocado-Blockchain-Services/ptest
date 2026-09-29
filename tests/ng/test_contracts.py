@@ -408,6 +408,7 @@ def test_clean_break_removes_legacy_register_and_init_surfaces():
     assert not forbidden.intersection(C.REQUIRED_ACTIONS)
     assert set(C.InitOptions.__dataclass_fields__) == {
         "runner", "dry_run", "reveal_command", "children", "agents",
+        "from_main",
     }
     options = C.InitOptions(runner=None, dry_run=True, reveal_command=False)
     assert options.dry_run is True
@@ -1231,7 +1232,8 @@ def test_effective_limits_pairing_and_bounds():
 def test_public_init_roundtrip_uses_config_summary():
     payload = C.serialize_init_result(_init_result())
     assert set(payload) == {
-        "action", "target", "exists", "warnings", "config"}
+        "action", "target", "exists", "warnings", "config", "commit_paths"}
+    assert payload["commit_paths"] == []
     assert payload["action"] == "created"
     assert payload["target"] == "/repo/.ptest.toml"
     assert set(payload["config"]) == {
@@ -1472,7 +1474,8 @@ _PUBLIC_DATA_KEYS = {
     "status": {"effective_limits", "queued", "active", "domain_root",
                "domain_from_env"},
     "history": {"summaries", "obligations"},
-    "init": {"action", "target", "exists", "warnings", "config"},
+    "init": {"action", "target", "exists", "warnings", "config",
+             "commit_paths"},
     "doctor": {"scope", "readiness", "findings", "limits", "usage",
                "limitations"},
     "register": {"root", "initialized", "proposed_runner", "commands",
@@ -2036,3 +2039,67 @@ def test_normalize_test_id_rejects_non_strings():
 
     with _pytest.raises(TypeError):
         C.normalize_test_id(None)  # type: ignore[arg-type]
+
+
+# --- config-uncommitted codes, InitOptions.from_main, InitResult.commit_paths ---
+
+def test_config_uncommitted_codes_are_registered():
+    assert "config-uncommitted" in C.REASON_CODES
+    assert "config.uncommitted" in C.FINDING_CODES
+    C.Reason(code="config-uncommitted", message="m", paths=())
+
+
+def test_init_options_from_main_defaults_false_and_validates_bool():
+    base = C.InitOptions(runner=None, dry_run=False, reveal_command=False)
+    assert base.from_main is False
+    assert C.InitOptions(
+        runner=None, dry_run=False, reveal_command=False,
+        from_main=True).from_main is True
+    with pytest.raises(TypeError):
+        C.InitOptions(runner=None, dry_run=False, reveal_command=False,
+                      from_main="x")
+
+
+def test_init_result_commit_paths_validates_repo_relative_posix():
+    result = _init_result()
+    assert result.commit_paths == ()
+    replaced = replace(result, commit_paths=(".ptest.toml", "a/.ptest.toml"))
+    assert replaced.commit_paths == (".ptest.toml", "a/.ptest.toml")
+    for bad in ("/abs/.ptest.toml", "../up/.ptest.toml", "a/../b.toml",
+                "", "a//b.toml", "a/./b.toml"):
+        with pytest.raises(ValueError):
+            replace(result, commit_paths=(bad,))
+    with pytest.raises(TypeError):
+        replace(result, commit_paths=(123,))
+
+
+def test_init_result_commit_paths_roundtrip_and_old_documents():
+    result = replace(_init_result(),
+                     commit_paths=(".ptest.toml", "docs/ptest-agent.md"))
+    payload = C.serialize_init_result(result)
+    assert payload["commit_paths"] == [".ptest.toml", "docs/ptest-agent.md"]
+    revived = C.decode_public_document(
+        C.encode_public_document("init", payload))
+    assert revived.data["commit_paths"] == [".ptest.toml", "docs/ptest-agent.md"]
+
+    old = {"action": "created", "target": "/repo/.ptest.toml",
+           "exists": True, "warnings": [], "config": payload["config"]}
+    projected = C.decode_public_document(_hostile_envelope("init", old))
+    assert projected.data["commit_paths"] == []
+
+    bad = dict(payload, commit_paths="not-a-list")
+    with pytest.raises(Problem, match="report-invalid"):
+        C.decode_public_document(C.encode_public_document("init", bad))
+
+
+def test_init_schema_file_matches_descriptors():
+    from pathlib import Path as _Path
+    schema_path = _Path(__file__).resolve().parents[2] / "docs" / "schemas" \
+        / "v1" / "init.json"
+    expected = json.dumps(C.PUBLIC_SCHEMAS["init"], indent=2, sort_keys=True) \
+        + "\n"
+    assert schema_path.read_text(encoding="utf-8") == expected
+    assert "commit_paths" in C.PUBLIC_SCHEMAS["init"]["properties"]["data"][
+        "properties"]
+    assert "commit_paths" not in C.PUBLIC_SCHEMAS["init"]["properties"][
+        "data"]["required"]

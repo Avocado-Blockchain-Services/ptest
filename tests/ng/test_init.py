@@ -993,3 +993,226 @@ def test_vitest_init_marks_node_modules_as_non_input(tmp_path):
     assert resolved.config.selection.non_input_outputs == ("node_modules",)
     text = result.target.read_text(encoding="utf-8")
     assert 'non_input_outputs = ["node_modules"]' in text
+
+
+# --- config-uncommitted init refusal and --from-main copy ---
+
+import tomllib
+
+from support import git, init_git_repo, write_ptest_toml
+
+
+def _linked_worktree(tmp_path, *, commit_config=False, **toml):
+    """main checkout (committed README) + linked worktree at tmp_path/wt."""
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main, **toml)
+    if commit_config:
+        git(main, "add", ".ptest.toml")
+        git(main, "commit", "-q", "-m", "config")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    return main, wt
+
+
+def _main_tree_snapshot(main):
+    snapshot = {}
+    for path in sorted(main.rglob("*")):
+        if ".git" in path.relative_to(main).parts:
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        stamp = path.stat()
+        snapshot[str(path.relative_to(main))] = (
+            path.read_bytes(), stamp.st_mtime_ns)
+    return snapshot
+
+
+def _from_main_options(*, dry_run=False):
+    return InitOptions(runner=None, dry_run=dry_run, reveal_command=False,
+                       from_main=True)
+
+
+def test_init_in_linked_worktree_refuses_without_from_main(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+
+    with pytest.raises(Problem) as caught:
+        init_project(wt, _options(dry_run=False))
+    assert caught.value.code == "config-uncommitted"
+
+    with pytest.raises(Problem) as dry_caught:
+        init_project(wt, _options(dry_run=True))
+    assert dry_caught.value.code == "config-uncommitted"
+
+    assert not (wt / ".ptest.toml").exists()
+
+
+def test_init_from_main_copies_bytes_verbatim(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+    before = _main_tree_snapshot(main)
+
+    result = init_project(wt, _from_main_options())
+
+    assert result.action is InitAction.CREATED
+    assert result.target == wt / ".ptest.toml"
+    assert result.exists is True
+    assert (wt / ".ptest.toml").read_bytes() == (
+        main / ".ptest.toml").read_bytes()
+    assert tomllib.loads((wt / ".ptest.toml").read_text())["project_id"] == \
+        tomllib.loads((main / ".ptest.toml").read_text())["project_id"]
+    assert result.commit_paths == ()
+    assert result.warnings
+    stopgap = result.warnings[0]
+    assert stopgap.code == "config-uncommitted"
+    assert "temporary stopgap" in stopgap.message
+    assert f"copied .ptest.toml from the main checkout {main}/.ptest.toml" in \
+        stopgap.message
+    assert _main_tree_snapshot(main) == before
+
+
+def test_init_from_main_copies_v2_children_and_skips_missing_dirs(tmp_path):
+    main = init_git_repo(
+        tmp_path / "main",
+        files={"README.md": "x\n", "api/.keep": "k\n", "web/.keep": "k\n"},
+    )
+    (main / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api", "gone", "web"]\n',
+        encoding="utf-8",
+    )
+    write_ptest_toml(main / "api")
+    write_ptest_toml(main / "web")
+    (main / "gone").mkdir()
+    write_ptest_toml(main / "gone")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    before = _main_tree_snapshot(main)
+
+    result = init_project(wt, _from_main_options())
+
+    assert result.action is InitAction.CREATED
+    assert (wt / ".ptest.toml").read_bytes() == (
+        main / ".ptest.toml").read_bytes()
+    assert (wt / "api" / ".ptest.toml").read_bytes() == (
+        main / "api" / ".ptest.toml").read_bytes()
+    assert (wt / "web" / ".ptest.toml").read_bytes() == (
+        main / "web" / ".ptest.toml").read_bytes()
+    assert not (wt / "gone").exists()
+    assert result.commit_paths == ()
+    assert [warning.message for warning in result.warnings[1:]] == [
+        "did not copy gone/.ptest.toml: that directory is missing in this worktree"
+    ]
+    assert _main_tree_snapshot(main) == before
+
+
+def test_init_from_main_dry_run_writes_nothing(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+    before = _main_tree_snapshot(main)
+
+    result = init_project(wt, _from_main_options(dry_run=True))
+
+    assert result.action is InitAction.PREVIEW
+    assert result.exists is False
+    assert result.config is None
+    assert not (wt / ".ptest.toml").exists()
+    assert _main_tree_snapshot(main) == before
+
+
+def test_init_from_main_second_run_is_existing(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+
+    first = init_project(wt, _from_main_options())
+    assert first.action is InitAction.CREATED
+
+    second = init_project(wt, _from_main_options())
+    assert second.action is InitAction.EXISTING
+    assert second.commit_paths == ()
+
+
+def test_init_from_main_outside_worktree_is_invalid_config(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    with pytest.raises(Problem) as caught:
+        init_project(plain, _from_main_options())
+    assert caught.value.code == "invalid-config"
+    assert caught.value.message == (
+        "--from-main only works in a linked git worktree whose main checkout "
+        "has .ptest.toml at this path; nothing was copied"
+    )
+
+
+def test_init_from_main_never_overwrites(tmp_path):
+    main, wt = _linked_worktree(tmp_path)
+    (wt / ".ptest.toml").write_bytes(b"version = 999\n# mine\n")
+
+    result = init_project(wt, _from_main_options())
+
+    assert result.action is InitAction.EXISTING
+    assert (wt / ".ptest.toml").read_bytes() == b"version = 999\n# mine\n"
+
+    main2 = init_git_repo(
+        tmp_path / "main2",
+        files={"README.md": "x\n", "api/.keep": "k\n"},
+    )
+    (main2 / ".ptest.toml").write_text(
+        'version = 2\n[monorepo]\nchildren = ["api"]\n', encoding="utf-8")
+    write_ptest_toml(main2 / "api")
+    wt2 = tmp_path / "wt2"
+    git(main2, "worktree", "add", "-q", "-b", "wt2", str(wt2))
+    child_path = wt2 / "api" / ".ptest.toml"
+    child_path.write_bytes(b"version = 999\n# child mine\n")
+
+    child_result = init_project(wt2, _from_main_options())
+
+    assert child_result.action is InitAction.CREATED
+    assert child_path.read_bytes() == b"version = 999\n# child mine\n"
+    assert (wt2 / ".ptest.toml").read_bytes() == (
+        main2 / ".ptest.toml").read_bytes()
+
+
+def test_init_commit_paths_for_created_preview_existing(tmp_path):
+    repo = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
+
+    created = init_project(
+        repo, InitOptions(runner=RunnerKind.PYTEST, dry_run=False,
+                          reveal_command=False))
+    assert created.action is InitAction.CREATED
+    assert created.commit_paths == (".ptest.toml",)
+
+    existing = init_project(
+        repo, InitOptions(runner=RunnerKind.PYTEST, dry_run=False,
+                          reveal_command=False))
+    assert existing.action is InitAction.EXISTING
+    assert existing.commit_paths == ()
+
+    preview_dir = tmp_path / "preview"
+    preview_dir.mkdir()
+    preview = init_project(
+        preview_dir, InitOptions(runner=RunnerKind.PYTEST, dry_run=True,
+                                 reveal_command=False))
+    assert preview.action is InitAction.PREVIEW
+    assert preview.commit_paths == ()
+
+    bare_dir = tmp_path / "bare"
+    bare_dir.mkdir()
+    bare = init_project(
+        bare_dir, InitOptions(runner=RunnerKind.PYTEST, dry_run=False,
+                              reveal_command=False))
+    assert bare.action is InitAction.CREATED
+    assert bare.commit_paths == ()
+
+
+def test_init_commit_paths_lists_monorepo_children_then_root(tmp_path):
+    repo = init_git_repo(tmp_path / "repo", files={"README.md": "x\n"})
+    (repo / "a").mkdir()
+    (repo / "b").mkdir()
+
+    result = init_project(
+        repo,
+        InitOptions(runner=None, dry_run=False, reveal_command=False,
+                    children=(("a", RunnerKind.PYTEST),
+                              ("b", RunnerKind.PYTEST))),
+    )
+
+    assert result.action is InitAction.CREATED
+    assert result.commit_paths == (
+        "a/.ptest.toml", "b/.ptest.toml", ".ptest.toml")
