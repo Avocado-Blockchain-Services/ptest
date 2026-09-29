@@ -384,3 +384,9 @@ def test_a_harmless_relative_import_stays_bounded(case):
     (target / "coverage-thresholds.ts").write_text(
         "export const COVERAGE_THRESHOLDS = { lines: 80 }\n", encoding="utf-8")
     assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=8)
+
+
+def test_a_regex_literal_ending_in_an_escaped_slash_is_code(case):
+    config = _versioned(case, "5.0.1",
+                        "export default { test: { testNamePattern: /^https?:\\/\\//, maxWorkers: 1 } }")
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=1)

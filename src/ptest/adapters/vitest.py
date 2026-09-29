@@ -178,7 +178,9 @@ def _strip_comments(text: str) -> str:
                 raise _Unknown("unterminated string")
             out.append(text[index:end + 1])
             index = end + 1
-        elif text.startswith("//", index):
+        elif text.startswith("//", index) and not (index and text[index - 1] == "\\"):
+            # A "//" right after a backslash ends a regex literal such as
+            # /^https?:\/\//; it is code, not a comment.
             end = text.find("\n", index)
             index = length if end < 0 else end
         elif text.startswith("/*", index):

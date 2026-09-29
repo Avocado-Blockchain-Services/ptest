@@ -29,6 +29,7 @@ from . import contracts as C
 from . import (config as config_api, executability, files, history, platform, progress, render,
                reports, scheduler, selection, source)
 from .adapters import vitest as vitest_adapter
+from . import verified
 from .runners import adapter_for
 
 
@@ -2425,6 +2426,107 @@ def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
     return (head[:7], age_s)
 
 
+_KIND_MARK = {"modified": "M", "raw": "M", "mode": "M", "deleted": "D",
+              "untracked": "?", "ignored": "!", "added": "A", "renamed": "R"}
+
+
+def _declarable_outputs(ignored: list[str], snapshot: C.InputSnapshot) -> list[str]:
+    """Collapse ignored files to the shortest directory holding no tracked
+    input, so declaring it can never hide a real source file."""
+    untracked = {change.new or change.old for change in snapshot.changes
+                 if change.kind in ("untracked", "ignored")}
+    tracked = [item.path for item in snapshot.files if item.path not in untracked]
+    tracked_dirs = {"/".join(path.split("/")[:index])
+                    for path in tracked for index in range(1, path.count("/") + 1)}
+    declare = []
+    for path in ignored:
+        parts = path.split("/")
+        chosen = path
+        for index in range(1, len(parts)):
+            prefix = "/".join(parts[:index])
+            if prefix not in tracked_dirs:
+                chosen = prefix
+                break
+        declare.append(chosen)
+    return sorted(dict.fromkeys(declare))
+
+
+def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
+                    policy_digest: str) -> str | None:
+    """Why a full gate cannot reuse its last green run, for one stderr line.
+
+    Undeclared gitignored inputs are named with their fix: they make every
+    tree dirty, so no baseline is recorded and nothing is ever skipped.
+    """
+    working = [change for change in snapshot.changes if change.kind in _KIND_MARK]
+    ignored = [change.new or change.old or "" for change in working
+               if change.kind == "ignored"]
+    if not snapshot.clean and ignored:
+        declare = _declarable_outputs(ignored, snapshot)
+        shown = ", ".join(declare[:3]) + (f" (+{len(declare) - 3} more)" if len(declare) > 3 else "")
+        return (f"gitignored paths count as test inputs: {shown} — add them to "
+                "[selection] non_input_outputs in .ptest.toml so a green run can "
+                "be recorded and reused")
+    if not snapshot.clean:
+        paths = [f"{_KIND_MARK.get(change.kind, '?')} {change.new or change.old}"
+                 for change in working]
+        if paths:
+            shown = ", ".join(paths[:3]) + (f" (+{len(paths) - 3} more)" if len(paths) > 3 else "")
+            return f"uncommitted changes: {shown}"
+        return "the source tree is not clean"
+    if baseline is None:
+        return "no green full run is recorded for this checkout yet"
+    if snapshot.head != baseline.head:
+        return (f"new commit since the last green ({baseline.head[:7]} -> "
+                f"{(snapshot.head or '')[:7]})")
+    if baseline.policy_digest != policy_digest:
+        return "the selection policy changed since the last green"
+    if snapshot.digest != baseline.input_digest or snapshot.compatibility != baseline.compatibility:
+        return "inputs, config or runner changed since the last green"
+    return None
+
+
+def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
+                             checkout: C.CheckoutIdentity, request: C.RunRequest,
+                             ) -> tuple[str, float, str] | None:
+    """(short sha, age_s, checkout root) when another checkout of the same
+    project passed exactly these inputs: same position in the repository,
+    policy, commit, clean source digest and compatibility. None otherwise."""
+    try:
+        scope = history.checkout_scope(checkout.root)
+        records = [record for record in verified.find(domain, checkout.project_id)
+                   if record.checkout_id != checkout.checkout_id and record.scope == scope]
+        if not records:
+            return None
+        policy = _policy_digest(config)
+        snapshots: dict = {}
+        for record in records:
+            if record.policy_digest != policy:
+                continue
+            identity = record.runtime_identity
+            if identity not in snapshots:
+                snapshots[identity] = _capture_source(
+                    domain, config, request, ensure_key=False,
+                    execution_tier=C.ExecutionTier.ADVANCED,
+                    runtime_identity=identity, baseline=None)
+            snapshot = snapshots[identity]
+            if (not snapshot.clean or snapshot.limitations
+                    or snapshot.digest != record.input_digest
+                    or snapshot.compatibility != record.compatibility
+                    or snapshot.head != record.head):
+                continue
+            try:
+                created = datetime.fromisoformat(record.created_at)
+                age_s = max(0.0, time.time() - created.timestamp())
+            except (TypeError, ValueError):
+                age_s = 0.0
+            return (record.head[:7], age_s, record.root)
+    except BaseException:
+        # Pre-admission only: uncertainty means the gate simply runs.
+        return None
+    return None
+
+
 def _joined_counts(value: object) -> C.Counts | None:
     """Best-effort counts from a joined run's summary; None when unusable."""
     if not isinstance(value, dict):
@@ -2533,6 +2635,18 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
                     progress.emit(progress.format_already_verified(
                         short_sha, age_s, color=color), quiet=request.quiet)
                     return ("skip", skipped, False)
+        # Another checkout of this project (a worktree, or the main
+        # checkout after a fast-forward) may already have passed exactly
+        # this tree.
+        elsewhere = _full_verified_elsewhere(domain, config, checkout, request)
+        if elsewhere is not None:
+            short_sha, age_s, where = elsewhere
+            skipped = _gated_full_result(
+                run_id, checkout, config, request, C.Status.PASSED, 0, None)
+            if skipped is not None:
+                progress.emit(progress.format_verified_elsewhere(
+                    short_sha, age_s, where, color=color), quiet=request.quiet)
+                return ("skip", skipped, False)
     try:
         snapshot = _capture_source(
             domain, config, request, ensure_key=False,
@@ -2543,6 +2657,11 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
     except BaseException:
         # Pre-admission only (see above): the admitted flow re-raises.
         return ("run", None, False)
+    if not request.again:
+        reason = full_run_reason(baseline, snapshot, _policy_digest(config))
+        if reason is not None:
+            progress.emit(f"ptest: full gate runs: {render.terminal_text(reason)}",
+                          quiet=request.quiet)
     digest = snapshot.digest
     if not isinstance(digest, str) or not digest:
         return ("run", None, False)

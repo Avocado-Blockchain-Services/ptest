@@ -24,6 +24,7 @@ from pathlib import Path
 import psutil
 
 from . import contracts as C
+from . import verified
 from . import reports
 from .reports import NativeReportBinding
 from .files import (
@@ -2597,6 +2598,45 @@ def _publish_locked(
         )
 
 
+def checkout_scope(root: Path) -> str:
+    """The checkout's path inside its git repository ('.' at the top)."""
+    path = Path(root)
+    for candidate in (path, *path.parents):
+        if os.path.lexists(candidate / ".git"):
+            relative = os.path.relpath(path, candidate)
+            return "." if relative == "." else relative.replace(os.sep, "/")
+    return "."
+
+
+def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
+                          result: C.RunResult, published: C.PublishResult) -> None:
+    """Share a committed green full baseline with the project's other
+    checkouts, and withdraw any record for a tree whose full run failed.
+    Best-effort: the checkout's own history stays the authority."""
+    try:
+        if (not published.committed or result.plan is None
+                or result.plan.execution != "full"):
+            return
+        if published.baseline_published:
+            baseline = read_history(domain, checkout).baseline
+            if baseline is None or baseline.run_id != result.run_id:
+                return
+            verified.record_green(domain, checkout.project_id, verified.Record(
+                run_id=baseline.run_id, head=baseline.head,
+                input_digest=baseline.input_digest,
+                compatibility=baseline.compatibility,
+                policy_digest=baseline.policy_digest,
+                runtime_identity=baseline.runtime_identity,
+                scope=checkout_scope(checkout.root),
+                checkout_id=checkout.checkout_id, root=str(checkout.root),
+                created_at=baseline.created_at))
+        elif (result.status is C.Status.FAILED and result.input_before is not None
+              and result.input_before.clean and result.input_before.digest):
+            verified.forget(domain, checkout.project_id, result.input_before.digest)
+    except Exception:
+        return
+
+
 def publish_outcome(
     domain: C.DomainPaths,
     checkout: C.CheckoutIdentity,
@@ -2617,7 +2657,9 @@ def publish_outcome(
                     committed=False, baseline_published=False, selection_disabled=True,
                     reasons=(_reason(marker_code, "history selection is disabled"),),
                 )
-            return _publish_locked(domain, checkout, result, inventory)
+            published = _publish_locked(domain, checkout, result, inventory)
+            _feed_verified_ledger(domain, checkout, result, published)
+            return published
         except (_HistoryStateError, C.Problem) as exc:
             code = exc.code
         except OSError:

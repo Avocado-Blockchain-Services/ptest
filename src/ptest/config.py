@@ -473,8 +473,12 @@ def _selection(data: object, root: Path) -> C.SelectionPolicy:
         "input_roots", "ignored_inputs", "full_triggers", "always",
         "no_tests", "non_input_outputs",
     )
+    # Outputs are paths ptest promises never to read, so their final
+    # component may be a symlink (a worktree's shared .env); every path
+    # ptest reads stays symlink-free.
     paths = {
-        field: _path_sequence(table.get(field, []), root)
+        field: _path_sequence(table.get(field, []), root,
+                              allow_final_symlink=field == "non_input_outputs")
         for field in path_fields
     }
     if sum(len(items) for items in paths.values()) > _MAX_PATH_ENTRIES:

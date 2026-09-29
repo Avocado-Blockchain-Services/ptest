@@ -362,15 +362,16 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
      ptest <folder>                  # changed tests under that folder (monorepo: ptest <project>/tests)
      ptest <file>                    # one file always runs (ptest <project>/tests/test_example.py)
      ptest --full <folder>           # all tests under that folder (not the integrated gate)
-     ptest --full                  # once, after the change is integrated
+     ptest --full                  # after bringing the base branch in; fix and rerun until green
      ptest --full --again          # force already-verified inputs
    A scoped or changed green is iteration only; only --full completes the
    change. A changed run may still run everything when the change is
    unselectable (a full trigger changed, inputs outside the import graph,
    or the affected set is too large); no baseline or coverage step is needed.
-   --full skips already-verified inputs (--again forces them); a duplicate
-   full run joins the running full run instead of starting a second one.
-   Never rerun --full without a change. Never invoke pytest, vitest, or
+   --full skips already-verified inputs, also when another checkout of the
+   project passed this exact tree (--again forces them); a duplicate full
+   run joins the running one. Merge the green tip by fast-forward and never
+   rerun for the merge; rerun only after a change. Never invoke pytest, vitest, or
    npm test directly; never cd into a child to run tests. The installed
    docs/ptest-agent.md lists every ptest output line and exit code with
    the action for each.

@@ -109,6 +109,15 @@ changes since the last green run (or, before the first green run, since your
 branch left the default branch). No baseline or coverage step is needed.
 Run `ptest --full` once before handoff.
 
+Before merging, bring the base branch into your branch, run `ptest --full`,
+fix and rerun until it is green, then fast-forward the base branch. A green
+full gate is shared by every checkout of the project, so `ptest --full` on the
+fast-forwarded base prints `already verified at <sha> in <worktree>` and runs
+nothing. When a full gate cannot reuse a green run it says why on one line
+(`ptest: full gate runs: <reason>`), for example gitignored paths that count as
+test inputs; add those to `[selection] non_input_outputs` so a green run can be
+recorded (a symlinked `.env` shared by worktrees may be declared there).
+
 `ptest init` looks at the repository, detects pytest/Vitest/Go/Cargo projects
 (including several in one monorepo), writes a `.ptest.toml` per project, and
 reports what it found:
@@ -172,7 +181,7 @@ Useful flags:
 | --- | --- |
 | `-v` | ptest's scheduling/setup detail, and a verbose runner |
 | `-q` | silence ptest's own lines (errors still print) |
-| `--again` | with `--full`: rerun even if these exact inputs already passed |
+| `--again` | with `--full`: rerun even if these exact inputs already passed, here or in another checkout of the project |
 | `--timeout 2700` | run deadline in seconds (default: from history, else estimated from the test count) |
 | `--workers N` | cap parallel workers for this run |
 

@@ -8,6 +8,8 @@ terminal width so mandated suffixes (verdict, hint) always survive.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 import sys
 
@@ -212,6 +214,16 @@ def format_already_verified(short_sha: str, age_s: float,
     """Skip line for a full run whose baseline already covers the inputs."""
     return (f"{_prefix(color=color)} already verified at {short_sha} "
             f"({format_duration(age_s)} ago) — ptest --full --again to rerun")
+
+
+def format_verified_elsewhere(short_sha: str, age_s: float, where: str,
+                              *, color: bool = False) -> str:
+    """Skip line for a full run another checkout of the project already passed."""
+    home = str(Path.home())
+    shown = "~" + where[len(home):] if where == home or where.startswith(home + "/") else where
+    return (f"{_prefix(color=color)} already verified at {short_sha} in "
+            f"{render.terminal_text(shown)} ({format_duration(age_s)} ago) — "
+            f"ptest --full --again to rerun")
 
 
 def format_joined_full_run(pid: int, *, color: bool = False) -> str:

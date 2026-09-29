@@ -788,6 +788,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "8bb7d5d62b1ae957c59d9c27c943d6e5710e17b63085eda84c55e43df3643322",
     # 0.3.6-0.3.7: guide before the `waiting: <reason>` wait-line row.
     "2639d68b4727643280c02301e1f21c6813dbcce4596d04b5666f2d0fb6b081c2",
+    # 0.3.8: guide before the 0.4.0 full-gate workflow.
+    "ed005461b423ccc09fd50433c6fdb0fc0ffceb2f95caf80f158a70ae1e7ede82",
 })
 
 

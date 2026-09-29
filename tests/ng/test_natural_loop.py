@@ -14,6 +14,7 @@ Target behavior (strict TDD: every test fails before the fix):
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -507,3 +508,168 @@ def test_full_unreadable_result_runs_normally(case, tmp_path, monkeypatch,
                            C.RunRequest(mode=C.Mode.FULL, queue_timeout_s=1))
     assert len(calls) == 1
     assert "joined the running full run" in capsys.readouterr().err
+
+
+# --- a green full gate is shared by the project's checkouts -----------------
+
+def _worktree_pair(case):
+    """A main checkout and a linked worktree of the same repository."""
+    domain = case.domain()
+    main_root = _repo(domain)
+    linked = domain.root / "linked"
+    git(main_root, "worktree", "add", "-q", str(linked), "-b", "feature")
+    return domain, main_root, linked
+
+
+def _green_in(domain, root, snapshot):
+    config = _config(root)
+    _publish_full(domain, operations._checkout(config), snapshot,
+                  operations._policy_digest(config))
+
+
+def test_a_fast_forwarded_tree_is_already_verified_in_the_other_checkout(
+        case, monkeypatch, capsys):
+    domain, main_root, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    snapshot = _snapshot(head)
+    _green_in(domain, linked, snapshot)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: snapshot)
+    calls = _no_admission(monkeypatch)
+
+    result = operations.execute(domain, _config(main_root),
+                                C.RunRequest(mode=C.Mode.FULL))
+
+    assert calls == []
+    assert (result.status, result.exit_code) == (C.Status.PASSED, 0)
+    err = capsys.readouterr().err
+    assert f"ptest: already verified at {head[:7]} in " in err
+    assert "linked" in err and "ptest --full --again to rerun" in err
+
+
+@pytest.mark.parametrize("change", ["digest", "dirty", "head"])
+def test_a_different_or_dirty_tree_is_not_verified_elsewhere(case, change):
+    domain, main_root, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    _green_in(domain, linked, _snapshot(head))
+    current = {"digest": _snapshot(head, digest="22" * 32),
+               "dirty": _snapshot(head, clean=False),
+               "head": _snapshot("0" * 40)}[change]
+    config = _config(main_root)
+    original = operations._capture_source
+    try:
+        operations._capture_source = lambda *args, **kwargs: current
+        assert operations._full_verified_elsewhere(
+            domain, config, operations._checkout(config),
+            C.RunRequest(mode=C.Mode.FULL)) is None
+    finally:
+        operations._capture_source = original
+
+
+def test_a_failed_full_run_on_the_same_tree_withdraws_the_evidence(case, monkeypatch):
+    domain, main_root, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    snapshot = _snapshot(head)
+    _green_in(domain, linked, snapshot)
+    config = _config(main_root)
+    checkout = operations._checkout(config)
+    history_api.publish_outcome(domain, checkout, replace(
+        _failed_full(domain, checkout, snapshot, operations._policy_digest(config))), None)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: snapshot)
+
+    assert operations._full_verified_elsewhere(
+        domain, config, checkout, C.RunRequest(mode=C.Mode.FULL)) is None
+
+
+def test_the_same_checkout_is_never_its_own_other_checkout(case, monkeypatch):
+    domain, _, linked = _worktree_pair(case)
+    head = git(linked, "rev-parse", "HEAD")
+    snapshot = _snapshot(head)
+    _green_in(domain, linked, snapshot)
+    config = _config(linked)
+    monkeypatch.setattr(operations, "_capture_source",
+                        lambda *args, **kwargs: snapshot)
+    assert operations._full_verified_elsewhere(
+        domain, config, operations._checkout(config),
+        C.RunRequest(mode=C.Mode.FULL)) is None
+
+
+def _failed_full(domain, checkout, snapshot, policy):
+    plan = C.Plan(mode=C.Mode.FULL, execution="full",
+                  input_digest=snapshot.digest, compatibility=snapshot.compatibility)
+    command = C.summarize_command(C.RunnerKind.COMMAND, C.Mode.FULL, ("true",),
+                                  workers=1, provenance=("test",))
+    return C.RunResult(
+        run_id="fa" * 16, project_id=checkout.project_id,
+        checkout_id=checkout.checkout_id, mode=C.Mode.FULL,
+        status=C.Status.FAILED, phase="complete",
+        started_at="2026-09-25T00:00:02+00:00",
+        finished_at="2026-09-25T00:00:03+00:00",
+        plan=plan, command=command, exit_code=1, exit_origin="runner",
+        runner_exit_code=1, source_valid=True, full_gate_eligible=True,
+        input_before=snapshot, input_after=snapshot, policy_digest=policy,
+        sequence=history_api.next_sequence(domain, checkout))
+
+
+# --- why a full gate cannot reuse its last green run ------------------------
+
+def _baseline(head="a" * 40, digest=_DIGEST, compat=_COMPAT, policy="dd" * 32):
+    return C.Baseline(run_id=_RUN_ID, head=head, input_digest=digest,
+                      compatibility=compat, policy_digest=policy,
+                      created_at="2026-09-25T00:00:00+00:00",
+                      inventory=C.Inventory(adapter="command", version="1",
+                                            complete=True, tests=(), digest="44" * 32))
+
+
+def _dirty(*changes):
+    return C.InputSnapshot(digest=_DIGEST, compatibility=_COMPAT, head="a" * 40,
+                           clean=False, changes=tuple(
+                               C.Change(old=None if kind in ("untracked", "ignored") else path,
+                                        new=path, kind=kind) for kind, path in changes))
+
+
+def test_undeclared_gitignored_inputs_are_named_with_their_fix():
+    reason = operations.full_run_reason(
+        _baseline(), _dirty(("ignored", "logs/app.log"), ("ignored", "build/x"),
+                            ("ignored", ".env"), ("ignored", "graphify-out/g.json")),
+        "dd" * 32)
+    assert reason == (
+        "gitignored paths count as test inputs: .env, build, graphify-out (+1 more)"
+        " — add them to [selection] non_input_outputs in .ptest.toml so a green"
+        " run can be recorded and reused")
+
+
+def test_an_ignored_file_beside_tracked_sources_is_named_exactly():
+    snapshot = C.InputSnapshot(
+        digest=_DIGEST, compatibility=_COMPAT, head="a" * 40, clean=False,
+        changes=(C.Change(old=None, new="src/generated.py", kind="ignored"),
+                 C.Change(old=None, new="logs/a.log", kind="ignored"),
+                 C.Change(old=None, new="logs/b.log", kind="ignored")),
+        files=tuple(C.FileFingerprint(path=path, digest="aa" * 32, mode=0o100644, size=1)
+                    for path in ("src/app.py", "src/generated.py", "logs/a.log", "logs/b.log")))
+    reason = operations.full_run_reason(_baseline(), snapshot, "dd" * 32)
+    # src/ holds a tracked input, so only the file itself is declarable.
+    assert reason.startswith("gitignored paths count as test inputs: logs, src/generated.py —")
+
+
+def test_uncommitted_changes_are_listed():
+    reason = operations.full_run_reason(
+        _baseline(), _dirty(("modified", "src/a.py"), ("untracked", "notes.md")),
+        "dd" * 32)
+    assert reason == "uncommitted changes: M src/a.py, ? notes.md"
+
+
+@pytest.mark.parametrize("baseline,snapshot,policy,expected", [
+    (None, _snapshot("a" * 40), "dd" * 32,
+     "no green full run is recorded for this checkout yet"),
+    ("default", _snapshot("b" * 40), "dd" * 32,
+     "new commit since the last green (aaaaaaa -> bbbbbbb)"),
+    ("default", _snapshot("a" * 40), "ee" * 32,
+     "the selection policy changed since the last green"),
+    ("default", _snapshot("a" * 40, digest="22" * 32), "dd" * 32,
+     "inputs, config or runner changed since the last green"),
+])
+def test_clean_trees_name_what_differs_from_the_last_green(baseline, snapshot, policy, expected):
+    base = _baseline() if baseline == "default" else baseline
+    assert operations.full_run_reason(base, snapshot, policy) == expected

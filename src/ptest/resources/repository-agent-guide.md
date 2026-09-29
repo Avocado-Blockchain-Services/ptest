@@ -12,12 +12,12 @@ holding the root `.ptest.toml`). Never invoke pytest, vitest, `npm test`,
 | Changed tests under one folder | `ptest <folder>`, e.g. `ptest <project>/tests` |
 | One test file (always runs it) | `ptest <file>`, e.g. `ptest <project>/tests/test_x.py` |
 | All tests under one folder | `ptest --full <folder>` |
-| Integrated change, before handoff | `ptest --full` once |
+| Before handoff or merge | bring the base branch in first, then `ptest --full`; fix and rerun until green |
 
 A scoped or changed green is iteration only; only `ptest --full` completes the
-change. Never rerun `ptest --full` without a change; add `--again` to force
-every test to rerun. A duplicate full run joins the running full run instead
-of starting a second one.
+change. Rerun it only after a change (`--again` forces one). Fast-forward the
+green tip and never rerun for the merge (`already verified … in <checkout>`).
+Keep notes and reports outside the repo, or in declared gitignored outputs.
 
 ## Monorepo
 
@@ -45,7 +45,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
-| `joined the running full run` | this full run attached to one already running | Wait for it; do not start another run. |
+| `joined the running full run` / `already verified at …` / `full gate runs: <why>` | attached to a running full run / this exact tree already passed (here or in another checkout) / why it must run | Wait / nothing to do / follow the named fix. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
 | `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
