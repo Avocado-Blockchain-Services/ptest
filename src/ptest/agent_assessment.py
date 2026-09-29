@@ -318,6 +318,7 @@ class EvidencePacket:
     context: object = None
     _item_chains: tuple = ()
     _inventory_sha256: str | None = None
+    _projected_admitted: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "declaration",
@@ -387,6 +388,23 @@ class EvidencePacket:
                 raise TypeError("packet._item_chains paths must be strings")
             normalized_chains.append((entry[0], entry[1], paths))
         object.__setattr__(self, "_item_chains", tuple(normalized_chains))
+        projected = self._projected_admitted
+        if isinstance(projected, bool) or not isinstance(projected, int):
+            raise TypeError("packet._projected_admitted must be int")
+        if projected < 0:
+            raise ValueError("packet._projected_admitted must be >= 0")
+
+
+def packet_has_evidence(packet) -> bool:
+    """True when a packet carries, or projects, admitted source evidence.
+
+    Static packets admit only core and marker excerpts, so evidence
+    presence also counts files the metadata projection admitted without
+    reading. Packets built by :func:`build_packets` always project zero,
+    so this matches ``bool(packet.excerpts)`` on the online path.
+    """
+    return bool(packet.excerpts) or getattr(
+        packet, "_projected_admitted", 0) > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1273,6 +1291,167 @@ def build_packets(workspace, resolution,
     return tuple(packets)
 
 
+@dataclass(frozen=True, slots=True)
+class StaticPackets:
+    """One static packet per declared selected child, in workspace order."""
+
+    packets: tuple[EvidencePacket, ...]
+    deadline_expired: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        packets = self.packets
+        if not isinstance(packets, (tuple, list)):
+            raise TypeError("packets must be a tuple")
+        for packet in tuple(packets):
+            if not isinstance(packet, EvidencePacket):
+                raise TypeError("packets entries must be EvidencePacket")
+        object.__setattr__(self, "packets", tuple(packets))
+        expired = self.deadline_expired
+        if not isinstance(expired, (tuple, list)):
+            raise TypeError("deadline_expired must be a tuple")
+        for declaration in tuple(expired):
+            if not isinstance(declaration, str):
+                raise TypeError("deadline_expired entries must be str")
+        object.__setattr__(self, "deadline_expired", tuple(expired))
+
+
+def _deadline_packet(root: Path, repo, resolution,
+                     scope_context: tuple) -> EvidencePacket:
+    """Empty packet for a child the offline deadline cut off.
+
+    Identity resolves exactly as at the head of :func:`_build_one_packet`,
+    including the no-config fallback for ``declaration == "."``. The item
+    chains bind to this packet's own digest with no sources, so offline
+    source selection never consults the ranking input.
+    """
+    declaration = repo.declaration
+    _child_root, _scan_start, scope = scope_context
+    config = repo.config
+    if declaration == "." and config is None:
+        # Preserve compatibility for standalone WorkspaceInspection values
+        # created by existing callers before RepositoryInspection exposed it.
+        config = resolution.config
+    if config is not None:
+        runner_kind = config.runner.kind.value
+        project_id = config.project_id
+    else:
+        runner_kind = "unknown"
+        project_id = "0" * 32
+    packet = EvidencePacket(
+        declaration=declaration, project_id=project_id, scope=scope,
+        packet_sha256="0" * 64, excerpts=(), dependencies=(),
+        runner_kind=runner_kind, excluded_count=0, truncated_count=0,
+        file_count=0, byte_count=0, context=None,
+        _inventory_sha256=None, _projected_admitted=0)
+    digest = packet_hash(packet)
+    chains = tuple(
+        (digest, item.id, ())
+        for item in _CHECKLIST_CATALOG
+        if item.id not in DETERMINISTIC_ITEM_IDS)
+    return replace(packet, packet_sha256=digest, _item_chains=chains)
+
+
+def build_static_packets(workspace, resolution,
+                         limits: EvidenceLimits = EvidenceLimits(), *,
+                         deadline: float | None = None,
+                         on_child: Callable[[str, int], None] | None = None,
+                         ) -> StaticPackets:
+    """Collect one static packet per declared selected child, in order.
+
+    The static packet admits only core and marker excerpts and projects
+    every other admission from file sizes, so it never builds the
+    candidate text pool or runs ranking. A child whose build has not
+    started when ``deadline`` passes, or whose build raises a
+    ``review-timeout`` problem, instead receives :func:`_deadline_packet`
+    and joins ``deadline_expired`` with every later child; any other
+    problem propagates. This function never raises ``review-timeout``.
+    ``on_child`` is called once per walked child with its declaration and
+    regular-file count after lockfile removal.
+    """
+    from . import doctor as doctor_api
+
+    if not isinstance(workspace, doctor_api.WorkspaceInspection):
+        raise TypeError("workspace must be doctor.WorkspaceInspection")
+    if not isinstance(resolution, C.ConfigResolution):
+        raise TypeError("resolution must be ConfigResolution")
+    if not isinstance(limits, EvidenceLimits):
+        raise TypeError("limits must be EvidenceLimits")
+    root = Path(resolution.root)
+    packets: list[EvidencePacket] = []
+    expired: list[str] = []
+    if len(workspace.repositories) > 256:
+        raise _fail("invalid-bound",
+                    "workspace declares more than 256 children")
+    for repo in workspace.repositories:
+        if repo.declaration != "." and not isinstance(repo.config, C.Config):
+            raise _fail("invalid-config",
+                        "declared child configuration is unavailable; "
+                        "assessment packets cannot be built")
+    # Scope validation runs without a deadline checkpoint: an already-passed
+    # deadline must still expire children gracefully below (never raise
+    # review-timeout here), and unsafe scopes must raise their own problem.
+    contexts = []
+    for repo in workspace.repositories:
+        contexts.append(_packet_scope_context(root, workspace, repo))
+    deadline_hit = False
+    for repo, scope_context in zip(workspace.repositories, contexts):
+        declaration = repo.declaration
+        if deadline_hit or (deadline is not None
+                            and time.monotonic() >= deadline):
+            packets.append(
+                _deadline_packet(root, repo, resolution, scope_context))
+            expired.append(declaration)
+            deadline_hit = True
+            continue
+        try:
+            packets.append(_build_one_packet(
+                root, repo, resolution, limits, scope_context,
+                deadline=deadline, progress=None, static=True,
+                on_child=on_child))
+        except C.Problem as error:
+            if error.code != "review-timeout":
+                raise
+            packets.append(
+                _deadline_packet(root, repo, resolution, scope_context))
+            expired.append(declaration)
+            deadline_hit = True
+    return StaticPackets(tuple(packets), tuple(expired))
+
+
+def _project_static_admission(state: _AdmissionState,
+                              candidates: list[tuple[str, int]],
+                              limits: EvidenceLimits) -> int:
+    """Project admission outcomes from file sizes without reading content.
+
+    This mirrors the order of checks in :func:`_admit_candidate`: the file
+    cap truncates, empty files are skipped, the byte cap truncates, and
+    anything else is admitted (counting a further truncation when the
+    per-file cap cuts it). Only ``state.skipped`` and ``state.truncated``
+    change; excerpts, byte counts, paths, and the read ledger are untouched.
+    Returns the number of projected admissions.
+    """
+    emu_files = len(state.excerpts)
+    emu_bytes = state.byte_count
+    admitted = 0
+    for _rel, size in candidates:
+        if emu_files >= limits.max_files_per_child:
+            state.truncated += 1
+        else:
+            chunk = min(size, limits.max_bytes_per_file)
+            was_cut = size > limits.max_bytes_per_file
+            if chunk == 0:
+                state.skipped += 1
+            elif emu_bytes + chunk > limits.max_bytes_per_child:
+                state.truncated += 1
+            else:
+                emu_files += 1
+                emu_bytes += chunk
+                admitted += 1
+                if was_cut:
+                    state.truncated += 1
+    return admitted
+
+
 class _AdmissionState:
     """Mutable per-child admission caps shared across tier phases."""
 
@@ -1829,7 +2008,9 @@ def _build_one_packet(root: Path, repo, resolution,
                       limits: EvidenceLimits,
                       scope_context: tuple, *,
                       deadline: float | None = None,
-                      progress: Callable[[], None] | None = None
+                      progress: Callable[[], None] | None = None,
+                      static: bool = False,
+                      on_child: Callable[[str, int], None] | None = None
                       ) -> EvidencePacket:
     declaration = repo.declaration
     child_root, scan_start, scope = scope_context
@@ -1858,6 +2039,8 @@ def _build_one_packet(root: Path, repo, resolution,
                    and entry[1].rsplit("/", 1)[-1] in _LOCKS)
     regular.sort(key=lambda item: item[0])
     _review_checkpoint(deadline, progress)
+    if on_child is not None:
+        on_child(declaration, len(regular))
     prefix = "" if declaration == "." else declaration + "/"
 
     state = _AdmissionState()
@@ -1922,16 +2105,22 @@ def _build_one_packet(root: Path, repo, resolution,
                if rel not in suite_skips]
     _review_checkpoint(deadline, progress)
 
-    candidate_texts = _candidate_text_pool(
-        child_root=child_root, regular=regular, state=state, limits=limits,
-        max_candidate_read=max_candidate_read, cache=cache,
-        deadline=deadline, progress=progress)
+    if static:
+        candidate_texts = {}
+    else:
+        candidate_texts = _candidate_text_pool(
+            child_root=child_root, regular=regular, state=state,
+            limits=limits, max_candidate_read=max_candidate_read,
+            cache=cache, deadline=deadline, progress=progress)
     from . import review_evidence as RE
     signal_cache: dict = {}
     support_cache: dict = {}
-    ranked_candidates = RE.rank_candidates(
-        context, candidate_texts, candidate_texts, _CHECKLIST_CATALOG,
-        signal_cache=signal_cache)
+    if static:
+        ranked_candidates: tuple = ()
+    else:
+        ranked_candidates = RE.rank_candidates(
+            context, candidate_texts, candidate_texts, _CHECKLIST_CATALOG,
+            signal_cache=signal_cache)
     candidate_rank = {path: index
                       for index, path in enumerate(ranked_candidates)}
     _review_checkpoint(deadline, progress)
@@ -1946,14 +2135,17 @@ def _build_one_packet(root: Path, repo, resolution,
     configured_setups = [rel for rel, _size in regular
                          if role_of.get(rel) == "setup"]
     candidate_paths = set(inventory_sizes)
-    eligible_callers = frozenset(candidate_texts)
-    chains_for_item = {
-        item.id: RE.item_source_chains(
-            item.id, candidate_texts, context, candidate_paths,
-            signal_cache=signal_cache, support_cache=support_cache,
-            caller_paths=eligible_callers)
-        for item in model_items
-    }
+    if static:
+        chains_for_item = {item.id: [] for item in model_items}
+    else:
+        eligible_callers = frozenset(candidate_texts)
+        chains_for_item = {
+            item.id: RE.item_source_chains(
+                item.id, candidate_texts, context, candidate_paths,
+                signal_cache=signal_cache, support_cache=support_cache,
+                caller_paths=eligible_callers)
+            for item in model_items
+        }
     selected_chains: dict[str, list[tuple[str, ...]]] = {
         item.id: [] for item in model_items}
     core_paths = list(dict.fromkeys(root_decisions + configured_setups))
@@ -2170,6 +2362,39 @@ def _build_one_packet(root: Path, repo, resolution,
     protected = set(core_paths + chosen_callers + support_paths)
     unresolved_suite = any(
         profile.status == "partial" for profile in context.suite_profiles)
+    projected_admitted = 0
+    if static and not early_halted:
+        # Static admission never reads or ranks plain sources: after the
+        # shared core admission above, admit only dependency marker files,
+        # then project every remaining outcome from file sizes alone.
+        core_set = set(core_paths)
+        marker_paths = sorted(
+            rel for rel, _size in regular
+            if rel not in core_set
+            and (rel.rsplit("/", 1)[-1] in _DECLARATIONS
+                 or rel.rsplit("/", 1)[-1] in _UNSUPPORTED_MARKERS))
+        for position, rel in enumerate(marker_paths):
+            _review_checkpoint(deadline, progress)
+            if not _admit_candidate(
+                    state, child_root, rel, prefix, limits,
+                    max_candidate_read,
+                    len(marker_paths) - position - 1,
+                    deadline=deadline, progress=progress, cache=cache):
+                early_halted = True
+                break
+        if not early_halted:
+            excluded = core_set | set(marker_paths)
+            candidates = sorted(
+                ((rel, size)
+                 for rel, size in regular
+                 if rel not in excluded
+                 and (role_of.get(rel) != "test" or unresolved_suite)),
+                key=lambda item: (
+                    _context_priority(
+                        item[0], role_of, linked, config_paths),
+                    _admission_tier(item[0]), item[0]))
+            projected_admitted = _project_static_admission(
+                state, candidates, limits)
     late = sorted(
         (rel for rel, _size in regular
          if rel not in protected
@@ -2180,7 +2405,7 @@ def _build_one_packet(root: Path, repo, resolution,
             _admission_tier(rel), rel))
     later_all = list(late)
     _review_checkpoint(deadline, progress)
-    if not early_halted:
+    if not static and not early_halted:
         linked_texts = {
             rel: text for rel, text in candidate_texts.items()
             if role_of.get(rel) in {"test", "setup", "fixture", "helper"}
@@ -2276,25 +2501,40 @@ def _build_one_packet(root: Path, repo, resolution,
                             truncated, byte_count, context)
         _review_checkpoint(deadline, progress)
     _review_checkpoint(deadline, progress)
-    packet = EvidencePacket(
-        declaration=declaration, project_id=project_id, scope=scope,
-        packet_sha256="0" * 64, excerpts=tuple(excerpts),
-        dependencies=dependencies, runner_kind=runner_kind,
-        excluded_count=skipped, truncated_count=truncated,
-        file_count=len(excerpts), byte_count=byte_count, context=context,
-        _inventory_sha256=_candidate_inventory_sha256(candidate_texts))
-    digest = packet_hash(packet)
-    admitted_paths = {excerpt.path for excerpt in excerpts}
-    item_chains = []
-    for item in model_items:
-        complete = tuple(
-            tuple((prefix + path) for path in chain)
-            for chain in selected_chains[item.id]
-            if all(prefix + path in admitted_paths for path in chain))
-        item_chains.append((digest, item.id, complete))
+    if static:
+        packet = EvidencePacket(
+            declaration=declaration, project_id=project_id, scope=scope,
+            packet_sha256="0" * 64, excerpts=tuple(excerpts),
+            dependencies=dependencies, runner_kind=runner_kind,
+            excluded_count=skipped, truncated_count=truncated,
+            file_count=len(excerpts), byte_count=byte_count,
+            context=context, _inventory_sha256=None,
+            _projected_admitted=projected_admitted)
+        digest = packet_hash(packet)
+        item_chains = tuple(
+            (digest, item.id, ()) for item in model_items)
+    else:
+        packet = EvidencePacket(
+            declaration=declaration, project_id=project_id, scope=scope,
+            packet_sha256="0" * 64, excerpts=tuple(excerpts),
+            dependencies=dependencies, runner_kind=runner_kind,
+            excluded_count=skipped, truncated_count=truncated,
+            file_count=len(excerpts), byte_count=byte_count,
+            context=context,
+            _inventory_sha256=_candidate_inventory_sha256(candidate_texts))
+        digest = packet_hash(packet)
+        admitted_paths = {excerpt.path for excerpt in excerpts}
+        item_chains = []
+        for item in model_items:
+            complete = tuple(
+                tuple((prefix + path) for path in chain)
+                for chain in selected_chains[item.id]
+                if all(prefix + path in admitted_paths for path in chain))
+            item_chains.append((digest, item.id, complete))
+        item_chains = tuple(item_chains)
     _review_checkpoint(deadline, progress)
     return replace(packet, packet_sha256=digest,
-                   _item_chains=tuple(item_chains))
+                   _item_chains=item_chains)
 
 
 def score(rows: tuple[AssessmentRow, ...]) -> Score | None:
@@ -3496,7 +3736,8 @@ __all__ = [
     "EvidenceLimits", "SourceExcerpt", "DependencyFact", "EvidencePacket",
     "Citation", "AssessmentRow", "Finding", "Score", "ChildAssessment",
     "ItemReview",
-    "build_packets", "score", "packet_hash", "runner_config_excerpt",
+    "build_packets", "build_static_packets", "StaticPackets",
+    "packet_has_evidence", "score", "packet_hash", "runner_config_excerpt",
     "plan_item_reviews", "assemble_child", "one_row_schema",
     "MAX_FILES_PER_CHILD", "MAX_BYTES_PER_CHILD", "MAX_BYTES_PER_FILE",
     "MAX_PROMPT_BYTES",

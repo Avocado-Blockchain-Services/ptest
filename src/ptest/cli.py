@@ -14,7 +14,7 @@ import signal
 import stat
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
@@ -497,6 +497,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         fix_seen = dry_seen = False
         verbose = False
         verbose_seen = False
+        quiet = False
+        quiet_seen = False
         review_timeout_s = 300
         review_model = None
         review_concurrency = 4
@@ -579,6 +581,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                     raise _problem("invalid-config", "option cannot be repeated")
                 verbose_seen = True
                 verbose = True
+            elif token in ("-q", "--quiet"):
+                if quiet_seen:
+                    raise _problem("invalid-config", "option cannot be repeated")
+                quiet_seen = True
+                quiet = True
             elif token == "--probe":
                 if probe:
                     raise _problem("invalid-config", "option cannot be repeated")
@@ -616,7 +623,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 raise _problem("invalid-config", "doctor probe requires --scope")
             if fix or fix_dry:
                 raise _problem("invalid-config", "doctor probe cannot combine with --fix")
-            if json_output or verbose_seen:
+            if json_output or verbose_seen or quiet_seen:
                 raise _problem("invalid-config", "doctor probe cannot combine output modes")
             if (reviewer_seen or allow_seen or timeout_seen
                     or model_seen or concurrency_seen or offline):
@@ -636,7 +643,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 or concurrency_seen) and offline:
             raise _problem("invalid-config", "review options cannot combine with --offline")
         if fix:
-            if json_output or scope is not None or limits:
+            if json_output or scope is not None or limits or quiet_seen:
                 raise _problem("invalid-config", "--fix takes no output, scope, or scan-limit options")
             if (reviewer_seen or allow_seen or timeout_seen or model_seen
                     or concurrency_seen):
@@ -644,6 +651,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             return ParsedArgs(command=command, fix=fix,
                               dry_run=fix_dry, offline=offline,
                               verbose=verbose)
+        if quiet_seen and not offline:
+            raise _problem("invalid-config", "--quiet requires --offline")
         if fix_dry or verbose_seen:
             raise _problem("invalid-config", "fix options require --fix")
         return ParsedArgs(command=command, json=json_output,
@@ -656,7 +665,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                           review_model_explicit=model_seen,
                           review_concurrency=review_concurrency,
                           review_concurrency_explicit=concurrency_seen,
-                          offline=offline, **limits)
+                          offline=offline, quiet=quiet, **limits)
     if command == "guide":
         if not args:
             return ParsedArgs(command=command)
@@ -1652,7 +1661,8 @@ def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
     for packet in packets:
         context = getattr(packet, "context", None)
         config_status = getattr(context, "config_status", "unavailable")
-        if (not packet.excerpts or packet.excluded_count
+        if (not agent_assessment.packet_has_evidence(packet)
+                or packet.excluded_count
                 or packet.truncated_count
                 or config_status in ("partial", "unavailable")):
             excluded_inventory = len(getattr(
@@ -1668,7 +1678,8 @@ def _assessment_limitations(packets, *, top_level: bool = False) -> list[dict]:
                 "code": "partial-evidence",
                 "message": (
                     ("No source files were admitted to this project packet. "
-                     if not packet.excerpts else "Evidence limits: ")
+                     if not agent_assessment.packet_has_evidence(packet)
+                     else "Evidence limits: ")
                     + evidence_limits),
                 "paths": [packet.scope],
             }
@@ -2095,17 +2106,52 @@ def _run_doctor_review(parsed: ParsedArgs, resolution: C.ConfigResolution,
         raise _problem("review-cancelled", "review was cancelled") from None
 
 
+def _offline_progress(parsed: ParsedArgs,
+                      resolution: C.ConfigResolution,
+                      ) -> Callable[[str, int], None] | None:
+    """One stderr progress line per offline child on a TTY, else None.
+
+    ``-q``/``--quiet`` and a non-TTY stderr suppress the narration; JSON
+    stdout is never written.
+    """
+    if parsed.quiet:
+        return None
+    try:
+        tty = sys.stderr.isatty()
+    except (OSError, ValueError):
+        return None
+    if not tty:
+        return None
+    root_name = resolution.root.name
+
+    def emit(declaration: str, file_count: int) -> None:
+        label = root_name if declaration == "." else declaration
+        line = (f"ptest: doctor: inspecting "
+                f"{render.terminal_text(label)} · "
+                f"{C.plural(file_count, 'file')}")
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except OSError:
+            pass
+
+    return emit
+
+
 def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
                           domain: C.DomainPaths) -> None:
     started = time.monotonic()
+    deadline = started + _REVIEW_TOTAL_TIMEOUT_S
+    on_child = _offline_progress(parsed, resolution)
     workspace = doctor.inspect_workspace(domain, resolution,
                                          _doctor_limits(parsed), parsed.scope)
     if parsed.json:
         sys.stdout.buffer.write(_doctor_offline_assessment_json(
-            resolution, domain, workspace))
+            resolution, domain, workspace, deadline=deadline,
+            on_child=on_child))
     else:
         child_data, _limitations, publication = _offline_assessment_parts(
-            resolution, domain, workspace)
+            resolution, domain, workspace, deadline=deadline,
+            on_child=on_child)
         sys.stdout.write(render.render_agent_assessment(
             child_data, workspace, report_path=publication["path"],
             publication_status=publication["status"],
@@ -2186,10 +2232,15 @@ def _run_doctor_fix(parsed: ParsedArgs, resolution: C.ConfigResolution) -> int:
 
 
 _OFFLINE_UNKNOWN_REASON = "offline static run: model review unavailable"
+_OFFLINE_DEADLINE_MESSAGE = (
+    "Offline static inspection stopped at the doctor deadline "
+    f"({_REVIEW_TOTAL_TIMEOUT_S} s); this project was not fully inspected.")
 
 
 def _offline_assessment_parts(resolution: C.ConfigResolution,
-                              domain: C.DomainPaths, workspace):
+                              domain: C.DomainPaths, workspace, *,
+                              deadline: float | None = None,
+                              on_child: Callable[[str, int], None] | None = None):
     """Shared offline children, limitations and publication record.
 
     Both ``--json`` and the terminal grid render from these parts, so the
@@ -2197,9 +2248,13 @@ def _offline_assessment_parts(resolution: C.ConfigResolution,
     assessment. No provider is launched and no report is written:
     deterministic items are answered from ptest's own facts while every
     item needing a model call becomes an ``unknown`` row carrying the
-    offline reason.
+    offline reason. Children cut off by ``deadline`` carry the offline
+    deadline partial-evidence limitation instead of inspected evidence.
     """
-    packets = agent_assessment.build_packets(workspace, resolution)
+    result = agent_assessment.build_static_packets(
+        workspace, resolution, deadline=deadline, on_child=on_child)
+    packets = result.packets
+    expired = set(result.deadline_expired)
     if not packets:
         raise _problem("invalid-config", "no selected project evidence is available")
     review_items = _resolution_items(resolution)
@@ -2219,6 +2274,14 @@ def _offline_assessment_parts(resolution: C.ConfigResolution,
         child_limitations = _assessment_limitations((packet,))
         if initialization_blocker is not None and packet.declaration == ".":
             child_limitations.insert(0, dict(initialization_blocker))
+        if packet.declaration in expired:
+            deadline_limitation = {
+                "code": "partial-evidence",
+                "message": _OFFLINE_DEADLINE_MESSAGE,
+                "paths": [packet.scope],
+            }
+            if deadline_limitation not in child_limitations:
+                child_limitations.append(deadline_limitation)
         child_data.append(_child_assessment_data(
             packet, assessment, child_limitations,
             execution=executions.get(packet.declaration),
@@ -2226,6 +2289,16 @@ def _offline_assessment_parts(resolution: C.ConfigResolution,
     limitations = _assessment_limitations(packets, top_level=True)
     if initialization_blocker is not None:
         limitations.insert(0, dict(initialization_blocker))
+    for packet in packets:
+        if packet.declaration in expired:
+            deadline_limitation = {
+                "code": "partial-evidence",
+                "message": _OFFLINE_DEADLINE_MESSAGE,
+                "paths": [packet.scope],
+            }
+            if deadline_limitation not in limitations:
+                limitations.append(deadline_limitation)
+    limitations = limitations[:64]
     publication = {"status": "skipped",
                    "path": "recommendations.md",
                    "sha256": "0" * 64}
@@ -2234,10 +2307,12 @@ def _offline_assessment_parts(resolution: C.ConfigResolution,
 
 def _doctor_offline_assessment_json(
         resolution: C.ConfigResolution,
-        domain: C.DomainPaths, workspace) -> bytes:
+        domain: C.DomainPaths, workspace, *,
+        deadline: float | None = None,
+        on_child: Callable[[str, int], None] | None = None) -> bytes:
     """Build the versioned assessment document from static facts only."""
     child_data, limitations, publication = _offline_assessment_parts(
-        resolution, domain, workspace)
+        resolution, domain, workspace, deadline=deadline, on_child=on_child)
     document = C.PublicDocument(
         kind="agent-assessment", ptest_version=C.PTEST_VERSION,
         domain=_domain_public(domain),
