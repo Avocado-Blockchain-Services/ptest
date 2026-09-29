@@ -320,7 +320,7 @@ def test_json_with_smoke_stays_machine_exact_and_never_runs(
     assert captured.err == ""
     document = C.decode_public_document(captured.out)
     assert set(document.data) == {
-        "action", "target", "exists", "warnings", "config"}
+        "action", "target", "exists", "warnings", "config", "commit_paths"}
 
 
 # --- setup, failure, sanitation, monorepo -----------------------------------

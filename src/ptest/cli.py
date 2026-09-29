@@ -25,6 +25,7 @@ from . import doctor, doctor_fix, executability, files, help as help_api, histor
 from . import init_render, init_smoke, lastgreen
 from . import operations, platform, progress, recommendations, scheduler
 from . import uninstall as uninstall_api
+from . import worktree as worktree_api
 from . import render
 from .adapters import pytest as pytest_adapter
 from .adapters import vitest as vitest_adapter
@@ -100,6 +101,7 @@ class ParsedArgs:
     fix: bool = False
     doctor_request: bool | None = None
     smoke: bool | None = None
+    from_main: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +279,7 @@ def _parse_execution(args: Sequence[str], *, command: str | None = None) -> Pars
 def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
     if command == "init":
         runner = None
-        dry_run = reveal = False
+        dry_run = reveal = from_main = False
         children = []
         agents = ()
         agents_explicit = False
@@ -299,6 +301,8 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
                 dry_run = True
             elif token == "--reveal-command":
                 reveal = True
+            elif token == "--from-main":
+                from_main = True
             elif token == "--runner":
                 value, index = _value(args, index, token)
                 try:
@@ -403,8 +407,11 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
             raise _problem("invalid-config", "init review cannot be combined with --json")
         if dry_run and (doctor_request is True or review_options_seen):
             raise _problem("invalid-config", "init review cannot be combined with --dry-run")
+        if from_main and (runner is not None or children):
+            raise _problem("invalid-config", "--from-main copies the main checkout's config; it cannot be combined with --runner or --child")
         return ParsedArgs(command=command, runner=runner, dry_run=dry_run,
                           reveal_command=reveal, json="--json" in args,
+                          from_main=from_main,
                           children=tuple(children), agents=agents,
                           agents_explicit=agents_explicit,
                           reviewer=reviewer, reviewer_explicit=reviewer_seen,
@@ -794,13 +801,19 @@ def _summary(config: C.Config) -> C.ConfigSummary:
 def _where_payload(resolution: C.ConfigResolution, domain: C.DomainPaths | None) -> dict:
     config = resolution.config
     if config is None:
+        if (resolution.problem is not None
+                and resolution.problem.code == "config-uncommitted"):
+            warnings = [{"code": "config-uncommitted",
+                         "message": resolution.problem.message, "paths": []}]
+        else:
+            warnings = []
         return {
             "root": str(resolution.root), "config_path": None,
             "initialized": False, "runner_kind": None, "capability": None,
             "commands": [], "effective_limits": {"max_slots": None,
             "max_jobs": None, "memory_mb": None, "repo_workers": None},
             "provenance": list(resolution.provenance),
-            "warnings": [],
+            "warnings": warnings,
             **_domain_facts(domain),
         }
     adapter_for(config.runner.kind)  # closed registry validation only
@@ -2098,6 +2111,27 @@ def _doctor_static_output(parsed: ParsedArgs, resolution: C.ConfigResolution,
         mention = _fix_mention(resolution)
         if mention is not None:
             sys.stdout.write(mention + "\n")
+        uncommitted = _uncommitted_mention(resolution)
+        if uncommitted is not None:
+            sys.stdout.write(uncommitted + "\n")
+
+
+def _uncommitted_mention(resolution: C.ConfigResolution) -> str | None:
+    """Name uncommitted ptest files after doctor output; None when clean.
+
+    Best effort only: never breaks doctor output.
+    """
+    try:
+        paths = worktree_api.uncommitted_config_files(
+            resolution.root, include_agent_rules=True)
+    except Exception:
+        return None
+    if not paths:
+        return None
+    head = ", ".join(paths[:5])
+    tail = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
+    return (f"not committed: {head}{tail} — new worktrees and clones "
+            "won't have them; commit them on the base branch")
 
 
 def _fix_mention(resolution: C.ConfigResolution) -> str | None:
@@ -2359,6 +2393,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         return _run_uninstall(parsed, cwd)
     if command == "init":
         try:
+            if not parsed.from_main:
+                uncommitted = config_api.config_uncommitted(cwd)
+                if uncommitted is not None:
+                    raise uncommitted
             agents = _init_agents(parsed, json_output=parsed.json)
             root = config_api.repository_root(cwd)
             plan = agent_rules.preview(root, agents=agents) if agents else None
@@ -2367,10 +2405,19 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 reveal_command=parsed.reveal_command,
                 children=parsed.children,
                 agents=agents,
+                from_main=parsed.from_main,
             ))
             applied = None
             if agents and not parsed.dry_run:
                 applied = agent_rules.apply(root, agents=agents)
+            if applied is not None and config_api.git_root(cwd) is not None:
+                extra = tuple(detail.target for detail in applied.details
+                              if detail.source == "guidance"
+                              and detail.action in ("created", "updated")
+                              and detail.target not in result.commit_paths)
+                if extra:
+                    result = replace(
+                        result, commit_paths=result.commit_paths + extra)
             payload = C.serialize_init_result(result)
             rules = applied if applied is not None else plan
             if parsed.json:
@@ -2491,6 +2538,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                     for limitation in payload["capability"]["limitations"]:
                         print(f"limitation: {render.terminal_text(limitation['message'])}")
                 print(_domain_text(domain))
+                if (resolution.problem is not None
+                        and resolution.problem.code == "config-uncommitted"):
+                    print(render.terminal_text(resolution.problem),
+                          file=sys.stderr)
             if parsed.reveal_command:
                 if resolution.config is None:
                     print("unredacted-command-disclosure: no command is configured",
@@ -2557,6 +2608,9 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 print(f"history: {len(payload['summaries'])} runs")
             return 0
         if command == "doctor":
+            if (resolution.problem is not None
+                    and resolution.problem.code == "config-uncommitted"):
+                raise resolution.problem
             domain = platform.domain_paths(parsed.fixture_domain)
             if parsed.fix:
                 return _run_doctor_fix(parsed, resolution)
@@ -2586,6 +2640,10 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
                 parsed, resolution, domain,
                 interactive=_interactive_review(),
             )
+            if not declined and not parsed.json:
+                uncommitted = _uncommitted_mention(resolution)
+                if uncommitted is not None:
+                    sys.stdout.write(uncommitted + "\n")
             if declined:
                 return 0
             return 0
@@ -2786,6 +2844,31 @@ def _warn_stale_guidance(root: Path) -> None:
     if stale:
         progress.emit("ptest: agent guidance is outdated — run ptest init "
                       "to update", quiet=False)
+
+
+def _warn_uncommitted_config(resolution: C.ConfigResolution, *,
+                             quiet: bool) -> None:
+    """One stderr line per executing run when config is not committed.
+
+    Best effort only: never alters output or exit status, never fails a run.
+    """
+    try:
+        if resolution.config is None and resolution.monorepo is None:
+            return
+        paths = worktree_api.uncommitted_config_files(resolution.root)
+        if not paths:
+            return
+        if len(paths) == 1:
+            line = (f"ptest: {paths[0]} is not committed"
+                    " — new worktrees won't have it")
+        else:
+            head = ", ".join(paths[:3])
+            tail = f" (+{len(paths) - 3} more)" if len(paths) > 3 else ""
+            line = (f"ptest: {head}{tail} are not committed"
+                    " — new worktrees won't have them")
+        progress.emit(render.terminal_text(line), quiet=quiet)
+    except Exception:
+        return
 
 
 def _normalize_scope_text(scope: str) -> str:
@@ -3328,12 +3411,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         resolution = config_api.resolve_config(Path.cwd())
         if (resolution.monorepo is None and resolution.config is None
                 and parsed.runner_argv and resolution.problem is not None
-                and resolution.problem.code == "initialization-required"):
+                and resolution.problem.code in {"initialization-required",
+                                                "config-uncommitted"}):
             # No root manifest is required to route a path: it resolves
             # to the nearest config at or above it. Bare `ptest` still
             # needs the root manifest to discover projects.
             rerouted = _reroute_nearest(parsed, Path.cwd())
             if isinstance(rerouted, tuple) and rerouted[0] == "missing":
+                missing_parts = _scope_parts(rerouted[1])
+                if missing_parts is not None:
+                    start = Path(Path.cwd(), *missing_parts)
+                    scope_dir = start if start.is_dir() else start.parent
+                    uncommitted = config_api.config_uncommitted(scope_dir)
+                    if uncommitted is None:
+                        # The scope path itself is usually absent from the
+                        # worktree (uncommitted main files never arrive), so
+                        # fall back to the invocation directory, which names
+                        # the same frozen problem via the nearest-first walk.
+                        uncommitted = config_api.config_uncommitted(Path.cwd())
+                    if uncommitted is not None:
+                        raise uncommitted
                 print(render.terminal_text(
                     f"ptest: no ptest project for {rerouted[1]}"
                     " — run ptest init there"), file=sys.stderr)
@@ -3346,6 +3443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     parsed = replace(parsed, mode=C.Mode.AUTOMATIC)
         progress.reset()
         _warn_stale_guidance(resolution.root)
+        _warn_uncommitted_config(resolution, quiet=parsed.quiet)
         if resolution.monorepo is not None:
             from . import monorepo
             domain = platform.domain_paths(parsed.fixture_domain)
