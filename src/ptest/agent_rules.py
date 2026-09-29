@@ -781,6 +781,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     # 4e26676 (0.3.2): guide before the five-command table (last-green-run
     # reference, per-child rows, baseline/coverage wording).
     "5fd9544b2fbbb648cd32e51a820c57231dd2ff7e840314923e359724ca304aa5",
+    # 80392ca (0.3.3-0.3.5): guide before the config-uncommitted row.
+    "4fd66f8dea3d1fa6bdb691daa0fe329ec54dd43670a0e2d88bb297552e621f9d",
 })
 
 

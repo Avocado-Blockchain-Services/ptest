@@ -976,6 +976,28 @@ def test_previous_hashes_cover_main_pre_change_guide():
     assert rules_module._guide_kind(current.decode("utf-8"), current) == "current"
 
 
+def test_shipped_guide_documents_config_uncommitted():
+    """The bundled agent guide must teach the worktree stop rule."""
+    from importlib.resources import files
+
+    guide = files("ptest").joinpath(
+        "resources", "repository-agent-guide.md").read_text(encoding="utf-8")
+    assert "config-uncommitted" in guide
+    assert "never run `ptest init`" in guide
+
+
+def test_previous_hashes_cover_pre_config_uncommitted_guide():
+    """The guide as shipped before the config-uncommitted row must upgrade.
+
+    ``4fd66f8d...`` is the sha256 of
+    ``src/ptest/resources/repository-agent-guide.md`` before the
+    config-uncommitted row was added.
+    """
+    import ptest.agent_rules as rules_module
+
+    assert "4fd66f8dea3d1fa6bdb691daa0fe329ec54dd43670a0e2d88bb297552e621f9d" in rules_module._PREVIOUS_GUIDE_SHA256S
+
+
 def test_every_shipped_guide_version_hashes_into_previous_set():
     """Every guide version ever shipped on this branch must upgrade, not conflict.
 

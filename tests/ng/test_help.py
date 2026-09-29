@@ -118,6 +118,32 @@ def test_doctor_help_documents_consented_review_and_per_provider_qualification(
     assert "separately consented" in agents_help.lower()
 
 
+def test_init_help_documents_from_main_stopgap():
+    """Init help must teach the worktree refusal and the stopgap."""
+    from ptest import help as help_api
+
+    text = help_api.topic("init")
+    flat = " ".join(text.split())
+    assert "[--from-main]" in text
+    assert "--from-main" in flat
+    assert "config-uncommitted" in flat
+    assert "commit" in flat.lower()
+    assert "base branch" in flat
+    lowered = flat.lower()
+    assert "stopgap" in lowered or "temporary" in lowered
+    assert "files to commit" in lowered or "commit these files" in lowered
+
+
+def test_agents_help_documents_config_uncommitted_stop_rule():
+    """The agents workflow must say stop, never init, on config-uncommitted."""
+    from ptest import help as help_api
+
+    text = help_api.topic("agents")
+    flat = " ".join(text.split())
+    assert "config-uncommitted" in flat
+    assert "never run ptest init" in flat
+
+
 def test_doctor_help_names_all_deterministic_items_as_model_free(
         tmp_path, monkeypatch, capsys):
     _no_execution(monkeypatch)

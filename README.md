@@ -245,6 +245,27 @@ exemptions) without touching values you tuned.
 
 ---
 
+## Worktrees and clones
+
+Commit the ptest files (`.ptest.toml` files, `docs/ptest-agent.md`, the
+managed block in `AGENTS.md`/`CLAUDE.md`, provider skills): linked git
+worktrees and fresh clones only receive committed files.
+
+In a linked worktree whose main checkout holds an uncommitted `.ptest.toml`
+at the same path, ptest refuses with `config-uncommitted` (exit 2) instead
+of running: stop, ask the user to commit the config on the base branch, and
+never run `ptest init` there. `ptest init --from-main` copies the main
+checkout's config verbatim as a temporary stopgap that may go stale; the
+fix is still a commit on the base branch. `--from-main` cannot be combined
+with `--runner` or `--child`.
+
+A run warns once on stderr when its config is not committed
+(`ptest: .ptest.toml is not committed — new worktrees won't have it`), and
+`ptest doctor` lists uncommitted ptest files the same way. A successful
+`ptest init` ends by listing the files to commit.
+
+---
+
 ## Reading the output
 
 ptest narrates on stderr in `ptest:` lines; your runner's output is untouched.

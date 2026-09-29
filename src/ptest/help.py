@@ -58,6 +58,7 @@ Syntax:
              [--child NAME --runner KIND]...
              [--agents none|all|claude,codex,opencode,gemini]
              [--dry-run] [--reveal-command] [--json]
+             [--from-main]
              [--doctor | --no-doctor]
              [--reviewer auto|claude|codex|opencode]
              [--allow-model-review] [--review-timeout SECONDS]
@@ -84,7 +85,15 @@ Notes:
   smoke test, and non-interactive smoke skips with the setup command.
   Fresh pytest configs enable change selection, so bare ptest runs only
   the tests a change reaches with no coverage or baseline step; existing
-  configs are never rewritten (ptest doctor --fix turns selection on)."""
+  configs are never rewritten (ptest doctor --fix turns selection on).
+  In a linked git worktree whose main checkout holds an uncommitted
+  `.ptest.toml` at the same path, init refuses with `config-uncommitted`:
+  worktrees only receive committed files, so the fix is to commit the
+  config on the base branch. `--from-main` copies the main checkout's
+  config verbatim as a temporary stopgap that may go stale; it cannot be
+  combined with `--runner` or `--child`. A successful init ends by
+  listing the files to commit: worktrees and clones only get committed
+  config."""
 
 _REGISTER = """ptest register: static registration preview. Read-only, never writes.
 
@@ -343,6 +352,8 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    From a monorepo root, scoped paths must be child-prefixed scopes for
    exactly one child; arbitrary runner flags are rejected by root scope
    validation.
+   `config-uncommitted` means stop and tell the user to commit `.ptest.toml`
+   on the base branch; never run ptest init in a linked worktree.
 
 3. Loop changed, then gate full:
      ptest                           # default loop after each edit (runs the tests the change reaches: changes since the last green run, no baseline or coverage needed)
