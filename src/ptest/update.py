@@ -265,8 +265,12 @@ def _missing_release_message(url: str) -> str:
             "the current install is unchanged")
 
 
+def _latest_location(timeout_s: float) -> str:
+    return _read_location(LATEST_URL, timeout_s)
+
+
 def default_transport() -> Transport:
-    return Transport(latest_location=_read_location,
+    return Transport(latest_location=_latest_location,
                      download=_stream_download)
 
 

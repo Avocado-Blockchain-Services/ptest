@@ -131,15 +131,29 @@ def _deny_update_network(monkeypatch):
     """
     from ptest import update as update_api
 
-    def deny(timeout_s: float) -> str:
-        pytest.fail("update network access in tests")
+    # Guard the network edge, not ``default_transport``: replacing the
+    # transport hid a miswired real transport in 0.4.2. Loopback fixture
+    # servers stay reachable so the real wiring is exercised end to end.
+    read_location = update_api._read_location
+    stream_download = update_api._stream_download
 
-    def deny_download(url, sink, max_bytes, timeout_s) -> None:
-        pytest.fail("update network access in tests")
+    def _loopback(url: str) -> bool:
+        return url.startswith("http://127.0.0.1:")
 
-    monkeypatch.setattr(update_api, "default_transport",
-                        lambda: update_api.Transport(
-                            latest_location=deny, download=deny_download))
+    def guarded_read(url: str, timeout_s: float) -> str:
+        if not _loopback(url):
+            pytest.fail("update network access in tests")
+        return read_location(url, timeout_s)
+
+    def guarded_download(url, sink, max_bytes, timeout_s) -> None:
+        if not _loopback(url):
+            pytest.fail("update network access in tests")
+        return stream_download(url, sink, max_bytes, timeout_s)
+
+    guarded_read.unguarded = read_location  # type: ignore[attr-defined]
+    guarded_download.unguarded = stream_download  # type: ignore[attr-defined]
+    monkeypatch.setattr(update_api, "_read_location", guarded_read)
+    monkeypatch.setattr(update_api, "_stream_download", guarded_download)
 
 
 @pytest.fixture(autouse=True)

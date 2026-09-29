@@ -1277,6 +1277,28 @@ def test_read_location_returns_redirect_target_without_following(
         server.server_close()
 
 
+def test_default_transport_resolves_latest_end_to_end(tmp_path, monkeypatch):
+    # 0.4.2 shipped with the real transport miswired (it called
+    # _read_location without its URL), so every real check was "offline"
+    # while every fake-transport test passed. Exercise the real transport:
+    # only the host is swapped for a local fixture server.
+    server = _fixture_server(monkeypatch, {
+        "/latest": (b"", 302, [("Location", _tag_url(NEWER))]),
+    })
+    try:
+        monkeypatch.setattr(
+            update_api, "LATEST_URL",
+            f"http://127.0.0.1:{server.server_port}/latest")
+        transport = update_api.default_transport()
+        assert update_api.resolve_latest(transport, timeout_s=5.0) == NEWER
+        result = update_api.run_update(requested=None, check_only=True,
+                                       layout=_fake_root(tmp_path))
+        assert (result.action, result.target_version) == ("available", NEWER)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_stream_download_success_redirect_cap_and_404(monkeypatch):
     body = b"x" * 1024
     release_path = ("/Avocado-Blockchain-Services/ptest/releases/download/"
@@ -1316,10 +1338,15 @@ def test_stream_download_success_redirect_cap_and_404(monkeypatch):
         server.server_close()
 
 
-def test_stream_download_refuses_off_allowlist():
+def test_stream_download_refuses_off_allowlist(monkeypatch):
+    # The allowlist refuses before any connection is even built.
+    def no_opener(*handlers):
+        pytest.fail("off-allowlist URL reached the network layer")
+
+    monkeypatch.setattr(update_api.urllib.request, "build_opener", no_opener)
+    stream_download = update_api._stream_download.unguarded
     with pytest.raises(C.Problem) as excinfo:
-        update_api._stream_download("https://example.com/file", io.BytesIO(),
-                                    65536, 5.0)
+        stream_download("https://example.com/file", io.BytesIO(), 65536, 5.0)
     assert excinfo.value.code == "update-unavailable"
 
 

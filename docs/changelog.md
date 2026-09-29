@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.3
+
+- Fix: in 0.4.2 the real update transport was miswired, so `ptest update`
+  always reported `could not reach the ptest releases on GitHub` (exit 75)
+  and the startup check never saw a new release. **If you run 0.4.2,
+  update once with `get.sh`**:
+  `curl -fsSL https://raw.githubusercontent.com/Avocado-Blockchain-Services/ptest/main/get.sh | sh`; from 0.4.3 on,
+  `ptest update` works. The test suite now guards the network edge rather
+  than replacing the transport, and exercises the real transport end to
+  end against a loopback server.
+
 ## 0.4.2
 
 - `ptest update` installs the latest release in place: `ptest update
