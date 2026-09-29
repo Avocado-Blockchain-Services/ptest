@@ -1454,6 +1454,11 @@ def _install_vitest_version(root, version):
 
 
 def _recording_enqueue(monkeypatch):
+    # An exported VITEST_* in the caller's shell would change both the
+    # bound and what the fake node records.
+    for name in ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS",
+                 "VITEST_MIN_THREADS", "VITEST_MIN_FORKS"):
+        monkeypatch.delenv(name, raising=False)
     seen = []
     real = scheduler.enqueue
 

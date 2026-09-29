@@ -209,9 +209,69 @@ def test_unreadable_worker_settings_keep_vitest_3_exclusive(case, text):
     assert adapter_for(C.RunnerKind.VITEST).requires_exclusive(config) is True
 
 
-def test_vitest_4_projects_are_bounded(case):
-    config = _versioned(case, "4.1.11", "export default { test: { projects: ['a', 'b'] } }")
+@pytest.fixture(autouse=True)
+def _no_inherited_vitest_env(monkeypatch):
+    for name in ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS",
+                 "VITEST_MIN_THREADS", "VITEST_MIN_FORKS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+# Each of these hides a serial setting where the literal root text cannot
+# show it; the environment would raise it, so ptest stays exclusive.
+@pytest.mark.parametrize("version", ["3.2.6", "5.0.1"])
+@pytest.mark.parametrize("text", [
+    "import shared from './vitest.shared.mjs'\nexport default mergeConfig(shared, {})",
+    "export default { test: { projects: ['packages/*'] } }",
+    "export default { test: { workspace: ['a'] } }",
+    "export default { test: { extends: './base.config.mjs' } }",
+    "export default { test: { browser: { enabled: true } } }",
+    "import base from '@acme/vitest-config'\nexport default base",
+    "export default { test: { \"maxWorkers\": 1 } }",
+    "const maxWorkers = 1\nexport default { test: { maxWorkers } }",
+])
+def test_worker_settings_ptest_cannot_see_keep_vitest_exclusive(case, version, text):
+    config = _versioned(case, version, text)
+    assert vitest_adapter.bound(config) is None
+
+
+def test_vite_config_limits_count_alongside_vitest_config(case):
+    config = _versioned(case, "3.2.6", "export default { test: { globals: true } }")
+    (case.base / "vite.config.mjs").write_text(
+        "export default { test: { poolOptions: { forks: { maxForks: 1 } } } }",
+        encoding="utf-8")
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=1)
+
+
+@pytest.mark.parametrize("version,expected", [("3.2.6", None), ("4.1.11", None), ("5.0.1", "bounded")])
+def test_a_parent_directory_config_keeps_vitest_below_5_exclusive(case, version, expected):
+    config = _versioned(case, version)
+    (case.base.parent / "vitest.config.mjs").write_text(
+        "export default { test: { maxWorkers: 1 } }", encoding="utf-8")
+    try:
+        result = vitest_adapter.bound(config)
+    finally:
+        (case.base.parent / "vitest.config.mjs").unlink()
+    assert (result is None) if expected is None else (result == vitest_adapter.VitestBound(limit=None))
+
+
+def test_comments_and_urls_are_not_settings(case):
+    config = _versioned(case, "5.0.1", (
+        'import { defineConfig } from "vitest/config";\n'
+        'import react from "@vitejs/plugin-react";\n'
+        "// Pass --maxWorkers on local runs to go faster.\n"
+        "/* singleFork: true was too slow */\n"
+        "export default defineConfig({ plugins: [react()], test: {\n"
+        "  pool: 'forks', env: { API: 'http://localhost:1' },\n"
+        "  exclude: [...configDefaults.exclude, 'e2e/**'] } })\n"))
     assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=None)
+
+
+def test_an_inherited_serial_environment_is_kept(case, monkeypatch):
+    config = _versioned(case, "5.0.1")
+    monkeypatch.setenv("VITEST_MAX_WORKERS", "1")
+    assert vitest_adapter.bound(config) == vitest_adapter.VitestBound(limit=1)
+    monkeypatch.setenv("VITEST_MAX_WORKERS", "50%")
+    assert vitest_adapter.bound(config) is None
 
 
 def test_a_vitest_3_workspace_file_keeps_it_exclusive(case):
@@ -248,7 +308,8 @@ def test_deeply_nested_package_json_stays_exclusive(case):
     ("--pool=forks",), ("--pool", "threads"), ("--poolOptions.threads.maxThreads=2",),
     ("--no-file-parallelism",), ("--fileParallelism=false",),
     ("--config", "other.config.ts"), ("-c", "other.config.ts"), ("-cother.config.ts",),
-    ("--project", "api"),
+    ("--project", "api"), ("--root", "sub"), ("-r", "sub"), ("--browser",),
+    ("--browser.enabled",),
 ])
 def test_project_owned_worker_controls_keep_vitest_exclusive(case, args):
     config = _versioned(case, "3.2.6", args=args)

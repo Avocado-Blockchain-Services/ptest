@@ -42,8 +42,8 @@ _MIN_CAPPED_MAJOR = 3
 # points at a config ptest cannot read.
 _WORKER_CONTROLS = ("--maxWorkers", "--minWorkers", "--pool", "--poolOptions",
                     "--fileParallelism", "--no-file-parallelism", "--config",
-                    "--workspace", "--project")
-_SHORT_CONTROLS = ("-c",)
+                    "--workspace", "--project", "--root", "--browser")
+_SHORT_CONTROLS = ("-c", "-r")
 _CONFIG_MAX_BYTES = 256 * 1024
 _VITEST_CONFIGS = tuple(f"vitest.config.{ext}" for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
 _VITE_CONFIGS = tuple(f"vite.config.{ext}" for ext in ("ts", "mts", "cts", "js", "mjs", "cjs"))
@@ -51,7 +51,19 @@ _WORKSPACE_FILES = tuple(f"vitest.workspace.{ext}"
                          for ext in ("ts", "mts", "cts", "js", "mjs", "cjs", "json"))
 _MAX_KEY = re.compile(r"\b(maxWorkers|maxThreads|maxForks)\s*:\s*([^,}\n]*)")
 _SERIAL_KEY = re.compile(r"\b(singleThread|singleFork|fileParallelism)\s*:\s*([^,}\n]*)")
-_PROJECTS_KEY = re.compile(r"\b(projects|workspace)\s*:")
+_WORKER_WORD = re.compile(r"\b(maxWorkers|maxThreads|maxForks|singleThread|singleFork|fileParallelism)\b")
+# Settings that can move worker limits out of this file's literal text: a
+# merged or extended config, per-project configs, or browser mode.
+_INDIRECT = re.compile(
+    r"\bmergeConfig\s*\(|\bdefineWorkspace\s*\(|\bextends\s*:\s*['\"`]"
+    r"|\b(?:projects|workspace|browser)\s*:")
+_IMPORT_SOURCE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"`]([^'"`]+)['"`]""",
+    re.MULTILINE)
+_LINE_COMMENT = re.compile(r"(^|[\s;,{(\[])//[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_ANCESTOR_LIMIT = 32
+_ENV_LIMITS = ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS")
 # The environment ptest sets on a bounded run; each Vitest major reads the
 # names it knows and ignores the rest.
 _CAP_ENV = ("VITEST_MAX_WORKERS", "VITEST_MAX_THREADS", "VITEST_MAX_FORKS")
@@ -145,36 +157,83 @@ def _read_config(root: Path, name: str) -> str | None:
         raise _Unknown(name) from exc
 
 
+def _strip_comments(text: str) -> str:
+    """Drop JS comments so prose never counts as a setting (URLs keep their //)."""
+    return _LINE_COMMENT.sub(lambda match: match.group(1), _BLOCK_COMMENT.sub(" ", text))
+
+
+def _config_like(source: str) -> bool:
+    """An import that may carry Vitest settings ptest cannot see."""
+    if source.startswith((".", "/")):
+        return re.search(r"vite|vitest|config", source, re.IGNORECASE) is not None
+    return (source not in ("vitest/config", "vite", "vitest")
+            and re.search(r"(?:vite|vitest)[-_./]?config", source, re.IGNORECASE) is not None)
+
+
+def _existing_configs(directory: Path) -> list[str]:
+    return [name for name in _VITEST_CONFIGS + _VITE_CONFIGS + _WORKSPACE_FILES
+            if os.path.lexists(directory / name)]
+
+
 def _config_limit(root: Path, major: int) -> int | None:
     """The project's own literal worker ceiling, None when it sets none.
 
-    Raises _Unknown for anything that is not a literal: an expression, a
-    percentage, or (Vitest 3) projects/workspace, whose pools each get
-    their own workers.
+    Fails closed (raises _Unknown) whenever a limit could live outside the
+    literal text ptest reads: merged, extended or imported configs,
+    per-project configs, workspace files, browser mode, any worker key not
+    in plain ``key: literal`` form, or (below Vitest 5, which search
+    upwards) a config found only in a parent directory.
     """
-    if major < 4 and any(_read_config(root, name) is not None for name in _WORKSPACE_FILES):
+    if any(_read_config(root, name) is not None for name in _WORKSPACE_FILES):
         raise _Unknown("workspace")
-    texts = [text for text in (_read_config(root, name) for name in _VITEST_CONFIGS)
+    texts = [text for text in (_read_config(root, name)
+                               for name in _VITEST_CONFIGS + _VITE_CONFIGS)
              if text is not None]
     if not texts:
-        texts = [text for text in (_read_config(root, name) for name in _VITE_CONFIGS)
-                 if text is not None]
+        if major < 5:
+            parent = root.parent
+            for _ in range(_ANCESTOR_LIMIT):
+                if _existing_configs(parent):
+                    raise _Unknown("ancestor config")
+                if parent.parent == parent:
+                    break
+                parent = parent.parent
+        return None
     limits: list[int] = []
     for text in texts:
-        for _key, value in _MAX_KEY.findall(text):
+        code = _strip_comments(text)
+        if _INDIRECT.search(code):
+            raise _Unknown("indirect")
+        if any(_config_like(source) for source in _IMPORT_SOURCE.findall(code)):
+            raise _Unknown("imported config")
+        literal = _MAX_KEY.findall(code) + _SERIAL_KEY.findall(code)
+        if len(_WORKER_WORD.findall(code)) != len(literal):
+            raise _Unknown("worker key form")
+        for _key, value in _MAX_KEY.findall(code):
             value = value.strip()
             if not re.fullmatch(r"[1-9][0-9]{0,3}", value):
                 raise _Unknown(value)
             limits.append(int(value))
-        for key, value in _SERIAL_KEY.findall(text):
+        for key, value in _SERIAL_KEY.findall(code):
             value = value.strip()
             serial = "false" if key == "fileParallelism" else "true"
             if value == serial:
                 limits.append(1)
             elif value not in ("true", "false"):
                 raise _Unknown(value)
-        if major < 4 and _PROJECTS_KEY.search(text):
-            raise _Unknown("projects")
+    return min(limits) if limits else None
+
+
+def _inherited_limit() -> int | None:
+    """An exported VITEST_MAX_* the caller set; Vitest would honour it."""
+    limits = []
+    for name in _ENV_LIMITS:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        if not re.fullmatch(r"[1-9][0-9]{0,3}", value.strip()):
+            raise _Unknown(name)
+        limits.append(int(value.strip()))
     return min(limits) if limits else None
 
 
@@ -192,9 +251,11 @@ def bound(config: C.Config) -> VitestBound | None:
     if major is None or major < _MIN_CAPPED_MAJOR:
         return None
     try:
-        return VitestBound(limit=_config_limit(root, major))
+        found = [limit for limit in (_config_limit(root, major), _inherited_limit())
+                 if limit is not None]
     except (_Unknown, RecursionError):
         return None
+    return VitestBound(limit=min(found) if found else None)
 
 
 def requires_exclusive(config: C.Config) -> bool:
