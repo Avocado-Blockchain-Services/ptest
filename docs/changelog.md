@@ -4,19 +4,23 @@
 
 - Vitest no longer takes the whole machine. Every Vitest run used to be
   admitted as exclusive, so with several agents one Vitest run at a time
-  stalled every other run behind it. ptest now reads the installed Vitest
-  version and caps it at the granted slots: Vitest 3 gets `--maxWorkers`,
-  `--minWorkers=1` and the `poolOptions` thread/fork caps (it ignores
-  `--maxWorkers` when the project config sets pool limits), Vitest 4 and
-  later get `--maxWorkers`. The run then shares the machine like pytest. It
-  asks for the project's `workers` when above 1, else half the machine.
-  Unknown versions and projects that pin workers or pool in runner args keep
-  the old exclusive run.
+  stalled every other ptest run. ptest now bounds Vitest 3+ to the granted
+  slots through its environment (`VITEST_MAX_WORKERS`, `VITEST_MAX_THREADS`,
+  `VITEST_MAX_FORKS`, with `VITEST_MIN_THREADS`/`_FORKS` = 1), which caps
+  every pool on Vitest 3, 4 and 5 including 4.x projects, and admits it like
+  pytest: the project's `workers` when above 1, else half the machine, and
+  never above a literal worker ceiling in the Vitest config. Unreadable
+  worker settings, `--config`/`--pool`/worker flags, Vitest 3 workspaces and
+  unknown versions keep the exclusive run. Vitest suites may now overlap
+  other runs: declare `[resources] locks` for a shared fixed port or
+  database. The first capped full run of a suite that used to get every
+  core may need longer than its history deadline; a deadline kill raises
+  the next one.
 - The waiting line names what a queued run really waits for when slots are
   free: an exclusive run holding the machine, a run that needs the whole
   machine, the job limit, a held lock, the same checkout, or earlier queued
   runs. `waiting for N slots (M of L free)` now only appears when slots are
-  the shortfall.
+  the shortfall, and never asks for more slots than the machine has.
 
 ## 0.3.7
 
