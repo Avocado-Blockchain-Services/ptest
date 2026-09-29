@@ -179,6 +179,23 @@ def test_scan_failure_falls_back_to_written_list(tmp_path, monkeypatch):
     assert result.commit_paths == (".ptest.toml",)
 
 
+def test_from_main_second_run_keeps_empty_commit_paths(tmp_path):
+    main = init_git_repo(tmp_path / "main", files={"README.md": "x\n"})
+    write_ptest_toml(main)
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "-b", "wt", str(wt))
+    options = InitOptions(runner=None, dry_run=False, reveal_command=False,
+                          from_main=True)
+
+    first = init_project(wt, options)
+    assert first.action is InitAction.CREATED
+    assert first.commit_paths == ()
+
+    second = init_project(wt, options)
+    assert second.action is InitAction.EXISTING
+    assert second.commit_paths == ()
+
+
 def test_control_characters_render_sanitized(tmp_path):
     from ptest import contracts as C
     from ptest.init_render import _commit_reminder_lines

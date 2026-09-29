@@ -1560,6 +1560,11 @@ def init_project(cwd: Path, options: C.InitOptions) -> C.InitResult:
     physical_cwd = _absolute_directory(cwd)
     resolution = resolve_config(physical_cwd)
     if resolution.path is not None:
+        # A --from-main config is a stopgap copy that must not be committed
+        # in this worktree; the stopgap warning governs it, so it keeps ().
+        if options.from_main:
+            return _existing_result(
+                resolution.root, resolution.path, resolution)
         return _existing_with_commit_paths(
             physical_cwd,
             _existing_result(resolution.root, resolution.path, resolution))
