@@ -51,6 +51,8 @@ from .contracts import (
 )
 
 _PHASE = "scheduler"
+# The one text for an expired queue deadline, whoever notices it first.
+QUEUE_DEADLINE_MESSAGE = "admission queue deadline expired"
 _DB_MAX_BYTES = 16 * 1024 * 1024
 _MARKER_MAX_BYTES = 65536
 _MACHINE_MAX_BYTES = 65536
@@ -1132,7 +1134,7 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
         return row
     if row["state"] == "QUEUED" and now >= row["deadline"]:
         row.update(state="CANCELLED", phase="complete", reason_code="queue-timeout",
-                   reason_message="admission queue deadline expired")
+                   reason_message=QUEUE_DEADLINE_MESSAGE)
         return row
     owner, absent = _observe_process(row["owner_pid"])
     if row["guard_pid"] is None:

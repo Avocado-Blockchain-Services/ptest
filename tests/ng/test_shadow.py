@@ -35,7 +35,7 @@ def _coverage_launcher():
         pytest.skip("unqualified: frozen pytest-cov tuple is not provisioned")
     checked = subprocess.run(
         [value, "-c", "import pytest,pytest_cov,coverage; print(pytest.__version__, pytest_cov.__version__, coverage.__version__)"],
-        capture_output=True, text=True, check=False, timeout=5,
+        capture_output=True, text=True, check=False, timeout=30,
     )
     if checked.returncode != 0 or checked.stdout.strip() != "9.1.1 7.1.0 7.15.0":
         pytest.skip("unqualified: frozen pytest-cov tuple is unavailable")

@@ -27,7 +27,7 @@ def test_pytest_full_rejects_base_before_queue(case, monkeypatch):
 def test_pytest_full_cli_rejects_base_before_admission(case, prefix):
     domain = case.domain()
     root = case.project(domain, kind="pytest")
-    completed = case.invoke(domain, root, *prefix, timeout=5)
+    completed = case.invoke(domain, root, *prefix, timeout=30)
     assert completed.code == 2
     assert b"invalid-config" in completed.stderr
     assert completed.result is None
@@ -52,7 +52,7 @@ def test_pytest_full_cli_parsing_rejects_base_in_both_orders():
 def test_pytest_full_cli_rejects_runner_suffix_before_enqueue(case, suffix):
     domain = case.domain()
     root = case.project(domain, kind="pytest")
-    completed = case.invoke(domain, root, *suffix, timeout=5)
+    completed = case.invoke(domain, root, *suffix, timeout=30)
     assert completed.code == 2
     assert b"invalid-config" in completed.stderr
     assert completed.result is None

@@ -1078,6 +1078,18 @@ def test_block():
 """
 
 
+# The guard gives a cancelled runner a fixed grace (C.CANCEL_GRACE_S) before
+# SIGKILL. Real pytest KeyboardInterrupt teardown can outlast it on a loaded
+# machine, which makes "the runner's own exit status wins" a race against
+# the wall clock. This fixture exits with its own status the moment the
+# signal lands, so that contract is tested without the race; escalation
+# past the grace is pinned by the guard tests with controlled children.
+_BLOCK_EXITS_ON_SIGINT = """
+import os, signal
+signal.signal(signal.SIGINT, lambda signum, frame: os._exit(2))
+""" + _BLOCK
+
+
 @pytest.mark.parametrize("change", ["args", "runner", "invalid", "removed"])
 def test_real_queued_config_change_cancels_without_launch(case, change):
     domain = case.domain(slots=2, jobs=2)
@@ -1135,7 +1147,7 @@ def test_real_checkout_admission_serializes_or_overlaps(case, same_checkout):
 def test_real_cancellation_reaps_guard_and_releases_checkout(case):
     domain = case.domain()
     root = _project(case, domain)
-    (root / "tests/test_native.py").write_text(_BLOCK)
+    (root / "tests/test_native.py").write_text(_BLOCK_EXITS_ON_SIGINT)
     def cancel_when_started():
         _wait_for(lambda: (root / "first-started").exists())
         os.kill(os.getpid(), signal.SIGINT)
@@ -1146,8 +1158,12 @@ def test_real_cancellation_reaps_guard_and_releases_checkout(case):
         cancel.result(timeout=5)
     data = C.serialize_run_result(result)
     assert result.exit_code == result.runner_exit_code == 2
-    assert data["status"] == "failed"  # Genuine pytest KeyboardInterrupt exit 2 wins.
-    assert data["exit_origin"] == "runner"
+    assert data["exit_origin"] == "runner"  # The runner's own exit 2 wins within the grace.
+    # The runner exited before pytest could write its terminal report, so
+    # the run is incomplete for that reason alone, never a ptest escalation.
+    assert data["status"] == "incomplete"
+    assert [(r["code"], r["message"]) for r in data["reasons"]] == [
+        ("state-unavailable", "native terminal report was unavailable")]
     _no_claims(data)
     _released(domain)
     (root / "first-release").touch()

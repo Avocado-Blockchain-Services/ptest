@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import support
-from ptest import contracts as C, config as config_api, operations, platform, scheduler
+from ptest import contracts as C, config as config_api, operations, platform, scheduler, storage
 
 
 _COMMAND_FIXTURE = Path(__file__).parent / "fixtures" / "command" / "command.py"
@@ -1390,3 +1390,41 @@ def test_parallel_worker_reason_messages():
         None, 1, 1, needs_parallel_baseline=True) is None
     assert operations._parallel_worker_reason(
         qualified, 1, 1, needs_parallel_baseline=False) is None
+
+
+@pytest.mark.parametrize("detector", ["scheduler", "client", "locked-ledger"])
+def test_queue_deadline_problem_is_identical_whichever_path_detects_it(
+        case, monkeypatch, detector):
+    # The queue deadline can be noticed by the scheduler's recovery view, by
+    # the client's own deadline check right after a poll, or by the retry
+    # loop while the ledger stays locked. Which one wins is a race decided
+    # by machine load, so all three must report the same problem.
+    domain = case.domain()
+    _follower(case, domain)
+    root = _command_project(case, domain, args=("exit", "0"))
+    config = config_api.resolve_config(root).config
+    poll = scheduler.poll
+    deadline = {}
+
+    def forced(domain_arg, ticket):
+        if "at" not in deadline:
+            deadline["at"] = time.monotonic() + 1.0
+        if detector == "scheduler":
+            while time.monotonic() < deadline["at"]:
+                time.sleep(0.01)
+            return poll(domain_arg, ticket)
+        if detector == "client":
+            state = poll(domain_arg, ticket)
+            while time.monotonic() < deadline["at"]:
+                time.sleep(0.01)
+            return state
+        raise storage.TransientContention(
+            message="database is locked", phase="scheduler")
+
+    monkeypatch.setattr(scheduler, "poll", forced)
+    with pytest.raises(C.Problem) as raised:
+        operations.execute(domain, config, C.RunRequest(
+            mode=C.Mode.FULL, queue_timeout_s=1))
+    problem = raised.value
+    assert (problem.code, problem.message, problem.phase, problem.retryable) == (
+        "queue-timeout", "admission queue deadline expired", "execution", True)

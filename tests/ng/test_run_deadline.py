@@ -440,20 +440,35 @@ def test_comparable_evidence_keeps_duration_when_counts_unusable(monkeypatch):
         object(), object(), full=True) == (50.0, None)
 
 
-def test_comparable_evidence_non_full_prefers_family_then_falls_back(monkeypatch):
+def test_comparable_evidence_non_full_uses_only_the_latest_full_run(monkeypatch):
+    # History does not record which scope a non-full run covered, so an
+    # earlier scoped or selected run says nothing about the next one. The
+    # full suite bounds every subset; that is the only safe evidence.
     newest_first = [
         _summary("scoped", "passed", 40.0, 160),
+        _summary("selected", "passed", 5.0, 3),
         _summary("full", "passed", 100.0, 400),
     ]
     monkeypatch.setattr(history_api, "read_history_summaries",
                         lambda domain, checkout, limit=None: tuple(newest_first))
     assert history_api.comparable_run_evidence(
-        object(), object(), full=False) == (40.0, 160)
-
-    monkeypatch.setattr(history_api, "read_history_summaries",
-                        lambda domain, checkout, limit=None: tuple(newest_first[1:]))
-    assert history_api.comparable_run_evidence(
         object(), object(), full=False) == (100.0, 400)
+
+
+def test_small_scoped_run_never_sets_the_deadline_of_a_bigger_one(monkeypatch):
+    # Field regression: a 5-test scoped run (8.5s) produced a 60s deadline
+    # that killed a healthy 965-test scoped run; its retry was killed at
+    # 3x that. With no full run the estimate/default path must apply.
+    newest_first = [
+        _summary("scoped", "failed", 8.5, 5),
+        {**_summary("scoped", "incomplete", 60.3, "missing"),
+         "reasons": [{"code": "execution-timeout", "message":
+                      "compound execution deadline expired after 60s (history)"}]},
+    ]
+    monkeypatch.setattr(history_api, "read_history_summaries",
+                        lambda domain, checkout, limit=None: tuple(newest_first))
+    assert history_api.comparable_run_evidence(
+        object(), object(), full=False) == (None, None)
 
 
 def test_comparable_evidence_empty_history_yields_nothing(monkeypatch):

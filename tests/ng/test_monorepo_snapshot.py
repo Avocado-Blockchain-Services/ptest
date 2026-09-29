@@ -53,7 +53,7 @@ def _launcher():
                     "import pytest, pytest_cov, coverage; "
                     "print(pytest.__version__, pytest_cov.__version__, "
                     "coverage.__version__)"
-                )], capture_output=True, text=True, timeout=10, check=False,
+                )], capture_output=True, text=True, timeout=30, check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue

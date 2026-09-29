@@ -2989,34 +2989,31 @@ def _compound_killed(summary: dict) -> bool:
 
 def comparable_run_evidence(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                             *, full: bool) -> tuple[float | None, int | None]:
-    """(execution_s, total_tests) of the most recent comparable completed run.
+    """(execution_s, total_tests) of the most recent comparable full run.
 
-    Comparable means the same mode family (full vs non-full), status
-    passed|failed (or incomplete when killed by the compound deadline),
-    and a numeric timings execution duration. A non-full request falls
-    back to the latest qualifying full run. Reads at most 20 summaries
-    and never raises: any store, shape, or decode problem yields
-    (None, None).
+    Comparable means a full run, status passed|failed (or incomplete when
+    killed by the compound deadline), and a numeric timings execution
+    duration. Every request, full or not, reads the latest such full run:
+    history does not record which scope a scoped or selected run covered,
+    so one says nothing about the next, while the full suite bounds every
+    subset. ``full`` names the caller's family and no longer changes the
+    answer. Reads at most 20 summaries and never raises: any store, shape,
+    or decode problem yields (None, None).
     """
     try:
         summaries = read_history_summaries(domain, checkout, 20)
     except Exception:
         return (None, None)
-    fallback: tuple[float, int | None] | None = None
     try:
         for summary in summaries:
             entry = _comparable_entry(summary)
             if entry is None:
                 continue
             execution_s, total_tests, is_full = entry
-            if is_full == bool(full):
+            if is_full:
                 return (execution_s, total_tests)
-            if fallback is None and is_full:
-                fallback = (execution_s, total_tests)
     except Exception:
         return (None, None)
-    if not full and fallback is not None:
-        return fallback
     return (None, None)
 
 

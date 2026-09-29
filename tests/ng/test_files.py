@@ -515,6 +515,17 @@ def test_invoke_output_past_cap_is_typed_failure(case, tmp_path):
     pythonpath = _write_mini_target(tmp_path, MINI_BIG_MAIN)
     with pytest.raises(ValueError, match="bound"):
         case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
+@pytest.mark.parametrize("timeout", [1.0, 5, 10, 19.9])
+def test_invoke_rejects_hang_guards_below_the_loaded_machine_floor(case, timeout):
+    # A whole ptest child (interpreter start, admission, guard, runner)
+    # legitimately takes several seconds on a loaded machine, so a tighter
+    # budget flakes instead of catching hangs. It fails at authoring time.
+    domain = case.domain()
+    project = case.project(domain)
+    with pytest.raises(ValueError, match="hang guard"):
+        case.invoke(domain, project, timeout=timeout)
+
+
 def test_invoke_watchdog_bounded_with_retained_pipe(case, tmp_path):
     domain = case.domain()
     project = case.project(domain)
@@ -523,7 +534,8 @@ def test_invoke_watchdog_bounded_with_retained_pipe(case, tmp_path):
     try:
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="timeout"):
-            case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=1.0)
+            case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=1.0,
+                        expect_timeout=True)
         elapsed = time.monotonic() - start
     finally:
         sentinel_alive = sentinel.poll() is None
@@ -536,7 +548,7 @@ def test_invoke_returns_when_child_exits_despite_retained_pipe(case, tmp_path):
     project = case.project(domain)
     pythonpath = _write_mini_target(tmp_path, MINI_EXIT_RETAIN_MAIN)
     start = time.monotonic()
-    completed = case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=15.0)
+    completed = case.invoke(domain, project, env={"PYTHONPATH": pythonpath}, timeout=20.0)
     elapsed = time.monotonic() - start
     assert completed.code == 0
     assert completed.result == {"ok": True}

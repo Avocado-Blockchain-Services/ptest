@@ -202,6 +202,18 @@ def _problem(code: str, message: str, *, phase: str = _PHASE,
                      retryable=retryable)
 
 
+def _queue_deadline_problem() -> C.Problem:
+    # The scheduler's recovery view, the check right after a poll and the
+    # locked-ledger retry loops all notice the same expired deadline; which
+    # one wins is decided by machine load, so they report one problem.
+    return _problem("queue-timeout", scheduler.QUEUE_DEADLINE_MESSAGE,
+                    retryable=True)
+
+
+def _admission_problem(problem: C.Problem) -> C.Problem:
+    return _queue_deadline_problem() if problem.code == "queue-timeout" else problem
+
+
 def _reason(code: str, message: str) -> C.Reason:
     # Public reasons are an intentionally closed vocabulary.  A private guard
     # problem is never copied verbatim into a public result.
@@ -1572,8 +1584,7 @@ def _enqueue_with_retry(domain: C.DomainPaths, admission: C.AdmissionRequest):
             if not _is_transient_coordinator(exc):
                 raise
             if time.monotonic() >= admission.deadline:
-                raise _problem("queue-timeout", "admission did not complete",
-                               retryable=True)
+                raise _queue_deadline_problem()
             time.sleep(min(C.SCHEDULER_POLL_S,
                            max(0.0, admission.deadline - time.monotonic())))
 
@@ -1588,8 +1599,7 @@ def _poll_with_retry(domain: C.DomainPaths, ticket: C.Ticket,
             if not _is_transient_coordinator(exc):
                 raise
             if time.monotonic() >= admission.deadline:
-                raise _problem("queue-timeout", "admission did not complete",
-                               retryable=True)
+                raise _queue_deadline_problem()
             time.sleep(min(C.SCHEDULER_POLL_S,
                            max(0.0, admission.deadline - time.monotonic())))
 
@@ -1689,11 +1699,13 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 grant = state.grant
                 break
             if state.state is C.LeaseState.CANCELLED:
-                raise state.problem or _problem("queue-timeout", "shadow admission did not complete", retryable=True)
+                if state.problem is not None:
+                    raise _admission_problem(state.problem)
+                raise _problem("queue-timeout", "shadow admission did not complete", retryable=True)
             if state.problem is not None and state.state is not C.LeaseState.QUEUED:
-                raise state.problem
+                raise _admission_problem(state.problem)
             if time.monotonic() >= admission.deadline:
-                raise _problem("queue-timeout", "admission queue timeout", retryable=True)
+                raise _queue_deadline_problem()
             time.sleep(min(C.SCHEDULER_POLL_S,
                            max(0.0, admission.deadline - time.monotonic())))
         assert grant is not None
@@ -2838,12 +2850,12 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 break
             if state.state is C.LeaseState.CANCELLED:
                 if state.problem is not None:
-                    raise state.problem
+                    raise _admission_problem(state.problem)
                 raise _problem("queue-timeout", "admission did not complete", retryable=True)
             if state.problem is not None and state.state is not C.LeaseState.QUEUED:
-                raise state.problem
+                raise _admission_problem(state.problem)
             if time.monotonic() >= admission.deadline:
-                raise _problem("queue-timeout", "admission queue timeout", retryable=True)
+                raise _queue_deadline_problem()
             elapsed = time.monotonic() - enqueued_at
             if elapsed >= progress.WAIT_FIRST_S and (
                     not waited or elapsed - wait_last >= progress.WAIT_REPEAT_S):

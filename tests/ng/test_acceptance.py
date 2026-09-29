@@ -159,7 +159,6 @@ def test_candidate_bound_execute_records_lifecycle_and_never_version_only_promot
         ptest=candidate,
         output=tmp_path.parent / f"{tmp_path.name}-candidate-evidence",
         execute=True,
-        timeout=5,
     )
     names = [attempt["name"] for attempt in evidence["attempts"]]
     assert names[:2] == ["candidate-version", "init"]

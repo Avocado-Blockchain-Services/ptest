@@ -55,7 +55,7 @@ def test_xdist_addopts_init_serial_then_scoped_run(case, monkeypatch):
     # what this twin exercises.
     scoped = case.invoke(domain, root, "--", "tests/test_sample.py",
                          env={"PYTHONPATH": env["PYTHONPATH"],
-                              "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}, timeout=15)
+                              "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}, timeout=30)
 
     assert scoped.code == 0, scoped.stderr.decode()
     assert b"1 deselected" in scoped.stdout

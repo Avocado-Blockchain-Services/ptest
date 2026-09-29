@@ -67,12 +67,23 @@ def _prefix_result_json(args: tuple) -> str | None:
 
 _READ_CHUNK = 65536
 _EXIT_DRAIN_GRACE_S = 1.0
-def _check_timeout(timeout: float) -> float:
+# A whole ptest child (interpreter start, admission, guard, runner) takes
+# several seconds on a loaded machine. An invoke timeout is a hang guard,
+# not a speed assertion, so budgets below this floor flake under load.
+HANG_GUARD_FLOOR_S = 20.0
+
+
+def _check_timeout(timeout: float, *, expect_timeout: bool = False) -> float:
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("invoke requires an explicit positive finite keyword timeout")
     deadline_s = float(timeout)
     if not math.isfinite(deadline_s) or deadline_s <= 0:
         raise ValueError("invoke requires an explicit positive finite keyword timeout")
+    if not expect_timeout and deadline_s < HANG_GUARD_FLOOR_S:
+        raise ValueError(
+            f"invoke timeout {deadline_s:g}s is a hang guard below the "
+            f"{HANG_GUARD_FLOOR_S:g}s loaded-machine floor; pass "
+            "expect_timeout=True only when the timeout itself is under test")
     return deadline_s
 def _close_stream(stream) -> None:
     try:
@@ -516,8 +527,9 @@ class CaseFactory:
         return path
 
     def invoke(self, domain: C.DomainPaths, root: Path, *args: str,
-               env: dict | None = None, timeout: float) -> Completed:
-        deadline_s = _check_timeout(timeout)
+               env: dict | None = None, timeout: float,
+               expect_timeout: bool = False) -> Completed:
+        deadline_s = _check_timeout(timeout, expect_timeout=expect_timeout)
         caller_export = _prefix_result_json(args)
         export_rel = None
         if caller_export is None:

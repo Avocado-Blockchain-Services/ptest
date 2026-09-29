@@ -732,7 +732,7 @@ def _mkdir_chain(root: Path, components: list[str]) -> int:
         raise
 
 
-def test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings(case):
+def test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings(case, monkeypatch):
     """Scope/readiness/path evidence must not escape the serialized byte cap."""
     domain = case.domain()
     root = case.project(domain)
@@ -764,6 +764,11 @@ def test_complete_report_cap_includes_hostile_scope_paths_and_near_cap_findings(
     finally:
         os.close(deep_descriptor)
 
+    # This pins the serialized byte cap, not the 8s scan deadline: freeze
+    # doctor's clock so a loaded machine cannot turn the deep hostile tree
+    # into an empty report.
+    import ptest.doctor as doctor
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: 0.0)
     report = inspect(domain, _resolution(case, root), C.DEFAULT_SCAN_LIMITS, scope)
     from ptest.render import render_doctor_json
     report_payload = render_doctor_json(
