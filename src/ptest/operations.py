@@ -2931,7 +2931,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             requested_slots = tier.workers
         else:
             requested_slots = 1
-        project_slots = requested_slots
+        project_slots = min(requested_slots, 64)
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
@@ -2945,7 +2945,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         if vitest_bound.limit is not None:
             # Never raise a ceiling the project set itself.
             requested_slots = min(requested_slots, vitest_bound.limit)
-        project_slots = requested_slots
+        project_slots = min(requested_slots, 64)
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
@@ -3022,6 +3022,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 quiet=request.quiet)
         waited = False
         wait_last = 0.0
+        wait_gap = progress.WAIT_REPEAT_S
         while True:
             state = _poll_with_retry(domain, ticket, admission)
             if signals.number is not None and state.state in {
@@ -3044,8 +3045,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 raise _queue_deadline_problem()
             elapsed = time.monotonic() - enqueued_at
             if elapsed >= progress.WAIT_FIRST_S and (
-                    not waited or elapsed - wait_last >= progress.WAIT_REPEAT_S):
+                    not waited or elapsed - wait_last >= wait_gap):
                 first = not waited
+                if not first:
+                    wait_gap = progress.next_wait_gap(wait_gap)
                 waited = True
                 wait_last = elapsed
                 in_use, limit, holders = _waiting_snapshot(domain, run_id)

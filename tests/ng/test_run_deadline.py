@@ -371,8 +371,13 @@ def test_compound_timeout_message_names_estimate_source(case):
     message = guard_api._compound_timeout_message(estimated)
     assert "estimate" in message
     assert message == (
-        "compound execution deadline expired after 21600s (estimate); raise it "
-        "with --timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml")
+        "compound execution deadline expired after 21600s (estimate); rerun once "
+        "unchanged (history raises the next limit); a lasting limit is "
+        "[runner] timeout / full_timeout in .ptest.toml")
+    # Agents act on the tool's own words: the line must never tell them to
+    # add a --timeout flag, which the agent guide forbids.
+    assert "--timeout" not in message
+    assert "--timeout" not in EXPECTED_COMPOUND_MESSAGE
 
 
 def test_manifest_source_round_trip(case):
@@ -698,8 +703,9 @@ def test_cli_timeout_rejects_bad_values(value, code):
 
 
 EXPECTED_COMPOUND_MESSAGE = (
-    "compound execution deadline expired after 0s; raise it with "
-    "--timeout SECONDS or [runner] timeout / full_timeout in .ptest.toml"
+    "compound execution deadline expired after 0s; rerun once unchanged (history "
+    "raises the next limit); a lasting limit is [runner] timeout / full_timeout "
+    "in .ptest.toml"
 )
 
 

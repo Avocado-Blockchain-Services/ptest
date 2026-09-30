@@ -378,8 +378,8 @@ _AGENTS = """Agent workflow (normal test execution needs no model APIs or extra 
    npm test directly; never cd into a child to run tests. The installed
    docs/ptest-agent.md lists every ptest output line and exit code with
    the action for each.
-   Concurrency (e.g. --workers N) requires verified isolation and adapter
-   support. Standalone v1 passes runner arguments literally: everything
+   Workers come from the project; never add --workers, --timeout or
+   --queue-timeout on your own. Standalone v1 passes runner arguments literally: everything
    from the first native token or -- passes through untouched. Exit status
    mirrors the outcome: 0 passes, nonzero fails, and root --full keeps the
    first child failure after all children finish.

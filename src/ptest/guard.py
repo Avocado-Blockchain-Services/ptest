@@ -53,8 +53,9 @@ def _compound_timeout_message(manifest: LaunchManifest) -> str:
     source = manifest.compound_timeout_source
     named = f" ({source})" if source is not None else ""
     return (f"compound execution deadline expired after "
-            f"{_compound_limit_s(manifest):.0f}s{named}; raise it with --timeout SECONDS "
-            f"or [runner] timeout / full_timeout in .ptest.toml")
+            f"{_compound_limit_s(manifest):.0f}s{named}; rerun once unchanged (history "
+            f"raises the next limit); a lasting limit is [runner] timeout / full_timeout "
+            f"in .ptest.toml")
 
 
 @dataclass

@@ -1315,6 +1315,15 @@ def test_parallel_request_workers_cap_limits_request(case, capsys):
             in capsys.readouterr().err)
 
 
+def test_workers_at_contract_ceiling_is_not_blamed_for_the_cap(case, capsys):
+    domain = case.domain(slots=2, jobs=2)
+    config = _xdist_project(case, domain, addopts="-n 100")
+
+    operations.execute(domain, config, C.RunRequest(mode=C.Mode.SCOPED, workers=64))
+
+    assert "--workers" not in capsys.readouterr().err
+
+
 def test_parallel_request_workers_at_or_above_project_is_silent(case, capsys):
     domain = case.domain(slots=4, jobs=4)
     config = _xdist_project(case, domain, addopts="-n 2")

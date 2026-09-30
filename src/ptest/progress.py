@@ -19,10 +19,17 @@ from .project_facts import terminal_width
 
 HINT = "run with ptest -v for scheduling and setup details"
 
-# A grant slower than this earns one waiting line; repeats stay this far
-# apart so a queued run never becomes a spinner stream.
+# A grant slower than this earns one waiting line; repeats start this far
+# apart and double up to WAIT_REPEAT_MAX_S, so even a 4 h queue wait prints
+# a few dozen lines, never a spinner stream.
 WAIT_FIRST_S = 1.0
 WAIT_REPEAT_S = 15.0
+WAIT_REPEAT_MAX_S = 300.0
+
+
+def next_wait_gap(gap: float) -> float:
+    """The interval before the next repeated waiting line."""
+    return min(gap * 2, WAIT_REPEAT_MAX_S)
 
 _hint_shown = False
 
@@ -431,7 +438,7 @@ def emit(line: str, *, quiet: bool = False, stream=None) -> bool:
 
 
 __all__ = [
-    "HINT", "WAIT_FIRST_S", "WAIT_REPEAT_S",
+    "HINT", "WAIT_FIRST_S", "WAIT_REPEAT_MAX_S", "WAIT_REPEAT_S", "next_wait_gap",
     "reset", "claim_hint",
     "format_duration", "format_timeout", "fit_text",
     "format_start", "format_waiting",

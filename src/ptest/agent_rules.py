@@ -794,6 +794,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "00ae397ca4360593e329854af6cf4ce6b24624195d2a3083c3379128f771af44",
     # 0.4.2-0.4.4: guide before the no-judgement-flags rule.
     "73c4bad038149411c57473d12c6c7a6e7dbcbf99be9af5ba5955d4f09e45ce90",
+    # 0.4.5 draft (7d3f3cd): before per-case timeout remedies.
+    "4c91d313e814937be378f16241bf54b2131efdabe1e9d9c444d326452f7652bf",
 })
 
 

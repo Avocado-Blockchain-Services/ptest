@@ -611,6 +611,20 @@ def test_duration_and_timeout_shapes():
     assert progress.format_timeout(600.0) == "10m"
 
 
+def test_waiting_line_repeats_back_off_to_a_few_dozen_over_4h():
+    from ptest import progress
+
+    gaps, gap = [], progress.WAIT_REPEAT_S
+    elapsed = progress.WAIT_FIRST_S
+    while elapsed < 14400.0:
+        gaps.append(gap)
+        elapsed += gap
+        gap = progress.next_wait_gap(gap)
+    assert gaps[:5] == [15.0, 30.0, 60.0, 120.0, 240.0]
+    assert max(gaps) == progress.WAIT_REPEAT_MAX_S == 300.0
+    assert len(gaps) < 60
+
+
 # ---- Parallel xdist end-line counts (persea-shaped) -----------------------------
 
 def _xdist_project(case, domain, *, test_count=5):

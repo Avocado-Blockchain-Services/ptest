@@ -47,7 +47,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | `joined the running full run` / `already verified at …` / `full gate runs: <why>` | attached to a running full run / this exact tree already passed (here or in another checkout) / why it must run | Wait / nothing to do / follow the named fix. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
-| `execution-timeout …` / `queue-timeout` | the run exceeded its time budget / waited out the queue limit | Rerun once unchanged; if it repeats, report it (the user can raise `[runner] timeout` / `full_timeout` in `.ptest.toml`). |
+| `execution-timeout …` / `queue-timeout` | the run exceeded its time limit / waited out the queue limit | Rerun once unchanged; if it repeats, report it: the time limit is `[runner] timeout` / `full_timeout` in `.ptest.toml`; for the queue, name what the waiting line says holds it. |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
 | `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
 | `update available: X … run: ptest update` / `ptest X can improve this config … run ptest doctor --fix` | a newer ptest exists / this config predates it | Run `ptest update` (running jobs keep their version) / run `ptest doctor --fix`; then continue. If it says `installed from source`, tell the user. |
@@ -60,7 +60,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | 1 | test failure | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | 2 | usage or config error | Fix the command or config. |
 | 70 | incomplete: ptest could not prove the result | Rerun once alone; report it if it repeats. |
-| 75 | queue or coordinator unavailable | Wait, then rerun. |
+| 75 | queue or coordinator unavailable | Rerun once unchanged; report a repeat. |
 | 124 | timeout | Rerun once unchanged; report a repeat. |
 | 130 | cancelled | Rerun if still needed. |
 
