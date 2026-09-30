@@ -58,6 +58,8 @@ def format_duration(seconds: float | None) -> str:
 
 
 def format_timeout(seconds: float) -> str:
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{int(seconds // 3600)}h"
     if seconds >= 60 and seconds % 60 == 0:
         return f"{int(seconds // 60)}m"
     if seconds == int(seconds):
@@ -411,6 +413,13 @@ def holder_label(pid: int, *, proc_root: str = "/proc") -> str:
         return f"{render.terminal_text(name)} (pid {pid})"
     except (OSError, ValueError):
         return f"pid {pid}"
+
+
+def format_workers_cap(workers: int, project_workers: int) -> str:
+    """The one line naming a --workers cap below the project's own count."""
+    return (f"ptest: --workers {workers} caps this run below the project's "
+            f"{project_workers} workers; the queue already shares the machine, "
+            f"so plain `ptest` needs no --workers")
 
 
 def emit(line: str, *, quiet: bool = False, stream=None) -> bool:

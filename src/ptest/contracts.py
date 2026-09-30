@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .checklist import CATALOG as _CHECKLIST_CATALOG
 
-PTEST_VERSION = "0.4.4"
+PTEST_VERSION = "0.4.5"
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
 GUARD_PROTOCOL_VERSION = 2
@@ -115,7 +115,7 @@ class InitAction(str, Enum):
 
 
 MAX_PROMPT_BYTES = 65536
-DEFAULT_QUEUE_TIMEOUT_S = 1800.0
+DEFAULT_QUEUE_TIMEOUT_S = 14400.0
 MAX_QUEUE_TIMEOUT_S = 86400.0
 DEFAULT_SETUP_TIMEOUT_S = 300.0
 DEFAULT_ATTEMPT_TIMEOUT_S = 30.0
@@ -1104,7 +1104,7 @@ class RunRequest:
     argv: tuple = ()
     base: str | None = None
     workers: int | None = None
-    queue_timeout_s: float = 1800.0
+    queue_timeout_s: float = DEFAULT_QUEUE_TIMEOUT_S
     no_setup: bool = False
     shadow: bool = False
     result_path: str | None = None

@@ -2931,6 +2931,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             requested_slots = tier.workers
         else:
             requested_slots = 1
+        project_slots = requested_slots
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
@@ -2944,6 +2945,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
         if vitest_bound.limit is not None:
             # Never raise a ceiling the project set itself.
             requested_slots = min(requested_slots, vitest_bound.limit)
+        project_slots = requested_slots
         if request.workers is not None:
             requested_slots = min(requested_slots, request.workers)
         requested_slots = min(requested_slots, 64)
@@ -2952,11 +2954,17 @@ def execute(domain: C.DomainPaths, config: C.Config,
             config.runner.workers,
             config.runner.workers if request.workers is None else request.workers,
         )
+        project_slots = 1 if (native_pytest and not advanced) else config.runner.workers
     needs_parallel_baseline = (
         advanced and plan.execution == "selected" and not support.parallel_identity
         and tier_admits)
     if needs_parallel_baseline or (advanced and not tier_admits):
-        requested_slots = 1
+        requested_slots = project_slots = 1
+    if request.workers is not None and requested_slots < project_slots:
+        # Make a caller's cap visible: the queue already shares the machine,
+        # so a lower --workers only slows this run down.
+        progress.emit(progress.format_workers_cap(requested_slots, project_slots),
+                      quiet=request.quiet)
     command = _summary(config, plan, request, requested_slots)
     started = _iso_now()
     run_mono = time.monotonic()

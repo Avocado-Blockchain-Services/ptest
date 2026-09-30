@@ -17,7 +17,7 @@ WRONG_NONCE = "cd" * 32
 
 
 def test_bootstrap_smoke():
-    assert C.PTEST_VERSION == "0.4.4"
+    assert C.PTEST_VERSION == "0.4.5"
     assert C.SCHEMA_VERSION == 1
     assert C.MAX_PROMPT_BYTES == 65536
     assert C.ExecutionTier("advanced") is C.ExecutionTier.ADVANCED
@@ -339,7 +339,7 @@ def test_nine_public_documents_parse():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
-        assert doc.ptest_version == "0.4.4"
+        assert doc.ptest_version == "0.4.5"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
     full = C.decode_public_document(
@@ -1033,7 +1033,10 @@ def test_default_constants_match_design():
     assert C.MAX_SCAN_LIMITS.files == 10000
     assert C.MAX_SCAN_LIMITS.file_bytes == 1048576
     assert C.MAX_SCAN_LIMITS.total_bytes == 67108864
-    assert C.DEFAULT_QUEUE_TIMEOUT_S == 1800.0
+    # Waiting in the FIFO queue is correct; the default must be long enough
+    # that no caller needs --queue-timeout on a busy machine.
+    assert C.DEFAULT_QUEUE_TIMEOUT_S == 14400.0
+    assert C.RunRequest(mode=C.Mode.FULL).queue_timeout_s == C.DEFAULT_QUEUE_TIMEOUT_S
     assert C.MAX_QUEUE_TIMEOUT_S == 86400.0
     assert C.CANCEL_GRACE_S == 3.0
     assert C.SCHEDULER_POLL_S == 0.25

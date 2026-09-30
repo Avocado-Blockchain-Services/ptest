@@ -443,20 +443,24 @@ def test_documented_onboarding_autodetects_monorepo(tmp_path, monkeypatch, capsy
     assert (tmp_path / ".claude" / "skills" / "ptest" / "SKILL.md").is_file()
 
 
-def test_documented_workers_example_sets_ptest_workers_before_scope():
+def test_documented_run_example_needs_no_worker_flag():
+    # Agents copy help examples verbatim: the example must be a plain run
+    # whose workers come from the project, never a --workers judgement call.
     from ptest import help as help_api
     import shlex
     text = help_api.topic("run")
     example = None
     for line in text.splitlines():
-        stripped = line.strip().removeprefix("e.g. ").strip()
-        if stripped.startswith("ptest --workers"):
-            example = tuple(shlex.split(stripped.removeprefix("ptest").strip()))
+        stripped = line.strip()
+        if stripped.startswith("e.g. ptest"):
+            command = stripped.removeprefix("e.g. ").split("#", 1)[0].strip()
+            example = tuple(shlex.split(command.removeprefix("ptest").strip()))
             break
     assert example is not None, text
     parsed = parse_argv(example)
-    assert parsed.workers is not None
-    assert parsed.runner_argv and "--workers" not in parsed.runner_argv
+    assert parsed.workers is None
+    assert parsed.runner_argv == ("tests/test_example.py",)
+    assert "--workers only lowers them" in text
 
 
 def test_help_never_reads_config_resolver(tmp_path, monkeypatch, capsys):

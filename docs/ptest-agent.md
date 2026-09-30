@@ -18,13 +18,13 @@ A scoped or changed green is iteration only; only `ptest --full` completes the
 change. Rerun it only after a change (`--again` forces one). Fast-forward the
 green tip and never rerun for the merge (`already verified … in <checkout>`).
 Keep notes and reports outside the repo, or in declared gitignored outputs.
+Run these commands exactly as shown: never add `--workers`, `--timeout` or `--queue-timeout` yourself or copy them from older notes; ptest sizes workers from the project and the machine-wide queue shares the load, so waiting is normal.
 
 ## Monorepo
 
 Always run from the monorepo root. Prefix scopes with the owning child, such
 as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
-Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite
-them.
+Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them.
 
 ## Reading ptest output
 
@@ -47,7 +47,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
 | `joined the running full run` / `already verified at …` / `full gate runs: <why>` | attached to a running full run / this exact tree already passed (here or in another checkout) / why it must run | Wait / nothing to do / follow the named fix. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
-| `execution-timeout …` / `queue-timeout` | the run exceeded its budget / admission never completed | Raise with `--timeout` and rerun; report a repeat `queue-timeout`. |
+| `execution-timeout …` / `queue-timeout` | the run exceeded its time budget / waited out the queue limit | Rerun once unchanged; if it repeats, report it (the user can raise `[runner] timeout` / `full_timeout` in `.ptest.toml`). |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
 | `unsafe-path` / `unknown command …` | a path is unsafe / bad command | Fix the path or command (exit 2 for a bad command), rerun. |
 | `update available: X … run: ptest update` / `ptest X can improve this config … run ptest doctor --fix` | a newer ptest exists / this config predates it | Run `ptest update` (running jobs keep their version) / run `ptest doctor --fix`; then continue. If it says `installed from source`, tell the user. |
@@ -61,7 +61,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | 2 | usage or config error | Fix the command or config. |
 | 70 | incomplete: ptest could not prove the result | Rerun once alone; report it if it repeats. |
 | 75 | queue or coordinator unavailable | Wait, then rerun. |
-| 124 | timeout | Raise with `--timeout`, rerun. |
+| 124 | timeout | Rerun once unchanged; report a repeat. |
 | 130 | cancelled | Rerun if still needed. |
 
 ## Test-quality rules

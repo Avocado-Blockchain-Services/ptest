@@ -197,8 +197,13 @@ Useful flags:
 | `-v` | ptest's scheduling/setup detail, and a verbose runner |
 | `-q` | silence ptest's own lines (errors still print) |
 | `--again` | with `--full`: rerun even if these exact inputs already passed, here or in another checkout of the project |
-| `--timeout 2700` | run deadline in seconds (default: from history, else estimated from the test count) |
-| `--workers N` | cap parallel workers for this run |
+| `--timeout 2700` | run deadline in seconds (default: from history, else estimated from the test count); for a lasting change set `[runner] timeout` / `full_timeout` in `.ptest.toml` |
+| `--workers N` | lower this run's workers below the project's own count (ptest prints a line saying so) |
+| `--queue-timeout S` | give up waiting in the queue after S seconds (default 4 hours) |
+
+Plain `ptest` and `ptest --full` need none of these: workers come from the
+project (xdist `-n`, `[runner] workers`) and the machine-wide queue shares the
+load. The agent guide tells coding agents never to add them on their own.
 
 ---
 

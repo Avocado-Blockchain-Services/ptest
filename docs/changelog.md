@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.5
+
+- Agents stop making worker and timeout judgement calls. The agent guide
+  now says to run `ptest` / `ptest --full` exactly as shown and never to
+  add `--workers`, `--timeout` or `--queue-timeout` (or copy them from
+  older notes): ptest sizes workers from the project and the machine-wide
+  queue shares the load. A timeout is now "rerun once unchanged, report a
+  repeat"; the lasting fix is `[runner] timeout` / `full_timeout`.
+- `--workers N` below the project's own count prints `ptest: --workers N
+  caps this run below the project's M workers …`, so a cap is visible.
+- The default `--queue-timeout` is 4 hours (was 30 minutes): waiting in the
+  FIFO queue is correct, and a busy machine no longer pushes callers to set
+  it. Waiting lines show whole hours (`queue timeout 4h`).
+- `ptest help run` no longer shows `--workers 2` as its example.
+- Run `ptest init` to refresh the agent guidance in your repositories
+  (ptest says `agent guidance is outdated` until you do).
+
 ## 0.4.4
 
 - A leftover `REBASE_HEAD` no longer blocks change selection or the full

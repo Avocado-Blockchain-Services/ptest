@@ -792,6 +792,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "ed005461b423ccc09fd50433c6fdb0fc0ffceb2f95caf80f158a70ae1e7ede82",
     # 0.4.0-0.4.1: guide before the update rows.
     "00ae397ca4360593e329854af6cf4ce6b24624195d2a3083c3379128f771af44",
+    # 0.4.2-0.4.4: guide before the no-judgement-flags rule.
+    "73c4bad038149411c57473d12c6c7a6e7dbcbf99be9af5ba5955d4f09e45ce90",
 })
 
 

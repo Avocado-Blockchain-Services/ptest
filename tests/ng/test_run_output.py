@@ -186,7 +186,7 @@ def test_queued_run_prints_waiting_line_then_repeats_with_elapsed(case):
     first, second = waiting
     assert first.startswith(
         "ptest: waiting for 1 slot (0 of 1 free) — in use by ")
-    assert "queue timeout 30m" in first
+    assert "queue timeout 4h" in first
     assert "(pid " in first  # the holder is named, never with argv/secrets
     assert "(position" not in first  # queue position is -v detail only
     assert first.endswith("run with ptest -v for scheduling and setup details")
@@ -606,6 +606,8 @@ def test_duration_and_timeout_shapes():
     assert progress.format_duration(192.3) == "3m12s"
     assert progress.format_duration(3723.0) == "1h2m3s"
     assert progress.format_timeout(1800.0) == "30m"
+    assert progress.format_timeout(14400.0) == "4h"
+    assert progress.format_timeout(5400.0) == "90m"
     assert progress.format_timeout(600.0) == "10m"
 
 

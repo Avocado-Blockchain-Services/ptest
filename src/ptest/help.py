@@ -283,10 +283,10 @@ _RUN = """Running tests: scoped iteration and the integrated full gate, from the
 Syntax (ptest options precede scoped/native arguments):
   ptest [--workers 1..64] [-v | --verbose] [-q | --quiet] [<scoped paths>...]
   ptest --changed | --full [--again] [--workers 1..64] [-v] [-q]
-  ptest [--queue-timeout 1..86400 (default 1800)] [--base X]
+  ptest [--queue-timeout 1..86400 (default 14400)] [--base X]
         [--timeout 1..86400 (default: history, else test-count estimate, else 600)]
         [--no-setup] [--shadow] [--result-json PATH] [-- SCOPES...]
-  e.g. ptest --workers 2 tests/test_example.py  # only with verified isolation and adapter support
+  e.g. ptest tests/test_example.py  # workers come from the project; --workers only lowers them
 
 Notes:
   Mode is changed by default; --full switches to all; a path only

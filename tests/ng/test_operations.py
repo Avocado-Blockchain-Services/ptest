@@ -1298,8 +1298,8 @@ def test_parallel_auto_requests_machine_slots(case):
             if code == "parallel-workers"] == []
 
 
-def test_parallel_request_workers_cap_limits_request(case):
-    """ptest --workers caps the requested count before admission."""
+def test_parallel_request_workers_cap_limits_request(case, capsys):
+    """ptest --workers caps the requested count before admission, and says so."""
     domain = case.domain(slots=4, jobs=4)
     config = _xdist_project(case, domain, addopts="-n 4")
 
@@ -1310,6 +1310,20 @@ def test_parallel_request_workers_cap_limits_request(case):
     assert result.command.workers == 2
     assert [code for code, _ in _reason_messages(result)
             if code == "parallel-workers"] == []
+    # An agent's judgement-call cap is visible to the human reading the run.
+    assert ("ptest: --workers 2 caps this run below the project's 4 workers"
+            in capsys.readouterr().err)
+
+
+def test_parallel_request_workers_at_or_above_project_is_silent(case, capsys):
+    domain = case.domain(slots=4, jobs=4)
+    config = _xdist_project(case, domain, addopts="-n 2")
+
+    result = operations.execute(
+        domain, config, C.RunRequest(mode=C.Mode.SCOPED, workers=4))
+
+    assert result.granted_workers == 2
+    assert "--workers" not in capsys.readouterr().err
 
 
 def test_parallel_oversized_request_caps_at_contract_ceiling(case):
