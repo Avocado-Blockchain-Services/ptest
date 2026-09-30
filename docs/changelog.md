@@ -6,7 +6,8 @@
   gate (`in-progress Git operation prevents selection`). Git can leave it
   behind after a rebase completes; like `git status`, ptest now treats a
   rebase as in progress only while `rebase-merge/` or `rebase-apply/`
-  exists. Merges, cherry-picks and reverts in progress still fail closed.
+  exists. Selection still fails closed while `MERGE_HEAD`,
+  `CHERRY_PICK_HEAD` or `REVERT_HEAD` exists.
 - Test suite: the update-network guard records every hit and fails the
   test at teardown, so a hit inside the startup check's fetch thread can
   no longer pass silently; its loopback check parses the URL.
