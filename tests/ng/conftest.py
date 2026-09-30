@@ -124,11 +124,14 @@ def isolated_env(monkeypatch, tmp_path_factory) -> IsolatedEnv:
 def _deny_update_network(monkeypatch):
     """Fail any test that reaches the update network without a fake.
 
-    ``pytest.fail`` raises a BaseException, so it escapes the startup
-    check's ``except Exception`` silence. Tests in ``test_update.py``
-    that exercise the check delete the opt-out above and pass or patch
-    their own transport.
+    Every hit is recorded and fails the test at teardown, because the
+    startup check fetches in a worker thread where ``pytest.fail`` alone
+    would only kill the thread and leave the check silent. Tests in
+    ``test_update.py`` that exercise the check delete the opt-out above
+    and pass or patch their own transport.
     """
+    import urllib.parse
+
     from ptest import update as update_api
 
     # Guard the network edge, not ``default_transport``: replacing the
@@ -136,24 +139,37 @@ def _deny_update_network(monkeypatch):
     # servers stay reachable so the real wiring is exercised end to end.
     read_location = update_api._read_location
     stream_download = update_api._stream_download
+    violations: list[str] = []
 
-    def _loopback(url: str) -> bool:
-        return url.startswith("http://127.0.0.1:")
+    def _deny(url: str) -> None:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            loopback = (parsed.scheme == "http"
+                        and parsed.hostname == "127.0.0.1"
+                        and parsed.username is None
+                        and parsed.password is None)
+        except ValueError:
+            loopback = False
+        if not loopback:
+            violations.append(url)
+            pytest.fail("update network access in tests")
 
     def guarded_read(url: str, timeout_s: float) -> str:
-        if not _loopback(url):
-            pytest.fail("update network access in tests")
+        _deny(url)
         return read_location(url, timeout_s)
 
     def guarded_download(url, sink, max_bytes, timeout_s) -> None:
-        if not _loopback(url):
-            pytest.fail("update network access in tests")
+        _deny(url)
         return stream_download(url, sink, max_bytes, timeout_s)
 
     guarded_read.unguarded = read_location  # type: ignore[attr-defined]
     guarded_download.unguarded = stream_download  # type: ignore[attr-defined]
+    guarded_read.violations = violations  # type: ignore[attr-defined]
     monkeypatch.setattr(update_api, "_read_location", guarded_read)
     monkeypatch.setattr(update_api, "_stream_download", guarded_download)
+    yield
+    if violations:
+        pytest.fail(f"update network access in tests: {violations}")
 
 
 @pytest.fixture(autouse=True)

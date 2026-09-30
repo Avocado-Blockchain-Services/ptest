@@ -1338,6 +1338,23 @@ def test_stream_download_success_redirect_cap_and_404(monkeypatch):
         server.server_close()
 
 
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_network_guard_records_hits_from_the_fetch_thread():
+    # The startup check fetches in a worker thread, where pytest.fail only
+    # kills the thread; the guard must still record the hit so the test
+    # fails at teardown instead of passing silently.
+    violations = update_api._read_location.violations
+    assert update_api._fetch_latest_bounded(
+        update_api.default_transport(), 2.0) is None
+    assert violations == [update_api.LATEST_URL]
+    violations.clear()
+    with pytest.raises(pytest.fail.Exception):
+        update_api._read_location("http://127.0.0.1:1@github.com/x", 1.0)
+    assert violations == ["http://127.0.0.1:1@github.com/x"]
+    violations.clear()
+
+
 def test_stream_download_refuses_off_allowlist(monkeypatch):
     # The allowlist refuses before any connection is even built.
     def no_opener(*handlers):

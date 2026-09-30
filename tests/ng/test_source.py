@@ -706,7 +706,7 @@ def test_dd_unmerged_index_cannot_produce_usable_identity(case):
     assert any("conflict" in reason.message.lower() for reason in result.limitations)
 
 
-@pytest.mark.parametrize("marker", ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply"])
+@pytest.mark.parametrize("marker", ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"])
 def test_in_progress_operation_with_clean_status_fails_closed(case, marker):
     from ptest.source import ensure_fingerprint_key
 
@@ -717,6 +717,17 @@ def test_in_progress_operation_with_clean_status_fails_closed(case, marker):
     else:
         target.write_text(git(root, "rev-parse", "HEAD") + "\n")
     assert snapshot(domain, _config(case, domain), None, None).digest is None
+
+
+def test_stale_rebase_head_after_finished_rebase_does_not_block(case):
+    # Git can leave REBASE_HEAD behind after a rebase completes; git status
+    # then reports no operation, so the snapshot must not refuse either.
+    from ptest.source import ensure_fingerprint_key
+
+    domain, root = _repository(case); ensure_fingerprint_key(domain)
+    (root / ".git" / "REBASE_HEAD").write_text(git(root, "rev-parse", "HEAD") + "\n")
+    assert "rebase" not in git(root, "status").lower()
+    assert snapshot(domain, _config(case, domain), None, None).digest is not None
 
 
 def test_git_environment_cannot_redirect_snapshot(case, monkeypatch):

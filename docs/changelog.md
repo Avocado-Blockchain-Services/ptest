@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4
+
+- A leftover `REBASE_HEAD` no longer blocks change selection or the full
+  gate (`in-progress Git operation prevents selection`). Git can leave it
+  behind after a rebase completes; like `git status`, ptest now treats a
+  rebase as in progress only while `rebase-merge/` or `rebase-apply/`
+  exists. Merges, cherry-picks and reverts in progress still fail closed.
+- Test suite: the update-network guard records every hit and fails the
+  test at teardown, so a hit inside the startup check's fetch thread can
+  no longer pass silently; its loopback check parses the URL.
+
 ## 0.4.3
 
 - Fix: in 0.4.2 the real update transport was miswired, so `ptest update`

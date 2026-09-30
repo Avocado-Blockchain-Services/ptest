@@ -36,7 +36,9 @@ _MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_GIT_BYTES = 32 * 1024 * 1024
 _TIMEOUT_S = 10.0
 _IDENTITY_PROTOCOL = "ptest-source-v2"
-_OPERATIONS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
+# A rebase is in progress while rebase-merge/ or rebase-apply/ exists, as
+# `git status` decides; REBASE_HEAD alone can outlive a finished rebase.
+_OPERATIONS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
 _CONVERSION_ATTRIBUTES = {"crlf", "eol", "filter", "ident", "text", "working-tree-encoding"}
 
 
