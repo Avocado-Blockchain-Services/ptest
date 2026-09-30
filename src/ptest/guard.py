@@ -22,7 +22,7 @@ from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
     DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, DEFAULT_COMPOUND_TIMEOUT_S,
     GUARD_PROTOCOL_VERSION,
-    MAX_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
+    MAX_COMPOUND_TIMEOUT_S, MAX_DYNAMIC_COMPOUND_TIMEOUT_S, ControlFrame, LaunchManifest, Problem,
     decode_control_frame, decode_launch_manifest, encode_control_frame,
 )
 
@@ -49,13 +49,21 @@ def _compound_limit_s(manifest: LaunchManifest) -> float:
 
 
 def _compound_timeout_message(manifest: LaunchManifest) -> str:
-    """Compound-scope expiry text: the limit, its source, plus how to raise it."""
+    """Compound-scope expiry text: the limit, its source, and the next step.
+
+    Only a dynamic limit below the dynamic ceiling grows from this run's
+    history, so only then is an unchanged rerun worth its cost; a config,
+    CLI or ceiling limit would expire again, so the reader reports it.
+    """
     source = manifest.compound_timeout_source
     named = f" ({source})" if source is not None else ""
-    return (f"compound execution deadline expired after "
-            f"{_compound_limit_s(manifest):.0f}s{named}; rerun once unchanged (history "
-            f"raises the next limit); a lasting limit is [runner] timeout / full_timeout "
-            f"in .ptest.toml")
+    limit = _compound_limit_s(manifest)
+    adaptive = (source in (None, "history", "estimate", "default")
+                and limit < MAX_DYNAMIC_COMPOUND_TIMEOUT_S)
+    step = ("rerun once unchanged (history raises the next limit)" if adaptive
+            else "this limit is fixed, so a rerun would expire again: report it")
+    return (f"compound execution deadline expired after {limit:.0f}s{named}; "
+            f"{step}; a lasting limit is [runner] timeout / full_timeout in .ptest.toml")
 
 
 @dataclass

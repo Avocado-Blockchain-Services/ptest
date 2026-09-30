@@ -6,14 +6,19 @@
   now says to run `ptest` / `ptest --full` exactly as shown and never to
   add `--workers`, `--timeout` or `--queue-timeout` (or copy them from
   older notes): ptest sizes workers from the project and the machine-wide
-  queue shares the load. A timeout is now "rerun once unchanged, report a
-  repeat"; the lasting fix is `[runner] timeout` / `full_timeout`.
+  queue shares the load. ptest's own timeout line no longer says "raise it
+  with --timeout": it says "rerun once unchanged (history raises the next
+  limit)" when the limit is dynamic, or "this limit is fixed … report it"
+  for a config, `--timeout` or 6 h-ceiling limit. The lasting fix is
+  `[runner] timeout` / `full_timeout`. Exit 75 is rerun once, then report.
 - `--workers N` below the project's own count prints `ptest: --workers N
   caps this run below the project's M workers …`, so a cap is visible.
 - The default `--queue-timeout` is 4 hours (was 30 minutes): waiting in the
   FIFO queue is correct, and a busy machine no longer pushes callers to set
-  it. Waiting lines show whole hours (`queue timeout 4h`).
-- `ptest help run` no longer shows `--workers 2` as its example.
+  it. Waiting lines show whole hours (`queue timeout 4h`) and repeat at
+  15 s, 30 s, 60 s … up to every 5 minutes, so a long wait stays short.
+- `ptest help run` no longer shows `--workers 2` as its example, and the
+  agent help no longer offers `--workers` as a lever.
 - Run `ptest init` to refresh the agent guidance in your repositories
   (ptest says `agent guidance is outdated` until you do).
 

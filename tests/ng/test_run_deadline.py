@@ -370,10 +370,20 @@ def test_compound_timeout_message_names_estimate_source(case):
                         compound_timeout_source="estimate")
     message = guard_api._compound_timeout_message(estimated)
     assert "estimate" in message
+    # At the dynamic ceiling history cannot raise the limit: say report it.
     assert message == (
-        "compound execution deadline expired after 21600s (estimate); rerun once "
-        "unchanged (history raises the next limit); a lasting limit is "
+        "compound execution deadline expired after 21600s (estimate); this limit "
+        "is fixed, so a rerun would expire again: report it; a lasting limit is "
         "[runner] timeout / full_timeout in .ptest.toml")
+    for source in ("config", "cli"):
+        fixed = guard_api._compound_timeout_message(
+            replace(_manifest_with_deadline(case, 600.0),
+                    compound_timeout_source=source))
+        assert f"600s ({source}); this limit is fixed" in fixed
+    adaptive = guard_api._compound_timeout_message(
+        replace(_manifest_with_deadline(case, 600.0),
+                compound_timeout_source="history"))
+    assert "600s (history); rerun once unchanged" in adaptive
     # Agents act on the tool's own words: the line must never tell them to
     # add a --timeout flag, which the agent guide forbids.
     assert "--timeout" not in message

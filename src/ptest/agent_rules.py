@@ -796,6 +796,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "73c4bad038149411c57473d12c6c7a6e7dbcbf99be9af5ba5955d4f09e45ce90",
     # 0.4.5 draft (7d3f3cd): before per-case timeout remedies.
     "4c91d313e814937be378f16241bf54b2131efdabe1e9d9c444d326452f7652bf",
+    # 0.4.5 draft (cd37373): before fixed-limit timeout wording.
+    "ee94fdd088deb85016b8064051427651df0f9c9e34556b80364b33049abc0b9c",
 })
 
 
