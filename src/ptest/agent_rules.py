@@ -800,6 +800,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "ee94fdd088deb85016b8064051427651df0f9c9e34556b80364b33049abc0b9c",
     # 72773a3 (0.4.5-0.4.6): guide before the ptest release row.
     "39c1333a9eed0449ef1a27920f24fa682246a94961faabecd7c1029d6b951233",
+    # 8187902 (0.4.7 draft): ptest release row at 101 lines.
+    "67e429c2b41d68651e0ef3972e56e4e22e406e49d03325ffa43f470d6a285ffe",
 })
 
 
