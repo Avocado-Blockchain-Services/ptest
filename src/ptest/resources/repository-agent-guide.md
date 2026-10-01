@@ -28,8 +28,7 @@ Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite th
 
 ## Reading ptest output
 
-ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
-`ptest -q` silences ptest lines (errors still print).
+ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail; `ptest -q` silences ptest lines (errors still print).
 
 | Line | Meaning | What to do |
 |---|---|---|
