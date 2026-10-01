@@ -653,13 +653,20 @@ def test_unread_notifications_hit_bounded_send_deadline_and_close_spawn(harness)
 def test_partial_active_frame_does_not_block_execution_deadline(harness):
     h = harness()
     h.workload()
-    h.manifest = replace(h.manifest, attempt_timeout_s=0.5)
+    # Below the guard's 2.0 s frame deadline, so a deadline blocked behind
+    # the partial frame would end as a protocol failure (70), never 143;
+    # long enough that a slow workload start cannot outrun it.
+    timeout_s = 1.5
+    h.manifest = replace(h.manifest, attempt_timeout_s=timeout_s)
     h.start()
     h.running()
+    spawned_at = h.owned[0].create_time()
     h.control.sendall(b"\x00\x00")
-    start = time.monotonic()
     assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
-    assert time.monotonic() - start < 1.5
+    # The attempt deadline fired on time, measured from the workload's own
+    # start rather than from a fixed point that slow startup can consume;
+    # 1.5 s is the lateness the original send-relative bound allowed.
+    assert time.time() - (spawned_at + timeout_s) < 1.5
     facts = [f.payload for f in h.frames if f.kind == "runner-facts"]
     assert facts[0]["problem"]["code"] == "execution-timeout"
     assert not h.later.exists()
@@ -730,8 +737,10 @@ def test_missing_executable_closes_all_later_attempts(harness):
 def test_timeout_fact_preserves_raw_status_and_closes_spawn(harness, scope):
     h = harness()
     h.workload()
-    h.manifest = replace(h.manifest, attempt_timeout_s=0.5 if scope == "attempt" else None,
-                         compound_timeout_s=0.5 if scope == "compound" else 20)
+    # Long enough that a slow workload start cannot outrun the deadline
+    # before the harness sees it running; nothing here measures latency.
+    h.manifest = replace(h.manifest, attempt_timeout_s=2.0 if scope == "attempt" else None,
+                         compound_timeout_s=2.0 if scope == "compound" else 20)
     h.start()
     h.running()
     assert h.finish(timeout=_CANCEL_WATCHDOG_S)[0] == 143
@@ -1527,6 +1536,33 @@ def test_predecessor_quiescent_stays_fast_while_cancelling(monkeypatch):
     assert time.monotonic() - started < 5
     assert state.problem is not None
     assert len(reads) >= 1
+
+
+def test_predecessor_quiescent_tolerates_slow_reap_view_while_cancelling(
+        monkeypatch):
+    import ptest.guard as guard_module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(guard_module, "_group_needs_cleanup",
+                        lambda identity, deadline_s=None: False)
+    running = SimpleNamespace(run_id="r1", state=C.LeaseState.RUNNING)
+    uncertain = SimpleNamespace(run_id="r1", state=C.LeaseState.UNCERTAIN)
+    started = time.monotonic()
+
+    def settling(domain):
+        # Under load, descendants exiting from the cancel signal can read as
+        # indeterminate for longer than one pass. A healthy cancelled run
+        # must not turn into an incomplete (exit 70) result.
+        return ((uncertain,) if time.monotonic() - started < 0.8
+                else (running,))
+
+    monkeypatch.setattr(guard_module.scheduler, "reconcile", settling)
+
+    state = guard_module._State()
+    state.cancel(signal.SIGINT)
+    assert guard_module._predecessor_quiescent(
+        _quiescent_manifest(), _quiescent_identity(), state) is True
+    assert state.problem is None
 
 
 @pytest.mark.parametrize("code", ["ownership-uncertain", "coordinator-unavailable"])

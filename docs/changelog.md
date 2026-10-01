@@ -22,6 +22,10 @@
   otherwise; `--force` applies only to runs granted more than 25 hours
   ago and never frees a held lock. The agent guide names it as the step
   for a repeated `ownership-uncertain` line.
+- Ctrl-C on a busy machine no longer ends a healthy run as incomplete
+  (exit 70): after the cancel reaps the run's processes, ptest allows
+  exiting processes a little longer (1.5 s) to settle before it judges
+  the run. Escaped or unreadable processes still make it incomplete.
 - At a monorepo root, `ptest --full` skips a child whose inputs are
   unchanged since its last green full run, even after new commits
   elsewhere in the repository: `ptest: <child> · unchanged since green at

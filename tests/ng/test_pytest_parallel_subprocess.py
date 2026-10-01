@@ -299,7 +299,7 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path, fake_pytest_project):
         "        handle.write('started\\n')\n")
     for name in ("a", "b", "c", "d"):
         body += (f"\ndef test_sleep_{name}():\n    _mark('{name}')\n"
-                 "    time.sleep(30)\n")
+                 "    time.sleep(120)\n")
     root = fake_pytest_project(tests={"tests/test_sleep.py": body},
                                git=False).resolve()
     markers = root / "markers"
@@ -348,7 +348,10 @@ def test_parallel_ctrl_c_leaves_no_survivors(tmp_path, fake_pytest_project):
         assert all((markers / name).exists() for name in "abcd"), \
             "workers never started"
         os.kill(proc.pid, signal.SIGINT)
-        assert proc.wait(timeout=15) != 0
+        # The workers sleep 120 s: exiting well before that proves the bridge
+        # interrupted them instead of waiting for the tests, with room for a
+        # loaded machine.
+        assert proc.wait(timeout=45) != 0
         # Every descendant held the fifo write end; EOF means none survive.
         gone_by = time.monotonic() + 10
         eof = False

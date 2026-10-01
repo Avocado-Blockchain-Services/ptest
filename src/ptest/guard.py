@@ -360,6 +360,12 @@ _GROUP_SCAN_RETRY_S = 0.005
 # scans there stay fast. Patience lives only at the spawn gate, where a
 # slow verdict merely delays the next spawn.
 _REAP_SCAN_DEADLINE_S = 0.5
+# After a cancel has reaped the group, the predecessor check still decides
+# the run's verdict: exiting descendants can read as indeterminate for more
+# than one pass under load, and a hasty refusal turns a healthy Ctrl-C into
+# exit 70. It gets more than the reap scan but stays well inside the cancel
+# latency budget (no further spawn follows a cancel).
+_CANCEL_QUIESCENCE_DEADLINE_S = 1.5
 
 
 def _sleep(delay: float) -> None:
@@ -505,8 +511,10 @@ def _predecessor_quiescent(
     # keeps its own budget. Otherwise be patient: a slow verdict here only
     # delays the next spawn, while a hasty one fails a healthy run.
     cancelling = state.cancel_signal is not None
-    scan_budget = _REAP_SCAN_DEADLINE_S if cancelling else _GROUP_SCAN_DEADLINE_S
-    view_budget = _REAP_SCAN_DEADLINE_S if cancelling else _LEASE_VIEW_RETRY_DEADLINE_S
+    scan_budget = (_CANCEL_QUIESCENCE_DEADLINE_S if cancelling
+                   else _GROUP_SCAN_DEADLINE_S)
+    view_budget = (_CANCEL_QUIESCENCE_DEADLINE_S if cancelling
+                   else _LEASE_VIEW_RETRY_DEADLINE_S)
     if _group_needs_cleanup(identity, deadline_s=scan_budget):
         state.fail(_problem(
             "ownership-uncertain",
