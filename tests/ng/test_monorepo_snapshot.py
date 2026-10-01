@@ -236,7 +236,10 @@ def test_child_full_records_baseline_then_changed_selects(case):
     # The skip path writes no export: request none here.
     again = case.invoke(domain, root, "--full", timeout=120)
     assert again.code == 0, again.stderr.decode(errors="replace")
-    assert b"already verified" in again.stderr
+    again_err = again.stderr.decode(errors="replace")
+    assert "ptest: api · unchanged since green at" in again_err
+    assert "ptest: web · unchanged since green at" in again_err
+    assert "2 children skipped (unchanged)" in again_err.splitlines()[-1]
 
     # On the default branch only uncommitted work counts as changed, so
     # commit the api touch on a feature branch to exercise per-child lines.

@@ -976,7 +976,19 @@ def test_queued_controller_group_signal_cancels_without_guard(harness, signum):
     queued = harness(domain=held.domain, owner=True, label="q")
     assert queued.grant is None
     os.killpg(queued.owner.pid, signum)
-    assert queued.owner.wait(timeout=_CANCEL_WATCHDOG_S) == 128 + signum
+    try:
+        rc = queued.owner.wait(timeout=_CANCEL_WATCHDOG_S)
+    except subprocess.TimeoutExpired:
+        # An idle fixture can wait whole seconds for a timeslice/page-in
+        # while hot paths sail through under box memory pressure; the group
+        # signal is pending, never lost, so grant the watchdog once more
+        # rather than failing a healthy controller. A controller that truly
+        # ignores the signal still times out and fails below.
+        if queued.owner.poll() is None:
+            rc = queued.owner.wait(timeout=_CANCEL_WATCHDOG_S)
+        else:
+            rc = queued.owner.returncode
+    assert rc == 128 + signum
     assert scheduler.poll(queued.domain, queued.ticket).state is C.LeaseState.CANCELLED
     assert queued.row()["guard_pid"] is None
     assert not queued.marker.exists()

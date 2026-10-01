@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- At a monorepo root, `ptest --full` skips a child whose inputs are
+  unchanged since its last green full run, even after new commits
+  elsewhere in the repository: `ptest: <child> · unchanged since green at
+  <sha> (<age> ago) · skipped — ptest --full --again to rerun`. A child's
+  inputs are its own files and `.ptest.toml`, the root `.ptest.toml`, and
+  its declared `full_triggers`; a change to a shared dependency file
+  outside every child (`uv.lock`, `pyproject.toml`, `package.json`, …)
+  reruns it. The total line counts skipped children separately
+  (`N children skipped (unchanged)`), never as tests, and a skip records
+  no new green. Tests that read files in a sibling child must declare them
+  in `full_triggers`; `ptest -v` lists the inputs behind each skip.
+  Single-project repositories still rerun the full gate on every new
+  commit.
+
 ## 0.4.6
 
 - Refreshing agent guidance works without a terminal. The outdated-guidance

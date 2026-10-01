@@ -2970,8 +2970,13 @@ def _summed_counts(items: list[C.Counts | None]) -> C.Counts | None:
 
 def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | None]],
                           started: float, code: int, *, quiet: bool,
-                          next_step: str | None = None) -> None:
-    """Emit the existing total line over per-child outcomes."""
+                          next_step: str | None = None,
+                          skipped: int = 0) -> None:
+    """Emit the existing total line over per-child outcomes.
+
+    Skipped children (an unchanged full gate) are reported as a note,
+    never as freshly run tests.
+    """
     total_counts = _summed_counts(
         [counts for _, _, counts in child_outcomes])
     status = _worst_status(
@@ -2980,11 +2985,13 @@ def _emit_monorepo_total(child_outcomes: list[tuple[int, C.Status, C.Counts | No
             and status in (C.Status.FAILED, C.Status.INCOMPLETE,
                            C.Status.NOT_RUN)
             and progress.claim_hint())
+    note = (progress.format_skipped_children(skipped)
+            if skipped else None)
     progress.emit(progress.format_end(
         status, counts=total_counts,
         duration_s=time.monotonic() - started, exit_code=code,
         hint=hint, lead="total", color=sys.stderr.isatty(),
-        next_step=next_step), quiet=quiet)
+        next_step=next_step, note=note), quiet=quiet)
 
 
 def _impact_api():
@@ -3770,15 +3777,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     request = child_full_request()
                     result = operations.execute(
                         domain, child.config, request)
-                    _note_run(domain, resolution.root, child.declaration,
-                              request, result)
+                    skipped = operations.full_gate_skipped(result)
+                    if not skipped:
+                        # A skipped child ran nothing: it records no
+                        # green point.
+                        _note_run(domain, resolution.root,
+                                  child.declaration, request, result)
                     _emit_reasons(result)
                     if getattr(result, "signal", None) == signal.SIGINT:
                         cancelled.append(True)
-                    child_outcomes.append(
-                        (result.exit_code, result.status, result.counts))
+                    if skipped:
+                        skipped_children.append(child.declaration)
+                    else:
+                        child_outcomes.append(
+                            (result.exit_code, result.status,
+                             result.counts))
                     return result.exit_code
                 child_outcomes: list[tuple[int, C.Status, C.Counts | None]] = []
+                skipped_children: list[str] = []
                 if parsed.runner_argv:
                     # `ptest --full <folder>` runs every test under those
                     # folders: not the integrated gate (no
@@ -3798,7 +3814,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code = monorepo.execute_full(children, run_full)
                 if not cancelled:
                     _emit_monorepo_total(child_outcomes, started, code,
-                                         quiet=parsed.quiet)
+                                         quiet=parsed.quiet,
+                                         skipped=len(skipped_children))
                 return code
             # Bare `ptest` at a monorepo root is the cheap loop: no scope
             # and no mode flag selects the same changed path as --changed.
