@@ -806,6 +806,10 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     # T2 (3739452): guide with the hardcoded `api/openapi.json` example,
     # before the `<sibling>` placeholder fix.
     "0796048d2da2f2e150e8b026947a000c34d38dd989ab051621e2654a3154a980",
+    # e71ff90 (0.4.7 draft): ptest release row, before the child-skip rows.
+    "a9aced45ed86ac1f390e6371aeb1dc8896c0214ef737baa04fc0dddfc5d7ede8",
+    # 21b7712 (0.4.7 draft): child-skip rows, before the ptest release row.
+    "f4faf6c682dc1052a5a2d98d661f2166210b339b5a5920060835e8cd54b608c4",
 })
 
 
