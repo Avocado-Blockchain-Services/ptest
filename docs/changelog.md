@@ -1,7 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.4.7
 
+- A run started inside a sandbox with its own PID namespace (Codex,
+  bubblewrap, `unshare`) no longer holds its slots forever after it ends,
+  and a sandboxed ptest no longer frees slots that host runs still use.
+  Each run now holds a private lease lock file for its lifetime (owner and
+  guard only; the test runner never inherits it) and records which PID
+  namespace it came from. ptest judges a run from another namespace by
+  that lock alone and frees it only once the lock is free; a missing or
+  replaced lock file never counts as proof. A run from another sandbox
+  cannot be checked for processes it left behind, and runs started by
+  0.4.6 or older are still judged by process IDs. The coordinator database
+  is unchanged, so older installed versions keep working alongside.
+- A recorded process ID now owned by a different process (a reused PID,
+  or a kernel thread seen from outside a sandbox) counts as proof the run
+  ended, instead of keeping its lease uncertain forever. Escaped or
+  unreadable descendants still keep it held.
+- New `ptest release <run_id>` frees a stuck run once its owner, guard and
+  lease lock are provably gone, prints what it freed, and refuses
+  otherwise; `--force` applies only to runs granted more than 25 hours
+  ago and never frees a held lock. The agent guide names it as the step
+  for a repeated `ownership-uncertain` line.
 - At a monorepo root, `ptest --full` skips a child whose inputs are
   unchanged since its last green full run, even after new commits
   elsewhere in the repository: `ptest: <child> · unchanged since green at
