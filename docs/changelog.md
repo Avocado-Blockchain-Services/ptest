@@ -9,6 +9,8 @@
   only the older guide and skills (no instruction-file edits); a problem
   there is one line, never init's result. Before, only `init`'s interactive
   prompt refreshed guidance, so an agent following the hint changed nothing.
+- `ptest rules` works at the repository root (as `init` does) even when run
+  from a subfolder, so following the warning never scatters guidance copies.
 - The warning appears only when that refresh can actually clear it: it
   uses the same file checks as the refresh, so a skill ptest refuses to
   rewrite (for example in a group-writable directory) no longer keeps the

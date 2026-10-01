@@ -1158,6 +1158,40 @@ def test_init_refresh_failure_never_fails_init(tmp_path, monkeypatch, capsys):
             "rules --apply") in capsys.readouterr().err
 
 
+def test_rules_apply_from_a_subfolder_writes_at_the_repository_root(
+        tmp_path, monkeypatch):
+    # The warning checks the root; an agent in a subfolder following it must
+    # fix the root guidance, never scatter a copy into the subfolder.
+    from ptest.cli import main
+
+    rules_module, claude, _ = _outdated_install(tmp_path, monkeypatch)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / ".git" / "config").write_text("")
+    sub = tmp_path / "api"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert main(("rules", "--apply")) == 0
+
+    assert (tmp_path / "docs" / "ptest-agent.md").read_bytes() == rules_module._guide()
+    assert claude.read_bytes() == rules_module._provider_text("claude")
+    assert not (sub / "docs").exists() and not (sub / "AGENTS.md").exists()
+    assert rules_module.guidance_outdated(tmp_path) is False
+
+
+def test_unsearchable_skill_parent_is_skipped_not_raised(tmp_path, monkeypatch):
+    rules_module, claude, _ = _outdated_install(tmp_path, monkeypatch)
+    top = tmp_path / ".claude"
+    top.chmod(0o600)
+    try:
+        assert "claude" not in rules_module.installed_providers(tmp_path)
+        assert all(rel != ".claude/skills/ptest/SKILL.md"
+                   for rel, *_ in rules_module._refresh_targets(tmp_path))
+    finally:
+        top.chmod(0o755)
+
+
 def test_group_writable_skill_dir_never_loops_the_warning(tmp_path, monkeypatch):
     # Where git creates directories 0775 (umask 002), apply cannot rewrite
     # the skill (unsafe-path), so the warning must not name a refresh that

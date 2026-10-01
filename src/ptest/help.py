@@ -240,7 +240,8 @@ _RULES = """ptest rules: preview (default) or install repository-local agent gui
 Syntax:
   ptest rules [--apply]
 
-Without --apply nothing is written. --apply adds references to existing
+Without --apply nothing is written. Rules always works at the repository
+root, wherever you run it. --apply adds references to existing
 instruction files, creating AGENTS.md only if none exist (plus
 docs/ptest-agent.md), and refreshes the ptest skills already installed
 here; it never installs a new per-agent skill (use init --agents) and

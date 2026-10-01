@@ -2547,11 +2547,14 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         return 0
     if command == "rules":
         try:
-            # Refresh the provider skills already installed here too, so
+            # Guidance lives at the repository root, as init installs it, so
+            # running this from a subfolder never scatters copies there. The
+            # provider skills already installed are refreshed too, so
             # `rules --apply` clears an outdated-guidance warning on its own.
-            installed = agent_rules.installed_providers(cwd)
-            result = (agent_rules.apply(cwd, agents=installed) if parsed.apply_rules
-                      else agent_rules.preview(cwd, agents=installed))
+            root = config_api.repository_root(cwd)
+            installed = agent_rules.installed_providers(root)
+            result = (agent_rules.apply(root, agents=installed) if parsed.apply_rules
+                      else agent_rules.preview(root, agents=installed))
             label = "applied" if parsed.apply_rules else "preview"
             print(f"{label}: " + (", ".join(result.actions) or "already configured"))
             return 0

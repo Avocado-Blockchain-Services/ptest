@@ -850,7 +850,7 @@ def _refresh_targets(root: Path) -> list[tuple[str, Path, bytes, bytes]]:
     for provider in SUPPORTED_AGENTS:
         try:
             relative, target, existing, kind = _provider_target(root, provider)
-        except C.Problem:
+        except (C.Problem, OSError):
             continue
         if kind in ("legacy", "previous") and existing is not None:
             targets.append((relative, target, bytes(existing),
@@ -1150,7 +1150,7 @@ def installed_providers(root: Path) -> tuple[str, ...]:
     for provider in SUPPORTED_AGENTS:
         try:
             kind = _provider_target(Path(root), provider)[3]
-        except C.Problem:
+        except (C.Problem, OSError):
             continue
         if kind in ("current", "legacy", "previous"):
             found.append(provider)
