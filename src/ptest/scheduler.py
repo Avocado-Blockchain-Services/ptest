@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 import psutil
 
-from . import files, platform, storage
+from . import files, leases, platform, storage
 from .contracts import (
     AdmissionRequest,
     AdmissionState,
@@ -43,6 +43,8 @@ from .contracts import (
     Reason,
     Ticket,
     DEFAULT_QUEUE_TIMEOUT_S,
+    DEFAULT_SETUP_TIMEOUT_S,
+    MAX_COMPOUND_TIMEOUT_S,
     MAX_QUEUE_TIMEOUT_S,
     MAX_PENDING_JOBS,
     MAX_TERMINAL_SUMMARIES,
@@ -53,6 +55,30 @@ from .contracts import (
 _PHASE = "scheduler"
 # The one text for an expired queue deadline, whoever notices it first.
 QUEUE_DEADLINE_MESSAGE = "admission queue deadline expired"
+# No legitimate run outlives setup + the maximum compound limit + one hour
+# of finalization slack. Measured from grant_time (else enqueue_time).
+RELEASE_FORCE_AFTER_S: float = DEFAULT_SETUP_TIMEOUT_S + MAX_COMPOUND_TIMEOUT_S + 3600.0
+FOREIGN_RELEASE_MESSAGE = ("lease from another PID namespace: its owner and guard "
+                           "are gone; outcome incomplete")
+OPERATOR_RELEASE_MESSAGE = "released by ptest release; outcome incomplete"
+
+EVIDENCE_LOCK = "owner and guard are gone (lease lock is free)"
+EVIDENCE_PROCESS = "owner and guard are gone (process table)"
+EVIDENCE_LEGACY = "owner and guard are gone (process table; this run has no namespace record)"
+EVIDENCE_RECOVERED = "normal recovery found it finished"
+EVIDENCE_FORCED = "forced after the hard time limit"
+EVIDENCE_ALREADY = "already finished"
+
+
+class ReleaseOutcome(NamedTuple):
+    run_id: str
+    released: bool  # True iff this call's transaction moved an active row to terminal
+    previous_state: str  # LeaseState value read right after BEGIN, before recovery
+    state: str  # LeaseState value after this call
+    slots: int  # slots the row held before this call
+    checkout_id: str
+    evidence: str  # one of the EVIDENCE_* strings above
+    forced: bool  # True iff the force path drove this release
 _DB_MAX_BYTES = 16 * 1024 * 1024
 _MARKER_MAX_BYTES = 65536
 _MACHINE_MAX_BYTES = 65536
@@ -922,6 +948,63 @@ def _same_identity(observed: ProcessIdentity | None, row: sqlite3.Row | dict,
             and observed.pgid == row[f"{prefix}_pgid"])
 
 
+def _proven_gone(observed: ProcessIdentity | None, absent: bool, birth: float | None) -> bool:
+    """True when a pid is proven dead: absent, or reused by another birth.
+
+    An ESRCH absence is proof; so is a live observation whose birth differs
+    from the recorded one (the pid was recycled). Anything else — a live
+    same-birth identity, or an indeterminate read — is not proof.
+    """
+    return absent or (observed is not None and observed.birth != birth)
+
+
+def _classify_row(row: dict, observer: str, lease_root: Path) -> tuple[str, leases.Sidecar]:
+    """Classify one active row: legacy, same, or foreign.
+
+    Legacy rows carry no sidecar file. Same rows carry a valid sidecar whose
+    namespace equals the observer's (and neither is "unknown"). Everything
+    else — including an invalid sidecar — is foreign and judged by the
+    lease lock alone.
+    """
+    try:
+        sidecar = leases.read_sidecar(lease_root, row["run_id"])
+    except (Problem, OSError, ValueError, TypeError):
+        return "foreign", leases.Sidecar(status="invalid")
+    if sidecar.status == "absent":
+        return "legacy", sidecar
+    if (sidecar.status == "valid" and sidecar.pid_namespace is not None
+            and not leases.is_foreign(sidecar.pid_namespace, observer)):
+        return "same", sidecar
+    return "foreign", sidecar
+
+
+def _sweep_leases_locked(conn: sqlite3.Connection, lease_root: Path) -> None:
+    """Delete lease files for committed-terminal or absent rows.
+
+    Runs immediately after _begin, before boot recovery or reconcile, so a
+    rolled-back verdict can never strand a live row without its files. For
+    each lease id on disk whose row is terminal or missing: drop this
+    process's own held fd (close only), then remove_if_released under the
+    recorded lock. Best effort: file races never fail the transaction.
+    """
+    try:
+        known = leases.run_ids(lease_root)
+    except (Problem, OSError, ValueError, TypeError):
+        return
+    for run_id in known:
+        try:
+            row = conn.execute("SELECT state FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+        except sqlite3.Error:
+            return
+        if row is not None and row["state"] not in _TERMINAL:
+            continue
+        leases.release_held(lease_root, run_id)
+        try:
+            leases.remove_if_released(lease_root, run_id)
+        except (Problem, OSError):
+            continue
+
+
 def _descendant_observations(row: dict, recorded: list[dict]) -> tuple[list[dict], bool]:
     """Track bounded observed identities, including children before they escape.
 
@@ -953,7 +1036,12 @@ def _descendant_observations(row: dict, recorded: list[dict]) -> tuple[list[dict
                                uid=None, pgid=None, uncertain=1)
 
     guard, absent = _observe_process(row["guard_pid"])
-    if not absent and not _same_identity(guard, row, "guard"):
+    if _proven_gone(guard, absent, row["guard_birth"]):
+        # A reused guard pid is proven dead, like an absent one: it neither
+        # walks (its subtree belongs to another process) nor adds a doubt
+        # sentinel. The mid-walk reuse check below stays fail-closed.
+        return list(observations.values()), fresh_uncertain
+    if not _same_identity(guard, row, "guard"):
         uncertain()
     if _same_identity(guard, row, "guard"):
         pending, visited = [guard.pid], set()
@@ -1128,7 +1216,29 @@ _HEALABLE_UNCERTAIN_REASONS = frozenset({
 })
 
 
-def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: bool) -> dict:
+def _foreign_view(row: dict, sidecar: leases.Sidecar, lease_root: Path) -> dict:
+    """Judge a foreign-namespace row by its lease lock alone.
+
+    No pid/pgid/psutil/probe_group calls at all: the recorded pids mean
+    nothing in this namespace. Only a free lock on the recorded inode is
+    proof of death; a held, missing, replaced or unreadable lock leaves
+    the row unchanged.
+    """
+    row = dict(row)
+    try:
+        lock = leases.probe(lease_root, row["run_id"], sidecar)
+    except (Problem, OSError, ValueError, TypeError):
+        return row
+    if lock != leases.ACQUIRABLE:
+        return row
+    row.update(state="CANCELLED" if row["guard_pid"] is None else "RELEASED",
+               phase="complete", reason_code="ownership-uncertain",
+               reason_message=FOREIGN_RELEASE_MESSAGE)
+    return row
+
+
+def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: bool,
+                   observer: str, lease_root: Path) -> dict:
     row = dict(row)
     if row["state"] in _TERMINAL:
         return row
@@ -1136,9 +1246,13 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
         row.update(state="CANCELLED", phase="complete", reason_code="queue-timeout",
                    reason_message=QUEUE_DEADLINE_MESSAGE)
         return row
+    kind, sidecar = _classify_row(row, observer, lease_root)
+    if kind == "foreign":
+        return _foreign_view(row, sidecar, lease_root)
     owner, absent = _observe_process(row["owner_pid"])
+    gone = _proven_gone(owner, absent, row["owner_birth"])
     if row["guard_pid"] is None:
-        if absent:
+        if gone:
             row.update(state="CANCELLED", phase="complete", reason_code="ownership-uncertain",
                        reason_message="owner absent before guard registration")
         elif row["state"] != "QUEUED" and not _same_identity(owner, row):
@@ -1157,10 +1271,10 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
     if group.exists is None or not group.permission or group.checked_at < checked_at:
         return _uncertain(row, "process-group ownership could not be proven")
     if group.exists:
-        if not absent and not _same_identity(owner, row):
+        if not gone and not _same_identity(owner, row):
             return _uncertain(row, "owner identity is indeterminate")
         if (row["state"] == "UNCERTAIN" and row["phase"] == "setup"
-                and not absent and (
+                and not gone and (
                     (row["reason_code"] == "ownership-uncertain"
                      and row["reason_message"] in _HEALABLE_UNCERTAIN_REASONS)
                     or row["reason_code"] == "unsupported-detached-descendant")):
@@ -1182,10 +1296,12 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
     if _escaped_or_unknown(row, observations, require_absent=True):
         return _uncertain(row, "observed descendants remain after group absence",
                           "unsupported-detached-descendant")
-    if not _observe_process(row["guard_pid"])[1]:
+    guard_observed, guard_absent = _observe_process(row["guard_pid"])
+    if not _proven_gone(guard_observed, guard_absent, row["guard_birth"]):
         return _uncertain(row, "guard absence cannot be proven")
     owner, absent = _observe_process(row["owner_pid"])
-    if absent:
+    gone = _proven_gone(owner, absent, row["owner_birth"])
+    if gone:
         row.update(state="RELEASED", phase="complete", reason_code="ownership-uncertain",
                    reason_message="owner and group absent; outcome incomplete")
     elif not _same_identity(owner, row):
@@ -1196,10 +1312,12 @@ def _recovery_view(conn: sqlite3.Connection, row: dict, now: float, *, persist: 
     return row
 
 
-def _reconcile_locked(conn: sqlite3.Connection, now: float) -> None:
+def _reconcile_locked(conn: sqlite3.Connection, now: float, *,
+                      observer: str, lease_root: Path) -> None:
     rows = conn.execute("SELECT * FROM jobs WHERE state NOT IN ('RELEASED','CANCELLED') ORDER BY sequence").fetchall()
     for original in rows:
-        row = _recovery_view(conn, dict(original), now, persist=True)
+        row = _recovery_view(conn, dict(original), now, persist=True,
+                             observer=observer, lease_root=lease_root)
         conn.execute("""UPDATE jobs SET state=?,phase=?,reason_code=?,reason_message=?
                      WHERE run_id=? AND nonce IS ? AND generation IS ?""",
                      (row["state"], row["phase"], row["reason_code"], row["reason_message"],
@@ -1214,8 +1332,13 @@ class _TransientAncestry(Exception):
         self.message = message
 
 
-def _check_nested_once(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
+def _check_nested_once(conn: sqlite3.Connection, owner: ProcessIdentity, *,
+                       observer: str, lease_root: Path) -> None:
     guards = conn.execute("SELECT * FROM jobs WHERE guard_pid IS NOT NULL AND state NOT IN ('RELEASED','CANCELLED')").fetchall()
+    # Foreign rows record pids from another namespace: they mean nothing
+    # here and must not poison the ancestry walk.
+    guards = [row for row in guards
+              if _classify_row(dict(row), observer, lease_root)[0] != "foreign"]
     if not guards:
         return
     identity, _ = _observe_process(owner.pid)
@@ -1249,7 +1372,8 @@ def _check_nested_once(conn: sqlite3.Connection, owner: ProcessIdentity) -> None
         raise _TransientAncestry("ancestry is inaccessible") from exc
 
 
-def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
+def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity, *,
+                  observer: str, lease_root: Path) -> None:
     """Walk the owner ancestry, looking past momentary observation stalls.
 
     Only an unobservable table is retried. A present-but-different identity,
@@ -1260,7 +1384,7 @@ def _check_nested(conn: sqlite3.Connection, owner: ProcessIdentity) -> None:
     delay = _ANCESTRY_RETRY_BASE_S
     while True:
         try:
-            _check_nested_once(conn, owner)
+            _check_nested_once(conn, owner, observer=observer, lease_root=lease_root)
             return
         except _TransientAncestry as exc:
             if time.monotonic() >= deadline:
@@ -1296,14 +1420,18 @@ def enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket:
     if request.owner.uid != os.getuid():
         _fail("ownership-uncertain", "admission owner is not the current account")
     conn, info = _open_state(domain, create=True)
+    lease_root = Path(domain.root)
+    observer = leases.namespace_identity()
+    created_lease = False
     ok = False
     try:
         _begin(conn)
+        _sweep_leases_locked(conn, lease_root)
         now = _now()
         info = _recover_boot_locked(conn, now)
-        _reconcile_locked(conn, now)
+        _reconcile_locked(conn, now, observer=observer, lease_root=lease_root)
         info = _refresh_limits_locked(conn, domain, info)
-        _check_nested(conn, request.owner)
+        _check_nested(conn, request.owner, observer=observer, lease_root=lease_root)
         if _pending_count(conn) >= MAX_PENDING_JOBS:
             _fail("capacity-exceeded", "pending admission capacity is full")
         if conn.execute("SELECT 1 FROM jobs WHERE run_id=?", (request.run_id,)).fetchone():
@@ -1314,6 +1442,22 @@ def enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket:
         if info["config_memory"] is not None and reserved is not None and reserved > info["config_memory"]:
             _fail("capacity-exceeded", "admission memory request exceeds the machine budget")
         sequence = int(conn.execute("SELECT coalesce(max(sequence),0)+1 FROM jobs").fetchone()[0])
+        # The lease is created and locked before the INSERT, inside the same
+        # BEGIN IMMEDIATE: an observer can never see a committed row whose
+        # lock is not held. Any failure below fails closed (no admission).
+        try:
+            leases.create(lease_root, request.run_id)
+        except Problem as exc:
+            if exc.code != "already-exists":
+                raise
+            # A swept orphan may still name the lock: one identity-checked
+            # removal, then exactly one retry. A second failure propagates.
+            try:
+                leases.remove_if_released(lease_root, request.run_id)
+            except (Problem, OSError):
+                pass
+            leases.create(lease_root, request.run_id)
+        created_lease = True
         conn.execute(
             """INSERT INTO jobs (
                 run_id,sequence,state,checkout_id,requested_slots,slots,exclusive,
@@ -1332,6 +1476,11 @@ def enqueue(domain: DomainPaths, request: AdmissionRequest) -> Ticket:
     except sqlite3.Error as exc:
         _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
+        if not ok and created_lease:
+            try:
+                leases.discard_created(lease_root, request.run_id)
+            except (Problem, OSError):
+                pass
         _finish_transaction(conn, ok)
     return Ticket(run_id=request.run_id, sequence=sequence)
 
@@ -1386,18 +1535,24 @@ def poll(domain: DomainPaths, ticket: Ticket) -> AdmissionState:
     if not isinstance(ticket, Ticket):
         raise TypeError("scheduler ticket must be Ticket")
     conn, info = _open_state(domain, create=False)
+    lease_root = Path(domain.root)
+    observer = leases.namespace_identity()
+    terminal_lease: str | None = None
     ok = False
     try:
         _begin(conn)
+        _sweep_leases_locked(conn, lease_root)
         now = _now()
         info = _recover_boot_locked(conn, now)
-        _reconcile_locked(conn, now)
+        _reconcile_locked(conn, now, observer=observer, lease_root=lease_root)
         info = _refresh_limits_locked(conn, domain, info)
         _grant_queued_locked(conn, info, now)
         row = conn.execute("SELECT * FROM jobs WHERE run_id=? AND sequence=?",
                            (ticket.run_id, ticket.sequence)).fetchone()
         if row is None:
             _fail("state-unavailable", "admission ticket is no longer retained")
+        if row["state"] in _TERMINAL:
+            terminal_lease = row["run_id"]
         ok = True
         return AdmissionState(
             state=LeaseState(row["state"]),
@@ -1411,6 +1566,8 @@ def poll(domain: DomainPaths, ticket: Ticket) -> AdmissionState:
         _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
+        if ok and terminal_lease is not None:
+            leases.release_held(lease_root, terminal_lease)
 
 
 @_transient_retry
@@ -1423,11 +1580,14 @@ def register_guard(domain: DomainPaths, grant: Grant, guard: ProcessIdentity) ->
     if guard.uid != os.getuid():
         _fail("ownership-uncertain", "guard is not owned by the current account")
     conn, info = _open_state(domain, create=False)
+    lease_root = Path(domain.root)
+    observer = leases.namespace_identity()
     ok = False
     try:
         _begin(conn)
+        _sweep_leases_locked(conn, lease_root)
         info = _recover_boot_locked(conn, _now())
-        _reconcile_locked(conn, _now())
+        _reconcile_locked(conn, _now(), observer=observer, lease_root=lease_root)
         row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (grant.run_id,)).fetchone()
         valid = (row is not None and row["state"] == "GRANTED"
                  and _matches_grant(row, grant, info)
@@ -1529,9 +1689,12 @@ def reconcile(domain: DomainPaths) -> tuple[LeaseView, ...]:
         info = _domain_info(conn)
         boot_changed = _boot_identity() != info["boot_id"]
         now = _now()
+        lease_root = Path(domain.root)
+        observer = leases.namespace_identity()
         rows = conn.execute("SELECT * FROM jobs ORDER BY sequence").fetchall()
         return tuple(_lease_view(_boot_transition(dict(row), now) if boot_changed else
-                                 _recovery_view(conn, dict(row), now, persist=False), now)
+                                 _recovery_view(conn, dict(row), now, persist=False,
+                                                observer=observer, lease_root=lease_root), now)
                      for row in rows)
     except sqlite3.Error as exc:
         _unavailable_from_sqlite(exc, "coordinator read failed")
@@ -1566,6 +1729,8 @@ def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, 
             "SELECT run_id, owner_pid, checkout_id FROM jobs WHERE state IN "
             "('GRANTED','RUNNING','DRAINING','FINALIZING','CANCELLING','UNCERTAIN')"
             " ORDER BY sequence LIMIT ?", (max(1, limit),)).fetchall()
+        lease_root = Path(domain.root)
+        observer = leases.namespace_identity()
         holders = []
         for row in rows:
             try:
@@ -1575,6 +1740,13 @@ def queue_holders(domain: DomainPaths, *, limit: int = 5) -> tuple[QueueHolder, 
             except (TypeError, ValueError):
                 continue
             if pid > 0 and checkout_id and run_id:
+                # A foreign pid label would mislead: it names a process in
+                # another namespace. Omit foreign rows from the display.
+                try:
+                    if _classify_row({"run_id": run_id}, observer, lease_root)[0] == "foreign":
+                        continue
+                except (Problem, OSError, ValueError, TypeError, KeyError):
+                    pass
                 holders.append(QueueHolder(
                     run_id=run_id, pid=pid, checkout_id=checkout_id))
         return tuple(holders)
@@ -1667,12 +1839,15 @@ def forget_checkouts(domain: DomainPaths, ids) -> int:
         if not isinstance(item, str) or not item:
             raise TypeError("scheduler checkout ids must be nonempty strings")
     conn, _ = _open_state(domain, create=False)
+    lease_root = Path(domain.root)
+    observer = leases.namespace_identity()
     ok = False
     try:
         _begin(conn)
+        _sweep_leases_locked(conn, lease_root)
         now = _now()
         _recover_boot_locked(conn, now)
-        _reconcile_locked(conn, now)
+        _reconcile_locked(conn, now, observer=observer, lease_root=lease_root)
         marks = ",".join("?" for _ in wanted)
         rows = conn.execute(
             f"SELECT checkout_id, state FROM jobs WHERE checkout_id IN ({marks})",
@@ -1764,6 +1939,7 @@ def cancel_pending(domain: DomainPaths, ticket: Ticket, owner: ProcessIdentity) 
         raise TypeError("scheduler owner must be ProcessIdentity")
     conn, info = _open_state(domain, create=False)
     ok = False
+    cancelled_run: str | None = None
     try:
         _begin(conn)
         if info["boot_id"] != _boot_identity():
@@ -1786,12 +1962,21 @@ def cancel_pending(domain: DomainPaths, ticket: Ticket, owner: ProcessIdentity) 
                  AND owner_uid=? AND owner_pgid=?""",
             (ticket.run_id, ticket.sequence, owner.pid, owner.birth, owner.uid, owner.pgid),
         )
+        cancelled = cursor.rowcount == 1
         ok = True
-        return cursor.rowcount == 1
+        cancelled_run = ticket.run_id if cancelled else None
+        return cancelled
     except sqlite3.Error as exc:
         _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok)
+        if ok and cancelled_run is not None:
+            lease_root = Path(domain.root)
+            leases.release_held(lease_root, cancelled_run)
+            try:
+                leases.remove_if_released(lease_root, cancelled_run)
+            except (Problem, OSError):
+                pass
 
 
 def _finalization_failure(conn: sqlite3.Connection, run_id: str, *, escaped: bool) -> None:
@@ -1928,6 +2113,207 @@ def finish(domain: DomainPaths, grant: Grant, proof: QuiescenceProof,
         _unavailable_from_sqlite(exc, "coordinator write failed")
     finally:
         _finish_transaction(conn, ok or commit_on_error)
+        if ok:
+            lease_root = Path(domain.root)
+            leases.release_held(lease_root, grant.run_id)
+            try:
+                leases.remove_if_released(lease_root, grant.run_id)
+            except (Problem, OSError):
+                pass
+
+
+def _release_refusal(message: str) -> None:
+    raise Problem(code="ownership-uncertain", message=message,
+                  phase=_PHASE, retryable=False)
+
+
+def _release_write(conn: sqlite3.Connection, row: dict) -> str:
+    """CAS one active row to terminal as an operator release. Returns state."""
+    state = "CANCELLED" if row["guard_pid"] is None else "RELEASED"
+    cursor = conn.execute(
+        """UPDATE jobs SET state=?,phase='complete',nonce=NULL,generation=NULL,
+           reason_code='ownership-uncertain',reason_message=?,
+           final_status='incomplete',final_exit_code=70,final_committed=0,final_source_valid=0
+           WHERE run_id=? AND state=? AND nonce IS ? AND generation IS ?""",
+        (state, OPERATOR_RELEASE_MESSAGE, row["run_id"], row["state"],
+         row["nonce"], row["generation"]),
+    )
+    if cursor.rowcount != 1:
+        _release_refusal("lease changed during release")
+        raise AssertionError("unreachable")
+    conn.execute("DELETE FROM observations WHERE run_id=?", (row["run_id"],))
+    return state
+
+
+def _release_evidence_same(row: dict, lock: str) -> str:
+    """Prove a same-namespace row dead by process table (and lock)."""
+    owner, owner_absent = _observe_process(row["owner_pid"])
+    if owner is not None and _same_identity(owner, row):
+        # Live with its exact recorded identity: refuses whatever the lock says.
+        _release_refusal(f"owner pid {row['owner_pid']} is still running")
+        raise AssertionError("unreachable")
+    owner_gone = _proven_gone(owner, owner_absent, row["owner_birth"]) or lock == leases.ACQUIRABLE
+    if not owner_gone:
+        _release_refusal(f"owner pid {row['owner_pid']} cannot be checked")
+        raise AssertionError("unreachable")
+    if row["guard_pid"] is not None:
+        guard, guard_absent = _observe_process(row["guard_pid"])
+        if guard is not None and _same_identity(guard, row, "guard"):
+            _release_refusal(f"guard pid {row['guard_pid']} is still running")
+            raise AssertionError("unreachable")
+        guard_gone = (_proven_gone(guard, guard_absent, row["guard_birth"])
+                      or lock == leases.ACQUIRABLE)
+        if not guard_gone:
+            _release_refusal(f"guard pid {row['guard_pid']} cannot be checked")
+            raise AssertionError("unreachable")
+        group = platform.probe_group(row["guard_pgid"])
+        if group.exists is not True and group.exists is not False:
+            _release_refusal(f"process group {row['guard_pgid']} cannot be checked")
+            raise AssertionError("unreachable")
+        if group.exists:
+            _release_refusal(f"process group {row['guard_pgid']} still has running members")
+            raise AssertionError("unreachable")
+        if not group.permission:
+            _release_refusal(f"process group {row['guard_pgid']} cannot be checked")
+            raise AssertionError("unreachable")
+    # An owner or guard observed live with its exact recorded identity
+    # always refused above, whatever the lock says.
+    return EVIDENCE_LOCK if lock == leases.ACQUIRABLE else EVIDENCE_PROCESS
+
+
+def _release_evidence_legacy(row: dict) -> str:
+    """Prove a legacy (sidecar-less) row dead by the process table here."""
+    owner, owner_absent = _observe_process(row["owner_pid"])
+    if not _proven_gone(owner, owner_absent, row["owner_birth"]):
+        if owner is not None and _same_identity(owner, row):
+            _release_refusal(f"owner pid {row['owner_pid']} is still running")
+            raise AssertionError("unreachable")
+        _release_refusal(f"owner pid {row['owner_pid']} cannot be checked")
+        raise AssertionError("unreachable")
+    if row["guard_pid"] is not None:
+        guard, guard_absent = _observe_process(row["guard_pid"])
+        if not _proven_gone(guard, guard_absent, row["guard_birth"]):
+            if guard is not None and _same_identity(guard, row, "guard"):
+                _release_refusal(f"guard pid {row['guard_pid']} is still running")
+                raise AssertionError("unreachable")
+            _release_refusal(f"guard pid {row['guard_pid']} cannot be checked")
+            raise AssertionError("unreachable")
+        group = platform.probe_group(row["guard_pgid"])
+        if group.exists is not True and group.exists is not False:
+            _release_refusal(f"process group {row['guard_pgid']} cannot be checked")
+            raise AssertionError("unreachable")
+        if group.exists:
+            _release_refusal(f"process group {row['guard_pgid']} still has running members")
+            raise AssertionError("unreachable")
+        if not group.permission:
+            _release_refusal(f"process group {row['guard_pgid']} cannot be checked")
+            raise AssertionError("unreachable")
+    return EVIDENCE_LEGACY
+
+
+@_transient_retry
+def release_run(domain: DomainPaths, run_id: str, *, force: bool = False) -> ReleaseOutcome:
+    """Free one stuck run's slots once its processes are provably gone.
+
+    One transaction: open, begin, sweep, read ``before``, boot recovery,
+    reconcile, re-read, classify, prove, CAS to terminal. No sleeps, no
+    blocking flock, no waitpid. Refusals raise ownership-uncertain with
+    the exact §5.3 texts and still commit recovery results.
+    """
+    if (isinstance(run_id, bool) or not isinstance(run_id, str)
+            or len(run_id) != 32 or any(c not in "0123456789abcdef" for c in run_id)):
+        _fail("invalid-config", "release run id must be 32 lowercase hex characters")
+    if type(force) is not bool:
+        _fail("invalid-config", "release force must be a bool")
+    conn, _ = _open_state(domain, create=False)
+    lease_root = Path(domain.root)
+    observer = leases.namespace_identity()
+    ok = False
+    commit_on_error = False
+    cleanup_files = False
+    outcome: ReleaseOutcome | None = None
+    try:
+        _begin(conn)
+        _sweep_leases_locked(conn, lease_root)
+        before = conn.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+        if before is None:
+            _fail("state-unavailable", "no retained lease has this run id")
+        before = dict(before)
+        previous_state = before["state"]
+        now = _now()
+        _recover_boot_locked(conn, now)
+        _reconcile_locked(conn, now, observer=observer, lease_root=lease_root)
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            _fail("state-unavailable", "no retained lease has this run id")
+        row = dict(row)
+        if previous_state in _TERMINAL:
+            outcome = ReleaseOutcome(run_id=run_id, released=False,
+                                     previous_state=previous_state, state=row["state"],
+                                     slots=before["slots"], checkout_id=before["checkout_id"],
+                                     evidence=EVIDENCE_ALREADY, forced=False)
+            ok = True
+        elif row["state"] in _TERMINAL:
+            outcome = ReleaseOutcome(run_id=run_id, released=True,
+                                     previous_state=previous_state, state=row["state"],
+                                     slots=before["slots"], checkout_id=before["checkout_id"],
+                                     evidence=EVIDENCE_RECOVERED, forced=False)
+            ok = True
+            cleanup_files = True
+        else:
+            kind, sidecar = _classify_row(row, observer, lease_root)
+            lock = leases.INDETERMINATE
+            if sidecar.status == "valid":
+                try:
+                    lock = leases.probe(lease_root, run_id, sidecar)
+                except (Problem, OSError, ValueError, TypeError):
+                    lock = leases.INDETERMINATE
+            try:
+                if lock == leases.HELD:
+                    _release_refusal("lease lock is held: its owner or guard is still running")
+                if force:
+                    age = now - float(row["grant_time"] if row["grant_time"] is not None
+                                      else row["enqueue_time"])
+                    if age < RELEASE_FORCE_AFTER_S:
+                        _release_refusal(
+                            "--force is allowed only 25 hours after the grant; "
+                            f"this run was granted {int(age // 60)} minutes ago")
+                    evidence = EVIDENCE_FORCED
+                    forced = True
+                elif kind == "foreign":
+                    if lock != leases.ACQUIRABLE:
+                        _release_refusal(
+                            "lease lock cannot be checked (missing, replaced or unreadable)")
+                    evidence = EVIDENCE_LOCK
+                    forced = False
+                elif kind == "same":
+                    evidence = _release_evidence_same(row, lock)
+                    forced = False
+                else:
+                    evidence = _release_evidence_legacy(row)
+                    forced = False
+                state = _release_write(conn, row)
+            except Problem:
+                commit_on_error = True
+                raise
+            outcome = ReleaseOutcome(run_id=run_id, released=True,
+                                     previous_state=previous_state, state=state,
+                                     slots=before["slots"], checkout_id=before["checkout_id"],
+                                     evidence=evidence, forced=forced)
+            ok = True
+            cleanup_files = True
+    except sqlite3.Error as exc:
+        _unavailable_from_sqlite(exc, "coordinator write failed")
+    finally:
+        _finish_transaction(conn, ok or commit_on_error)
+        if ok and cleanup_files:
+            leases.release_held(lease_root, run_id)
+            try:
+                leases.remove_if_released(lease_root, run_id)
+            except (Problem, OSError):
+                pass
+    assert outcome is not None
+    return outcome
 
 
 __all__ = [
@@ -1935,4 +2321,5 @@ __all__ = [
     "begin_finalization", "reconcile", "finish", "effective_limits",
     "admission_blocker",
     "prepare_state_directory",
+    "release_run",
 ]

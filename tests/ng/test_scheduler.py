@@ -177,7 +177,10 @@ def test_unregistered_grant_releases_only_for_proven_absence(case, world, observ
     elif observation == "absent":
         world.absent.add(world.owner.pid)
     result = poll(domain, ticket)
-    assert result.state is (C.LeaseState.CANCELLED if observation == "absent" else C.LeaseState.UNCERTAIN)
+    # Item 10: a pid reused by another birth is proven dead, like an
+    # absent one, so "reuse" now cancels instead of going uncertain.
+    assert result.state is (C.LeaseState.CANCELLED if observation in {"absent", "reuse"}
+                            else C.LeaseState.UNCERTAIN)
     assert register_guard(domain, grant, world.guard) is False
     if observation != "absent":
         assert poll(domain, follower).grant is None
@@ -230,12 +233,15 @@ def test_existing_status_is_read_only_and_reports_current_queue_wait(case, world
     tail = enqueue(domain, _request(case, domain, "tail"))
     world.now += 17
     _gone(world, world.owner)
-    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in domain.root.iterdir()}
+    # leases/ is a directory: snapshot recursively, files only.
+    before = {str(p.relative_to(domain.root)): (p.read_bytes(), p.stat().st_mtime_ns)
+              for p in sorted(domain.root.rglob("*")) if p.is_file()}
     views = {item.run_id: item for item in reconcile(domain)}
     assert views[ticket.run_id].state is C.LeaseState.CANCELLED
     assert views[tail.run_id].queue_wait_s == 17
     assert views[tail.run_id].age_s == 17
-    assert before == {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in domain.root.iterdir()}
+    assert before == {str(p.relative_to(domain.root)): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in sorted(domain.root.rglob("*")) if p.is_file()}
 
 
 @pytest.mark.parametrize("memory", [128, None])
@@ -1030,7 +1036,8 @@ def test_dead_or_uncertain_owner_never_promotes_pass(case, world, owner):
     with pytest.raises(C.Problem):
         finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())
     assert _sql(domain, "SELECT final_committed FROM jobs") == [(None,)]
-    if owner == "absent":
+    # Item 10: a reused owner birth is proven dead, so "reused" releases.
+    if owner in {"absent", "reused"}:
         assert reconcile(domain)[0].state is C.LeaseState.RELEASED
     else:
         assert reconcile(domain)[0].state is C.LeaseState.UNCERTAIN
@@ -2146,3 +2153,47 @@ def test_blocker_is_none_for_unknown_or_admitted_runs(case):
     active = _live(case, domain, "only")
     assert scheduler.admission_blocker(domain, active.run_id) is None
     assert scheduler.admission_blocker(domain, "ef" * 16) is None
+
+
+def test_reused_guard_at_pass_start_creates_no_sentinel_and_releases(case, world):
+    """Item 10: a guard pid recycled by another birth is proven dead.
+
+    The pass-start check neither walks its (foreign) subtree nor records a
+    doubt sentinel, so with the owner and group also gone the row releases
+    instead of sticking in UNCERTAIN.
+    """
+    domain = case.domain()
+    ticket, _ = _running(case, domain, world)
+    world.identities[world.guard.pid] = replace(world.guard, birth=world.guard.birth + 1)
+    world.groups[world.guard.pgid] = False
+    _gone(world, world.owner)
+    result = poll(domain, ticket)
+    assert result.state is C.LeaseState.RELEASED
+    assert _sql(domain, "SELECT * FROM observations") == []
+
+
+def test_mid_walk_guard_reuse_still_uncertain_and_persists_sentinel(case, world):
+    """Item 10 deliberate fail-closed: reuse discovered mid-walk still doubts."""
+    domain = case.domain(slots=1, jobs=1)
+    ticket, _ = _running(case, domain, world)
+    world.reuse_on_children[world.guard.pid] = replace(
+        world.guard, birth=world.guard.birth + 1)
+    result = poll(domain, ticket)
+    assert result.state is C.LeaseState.UNCERTAIN
+    assert result.problem is not None
+    assert result.problem.code == "unsupported-detached-descendant"
+    assert _sql(domain, "SELECT uncertain FROM observations WHERE pid=0") == [(1,)]
+
+
+def test_persisted_sentinel_with_dead_guard_stays_failed_closed(case, world):
+    """Item 10 deliberate fail-closed: stale doubt outlives a dead guard."""
+    domain = case.domain()
+    ticket, grant = _running(case, domain, world)
+    world.inaccessible.add(world.guard.pid)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    world.inaccessible.clear()
+    _gone(world, world.guard)
+    assert poll(domain, ticket).state is C.LeaseState.UNCERTAIN
+    assert _sql(domain, "SELECT uncertain FROM observations WHERE pid=0") == [(1,)]
+    with pytest.raises(C.Problem):
+        finish(domain, grant, _proof(grant, world.guard.pgid, world.now), _final())

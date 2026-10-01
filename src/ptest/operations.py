@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import (config as config_api, executability, files, history, platform, progress, render,
+from . import (config as config_api, executability, files, history, leases, platform, progress, render,
                reports, scheduler, selection, source)
 from .adapters import vitest as vitest_adapter
 from . import verified
@@ -37,7 +37,7 @@ _PHASE = "execution"
 _GUARD_SCRIPT = (
     "from ptest.guard import run_guard; "
     "raise SystemExit(run_guard(int(__import__('sys').argv[1]), "
-    "int(__import__('sys').argv[2])))"
+    "int(__import__('sys').argv[2]), int(__import__('sys').argv[3])))"
 )
 _FRAME_TIMEOUT_S = 2.0
 _POLL_S = 0.05
@@ -1262,6 +1262,11 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
         compound_timeout_source=_COMPOUND_TIMEOUT_SOURCE.get(),
     )
+    lease_fd = leases.held_fd(Path(domain.root), grant.run_id)
+    if lease_fd is None:
+        raise C.Problem(code="ownership-uncertain",
+                        message="run lease is not held by this process",
+                        phase="execution", retryable=False)
     guard_peer, controller = socket.socketpair()
     manifest_read, manifest_write = os.pipe()
     process: subprocess.Popen | None = None
@@ -1269,8 +1274,8 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         launched = platform.process_identity
         process = subprocess.Popen(
             (os.fspath(Path(sys.executable)), "-c", _GUARD_SCRIPT,
-             str(guard_peer.fileno()), str(manifest_read)),
-            close_fds=True, pass_fds=(guard_peer.fileno(), manifest_read),
+             str(guard_peer.fileno()), str(manifest_read), str(lease_fd)),
+            close_fds=True, pass_fds=(guard_peer.fileno(), manifest_read, lease_fd),
             start_new_session=True,
             env={name: value for name, value in os.environ.items()
                  if not name.startswith("PTEST_")

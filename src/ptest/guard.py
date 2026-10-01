@@ -14,10 +14,11 @@ import struct
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import psutil
 
-from . import platform, scheduler
+from . import leases, platform, scheduler
 from .contracts import (
     CANCEL_GRACE_S, CONTROL_FRAME_MAX_BYTES, MANIFEST_MAX_BYTES,
     DEFAULT_ATTEMPT_DECISION_TIMEOUT_S, DEFAULT_COMPOUND_TIMEOUT_S,
@@ -582,11 +583,21 @@ def _run_one(control: _Control, manifest: LaunchManifest, prepared,
     return result
 
 
-def run_guard(control_fd: int, manifest_fd: int) -> int:
-    """Execute only after registration; every ordinary exit contains cleanup."""
+def run_guard(control_fd: int, manifest_fd: int, lease_fd: int = -1) -> int:
+    """Execute only after registration; every ordinary exit contains cleanup.
+
+    ``lease_fd`` is the owner-held run lease passed via ``pass_fds``: it is
+    adopted (verified against its sidecar, marked non-inheritable) before
+    guard registration and held until return. ``-1`` means no lease and is
+    only for test drivers that call this directly.
+    """
     if (isinstance(control_fd, bool) or isinstance(manifest_fd, bool)
+            or isinstance(lease_fd, bool)
             or not isinstance(control_fd, int) or not isinstance(manifest_fd, int)
-            or control_fd < 0 or manifest_fd < 0 or control_fd == manifest_fd):
+            or not isinstance(lease_fd, int)
+            or control_fd < 0 or manifest_fd < 0 or lease_fd < -1
+            or control_fd == manifest_fd
+            or (lease_fd >= 0 and lease_fd in (control_fd, manifest_fd))):
         return _EXIT_PROTOCOL
     state = _State()
     control = identity = None
@@ -602,6 +613,12 @@ def run_guard(control_fd: int, manifest_fd: int) -> int:
         manifest = _read_manifest(manifest_fd, state)
         os.close(manifest_fd)
         manifest_fd = -1
+        if lease_fd >= 0:
+            try:
+                leases.adopt_inherited(Path(manifest.domain.root),
+                                       manifest.grant.run_id, lease_fd)
+            except Exception:
+                return _EXIT_REGISTRATION
         control = _Control(control_fd, manifest, state)
         control.poll()
         while control.pending and not state.spawn_closed:
@@ -670,7 +687,7 @@ def run_guard(control_fd: int, manifest_fd: int) -> int:
     finally:
         for signum, handler in handlers.items():
             signal.signal(signum, handler)
-        for fd in (control_fd, manifest_fd):
+        for fd in (control_fd, manifest_fd, lease_fd):
             if fd >= 0:
                 try:
                     os.close(fd)

@@ -12,6 +12,7 @@ absent inputs, ``already-exists`` for refused overwrites and
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import secrets
 import stat
@@ -392,6 +393,146 @@ def create_exclusive(root: Path, relative: str, data: bytes, *,
         _close_quietly(fd)
         if parent_fd is not None and parent_fd is not root_fd:
             _close_quietly(parent_fd)
+        _close_quietly(root_fd)
+
+
+def create_locked(root: Path, name: str) -> int:
+    """Create one new private file and return its descriptor holding LOCK_EX.
+
+    ``name`` is one validated component directly under the validated private
+    directory ``root``. Opens O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, 0o600,
+    dir-relative; takes fcntl.flock(LOCK_EX|LOCK_NB); verifies fstat (regular,
+    st_uid == getuid, mode 0600, nlink 1); fsyncs root. The caller owns the fd.
+    Problems: already-exists (EEXIST), unsafe-path (ELOOP/type/mode),
+    state-unavailable (ENOENT/EACCES/other), capacity-exceeded (ENOSPC/EDQUOT).
+    On any failure after creation: unlink only if the entry still names the
+    created inode, close the fd, re-raise.
+    """
+    validate_single_name(name)
+    root_fd = _open_dir(Path(root))
+    fd = None
+    try:
+        stamp = os.fstat(root_fd)
+        if (not stat.S_ISDIR(stamp.st_mode) or stamp.st_uid != os.getuid()
+                or stat.S_IMODE(stamp.st_mode) != 0o700):
+            _fail("unsafe-path", f"directory {root} is not a private directory")
+        try:
+            fd = os.open(name,
+                         os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=root_fd)
+        except FileExistsError:
+            _fail("already-exists", f"file {name!r} already exists")
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                _fail("unsafe-path", f"file {name!r} is a symlink")
+            if exc.errno == errno.ENOENT:
+                _fail("state-unavailable", f"parent for file {name!r} does not exist")
+            if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                _fail("state-unavailable", f"cannot create file {name!r}: permission denied")
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                _fail("capacity-exceeded", f"cannot create file {name!r}: no space left")
+            _fail("state-unavailable", f"cannot create file {name!r}")
+            raise AssertionError("unreachable")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            created = os.fstat(fd)
+            if (not stat.S_ISREG(created.st_mode) or created.st_nlink != 1
+                    or created.st_uid != os.getuid()
+                    or stat.S_IMODE(created.st_mode) != 0o600):
+                _fail("unsafe-path", f"file {name!r} failed creation checks")
+            try:
+                os.fsync(root_fd)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                owned = os.fstat(fd)
+                current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                    try:
+                        os.unlink(name, dir_fd=root_fd)
+                    except OSError:
+                        pass
+                    try:
+                        os.fsync(root_fd)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            raise
+        return fd
+    except BaseException:
+        _close_quietly(fd)
+        raise
+    finally:
+        _close_quietly(root_fd)
+
+
+def open_regular_fd(root: Path, name: str) -> int:
+    """Open an existing regular file O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC.
+
+    Dir-relative under ``root`` (no symlinked root). Returns a caller-owned fd.
+    Problems: state-unavailable (missing root or file), unsafe-path (symlink,
+    non-regular after fstat; fd closed before raising).
+    """
+    validate_single_name(name)
+    root_fd = _open_dir(Path(root))
+    fd = None
+    try:
+        try:
+            fd = os.open(name,
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=root_fd)
+        except FileNotFoundError:
+            _fail("state-unavailable", f"file {name!r} does not exist")
+            raise AssertionError("unreachable")
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                _fail("unsafe-path", f"file {name!r} is a symlink")
+                raise AssertionError("unreachable")
+            _fail("state-unavailable", f"cannot open file {name!r}")
+            raise AssertionError("unreachable")
+        stamp = os.fstat(fd)
+        if not stat.S_ISREG(stamp.st_mode):
+            _fail("unsafe-path", f"file {name!r} is not a regular file")
+            raise AssertionError("unreachable")
+        result = fd
+        fd = None
+        return result
+    finally:
+        _close_quietly(fd)
+        _close_quietly(root_fd)
+
+
+def unlink_if_same(root: Path, name: str, device: int, inode: int) -> bool:
+    """Unlink ``name`` only while it still names (device, inode); fsync root.
+
+    Returns False (never raises for absence) when missing or replaced.
+    """
+    validate_single_name(name)
+    root_fd = _open_dir(Path(root))
+    try:
+        try:
+            current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return False
+            _fail("state-unavailable", f"cannot inspect file {name!r}")
+            raise AssertionError("unreachable")
+        if (current.st_dev, current.st_ino) != (device, inode):
+            return False
+        try:
+            os.unlink(name, dir_fd=root_fd)
+        except FileNotFoundError:
+            return False
+        try:
+            os.fsync(root_fd)
+        except OSError:
+            pass
+        return True
+    finally:
         _close_quietly(root_fd)
 
 

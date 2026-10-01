@@ -207,3 +207,12 @@ def _deny_non_tmp_self_roots(monkeypatch, tmp_path, isolated_env):
 @pytest.fixture
 def case(tmp_path):
     return CaseFactory(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _release_lease_fds():
+    """Never accumulate lease fds across tests in one xdist worker."""
+    yield
+    from ptest import leases as _leases
+
+    _leases.release_all_held()
