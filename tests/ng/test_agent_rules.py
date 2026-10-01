@@ -177,7 +177,7 @@ def test_repository_guide_states_assessment_only_authority():
     assert "It uses requested models Codex `gpt-6-sol` and Claude `opus` by default" in flat
     assert "Timing, selection, and parallel-execution items use ptest's own facts" in flat
     assert "omitted decisive callers or failure paths remain unknown" in flat
-    assert len(guide.splitlines()) <= 100
+    assert len(guide.splitlines()) <= 101
 
 
 def test_local_repair_guide_has_no_repo_internal_workflow():

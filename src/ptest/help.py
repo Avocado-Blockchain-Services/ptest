@@ -32,6 +32,7 @@ Inspect and review:
   ptest rules                     # preview agent guidance
   ptest uninstall                 # remove what ptest set up (see ptest help uninstall)
   ptest update                    # install the latest release (see ptest help update)
+  ptest release <run_id>          # free a stuck run's slots (see ptest help release)
 
 Local state:
   PTEST_STATE_DIR=/absolute/path  # config, coordination, history, review cache
@@ -42,7 +43,7 @@ Machine output:
   --json on init/register/where/status/history/plan/doctor/update; guide is text-only.
 
 Discover commands:
-  ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall update
+  ptest help <topic>              # init register where status history plan doctor guide rules run agents uninstall update release
   ptest <inspection-command> --help  # e.g. ptest doctor --help
   ptest --help | -h               # this overview
 
@@ -441,6 +442,25 @@ on. PTEST_NO_UPDATE_CHECK=1, a truthy CI, --fixture-domain and -q turn the
 check off. From a source checkout ptest says `installed from source; update
 it with git pull` and `ptest update` refuses with that text."""
 
+_RELEASE = """ptest release: free a stuck run's slots once its processes are provably gone.
+
+Syntax:
+  ptest release <run_id> [--force]
+
+Find the run id with `ptest status --json` (an UNCERTAIN lease). release
+frees a run only when its owner, its guard and its lease lock are all gone:
+proven by a free lease lock, or by this machine's process table for a run
+started in the same PID namespace. Runs started by ptest 0.4.6 or older
+carry no namespace record and are judged by the process table here. It
+refuses while anything is alive or unproven, and it never waits.
+A run started in another sandbox is judged by its lease lock only, which
+cannot see processes that run left behind.
+--force skips the process checks, only for a run granted more than 25
+hours ago (past every ptest time limit); it never frees a run whose lease
+lock is held.
+Prints exactly what it released. Exit 0 released or already finished,
+1 refused, 2 bad command or unknown run id."""
+
 _TOPIC_TEXTS = {
     "init": _INIT,
     "register": _REGISTER,
@@ -455,6 +475,7 @@ _TOPIC_TEXTS = {
     "agents": _AGENTS,
     "uninstall": _UNINSTALL,
     "update": _UPDATE,
+    "release": _RELEASE,
 }
 
 TOPICS = tuple(_TOPIC_TEXTS)

@@ -4472,6 +4472,40 @@ def test_update_parser_rejects_unknown_option():
     assert excinfo.value.message == "unknown inspection option"
 
 
+def test_release_parser_accepts_grammar_forms():
+    from ptest.cli import ParsedArgs
+
+    run_id = "ab" * 16
+    assert parse_argv(("release", run_id)) == ParsedArgs(
+        command="release", release_run_id=run_id)
+    assert parse_argv(("release", run_id, "--force")) == ParsedArgs(
+        command="release", release_run_id=run_id, release_force=True)
+    assert parse_argv(("release", "--force", run_id)) == ParsedArgs(
+        command="release", release_run_id=run_id, release_force=True)
+
+
+def test_release_parser_rejects_repeated_force():
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(("release", "ab" * 16, "--force", "--force"))
+    assert excinfo.value.code == "invalid-config"
+    assert excinfo.value.message == "option cannot be repeated"
+
+
+@pytest.mark.parametrize("argv", [
+    ("release",),
+    ("release", "xyz"),
+    ("release", "AB" + "0" * 30),
+    ("release", "a" * 31),
+    ("release", "ab" * 16, "extra"),
+    ("release", "ab" * 16, "--json"),
+    ("release", "ab" * 16, "--bogus"),
+])
+def test_release_parser_rejects_bad_run_id_and_options(argv):
+    with pytest.raises(C.Problem) as excinfo:
+        parse_argv(argv)
+    assert excinfo.value.code == "invalid-config"
+
+
 def test_config_upgrade_notice_appears_once_per_version(case, monkeypatch, capsys):
     from ptest import doctor_fix
 

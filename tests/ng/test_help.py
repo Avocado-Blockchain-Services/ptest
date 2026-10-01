@@ -8,7 +8,7 @@ from ptest.cli import main, parse_argv
 
 VALID_TOPICS = ("init", "register", "where", "status", "history", "plan",
                 "doctor", "guide", "rules", "run", "agents", "uninstall",
-                "update")
+                "update", "release")
 
 
 def _no_execution(monkeypatch):
@@ -166,7 +166,7 @@ def test_user_facing_text_has_no_banned_terms():
     bodies = [help_api.overview()]
     for topic in ("init", "register", "where", "status", "history", "plan",
                   "doctor", "guide", "rules", "run", "agents", "uninstall",
-                  "update"):
+                  "update", "release"):
         bodies.append(help_api.topic(topic))
     bodies.append(files("ptest").joinpath(
         "resources", "repository-agent-guide.md").read_text(
