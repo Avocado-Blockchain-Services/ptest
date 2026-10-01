@@ -24,7 +24,7 @@ Run these commands exactly as shown: never add `--workers`, `--timeout` or `--qu
 
 Always run from the monorepo root. Prefix scopes with the owning child, such
 as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
-Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them.
+Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them. `ptest --full` skips a child whose own files, config, root `.ptest.toml` and `full_triggers` are unchanged since its last green, even after commits elsewhere, so a child whose tests read files outside its folder (a sibling's `<sibling>/openapi.json`, generated types) must list them in its `[selection] full_triggers`; `ptest -v` lists the inputs behind each skip.
 
 ## Reading ptest output
 
@@ -45,7 +45,7 @@ ptest narrates on stderr; runner output is untouched. `ptest -v` adds detail;
 | `setup failed …` | setup failed | Fix the setup cause, rerun `ptest`. |
 | `passed · N tests` | green | Continue; a scoped green is iteration only. |
 | `failed · …` | tests failed | Fix the code under test, then rerun `ptest`; never weaken, skip or delete tests or assertions to get green. |
-| `joined the running full run` / `already verified at …` / `full gate runs: <why>` | attached to a running full run / this exact tree already passed (here or in another checkout) / why it must run | Wait / nothing to do / follow the named fix. |
+| `joined the running full run` / `already verified at …` / `<child> · unchanged since green at <sha> … · skipped` / `full gate runs: <why>` | attached to a running full run / this exact tree already passed (here or in another checkout) / that child's inputs match its last green full run, so it did not run (the total counts it as skipped, not as tests) / why it must run | Wait / nothing to do / nothing, unless its tests read an undeclared file outside the child: add it to that child's `full_triggers` / follow the named fix. |
 | `incomplete (exit 70)`, `protocol-mismatch`, `ownership-uncertain` | ptest could not prove the result | Rerun once alone; if it repeats, report it — do not change code for it. |
 | `execution-timeout …` / `queue-timeout` | the run exceeded its time limit / waited out the queue limit | Do what the line says (rerun once unchanged, or report a fixed limit); report a repeat: the time limit is `[runner] timeout` / `full_timeout` in `.ptest.toml`; for the queue, name what the waiting line says holds it. |
 | `config-uncommitted: …` | this linked git worktree lacks the committed `.ptest.toml` that the main checkout has | Stop and tell the user to commit `.ptest.toml` on the base branch, or to update this branch if it is already committed there; never run `ptest init` here. |
