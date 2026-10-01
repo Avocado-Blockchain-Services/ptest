@@ -35,9 +35,9 @@ from .runners import adapter_for
 
 _INSPECTION = frozenset({
     "init", "register", "where", "status", "history", "plan",
-    "doctor", "guide", "rules", "uninstall", "update",
+    "doctor", "guide", "rules", "uninstall", "update", "release",
 })
-_UPDATE_CHECK_EXEMPT = frozenset({"help", "version", "update", "uninstall"})
+_UPDATE_CHECK_EXEMPT = frozenset({"help", "version", "update", "uninstall", "release"})
 _EXECUTION_VALUE = frozenset({
     "--base", "--workers", "--queue-timeout", "--timeout", "--result-json",
 })
@@ -88,6 +88,8 @@ class ParsedArgs:
     uninstall_yes: bool = False
     update_check: bool = False
     update_version: str | None = None
+    release_run_id: str | None = None
+    release_force: bool = False
     children: tuple = ()
     agents: tuple[str, ...] = ()
     agents_explicit: bool = False
@@ -505,6 +507,42 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
         return ParsedArgs(command=command, json=update_json,
                           update_check=update_check,
                           update_version=update_version)
+    if command == "release":
+        run_id = None
+        force = False
+        for token in args:
+            if token == "--force":
+                if force:
+                    raise _problem("invalid-config",
+                                   "option cannot be repeated")
+                force = True
+            elif token.startswith("-"):
+                raise _problem("invalid-config", "unknown inspection option")
+            elif run_id is None:
+                run_id = token
+            else:
+                raise _problem(
+                    "invalid-config",
+                    "release needs one run id (32 hex characters; find it "
+                    "with `ptest status --json`)")
+        if run_id is None:
+            if os.path.lexists("release"):
+                raise _problem(
+                    "invalid-config",
+                    "release is both a ptest command and a path here: run "
+                    "`ptest ./release` for its tests, or `ptest release "
+                    "<run_id>` to free a stuck run")
+            raise _problem(
+                "invalid-config",
+                "release needs one run id (32 hex characters; find it "
+                "with `ptest status --json`)")
+        if _RELEASE_RUN_ID.fullmatch(run_id) is None:
+            raise _problem(
+                "invalid-config",
+                "release needs one run id (32 hex characters; find it "
+                "with `ptest status --json`)")
+        return ParsedArgs(command=command, release_run_id=run_id,
+                          release_force=force)
     if command in {"where", "status", "plan"}:
         allowed = {"--json", "--reveal-command"} if command == "where" else {"--json"}
         base = None
@@ -733,6 +771,7 @@ def _parse_inspection(command: str, args: Sequence[str]) -> ParsedArgs:
 
 
 _COMMAND_WORD = re.compile(r"[a-z][a-z-]{0,31}")
+_RELEASE_RUN_ID = re.compile(r"[0-9a-f]{32}")
 # Words people reach for that mean an existing command.
 _COMMAND_ALIASES = {"install": "init", "setup": "init", "configure": "init",
                     "upgrade": "update"}
@@ -2521,6 +2560,30 @@ def _run_update(parsed: ParsedArgs) -> int:
                            json_output=parsed.json, domain=domain)
 
 
+def _run_release(parsed: ParsedArgs) -> int:
+    domain: C.DomainPaths | None = None
+    try:
+        domain = platform.domain_paths(parsed.fixture_domain)
+        outcome = scheduler.release_run(
+            domain, parsed.release_run_id, force=parsed.release_force)
+        if outcome.released:
+            plural = "" if outcome.slots == 1 else "s"
+            print(f"released {outcome.run_id} · was {outcome.previous_state} "
+                  f"· {outcome.slots} slot{plural} freed "
+                  f"· checkout {outcome.checkout_id} · {outcome.evidence}")
+        else:
+            print(f"{outcome.run_id} is already {outcome.state}; nothing released")
+        return 0
+    except C.Problem as problem:
+        if problem.code == "ownership-uncertain":
+            print(render.terminal_text(
+                f"ptest: release refused for {parsed.release_run_id}: "
+                f"{problem.message}"), file=sys.stderr)
+            return 1
+        return _emit_error(problem, kind="release", json_output=False,
+                           domain=domain)
+
+
 def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
     command = parsed.command
     if command == "help":
@@ -2564,6 +2627,8 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         return _run_uninstall(parsed, cwd)
     if command == "update":
         return _run_update(parsed)
+    if command == "release":
+        return _run_release(parsed)
     if command == "init":
         try:
             if not parsed.from_main:
@@ -3842,7 +3907,7 @@ def _inspection_json_requested(args: Sequence[str], prefix: _CliPrefix) -> bool:
 
     Guide is text-only. Execution tails never give --json ptest semantics.
     """
-    return (prefix.command is not None and prefix.command != "guide"
+    return (prefix.command is not None and prefix.command not in {"guide", "release"}
             and "--json" in args[prefix.remainder_index + 1:])
 
 

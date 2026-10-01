@@ -798,6 +798,8 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "4c91d313e814937be378f16241bf54b2131efdabe1e9d9c444d326452f7652bf",
     # 0.4.5 draft (cd37373): before fixed-limit timeout wording.
     "ee94fdd088deb85016b8064051427651df0f9c9e34556b80364b33049abc0b9c",
+    # 72773a3 (0.4.5-0.4.6): guide before the ptest release row.
+    "39c1333a9eed0449ef1a27920f24fa682246a94961faabecd7c1029d6b951233",
 })
 
 
