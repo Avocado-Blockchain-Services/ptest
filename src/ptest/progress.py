@@ -225,14 +225,50 @@ def format_already_verified(short_sha: str, age_s: float,
             f"({format_duration(age_s)} ago) — ptest --full --again to rerun")
 
 
+def _shorten_where(where: str) -> str:
+    """Shorten a checkout path to ~/… exactly like format_verified_elsewhere."""
+    home = str(Path.home())
+    return ("~" + where[len(home):]
+            if where == home or where.startswith(home + "/") else where)
+
+
 def format_verified_elsewhere(short_sha: str, age_s: float, where: str,
                               *, color: bool = False) -> str:
     """Skip line for a full run another checkout of the project already passed."""
-    home = str(Path.home())
-    shown = "~" + where[len(home):] if where == home or where.startswith(home + "/") else where
+    shown = _shorten_where(where)
     return (f"{_prefix(color=color)} already verified at {short_sha} in "
             f"{render.terminal_text(shown)} ({format_duration(age_s)} ago) — "
             f"ptest --full --again to rerun")
+
+
+def format_child_unchanged(declaration: str, short_sha: str, age_s: float,
+                           where: str | None = None, *,
+                           color: bool = False) -> str:
+    """Skip line for a monorepo child whose inputs match its last green."""
+    head = (f"{_prefix(color=color)} "
+            f"{_project(render.terminal_text(declaration), color=color)} "
+            f"· unchanged since green at {short_sha}")
+    if where is not None:
+        head += f" in {render.terminal_text(_shorten_where(where))}"
+    return (f"{head} ({format_duration(age_s)} ago) · skipped — "
+            f"ptest --full --again to rerun")
+
+
+def format_child_skip_inputs(declaration: str, triggers: tuple[str, ...], *,
+                             color: bool = False) -> str:
+    """Verbose inputs behind a child skip: the child dir plus root inputs."""
+    shown = ", ".join(render.terminal_text(item) for item in triggers)
+    return (f"{_prefix(color=color)} -v "
+            f"{_project(render.terminal_text(declaration), color=color)} "
+            f"inputs: {render.terminal_text(declaration)}/ + {shown} — "
+            f"declare other cross-child inputs in full_triggers")
+
+
+def format_skipped_children(count: int) -> str:
+    """'1 child skipped (unchanged)' / 'N children skipped (unchanged)'."""
+    if count == 1:
+        return "1 child skipped (unchanged)"
+    return f"{count} children skipped (unchanged)"
 
 
 def format_joined_full_run(pid: int, *, color: bool = False) -> str:
@@ -373,7 +409,8 @@ _VERDICT_STYLES = {
 def format_end(status: C.Status, *, counts: C.Counts | None,
                duration_s: float | None, exit_code: int,
                hint: bool = False, lead: str | None = None,
-               color: bool = False, next_step: str | None = None) -> str:
+               color: bool = False, next_step: str | None = None,
+               note: str | None = None) -> str:
     verdict = render.paint(_VERDICTS[status], _VERDICT_STYLES.get(status, ""),
                            color=color)
     duration = render.paint(format_duration(duration_s), "dim", color=color)
@@ -382,6 +419,8 @@ def format_end(status: C.Status, *, counts: C.Counts | None,
     segment = format_counts(counts, status)
     if segment is not None:
         parts.append(segment)
+    if note is not None:
+        parts.append(note)
     parts.append(duration)
     line = " · ".join(parts)
     if exit_code != 0:
@@ -445,7 +484,9 @@ __all__ = [
     "format_changed_selected", "format_changed_start", "format_no_changes",
     "NEXT_FULL", "NEXT_FIX", "next_step", "format_impact",
     "format_nothing_changed", "format_no_green_changes",
-    "format_already_verified", "format_joined_full_run",
+    "format_already_verified", "format_verified_elsewhere",
+    "format_child_unchanged", "format_child_skip_inputs",
+    "format_skipped_children", "format_joined_full_run",
     "explain_changed_full_reason",
     "format_baseline_note",
     "format_setup_start", "format_setup_done", "format_setup_failed",
