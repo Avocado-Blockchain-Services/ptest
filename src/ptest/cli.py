@@ -2587,12 +2587,19 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             applied = None
             if agents and not parsed.dry_run:
                 applied = agent_rules.apply(root, agents=agents)
-            elif (not parsed.dry_run and not parsed.agents_explicit
-                  and agent_rules.guidance_outdated(root)):
+            elif not parsed.dry_run and not parsed.agents_explicit:
                 # No prompt (an agent, CI, a pipe): still refresh guidance
-                # ptest itself installed earlier, never anything new.
-                applied = agent_rules.apply(
-                    root, agents=agent_rules.installed_providers(root))
+                # ptest itself installed earlier, never anything new. It is
+                # best effort: the config is already written, so a refresh
+                # problem is one line, never init's result.
+                try:
+                    refreshed = agent_rules.refresh(root)
+                except C.Problem as problem:
+                    progress.emit(f"ptest: agent guidance not refreshed: "
+                                  f"{problem.code} — run ptest rules --apply",
+                                  quiet=False)
+                else:
+                    applied = refreshed if refreshed.changed else None
             if applied is not None and config_api.git_root(cwd) is not None:
                 extra = tuple(detail.target for detail in applied.details
                               if detail.source == "guidance"

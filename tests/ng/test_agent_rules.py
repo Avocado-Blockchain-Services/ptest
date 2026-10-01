@@ -1087,6 +1087,11 @@ def _outdated_install(tmp_path, monkeypatch):
     gemini = tmp_path / ".gemini" / "skills" / "ptest" / "SKILL.md"
     gemini.parent.mkdir(parents=True)
     gemini.write_bytes(b"# my own gemini notes\n")
+    # Pin modes: a umask 002 machine would otherwise make these 0775.
+    for top in (".claude", ".gemini", "docs"):
+        for directory in (tmp_path / top, *(tmp_path / top).rglob("*")):
+            if directory.is_dir():
+                directory.chmod(0o755)
     return rules_module, claude, gemini
 
 
@@ -1128,6 +1133,44 @@ def test_init_without_prompt_refreshes_outdated_guidance(tmp_path, monkeypatch):
     assert claude.read_bytes() == rules_module._provider_text("claude")
     assert gemini.read_bytes() == b"# my own gemini notes\n"
     assert rules_module.guidance_outdated(tmp_path) is False
+    # Refresh only: no instruction file is created or edited.
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_init_refresh_failure_never_fails_init(tmp_path, monkeypatch, capsys):
+    from ptest import contracts as C
+    from ptest.cli import main
+
+    rules_module, claude, _ = _outdated_install(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    def broken(*args, **kwargs):
+        raise C.Problem(code="state-unavailable", message="disk says no",
+                        phase="rules")
+
+    monkeypatch.setattr(rules_module, "_replace", broken)
+
+    assert main(("init", "--runner", "pytest")) == 0
+
+    assert (tmp_path / ".ptest.toml").is_file()
+    assert ("ptest: agent guidance not refreshed: state-unavailable — run ptest "
+            "rules --apply") in capsys.readouterr().err
+
+
+def test_group_writable_skill_dir_never_loops_the_warning(tmp_path, monkeypatch):
+    # Where git creates directories 0775 (umask 002), apply cannot rewrite
+    # the skill (unsafe-path), so the warning must not name a refresh that
+    # can never clear it: outdated and refresh agree.
+    rules_module, claude, _ = _outdated_install(tmp_path, monkeypatch)
+    (tmp_path / "docs" / "ptest-agent.md").write_bytes(rules_module._guide())
+    claude.parent.chmod(0o775)
+    try:
+        assert rules_module.guidance_outdated(tmp_path) is False
+        assert rules_module.refresh(tmp_path).changed is False
+        assert claude.read_bytes() == rules_module._previous_provider_text("claude")
+    finally:
+        claude.parent.chmod(0o755)
 
 
 def test_init_without_prompt_never_installs_new_guidance(tmp_path, monkeypatch):

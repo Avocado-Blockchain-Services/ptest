@@ -828,37 +828,70 @@ def _previous_skill_bytes(provider: str) -> tuple[bytes, ...]:
     )
 
 
-def guidance_outdated(root: Path) -> bool:
-    """True when installed managed guidance is a recognised older version.
+def _refresh_targets(root: Path) -> list[tuple[str, Path, bytes, bytes]]:
+    """Managed files that are a recognised older ptest version.
 
-    Read-only and fail-closed: missing files, current bytes, user edits,
-    and any I/O problem all report False (no warning). Old version bytes
-    are only recognised here, never written.
+    ``(relative, path, existing, replacement)`` for the guide and for each
+    installed provider skill, classified exactly as ``apply`` classifies
+    them (``_guide_kind`` hashes, ``_provider_target``), so a file counted
+    here is one ``apply`` and ``refresh`` will rewrite. Missing, current,
+    user-edited or unsafe files are never targets.
+    """
+    root = Path(root)
+    targets: list[tuple[str, Path, bytes, bytes]] = []
+    guide = _guide()
+    try:
+        raw = files.read_regular(root, _GUIDE_PATH, _MAX_FILE_BYTES + 1)
+    except (C.Problem, OSError, ValueError):
+        raw = None
+    if (raw is not None and raw != guide
+            and hashlib.sha256(bytes(raw)).hexdigest() in _PREVIOUS_GUIDE_SHA256S):
+        targets.append((_GUIDE_PATH, root / _GUIDE_PATH, bytes(raw), guide))
+    for provider in SUPPORTED_AGENTS:
+        try:
+            relative, target, existing, kind = _provider_target(root, provider)
+        except C.Problem:
+            continue
+        if kind in ("legacy", "previous") and existing is not None:
+            targets.append((relative, target, bytes(existing),
+                            _provider_text(provider)))
+    return targets
+
+
+def guidance_outdated(root: Path) -> bool:
+    """True when ``refresh`` (and so ``rules --apply``) would update a file.
+
+    Read-only and fail-closed: any problem reports False, so the warning
+    only ever names a refresh that can actually clear it.
     """
     try:
-        root = Path(root)
-        try:
-            raw = files.read_regular(root, _GUIDE_PATH,
-                                     _MAX_FILE_BYTES + 1)
-        except (C.Problem, OSError, ValueError):
-            raw = None
-        if raw is not None and raw != _guide():
-            if hashlib.sha256(bytes(raw)).hexdigest() in \
-                    _PREVIOUS_GUIDE_SHA256S:
-                return True
-        for provider, relative in _PROVIDER_SKILLS.items():
-            try:
-                existing = files.read_regular(root, relative,
-                                              _MAX_FILE_BYTES + 1)
-            except (C.Problem, OSError, ValueError):
-                continue
-            if existing == _provider_text(provider):
-                continue
-            if bytes(existing) in _previous_skill_bytes(provider):
-                return True
+        return bool(_refresh_targets(root))
     except Exception:
         return False
-    return False
+
+
+def refresh(root: Path) -> RulesResult:
+    """Rewrite only older ptest-managed guidance in place.
+
+    Never creates a file, never touches AGENTS.md/CLAUDE.md/GEMINI.md, and
+    never overwrites a user edit (each write re-checks the bytes it read).
+    Each file is replaced atomically on its own.
+    """
+    root = Path(root)
+    details = []
+    for relative, target, existing, replacement in _refresh_targets(root):
+        try:
+            stamp = os.lstat(target)
+            _replace(root, target, replacement.decode("utf-8"),
+                     mode=stat.S_IMODE(stamp.st_mode), expect_bytes=existing)
+        except OSError as error:
+            raise _problem("state-unavailable",
+                           f"agent guidance {relative} could not be refreshed: "
+                           f"{error.strerror or 'write failed'}") from None
+        details.append(_detail(relative, "updated"))
+    return RulesResult(changed=bool(details),
+                       actions=tuple(f"update {item.target}" for item in details),
+                       details=tuple(details))
 
 
 def _validated(root: Path) -> tuple[Path, dict[str, str | None], bytes, str]:

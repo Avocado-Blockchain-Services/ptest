@@ -4,11 +4,15 @@
 
 - Refreshing agent guidance works without a terminal. The outdated-guidance
   line now says `run ptest rules --apply to update`; `ptest rules --apply`
-  also refreshes the ptest skills already installed (never a new one, never
-  one you edited), and `ptest init` run by an agent or in CI refreshes
-  guidance ptest installed earlier instead of silently skipping it. Before,
-  only `init`'s interactive agents prompt refreshed guidance, so an agent
-  following the hint changed nothing.
+  also rewrites the older ptest skills already installed (never a new one,
+  never one you edited). `ptest init` run by an agent or in CI rewrites
+  only the older guide and skills (no instruction-file edits); a problem
+  there is one line, never init's result. Before, only `init`'s interactive
+  prompt refreshed guidance, so an agent following the hint changed nothing.
+- The warning appears only when that refresh can actually clear it: it
+  uses the same file checks as the refresh, so a skill ptest refuses to
+  rewrite (for example in a group-writable directory) no longer keeps the
+  warning on forever.
 
 ## 0.4.5
 
