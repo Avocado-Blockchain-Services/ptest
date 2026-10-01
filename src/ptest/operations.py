@@ -26,8 +26,8 @@ import time
 from pathlib import Path
 
 from . import contracts as C
-from . import (config as config_api, executability, files, history, platform, progress, render,
-               reports, scheduler, selection, source)
+from . import (config as config_api, executability, files, history, monorepo, platform, progress,
+               render, reports, scheduler, selection, source)
 from .adapters import vitest as vitest_adapter
 from . import verified
 from .runners import adapter_for
@@ -2337,6 +2337,46 @@ def _emit_end(request: C.RunRequest, result: C.RunResult,
 _FULL_SUMMARY_LIMIT = 50
 _FULL_JOIN_POLL_S = 0.1
 
+#: Run ids this process returned from a pre-admission already-verified
+#: skip (no tests ran, nothing recorded). Process-local only.
+_FULL_SKIP_RUN_IDS: set[str] = set()
+
+
+def full_gate_skipped(result: object) -> bool:
+    """True only for a PASSED skip result minted by this process.
+
+    The run id must have been registered at a ``_full_pre_admission``
+    'skip' return. Getattr-based, so fakes without run_id/status
+    return False.
+    """
+    try:
+        if getattr(result, "status", None) is not C.Status.PASSED:
+            return False
+        run_id = getattr(result, "run_id", None)
+        return isinstance(run_id, str) and run_id in _FULL_SKIP_RUN_IDS
+    except Exception:
+        return False
+
+
+def _remember_full_skip(run_id: str) -> None:
+    if len(_FULL_SKIP_RUN_IDS) > 1024:
+        _FULL_SKIP_RUN_IDS.clear()
+    if isinstance(run_id, str) and run_id:
+        _FULL_SKIP_RUN_IDS.add(run_id)
+
+
+def _monorepo_child(config: C.Config) -> monorepo.ChildOfRoot | None:
+    """The checkout as a declared monorepo child, or None. Never raises."""
+    try:
+        root = (config.checkout.root if config.checkout is not None else
+                config.config_path.parent
+                if config.config_path is not None else None)
+        if root is None:
+            return None
+        return monorepo.declared_child(Path(root))
+    except Exception:
+        return None
+
 
 def _pid_alive(pid: int) -> bool:
     """True when a process with this pid exists (any owner)."""
@@ -2380,26 +2420,34 @@ def _latest_full_summary(domain: C.DomainPaths,
 
 def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
                       checkout: C.CheckoutIdentity, request: C.RunRequest,
-                      baseline: C.Baseline) -> tuple[str, float] | None:
+                      baseline: C.Baseline, *,
+                      child: monorepo.ChildOfRoot | None = None
+                      ) -> tuple[str, float] | None:
     """(short sha, age_s) when the baseline already verifies current inputs.
 
     All of: same commit, clean tree, same source digest and compatibility
     (config, lock and trigger fingerprint plus runner identity), same
     selection policy, and the latest full run passed by recording exactly
     this baseline. None on any mismatch or unreadable evidence.
+
+    For a declared monorepo child (``child`` set) the same-commit
+    requirement is dropped -- the child-scoped digest already covers the
+    child's inputs -- and a shared root dependency change blocks the
+    skip instead. Every other condition stays.
     """
     try:
         snapshot = _capture_source(
             domain, config, request, ensure_key=False,
             execution_tier=C.ExecutionTier.ADVANCED,
-            runtime_identity=baseline.runtime_identity, baseline=baseline)
+            runtime_identity=baseline.runtime_identity,
+            baseline=None if child is not None else baseline)
     except BaseException:
         # Pre-admission only: the admitted flow re-captures and re-raises
         # aborts itself, so even KeyboardInterrupt runs normally here.
         return None
     if (snapshot.digest != baseline.input_digest
             or snapshot.compatibility != baseline.compatibility
-            or snapshot.head != baseline.head
+            or (child is None and snapshot.head != baseline.head)
             or not snapshot.clean
             or snapshot.limitations):
         return None
@@ -2417,6 +2465,12 @@ def _full_skip_inputs(domain: C.DomainPaths, config: C.Config,
             return None
     except Exception:
         return None
+    if child is not None:
+        # Last: it costs Git calls, and None (unreadable) means run.
+        if monorepo.shared_dependency_changes(
+                child.git_root, child.children,
+                baseline.head) != ():
+            return None
     try:
         created = datetime.fromisoformat(baseline.created_at)
         age_s = max(0.0, time.time() - created.timestamp())
@@ -2449,8 +2503,15 @@ def _declarable_outputs(ignored: list[str], snapshot: C.InputSnapshot) -> list[s
 
 
 def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
-                    policy_digest: str, *, last_failed: bool = False) -> str | None:
-    """Why a full gate cannot reuse its last green run, for one stderr line."""
+                    policy_digest: str, *, last_failed: bool = False,
+                    child: bool = False,
+                    shared_change: tuple[str, ...] | None = ()) -> str | None:
+    """Why a full gate cannot reuse its last green run, for one stderr line.
+
+    With ``child`` (a declared monorepo child) there is no head check: a
+    sibling-only commit never explains a child run. Shared root
+    dependency evidence follows the digest check instead.
+    """
     if snapshot.limitations:
         return f"source evidence is limited: {snapshot.limitations[0].message}"
     ignored = [change.new or change.old or "" for change in snapshot.changes
@@ -2465,13 +2526,21 @@ def full_run_reason(baseline: C.Baseline | None, snapshot: C.InputSnapshot,
         return "uncommitted changes in the working tree (see git status)"
     if baseline is None:
         return "no green full run is recorded for this checkout yet"
-    if snapshot.head != baseline.head:
+    if not child and snapshot.head != baseline.head:
         return (f"new commit since the last green ({baseline.head[:7]} -> "
                 f"{(snapshot.head or '')[:7]})")
     if baseline.policy_digest != policy_digest:
         return "the selection policy changed since the last green"
     if snapshot.digest != baseline.input_digest or snapshot.compatibility != baseline.compatibility:
         return "inputs, config or runner changed since the last green"
+    if child and shared_change is None:
+        return ("files outside the child cannot be compared with the last "
+                f"green at {baseline.head[:7]}")
+    if child and shared_change:
+        first, rest = shared_change[0], len(shared_change) - 1
+        suffix = f" (+{rest} more)" if rest else ""
+        return (f"shared file {first} changed since the last green at "
+                f"{baseline.head[:7]}{suffix}")
     if last_failed:
         return "the last full run on this tree did not pass"
     return None
@@ -2488,13 +2557,20 @@ def _summary_digest(summary: dict) -> str | None:
 
 def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
                              checkout: C.CheckoutIdentity, request: C.RunRequest,
+                             *, child: monorepo.ChildOfRoot | None = None
                              ) -> tuple[str, float, str] | None:
     """(short sha, age_s, checkout root) when another checkout of the same
     project passed exactly these inputs: same position in the repository,
     policy, commit, clean source digest and compatibility, and this
     checkout's own latest full run on the same tree did not fail. None
     otherwise. One source capture unless a matching record needs its own
-    runtime identity."""
+    runtime identity.
+
+    For a declared monorepo child (``child`` set) the commit-equality
+    filters are dropped -- the child-scoped digest already covers the
+    child's inputs -- and each reused record must additionally show no
+    shared root dependency change since its green commit.
+    """
     try:
         scope = history.checkout_scope(checkout.root)
         policy = _policy_digest(config)
@@ -2510,8 +2586,12 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
             runtime_identity=first_identity, baseline=None)
         if not first.clean or not first.digest:
             return None
-        records = [record for record in records
-                   if record.head == first.head and record.input_digest == first.digest]
+        if child is None:
+            records = [record for record in records
+                       if record.head == first.head and record.input_digest == first.digest]
+        else:
+            records = [record for record in records
+                       if record.input_digest == first.digest]
         if not records:
             return None
         latest = _latest_full_summary(domain, checkout)
@@ -2520,6 +2600,7 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
             # This checkout already saw this exact tree fail or not finish.
             return None
         snapshots = {first_identity: first}
+        shared_cache: dict[str, tuple[str, ...] | None] = {}
         for record in records:
             identity = record.runtime_identity
             if identity not in snapshots:
@@ -2531,8 +2612,14 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
             if (not snapshot.clean or snapshot.limitations
                     or snapshot.digest != record.input_digest
                     or snapshot.compatibility != record.compatibility
-                    or snapshot.head != record.head):
+                    or (child is None and snapshot.head != record.head)):
                 continue
+            if child is not None:
+                if record.head not in shared_cache:
+                    shared_cache[record.head] = monorepo.shared_dependency_changes(
+                        child.git_root, child.children, record.head)
+                if shared_cache[record.head] != ():
+                    continue
             try:
                 created = datetime.fromisoformat(record.created_at)
                 age_s = max(0.0, time.time() - created.timestamp())
@@ -2634,6 +2721,10 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
     means ("run", None, False).
     """
     color = sys.stderr.isatty()
+    try:
+        child = _monorepo_child(config)
+    except Exception:
+        child = None
     baseline = None
     if not request.again:
         # Pre-admission only (see above): the admitted flow re-raises.
@@ -2643,27 +2734,58 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
             baseline = None
         if baseline is not None:
             verdict = _full_skip_inputs(domain, config, checkout, request,
-                                        baseline)
+                                        baseline, child=child)
             if verdict is not None:
                 short_sha, age_s = verdict
                 skipped = _gated_full_result(
                     run_id, checkout, config, request, C.Status.PASSED, 0,
                     None)
                 if skipped is not None:
-                    progress.emit(progress.format_already_verified(
-                        short_sha, age_s, color=color), quiet=request.quiet)
+                    if child is not None:
+                        progress.emit(progress.format_child_unchanged(
+                            child.declaration, short_sha, age_s,
+                            color=color), quiet=request.quiet)
+                        if request.verbose:
+                            triggers = tuple(dict.fromkeys(
+                                (".ptest.toml",
+                                 *config.selection.full_triggers)))
+                            progress.emit(
+                                progress.format_child_skip_inputs(
+                                    child.declaration, triggers,
+                                    color=color), quiet=request.quiet)
+                    else:
+                        progress.emit(progress.format_already_verified(
+                            short_sha, age_s, color=color),
+                            quiet=request.quiet)
+                    _remember_full_skip(skipped.run_id)
                     return ("skip", skipped, False)
         # Another checkout of this project (a worktree, or the main
         # checkout after a fast-forward) may already have passed exactly
         # this tree.
-        elsewhere = _full_verified_elsewhere(domain, config, checkout, request)
+        elsewhere = _full_verified_elsewhere(domain, config, checkout,
+                                             request, child=child)
         if elsewhere is not None:
             short_sha, age_s, where = elsewhere
             skipped = _gated_full_result(
                 run_id, checkout, config, request, C.Status.PASSED, 0, None)
             if skipped is not None:
-                progress.emit(progress.format_verified_elsewhere(
-                    short_sha, age_s, where, color=color), quiet=request.quiet)
+                if child is not None:
+                    progress.emit(progress.format_child_unchanged(
+                        child.declaration, short_sha, age_s, where=where,
+                        color=color), quiet=request.quiet)
+                    if request.verbose:
+                        triggers = tuple(dict.fromkeys(
+                            (".ptest.toml",
+                             *config.selection.full_triggers)))
+                        progress.emit(
+                            progress.format_child_skip_inputs(
+                                child.declaration, triggers,
+                                color=color), quiet=request.quiet)
+                else:
+                    progress.emit(progress.format_verified_elsewhere(
+                        short_sha, age_s, where, color=color),
+                        quiet=request.quiet)
+                _remember_full_skip(skipped.run_id)
                 return ("skip", skipped, False)
     try:
         snapshot = _capture_source(
@@ -2671,7 +2793,7 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
             execution_tier=C.ExecutionTier.ADVANCED,
             runtime_identity=(baseline.runtime_identity
                               if baseline is not None else None),
-            baseline=baseline)
+            baseline=None if child is not None else baseline)
     except BaseException:
         # Pre-admission only (see above): the admitted flow re-raises.
         return ("run", None, False)
@@ -2679,11 +2801,17 @@ def _full_pre_admission(domain: C.DomainPaths, config: C.Config,
         # Only runners that record a green baseline can ever skip; others
         # would be told to fix something that never helps.
         latest = _latest_full_summary(domain, checkout)
+        shared_change: tuple[str, ...] | None = ()
+        if (child is not None and baseline is not None and snapshot.clean
+                and snapshot.digest == baseline.input_digest):
+            shared_change = monorepo.shared_dependency_changes(
+                child.git_root, child.children, baseline.head)
         reason = full_run_reason(
             baseline, snapshot, _policy_digest(config),
             last_failed=(latest is not None
                          and _summary_digest(latest) == snapshot.digest
-                         and latest.get("status") != C.Status.PASSED.value))
+                         and latest.get("status") != C.Status.PASSED.value),
+            child=child is not None, shared_change=shared_change)
         if reason is not None:
             progress.emit(f"ptest: full gate runs: {render.terminal_text(reason)}",
                           quiet=request.quiet)

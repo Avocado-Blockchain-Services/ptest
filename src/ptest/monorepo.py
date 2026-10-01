@@ -1,6 +1,7 @@
 """Strict, explicit dispatch for a v2 monorepo root."""
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import stat
@@ -384,6 +385,103 @@ def execute_full(children: tuple[ChildTarget, ...], execute_child: Callable[[Chi
         if code and not first_failure:
             first_failure = code
     return first_failure
+
+
+@dataclass(frozen=True, slots=True)
+class ChildOfRoot:
+    """A checkout proven to be one declared child of a v2 monorepo root."""
+
+    git_root: Path               # Git top level == monorepo root
+    declaration: str             # checkout path relative to git_root (posix)
+    children: tuple[str, ...]    # every manifest child
+
+
+def declared_child(root: Path) -> ChildOfRoot | None:
+    """``root`` as a declared child of the v2 manifest at its Git top level.
+
+    None on any doubt; never raises.
+    """
+    try:
+        from . import config as config_api
+        from . import files as files_api
+
+        raw_top = _git_blob(Path(root), "rev-parse", "--show-toplevel")
+        if raw_top is None:
+            return None
+        try:
+            top = Path(os.fsdecode(raw_top.strip()))
+        except (OSError, ValueError):
+            return None
+        try:
+            real_root = os.path.realpath(root)
+            real_top = os.path.realpath(top)
+            if real_root == real_top:
+                return None
+            relative = Path(real_root).relative_to(real_top)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not relative.parts:
+            return None
+        declaration = relative.as_posix()
+        try:
+            raw = files_api.read_regular(
+                top, ".ptest.toml", config_api._CONFIG_MAX_BYTES + 1)
+        except Exception:
+            return None
+        try:
+            manifest = parse_monorepo_manifest(raw, top / ".ptest.toml")
+        except Exception:
+            return None
+        if declaration not in manifest.children:
+            return None
+        return ChildOfRoot(git_root=top, declaration=declaration,
+                           children=manifest.children)
+    except Exception:
+        return None
+
+
+SHARED_DEPENDENCY_NAMES: frozenset[str] = frozenset({
+    "uv.lock", "pyproject.toml", "poetry.lock", "Pipfile", "Pipfile.lock",
+    "setup.py", "setup.cfg", "tox.ini", "pytest.ini", "conftest.py",
+    ".python-version", "package.json", "package-lock.json",
+    "npm-shrinkwrap.json", "pnpm-lock.yaml", "pnpm-workspace.yaml",
+    "yarn.lock", "bun.lock", "bun.lockb", ".npmrc", ".nvmrc",
+    "tsconfig.json", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum",
+    "go.work", "go.work.sum",
+})
+
+
+def _is_shared_dependency(basename: str) -> bool:
+    if basename in SHARED_DEPENDENCY_NAMES:
+        return True
+    return fnmatch.fnmatchcase(basename, "requirements*.txt")
+
+
+def shared_dependency_changes(git_root: Path, children: tuple[str, ...],
+                              since: str) -> tuple[str, ...] | None:
+    """Shared dependency files outside every child that changed since ``since``.
+
+    Sorted repo-relative paths outside every child directory whose
+    basename is a shared dependency file and that changed in since..HEAD,
+    uncommitted, or untracked. () means proven unchanged; None means the
+    evidence is unavailable (callers must treat None as 'changed').
+    Never raises.
+    """
+    try:
+        changed = worktree_changed_files(Path(git_root), since)
+        if changed is None:
+            return None
+        prefixes = tuple(child + "/" for child in children)
+        selected = []
+        for path in changed:
+            if path in children or path.startswith(prefixes):
+                continue
+            basename = path.rsplit("/", 1)[-1]
+            if _is_shared_dependency(basename):
+                selected.append(path)
+        return tuple(sorted(selected))
+    except Exception:
+        return None
 
 
 _GIT_TIMEOUT_S = 10.0
