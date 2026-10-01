@@ -1070,6 +1070,75 @@ def test_init_upgrades_old_guide_in_place(tmp_path, monkeypatch):
     assert (guide_dir / "ptest-agent.md").read_bytes() == rules_module._guide()
 
 
+def _outdated_install(tmp_path, monkeypatch):
+    """An old ptest guide, an old claude skill and a user-edited gemini skill."""
+    import hashlib
+
+    import ptest.agent_rules as rules_module
+
+    old = b"# old managed guide\n"
+    monkeypatch.setattr(rules_module, "_PREVIOUS_GUIDE_SHA256S",
+                        frozenset({hashlib.sha256(old).hexdigest()}))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "ptest-agent.md").write_bytes(old)
+    claude = tmp_path / ".claude" / "skills" / "ptest" / "SKILL.md"
+    claude.parent.mkdir(parents=True)
+    claude.write_bytes(rules_module._previous_provider_text("claude"))
+    gemini = tmp_path / ".gemini" / "skills" / "ptest" / "SKILL.md"
+    gemini.parent.mkdir(parents=True)
+    gemini.write_bytes(b"# my own gemini notes\n")
+    return rules_module, claude, gemini
+
+
+def test_installed_providers_counts_only_ptest_managed_skills(tmp_path, monkeypatch):
+    rules_module, _, _ = _outdated_install(tmp_path, monkeypatch)
+    assert rules_module.installed_providers(tmp_path) == ("claude",)
+
+
+def test_rules_apply_refreshes_installed_skills_and_clears_the_warning(
+        tmp_path, monkeypatch, capsys):
+    # The outdated-guidance warning names `ptest rules --apply`, so that
+    # command alone (no prompt, no --agents) must make the warning go away.
+    from ptest.cli import main
+
+    rules_module, claude, gemini = _outdated_install(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert rules_module.guidance_outdated(tmp_path) is True
+
+    assert main(("rules", "--apply")) == 0
+
+    assert (tmp_path / "docs" / "ptest-agent.md").read_bytes() == rules_module._guide()
+    assert claude.read_bytes() == rules_module._provider_text("claude")
+    assert gemini.read_bytes() == b"# my own gemini notes\n"
+    assert not (tmp_path / ".agents").exists()  # never installs a new provider
+    assert rules_module.guidance_outdated(tmp_path) is False
+
+
+def test_init_without_prompt_refreshes_outdated_guidance(tmp_path, monkeypatch):
+    # An agent runs `ptest init` with no terminal: there is no agents prompt,
+    # yet guidance ptest installed earlier must still be refreshed.
+    from ptest.cli import main
+
+    rules_module, claude, gemini = _outdated_install(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(("init", "--runner", "pytest")) == 0
+
+    assert (tmp_path / "docs" / "ptest-agent.md").read_bytes() == rules_module._guide()
+    assert claude.read_bytes() == rules_module._provider_text("claude")
+    assert gemini.read_bytes() == b"# my own gemini notes\n"
+    assert rules_module.guidance_outdated(tmp_path) is False
+
+
+def test_init_without_prompt_never_installs_new_guidance(tmp_path, monkeypatch):
+    from ptest.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    assert main(("init", "--runner", "pytest")) == 0
+    assert not (tmp_path / "docs" / "ptest-agent.md").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
 def test_user_edited_guide_still_conflicts_before_any_write(tmp_path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "ptest-agent.md").write_text(

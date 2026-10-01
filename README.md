@@ -399,7 +399,9 @@ line, every exit code, test-quality rules), a managed block in
 `AGENTS.md`/`CLAUDE.md`, and a `ptest` skill per agent
 (`.claude/skills`, `.agents/skills`, `.opencode/skills`, `.gemini/skills`).
 When a new ptest ships newer guidance, `ptest` says
-`agent guidance is outdated — run ptest init to update`.
+`agent guidance is outdated — run ptest rules --apply to update`. That
+refreshes the guide and the skills ptest installed, with no prompt, so an
+agent can run it; `ptest init` without a terminal does the same refresh.
 
 `scripts/agent_eval.py` checks that models actually follow the guidance: it
 builds a scratch monorepo with the installed guidance, asks 14 scenarios

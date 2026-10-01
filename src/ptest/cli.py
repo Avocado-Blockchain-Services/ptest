@@ -2547,8 +2547,11 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
         return 0
     if command == "rules":
         try:
-            result = (agent_rules.apply(cwd) if parsed.apply_rules
-                      else agent_rules.preview(cwd))
+            # Refresh the provider skills already installed here too, so
+            # `rules --apply` clears an outdated-guidance warning on its own.
+            installed = agent_rules.installed_providers(cwd)
+            result = (agent_rules.apply(cwd, agents=installed) if parsed.apply_rules
+                      else agent_rules.preview(cwd, agents=installed))
             label = "applied" if parsed.apply_rules else "preview"
             print(f"{label}: " + (", ".join(result.actions) or "already configured"))
             return 0
@@ -2584,6 +2587,12 @@ def _static_dispatch(parsed: ParsedArgs, cwd: Path) -> int:
             applied = None
             if agents and not parsed.dry_run:
                 applied = agent_rules.apply(root, agents=agents)
+            elif (not parsed.dry_run and not parsed.agents_explicit
+                  and agent_rules.guidance_outdated(root)):
+                # No prompt (an agent, CI, a pipe): still refresh guidance
+                # ptest itself installed earlier, never anything new.
+                applied = agent_rules.apply(
+                    root, agents=agent_rules.installed_providers(root))
             if applied is not None and config_api.git_root(cwd) is not None:
                 extra = tuple(detail.target for detail in applied.details
                               if detail.source == "guidance"
@@ -3016,8 +3025,8 @@ def _warn_stale_guidance(root: Path) -> None:
     except Exception:
         return
     if stale:
-        progress.emit("ptest: agent guidance is outdated — run ptest init "
-                      "to update", quiet=False)
+        progress.emit("ptest: agent guidance is outdated — run ptest rules "
+                      "--apply to update", quiet=False)
 
 
 def _notice_config_upgrade(resolution: C.ConfigResolution, parsed) -> None:

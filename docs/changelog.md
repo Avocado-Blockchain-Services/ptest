@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.6
+
+- Refreshing agent guidance works without a terminal. The outdated-guidance
+  line now says `run ptest rules --apply to update`; `ptest rules --apply`
+  also refreshes the ptest skills already installed (never a new one, never
+  one you edited), and `ptest init` run by an agent or in CI refreshes
+  guidance ptest installed earlier instead of silently skipping it. Before,
+  only `init`'s interactive agents prompt refreshed guidance, so an agent
+  following the hint changed nothing.
+
 ## 0.4.5
 
 - Agents stop making worker and timeout judgement calls. The agent guide

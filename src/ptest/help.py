@@ -242,8 +242,9 @@ Syntax:
 
 Without --apply nothing is written. --apply adds references to existing
 instruction files, creating AGENTS.md only if none exist (plus
-docs/ptest-agent.md); it does not install per-agent skills. Use
-init --agents for provider skills; failures roll back guidance writes.
+docs/ptest-agent.md), and refreshes the ptest skills already installed
+here; it never installs a new per-agent skill (use init --agents) and
+never overwrites one you edited. Failures roll back guidance writes.
 Rules accepts no --json."""
 
 _UNINSTALL = """ptest uninstall: remove what ptest set up, keeping your work.

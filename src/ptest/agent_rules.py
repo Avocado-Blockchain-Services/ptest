@@ -1106,6 +1106,24 @@ def _rollback(root: Path,
     return incomplete
 
 
+def installed_providers(root: Path) -> tuple[str, ...]:
+    """Providers whose ptest skill file is installed and ptest-managed.
+
+    Current, legacy and previous templates count; a missing skill or one
+    the user edited (or an unsafe path) never does, so refreshing these
+    never creates a skill nobody asked for nor overwrites a user's edit.
+    """
+    found = []
+    for provider in SUPPORTED_AGENTS:
+        try:
+            kind = _provider_target(Path(root), provider)[3]
+        except C.Problem:
+            continue
+        if kind in ("current", "legacy", "previous"):
+            found.append(provider)
+    return tuple(found)
+
+
 def apply(root: Path, *, agents: tuple[str, ...] = ()) -> RulesResult:
     root, texts, guide, guide_kind = _validated(root)
     providers = tuple(dict.fromkeys(agents))

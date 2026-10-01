@@ -359,8 +359,8 @@ def test_run_warns_once_on_older_managed_guide(tmp_path, monkeypatch, capsys,
 
     assert calls == []
     err = capsys.readouterr().err
-    assert err.count("ptest: agent guidance is outdated — run ptest init "
-                     "to update") == 1
+    assert err.count("ptest: agent guidance is outdated — run ptest rules "
+                     "--apply to update") == 1
 
 
 def test_run_stays_silent_on_current_or_edited_guidance(
