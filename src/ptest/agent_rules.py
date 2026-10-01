@@ -800,6 +800,9 @@ _PREVIOUS_GUIDE_SHA256S = frozenset({
     "ee94fdd088deb85016b8064051427651df0f9c9e34556b80364b33049abc0b9c",
     # 0.4.5-0.4.6 (72773a3): guide before the monorepo child-skip row.
     "39c1333a9eed0449ef1a27920f24fa682246a94961faabecd7c1029d6b951233",
+    # T2 (3739452): guide with the hardcoded `api/openapi.json` example,
+    # before the `<sibling>` placeholder fix.
+    "0796048d2da2f2e150e8b026947a000c34d38dd989ab051621e2654a3154a980",
 })
 
 
