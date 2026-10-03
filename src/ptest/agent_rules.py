@@ -735,6 +735,8 @@ def _replace(root: Path, path: Path, text: str, *, mode: int,
 # hashes to the entry below it. See
 # ``test_every_shipped_guide_version_hashes_into_previous_set``.
 _PREVIOUS_GUIDE_SHA256S = frozenset({
+    # 732d811: guide shipped before native Vitest full-result reuse.
+    "6480e8baa993129c6aeee79a9612af2503af117a08ee3e9af203a20361d73511",
     # 93940f4: guide as shipped on main before the G1 cleanup.
     "0b2ea261830578734a9f724e134a1207c651baa160d60b05fe0f025438dd96c6",
     # 66822ca.
