@@ -17,7 +17,7 @@ WRONG_NONCE = "cd" * 32
 
 
 def test_bootstrap_smoke():
-    assert C.PTEST_VERSION == "0.4.7"
+    assert C.PTEST_VERSION == "0.4.8"
     assert C.SCHEMA_VERSION == 1
     assert C.MAX_PROMPT_BYTES == 65536
     assert C.ExecutionTier("advanced") is C.ExecutionTier.ADVANCED
@@ -339,7 +339,7 @@ def test_nine_public_documents_parse():
         doc = C.decode_public_document(C.encode_public_document(kind, data))
         assert doc.kind == kind
         assert doc.error is None
-        assert doc.ptest_version == "0.4.7"
+        assert doc.ptest_version == "0.4.8"
     run_doc = C.decode_public_document(C.encode_public_document("run", _run_data()))
     assert run_doc.data["run_id"] == RUN_ID
     full = C.decode_public_document(
