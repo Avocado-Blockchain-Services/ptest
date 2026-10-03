@@ -25,6 +25,7 @@ import psutil
 
 from . import contracts as C
 from . import verified
+from . import vitest_full
 from . import reports
 from .reports import NativeReportBinding
 from .files import (
@@ -2609,7 +2610,8 @@ def checkout_scope(root: Path) -> str:
 
 
 def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
-                          result: C.RunResult, published: C.PublishResult) -> None:
+                          result: C.RunResult, published: C.PublishResult,
+                          verification_token=None) -> None:
     """Share a committed green full baseline with the project's other
     checkouts. Best-effort: the checkout's own history stays the authority."""
     try:
@@ -2628,7 +2630,17 @@ def _feed_verified_ledger(domain: C.DomainPaths, checkout: C.CheckoutIdentity,
                 runtime_identity=baseline.runtime_identity,
                 scope=checkout_scope(checkout.root),
                 checkout_id=checkout.checkout_id, root=str(checkout.root),
-                created_at=baseline.created_at))
+                created_at=baseline.created_at), token=verification_token)
+        elif vitest_full.reusable_full_result(result) and isinstance(verification_token, verified.PublicationToken):
+            before = result.input_before
+            verified.record_green(domain, checkout.project_id, verified.Record(
+                run_id=result.run_id, head=before.head,
+                input_digest=before.digest, compatibility=before.compatibility,
+                policy_digest=result.policy_digest,
+                runtime_identity=result.runtime_identity,
+                scope=checkout_scope(checkout.root),
+                checkout_id=checkout.checkout_id, root=str(checkout.root),
+                created_at=result.finished_at), token=verification_token)
     except Exception:
         return
 
@@ -2653,6 +2665,7 @@ def publish_outcome(
     checkout: C.CheckoutIdentity,
     result: C.RunResult,
     inventory: C.Inventory | None,
+    *, verification_token=None,
 ) -> C.PublishResult:
     """Commit one immutable result and reconcile durable obligations atomically."""
     _validate_arguments(domain, checkout)
@@ -2670,7 +2683,7 @@ def publish_outcome(
                     reasons=(_reason(marker_code, "history selection is disabled"),),
                 )
             published = _publish_locked(domain, checkout, result, inventory)
-            _feed_verified_ledger(domain, checkout, result, published)
+            _feed_verified_ledger(domain, checkout, result, published, verification_token)
             return published
         except (_HistoryStateError, C.Problem) as exc:
             code = exc.code

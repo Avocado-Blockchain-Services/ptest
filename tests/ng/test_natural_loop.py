@@ -82,7 +82,10 @@ def _publish_full(domain, checkout, snapshot: C.InputSnapshot, policy: str,
                             setup_s=None, call_s=0.01, teardown_s=None),),
         digest="44" * 32,
     )
-    published = history_api.publish_outcome(domain, checkout, result, inventory)
+    from ptest import verified
+    token = verified.begin_full(domain, checkout.project_id, snapshot.digest)
+    published = history_api.publish_outcome(domain, checkout, result, inventory,
+                                            verification_token=token)
     assert published.baseline_published is True
     return result
 
@@ -742,7 +745,7 @@ def test_many_other_worktrees_cost_one_source_capture(case, monkeypatch):
     domain, main_root, _ = _worktree_pair(case)
     config = _config(main_root)
     for n in range(20):
-        verified.record_green(domain, config.project_id, verified.Record(
+        _verified_green(domain, config.project_id, verified.Record(
             run_id=f"{n + 1:032x}", head=f"{n + 1:040x}", input_digest=f"{n + 1:064x}",
             compatibility=_COMPAT, policy_digest=operations._policy_digest(config),
             runtime_identity=f"{n + 1:064x}", scope=".", checkout_id=f"{n + 100:032x}",
@@ -773,8 +776,8 @@ def test_an_older_matching_green_is_reused_when_a_newer_record_differs(case, mon
             runtime_identity=identity, scope=".", checkout_id=f"{n + 100:032x}",
             root=f"/w/{n}", created_at="2026-09-25T00:00:00+00:00")
 
-    verified.record_green(domain, config.project_id, record(1, "a" * 64, _DIGEST, head))
-    verified.record_green(domain, config.project_id, record(2, "b" * 64, "22" * 32, "0" * 40))
+    _verified_green(domain, config.project_id, record(1, "a" * 64, _DIGEST, head))
+    _verified_green(domain, config.project_id, record(2, "b" * 64, "22" * 32, "0" * 40))
     calls = []
 
     def capture(*args, runtime_identity=None, **kwargs):
@@ -787,3 +790,9 @@ def test_an_older_matching_green_is_reused_when_a_newer_record_differs(case, mon
         domain, config, operations._checkout(config), C.RunRequest(mode=C.Mode.FULL))
     assert found is not None and found[2] == "/w/1"
     assert calls == ["b" * 64, "a" * 64]
+
+
+def _verified_green(domain, project_id, record):
+    from ptest import verified
+    token = verified.begin_full(domain, project_id, record.input_digest)
+    verified.record_green(domain, project_id, record, token=token)

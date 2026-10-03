@@ -30,6 +30,7 @@ from . import (config as config_api, executability, files, history, leases, mono
                progress, render, reports, scheduler, selection, source)
 from .adapters import vitest as vitest_adapter
 from . import verified
+from . import vitest_full
 from .runners import adapter_for
 
 
@@ -2579,12 +2580,21 @@ def _full_verified_elsewhere(domain: C.DomainPaths, config: C.Config,
     try:
         scope = history.checkout_scope(checkout.root)
         policy = _policy_digest(config)
+        native_vitest = config.runner.kind is C.RunnerKind.VITEST
+        current_runtime = None
+        if native_vitest:
+            if not vitest_full.full_command_qualified(config, request):
+                return None
+            current_runtime = vitest_full.runtime_identity(config)
+            if current_runtime is None:
+                return None
         records = [record for record in verified.find(domain, checkout.project_id)
-                   if record.checkout_id != checkout.checkout_id
-                   and record.scope == scope and record.policy_digest == policy]
+                   if (native_vitest or record.checkout_id != checkout.checkout_id)
+                   and record.scope == scope and record.policy_digest == policy
+                   and (not native_vitest or record.runtime_identity == current_runtime)]
         if not records:
             return None
-        first_identity = records[0].runtime_identity
+        first_identity = current_runtime if native_vitest else records[0].runtime_identity
         first = _capture_source(
             domain, config, request, ensure_key=False,
             execution_tier=C.ExecutionTier.ADVANCED,
@@ -2890,6 +2900,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
         return _execute_probe(domain, config, request)
     native_pytest = config.runner.kind is C.RunnerKind.PYTEST
     native_runner = native_pytest
+    vitest_candidate = (config.runner.kind is C.RunnerKind.VITEST
+                        and vitest_full.full_command_qualified(config, request))
     adapter = adapter_for(config.runner.kind)
     catalog_profile = (adapter.qualified_profile(config) if native_runner else None)
     if (native_pytest and request.mode is C.Mode.AUTOMATIC
@@ -3106,6 +3118,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 snapshot=planning_snapshot, history_view=history_view)
 
     def _finish(result: C.RunResult) -> C.RunResult:
+        if vitest_candidate:
+            # Include failed launch, protocol, quiescence and export/finalize
+            # early exits; none may leave an older green reusable.
+            history._withdraw_verified(domain, checkout, result)
         _emit_end(request, result, run_mono,
                   baseline_note=_baseline_note(
                       plan=plan, advanced=advanced, result=result,
@@ -3122,6 +3138,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
     grant = None
     report_binding = None
     full_lease_claimed = False
+    verification_token = None
     try:
         if request.mode is C.Mode.FULL:
             # The pre-admission gate (skip verified work, coalesce
@@ -3220,7 +3237,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     run_id, checkout, request, plan, command,
                     signals.number, time.monotonic() - enqueued_at)))
             raise _problem("ownership-uncertain", "pending cancellation could not be confirmed")
-        if native_runner:
+        if native_runner or vitest_candidate:
             # The queue can outlive edits to the command, resource locks, or
             # project identity. Never launch the previously resolved config
             # under a grant that was obtained for different inputs.
@@ -3229,13 +3246,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 if (resolved.problem is not None
                         or resolved.config != replace(config, checkout=None)):
                     raise _problem("changed-during-run",
-                                   "pytest configuration changed while awaiting admission")
+                                   "runner configuration changed while awaiting admission")
             except BaseException:
                 scheduler.cancel_pending(domain, ticket, owner)
                 raise
         attempt = _attempt(grant, checkout)
         effective = _effective_config(config, request, plan, grant)
         expected_runtime_identity = (
+            vitest_full.runtime_identity(config) if vitest_candidate else
             history_view.baseline.runtime_identity
             if (advanced and plan.execution == "selected"
                 and history_view.baseline is not None)
@@ -3355,7 +3373,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
         gate_snapshot: C.InputSnapshot | None = None
 
         def decide_attempt() -> C.Reason | None:
-            nonlocal gate_snapshot, input_before
+            nonlocal gate_snapshot, input_before, expected_runtime_identity, verification_token
+            prior_runtime = expected_runtime_identity
+            if vitest_candidate and setup_prepared is not None:
+                expected_runtime_identity = vitest_full.runtime_identity(effective)
             if setup_prepared is not None:
                 setup_reason = _finish_setup(
                     domain, effective, checkout, setup_fingerprint_before)
@@ -3367,6 +3388,15 @@ def execute(domain: C.DomainPaths, config: C.Config,
                                 else C.ExecutionTier.BASIC_SERIAL),
                 runtime_identity=expected_runtime_identity,
                 baseline=source_baseline)
+            if vitest_candidate and setup_prepared is not None and prior_runtime is None:
+                # A first dependency install supplies runtime authority only
+                # after setup; tracked input identity still must stay stable.
+                input_before = replace(input_before,
+                    compatibility=gate_snapshot.compatibility,
+                    limitations=gate_snapshot.limitations)
+            if plan.execution == "full" and (advanced or vitest_candidate):
+                verification_token = verified.begin_full(
+                    domain, checkout.project_id, gate_snapshot.digest)
             if (native_runner and plan.execution == "full"
                     and (input_before.digest is None
                          or gate_snapshot.digest is None)):
@@ -3583,6 +3613,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 pass
         # Only authenticated DRAINING plus guard reap permits this proof. Take
         # the post-run snapshot while the lease is held, before finalization.
+        if vitest_candidate:
+            expected_runtime_identity = vitest_full.runtime_identity(effective)
         input_after = _capture_source(
             domain, effective, request, ensure_key=False,
             execution_tier=(C.ExecutionTier.ADVANCED if advanced
@@ -3616,8 +3648,8 @@ def execute(domain: C.DomainPaths, config: C.Config,
             proof = _finalize_with_retry(
                                 lambda: scheduler.begin_finalization(domain, grant))
         except (C.Problem, OSError):
-            return _export(domain, checkout, request, _incomplete(
-                result, _reason("ownership-uncertain", "guard quiescence could not be confirmed")))
+            return _finish(_export(domain, checkout, request, _incomplete(
+                result, _reason("ownership-uncertain", "guard quiescence could not be confirmed"))))
         result = replace(result, timings=replace(result.timings, finalization_s=(
             time.monotonic() - finalization_started)))
         consumed_report = False
@@ -3824,7 +3856,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
         # native failure or a refused/malformed report. Promotion is possible
         # only when the authenticated evidence above made the controller set
         # full_gate_eligible and runtime/source identity itself.
-        if advanced:
+        if vitest_candidate:
+            result = replace(
+                result, runtime_identity=expected_runtime_identity,
+                plan=replace(result.plan, input_digest=input_after.digest,
+                             compatibility=input_after.compatibility),
+                full_gate_eligible=(not setup_failed and not stopped_at_gate
+                    and source_valid and verification_token is not None),
+                limitations=tuple(item for item in result.limitations
+                    if not (item.code == "unsupported-capability"
+                            and item.message == "command execution has no inventory or verified runtime identity")),
+            )
+        if advanced or vitest_candidate:
             try:
                 sequence = history.next_sequence(domain, checkout)
                 result = replace(
@@ -3837,6 +3880,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 publication = history.publish_outcome(
                     domain, checkout, result,
                     None if native_evidence is None else native_evidence.inventory,
+                    verification_token=verification_token,
                 )
                 result = replace(
                     result,
