@@ -133,6 +133,17 @@ test inputs: list those tests never read in `[selection] non_input_outputs`
 and those they read in `ignored_inputs`. A worktree's symlinked `.env` may be
 declared as an output; edits to it then need `ptest --full --again`.
 
+Vitest can also reuse a verified whole-suite full command, including native
+`--maxWorkers=100%`. It preserves the configured command and runner output;
+it does not claim a pytest inventory or coverage baseline. Reuse compares
+current source, configuration, policy and native Node/Vitest dependency bytes.
+Initial qualification supports npm/package-lock installations without native
+Vite/Vitest config files. pnpm, executable configs, narrowed commands,
+no-test acceptance and uncertain runtime evidence run normally without
+earning reusable proof.
+A failed or incomplete full rerun withdraws the corresponding proof, including
+across worktrees; an older delayed success cannot restore it.
+
 `ptest init` looks at the repository, detects pytest/Vitest/Go/Cargo projects
 (including several in one monorepo), writes a `.ptest.toml` per project, and
 reports what it found:

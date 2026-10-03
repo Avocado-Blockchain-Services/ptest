@@ -24,7 +24,7 @@ Run these commands exactly as shown: never add `--workers`, `--timeout` or `--qu
 
 Always run from the monorepo root. Prefix scopes with the owning child, such
 as `ptest <project>/tests/test_example.py`. Never cd into a child to run tests.
-Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them. `ptest --full` skips a child whose own files, config, root `.ptest.toml` and `full_triggers` are unchanged since its last green, even after commits elsewhere, so a child whose tests read files outside its folder (a sibling's `<sibling>/openapi.json`, generated types) must list them in its `[selection] full_triggers`; `ptest -v` lists the inputs behind each skip.
+Child `.ptest.toml` files remain authoritative; never copy, merge, or rewrite them. `ptest --full` skips a child whose own files, config, root `.ptest.toml` and `full_triggers` are unchanged since its last green, even after commits elsewhere, so a child whose tests read files outside its folder (a sibling's `<sibling>/openapi.json`, generated types) must list them in its `[selection] full_triggers`; `ptest -v` lists the inputs behind each skip. Qualified Vitest whole-suite runs can also reuse full results when native runtime bytes match; narrowed commands or uncertain configuration execute normally without reusable full proof.
 
 ## Reading ptest output
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.8
+
+- Reuse controller-verified native Vitest whole-suite successes for unchanged
+  `ptest --full` runs, including unchanged monorepo children and worktrees.
+  Preserve literal runner arguments and full native parallelism. Evidence
+  binds current source, configuration, policy and installed runtime bytes;
+  it never fabricates a pytest inventory or coverage baseline. Initial
+  qualification supports standard npm installations without executable
+  Vitest/Vite configs. Unsupported inputs run normally without reuse.
+- Failed or incomplete full reruns withdraw reusable evidence. Preexecution
+  publication tokens prevent an older delayed success from restoring it
+  after another checkout fails. Shared ledger version 2 declines old
+  version-1 evidence; a genuine new full success can establish proof again.
+
 ## 0.4.7
 
 - A run started inside a sandbox with its own PID namespace (Codex,
