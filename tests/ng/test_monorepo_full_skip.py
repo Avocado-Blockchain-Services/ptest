@@ -148,7 +148,10 @@ def _green(domain, child_config):
                             setup_s=None, call_s=0.01, teardown_s=None),),
         digest="44" * 32,
     )
-    published = history_api.publish_outcome(domain, checkout, result, inventory)
+    from ptest import verified
+    token = verified.begin_full(domain, checkout.project_id, snapshot.digest)
+    published = history_api.publish_outcome(domain, checkout, result, inventory,
+                                            verification_token=token)
     assert published.baseline_published is True
     return result
 
@@ -469,7 +472,10 @@ def test_single_project_new_commit_still_runs(case):
                             setup_s=None, call_s=0.01, teardown_s=None),),
         digest="44" * 32,
     )
-    published = history_api.publish_outcome(domain, checkout, result, inventory)
+    from ptest import verified
+    token = verified.begin_full(domain, checkout.project_id, snapshot.digest)
+    published = history_api.publish_outcome(domain, checkout, result, inventory,
+                                            verification_token=token)
     assert published.baseline_published is True
     git(root, "commit", "-q", "--allow-empty", "-m", "empty")
     baseline = history_api.read_history(domain, checkout).baseline
@@ -524,7 +530,7 @@ def test_skipped_child_records_nothing(case):
     assert before_verified, "green runs must feed the verified ledger"
     ledger = json.loads(
         before_verified["verified.json"].decode("utf-8"))
-    assert ledger["version"] == 1
+    assert ledger["version"] == 2
     assert set(ledger["records"][0]) == set(verified.Record.__slots__)
     lastgreen_path = lastgreen.record_path(
         domain.root, os.path.realpath(root), "web")
