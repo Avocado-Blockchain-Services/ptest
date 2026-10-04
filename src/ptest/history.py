@@ -36,7 +36,7 @@ from .files import (
     validate_private_dir,
     validate_private_file,
 )
-from .storage import open_database
+from .storage import is_hot_journal_refusal, open_database, recover_hot_journal
 
 HISTORY_MAX_BYTES = C.HISTORY_MAX_BYTES
 HISTORY_MAX_SUMMARIES = C.HISTORY_MAX_SUMMARIES
@@ -743,6 +743,50 @@ def _set_aside_reinitialised_store(
     return True
 
 
+def _open_store_read_only(
+    path: Path, checkout: C.CheckoutIdentity,
+) -> sqlite3.Connection | None:
+    """Open an existing store read-only; sqlite3.Error propagates unmapped."""
+    connection = None
+    try:
+        if path.stat().st_size > HISTORY_MAX_BYTES:
+            raise _HistoryStateError("capacity-exceeded")
+        if path.stat().st_size == 0:
+            return None
+        before = os.lstat(path)
+        absolute = path if path.is_absolute() else Path(os.path.abspath(path))
+        target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=ro"
+        connection = sqlite3.connect(
+            target, uri=True, timeout=_SQLITE_BUSY_TIMEOUT_S,
+        )
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+        # Every validation and payload SELECT must see the same committed
+        # state; otherwise a concurrent baseline replacement can look like
+        # a missing/corrupt run halfway through a read.
+        connection.execute("BEGIN")
+        if not _schema_tables(connection):
+            connection.close()
+            return None
+        _validate_schema(
+            connection, project_id=checkout.project_id,
+            checkout_id=checkout.checkout_id,
+            required_tables=_BASE_REQUIRED_TABLES,
+        )
+        _compound_schema_present(connection)
+        after = os.lstat(path)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise _HistoryStateError("unsafe-path")
+        return connection
+    except Exception:
+        try:
+            if connection is not None:
+                connection.close()
+        except sqlite3.Error:
+            pass
+        raise
+
+
 def _open_store(
     domain: C.DomainPaths, checkout: C.CheckoutIdentity, *, create: bool,
 ) -> sqlite3.Connection | None:
@@ -751,7 +795,6 @@ def _open_store(
         return None
     path = directory / _STORE_NAME
     if not create:
-        connection = None
         try:
             validate_private_file(path)
         except C.Problem as exc:
@@ -759,44 +802,15 @@ def _open_store(
                 return None
             raise
         try:
-            if path.stat().st_size > HISTORY_MAX_BYTES:
-                raise _HistoryStateError("capacity-exceeded")
-            if path.stat().st_size == 0:
-                return None
-            before = os.lstat(path)
-            absolute = path if path.is_absolute() else Path(os.path.abspath(path))
-            target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=ro"
-            connection = sqlite3.connect(
-                target, uri=True, timeout=_SQLITE_BUSY_TIMEOUT_S,
-            )
-            connection.execute("PRAGMA query_only=ON")
-            connection.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
-            # Every validation and payload SELECT must see the same committed
-            # state; otherwise a concurrent baseline replacement can look like
-            # a missing/corrupt run halfway through a read.
-            connection.execute("BEGIN")
-            if not _schema_tables(connection):
-                connection.close()
-                return None
-            _validate_schema(
-                connection, project_id=checkout.project_id,
-                checkout_id=checkout.checkout_id,
-                required_tables=_BASE_REQUIRED_TABLES,
-            )
-            _compound_schema_present(connection)
-            after = os.lstat(path)
-            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-                raise _HistoryStateError("unsafe-path")
-            return connection
-        except Exception as exc:
-            try:
-                if connection is not None:
-                    connection.close()
-            except sqlite3.Error:
-                pass
-            if isinstance(exc, sqlite3.Error):
+            return _open_store_read_only(path, checkout)
+        except sqlite3.Error as exc:
+            if not is_hot_journal_refusal(exc):
                 raise _state_error_for_sqlite(exc) from None
-            raise
+        try:
+            recover_hot_journal(path)
+            return _open_store_read_only(path, checkout)
+        except sqlite3.Error as exc:
+            raise _state_error_for_sqlite(exc) from None
     for attempt in range(3):
         try:
             os.lstat(path)

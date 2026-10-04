@@ -19,6 +19,7 @@ import psutil
 from ptest import contracts as C
 from ptest import platform
 import ptest.scheduler as scheduler
+from support import leave_hot_journal
 from ptest.scheduler import (
     begin_finalization,
     cancel_pending,
@@ -243,6 +244,22 @@ def test_existing_status_is_read_only_and_reports_current_queue_wait(case, world
     assert before == {str(p.relative_to(domain.root)): (p.read_bytes(), p.stat().st_mtime_ns)
                       for p in sorted(domain.root.rglob("*")) if p.is_file()}
 
+
+
+def test_status_recovers_a_crashed_writer_journal_instead_of_reporting_corruption(case, world):
+    domain = case.domain()
+    first = enqueue(domain, _request(case, domain, "first"))
+    tail = enqueue(domain, _request(case, domain, "tail"))
+    assert poll(domain, first).grant is not None
+    expected = {item.run_id: item.state for item in reconcile(domain)}
+    leave_hot_journal(Path(domain.ledger))
+    views = {item.run_id: item.state for item in reconcile(domain)}
+    assert views == expected
+    assert set(views) == {first.run_id, tail.run_id}
+    assert not Path(f"{domain.ledger}-journal").exists()
+    later = enqueue(domain, _request(case, domain, "later"))
+    assert {item.run_id for item in reconcile(domain)} == {
+        first.run_id, tail.run_id, later.run_id}
 
 @pytest.mark.parametrize("memory", [128, None])
 def test_memory_budget_loosening_waits_for_idle(case, world, monkeypatch, tmp_path, memory, account_home):

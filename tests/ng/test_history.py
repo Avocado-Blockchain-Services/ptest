@@ -22,6 +22,7 @@ import pytest
 from ptest import contracts as C
 from ptest import files as F
 from ptest import history as H
+from support import leave_hot_journal
 
 
 def _tree_snapshot(root: Path) -> tuple:
@@ -1031,6 +1032,18 @@ def test_skip_does_not_clear_failure(case):
     )
     assert H.read_history(domain, checkout).obligations[0].file == "tests/test_a.py"
 
+
+
+def test_read_history_recovers_a_crashed_writer_journal(case):
+    domain = case.domain()
+    checkout = case.checkout(domain)
+    _publish_failure(case, domain, checkout)
+    expected = H.read_history(domain, checkout)
+    assert expected.obligations
+    path = _store_path(domain, checkout)
+    leave_hot_journal(path)
+    assert H.read_history(domain, checkout) == expected
+    assert not Path(f"{path}-journal").exists()
 
 def test_complete_pass_clears_only_the_matching_newer_failure(case):
     domain = case.domain()

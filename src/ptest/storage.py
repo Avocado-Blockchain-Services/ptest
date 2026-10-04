@@ -26,6 +26,9 @@ _TRANSIENT_SQLITE_PHRASES = (
     "database table is locked",
     "database schema is locked",
 )
+# SQLITE_READONLY_ROLLBACK: a read-only connection met the hot rollback
+# journal of a writer that died mid-transaction and cannot roll it back.
+_READONLY_ROLLBACK = 776
 
 
 def _fail(code: str, message: str) -> None:
@@ -63,6 +66,29 @@ def is_transient_sqlite(exc: sqlite3.Error) -> bool:
         return True
     text = str(exc).lower()
     return any(phrase in text for phrase in _TRANSIENT_SQLITE_PHRASES)
+
+
+def is_hot_journal_refusal(exc: sqlite3.Error) -> bool:
+    """True when a read-only open was refused only by a dead writer's journal."""
+    return _sqlite_error_code(exc) == _READONLY_ROLLBACK
+
+
+def recover_hot_journal(path: Path) -> None:
+    """Let SQLite roll back a dead writer's hot journal to committed state.
+
+    Any read-write connection does this on its first read; read-only ones
+    cannot. A live writer holds its RESERVED lock, so its journal is not hot
+    and stays untouched. mode=rw never creates a missing file. sqlite3.Error
+    is left to the caller to classify.
+    """
+    absolute = path if path.is_absolute() else Path(os.path.abspath(path))
+    target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=rw"
+    conn = sqlite3.connect(target, uri=True, timeout=_BUSY_TIMEOUT_MS / 1000)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    finally:
+        conn.close()
 
 
 def _identity(path: Path) -> tuple:
@@ -115,6 +141,29 @@ def open_database(root: Path, name: str, *, max_bytes: int,
             _fail("unsafe-path", f"database {name!r} must have exactly one hard link")
         if before.st_size > max_bytes:
             _fail("capacity-exceeded", f"database {name!r} exceeds max_bytes")
+    conn = _connect_verified(path, name, max_bytes=max_bytes, read_only=read_only,
+                             recover=read_only)
+    try:
+        after = _identity(path)
+    except FileNotFoundError:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        _fail("unsafe-path", f"database {name!r} vanished during open")
+        raise AssertionError("unreachable")
+    if after != (before.st_dev, before.st_ino):
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        _fail("unsafe-path", f"database {name!r} was replaced during open")
+    return conn
+
+
+def _connect_verified(path: Path, name: str, *, max_bytes: int, read_only: bool,
+                      recover: bool) -> sqlite3.Connection:
+    """Connect with verified pragmas; recover a dead writer's journal once."""
     if read_only:
         absolute = path if path.is_absolute() else Path(os.path.abspath(path))
         target = f"file:{urllib.parse.quote(str(absolute), safe='/')}?mode=ro"
@@ -159,24 +208,19 @@ def open_database(root: Path, name: str, *, max_bytes: int,
             conn.close()
         except sqlite3.Error:
             pass
+        if recover and is_hot_journal_refusal(exc):
+            try:
+                recover_hot_journal(path)
+            except sqlite3.Error as recovery:
+                if is_transient_sqlite(recovery):
+                    raise TransientContention(message=f"database {name!r} is busy",
+                                              phase=_PHASE)
+                _fail("coordinator-corrupt", f"database {name!r} is corrupt")
+            return _connect_verified(path, name, max_bytes=max_bytes,
+                                     read_only=read_only, recover=False)
         if is_transient_sqlite(exc):
             raise TransientContention(message=f"database {name!r} is busy",
                                       phase=_PHASE)
         _fail("coordinator-corrupt", f"database {name!r} is corrupt")
         raise AssertionError("unreachable")
-    try:
-        after = _identity(path)
-    except FileNotFoundError:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-        _fail("unsafe-path", f"database {name!r} vanished during open")
-        raise AssertionError("unreachable")
-    if after != (before.st_dev, before.st_ino):
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-        _fail("unsafe-path", f"database {name!r} was replaced during open")
     return conn

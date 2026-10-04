@@ -8,7 +8,8 @@ import stat
 import pytest
 
 from ptest.contracts import Problem
-from ptest.storage import open_database
+from ptest.storage import open_database, recover_hot_journal
+from support import leave_hot_journal
 
 
 def _private_root(tmp_path, name="owned"):
@@ -132,6 +133,70 @@ needs_proc_fd = pytest.mark.skipif(
     reason="descriptor accounting needs /proc/self/fd",
 )
 
+
+
+def _seed_rows(root, name, rows=("committed",)):
+    seed = open_database(root, name, max_bytes=16 << 20)
+    try:
+        seed.execute("CREATE TABLE t(x TEXT)")
+        seed.executemany("INSERT INTO t VALUES (?)", [(row,) for row in rows])
+        seed.commit()
+    finally:
+        seed.close()
+
+
+def test_open_database_read_only_rolls_back_crashed_writer_journal(tmp_path):
+    """A dead writer's hot journal is recovery work, never corruption."""
+    root = _private_root(tmp_path)
+    _seed_rows(root, "coord.sqlite3")
+    path = root / "coord.sqlite3"
+    leave_hot_journal(path)
+    inode = os.stat(path).st_ino
+    conn = open_database(root, "coord.sqlite3", max_bytes=16 << 20, read_only=True)
+    try:
+        assert conn.execute("SELECT x FROM t").fetchall() == [("committed",)]
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert tables == {"t"}
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("INSERT INTO t VALUES ('write')")
+    finally:
+        conn.close()
+    assert not (root / "coord.sqlite3-journal").exists()
+    assert os.stat(path).st_ino == inode
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+
+def test_recover_hot_journal_never_creates_a_missing_database(tmp_path):
+    root = _private_root(tmp_path)
+    with pytest.raises(sqlite3.OperationalError):
+        recover_hot_journal(root / "absent.sqlite3")
+    assert not (root / "absent.sqlite3").exists()
+
+def test_open_database_read_only_leaves_live_writer_transaction_alone(tmp_path):
+    """Only a dead writer's journal is rolled back; a live one keeps its work."""
+    root = _private_root(tmp_path)
+    _seed_rows(root, "coord.sqlite3")
+    writer = sqlite3.connect(str(root / "coord.sqlite3"), isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO t VALUES ('pending')")
+        conn = open_database(root, "coord.sqlite3", max_bytes=16 << 20,
+                             read_only=True)
+        try:
+            assert conn.execute("SELECT x FROM t").fetchall() == [("committed",)]
+        finally:
+            conn.close()
+        writer.execute("COMMIT")
+    finally:
+        writer.close()
+    check = open_database(root, "coord.sqlite3", max_bytes=16 << 20, read_only=True)
+    try:
+        assert check.execute("SELECT x FROM t ORDER BY rowid").fetchall() == [
+            ("committed",), ("pending",)]
+    finally:
+        check.close()
 
 def test_open_database_reports_lock_contention_as_unavailable(tmp_path):
     """A write-locked DB is contention (retryable), never corruption evidence."""

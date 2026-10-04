@@ -9,6 +9,7 @@ import pwd
 import secrets
 import select
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -837,3 +838,41 @@ def ptest_toml_text(*, kind: str = "command", launcher=("echo",),
 
 def write_ptest_toml(root, **kwargs) -> Path:
     return write_file(Path(root) / ".ptest.toml", ptest_toml_text(**kwargs))
+
+
+def leave_hot_journal(path) -> None:
+    """Leave the bytes a writer that died mid-transaction leaves behind.
+
+    The database keeps its inode (ptest checks identity) and gains a hot
+    rollback journal that only a read-write connection can roll back.
+    """
+    path = Path(path)
+    journal = Path(f"{path}-journal")
+    writer = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        writer.execute("PRAGMA journal_mode=DELETE")
+        writer.execute("PRAGMA cache_size=1")  # spill dirty pages into the file
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("CREATE TABLE crashed_writer(x BLOB)")
+        writer.executemany("INSERT INTO crashed_writer VALUES (randomblob(4000))",
+                           [()] * 64)
+        database_bytes = path.read_bytes()
+        journal_bytes = journal.read_bytes()
+        writer.execute("ROLLBACK")
+    finally:
+        writer.close()
+    with open(path, "r+b") as handle:
+        handle.write(database_bytes)
+        handle.truncate()
+    fd = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(journal_bytes)
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        probe.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except sqlite3.OperationalError as exc:
+        assert exc.sqlite_errorname == "SQLITE_READONLY_ROLLBACK", exc
+    else:
+        raise AssertionError("journal is not hot")
+    finally:
+        probe.close()
