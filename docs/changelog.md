@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.9
+
+- A ptest process that died mid-write left a hot SQLite rollback journal,
+  and every read-only command (`ptest status`, `history`, `uninstall`) then
+  reported the healthy coordinator or history store as `coordinator-corrupt`
+  until something wrote to it. Read-only opens now let SQLite roll the
+  journal back to the last committed state once and retry. A live writer's
+  journal is never touched, recovery never creates a missing database, and
+  real damage still fails closed.
+
 ## 0.4.8
 
 - Reuse controller-verified native Vitest whole-suite successes for unchanged
