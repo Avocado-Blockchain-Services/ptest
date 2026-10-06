@@ -27,7 +27,8 @@ from pathlib import Path
 
 from . import contracts as C
 from . import (config as config_api, executability, files, history, leases, monorepo, platform,
-               progress, render, reports, scheduler, selection, source)
+               progress, render, reports, scheduler, selection, source,
+               stack_dumps)
 from .adapters import vitest as vitest_adapter
 from . import verified
 from . import vitest_full
@@ -51,6 +52,39 @@ _COMPOUND_TIMEOUT_S: contextvars.ContextVar[float] = contextvars.ContextVar(
     "ptest_compound_timeout_s", default=C.DEFAULT_COMPOUND_TIMEOUT_S)
 _COMPOUND_TIMEOUT_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "ptest_compound_timeout_source", default="default")
+# The resolved post-test stall window travels from execute() to
+# _launch_guard through this contextvar, mirroring the compound deadline
+# above so the seam signature stays unchanged. Direct callers that never
+# resolve see None (no stall detection).
+_STALL_TIMEOUT_S: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "ptest_stall_timeout_s", default=None)
+
+_STALL_RERUN_SUFFIX = "; rerun once alone, report a repeat"
+_STALL_DUMPS_SUFFIX = "; stack dumps above; rerun once alone, report a repeat"
+
+
+def _stall_timeout_s(config: C.Config) -> float | None:
+    """The guard stall window for one config; None disables detection.
+
+    Only the pytest runner carries a report path for the bridge marker and
+    dump files, so every other runner maps to None. An absent config value
+    means the 120 s default; 0 disables.
+    """
+    if config.runner.kind is not C.RunnerKind.PYTEST:
+        return None
+    # getattr: the T2 contracts barrier adds RunnerConfig.stall_timeout_s;
+    # before it lands the field reads as absent (effective 120).
+    value = getattr(config.runner, "stall_timeout_s", None)
+    if value is None:
+        return getattr(C, "DEFAULT_STALL_TIMEOUT_S", 120.0)
+    if value == 0:
+        return None
+    return value
+
+
+def _stall_reason_message(message: str, printed: int) -> str:
+    """Append the frozen post-test-stall rerun hint to a guard message."""
+    return message + (_STALL_DUMPS_SUFFIX if printed else _STALL_RERUN_SUFFIX)
 
 _ESTIMATE_MAX_FILES = 20000
 _ESTIMATE_MAX_FILE_BYTES = 1048576
@@ -1254,7 +1288,7 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
                                                                _Frames]:
     attempts = prepared if isinstance(prepared, tuple) else (prepared,)
     attempt_ids = tuple(f"a{index:03d}" for index in range(1, len(attempts) + 1))
-    manifest = C.LaunchManifest(
+    manifest_fields: dict = dict(
         protocol=C.GUARD_PROTOCOL_VERSION,
         domain=domain, grant=grant, setup=setup,
         attempts=attempts, attempt_ids=attempt_ids,
@@ -1263,6 +1297,12 @@ def _launch_guard(domain: C.DomainPaths, grant: C.Grant,
         compound_timeout_s=_COMPOUND_TIMEOUT_S.get(),
         compound_timeout_source=_COMPOUND_TIMEOUT_SOURCE.get(),
     )
+    if "stall_timeout_s" in C.LaunchManifest.__dataclass_fields__:
+        # Pre-T2-barrier LaunchManifest has no stall window; the guard then
+        # runs without stall detection. The field is always present after
+        # the barrier lands.
+        manifest_fields["stall_timeout_s"] = _STALL_TIMEOUT_S.get()
+    manifest = C.LaunchManifest(**manifest_fields)
     lease_fd = leases.held_fd(Path(domain.root), grant.run_id)
     if lease_fd is None:
         raise C.Problem(code="ownership-uncertain",
@@ -1387,6 +1427,11 @@ def _outcome(raw: int | None, cancellation: int | None,
              guard_problem: C.Problem | None, incomplete: bool
              ) -> tuple[C.Status, int, str, int | None]:
     """One precedence rule for all post-launch results, including partial ones."""
+    if (guard_problem is not None and guard_problem.code == "post-test-stall"
+            and cancellation is None):
+        # A stall verdict is never diluted by the native code: the tests
+        # finished but the runner processes never exited.
+        return C.Status.INCOMPLETE, 70, "ptest", None
     if raw is not None and raw > 0:
         return (C.Status.INCOMPLETE if incomplete else C.Status.FAILED,
                 raw, "runner", None)
@@ -1835,6 +1880,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
                 quiet=request.quiet)
         token = _COMPOUND_TIMEOUT_S.set(limit)
         source_token = _COMPOUND_TIMEOUT_SOURCE.set(source)
+        stall_token = _STALL_TIMEOUT_S.set(_stall_timeout_s(config))
         try:
             raw_guard, frames, execution_s = _run_guard(
                 domain, grant, tuple(prepared_runs), signal_state,
@@ -1843,6 +1889,7 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
         finally:
             _COMPOUND_TIMEOUT_S.reset(token)
             _COMPOUND_TIMEOUT_SOURCE.reset(source_token)
+            _STALL_TIMEOUT_S.reset(stall_token)
         observed = getattr(frames, "facts_by_attempt", {})
         raw_codes = {
             attempt_id: facts["raw_exit_code"]
@@ -1897,10 +1944,26 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
             message = (setup_problem.message if code == setup_problem.code
                        else "guard reported invalid setup facts")
             reasons += (_reason(code, message),)
-        for problem in fact_problems.values():
+        stall_printed: dict[str, int] = {}
+        for index, binding in enumerate(bindings):
+            attempt_problem_id = f"a{index + 1:03d}"
+            attempt_problem = fact_problems.get(attempt_problem_id)
+            if (signal_state.number is None and attempt_problem is not None
+                    and attempt_problem.code in ("post-test-stall", "execution-timeout")):
+                # The guard is reaped above; print per attempt in order.
+                # Printing never fails the run.
+                try:
+                    stall_printed[attempt_problem_id] = stack_dumps.emit(
+                        binding.path, attempt_problem.code)
+                except Exception:
+                    stall_printed[attempt_problem_id] = 0
+        for attempt_id, problem in fact_problems.items():
             code = problem.code if problem.code in C.REASON_CODES else "state-unavailable"
             message = (problem.message if code == problem.code
                        else "guard reported invalid runner facts")
+            if code == "post-test-stall":
+                message = _stall_reason_message(
+                    message, stall_printed.get(attempt_id, 0))
             reasons += (_reason(code, message),)
         if decision_reason is not None:
             reasons += (decision_reason,)
@@ -2102,9 +2165,11 @@ def _execute_shadow(domain: C.DomainPaths, config: C.Config,
         finally:
             for binding in bindings:
                 reports.cleanup_report(binding)
+                stack_dumps.cleanup(binding.path)
     except BaseException:
         for binding in bindings:
             reports.cleanup_report(binding)
+            stack_dumps.cleanup(binding.path)
         if grant is not None:
             try:
                 if frames is not None and frames.registered:
@@ -3435,6 +3500,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     quiet=request.quiet)
             token = _COMPOUND_TIMEOUT_S.set(limit)
             source_token = _COMPOUND_TIMEOUT_SOURCE.set(source)
+            stall_token = _STALL_TIMEOUT_S.set(_stall_timeout_s(effective))
             try:
                 raw_guard, frames, execution_s = _run_guard(
                     domain, grant, prepared, signals, decide_attempt,
@@ -3442,6 +3508,7 @@ def execute(domain: C.DomainPaths, config: C.Config,
             finally:
                 _COMPOUND_TIMEOUT_S.reset(token)
                 _COMPOUND_TIMEOUT_SOURCE.reset(source_token)
+                _STALL_TIMEOUT_S.reset(stall_token)
         except (C.Problem, OSError):
             # A launch failure before registration is still cancellable.  Once
             # registration wins the CAS, cancellation deliberately retains the
@@ -3485,6 +3552,18 @@ def execute(domain: C.DomainPaths, config: C.Config,
         raw = None if frames.facts is None else frames.facts["raw_exit_code"]
         guard_problem = (None if frames.facts is None or frames.facts["problem"] is None
                          else C.Problem(**frames.facts["problem"]))
+        stall_dumps_printed = 0
+        if (signals.number is None and guard_problem is not None
+                and guard_problem.code in ("post-test-stall", "execution-timeout")
+                and prepared.report_path is not None):
+            # The guard is reaped above; its SIGWINCH dumps are on disk when
+            # the bridge registered them. Printing never fails the run and
+            # never reaches JSON, history or exports.
+            try:
+                stall_dumps_printed = stack_dumps.emit(
+                    prepared.report_path, guard_problem.code)
+            except Exception:
+                stall_dumps_printed = 0
         stopped_at_gate = frames.decision_reason is not None
         continued_handoff = (
             frames.ready is not None and frames.decision_sent
@@ -3531,7 +3610,10 @@ def execute(domain: C.DomainPaths, config: C.Config,
                 reasons += (_reason("missing-executable", "runner could not be launched"),)
             else:
                 incomplete = True
-                reasons += (_reason(guard_problem.code, guard_problem.message),)
+                message = guard_problem.message
+                if guard_problem.code == "post-test-stall":
+                    message = _stall_reason_message(message, stall_dumps_printed)
+                reasons += (_reason(guard_problem.code, message),)
         elif ((raw is None and not stopped_at_gate)
               or (raw_guard != 0 and signals.number is None)):
             incomplete = True
@@ -3587,6 +3669,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
                     scheduler.cancel_pending(domain, ticket, owner)
                 except C.Problem:
                     result = _incomplete(result, _reason("ownership-uncertain", "pending grant remains unconfirmed"))
+            if (signals.number is None and stall_dumps_printed == 0
+                    and prepared.report_path is not None):
+                # The guard SIGKILLed itself after grace and facts were lost,
+                # but its SIGWINCH dumps may still be on disk.
+                try:
+                    stack_dumps.emit(prepared.report_path, "guard handoff incomplete")
+                except Exception:
+                    pass
             return _finish(_export(domain, checkout, request, result))
         if (not advanced and guard_problem is not None
                 and guard_problem.code == "execution-timeout"
@@ -3912,6 +4002,14 @@ def execute(domain: C.DomainPaths, config: C.Config,
         )
         return _finish(result)
     finally:
+        if report_binding is not None:
+            # Per-attempt marker and dumps go on every outcome, after the
+            # guard returned. Cleanup never fails the run and never follows
+            # symlinks or touches other attempts' files.
+            try:
+                stack_dumps.cleanup(report_binding.path)
+            except Exception:
+                pass
         if full_lease_claimed:
             history.release_full_lease(domain, checkout, run_id)
         for signum, handler in previous.items():
