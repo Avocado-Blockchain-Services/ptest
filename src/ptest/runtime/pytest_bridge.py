@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import faulthandler
 import json
 import hashlib
 import importlib.metadata
@@ -15,8 +16,11 @@ import inspect
 import os
 import re
 import shlex
+import signal
+import stat
 import sys
 import textwrap
+from collections import Counter
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -839,6 +843,199 @@ def _report_binding() -> tuple[Path, dict[str, str]] | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Post-test stall marker and SIGWINCH stack-dump registration.
+#
+# The controller creates exactly one ``<report>.done`` marker once every
+# collected item has a final outcome (or the runtest loop returns), and the
+# controller plus every xdist worker registers faulthandler on SIGWINCH into
+# its own ``<report>.stack-<pid>`` file. Every failure path skips silently
+# (N11); a pre-created symlink is refused through O_NOFOLLOW (N6). The
+# three literals duplicate the contracts.py values (pinned equal by
+# tests/ng/test_stall_bridge.py) because this file must stay importable
+# without any ptest module.
+_STALL_MARKER_SUFFIX = ".done"
+_STACK_DUMP_INFIX = ".stack-"
+_STACK_DUMP_HEADER_PREFIX = "ptest stack dump: "
+
+_FINAL_CALL_OUTCOMES = frozenset({"passed", "failed", "skipped"})
+
+# Open dump-file descriptors, kept for the process lifetime so faulthandler
+# always writes to a live file.
+_STACK_DUMP_FDS: list[int] = []
+
+
+def _stall_marker_path(report_path: Path) -> Path:
+    """Marker bound to one attempt report: ``str(report) + ".done"``."""
+    return Path(str(report_path) + _STALL_MARKER_SUFFIX)
+
+
+def _stack_dump_path(report_path: Path, pid: int) -> Path:
+    """Per-process dump bound to one attempt report and one pid."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("dump pid must be a positive int")
+    return Path(f"{report_path}{_STACK_DUMP_INFIX}{pid}")
+
+
+def _create_stall_marker(marker: Path) -> bool:
+    """Create an empty marker once; refuse links, swallow every failure."""
+    try:
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except (OSError, ValueError, TypeError):
+        return False
+    try:
+        os.close(fd)
+    except (OSError, ValueError):
+        pass
+    return True
+
+
+def _register_stack_dump(report_path: Path, *, role: str,
+                         worker_id: str = "") -> bool:
+    """Register faulthandler on SIGWINCH into this process's dump file.
+
+    Writes exactly one header line, then registers with ``all_threads``
+    and ``chain`` so pytest's own faulthandler plugin (a different
+    mechanism) is untouched. The descriptor stays open for the process
+    lifetime. Any failure means skip silently (N11).
+    """
+    try:
+        pid = os.getpid()
+        if role == "controller":
+            header = (f"{_STACK_DUMP_HEADER_PREFIX}"
+                      f"role=controller pid={pid}\n")
+        elif role == "worker":
+            if not isinstance(worker_id, str) or re.fullmatch(
+                    r"gw[0-9]+", worker_id) is None:
+                return False
+            header = (f"{_STACK_DUMP_HEADER_PREFIX}"
+                      f"role=worker id={worker_id} pid={pid}\n")
+        else:
+            return False
+        path = _stack_dump_path(Path(report_path), pid)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_APPEND | os.O_CLOEXEC, 0o600)
+        try:
+            view = memoryview(header.encode("utf-8"))
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("dump header write made no progress")
+                view = view[written:]
+            faulthandler.register(signal.SIGWINCH, file=fd,
+                                  all_threads=True, chain=True)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return False
+        _STACK_DUMP_FDS.append(fd)
+        return True
+    except Exception:
+        return False
+
+
+def _worker_report_path() -> Path | None:
+    """Best-effort bound report path for an xdist worker, else None.
+
+    Cheap re-validation only (absolute, valid basename, private real
+    directory): it never raises, so a worker without a binding skips
+    dump registration silently instead of failing the run.
+    """
+    try:
+        value = os.environ.get("PTEST_PYTEST_REPORT_PATH", "")
+        if not value or not os.path.isabs(value):
+            return None
+        path = Path(value)
+        if _REPORT_NAME.fullmatch(path.name) is None:
+            return None
+        parent = path.parent
+        stamp = os.lstat(parent)
+        if (not stat.S_ISDIR(stamp.st_mode)
+                or stamp.st_uid != os.getuid()
+                or stamp.st_mode & 0o077):
+            return None
+        if os.path.realpath(parent) != str(parent):
+            return None
+        return path
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+class _StallArm:
+    """Controller-only post-test stall marker arm.
+
+    ``expect`` records the raw collected node ids (a Counter, so
+    duplicates count); ``observe`` counts one final outcome per report:
+    a call-phase report with outcome passed/failed/skipped, or a
+    setup-phase failure/skip that prevents the call. Teardown reports
+    never gate arming, because a hang in teardown must still arm.
+    ``loop_returned`` arms when the native loop finished without every
+    outcome (``-x``/maxfail/interrupts/collection errors). Arming
+    creates the marker at most once per process and never raises.
+    """
+
+    def __init__(self, report_path: Path) -> None:
+        self._report_path = Path(report_path)
+        self._report_name = self._report_path.name
+        self._expected: Counter[str] | None = None
+        self._observed: Counter[str] = Counter()
+        self._armed = False
+
+    def expect(self, nodeids: Any) -> None:
+        try:
+            counts: Counter[str] = Counter()
+            for nodeid in nodeids:
+                if isinstance(nodeid, str) and nodeid:
+                    counts[nodeid] += 1
+            self._expected = counts
+        except Exception:
+            self._expected = Counter()
+
+    def observe(self, report: Any) -> None:
+        try:
+            nodeid = getattr(report, "nodeid", "")
+            when = getattr(report, "when", "")
+            if not isinstance(nodeid, str) or not nodeid:
+                return
+            final = False
+            if when == "call":
+                final = (str(getattr(report, "outcome", ""))
+                         in _FINAL_CALL_OUTCOMES)
+            elif when == "setup":
+                final = (bool(getattr(report, "failed", False))
+                         or bool(getattr(report, "skipped", False)))
+            if not final:
+                return
+            self._observed[nodeid] += 1
+            self._maybe_arm()
+        except Exception:
+            return
+
+    def loop_returned(self) -> None:
+        try:
+            self._arm()
+        except Exception:
+            pass
+
+    def _maybe_arm(self) -> None:
+        expected = self._expected
+        if self._armed or not expected:
+            return
+        for nodeid, count in expected.items():
+            if self._observed.get(nodeid, 0) < count:
+                return
+        self._arm()
+
+    def _arm(self) -> None:
+        if self._armed:
+            return
+        self._armed = True
+        _create_stall_marker(_stall_marker_path(self._report_path))
+
+
 def _empty_narrowing() -> dict[str, Any]:
     """Blank bridge-owned narrowing report for unfiltered or refused runs."""
     return {"narrowing": None, "conftest_hooks": [], "notes": []}
@@ -1446,6 +1643,9 @@ class OwnedPlugin:
         # normalisation below enforces the same frozen limit the report
         # writer enforces (never a literal, never a second bound).
         self._test_id_bound: int | None = None
+        # Post-test stall arm (controller only): run() attaches one when
+        # a report binding exists; worker-half plugins never get one.
+        self._stall_arm: _StallArm | None = None
 
     def _test_identity(self, nodeid: str) -> str:
         """Normalise one native node id to its bounded test identity.
@@ -2198,12 +2398,25 @@ class OwnedPlugin:
             finished = set(id(item) for item in getattr(session, "items", ()))
             if set(self._worker_collected_ids) - finished:
                 self._worker_dropped = True
+        # Serial expectation for the stall arm: the post-modifyitems
+        # inventory, raw node ids. Never raises into pytest.
+        arm = self._stall_arm
+        if arm is not None and self.workers == 1:
+            arm.expect(str(getattr(item, "nodeid", ""))
+                       for item in getattr(session, "items", ()))
         return result
 
     def pytest_runtestloop(self, session: Any) -> Any:
         """Check execution hooks immediately before entering the test loop."""
         self._validate(session.config, generated=True)
-        return (yield)
+        try:
+            return (yield)
+        finally:
+            # The loop returned or raised (-x/maxfail/interrupt/collection
+            # error): arm even when outcomes are missing. Never raises.
+            arm = self._stall_arm
+            if arm is not None:
+                arm.loop_returned()
 
     def pytest_collection_modifyitems(self, session: Any) -> Any:
         """Snapshot the final collected inventory after all narrowing hooks.
@@ -2270,6 +2483,9 @@ class OwnedPlugin:
             nodeid = ""
         if nodeid:
             self._reported_nodeids.add(self._test_identity(nodeid))
+        arm = self._stall_arm
+        if arm is not None:
+            arm.observe(report)
 
     def pytest_collectreport(self, report: Any) -> None:
         """Observe native collection errors; they fail the run like test failures."""
@@ -2413,6 +2629,11 @@ class OwnedPlugin:
         # the same bounded identities the report writer emits.
         self._node_collections[worker] = tuple(
             self._test_identity(nodeid) for nodeid in collected)
+        # xdist-controller expectation for the stall arm: the first
+        # worker's raw collection. Never raises into pytest.
+        arm = self._stall_arm
+        if arm is not None and arm._expected is None:
+            arm.expect(collected)
 
     def pytest_testnodedown(self, node: Any, error: Any) -> None:
         """Record a worker going down, with its bridge record when sent.
@@ -2526,7 +2747,14 @@ class AdvancedPlugin(OwnedPlugin):
             self._refuse("observed native runtime identity changed before tests")
         self._initial_runtime_facts = current_facts
         self._initial_runtime_identity = current_identity
-        return (yield)
+        try:
+            return (yield)
+        finally:
+            # The loop returned or raised: arm even when outcomes are
+            # missing. Never raises.
+            arm = self._stall_arm
+            if arm is not None:
+                arm.loop_returned()
 
     def _refresh_runtime_facts(self, config: Any) -> None:
         """Capture live plugin, hook, and effective-option state.
@@ -2691,6 +2919,11 @@ class AdvancedPlugin(OwnedPlugin):
         self.collection_complete = True
         collected = getattr(session, "testscollected", None)
         self._testscollected = collected if isinstance(collected, int) else None
+        # Serial expectation for the stall arm. Never raises into pytest.
+        arm = self._stall_arm
+        if arm is not None and self.workers == 1:
+            arm.expect(str(getattr(item, "nodeid", ""))
+                       for item in getattr(session, "items", ()))
         # Collection can register ordinary pytest lifecycle plugins after
         # session start. This is the last pre-execution point, so refresh the
         # authenticated baseline here.
@@ -2726,6 +2959,9 @@ class AdvancedPlugin(OwnedPlugin):
             item["teardown_s"] = duration
             if getattr(report, "failed", False):
                 item["outcome"] = "error"
+        arm = self._stall_arm
+        if arm is not None:
+            arm.observe(report)
 
     def worker_identities(self) -> list[dict[str, str]]:
         if self.workers > 1:
@@ -3104,6 +3340,15 @@ def run(argv: list[str] | tuple[str, ...] | None = None) -> int:
                   else plugin_type(workers, execution, roots))
         if profile == "advanced":
             advanced_plugin = plugin
+        # The stall arm lives on the controller plugin only, whenever a
+        # report binding exists; worker-half plugins never get one.
+        if binding is not None:
+            plugin._stall_arm = _StallArm(binding[0])
+        # Process-global SIGWINCH dump registration for the controller,
+        # immediately before pytest.main. Only when launched as __main__:
+        # in-process callers must never steal the outer run's registration.
+        if binding is not None and __name__ == "__main__":
+            _register_stack_dump(binding[0], role="controller")
         native_exit = int(pytest.main(native_argv, plugins=[plugin]))
         bridge_exit = native_exit
         # Hooks may register only after the final item boundary (for example
@@ -3291,6 +3536,14 @@ def _worker_bootstrap(config: Any) -> OwnedPlugin | None:
         _deny("a parallel worker was not observed by the bridge")
     os.environ["PTEST_WORKER_ID"] = claimed_id
     os.environ["PTEST_RESOURCE_PREFIX"] = claimed_prefix
+    # Process-global SIGWINCH dump registration for this xdist worker.
+    # Only for the ``-p pytest_bridge`` import: any other import path must
+    # leave faulthandler state untouched. Failures skip silently (N11).
+    if __name__ == "pytest_bridge":
+        worker_report = _worker_report_path()
+        if worker_report is not None and isinstance(worker_id, str):
+            _register_stack_dump(worker_report, role="worker",
+                                 worker_id=worker_id)
     _worker_plugin = OwnedPlugin(workers)
     _worker_config = config
     return _worker_plugin
