@@ -2155,3 +2155,139 @@ def test_update_smuggled_field_is_dropped():
     assert set(projected.data) == {
         "running_version", "target_version", "action",
         "check_only", "install_root"}
+
+
+# --- post-test-stall: constants, reason code, paths, timeouts ---------------
+
+STALL_RUNNER_KWARGS = {
+    "kind": C.RunnerKind.PYTEST,
+    "launcher": ("python",),
+    "test_roots": ("tests",),
+}
+
+
+def _stall_runner(**overrides):
+    fields = dict(STALL_RUNNER_KWARGS)
+    fields.update(overrides)
+    return C.RunnerConfig(**fields)
+
+
+def test_stall_timeout_constants():
+    assert C.DEFAULT_STALL_TIMEOUT_S == 120.0
+    assert C.MIN_STALL_TIMEOUT_S == 10.0
+    assert C.MAX_STALL_TIMEOUT_S == 86400.0
+    assert C.STALL_DUMP_WAIT_S == 1.0
+    assert C.STALL_MARKER_SUFFIX == ".done"
+    assert C.STACK_DUMP_INFIX == ".stack-"
+    assert C.STACK_DUMP_HEADER_PREFIX == "ptest stack dump: "
+
+
+def test_post_test_stall_reason_code_is_registered():
+    assert "post-test-stall" in C.REASON_CODES
+    C.Reason(code="post-test-stall", message="m", paths=())
+    C.Problem(code="post-test-stall", message="m", phase="guard",
+              retryable=False)
+
+
+def test_runner_stall_timeout_defaults_to_none_and_accepts_bounds():
+    assert _stall_runner().stall_timeout_s is None
+    assert _stall_runner(stall_timeout_s=0).stall_timeout_s == 0.0
+    assert _stall_runner(stall_timeout_s=10).stall_timeout_s == 10.0
+    assert _stall_runner(stall_timeout_s=10.5).stall_timeout_s == 10.5
+    assert _stall_runner(stall_timeout_s=120).stall_timeout_s == 120.0
+    assert _stall_runner(stall_timeout_s=86400).stall_timeout_s == 86400.0
+
+
+@pytest.mark.parametrize("value",
+                         [-1, 5, 9.99, "120", 1e9, True,
+                          float("nan"), float("inf"), 86400.5])
+def test_runner_stall_timeout_rejects_out_of_range(value):
+    with pytest.raises((TypeError, ValueError)):
+        _stall_runner(stall_timeout_s=value)
+
+
+def test_runner_repr_omits_stall_timeout():
+    rendered = repr(_stall_runner(stall_timeout_s=120))
+    assert "stall_timeout_s" not in rendered
+
+
+def _stall_manifest(case, **overrides):
+    domain = case.domain()
+    fields = {
+        "protocol": C.GUARD_PROTOCOL_VERSION,
+        "domain": domain,
+        "grant": C.Grant(
+            run_id=RUN_ID, nonce=NONCE, slots=1,
+            memory_estimate_mb=None, reserved_memory_mb=None,
+            generation=1, domain_id="d" * 32,
+        ),
+        "setup": None,
+        "attempts": (C.PreparedRun(
+            argv=("true",), cwd=domain.root, env_updates=(),
+            report_path=domain.root / "report.json",
+            capability=None, summary=None,
+        ),),
+        "attempt_ids": ("a001",),
+        "setup_timeout_s": 300.0,
+        "attempt_timeout_s": 30.0,
+        "compound_timeout_s": 600.0,
+    }
+    fields.update(overrides)
+    return C.LaunchManifest(**fields)
+
+
+@pytest.mark.parametrize("value", [None, 1.0, 120.0])
+def test_launch_manifest_stall_timeout_round_trips(case, value):
+    manifest = _stall_manifest(case, stall_timeout_s=value)
+    decoded = C.decode_launch_manifest(C.encode_launch_manifest(manifest))
+    assert decoded.stall_timeout_s == value
+    body = json.loads(C.encode_launch_manifest(manifest)[4:])
+    assert body["stall_timeout_s"] == value
+
+
+@pytest.mark.parametrize("value", [0, -1, 1e9, "x", True])
+def test_launch_manifest_stall_timeout_rejects_bad_values(case, value):
+    with pytest.raises((Problem, TypeError, ValueError)):
+        decoded_raw = _manifest_raw(
+            case, lambda body: body.update(stall_timeout_s=value))
+        C.decode_launch_manifest(decoded_raw)
+    with pytest.raises((TypeError, ValueError)):
+        _stall_manifest(case, stall_timeout_s=value)
+
+
+def test_stall_marker_path_appends_done_suffix():
+    report = Path("/r/checkouts/abc/reports/native-a001-deadbeef.json")
+    assert C.stall_marker_path(report) == Path(str(report) + ".done")
+
+
+def test_stack_dump_path_appends_pid_suffix():
+    report = Path("/r/report.json")
+    assert C.stack_dump_path(report, 42) == Path(f"{report}.stack-42")
+
+
+@pytest.mark.parametrize("pid", [0, -1, True, False, "42", 4.5, None])
+def test_stack_dump_path_rejects_non_positive_int_pid(pid):
+    with pytest.raises((TypeError, ValueError)):
+        C.stack_dump_path(Path("/r/report.json"), pid)
+
+
+def test_stack_dump_pid_extracts_own_report_pid():
+    report_name = "native-a001-deadbeef.json"
+    assert C.stack_dump_pid(report_name, report_name + ".stack-42") == 42
+    assert C.stack_dump_pid(report_name, report_name + ".stack-1") == 1
+    assert C.stack_dump_pid(
+        report_name, report_name + ".stack-1234567890") == 1234567890
+
+
+@pytest.mark.parametrize("name", [
+    "other-a001-deadbeef.json.stack-42",
+    "native-a001-deadbeef.json.stack-0123",
+    "native-a001-deadbeef.json.stack-12345678901",
+    "native-a001-deadbeef.json.stack-",
+    "native-a001-deadbeef.json.stack-4٢",
+    "native-a001-deadbeef.json.stack-4x",
+    "native-a001-deadbeef.json",
+    "",
+])
+def test_stack_dump_pid_rejects_foreign_or_malformed_names(name):
+    assert C.stack_dump_pid("native-a001-deadbeef.json", name) is None
